@@ -4,8 +4,8 @@ use std::process::ExitCode;
 
 use shlop_cli::{
     CliError, ServeOptions, default_policy_store_path, default_session_id,
-    default_session_store_path, default_socket_path, run_daemon, run_embedded_message_with_trace,
-    send_daemon_message_with_trace,
+    default_session_store_path, default_socket_path, policy_lines, run_daemon,
+    run_embedded_message_with_trace, send_daemon_message_with_trace, session_lines,
 };
 
 fn main() -> ExitCode {
@@ -49,6 +49,9 @@ fn run_main() -> Result<(), CliError> {
             let message = message.unwrap_or_else(|| "hello".to_owned());
             let outcome = run_embedded_message_with_trace(session_store, &session_id, &message)?;
             println!("user: {message}");
+            for lifecycle in outcome.lifecycle_messages {
+                println!("lifecycle: {lifecycle}");
+            }
             for progress in outcome.progress_messages {
                 println!("progress: {progress}");
             }
@@ -112,10 +115,53 @@ fn run_main() -> Result<(), CliError> {
             let message = message.unwrap_or_else(|| "hello".to_owned());
             let outcome = send_daemon_message_with_trace(socket_path, &session_id, &message)?;
             println!("user: {message}");
+            for lifecycle in outcome.lifecycle_messages {
+                println!("lifecycle: {lifecycle}");
+            }
             for progress in outcome.progress_messages {
                 println!("progress: {progress}");
             }
             println!("agent: {}", outcome.response);
+            Ok(())
+        }
+        "session-show" => {
+            let mut session_id = default_session_id().to_owned();
+            let mut session_store = default_session_store_path();
+            while let Some(flag) = args.next() {
+                match flag.as_str() {
+                    "--session-id" => {
+                        if let Some(value) = args.next() {
+                            session_id = value;
+                        }
+                    }
+                    "--session-store" => {
+                        if let Some(value) = args.next() {
+                            session_store = PathBuf::from(value);
+                        }
+                    }
+                    _ => print_help(),
+                }
+            }
+            for line in session_lines(session_store, &session_id)? {
+                println!("{line}");
+            }
+            Ok(())
+        }
+        "policy-show" => {
+            let mut policy_store = default_policy_store_path();
+            while let Some(flag) = args.next() {
+                match flag.as_str() {
+                    "--policy-store" => {
+                        if let Some(value) = args.next() {
+                            policy_store = PathBuf::from(value);
+                        }
+                    }
+                    _ => print_help(),
+                }
+            }
+            for line in policy_lines(policy_store)? {
+                println!("{line}");
+            }
             Ok(())
         }
         "help" | "--help" | "-h" => {
@@ -134,4 +180,6 @@ fn print_help() {
     eprintln!("  embedded [--message TEXT] [--session-id ID] [--session-store PATH]");
     eprintln!("  serve [--socket PATH] [--session-store PATH] [--policy-store PATH]");
     eprintln!("  send [--message TEXT] [--session-id ID] [--socket PATH]");
+    eprintln!("  session-show [--session-id ID] [--session-store PATH]");
+    eprintln!("  policy-show [--policy-store PATH]");
 }

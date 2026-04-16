@@ -13,8 +13,8 @@ use std::time::{Duration, Instant};
 
 use shlop_core::{
     Connection, ConnectionMetadata, ConnectionOrigin, ConnectionSendError, ConnectionSink,
-    DefaultSubscriptionPolicy, EventBus, PolicyStore, RouteError, SessionStore, SessionStoreError,
-    ToolActivityOutcome, ToolActivityRecord, ToolRegistry, ToolRouteError,
+    DefaultSubscriptionPolicy, EventBus, PolicyStore, RouteError, SessionEntry, SessionStore,
+    SessionStoreError, ToolActivityOutcome, ToolActivityRecord, ToolRegistry, ToolRouteError,
 };
 use shlop_proto::{
     ChatMessage, ClientKind, DecodeError, Event, EventName, EventReader, EventSelector,
@@ -37,6 +37,7 @@ pub struct ServeOptions {
 /// One completed user interaction with optional progress updates.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct InteractionOutcome {
+    pub lifecycle_messages: Vec<String>,
     pub progress_messages: Vec<String>,
     pub response: String,
 }
@@ -206,6 +207,7 @@ struct Harness {
     store: SessionStore,
     pending_request_sessions: VecDeque<String>,
     pending_tool_sessions: std::collections::HashMap<String, String>,
+    lifecycle_messages: Vec<String>,
     agent: ParticipantHandle,
     filesystem_tool: ParticipantHandle,
     shell_tool: ParticipantHandle,
@@ -273,6 +275,7 @@ impl Harness {
             store,
             pending_request_sessions: VecDeque::new(),
             pending_tool_sessions: std::collections::HashMap::new(),
+            lifecycle_messages: Vec::new(),
             agent: ParticipantHandle {
                 connection_id: agent_id,
                 ..agent
@@ -286,6 +289,9 @@ impl Harness {
                 ..shell_tool
             },
         };
+        harness.emit_extension_starting("agent");
+        harness.emit_extension_starting("filesystem-tool");
+        harness.emit_extension_starting("shell-tool");
         harness.wait_for_startup()?;
         Ok(harness)
     }
@@ -388,6 +394,7 @@ impl Harness {
             }
             if let Some(response) = self.poll_participants_once(&mut progress_messages)? {
                 return Ok(InteractionOutcome {
+                    lifecycle_messages: Vec::new(),
                     progress_messages,
                     response: response.text,
                 });
@@ -461,6 +468,7 @@ impl Harness {
                 Ok(None)
             }
             Event::LifecycleReady(ready) => {
+                self.emit_extension_ready(source_id);
                 let _ = self
                     .bus
                     .publish_from(Some(source_id), Event::LifecycleReady(ready));
@@ -634,20 +642,54 @@ impl Harness {
         if let Some(handle) = self.agent.thread.take() {
             let result = handle.join().map_err(|_| CliError::ThreadJoin("agent"))?;
             result.map_err(CliError::Participant)?;
+            self.emit_extension_exited("agent");
         }
         if let Some(handle) = self.filesystem_tool.thread.take() {
             let result = handle
                 .join()
                 .map_err(|_| CliError::ThreadJoin("filesystem-tool"))?;
             result.map_err(CliError::Participant)?;
+            self.emit_extension_exited("filesystem-tool");
         }
         if let Some(handle) = self.shell_tool.thread.take() {
             let result = handle
                 .join()
                 .map_err(|_| CliError::ThreadJoin("shell-tool"))?;
             result.map_err(CliError::Participant)?;
+            self.emit_extension_exited("shell-tool");
         }
         Ok(())
+    }
+
+    fn emit_extension_starting(&mut self, extension_name: &str) {
+        let event = Event::ExtensionStarting(shlop_proto::ExtensionStarting {
+            extension_name: extension_name.to_owned(),
+            argv: Vec::new(),
+        });
+        self.lifecycle_messages.push(format_extension_event(&event));
+        let _ = self.bus.publish(event);
+    }
+
+    fn emit_extension_ready(&mut self, connection_id: &str) {
+        let Some(connection) = self.bus.connection(connection_id).cloned() else {
+            return;
+        };
+        let event = Event::ExtensionReady(shlop_proto::ExtensionReady {
+            extension_name: connection.name,
+            connection_id: Some(connection.id),
+        });
+        self.lifecycle_messages.push(format_extension_event(&event));
+        let _ = self.bus.publish(event);
+    }
+
+    fn emit_extension_exited(&mut self, extension_name: &str) {
+        let event = Event::ExtensionExited(shlop_proto::ExtensionExited {
+            extension_name: extension_name.to_owned(),
+            exit_code: None,
+            signal: None,
+        });
+        self.lifecycle_messages.push(format_extension_event(&event));
+        let _ = self.bus.publish(event);
     }
 }
 
@@ -714,6 +756,52 @@ fn format_tool_progress(progress: &ToolProgress) -> String {
     text
 }
 
+fn format_extension_event(event: &Event) -> String {
+    match event {
+        Event::ExtensionStarting(starting) => {
+            format!("extension {} starting", starting.extension_name)
+        }
+        Event::ExtensionReady(ready) => {
+            format!("extension {} ready", ready.extension_name)
+        }
+        Event::ExtensionExited(exited) => {
+            format!("extension {} exited", exited.extension_name)
+        }
+        Event::ExtensionRestarting(restarting) => {
+            format!("extension {} restarting", restarting.extension_name)
+        }
+        _ => event.name().to_string(),
+    }
+}
+
+fn format_session_entry(entry: &SessionEntry) -> String {
+    match entry {
+        SessionEntry::UserMessage { text } => format!("user: {text}"),
+        SessionEntry::AgentMessage { text } => format!("agent: {text}"),
+        SessionEntry::ToolActivity(activity) => format_tool_activity(activity),
+    }
+}
+
+fn format_tool_activity(activity: &ToolActivityRecord) -> String {
+    match &activity.outcome {
+        ToolActivityOutcome::Requested { .. } => {
+            format!("tool.request {} ({})", activity.tool_name, activity.call_id)
+        }
+        ToolActivityOutcome::Result { result } => {
+            format!(
+                "tool.result {} ({}) -> {result:?}",
+                activity.tool_name, activity.call_id
+            )
+        }
+        ToolActivityOutcome::Error { message, .. } => {
+            format!(
+                "tool.error {} ({}) -> {}",
+                activity.tool_name, activity.call_id, message
+            )
+        }
+    }
+}
+
 /// Runs one embedded interaction and returns progress plus the final agent
 /// response.
 pub fn run_embedded_message_with_trace(
@@ -726,8 +814,9 @@ pub fn run_embedded_message_with_trace(
         session_store_path.clone(),
         default_policy_store_path_from_session_store(&session_store_path),
     )?;
-    let outcome = harness.send_user_message(session_id, message, None)?;
+    let mut outcome = harness.send_user_message(session_id, message, None)?;
     harness.shutdown()?;
+    outcome.lifecycle_messages = harness.lifecycle_messages;
     Ok(outcome)
 }
 
@@ -811,6 +900,7 @@ pub fn send_daemon_message_with_trace(
         selectors: vec![
             EventSelector::Exact(EventName::MessageAgent),
             EventSelector::Exact(EventName::ToolProgress),
+            EventSelector::Prefix("extension.".to_owned()),
         ],
     }))?;
     peer.send(&Event::MessageUser(ChatMessage {
@@ -819,6 +909,7 @@ pub fn send_daemon_message_with_trace(
     }))?;
 
     let started_at = Instant::now();
+    let mut lifecycle_messages = Vec::new();
     let mut progress_messages = Vec::new();
     loop {
         if RESPONSE_TIMEOUT <= started_at.elapsed() {
@@ -829,11 +920,18 @@ pub fn send_daemon_message_with_trace(
                 Event::ToolProgress(progress) => {
                     progress_messages.push(format_tool_progress(&progress))
                 }
+                Event::ExtensionStarting(_)
+                | Event::ExtensionReady(_)
+                | Event::ExtensionExited(_)
+                | Event::ExtensionRestarting(_) => {
+                    lifecycle_messages.push(format_extension_event(&event))
+                }
                 Event::MessageAgent(message) => {
                     peer.send(&Event::LifecycleDisconnect(LifecycleDisconnect {
                         reason: Some("done".to_owned()),
                     }))?;
                     return Ok(InteractionOutcome {
+                        lifecycle_messages,
                         progress_messages,
                         response: message.text,
                     });
@@ -889,9 +987,48 @@ pub fn open_session_store(path: impl AsRef<Path>) -> Result<SessionStore, CliErr
     SessionStore::open(path.as_ref()).map_err(CliError::from)
 }
 
+/// Formats one session as printable lines for CLI output.
+pub fn session_lines(path: impl AsRef<Path>, session_id: &str) -> Result<Vec<String>, CliError> {
+    let store = open_session_store(path)?;
+    let Some(session) = store.session(session_id) else {
+        return Ok(vec![format!("session {session_id} not found")]);
+    };
+
+    Ok(session
+        .entries
+        .iter()
+        .enumerate()
+        .map(|(index, entry)| format!("{}: {}", index + 1, format_session_entry(entry)))
+        .collect())
+}
+
 /// Opens the policy store for inspection or tests.
 pub fn open_policy_store(path: impl AsRef<Path>) -> Result<PolicyStore, CliError> {
     PolicyStore::open(path.as_ref()).map_err(CliError::from)
+}
+
+/// Formats persisted policy approvals as printable lines for CLI output.
+pub fn policy_lines(path: impl AsRef<Path>) -> Result<Vec<String>, CliError> {
+    let store = open_policy_store(path)?;
+    Ok(store
+        .approvals()
+        .iter()
+        .map(|approval| {
+            let selectors = approval
+                .selectors
+                .iter()
+                .map(|selector| match selector {
+                    EventSelector::Exact(name) => name.as_str().to_owned(),
+                    EventSelector::Prefix(prefix) => format!("{prefix}*"),
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!(
+                "{} [{:?}] -> {}",
+                approval.connection_name, approval.connection_origin, selectors
+            )
+        })
+        .collect())
 }
 
 #[cfg(test)]
@@ -1046,5 +1183,87 @@ mod tests {
             .join()
             .expect("server thread should finish")
             .expect("daemon should exit cleanly");
+    }
+
+    #[test]
+    fn traced_embedded_interaction_reports_lifecycle_messages() {
+        let tempdir = TempDir::new().expect("tempdir should exist");
+        let store_path = tempdir.path().join("sessions.cbor");
+
+        let outcome = run_embedded_message_with_trace(&store_path, "session-1", "hello")
+            .expect("embedded interaction should succeed");
+        assert!(
+            outcome
+                .lifecycle_messages
+                .iter()
+                .any(|message| message == "extension agent starting")
+        );
+        assert!(
+            outcome
+                .lifecycle_messages
+                .iter()
+                .any(|message| message == "extension agent ready")
+        );
+        assert!(
+            outcome
+                .lifecycle_messages
+                .iter()
+                .any(|message| message == "extension agent exited")
+        );
+    }
+
+    #[test]
+    fn session_and_policy_lines_are_printable() {
+        let tempdir = TempDir::new().expect("tempdir should exist");
+        let socket_path = tempdir.path().join("daemon.sock");
+        let store_path = tempdir.path().join("sessions.cbor");
+        let policy_path = tempdir.path().join("policy.cbor");
+
+        let server = thread::spawn({
+            let socket_path = socket_path.clone();
+            let store_path = store_path.clone();
+            let policy_path = policy_path.clone();
+            move || {
+                run_daemon(
+                    socket_path,
+                    store_path,
+                    ServeOptions {
+                        max_clients: Some(1),
+                        policy_store_path: Some(policy_path),
+                    },
+                )
+            }
+        });
+
+        let started_at = Instant::now();
+        while !socket_path.exists() {
+            if Duration::from_secs(2) <= started_at.elapsed() {
+                panic!("daemon socket was not created in time");
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        let _ = send_daemon_message_with_trace(&socket_path, "session-1", "hello")
+            .expect("daemon interaction should succeed");
+        server
+            .join()
+            .expect("server thread should finish")
+            .expect("daemon should exit cleanly");
+
+        let session_output =
+            session_lines(&store_path, "session-1").expect("session lines should load");
+        assert!(
+            session_output
+                .iter()
+                .any(|line| line.contains("user: hello"))
+        );
+        assert!(
+            session_output
+                .iter()
+                .any(|line| line.contains("tool.request demo.echo"))
+        );
+
+        let policy_output = policy_lines(&policy_path).expect("policy lines should load");
+        assert!(policy_output.iter().any(|line| line.contains("socket-ui")));
     }
 }
