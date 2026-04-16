@@ -6,6 +6,7 @@ use shlop_cli::{
     CliError, ServeOptions, default_policy_store_path, default_session_id,
     default_session_store_path, default_socket_path, policy_lines, run_daemon,
     run_embedded_message_with_trace, send_daemon_message_with_trace, session_lines,
+    session_list_lines,
 };
 
 fn main() -> ExitCode {
@@ -124,6 +125,23 @@ fn run_main() -> Result<(), CliError> {
             println!("agent: {}", outcome.response);
             Ok(())
         }
+        "session-list" => {
+            let mut session_store = default_session_store_path();
+            while let Some(flag) = args.next() {
+                match flag.as_str() {
+                    "--session-store" => {
+                        if let Some(value) = args.next() {
+                            session_store = PathBuf::from(value);
+                        }
+                    }
+                    _ => print_help(),
+                }
+            }
+            for line in session_list_lines(session_store)? {
+                println!("{line}");
+            }
+            Ok(())
+        }
         "session-show" => {
             let mut session_id = default_session_id().to_owned();
             let mut session_store = default_session_store_path();
@@ -180,6 +198,7 @@ fn print_help() {
     eprintln!("  embedded [--message TEXT] [--session-id ID] [--session-store PATH]");
     eprintln!("  serve [--socket PATH] [--session-store PATH] [--policy-store PATH]");
     eprintln!("  send [--message TEXT] [--session-id ID] [--socket PATH]");
+    eprintln!("  session-list [--session-store PATH]");
     eprintln!("  session-show [--session-id ID] [--session-store PATH]");
     eprintln!("  policy-show [--policy-store PATH]");
 }

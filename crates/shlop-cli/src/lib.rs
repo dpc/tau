@@ -207,6 +207,7 @@ struct Harness {
     store: SessionStore,
     pending_request_sessions: VecDeque<String>,
     pending_tool_sessions: std::collections::HashMap<String, String>,
+    extension_statuses: std::collections::HashMap<String, Event>,
     lifecycle_messages: Vec<String>,
     agent: ParticipantHandle,
     filesystem_tool: ParticipantHandle,
@@ -275,6 +276,7 @@ impl Harness {
             store,
             pending_request_sessions: VecDeque::new(),
             pending_tool_sessions: std::collections::HashMap::new(),
+            extension_statuses: std::collections::HashMap::new(),
             lifecycle_messages: Vec::new(),
             agent: ParticipantHandle {
                 connection_id: agent_id,
@@ -591,9 +593,13 @@ impl Harness {
             Event::LifecycleSubscribe(subscribe) => {
                 self.bus
                     .set_subscriptions(client_id, subscribe.selectors.clone())?;
+                let replay_extension_statuses = wants_extension_events(&subscribe.selectors);
                 let _ = self
                     .bus
                     .publish_from(Some(client_id), Event::LifecycleSubscribe(subscribe));
+                if replay_extension_statuses {
+                    self.replay_extension_statuses(client_id)?;
+                }
                 Ok(true)
             }
             Event::MessageUser(message) => {
@@ -666,6 +672,8 @@ impl Harness {
             extension_name: extension_name.to_owned(),
             argv: Vec::new(),
         });
+        self.extension_statuses
+            .insert(extension_name.to_owned(), event.clone());
         self.lifecycle_messages.push(format_extension_event(&event));
         let _ = self.bus.publish(event);
     }
@@ -674,10 +682,13 @@ impl Harness {
         let Some(connection) = self.bus.connection(connection_id).cloned() else {
             return;
         };
+        let extension_name = connection.name;
         let event = Event::ExtensionReady(shlop_proto::ExtensionReady {
-            extension_name: connection.name,
+            extension_name: extension_name.clone(),
             connection_id: Some(connection.id),
         });
+        self.extension_statuses
+            .insert(extension_name, event.clone());
         self.lifecycle_messages.push(format_extension_event(&event));
         let _ = self.bus.publish(event);
     }
@@ -688,9 +699,29 @@ impl Harness {
             exit_code: None,
             signal: None,
         });
+        self.extension_statuses
+            .insert(extension_name.to_owned(), event.clone());
         self.lifecycle_messages.push(format_extension_event(&event));
         let _ = self.bus.publish(event);
     }
+
+    fn replay_extension_statuses(&mut self, client_id: &str) -> Result<(), CliError> {
+        let mut extension_names = self.extension_statuses.keys().cloned().collect::<Vec<_>>();
+        extension_names.sort();
+        for extension_name in extension_names {
+            if let Some(event) = self.extension_statuses.get(&extension_name).cloned() {
+                let _ = self.bus.send_to(client_id, None, event)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+fn wants_extension_events(selectors: &[EventSelector]) -> bool {
+    selectors.iter().any(|selector| match selector {
+        EventSelector::Exact(name) => name.as_str().starts_with("extension."),
+        EventSelector::Prefix(prefix) => prefix.starts_with("extension."),
+    })
 }
 
 fn spawn_local_participant<F>(
@@ -800,6 +831,13 @@ fn format_tool_activity(activity: &ToolActivityRecord) -> String {
             )
         }
     }
+}
+
+fn latest_agent_preview(session: &shlop_core::SessionSnapshot) -> Option<String> {
+    session.entries.iter().rev().find_map(|entry| match entry {
+        SessionEntry::AgentMessage { text } => Some(text.clone()),
+        _ => None,
+    })
 }
 
 /// Runs one embedded interaction and returns progress plus the final agent
@@ -1002,6 +1040,29 @@ pub fn session_lines(path: impl AsRef<Path>, session_id: &str) -> Result<Vec<Str
         .collect())
 }
 
+/// Formats all known sessions as one-line summaries for CLI output.
+pub fn session_list_lines(path: impl AsRef<Path>) -> Result<Vec<String>, CliError> {
+    let store = open_session_store(path)?;
+    let mut sessions = store.sessions();
+    sessions.sort_by(|left, right| left.session_id.cmp(&right.session_id));
+    if sessions.is_empty() {
+        return Ok(vec!["no sessions".to_owned()]);
+    }
+    Ok(sessions
+        .into_iter()
+        .map(|session| {
+            format!(
+                "{} ({} entries){}",
+                session.session_id,
+                session.entries.len(),
+                latest_agent_preview(session)
+                    .map(|preview| format!(": {preview}"))
+                    .unwrap_or_default()
+            )
+        })
+        .collect())
+}
+
 /// Opens the policy store for inspection or tests.
 pub fn open_policy_store(path: impl AsRef<Path>) -> Result<PolicyStore, CliError> {
     PolicyStore::open(path.as_ref()).map_err(CliError::from)
@@ -1010,9 +1071,13 @@ pub fn open_policy_store(path: impl AsRef<Path>) -> Result<PolicyStore, CliError
 /// Formats persisted policy approvals as printable lines for CLI output.
 pub fn policy_lines(path: impl AsRef<Path>) -> Result<Vec<String>, CliError> {
     let store = open_policy_store(path)?;
-    Ok(store
-        .approvals()
-        .iter()
+    let mut approvals = store.approvals().to_vec();
+    approvals.sort_by(|left, right| left.connection_name.cmp(&right.connection_name));
+    if approvals.is_empty() {
+        return Ok(vec!["no policy approvals".to_owned()]);
+    }
+    Ok(approvals
+        .into_iter()
         .map(|approval| {
             let selectors = approval
                 .selectors
@@ -1173,6 +1238,24 @@ mod tests {
 
         let outcome = send_daemon_message_with_trace(&socket_path, "session-1", "shell printf hi")
             .expect("daemon shell command should succeed");
+        assert!(
+            outcome
+                .lifecycle_messages
+                .iter()
+                .any(|message| message == "extension agent ready")
+        );
+        assert!(
+            outcome
+                .lifecycle_messages
+                .iter()
+                .any(|message| message == "extension filesystem-tool ready")
+        );
+        assert!(
+            outcome
+                .lifecycle_messages
+                .iter()
+                .any(|message| message == "extension shell-tool ready")
+        );
         assert_eq!(
             outcome.progress_messages,
             vec!["shell.exec: running shell command".to_owned()]
@@ -1263,7 +1346,35 @@ mod tests {
                 .any(|line| line.contains("tool.request demo.echo"))
         );
 
+        let session_list_output =
+            session_list_lines(&store_path).expect("session list should load");
+        assert!(
+            session_list_output
+                .iter()
+                .any(|line| line.contains("session-1 (4 entries)"))
+        );
+
         let policy_output = policy_lines(&policy_path).expect("policy lines should load");
         assert!(policy_output.iter().any(|line| line.contains("socket-ui")));
+    }
+
+    #[test]
+    fn empty_session_and_policy_views_are_friendly() {
+        let tempdir = TempDir::new().expect("tempdir should exist");
+        let store_path = tempdir.path().join("sessions.cbor");
+        let policy_path = tempdir.path().join("policy.cbor");
+
+        assert_eq!(
+            session_list_lines(&store_path).expect("session list should load"),
+            vec!["no sessions".to_owned()]
+        );
+        assert_eq!(
+            policy_lines(&policy_path).expect("policy lines should load"),
+            vec!["no policy approvals".to_owned()]
+        );
+        assert_eq!(
+            session_lines(&store_path, "missing").expect("session lines should load"),
+            vec!["session missing not found".to_owned()]
+        );
     }
 }
