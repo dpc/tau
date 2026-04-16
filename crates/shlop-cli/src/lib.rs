@@ -133,6 +133,13 @@ impl From<ToolRouteError> for CliError {
 }
 
 #[derive(Debug)]
+enum LocalPeerPoll {
+    Event(Event),
+    Timeout,
+    Disconnected,
+}
+
+#[derive(Debug)]
 struct LocalPeer {
     writer: EventWriter<BufWriter<UnixStream>>,
     incoming: Receiver<Result<Event, DecodeError>>,
@@ -156,13 +163,13 @@ impl LocalPeer {
         Ok(())
     }
 
-    fn recv_timeout(&mut self, timeout: Duration) -> Result<Option<Event>, CliError> {
+    fn recv_timeout(&mut self, timeout: Duration) -> Result<LocalPeerPoll, CliError> {
         match self.incoming.recv_timeout(timeout) {
-            Ok(Ok(event)) => Ok(Some(event)),
-            Ok(Err(error)) if is_unexpected_eof(&error) => Ok(None),
+            Ok(Ok(event)) => Ok(LocalPeerPoll::Event(event)),
+            Ok(Err(error)) if is_unexpected_eof(&error) => Ok(LocalPeerPoll::Disconnected),
             Ok(Err(error)) => Err(CliError::ProtocolDecode(error)),
-            Err(RecvTimeoutError::Timeout) => Ok(None),
-            Err(RecvTimeoutError::Disconnected) => Ok(None),
+            Err(RecvTimeoutError::Timeout) => Ok(LocalPeerPoll::Timeout),
+            Err(RecvTimeoutError::Disconnected) => Ok(LocalPeerPoll::Disconnected),
         }
     }
 }
@@ -197,6 +204,7 @@ impl ConnectionSink for SocketPeerSink {
 #[derive(Debug)]
 struct ParticipantHandle {
     connection_id: String,
+    connected: bool,
     peer: Rc<RefCell<LocalPeer>>,
     thread: Option<JoinHandle<Result<(), String>>>,
 }
@@ -280,14 +288,17 @@ impl Harness {
             lifecycle_messages: Vec::new(),
             agent: ParticipantHandle {
                 connection_id: agent_id,
+                connected: true,
                 ..agent
             },
             filesystem_tool: ParticipantHandle {
                 connection_id: filesystem_tool_id,
+                connected: true,
                 ..filesystem_tool
             },
             shell_tool: ParticipantHandle {
                 connection_id: shell_tool_id,
+                connected: true,
                 ..shell_tool
             },
         };
@@ -319,12 +330,21 @@ impl Harness {
             }
 
             let agent_event = { self.agent.peer.borrow_mut().recv_timeout(POLL_INTERVAL)? };
-            if let Some(event) = agent_event {
-                if matches!(event, Event::LifecycleReady(_)) {
-                    agent_ready = true;
+            match agent_event {
+                LocalPeerPoll::Event(event) => {
+                    if matches!(event, Event::LifecycleReady(_)) {
+                        agent_ready = true;
+                    }
+                    let agent_id = self.agent.connection_id.clone();
+                    let _ = self.handle_participant_event(&agent_id, event, &mut Vec::new())?;
                 }
-                let agent_id = self.agent.connection_id.clone();
-                let _ = self.handle_participant_event(&agent_id, event, &mut Vec::new())?;
+                LocalPeerPoll::Disconnected => {
+                    self.handle_participant_disconnect("agent");
+                    return Err(CliError::Participant(
+                        "agent disconnected during startup".to_owned(),
+                    ));
+                }
+                LocalPeerPoll::Timeout => {}
             }
 
             let filesystem_event = {
@@ -333,17 +353,26 @@ impl Harness {
                     .borrow_mut()
                     .recv_timeout(POLL_INTERVAL)?
             };
-            if let Some(event) = filesystem_event {
-                if matches!(event, Event::LifecycleReady(_)) {
-                    filesystem_ready = true;
+            match filesystem_event {
+                LocalPeerPoll::Event(event) => {
+                    if matches!(event, Event::LifecycleReady(_)) {
+                        filesystem_ready = true;
+                    }
+                    if let Event::ToolRegister(register) = &event {
+                        echo_registered |= register.tool.name == shlop_ext_fs::DEMO_ECHO_TOOL_NAME;
+                        fs_registered |= register.tool.name == shlop_ext_fs::FS_READ_TOOL_NAME;
+                    }
+                    let filesystem_tool_id = self.filesystem_tool.connection_id.clone();
+                    let _ =
+                        self.handle_participant_event(&filesystem_tool_id, event, &mut Vec::new())?;
                 }
-                if let Event::ToolRegister(register) = &event {
-                    echo_registered |= register.tool.name == shlop_ext_fs::DEMO_ECHO_TOOL_NAME;
-                    fs_registered |= register.tool.name == shlop_ext_fs::FS_READ_TOOL_NAME;
+                LocalPeerPoll::Disconnected => {
+                    self.handle_participant_disconnect("filesystem-tool");
+                    return Err(CliError::Participant(
+                        "filesystem-tool disconnected during startup".to_owned(),
+                    ));
                 }
-                let filesystem_tool_id = self.filesystem_tool.connection_id.clone();
-                let _ =
-                    self.handle_participant_event(&filesystem_tool_id, event, &mut Vec::new())?;
+                LocalPeerPoll::Timeout => {}
             }
 
             let shell_event = {
@@ -352,15 +381,26 @@ impl Harness {
                     .borrow_mut()
                     .recv_timeout(POLL_INTERVAL)?
             };
-            if let Some(event) = shell_event {
-                if matches!(event, Event::LifecycleReady(_)) {
-                    shell_ready = true;
+            match shell_event {
+                LocalPeerPoll::Event(event) => {
+                    if matches!(event, Event::LifecycleReady(_)) {
+                        shell_ready = true;
+                    }
+                    if let Event::ToolRegister(register) = &event {
+                        shell_registered |=
+                            register.tool.name == shlop_ext_shell::SHELL_EXEC_TOOL_NAME;
+                    }
+                    let shell_tool_id = self.shell_tool.connection_id.clone();
+                    let _ =
+                        self.handle_participant_event(&shell_tool_id, event, &mut Vec::new())?;
                 }
-                if let Event::ToolRegister(register) = &event {
-                    shell_registered |= register.tool.name == shlop_ext_shell::SHELL_EXEC_TOOL_NAME;
+                LocalPeerPoll::Disconnected => {
+                    self.handle_participant_disconnect("shell-tool");
+                    return Err(CliError::Participant(
+                        "shell-tool disconnected during startup".to_owned(),
+                    ));
                 }
-                let shell_tool_id = self.shell_tool.connection_id.clone();
-                let _ = self.handle_participant_event(&shell_tool_id, event, &mut Vec::new())?;
+                LocalPeerPoll::Timeout => {}
             }
         }
 
@@ -408,41 +448,66 @@ impl Harness {
         &mut self,
         progress_messages: &mut Vec<String>,
     ) -> Result<Option<ChatMessage>, CliError> {
-        let agent_event = { self.agent.peer.borrow_mut().recv_timeout(POLL_INTERVAL)? };
-        if let Some(event) = agent_event {
-            let agent_id = self.agent.connection_id.clone();
-            if let Some(message) =
-                self.handle_participant_event(&agent_id, event, progress_messages)?
-            {
-                return Ok(Some(message));
+        if self.agent.connected {
+            let agent_event = { self.agent.peer.borrow_mut().recv_timeout(POLL_INTERVAL)? };
+            match agent_event {
+                LocalPeerPoll::Event(event) => {
+                    let agent_id = self.agent.connection_id.clone();
+                    if let Some(message) =
+                        self.handle_participant_event(&agent_id, event, progress_messages)?
+                    {
+                        return Ok(Some(message));
+                    }
+                }
+                LocalPeerPoll::Disconnected => {
+                    self.handle_participant_disconnect("agent");
+                    return Err(CliError::Participant("agent disconnected".to_owned()));
+                }
+                LocalPeerPoll::Timeout => {}
             }
         }
-        let filesystem_event = {
-            self.filesystem_tool
-                .peer
-                .borrow_mut()
-                .recv_timeout(POLL_INTERVAL)?
-        };
-        if let Some(event) = filesystem_event {
-            let filesystem_tool_id = self.filesystem_tool.connection_id.clone();
-            if let Some(message) =
-                self.handle_participant_event(&filesystem_tool_id, event, progress_messages)?
-            {
-                return Ok(Some(message));
+        if self.filesystem_tool.connected {
+            let filesystem_event = {
+                self.filesystem_tool
+                    .peer
+                    .borrow_mut()
+                    .recv_timeout(POLL_INTERVAL)?
+            };
+            match filesystem_event {
+                LocalPeerPoll::Event(event) => {
+                    let filesystem_tool_id = self.filesystem_tool.connection_id.clone();
+                    if let Some(message) = self.handle_participant_event(
+                        &filesystem_tool_id,
+                        event,
+                        progress_messages,
+                    )? {
+                        return Ok(Some(message));
+                    }
+                }
+                LocalPeerPoll::Disconnected => {
+                    self.handle_participant_disconnect("filesystem-tool")
+                }
+                LocalPeerPoll::Timeout => {}
             }
         }
-        let shell_event = {
-            self.shell_tool
-                .peer
-                .borrow_mut()
-                .recv_timeout(POLL_INTERVAL)?
-        };
-        if let Some(event) = shell_event {
-            let shell_tool_id = self.shell_tool.connection_id.clone();
-            if let Some(message) =
-                self.handle_participant_event(&shell_tool_id, event, progress_messages)?
-            {
-                return Ok(Some(message));
+        if self.shell_tool.connected {
+            let shell_event = {
+                self.shell_tool
+                    .peer
+                    .borrow_mut()
+                    .recv_timeout(POLL_INTERVAL)?
+            };
+            match shell_event {
+                LocalPeerPoll::Event(event) => {
+                    let shell_tool_id = self.shell_tool.connection_id.clone();
+                    if let Some(message) =
+                        self.handle_participant_event(&shell_tool_id, event, progress_messages)?
+                    {
+                        return Ok(Some(message));
+                    }
+                }
+                LocalPeerPoll::Disconnected => self.handle_participant_disconnect("shell-tool"),
+                LocalPeerPoll::Timeout => {}
             }
         }
         Ok(None)
@@ -482,9 +547,23 @@ impl Harness {
             }
             Event::ToolRequest(request) => {
                 self.persist_tool_request(&request)?;
-                let _ = self
+                match self
                     .registry
-                    .route_tool_request(&mut self.bus, source_id, request)?;
+                    .route_tool_request(&mut self.bus, source_id, request.clone())
+                {
+                    Ok(_) => {}
+                    Err(ToolRouteError::NoProvider { tool_name }) => {
+                        let error = ToolError {
+                            call_id: request.call_id,
+                            tool_name,
+                            message: "no live provider available".to_owned(),
+                            details: None,
+                        };
+                        self.persist_tool_error(&error)?;
+                        let _ = self.bus.publish(Event::ToolError(error));
+                    }
+                    Err(error) => return Err(CliError::ToolRoute(error)),
+                }
                 Ok(None)
             }
             Event::ToolResult(result) => {
@@ -678,6 +757,27 @@ impl Harness {
         let _ = self.bus.publish(event);
     }
 
+    fn handle_participant_disconnect(&mut self, extension_name: &str) {
+        let connection_id = match extension_name {
+            "agent" => {
+                self.agent.connected = false;
+                self.agent.connection_id.clone()
+            }
+            "filesystem-tool" => {
+                self.filesystem_tool.connected = false;
+                self.filesystem_tool.connection_id.clone()
+            }
+            "shell-tool" => {
+                self.shell_tool.connected = false;
+                self.shell_tool.connection_id.clone()
+            }
+            _ => return,
+        };
+        let _ = self.bus.disconnect(&connection_id);
+        let _ = self.registry.unregister_connection(&connection_id);
+        self.emit_extension_exited(extension_name);
+    }
+
     fn emit_extension_ready(&mut self, connection_id: &str) {
         let Some(connection) = self.bus.connection(connection_id).cloned() else {
             return;
@@ -738,6 +838,7 @@ where
     let thread = thread::spawn(move || run(reader_stream, runtime_stream));
     Ok(ParticipantHandle {
         connection_id: String::new(),
+        connected: false,
         peer,
         thread: Some(thread),
     })
@@ -974,6 +1075,13 @@ pub fn send_daemon_message_with_trace(
                         response: message.text,
                     });
                 }
+                Event::LifecycleDisconnect(disconnect) => {
+                    return Err(CliError::Participant(
+                        disconnect
+                            .reason
+                            .unwrap_or_else(|| "daemon disconnected".to_owned()),
+                    ));
+                }
                 _ => {}
             }
         }
@@ -1194,6 +1302,75 @@ mod tests {
     }
 
     #[test]
+    fn unavailable_tool_is_reported_without_crashing_harness() {
+        let tempdir = TempDir::new().expect("tempdir should exist");
+        let store_path = tempdir.path().join("sessions.cbor");
+        let policy_path = tempdir.path().join("policy.cbor");
+        let mut harness = Harness::new(&store_path, &policy_path).expect("harness should start");
+
+        let removed_tools = harness
+            .registry
+            .unregister_connection(&harness.shell_tool.connection_id);
+        assert!(
+            removed_tools
+                .iter()
+                .any(|tool_name| tool_name == "shell.exec")
+        );
+
+        let outcome = harness
+            .send_user_message("session-1", "shell printf hi", None)
+            .expect("interaction should succeed with synthetic error");
+        assert!(
+            outcome
+                .response
+                .contains("shell.exec failed: no live provider available")
+        );
+
+        harness.shutdown().expect("harness should shut down");
+    }
+
+    #[test]
+    fn disconnected_tool_is_removed_and_reported_cleanly() {
+        let tempdir = TempDir::new().expect("tempdir should exist");
+        let store_path = tempdir.path().join("sessions.cbor");
+        let policy_path = tempdir.path().join("policy.cbor");
+        let mut harness = Harness::new(&store_path, &policy_path).expect("harness should start");
+
+        harness
+            .bus
+            .send_to(
+                &harness.shell_tool.connection_id,
+                None,
+                Event::LifecycleDisconnect(LifecycleDisconnect {
+                    reason: Some("test shutdown".to_owned()),
+                }),
+            )
+            .expect("disconnect should route");
+        for _ in 0..10 {
+            let _ = harness.poll_participants_once(&mut Vec::new());
+            if !harness.shell_tool.connected {
+                break;
+            }
+        }
+
+        assert!(!harness.shell_tool.connected);
+        assert!(harness.registry.providers_for("shell.exec").is_empty());
+        assert!(
+            harness
+                .lifecycle_messages
+                .iter()
+                .any(|message| message == "extension shell-tool exited")
+        );
+
+        let outcome = harness
+            .send_user_message("session-1", "shell printf hi", None)
+            .expect("interaction should succeed with synthetic error");
+        assert!(outcome.response.contains("no live provider available"));
+
+        harness.shutdown().expect("harness should shut down");
+    }
+
+    #[test]
     fn traced_embedded_interaction_reports_shell_progress() {
         let tempdir = TempDir::new().expect("tempdir should exist");
         let store_path = tempdir.path().join("sessions.cbor");
@@ -1376,5 +1553,37 @@ mod tests {
             session_lines(&store_path, "missing").expect("session lines should load"),
             vec!["session missing not found".to_owned()]
         );
+    }
+
+    #[test]
+    fn daemon_disconnect_reason_is_reported_to_cli_clients() {
+        let tempdir = TempDir::new().expect("tempdir should exist");
+        let socket_path = tempdir.path().join("daemon.sock");
+        let listener = SocketListener::bind(&socket_path).expect("listener should bind");
+
+        let server = thread::spawn(move || {
+            let mut peer = listener.accept().expect("client should connect");
+            let _ = peer
+                .recv_timeout(Duration::from_secs(1))
+                .expect("hello should decode")
+                .expect("hello should arrive");
+            let _ = peer
+                .recv_timeout(Duration::from_secs(1))
+                .expect("subscribe should decode")
+                .expect("subscribe should arrive");
+            let _ = peer
+                .recv_timeout(Duration::from_secs(1))
+                .expect("message should decode")
+                .expect("message should arrive");
+            peer.send(&Event::LifecycleDisconnect(LifecycleDisconnect {
+                reason: Some("test disconnect".to_owned()),
+            }))
+            .expect("disconnect should send");
+        });
+
+        let error = send_daemon_message_with_trace(&socket_path, "session-1", "hello")
+            .expect_err("client should receive disconnect error");
+        assert!(matches!(error, CliError::Participant(reason) if reason == "test disconnect"));
+        server.join().expect("server thread should finish");
     }
 }
