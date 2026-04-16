@@ -179,3 +179,53 @@ fn disconnect_cleanup_removes_registered_tools_after_child_exit() {
         })
     );
 }
+
+#[test]
+fn restarted_child_can_reregister_after_disconnect_cleanup() {
+    let command = ExtensionCommand {
+        name: "test-child".to_owned(),
+        program: test_child_path(),
+        args: Vec::new(),
+    };
+    let mut registry = ToolRegistry::new();
+
+    for connection_id in ["conn-child-1", "conn-child-2"] {
+        let mut child = SupervisedChild::spawn(command.clone()).expect("child should spawn");
+        let _hello = child
+            .recv_timeout(Duration::from_secs(1))
+            .expect("hello should decode")
+            .expect("hello should arrive");
+        child
+            .send(&Event::LifecycleHello(LifecycleHello {
+                protocol_version: PROTOCOL_VERSION,
+                client_name: "parent".to_owned(),
+                client_kind: ClientKind::Core,
+            }))
+            .expect("hello should be sent");
+        let _ready = child
+            .recv_timeout(Duration::from_secs(1))
+            .expect("ready should decode")
+            .expect("ready should arrive");
+        let register = child
+            .recv_timeout(Duration::from_secs(1))
+            .expect("register should decode")
+            .expect("register should arrive");
+        let Event::ToolRegister(register) = register else {
+            panic!("expected tool register event");
+        };
+        registry.register(connection_id, register.tool);
+        assert_eq!(registry.providers_for("demo.echo").len(), 1);
+
+        child
+            .send(&Event::LifecycleDisconnect(LifecycleDisconnect {
+                reason: Some("restart".to_owned()),
+            }))
+            .expect("disconnect should be sent");
+        let exit = child
+            .wait_for_exit(Duration::from_secs(2))
+            .expect("child should exit");
+        let cleanup = child.cleanup_disconnect(&mut registry, connection_id, &exit);
+        assert_eq!(cleanup.removed_tools, vec!["demo.echo".to_owned()]);
+        assert!(registry.providers_for("demo.echo").is_empty());
+    }
+}

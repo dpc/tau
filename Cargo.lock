@@ -360,6 +360,7 @@ name = "shlop-socket"
 version = "0.1.0"
 dependencies = [
  "shlop-proto",
+ "shlop-test-support",
  "tempfile",
 ]
 
@@ -369,6 +370,15 @@ version = "0.1.0"
 dependencies = [
  "shlop-core",
  "shlop-proto",
+]
+
+[[package]]
+name = "shlop-test-support"
+version = "0.1.0"
+dependencies = [
+ "shlop-cli",
+ "shlop-core",
+ "tempfile",
 ]
 
 [[package]]

@@ -19,12 +19,22 @@ use shlop_proto::{
     ToolSpec,
 };
 
+/// The origin class of one live connection.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConnectionOrigin {
+    Supervised,
+    Socket,
+    InMemory,
+}
+
 /// Immutable metadata describing one live connection.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ConnectionMetadata {
     pub id: ConnectionId,
     pub name: String,
     pub kind: ClientKind,
+    pub origin: ConnectionOrigin,
 }
 
 /// One protocol event routed through the internal bus.
@@ -157,7 +167,13 @@ pub struct DeliveryFailure {
 /// Error returned when the bus cannot route as requested.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RouteError {
-    UnknownConnection { connection_id: ConnectionId },
+    UnknownConnection {
+        connection_id: ConnectionId,
+    },
+    SubscriptionDenied {
+        connection_id: ConnectionId,
+        reason: String,
+    },
 }
 
 impl fmt::Display for RouteError {
@@ -166,6 +182,10 @@ impl fmt::Display for RouteError {
             Self::UnknownConnection { connection_id } => {
                 write!(f, "unknown connection: {connection_id}")
             }
+            Self::SubscriptionDenied {
+                connection_id,
+                reason,
+            } => write!(f, "subscription denied for {connection_id}: {reason}"),
         }
     }
 }
@@ -202,11 +222,219 @@ impl fmt::Display for ConnectionSendError {
 
 impl Error for ConnectionSendError {}
 
+/// Persisted approval for one subscription request.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct SubscriptionApproval {
+    pub connection_name: String,
+    pub connection_origin: ConnectionOrigin,
+    pub selectors: Vec<EventSelector>,
+}
+
+/// File-backed store of approved subscription sets.
+#[derive(Debug)]
+pub struct PolicyStore {
+    path: PathBuf,
+    approvals: Vec<SubscriptionApproval>,
+}
+
+impl PolicyStore {
+    /// Opens a policy store, loading any existing approvals.
+    pub fn open(path: impl Into<PathBuf>) -> Result<Self, SessionStoreError> {
+        let path = path.into();
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|source| {
+                SessionStoreError::CreateParentDirectory {
+                    path: parent.to_path_buf(),
+                    source,
+                }
+            })?;
+        }
+
+        let approvals = if path.exists() {
+            let bytes = fs::read(&path).map_err(|source| SessionStoreError::Read {
+                path: path.clone(),
+                source,
+            })?;
+            if bytes.is_empty() {
+                Vec::new()
+            } else {
+                ciborium::from_reader(bytes.as_slice()).map_err(|source| {
+                    SessionStoreError::Decode {
+                        path: path.clone(),
+                        source,
+                    }
+                })?
+            }
+        } else {
+            Vec::new()
+        };
+
+        Ok(Self { path, approvals })
+    }
+
+    /// Returns true when the exact approval is already present.
+    #[must_use]
+    pub fn contains(&self, approval: &SubscriptionApproval) -> bool {
+        self.approvals.iter().any(|existing| existing == approval)
+    }
+
+    /// Records one approval and persists it if it is new.
+    pub fn record(&mut self, approval: SubscriptionApproval) -> Result<(), SessionStoreError> {
+        if self.contains(&approval) {
+            return Ok(());
+        }
+        self.approvals.push(approval);
+
+        let mut encoded = Vec::new();
+        ciborium::into_writer(&self.approvals, &mut encoded).map_err(|source| {
+            SessionStoreError::Encode {
+                path: self.path.clone(),
+                source,
+            }
+        })?;
+        fs::write(&self.path, encoded).map_err(|source| SessionStoreError::Write {
+            path: self.path.clone(),
+            source,
+        })
+    }
+
+    /// Returns all persisted approvals.
+    #[must_use]
+    pub fn approvals(&self) -> &[SubscriptionApproval] {
+        &self.approvals
+    }
+}
+
+/// Policy error returned when a subscription request is rejected.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SubscriptionPolicyError {
+    reason: String,
+}
+
+impl SubscriptionPolicyError {
+    /// Creates a new policy error.
+    #[must_use]
+    pub fn new(reason: impl Into<String>) -> Self {
+        Self {
+            reason: reason.into(),
+        }
+    }
+
+    /// Returns the rejection reason.
+    #[must_use]
+    pub fn reason(&self) -> &str {
+        &self.reason
+    }
+}
+
+impl fmt::Display for SubscriptionPolicyError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.reason)
+    }
+}
+
+impl Error for SubscriptionPolicyError {}
+
+/// Subscription-time policy hook.
+pub trait SubscriptionPolicy {
+    fn evaluate(
+        &self,
+        connection: &ConnectionMetadata,
+        selectors: &[EventSelector],
+    ) -> Result<(), SubscriptionPolicyError>;
+}
+
+/// Default MVP subscription policy.
+#[derive(Debug, Default)]
+pub struct DefaultSubscriptionPolicy {
+    store: Option<RefCell<PolicyStore>>,
+}
+
+impl DefaultSubscriptionPolicy {
+    /// Creates the default in-memory-only policy.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Creates the default policy backed by one approval store.
+    pub fn with_store(store: PolicyStore) -> Self {
+        Self {
+            store: Some(RefCell::new(store)),
+        }
+    }
+
+    fn record_approval(
+        &self,
+        connection: &ConnectionMetadata,
+        selectors: &[EventSelector],
+    ) -> Result<(), SubscriptionPolicyError> {
+        let Some(store) = &self.store else {
+            return Ok(());
+        };
+        if connection.origin != ConnectionOrigin::Socket {
+            return Ok(());
+        }
+
+        store
+            .borrow_mut()
+            .record(SubscriptionApproval {
+                connection_name: connection.name.clone(),
+                connection_origin: connection.origin.clone(),
+                selectors: selectors.to_vec(),
+            })
+            .map_err(|error| SubscriptionPolicyError::new(error.to_string()))
+    }
+}
+
+impl SubscriptionPolicy for DefaultSubscriptionPolicy {
+    fn evaluate(
+        &self,
+        connection: &ConnectionMetadata,
+        selectors: &[EventSelector],
+    ) -> Result<(), SubscriptionPolicyError> {
+        if connection.origin == ConnectionOrigin::Socket {
+            for selector in selectors {
+                let allowed = match selector {
+                    EventSelector::Exact(name) => {
+                        let name = name.as_str();
+                        name.starts_with("message.")
+                            || name.starts_with("tool.")
+                            || name.starts_with("extension.")
+                    }
+                    EventSelector::Prefix(prefix) => {
+                        prefix.starts_with("message.")
+                            || prefix.starts_with("tool.")
+                            || prefix.starts_with("extension.")
+                    }
+                };
+                if !allowed {
+                    return Err(SubscriptionPolicyError::new(
+                        "socket clients may only subscribe to message.*, tool.*, or extension.*",
+                    ));
+                }
+            }
+        }
+
+        self.record_approval(connection, selectors)
+    }
+}
+
 /// Internal event bus and subscription registry.
-#[derive(Default)]
 pub struct EventBus {
     next_connection_id: u64,
     connections: HashMap<ConnectionId, ConnectionEntry>,
+    subscription_policy: Box<dyn SubscriptionPolicy>,
+}
+
+impl Default for EventBus {
+    fn default() -> Self {
+        Self {
+            next_connection_id: 0,
+            connections: HashMap::new(),
+            subscription_policy: Box::new(DefaultSubscriptionPolicy::new()),
+        }
+    }
 }
 
 impl EventBus {
@@ -214,6 +442,16 @@ impl EventBus {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Creates an empty event bus with an explicit subscription policy.
+    #[must_use]
+    pub fn with_subscription_policy(policy: Box<dyn SubscriptionPolicy>) -> Self {
+        Self {
+            next_connection_id: 0,
+            connections: HashMap::new(),
+            subscription_policy: policy,
+        }
     }
 
     /// Registers a connection and returns its assigned connection ID.
@@ -228,6 +466,7 @@ impl EventBus {
             id: connection_id.clone(),
             name: connection.metadata.name,
             kind: connection.metadata.kind,
+            origin: connection.metadata.origin,
         };
 
         let entry = ConnectionEntry {
@@ -271,6 +510,19 @@ impl EventBus {
         connection_id: &str,
         selectors: Vec<EventSelector>,
     ) -> Result<(), RouteError> {
+        let metadata = self
+            .connections
+            .get(connection_id)
+            .map(|entry| entry.metadata.clone())
+            .ok_or_else(|| RouteError::UnknownConnection {
+                connection_id: connection_id.to_owned(),
+            })?;
+        self.subscription_policy
+            .evaluate(&metadata, &selectors)
+            .map_err(|error| RouteError::SubscriptionDenied {
+                connection_id: connection_id.to_owned(),
+                reason: error.reason().to_owned(),
+            })?;
         let entry = self.connections.get_mut(connection_id).ok_or_else(|| {
             RouteError::UnknownConnection {
                 connection_id: connection_id.to_owned(),
@@ -927,6 +1179,7 @@ pub fn memory_connection(name: impl Into<String>, kind: ClientKind) -> (Connecti
             id: String::new(),
             name: name.into(),
             kind,
+            origin: ConnectionOrigin::InMemory,
         },
         Box::new(MemorySink {
             inbox: inbox.clone(),
@@ -980,6 +1233,7 @@ mod tests {
                 id: String::new(),
                 name: name.to_owned(),
                 kind,
+                origin: ConnectionOrigin::InMemory,
             },
             Box::new(StreamSink {
                 writer: Rc::new(RefCell::new(EventWriter::new(BufWriter::new(
@@ -1351,6 +1605,75 @@ mod tests {
                     result: CborValue::Text("README".to_owned()),
                 },
             })
+        );
+    }
+
+    #[test]
+    fn socket_clients_are_denied_forbidden_subscriptions() {
+        let mut bus = EventBus::new();
+        let inbox = MemoryInbox::default();
+        let connection = Connection::new(
+            ConnectionMetadata {
+                id: String::new(),
+                name: "socket-ui".to_owned(),
+                kind: ClientKind::Ui,
+                origin: ConnectionOrigin::Socket,
+            },
+            Box::new(MemorySink { inbox }),
+        );
+        let connection_id = bus.connect(connection);
+
+        let error = bus
+            .set_subscriptions(
+                &connection_id,
+                vec![EventSelector::Prefix("lifecycle.".to_owned())],
+            )
+            .expect_err("socket lifecycle subscription should be denied");
+        assert_eq!(
+            error,
+            RouteError::SubscriptionDenied {
+                connection_id,
+                reason: "socket clients may only subscribe to message.*, tool.*, or extension.*"
+                    .to_owned(),
+            }
+        );
+    }
+
+    #[test]
+    fn policy_store_persists_allowed_socket_subscriptions() {
+        let tempdir = TempDir::new().expect("tempdir should exist");
+        let policy_path = tempdir.path().join("policy.cbor");
+        let store = PolicyStore::open(&policy_path).expect("policy store should open");
+        let mut bus = EventBus::with_subscription_policy(Box::new(
+            DefaultSubscriptionPolicy::with_store(store),
+        ));
+        let inbox = MemoryInbox::default();
+        let connection = Connection::new(
+            ConnectionMetadata {
+                id: String::new(),
+                name: "socket-ui".to_owned(),
+                kind: ClientKind::Ui,
+                origin: ConnectionOrigin::Socket,
+            },
+            Box::new(MemorySink { inbox }),
+        );
+        let connection_id = bus.connect(connection);
+
+        bus.set_subscriptions(
+            &connection_id,
+            vec![EventSelector::Prefix("message.".to_owned())],
+        )
+        .expect("allowed socket subscription should persist");
+
+        let reopened = PolicyStore::open(&policy_path).expect("policy store should reopen");
+        assert_eq!(
+            reopened.approvals(),
+            [SubscriptionApproval {
+                connection_name: "socket-ui".to_owned(),
+                connection_origin: ConnectionOrigin::Socket,
+                selectors: vec![EventSelector::Prefix("message.".to_owned())],
+            }]
+            .as_slice()
         );
     }
 

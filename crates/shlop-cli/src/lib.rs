@@ -12,9 +12,9 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use shlop_core::{
-    Connection, ConnectionMetadata, ConnectionSendError, ConnectionSink, EventBus, RouteError,
-    SessionStore, SessionStoreError, ToolActivityOutcome, ToolActivityRecord, ToolRegistry,
-    ToolRouteError,
+    Connection, ConnectionMetadata, ConnectionOrigin, ConnectionSendError, ConnectionSink,
+    DefaultSubscriptionPolicy, EventBus, PolicyStore, RouteError, SessionStore, SessionStoreError,
+    ToolActivityOutcome, ToolActivityRecord, ToolRegistry, ToolRouteError,
 };
 use shlop_proto::{
     ChatMessage, ClientKind, DecodeError, Event, EventName, EventReader, EventSelector,
@@ -28,9 +28,10 @@ const STARTUP_TIMEOUT: Duration = Duration::from_secs(2);
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Serve-loop options for daemon mode.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ServeOptions {
     pub max_clients: Option<usize>,
+    pub policy_store_path: Option<PathBuf>,
 }
 
 /// Errors returned by the minimal CLI runtime.
@@ -204,8 +205,13 @@ struct Harness {
 }
 
 impl Harness {
-    fn new(store_path: impl Into<PathBuf>) -> Result<Self, CliError> {
-        let mut bus = EventBus::new();
+    fn new(
+        store_path: impl Into<PathBuf>,
+        policy_store_path: impl Into<PathBuf>,
+    ) -> Result<Self, CliError> {
+        let mut bus = EventBus::with_subscription_policy(Box::new(
+            DefaultSubscriptionPolicy::with_store(PolicyStore::open(policy_store_path.into())?),
+        ));
         let store = SessionStore::open(store_path)?;
 
         let agent = spawn_local_participant("agent", ClientKind::Agent, |reader, writer| {
@@ -225,6 +231,7 @@ impl Harness {
                 id: String::new(),
                 name: "agent".to_owned(),
                 kind: ClientKind::Agent,
+                origin: ConnectionOrigin::Supervised,
             },
             Box::new(LocalPeerSink {
                 peer: agent.peer.clone(),
@@ -235,6 +242,7 @@ impl Harness {
                 id: String::new(),
                 name: "filesystem-tool".to_owned(),
                 kind: ClientKind::Tool,
+                origin: ConnectionOrigin::Supervised,
             },
             Box::new(LocalPeerSink {
                 peer: filesystem_tool.peer.clone(),
@@ -245,6 +253,7 @@ impl Harness {
                 id: String::new(),
                 name: "shell-tool".to_owned(),
                 kind: ClientKind::Tool,
+                origin: ConnectionOrigin::Supervised,
             },
             Box::new(LocalPeerSink {
                 peer: shell_tool.peer.clone(),
@@ -422,6 +431,8 @@ impl Harness {
                 Ok(None)
             }
             Event::LifecycleSubscribe(subscribe) => {
+                self.bus
+                    .set_subscriptions(source_id, subscribe.selectors.clone())?;
                 let _ = self
                     .bus
                     .publish_from(Some(source_id), Event::LifecycleSubscribe(subscribe));
@@ -541,6 +552,8 @@ impl Harness {
                 Ok(true)
             }
             Event::LifecycleSubscribe(subscribe) => {
+                self.bus
+                    .set_subscriptions(client_id, subscribe.selectors.clone())?;
                 let _ = self
                     .bus
                     .publish_from(Some(client_id), Event::LifecycleSubscribe(subscribe));
@@ -568,6 +581,7 @@ impl Harness {
                 id: String::new(),
                 name: "socket-ui".to_owned(),
                 kind: ClientKind::Ui,
+                origin: ConnectionOrigin::Socket,
             },
             Box::new(SocketPeerSink { peer }),
         ))
@@ -661,7 +675,11 @@ pub fn run_embedded_message(
     session_id: &str,
     message: &str,
 ) -> Result<String, CliError> {
-    let mut harness = Harness::new(session_store_path)?;
+    let session_store_path = session_store_path.into();
+    let mut harness = Harness::new(
+        session_store_path.clone(),
+        default_policy_store_path_from_session_store(&session_store_path),
+    )?;
     let response = harness.send_user_message(session_id, message, None)?;
     harness.shutdown()?;
     Ok(response)
@@ -674,8 +692,13 @@ pub fn run_daemon(
     options: ServeOptions,
 ) -> Result<(), CliError> {
     let socket_path = socket_path.into();
+    let session_store_path = session_store_path.into();
     let listener = SocketListener::bind(&socket_path)?;
-    let mut harness = Harness::new(session_store_path)?;
+    let policy_store_path = options
+        .policy_store_path
+        .clone()
+        .unwrap_or_else(|| default_policy_store_path_from_session_store(&session_store_path));
+    let mut harness = Harness::new(session_store_path, policy_store_path)?;
     let mut handled_clients = 0_usize;
 
     loop {
@@ -693,7 +716,18 @@ pub fn run_daemon(
         while keep_client {
             let client_event = { peer.borrow_mut().recv_timeout(POLL_INTERVAL)? };
             if let Some(event) = client_event {
-                keep_client = harness.handle_client_event(&client_id, event)?;
+                match harness.handle_client_event(&client_id, event) {
+                    Ok(new_keep_client) => keep_client = new_keep_client,
+                    Err(CliError::Route(RouteError::SubscriptionDenied { reason, .. })) => {
+                        peer.borrow_mut().send(&Event::LifecycleDisconnect(
+                            LifecycleDisconnect {
+                                reason: Some(format!("subscription denied: {reason}")),
+                            },
+                        ))?;
+                        keep_client = false;
+                    }
+                    Err(error) => return Err(error),
+                }
             }
             let _ = harness.poll_participants_once()?;
         }
@@ -747,6 +781,19 @@ pub fn default_session_store_path() -> PathBuf {
     PathBuf::from(".shlop").join("sessions.cbor")
 }
 
+/// Returns the default policy-store path used by the CLI.
+#[must_use]
+pub fn default_policy_store_path() -> PathBuf {
+    PathBuf::from(".shlop").join("policy.cbor")
+}
+
+fn default_policy_store_path_from_session_store(session_store_path: &Path) -> PathBuf {
+    session_store_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("policy.cbor")
+}
+
 /// Returns the default daemon socket path used by the CLI.
 #[must_use]
 pub fn default_socket_path() -> PathBuf {
@@ -762,6 +809,11 @@ pub fn default_session_id() -> &'static str {
 /// Opens the session store for inspection or tests.
 pub fn open_session_store(path: impl AsRef<Path>) -> Result<SessionStore, CliError> {
     SessionStore::open(path.as_ref()).map_err(CliError::from)
+}
+
+/// Opens the policy store for inspection or tests.
+pub fn open_policy_store(path: impl AsRef<Path>) -> Result<PolicyStore, CliError> {
+    PolicyStore::open(path.as_ref()).map_err(CliError::from)
 }
 
 #[cfg(test)]
@@ -802,6 +854,7 @@ mod tests {
                     store_path,
                     ServeOptions {
                         max_clients: Some(2),
+                        policy_store_path: None,
                     },
                 )
             }

@@ -8,6 +8,7 @@ Rust workspace skeleton for the `shlop` agent harness.
 - `crates/shlop-config` — user and project configuration loading
 - `crates/shlop-core` — event bus, routing, state, and tool registry
 - `crates/shlop-supervisor` — supervised child-process and stdio transport glue
+- `crates/shlop-test-support` — reusable end-to-end test utilities
 - `crates/shlop-socket` — Unix socket transport glue
 - `crates/shlop-cli` — CLI entrypoint for embedded and daemon-attached use
 - `crates/shlop-agent` — first-party agent process

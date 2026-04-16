@@ -9,6 +9,7 @@ members = [
   "crates/shlop-proto",
   "crates/shlop-socket",
   "crates/shlop-supervisor",
+  "crates/shlop-test-support",
 ]
 resolver = "2"
 
