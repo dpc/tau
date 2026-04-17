@@ -2,15 +2,18 @@
   <img src="docs/logo.svg" width="200" alt="tau logo">
 </p>
 
+
+*Note: Not ready yet for public consumption. For informational purposes only.*
+
 # Tau coding agent
 
 > Tau is like [Pi][pi], but twice as much.
 
-[Pi][pi] is truly a breath of fresh air in the AI harness space,
-but it doesn't go far enough. Tau is twice as as Unix-like,
-which is twice as everything.
+[Pi agent][pi] is truly a breath of fresh air in the AI coding space,
+but it doesn't go far enough. Tau is twice as Unix-like,
+which makes it just right.
 
-Instead of being built on top of a Typescript runtime, Tau builds on top
+Instead of being built on top of a Typescript (JS) runtime, Tau builds on top
 the most venerable, powerful and ubiquitous runtime there is: Unix itself.
 
 Tau runs all its components as standalone Posix processes, communicating
@@ -37,27 +40,14 @@ This architecture has important benefits:
 
 [pi]: https://shittycodingagent.ai/
 
-## Workspace layout
 
-- `crates/tau-proto` — shared protocol types and CBOR codec helpers
-- `crates/tau-config` — user and project configuration loading
-- `crates/tau-core` — event bus, routing, state, and tool registry
-- `crates/tau-supervisor` — supervised child-process and stdio transport glue
-- `crates/tau-test-support` — reusable end-to-end test utilities
-- `crates/tau-socket` — Unix socket transport glue
-- `crates/tau-cli` — CLI entrypoint for embedded and daemon-attached use
-- `crates/tau-agent` — first-party agent process
-- `crates/tau-ext-fs` — filesystem-oriented extension
-- `crates/tau-ext-shell` — shell-oriented extension
+## Contact
 
-## Getting started
-
-- `cargo check`
-- `nix develop`
-- `selfci check`
+* [I don't want your PRs anymore](https://dpc.pw/posts/i-dont-want-your-prs-anymore/)
+* [`#support:dpc.pw` Matrix channel](https://matrix.to/#/#support:dpc.pw)
 
 ## AI usage disclosure
 
 [I use LLMs when working on my projects.](https://dpc.pw/posts/personal-ai-usage-disclosure/),
-though due to its nature this project is more "vibed" than I typically would do,
+though due to its nature this project is more "vibed" than usual,
 especially in its infancy.
