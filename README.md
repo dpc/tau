@@ -10,20 +10,26 @@ Instead of being built on top of a Typescript runtime, Tau builds on top
 the most venerable, powerful and ubiquitous runtime there is: Unix itself.
 
 Tau runs all its components as standalone Posix processes, communicating
-over stdio/rpc.
+over stdio/RPC.
 
 Components include:
 
 * UI
 * harness
 * LLM API
-* each extension
+* extensions
 
 This architecture has tremendous benefits:
 
-* each component can be ran and sandboxed individually using tools like bubblewrap, docker, VM, or a different machine
-* components can be implemented in any programming language,
-*
+* Starting a component is just running a process with all the power it brings.
+* Components can be system-provided, which pairs well with technologies like NixOS.
+* Each component can be easily ran on a different VM or system.
+  Remote execution is as simple as prefixing a component command with `ssh user@host -c`.
+* Each component can be sandboxed individually using tools like bubblewrap, docker, jails, landlock, etc.
+  according to its actual needs.
+* Components can be implemented in any programming language.
+* In theory with a little shim Tau could run [Pi][pi] extensions.
+
 
 [pi]: https://shittycodingagent.ai/
 
@@ -48,4 +54,6 @@ This architecture has tremendous benefits:
 
 ## AI usage disclosure
 
-[I use LLMs when working on my projects.](https://dpc.pw/posts/personal-ai-usage-disclosure/)
+[I use LLMs when working on my projects.](https://dpc.pw/posts/personal-ai-usage-disclosure/),
+though due to its nature this project is more "vibed" than I typically would do,
+especially in its infancy.
