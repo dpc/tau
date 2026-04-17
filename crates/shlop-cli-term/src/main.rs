@@ -30,33 +30,37 @@ fn spawn_animator(tx: OutputSender) {
     thread::spawn(move || {
         let mut tick = 0u64;
         let ball_width = 30;
-        let mut ball_pos: usize = 0;
-        let mut ball_dir: isize = 1;
+        let mut ball_x: usize = 1;
+        let mut ball_y: usize = 0;
+        let mut ball_dx: isize = 1;
+        let mut ball_dy: isize = 1;
 
         loop {
             thread::sleep(Duration::from_millis(200));
             tick += 1;
 
-            // Bouncing ball in the above-prompt area.
+            // Bouncing ball in a 3-line-high box.
             let mut above = String::new();
-            for row in 0..3 {
-                let line_pos = ball_pos.wrapping_add(row * 3) % (ball_width * 2);
-                let col = if line_pos < ball_width {
-                    line_pos
-                } else {
-                    ball_width * 2 - line_pos
-                };
-                let mut line = " ".repeat(col);
-                line.push('o');
-                above.push_str(&line);
+            for row in 0..3_usize {
+                for col in 0..ball_width {
+                    if row == ball_y && col == ball_x {
+                        above.push('o');
+                    } else {
+                        above.push(' ');
+                    }
+                }
                 if row < 2 {
                     above.push('\n');
                 }
             }
 
-            ball_pos = (ball_pos as isize + ball_dir) as usize;
-            if ball_pos == 0 || ball_pos >= ball_width - 1 {
-                ball_dir = -ball_dir;
+            ball_x = (ball_x as isize + ball_dx) as usize;
+            ball_y = (ball_y as isize + ball_dy) as usize;
+            if ball_x == 0 || ball_x >= ball_width - 1 {
+                ball_dx = -ball_dx;
+            }
+            if ball_y == 0 || ball_y >= 2 {
+                ball_dy = -ball_dy;
             }
 
             let _ = tx.set_above_prompt(above);
