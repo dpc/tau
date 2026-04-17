@@ -11,7 +11,7 @@
 
 [Pi agent][pi] is truly a breath of fresh air in the AI coding space,
 but it doesn't go far enough. Tau is twice as Unix-like,
-which makes it just right.
+which makes it just right for command line nerds and Linux hackers.
 
 Instead of being built on top of a Typescript (JS) runtime, Tau builds on top
 the most venerable, powerful and ubiquitous runtime there is: Unix itself.
