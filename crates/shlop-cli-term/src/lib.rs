@@ -47,6 +47,8 @@ use screen::{Screen, layout_lines};
 pub enum UiEvent {
     /// A terminal key event from the input thread.
     Key(KeyEvent),
+    /// The terminal was resized.
+    Resize(u16, u16),
     /// Async output that should be printed above the prompt.
     Output(String),
     /// Update a prompt zone and re-render.
@@ -173,10 +175,13 @@ impl Prompt {
                     Ok(ev) => ev,
                     Err(_) => break,
                 };
-                if let CtEvent::Key(key) = ev {
-                    if tx.send(UiEvent::Key(key)).is_err() {
-                        break;
-                    }
+                let ui_event = match ev {
+                    CtEvent::Key(key) => UiEvent::Key(key),
+                    CtEvent::Resize(w, h) => UiEvent::Resize(w, h),
+                    _ => continue,
+                };
+                if tx.send(ui_event).is_err() {
+                    break;
                 }
             }
         }));
@@ -197,6 +202,15 @@ impl Prompt {
                     if let Some(result) = self.handle_key(key)? {
                         return Ok(result);
                     }
+                }
+                UiEvent::Resize(w, _h) => {
+                    self.screen.set_width(w as usize);
+                    // Terminal reflow may have changed line positions.
+                    // Erase and redraw from scratch.
+                    self.screen.erase_all(&mut self.stdout)?;
+                    self.stdout.flush()?;
+                    self.screen.invalidate();
+                    self.render()?;
                 }
                 UiEvent::Output(text) => {
                     self.print_above(&text)?;
@@ -315,6 +329,20 @@ impl Prompt {
                 }
             }
 
+            KeyCode::Up => {
+                if let Some(new_cursor) = self.move_cursor_vertical(-1) {
+                    self.cursor = new_cursor;
+                    self.render()?;
+                }
+            }
+
+            KeyCode::Down => {
+                if let Some(new_cursor) = self.move_cursor_vertical(1) {
+                    self.cursor = new_cursor;
+                    self.render()?;
+                }
+            }
+
             KeyCode::Home => {
                 self.cursor = 0;
                 self.render()?;
@@ -329,6 +357,43 @@ impl Prompt {
         }
 
         Ok(None)
+    }
+
+    /// Computes a new buffer byte offset after moving the cursor up or
+    /// down by `delta` physical rows. Returns `None` if the target row
+    /// is outside the input area.
+    fn move_cursor_vertical(&self, delta: isize) -> Option<usize> {
+        let width = term_width();
+        let left_chars = self.left_prompt.chars().count();
+        let cursor_chars = left_chars + char_count_for_bytes(&self.buffer, self.cursor);
+        let current_row = cursor_chars / width;
+        let current_col = cursor_chars % width;
+
+        let target_row = current_row as isize + delta;
+        if target_row < 0 {
+            return None;
+        }
+        let target_row = target_row as usize;
+
+        // Total chars in the input content (left_prompt + buffer).
+        let total_chars = left_chars + self.buffer.chars().count();
+        let max_row = if total_chars == 0 {
+            0
+        } else {
+            (total_chars.saturating_sub(1)) / width
+        };
+        if target_row > max_row {
+            return None;
+        }
+
+        // Target char offset, clamped to content length.
+        let target_offset = (target_row * width + current_col).min(total_chars);
+
+        // Convert from char offset in the full content to byte offset
+        // in the buffer.
+        let target_buffer_chars = target_offset.saturating_sub(left_chars);
+        let new_cursor = char_offset_to_byte(&self.buffer, target_buffer_chars);
+        Some(new_cursor)
     }
 
     /// Prints text above the prompt, then redraws the prompt.
@@ -435,4 +500,12 @@ fn next_char_boundary(s: &str, pos: usize) -> usize {
         p += 1;
     }
     p
+}
+
+/// Returns the byte offset of the `n`-th char in `s`, clamped to `s.len()`.
+fn char_offset_to_byte(s: &str, n: usize) -> usize {
+    s.char_indices()
+        .nth(n)
+        .map(|(byte, _)| byte)
+        .unwrap_or(s.len())
 }
