@@ -2,41 +2,37 @@
 //!
 //! Provides a line-editing prompt that can be interrupted by async output
 //! without corrupting the display. No alternate screen mode — just
-//! erase/print/redraw in the normal terminal buffer.
+//! diff-based rendering in the normal terminal buffer.
 //!
-//! # Multi-line wrapping
+//! # Rendering
 //!
-//! When the prompt + input exceeds the terminal width, the terminal wraps
-//! it onto multiple physical lines. To erase everything before printing
-//! async output, we:
+//! Uses a dual-buffer diff approach inspired by fish shell's `screen.rs`:
+//! the [`screen::Screen`] tracks what is currently on the terminal
+//! ("actual") and diffs it against what should be there ("desired"),
+//! emitting only the escape sequences for characters that changed. This
+//! minimizes terminal I/O, which matters over slow SSH connections.
 //!
-//! 1. Calculate which physical row the cursor is on:
-//!    `cursor_row = (prefix_len + cursor_pos) / terminal_width`
-//! 2. Move up to row 0 with `CursorUp(cursor_row)`
-//! 3. Clear from there down with `ClearFromCursorDown` (one-shot wipe)
-//! 4. Print async output, then redraw prompt + buffer
-//!
-//! This approach is borrowed from fish shell's `screen.rs`, which uses
-//! relative cursor movement + clear-to-end-of-screen rather than
-//! absolute positioning. Fish goes further with a dual-buffer diff
-//! system (tracking "desired" vs "actual" screen state to emit minimal
-//! escape sequences), but for our simpler case the erase-and-redraw
-//! approach is sufficient.
+//! For async output (printed above the prompt), we erase the prompt area
+//! using relative cursor movement + `ClearFromCursorDown`, print the
+//! output, then let the diff renderer redraw the prompt from scratch
+//! (since the actual state was invalidated by the erase).
 //!
 //! References:
 //! - fish shell screen rendering: <https://github.com/fish-shell/fish-shell/blob/master/src/screen.rs>
 //! - fish `Screen::update()` for the diff-based repaint logic
-//! - fish `reset_line()` / `actual_lines_before_reset` for the clear strategy
+
+pub mod screen;
 
 use std::io::{self, Stdout, Write};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::{self, JoinHandle};
 
-use crossterm::cursor::{MoveToColumn, MoveUp};
 use crossterm::event::{self, Event as CtEvent, KeyCode, KeyEvent, KeyModifiers};
 use crossterm::style::Print;
-use crossterm::terminal::{self, ClearType};
+use crossterm::terminal;
 use crossterm::QueueableCommand;
+
+use screen::{Screen, layout_lines};
 
 /// Events flowing into the UI loop from any producer.
 pub enum UiEvent {
@@ -79,6 +75,7 @@ pub struct Prompt {
     rx: Receiver<UiEvent>,
     tx: Sender<UiEvent>,
     stdout: Stdout,
+    screen: Screen,
     input_handle: Option<JoinHandle<()>>,
     prefix: String,
     buffer: String,
@@ -93,11 +90,13 @@ impl Prompt {
     pub fn new(prefix: &str) -> io::Result<(Self, OutputSender)> {
         let (tx, rx) = mpsc::channel();
         let output_sender = OutputSender { tx: tx.clone() };
+        let width = term_width();
         Ok((
             Self {
                 rx,
                 tx,
                 stdout: io::stdout(),
+                screen: Screen::new(width),
                 input_handle: None,
                 prefix: prefix.to_owned(),
                 buffer: String::new(),
@@ -113,7 +112,7 @@ impl Prompt {
     /// [`Drop`].
     pub fn start(&mut self) -> io::Result<()> {
         terminal::enable_raw_mode()?;
-        self.draw_prompt()?;
+        self.render()?;
 
         let tx = self.tx.clone();
         self.input_handle = Some(thread::spawn(move || {
@@ -162,9 +161,14 @@ impl Prompt {
 
         match key.code {
             KeyCode::Enter => {
-                // Move to end of content, then newline.
-                self.move_cursor_to_content_end()?;
+                // Move cursor to end of content so the newline appears
+                // after the last character.
+                self.cursor = self.buffer.len();
+                self.render()?;
                 self.stdout.queue(Print("\r\n"))?.flush()?;
+                // The prompt area is now above us; invalidate so the next
+                // render starts fresh on the new line.
+                self.screen.invalidate();
                 let line = std::mem::take(&mut self.buffer);
                 self.cursor = 0;
                 return Ok(Some(PromptResult::Line(line)));
@@ -173,6 +177,7 @@ impl Prompt {
             KeyCode::Char('d') if ctrl => {
                 if self.buffer.is_empty() {
                     self.stdout.queue(Print("\r\n"))?.flush()?;
+                    self.screen.invalidate();
                     return Ok(Some(PromptResult::Eof));
                 }
             }
@@ -180,13 +185,13 @@ impl Prompt {
             KeyCode::Char('c') if ctrl => {
                 self.buffer.clear();
                 self.cursor = 0;
-                self.redraw()?;
+                self.render()?;
             }
 
             KeyCode::Char('u') if ctrl => {
                 self.buffer.drain(..self.cursor);
                 self.cursor = 0;
-                self.redraw()?;
+                self.render()?;
             }
 
             KeyCode::Char('w') if ctrl => {
@@ -199,24 +204,24 @@ impl Prompt {
                         .unwrap_or(0);
                     self.buffer.drain(new_end..self.cursor);
                     self.cursor = new_end;
-                    self.redraw()?;
+                    self.render()?;
                 }
             }
 
             KeyCode::Char('a') if ctrl => {
                 self.cursor = 0;
-                self.place_cursor()?;
+                self.render()?;
             }
 
             KeyCode::Char('e') if ctrl => {
                 self.cursor = self.buffer.len();
-                self.place_cursor()?;
+                self.render()?;
             }
 
             KeyCode::Char(ch) => {
                 self.buffer.insert(self.cursor, ch);
                 self.cursor += ch.len_utf8();
-                self.redraw()?;
+                self.render()?;
             }
 
             KeyCode::Backspace => {
@@ -224,7 +229,7 @@ impl Prompt {
                     let prev = prev_char_boundary(&self.buffer, self.cursor);
                     self.buffer.drain(prev..self.cursor);
                     self.cursor = prev;
-                    self.redraw()?;
+                    self.render()?;
                 }
             }
 
@@ -232,32 +237,32 @@ impl Prompt {
                 if self.cursor < self.buffer.len() {
                     let next = next_char_boundary(&self.buffer, self.cursor);
                     self.buffer.drain(self.cursor..next);
-                    self.redraw()?;
+                    self.render()?;
                 }
             }
 
             KeyCode::Left => {
                 if self.cursor > 0 {
                     self.cursor = prev_char_boundary(&self.buffer, self.cursor);
-                    self.place_cursor()?;
+                    self.render()?;
                 }
             }
 
             KeyCode::Right => {
                 if self.cursor < self.buffer.len() {
                     self.cursor = next_char_boundary(&self.buffer, self.cursor);
-                    self.place_cursor()?;
+                    self.render()?;
                 }
             }
 
             KeyCode::Home => {
                 self.cursor = 0;
-                self.place_cursor()?;
+                self.render()?;
             }
 
             KeyCode::End => {
                 self.cursor = self.buffer.len();
-                self.place_cursor()?;
+                self.render()?;
             }
 
             _ => {}
@@ -266,130 +271,40 @@ impl Prompt {
         Ok(None)
     }
 
-    /// Prints text above the prompt, then redraws the prompt line.
+    /// Prints text above the prompt, then redraws the prompt.
     pub fn print_output(&mut self, text: &str) -> io::Result<()> {
         self.print_above(text)
     }
 
-    /// Erases the entire prompt (including wrapped lines), prints text,
-    /// then redraws the prompt.
+    /// Erases the prompt area, prints text, then redraws the prompt via
+    /// the diff renderer (which will emit everything since actual was
+    /// invalidated).
     fn print_above(&mut self, text: &str) -> io::Result<()> {
-        self.erase_prompt()?;
+        self.screen.erase_all(&mut self.stdout)?;
         for line in text.lines() {
             self.stdout.queue(Print(line))?.queue(Print("\r\n"))?;
         }
-        self.draw_prompt_queued()?;
-        self.stdout.flush()
+        self.stdout.flush()?;
+        // Actual state is gone — next render emits everything.
+        self.screen.invalidate();
+        self.render()
     }
 
-    /// Moves cursor to line 0, column 0 of the prompt area and clears
-    /// everything from there down.
-    fn erase_prompt(&mut self) -> io::Result<()> {
-        let width = self.term_width();
-        let cursor_offset = self.prefix.len() + self.cursor;
+    /// Builds the desired screen content from prefix + buffer, then diffs
+    /// against the actual state via [`Screen::update`].
+    fn render(&mut self) -> io::Result<()> {
+        self.screen.set_width(term_width());
+        let width = self.screen.width();
+        let content = format!("{}{}", self.prefix, self.buffer);
+        let desired = layout_lines(&content, width);
 
-        // Which physical row is the cursor on (0-based from prompt start)?
-        let cursor_row = cursor_offset / width;
-        // Move up from cursor_row to row 0.
-        if cursor_row > 0 {
-            self.stdout.queue(MoveUp(cursor_row as u16))?;
-        }
-        self.stdout
-            .queue(MoveToColumn(0))?
-            .queue(terminal::Clear(ClearType::FromCursorDown))?;
-        Ok(())
-    }
+        // Cursor position in character offset, then map to (row, col).
+        let cursor_chars = self.prefix.chars().count() + char_count_for_bytes(&self.buffer, self.cursor);
+        let cursor_row = cursor_chars / width;
+        let cursor_col = cursor_chars % width;
 
-    /// Full redraw: erase everything, then draw prompt + buffer + place
-    /// cursor.
-    fn redraw(&mut self) -> io::Result<()> {
-        self.erase_prompt()?;
-        self.draw_prompt_queued()?;
-        self.stdout.flush()
-    }
-
-    /// Draws the prompt fresh (assumes cursor is at the right position to
-    /// start writing). Used after erase or at startup.
-    fn draw_prompt(&mut self) -> io::Result<()> {
-        self.draw_prompt_queued()?;
-        self.stdout.flush()
-    }
-
-    fn draw_prompt_queued(&mut self) -> io::Result<()> {
-        let width = self.term_width();
-        let cursor_offset = self.prefix.len() + self.cursor;
-        let cursor_row = cursor_offset / width;
-        let cursor_col = cursor_offset % width;
-
-        // Print the full prompt + buffer. The terminal will wrap naturally.
-        self.stdout
-            .queue(Print(&self.prefix))?
-            .queue(Print(&self.buffer))?;
-
-        // Now position the cursor. After printing, the terminal cursor is
-        // at the end of the content. We need to move it to (cursor_row,
-        // cursor_col) relative to the start of the prompt.
-        let total_chars = self.prefix.len() + self.buffer.len();
-        let end_row = if total_chars == 0 {
-            0
-        } else {
-            (total_chars.saturating_sub(1)) / width
-        };
-
-        // Move up from end to cursor row.
-        let rows_up = end_row.saturating_sub(cursor_row);
-        if rows_up > 0 {
-            self.stdout.queue(MoveUp(rows_up as u16))?;
-        }
-        self.stdout.queue(MoveToColumn(cursor_col as u16))?;
-        Ok(())
-    }
-
-    /// Just repositions the cursor without redrawing content (for arrow
-    /// keys, home/end).
-    fn place_cursor(&mut self) -> io::Result<()> {
-        // We need to know where the cursor currently is on screen
-        // vs where it should be. Simplest approach: full redraw.
-        // For arrow keys this is fine — the content hasn't changed,
-        // and the terminal just needs to reposition.
-        self.redraw()
-    }
-
-    /// Moves the terminal cursor to the end of the prompt content.
-    /// Used before printing a newline (Enter, Ctrl-C) so the newline
-    /// appears after the last character.
-    fn move_cursor_to_content_end(&mut self) -> io::Result<()> {
-        let width = self.term_width();
-        let cursor_offset = self.prefix.len() + self.cursor;
-        let total_chars = self.prefix.len() + self.buffer.len();
-
-        let cursor_row = cursor_offset / width;
-        let end_row = if total_chars == 0 {
-            0
-        } else {
-            (total_chars.saturating_sub(1)) / width
-        };
-        let end_col = if total_chars == 0 {
-            0
-        } else {
-            (total_chars.saturating_sub(1)) % width + 1
-        };
-
-        // Move down from cursor to end.
-        let rows_down = end_row.saturating_sub(cursor_row);
-        if rows_down > 0 {
-            for _ in 0..rows_down {
-                self.stdout.queue(Print("\n"))?;
-            }
-        }
-        self.stdout.queue(MoveToColumn(end_col as u16))?.flush()
-    }
-
-    fn term_width(&self) -> usize {
-        terminal::size()
-            .map(|(w, _)| w as usize)
-            .unwrap_or(80)
-            .max(1)
+        self.screen
+            .update(&mut self.stdout, &desired, (cursor_row, cursor_col))
     }
 }
 
@@ -397,6 +312,18 @@ impl Drop for Prompt {
     fn drop(&mut self) {
         let _ = terminal::disable_raw_mode();
     }
+}
+
+fn term_width() -> usize {
+    terminal::size()
+        .map(|(w, _)| w as usize)
+        .unwrap_or(80)
+        .max(1)
+}
+
+/// Returns the number of `char`s in `s[..byte_pos]`.
+fn char_count_for_bytes(s: &str, byte_pos: usize) -> usize {
+    s[..byte_pos].chars().count()
 }
 
 fn prev_char_boundary(s: &str, pos: usize) -> usize {
