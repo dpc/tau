@@ -72,10 +72,16 @@
             };
           }
         );
+
+        site = pkgs.runCommand "tau-agent-site" { } ''
+          mkdir -p $out/share/tau-agent-site
+          cp -r ${./site}/* $out/share/tau-agent-site/
+        '';
       in
       {
         packages.default = multiBuild.shlop-cli;
         packages.shlop-cli = multiBuild.shlop-cli;
+        packages.site = site;
 
         ci = {
           inherit (multiBuild) workspace clippy tests;

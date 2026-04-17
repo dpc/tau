@@ -28,10 +28,16 @@ function job_cargo() {
   fi
 }
 
+function job_site() {
+  selfci step start "site"
+  nix build -L .#site
+}
+
 case "$SELFCI_JOB_NAME" in
   main)
     selfci job start "lint"
     selfci job start "cargo"
+    selfci job start "site"
     ;;
   cargo)
     job_cargo
@@ -39,6 +45,9 @@ case "$SELFCI_JOB_NAME" in
   lint)
     export -f job_lint
     nix develop -c bash -c "job_lint"
+    ;;
+  site)
+    job_site
     ;;
   *)
     echo "Unknown job: $SELFCI_JOB_NAME"
