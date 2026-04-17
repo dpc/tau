@@ -1,7 +1,7 @@
-use std::env;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+use clap::{Parser, Subcommand};
 use shlop_cli::{
     CliError, ServeOptions, default_policy_store_path, default_session_id,
     default_session_store_path, default_socket_path, policy_lines, run_daemon,
@@ -10,6 +10,109 @@ use shlop_cli::{
     session_list_lines,
 };
 use shlop_config::{Config, LoadConfigError, LoadOptions};
+
+#[derive(Parser)]
+#[command(name = "shlop", about = "Unix-native LLM agent harness")]
+struct Cli {
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Interactive chat session
+    Chat {
+        /// Session identifier
+        #[arg(long, default_value_t = default_session_id().to_owned())]
+        session_id: String,
+
+        /// Path to session store
+        #[arg(long, default_value_os_t = default_session_store_path())]
+        session_store: PathBuf,
+
+        /// Path to extension configuration file
+        #[arg(long)]
+        config: Option<PathBuf>,
+    },
+
+    /// Run a single embedded interaction (interactive if --message is omitted)
+    Embedded {
+        /// Message to send (omit for interactive mode)
+        #[arg(long)]
+        message: Option<String>,
+
+        /// Session identifier
+        #[arg(long, default_value_t = default_session_id().to_owned())]
+        session_id: String,
+
+        /// Path to session store
+        #[arg(long, default_value_os_t = default_session_store_path())]
+        session_store: PathBuf,
+
+        /// Path to extension configuration file
+        #[arg(long)]
+        config: Option<PathBuf>,
+    },
+
+    /// Start the daemon and accept socket clients
+    Serve {
+        /// Unix socket path
+        #[arg(long, default_value_os_t = default_socket_path())]
+        socket: PathBuf,
+
+        /// Path to session store
+        #[arg(long, default_value_os_t = default_session_store_path())]
+        session_store: PathBuf,
+
+        /// Path to policy store
+        #[arg(long, default_value_os_t = default_policy_store_path())]
+        policy_store: PathBuf,
+
+        /// Path to extension configuration file
+        #[arg(long)]
+        config: Option<PathBuf>,
+    },
+
+    /// Send a single message to a running daemon
+    Send {
+        /// Message to send
+        #[arg(long, default_value = "hello")]
+        message: String,
+
+        /// Session identifier
+        #[arg(long, default_value_t = default_session_id().to_owned())]
+        session_id: String,
+
+        /// Unix socket path of the daemon
+        #[arg(long, default_value_os_t = default_socket_path())]
+        socket: PathBuf,
+    },
+
+    /// List all sessions
+    SessionList {
+        /// Path to session store
+        #[arg(long, default_value_os_t = default_session_store_path())]
+        session_store: PathBuf,
+    },
+
+    /// Show a single session's history
+    SessionShow {
+        /// Session identifier
+        #[arg(long, default_value_t = default_session_id().to_owned())]
+        session_id: String,
+
+        /// Path to session store
+        #[arg(long, default_value_os_t = default_session_store_path())]
+        session_store: PathBuf,
+    },
+
+    /// Show persisted policy approvals
+    PolicyShow {
+        /// Path to policy store
+        #[arg(long, default_value_os_t = default_policy_store_path())]
+        policy_store: PathBuf,
+    },
+}
 
 fn main() -> ExitCode {
     match run_main() {
@@ -22,159 +125,75 @@ fn main() -> ExitCode {
 }
 
 fn run_main() -> Result<(), CliError> {
-    let mut args = env::args().skip(1);
-    let Some(command) = args.next() else {
-        print_help();
-        return Ok(());
-    };
+    let cli = Cli::parse();
 
-    match command.as_str() {
-        "chat" => {
-            let mut session_id = default_session_id().to_owned();
-            let mut session_store = default_session_store_path();
-            let mut config_path: Option<PathBuf> = None;
-            while let Some(flag) = args.next() {
-                match flag.as_str() {
-                    "--session-id" => {
-                        if let Some(value) = args.next() {
-                            session_id = value;
-                        }
+    match cli.command {
+        Command::Chat {
+            session_id,
+            session_store,
+            config,
+        } => match try_load_config(config.as_deref())? {
+            Some(cfg) => run_interactive_with_config(&cfg, session_store, &session_id),
+            None => run_interactive(session_store, &session_id),
+        },
+
+        Command::Embedded {
+            message,
+            session_id,
+            session_store,
+            config,
+        } => match message {
+            Some(message) => {
+                let outcome = match try_load_config(config.as_deref())? {
+                    Some(cfg) => run_embedded_message_with_config(
+                        &cfg,
+                        session_store,
+                        &session_id,
+                        &message,
+                    )?,
+                    None => {
+                        run_embedded_message_with_trace(session_store, &session_id, &message)?
                     }
-                    "--session-store" => {
-                        if let Some(value) = args.next() {
-                            session_store = PathBuf::from(value);
-                        }
-                    }
-                    "--config" => {
-                        config_path = args.next().map(PathBuf::from);
-                    }
-                    _ => print_help(),
+                };
+                println!("user: {message}");
+                for lifecycle in outcome.lifecycle_messages {
+                    println!("lifecycle: {lifecycle}");
                 }
+                for progress in outcome.progress_messages {
+                    println!("progress: {progress}");
+                }
+                println!("agent: {}", outcome.response);
+                Ok(())
             }
-            match try_load_config(config_path.as_deref())? {
-                Some(config) => {
-                    run_interactive_with_config(&config, session_store, &session_id)
-                }
+            None => match try_load_config(config.as_deref())? {
+                Some(cfg) => run_interactive_with_config(&cfg, session_store, &session_id),
                 None => run_interactive(session_store, &session_id),
-            }
-        }
-        "embedded" => {
-            let mut message = None;
-            let mut session_id = default_session_id().to_owned();
-            let mut session_store = default_session_store_path();
-            let mut config_path: Option<PathBuf> = None;
-            while let Some(flag) = args.next() {
-                match flag.as_str() {
-                    "--message" => message = args.next(),
-                    "--session-id" => {
-                        if let Some(value) = args.next() {
-                            session_id = value;
-                        }
-                    }
-                    "--session-store" => {
-                        if let Some(value) = args.next() {
-                            session_store = PathBuf::from(value);
-                        }
-                    }
-                    "--config" => {
-                        config_path = args.next().map(PathBuf::from);
-                    }
-                    _ => print_help(),
-                }
-            }
-            match message {
-                Some(message) => {
-                    let outcome = match try_load_config(config_path.as_deref())? {
-                        Some(config) => run_embedded_message_with_config(
-                            &config,
-                            session_store,
-                            &session_id,
-                            &message,
-                        )?,
-                        None => {
-                            run_embedded_message_with_trace(session_store, &session_id, &message)?
-                        }
-                    };
-                    println!("user: {message}");
-                    for lifecycle in outcome.lifecycle_messages {
-                        println!("lifecycle: {lifecycle}");
-                    }
-                    for progress in outcome.progress_messages {
-                        println!("progress: {progress}");
-                    }
-                    println!("agent: {}", outcome.response);
-                    Ok(())
-                }
-                None => match try_load_config(config_path.as_deref())? {
-                    Some(config) => {
-                        run_interactive_with_config(&config, session_store, &session_id)
-                    }
-                    None => run_interactive(session_store, &session_id),
-                },
-            }
-        }
-        "serve" => {
-            let mut socket_path = default_socket_path();
-            let mut session_store = default_session_store_path();
-            let mut policy_store = default_policy_store_path();
-            let mut config_path: Option<PathBuf> = None;
-            while let Some(flag) = args.next() {
-                match flag.as_str() {
-                    "--socket" => {
-                        if let Some(value) = args.next() {
-                            socket_path = PathBuf::from(value);
-                        }
-                    }
-                    "--session-store" => {
-                        if let Some(value) = args.next() {
-                            session_store = PathBuf::from(value);
-                        }
-                    }
-                    "--policy-store" => {
-                        if let Some(value) = args.next() {
-                            policy_store = PathBuf::from(value);
-                        }
-                    }
-                    "--config" => {
-                        config_path = args.next().map(PathBuf::from);
-                    }
-                    _ => print_help(),
-                }
-            }
-            eprintln!("serving on {}", socket_path.display());
+            },
+        },
+
+        Command::Serve {
+            socket,
+            session_store,
+            policy_store,
+            config,
+        } => {
+            eprintln!("serving on {}", socket.display());
             let options = ServeOptions {
                 max_clients: None,
                 policy_store_path: Some(policy_store),
             };
-            match try_load_config(config_path.as_deref())? {
-                Some(config) => {
-                    run_daemon_with_config(&config, socket_path, session_store, options)
-                }
-                None => run_daemon(socket_path, session_store, options),
+            match try_load_config(config.as_deref())? {
+                Some(cfg) => run_daemon_with_config(&cfg, socket, session_store, options),
+                None => run_daemon(socket, session_store, options),
             }
         }
-        "send" => {
-            let mut message = None;
-            let mut session_id = default_session_id().to_owned();
-            let mut socket_path = default_socket_path();
-            while let Some(flag) = args.next() {
-                match flag.as_str() {
-                    "--message" => message = args.next(),
-                    "--session-id" => {
-                        if let Some(value) = args.next() {
-                            session_id = value;
-                        }
-                    }
-                    "--socket" => {
-                        if let Some(value) = args.next() {
-                            socket_path = PathBuf::from(value);
-                        }
-                    }
-                    _ => print_help(),
-                }
-            }
-            let message = message.unwrap_or_else(|| "hello".to_owned());
-            let outcome = send_daemon_message_with_trace(socket_path, &session_id, &message)?;
+
+        Command::Send {
+            message,
+            session_id,
+            socket,
+        } => {
+            let outcome = send_daemon_message_with_trace(socket, &session_id, &message)?;
             println!("user: {message}");
             for lifecycle in outcome.lifecycle_messages {
                 println!("lifecycle: {lifecycle}");
@@ -185,69 +204,28 @@ fn run_main() -> Result<(), CliError> {
             println!("agent: {}", outcome.response);
             Ok(())
         }
-        "session-list" => {
-            let mut session_store = default_session_store_path();
-            while let Some(flag) = args.next() {
-                match flag.as_str() {
-                    "--session-store" => {
-                        if let Some(value) = args.next() {
-                            session_store = PathBuf::from(value);
-                        }
-                    }
-                    _ => print_help(),
-                }
-            }
+
+        Command::SessionList { session_store } => {
             for line in session_list_lines(session_store)? {
                 println!("{line}");
             }
             Ok(())
         }
-        "session-show" => {
-            let mut session_id = default_session_id().to_owned();
-            let mut session_store = default_session_store_path();
-            while let Some(flag) = args.next() {
-                match flag.as_str() {
-                    "--session-id" => {
-                        if let Some(value) = args.next() {
-                            session_id = value;
-                        }
-                    }
-                    "--session-store" => {
-                        if let Some(value) = args.next() {
-                            session_store = PathBuf::from(value);
-                        }
-                    }
-                    _ => print_help(),
-                }
-            }
+
+        Command::SessionShow {
+            session_id,
+            session_store,
+        } => {
             for line in session_lines(session_store, &session_id)? {
                 println!("{line}");
             }
             Ok(())
         }
-        "policy-show" => {
-            let mut policy_store = default_policy_store_path();
-            while let Some(flag) = args.next() {
-                match flag.as_str() {
-                    "--policy-store" => {
-                        if let Some(value) = args.next() {
-                            policy_store = PathBuf::from(value);
-                        }
-                    }
-                    _ => print_help(),
-                }
-            }
+
+        Command::PolicyShow { policy_store } => {
             for line in policy_lines(policy_store)? {
                 println!("{line}");
             }
-            Ok(())
-        }
-        "help" | "--help" | "-h" => {
-            print_help();
-            Ok(())
-        }
-        _ => {
-            print_help();
             Ok(())
         }
     }
@@ -283,19 +261,4 @@ fn try_load_config(explicit_path: Option<&std::path::Path>) -> Result<Option<Con
             | LoadConfigError::ParseFile { .. },
         ) => Ok(None),
     }
-}
-
-fn print_help() {
-    eprintln!("shlop-cli commands:");
-    eprintln!("  chat [--session-id ID] [--session-store PATH] [--config PATH]");
-    eprintln!(
-        "  embedded [--message TEXT] [--session-id ID] [--session-store PATH] [--config PATH]"
-    );
-    eprintln!(
-        "  serve [--socket PATH] [--session-store PATH] [--policy-store PATH] [--config PATH]"
-    );
-    eprintln!("  send [--message TEXT] [--session-id ID] [--socket PATH]");
-    eprintln!("  session-list [--session-store PATH]");
-    eprintln!("  session-show [--session-id ID] [--session-store PATH]");
-    eprintln!("  policy-show [--policy-store PATH]");
 }

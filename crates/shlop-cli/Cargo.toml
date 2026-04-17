@@ -9,6 +9,7 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+clap = { version = "4", features = ["derive"] }
 shlop-agent = { path = "../shlop-agent" }
 shlop-config = { path = "../shlop-config" }
 shlop-core = { path = "../shlop-core" }
