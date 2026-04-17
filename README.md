@@ -46,6 +46,10 @@ This architecture has important benefits:
 * [I don't want your PRs anymore](https://dpc.pw/posts/i-dont-want-your-prs-anymore/)
 * [`#support:dpc.pw` Matrix channel](https://matrix.to/#/#support:dpc.pw)
 
+## Status
+
+[![asciicast](https://asciinema.org/a/KCpgTfSOQGEEuWJ1.svg)](https://asciinema.org/a/KCpgTfSOQGEEuWJ1)
+
 ## AI usage disclosure
 
 [I use LLMs when working on my projects.](https://dpc.pw/posts/personal-ai-usage-disclosure/),
