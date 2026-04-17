@@ -45,8 +45,11 @@ This architecture has important benefits:
 
 * [I don't want your PRs anymore](https://dpc.pw/posts/i-dont-want-your-prs-anymore/)
 * [`#support:dpc.pw` Matrix channel](https://matrix.to/#/#support:dpc.pw)
+* [Rostra p2p social network profile](https://rostra.me/profile/rse1okfyp4yj75i6riwbz86mpmbgna3f7qr66aj1njceqoigjabegy)
 
 ## Status
+
+Prototyping the core UI part:
 
 [![asciicast](https://asciinema.org/a/KCpgTfSOQGEEuWJ1.svg)](https://asciinema.org/a/KCpgTfSOQGEEuWJ1)
 
