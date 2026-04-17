@@ -1,5 +1,7 @@
 //! Minimal CLI runtime for embedded and daemon-attached use.
 
+pub mod cli;
+
 use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::fmt;
