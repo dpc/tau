@@ -9,6 +9,7 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+dirs = "6"
 serde = { version = "1", features = ["derive"] }
 toml = "0.9"
 

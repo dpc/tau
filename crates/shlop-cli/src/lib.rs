@@ -1267,9 +1267,14 @@ fn default_policy_store_path_from_session_store(session_store_path: &Path) -> Pa
 }
 
 /// Returns the default daemon socket path used by the CLI.
+///
+/// Prefers `$XDG_RUNTIME_DIR/shlop/daemon.sock` when available, falling
+/// back to a project-local `.shlop/daemon.sock`.
 #[must_use]
 pub fn default_socket_path() -> PathBuf {
-    PathBuf::from(".shlop").join("daemon.sock")
+    dirs::runtime_dir()
+        .map(|dir| dir.join("shlop").join("daemon.sock"))
+        .unwrap_or_else(|| PathBuf::from(".shlop").join("daemon.sock"))
 }
 
 /// Returns the default session ID used by the CLI.

@@ -1,9 +1,8 @@
 //! User and project configuration loading and merge logic.
 //!
-//! Default paths follow a simple Unix/XDG convention:
+//! Default paths follow standard platform conventions via the `dirs` crate:
 //!
-//! - user config: `$XDG_CONFIG_HOME/shlop/config.toml`
-//! - fallback user config: `$HOME/.config/shlop/config.toml`
+//! - user config: `<config_dir>/shlop/config.toml` (e.g. `~/.config/shlop/config.toml`)
 //! - project config: `<project-root>/.shlop.toml`
 //!
 //! Project config layering is additive for `[[extensions]]`: project entries
@@ -115,8 +114,8 @@ pub struct LoadOptions {
 /// Filesystem and environment inputs used to derive default config paths.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LoadPaths {
-    pub xdg_config_home: Option<PathBuf>,
-    pub home: Option<PathBuf>,
+    /// Platform config directory (e.g. `~/.config` on Linux).
+    pub config_dir: Option<PathBuf>,
     pub current_dir: PathBuf,
 }
 
@@ -124,8 +123,7 @@ impl LoadPaths {
     /// Reads process paths from the current environment.
     pub fn from_process() -> io::Result<Self> {
         Ok(Self {
-            xdg_config_home: std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from),
-            home: std::env::var_os("HOME").map(PathBuf::from),
+            config_dir: dirs::config_dir(),
             current_dir: std::env::current_dir()?,
         })
     }
@@ -191,15 +189,9 @@ pub fn parse_config_str(input: &str) -> Result<ConfigFile, toml::de::Error> {
 #[must_use]
 pub fn default_user_config_path(paths: &LoadPaths) -> Option<PathBuf> {
     paths
-        .xdg_config_home
+        .config_dir
         .as_deref()
         .map(|path| path.join("shlop").join("config.toml"))
-        .or_else(|| {
-            paths
-                .home
-                .as_deref()
-                .map(|path| path.join(".config").join("shlop").join("config.toml"))
-        })
 }
 
 /// Returns the default project config path for a project root.
@@ -316,42 +308,37 @@ role = "tool"
 "#;
 
     #[test]
-    fn default_user_config_path_prefers_xdg_config_home() {
+    fn default_user_config_path_uses_config_dir() {
         let paths = LoadPaths {
-            xdg_config_home: Some(PathBuf::from("/tmp/xdg")),
-            home: Some(PathBuf::from("/tmp/home")),
+            config_dir: Some(PathBuf::from("/tmp/config")),
             current_dir: PathBuf::from("/tmp/project"),
         };
 
         assert_eq!(
             default_user_config_path(&paths),
-            Some(PathBuf::from("/tmp/xdg/shlop/config.toml"))
+            Some(PathBuf::from("/tmp/config/shlop/config.toml"))
         );
     }
 
     #[test]
-    fn default_user_config_path_falls_back_to_home_config_dir() {
+    fn default_user_config_path_returns_none_without_config_dir() {
         let paths = LoadPaths {
-            xdg_config_home: None,
-            home: Some(PathBuf::from("/tmp/home")),
+            config_dir: None,
             current_dir: PathBuf::from("/tmp/project"),
         };
 
-        assert_eq!(
-            default_user_config_path(&paths),
-            Some(PathBuf::from("/tmp/home/.config/shlop/config.toml"))
-        );
+        assert_eq!(default_user_config_path(&paths), None);
     }
 
     #[test]
     fn load_with_paths_automatically_loads_user_config_from_default_path() {
         let tempdir = TempDir::new().expect("tempdir should exist");
-        let xdg_root = tempdir.path().join("xdg");
+        let config_root = tempdir.path().join("config");
         let project_root = tempdir.path().join("project");
-        fs::create_dir_all(xdg_root.join("shlop")).expect("xdg path should be created");
+        fs::create_dir_all(config_root.join("shlop")).expect("config path should be created");
         fs::create_dir_all(&project_root).expect("project path should be created");
         fs::write(
-            xdg_root.join("shlop").join("config.toml"),
+            config_root.join("shlop").join("config.toml"),
             USER_CONFIG_FIXTURE,
         )
         .expect("user config should be written");
@@ -359,8 +346,7 @@ role = "tool"
         let config = load_with_paths(
             &LoadOptions::default(),
             &LoadPaths {
-                xdg_config_home: Some(xdg_root),
-                home: None,
+                config_dir: Some(config_root),
                 current_dir: project_root,
             },
         )
@@ -387,8 +373,7 @@ role = "tool"
                 project_config_path: Some(project_path),
             },
             &LoadPaths {
-                xdg_config_home: None,
-                home: None,
+                config_dir: None,
                 current_dir: tempdir.path().to_path_buf(),
             },
         )
@@ -416,8 +401,7 @@ role = "tool"
                 project_config_path: Some(project_path),
             },
             &LoadPaths {
-                xdg_config_home: None,
-                home: None,
+                config_dir: None,
                 current_dir: tempdir.path().to_path_buf(),
             },
         )

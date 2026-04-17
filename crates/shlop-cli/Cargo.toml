@@ -10,6 +10,7 @@ workspace = true
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
+dirs = "6"
 shlop-agent = { path = "../shlop-agent" }
 shlop-config = { path = "../shlop-config" }
 shlop-core = { path = "../shlop-core" }
