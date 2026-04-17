@@ -1,0 +1,533 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Tau — Unix-native coding agent</title>
+  <meta name="description" content="Tau is a Unix-native LLM coding agent. Process-oriented, local-first, and built for command line nerds.">
+  <link rel="icon" type="image/svg+xml" href="favicon.svg">
+  <style>
+    /* Solarized Dark palette */
+    :root {
+      --base03:  #002b36;
+      --base02:  #073642;
+      --base01:  #586e75;
+      --base00:  #657b83;
+      --base0:   #839496;
+      --base1:   #93a1a1;
+      --base2:   #eee8d5;
+      --base3:   #fdf6e3;
+      --yellow:  #b58900;
+      --orange:  #cb4b16;
+      --red:     #dc322f;
+      --magenta: #d33682;
+      --violet:  #6c71c4;
+      --blue:    #268bd2;
+      --cyan:    #2aa198;
+      --green:   #859900;
+    }
+
+    *, *::before, *::after {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    html {
+      scroll-behavior: smooth;
+    }
+
+    body {
+      font-family: "IBM Plex Mono", "JetBrains Mono", "Fira Code", "Source Code Pro", ui-monospace, monospace;
+      background: var(--base03);
+      color: var(--base0);
+      line-height: 1.7;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    a {
+      color: var(--cyan);
+      text-decoration: none;
+      transition: color 0.2s;
+    }
+
+    a:hover {
+      color: var(--blue);
+    }
+
+    /* Header */
+    header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      max-width: 860px;
+      margin: 0 auto;
+      padding: 1.5rem 2rem;
+    }
+
+    .logo-link {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+      color: var(--base1);
+      font-size: 1.25rem;
+      font-weight: 700;
+      letter-spacing: 0.05em;
+    }
+
+    .logo-link:hover {
+      color: var(--base2);
+    }
+
+    .logo-link svg {
+      width: 32px;
+      height: 32px;
+    }
+
+    .header-links {
+      display: flex;
+      gap: 1.25rem;
+      align-items: center;
+    }
+
+    .header-links a {
+      color: var(--base01);
+      display: flex;
+      align-items: center;
+    }
+
+    .header-links a:hover {
+      color: var(--base1);
+    }
+
+    .header-links svg {
+      width: 22px;
+      height: 22px;
+      fill: currentColor;
+    }
+
+    /* Hero */
+    .hero {
+      max-width: 860px;
+      margin: 0 auto;
+      padding: 6rem 2rem 4rem;
+      text-align: center;
+    }
+
+    .hero-logo {
+      width: 120px;
+      height: 120px;
+      margin: 0 auto 2rem;
+    }
+
+    .hero h1 {
+      font-size: clamp(1.6rem, 4vw, 2.4rem);
+      color: var(--base2);
+      font-weight: 700;
+      line-height: 1.3;
+      margin-bottom: 1rem;
+    }
+
+    .hero h1 .accent {
+      color: var(--yellow);
+    }
+
+    .hero p {
+      font-size: 1.05rem;
+      color: var(--base01);
+      max-width: 540px;
+      margin: 0 auto 2rem;
+    }
+
+    .hero-tagline {
+      font-size: 1.1rem;
+      color: var(--base1);
+      margin-bottom: 0.5rem;
+    }
+
+    .hero-cta {
+      display: inline-flex;
+      gap: 1rem;
+      margin-top: 1rem;
+    }
+
+    .hero-cta a {
+      padding: 0.6rem 1.4rem;
+      border-radius: 4px;
+      font-size: 0.9rem;
+      font-family: inherit;
+      font-weight: 600;
+      transition: background 0.2s, color 0.2s;
+    }
+
+    .btn-primary {
+      background: var(--cyan);
+      color: var(--base03);
+    }
+
+    .btn-primary:hover {
+      background: var(--blue);
+      color: var(--base03);
+    }
+
+    .btn-secondary {
+      border: 1px solid var(--base01);
+      color: var(--base1);
+    }
+
+    .btn-secondary:hover {
+      border-color: var(--base1);
+      color: var(--base2);
+    }
+
+    /* Sections */
+    section {
+      max-width: 860px;
+      margin: 0 auto;
+      padding: 3rem 2rem;
+    }
+
+    section h2 {
+      font-size: 1.4rem;
+      color: var(--base2);
+      margin-bottom: 0.4rem;
+    }
+
+    section h3 {
+      font-size: 1rem;
+      color: var(--yellow);
+      margin-bottom: 1rem;
+      font-weight: 400;
+    }
+
+    section p {
+      margin-bottom: 1rem;
+    }
+
+    .divider {
+      border: none;
+      border-top: 1px solid var(--base02);
+      max-width: 860px;
+      margin: 0 auto;
+    }
+
+    /* Feature grid */
+    .features {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 1.5rem;
+      margin-top: 1.5rem;
+    }
+
+    .feature {
+      background: var(--base02);
+      border-radius: 6px;
+      padding: 1.5rem;
+    }
+
+    .feature-title {
+      font-size: 0.95rem;
+      color: var(--base1);
+      font-weight: 700;
+      margin-bottom: 0.5rem;
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+
+    .feature-title .icon {
+      color: var(--cyan);
+      font-size: 1rem;
+    }
+
+    .feature p {
+      font-size: 0.88rem;
+      color: var(--base00);
+      margin-bottom: 0;
+      line-height: 1.6;
+    }
+
+    /* Architecture diagram */
+    .arch-diagram {
+      background: var(--base02);
+      border-radius: 6px;
+      padding: 1.5rem 2rem;
+      margin-top: 1.5rem;
+      font-size: 0.85rem;
+      color: var(--base01);
+      overflow-x: auto;
+      white-space: pre;
+      line-height: 1.5;
+    }
+
+    .arch-diagram .h {
+      color: var(--cyan);
+    }
+
+    .arch-diagram .c {
+      color: var(--base00);
+    }
+
+    /* Status */
+    .status-badge {
+      display: inline-block;
+      background: var(--base02);
+      color: var(--yellow);
+      font-size: 0.8rem;
+      font-weight: 700;
+      padding: 0.2rem 0.6rem;
+      border-radius: 3px;
+      letter-spacing: 0.05em;
+      margin-bottom: 1rem;
+    }
+
+    .demo-link {
+      display: inline-block;
+      margin-top: 1rem;
+    }
+
+    /* Philosophy */
+    .philosophy-list {
+      list-style: none;
+      margin-top: 1rem;
+    }
+
+    .philosophy-list li {
+      padding: 0.5rem 0;
+      border-bottom: 1px solid var(--base02);
+      font-size: 0.92rem;
+    }
+
+    .philosophy-list li:last-child {
+      border-bottom: none;
+    }
+
+    .philosophy-list .keyword {
+      color: var(--green);
+      font-weight: 700;
+    }
+
+    /* Contact */
+    .contact-links {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 1rem;
+      margin-top: 1rem;
+    }
+
+    .contact-links a {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.4rem;
+      padding: 0.5rem 1rem;
+      background: var(--base02);
+      border-radius: 4px;
+      font-size: 0.88rem;
+      color: var(--base1);
+      transition: background 0.2s;
+    }
+
+    .contact-links a:hover {
+      background: #0a4050;
+      color: var(--base2);
+    }
+
+    /* Footer */
+    footer {
+      max-width: 860px;
+      margin: 0 auto;
+      padding: 2rem;
+      text-align: center;
+      font-size: 0.8rem;
+      color: var(--base01);
+    }
+
+    footer a {
+      color: var(--base01);
+    }
+
+    footer a:hover {
+      color: var(--base1);
+    }
+
+    /* Responsive */
+    @media (max-width: 640px) {
+      .features {
+        grid-template-columns: 1fr;
+      }
+
+      .hero {
+        padding: 4rem 1.5rem 3rem;
+      }
+
+      section {
+        padding: 2rem 1.5rem;
+      }
+
+      .hero-cta {
+        flex-direction: column;
+        align-items: center;
+      }
+    }
+  </style>
+</head>
+<body>
+
+  <header>
+    <a class="logo-link" href="/">
+      <svg viewBox="0 0 800 800" fill="currentColor">
+        <path d="M165.29 165.29H634.72V282.65H400V517.36H517.36V634.72H282.65V282.65H165.29Z"/>
+      </svg>
+      tau
+    </a>
+    <div class="header-links">
+      <a href="https://github.com/nicedpc/tau-agent" aria-label="GitHub">
+        <svg viewBox="0 0 24 24"><path d="M12 .3a12 12 0 0 0-3.8 23.38c.6.11.82-.26.82-.58v-2.02c-3.34.73-4.04-1.61-4.04-1.61-.55-1.39-1.34-1.76-1.34-1.76-1.08-.74.08-.73.08-.73 1.2.09 1.84 1.24 1.84 1.24 1.07 1.83 2.8 1.3 3.49 1 .1-.78.42-1.3.76-1.6-2.67-.31-5.47-1.34-5.47-5.93 0-1.31.47-2.38 1.24-3.22-.14-.3-.54-1.52.1-3.18 0 0 1-.32 3.3 1.23a11.5 11.5 0 0 1 6.02 0c2.28-1.55 3.29-1.23 3.29-1.23.64 1.66.24 2.88.12 3.18a4.65 4.65 0 0 1 1.23 3.22c0 4.61-2.8 5.62-5.48 5.92.42.36.81 1.1.81 2.22v3.29c0 .32.2.7.82.58A12 12 0 0 0 12 .3"/></svg>
+      </a>
+      <a href="https://matrix.to/#/#support:dpc.pw" aria-label="Matrix chat">
+        <svg viewBox="0 0 24 24"><path d="M.632.55v22.9H2.28V24H0V0h2.28v.55zm7.043 7.26v1.157h.033c.309-.443.683-.784 1.117-1.024.433-.245.936-.365 1.5-.365.54 0 1.033.107 1.488.32.45.214.773.553.96 1.016.293-.36.674-.67 1.143-.93a3.07 3.07 0 0 1 1.53-.406c.425 0 .82.06 1.185.183.365.12.685.303.96.553.27.249.48.558.63.928.15.373.22.8.22 1.29v5.6h-2.04v-4.63c0-.27-.015-.53-.038-.78a1.63 1.63 0 0 0-.2-.637.96.96 0 0 0-.45-.413c-.2-.1-.456-.149-.765-.149-.31 0-.563.06-.762.178a1.34 1.34 0 0 0-.468.46 1.81 1.81 0 0 0-.237.636 3.87 3.87 0 0 0-.06.674v4.66h-2.04v-4.63c0-.254-.004-.503-.013-.748a2.02 2.02 0 0 0-.147-.64.97.97 0 0 0-.404-.44c-.184-.11-.457-.166-.82-.166a1.56 1.56 0 0 0-.478.082 1.37 1.37 0 0 0-.5.298c-.16.14-.29.334-.39.58-.1.243-.15.57-.15.974v4.69h-2.04V7.81zm15.693 15.64V.55H21.72V0H24v24h-2.28v-.55z"/></svg>
+      </a>
+    </div>
+  </header>
+
+  <div class="hero">
+    <div class="hero-logo">
+      <svg viewBox="0 0 800 800" fill="var(--yellow)">
+        <path d="M165.29 165.29H634.72V282.65H400V517.36H517.36V634.72H282.65V282.65H165.29Z"/>
+      </svg>
+    </div>
+    <p class="hero-tagline">There are many coding agents, but this one is</p>
+    <h1><span class="accent">Unix-native.</span></h1>
+    <p>Tau is a process-oriented LLM coding agent harness built for
+      command&nbsp;line&nbsp;nerds and Linux&nbsp;hackers.
+      Like <a href="https://shittycodingagent.ai/">Pi</a>, but twice as much.</p>
+    <div class="hero-cta">
+      <a class="btn-primary" href="https://github.com/nicedpc/tau-agent">View on GitHub</a>
+      <a class="btn-secondary" href="#architecture">Learn more</a>
+    </div>
+  </div>
+
+  <hr class="divider">
+
+  <section id="about">
+    <h2>Why Tau?</h2>
+    <h3>Everything is a process.</h3>
+    <p>Instead of building on top of a JavaScript runtime, Tau builds on top
+      of the most venerable, powerful, and ubiquitous runtime there is:
+      <strong style="color:var(--base1)">Unix itself.</strong></p>
+    <p>All components&mdash;UI, harness, LLM API, extensions&mdash;run as
+      standalone POSIX processes, communicating over stdio using a CBOR event
+      protocol. No Node. No npm. Just processes and pipes.</p>
+  </section>
+
+  <hr class="divider">
+
+  <section id="architecture">
+    <h2>Architecture</h2>
+    <h3>Processes over plugins.</h3>
+    <div class="arch-diagram"><span class="c">┌─────────┐    stdio/cbor    ┌───────────┐</span>
+<span class="h">│   CLI   │</span><span class="c">─────────────────</span><span class="h">│  Harness  │</span>
+<span class="c">└─────────┘                   └─────┬─────┘</span>
+                        <span class="c">┌───────────┼───────────┐</span>
+                   <span class="c">stdio/cbor  stdio/cbor  stdio/cbor</span>
+                   <span class="c">┌────┴────┐ ┌────┴────┐ ┌────┴────┐</span>
+                   <span class="h">│  Agent  │</span> <span class="h">│  fs ext │</span> <span class="h">│ sh ext  │</span>
+                   <span class="c">└─────────┘ └─────────┘ └─────────┘</span></div>
+  </section>
+
+  <hr class="divider">
+
+  <section id="features">
+    <h2>Benefits</h2>
+    <h3>What Unix gives you for free.</h3>
+    <div class="features">
+      <div class="feature">
+        <div class="feature-title"><span class="icon">$</span> Any language</div>
+        <p>Extensions are just executables. Write them in Rust, Python, Go,
+          Bash&mdash;whatever fits the job.</p>
+      </div>
+      <div class="feature">
+        <div class="feature-title"><span class="icon">#</span> Real sandboxing</div>
+        <p>Each component can be individually sandboxed with bubblewrap,
+          Docker, Landlock, or jails&mdash;matched to its actual needs.</p>
+      </div>
+      <div class="feature">
+        <div class="feature-title"><span class="icon">@</span> Remote execution</div>
+        <p>Running a component on another machine is as simple as prefixing
+          its command with <code style="color:var(--cyan)">ssh&nbsp;user@host&nbsp;-c</code>.</p>
+      </div>
+      <div class="feature">
+        <div class="feature-title"><span class="icon">&amp;</span> System-provided</div>
+        <p>Components can be packaged and managed by your OS. Pairs naturally
+          with NixOS, Guix, and traditional package managers.</p>
+      </div>
+      <div class="feature">
+        <div class="feature-title"><span class="icon">~</span> Single binary</div>
+        <p>Ships as one unified binary containing CLI, agent, and built-in
+          extensions. No runtime dependencies.</p>
+      </div>
+      <div class="feature">
+        <div class="feature-title"><span class="icon">%</span> Pi compatible</div>
+        <p>In theory, with a small shim Tau could run Pi extensions.
+          Same philosophy, broader runtime.</p>
+      </div>
+    </div>
+  </section>
+
+  <hr class="divider">
+
+  <section id="philosophy">
+    <h2>Philosophy</h2>
+    <h3>Primitives, not frameworks.</h3>
+    <p>Tau doesn't try to be clever. It gives you the building blocks and
+      gets out of the way.</p>
+    <ul class="philosophy-list">
+      <li><span class="keyword">Processes</span> over plugins&mdash;start,
+        stop, restart, redirect, and compose with standard tools.</li>
+      <li><span class="keyword">Stdio</span> over HTTP&mdash;no ports, no
+        TLS, no service discovery. Just file descriptors.</li>
+      <li><span class="keyword">CBOR</span> over JSON&mdash;compact, binary,
+        schema-friendly, and streamable.</li>
+      <li><span class="keyword">Events</span> over RPC&mdash;no
+        request/response pairing. Correlation via operation IDs in payloads.</li>
+      <li><span class="keyword">Local-first</span>&mdash;your code stays on
+        your machine. Your agent runs where you tell it to.</li>
+    </ul>
+  </section>
+
+  <hr class="divider">
+
+  <section id="status">
+    <h2>Status</h2>
+    <span class="status-badge">PROTOTYPE</span>
+    <p>Tau is in early development. The core architecture, event protocol,
+      and terminal UI are being actively built in Rust.</p>
+    <a class="demo-link" href="https://asciinema.org/a/KCpgTfSOQGEEuWJ1">Watch the demo on asciinema</a>
+  </section>
+
+  <hr class="divider">
+
+  <section id="contact">
+    <h2>Community</h2>
+    <h3>Get in touch.</h3>
+    <div class="contact-links">
+      <a href="https://github.com/nicedpc/tau-agent">
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M12 .3a12 12 0 0 0-3.8 23.38c.6.11.82-.26.82-.58v-2.02c-3.34.73-4.04-1.61-4.04-1.61-.55-1.39-1.34-1.76-1.34-1.76-1.08-.74.08-.73.08-.73 1.2.09 1.84 1.24 1.84 1.24 1.07 1.83 2.8 1.3 3.49 1 .1-.78.42-1.3.76-1.6-2.67-.31-5.47-1.34-5.47-5.93 0-1.31.47-2.38 1.24-3.22-.14-.3-.54-1.52.1-3.18 0 0 1-.32 3.3 1.23a11.5 11.5 0 0 1 6.02 0c2.28-1.55 3.29-1.23 3.29-1.23.64 1.66.24 2.88.12 3.18a4.65 4.65 0 0 1 1.23 3.22c0 4.61-2.8 5.62-5.48 5.92.42.36.81 1.1.81 2.22v3.29c0 .32.2.7.82.58A12 12 0 0 0 12 .3"/></svg>
+        GitHub
+      </a>
+      <a href="https://matrix.to/#/#support:dpc.pw">
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M.632.55v22.9H2.28V24H0V0h2.28v.55zm7.043 7.26v1.157h.033c.309-.443.683-.784 1.117-1.024.433-.245.936-.365 1.5-.365.54 0 1.033.107 1.488.32.45.214.773.553.96 1.016.293-.36.674-.67 1.143-.93a3.07 3.07 0 0 1 1.53-.406c.425 0 .82.06 1.185.183.365.12.685.303.96.553.27.249.48.558.63.928.15.373.22.8.22 1.29v5.6h-2.04v-4.63c0-.27-.015-.53-.038-.78a1.63 1.63 0 0 0-.2-.637.96.96 0 0 0-.45-.413c-.2-.1-.456-.149-.765-.149-.31 0-.563.06-.762.178a1.34 1.34 0 0 0-.468.46 1.81 1.81 0 0 0-.237.636 3.87 3.87 0 0 0-.06.674v4.66h-2.04v-4.63c0-.254-.004-.503-.013-.748a2.02 2.02 0 0 0-.147-.64.97.97 0 0 0-.404-.44c-.184-.11-.457-.166-.82-.166a1.56 1.56 0 0 0-.478.082 1.37 1.37 0 0 0-.5.298c-.16.14-.29.334-.39.58-.1.243-.15.57-.15.974v4.69h-2.04V7.81zm15.693 15.64V.55H21.72V0H24v24h-2.28v-.55z"/></svg>
+        Matrix chat
+      </a>
+      <a href="https://rostra.me/profile/rse1okfyp4yj75i6riwbz86mpmbgna3f7qr66aj1njceqoigjabegy">
+        Rostra
+      </a>
+    </div>
+  </section>
+
+  <footer>
+    <p>Tau is <a href="https://github.com/nicedpc/tau-agent">open source</a>.</p>
+  </footer>
+
+</body>
+</html>
