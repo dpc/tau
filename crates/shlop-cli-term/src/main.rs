@@ -1,6 +1,7 @@
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use crossterm::terminal;
 use shlop_cli_term::{OutputSender, Prompt, PromptResult};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -29,7 +30,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 fn spawn_animator(tx: OutputSender) {
     thread::spawn(move || {
         let mut tick = 0u64;
-        let ball_width = 30;
         let mut ball_x: usize = 1;
         let mut ball_y: usize = 0;
         let mut ball_dx: isize = 1;
@@ -39,7 +39,8 @@ fn spawn_animator(tx: OutputSender) {
             thread::sleep(Duration::from_millis(200));
             tick += 1;
 
-            // Bouncing ball in a 3-line-high box.
+            // Bouncing ball in a 3-line-high box spanning terminal width.
+            let ball_width = terminal::size().map(|(w, _)| w as usize).unwrap_or(80).max(2);
             let mut above = String::new();
             for row in 0..3_usize {
                 for col in 0..ball_width {
@@ -54,9 +55,14 @@ fn spawn_animator(tx: OutputSender) {
                 }
             }
 
+            // Clamp in case terminal was resized smaller.
+            if ball_x >= ball_width.saturating_sub(1) {
+                ball_x = ball_width.saturating_sub(2);
+                ball_dx = -1;
+            }
             ball_x = (ball_x as isize + ball_dx) as usize;
             ball_y = (ball_y as isize + ball_dy) as usize;
-            if ball_x == 0 || ball_x >= ball_width - 1 {
+            if ball_x == 0 || ball_x >= ball_width.saturating_sub(1) {
                 ball_dx = -ball_dx;
             }
             if ball_y == 0 || ball_y >= 2 {
