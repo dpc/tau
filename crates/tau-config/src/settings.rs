@@ -178,14 +178,18 @@ fn load_json5_layered<T: for<'de> Deserialize<'de> + Default>(
     dir: &Path,
     name: &str,
 ) -> Result<T, SettingsError> {
-    let base_path = dir.join(format!("{name}.json5"));
+    let base_path = dir.join(format!("{name}.json"));
     let drop_dir = dir.join(format!("{name}.d"));
 
     let mut builder = config::Config::builder();
 
     // Base file (optional).
     if base_path.exists() {
-        builder = builder.add_source(config::File::from(base_path).required(false));
+        builder = builder.add_source(
+            config::File::from(base_path)
+                .format(config::FileFormat::Json5)
+                .required(false),
+        );
     }
 
     // Drop-in directory (optional, sorted).
@@ -194,14 +198,15 @@ fn load_json5_layered<T: for<'de> Deserialize<'de> + Default>(
             .into_iter()
             .flatten()
             .filter_map(|e| e.ok().map(|e| e.path()))
-            .filter(|p| {
-                p.extension()
-                    .is_some_and(|ext| ext == "json5" || ext == "json")
-            })
+            .filter(|p| p.extension().is_some_and(|ext| ext == "json"))
             .collect();
         paths.sort();
         for path in paths {
-            builder = builder.add_source(config::File::from(path).required(false));
+            builder = builder.add_source(
+                config::File::from(path)
+                    .format(config::FileFormat::Json5)
+                    .required(false),
+            );
         }
     }
 
@@ -233,7 +238,7 @@ mod tests {
         let td = TempDir::new().expect("tempdir");
         let dir = td.path();
         std::fs::write(
-            dir.join("settings.json5"),
+            dir.join("settings.json"),
             r#"{ greeting: false, default_model: "anthropic/claude-sonnet-4-20250514" }"#,
         )
         .expect("write");
@@ -247,10 +252,10 @@ mod tests {
     fn settings_d_overrides_base() {
         let td = TempDir::new().expect("tempdir");
         let dir = td.path();
-        std::fs::write(dir.join("settings.json5"), r#"{ greeting: true }"#).expect("write");
+        std::fs::write(dir.join("settings.json"), r#"{ greeting: true }"#).expect("write");
         std::fs::create_dir(dir.join("settings.d")).expect("mkdir");
         std::fs::write(
-            dir.join("settings.d").join("01-override.json5"),
+            dir.join("settings.d").join("01-override.json"),
             r#"{ greeting: false }"#,
         )
         .expect("write");
@@ -264,7 +269,7 @@ mod tests {
         let td = TempDir::new().expect("tempdir");
         let dir = td.path();
         std::fs::write(
-            dir.join("models.json5"),
+            dir.join("models.json"),
             r#"{
                 providers: {
                     local: {

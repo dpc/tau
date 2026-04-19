@@ -9,4 +9,8 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+serde.workspace = true
+serde_json.workspace = true
+tau-config.workspace = true
 tau-proto.workspace = true
+ureq.workspace = true
