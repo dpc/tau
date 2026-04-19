@@ -656,6 +656,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "tau-cli-term"
+version = "0.1.0"
+dependencies = [
+ "tau-cli-term-raw",
+]
+
+[[package]]
 name = "tau-cli-term-raw"
 version = "0.1.0"
 dependencies = [

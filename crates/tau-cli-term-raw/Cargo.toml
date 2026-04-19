@@ -12,5 +12,9 @@ workspace = true
 crossterm = "0.28"
 tau-blocking-notify-channel = { path = "../tau-blocking-notify-channel" }
 
+[[bin]]
+name = "tau-cli-term-raw-demo"
+path = "src/main.rs"
+
 [dev-dependencies]
 vt100 = "0.16"

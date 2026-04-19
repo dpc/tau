@@ -64,7 +64,10 @@ struct SharedState {
     above_active: Vec<BlockId>,
     /// Blocks pinned right above the prompt.
     above_sticky: Vec<BlockId>,
-    /// Blocks rendered below the input line.
+    /// Blocks rendered immediately below the input line (e.g.
+    /// completion menus). Sits between the prompt and `below`.
+    suggestions: Vec<BlockId>,
+    /// Blocks rendered below suggestions.
     below: Vec<BlockId>,
 
     left_prompt: StyledText,
@@ -93,6 +96,12 @@ pub enum Event {
     Resize { width: u16, height: u16 },
     /// The input buffer changed (character inserted/deleted/cleared).
     BufferChanged,
+    /// The user pressed Tab.
+    Tab,
+    /// The user pressed Shift-Tab (backtab).
+    BackTab,
+    /// The user pressed Escape.
+    Escape,
 }
 
 /// A cloneable handle for mutating prompt zones from any thread.
@@ -142,6 +151,7 @@ impl TermHandle {
         st.history.retain(|&x| x != id);
         st.above_active.retain(|&x| x != id);
         st.above_sticky.retain(|&x| x != id);
+        st.suggestions.retain(|&x| x != id);
         st.below.retain(|&x| x != id);
     }
 
@@ -180,6 +190,20 @@ impl TermHandle {
         self.lock().above_sticky.retain(|&x| x != id);
     }
 
+    /// Appends a block id to the suggestions zone (if not already
+    /// present). Rendered between the prompt and below blocks.
+    pub fn push_suggestions(&self, id: BlockId) {
+        let mut st = self.lock();
+        if !st.suggestions.contains(&id) {
+            st.suggestions.push(id);
+        }
+    }
+
+    /// Removes a block id from the suggestions zone.
+    pub fn remove_suggestions(&self, id: BlockId) {
+        self.lock().suggestions.retain(|&x| x != id);
+    }
+
     /// Appends a block id to the below zone (if not already present).
     pub fn push_below(&self, id: BlockId) {
         let mut st = self.lock();
@@ -210,6 +234,18 @@ impl TermHandle {
     /// Updates the left prompt prefix.
     pub fn set_left_prompt(&self, text: impl Into<StyledText>) {
         self.lock().left_prompt = text.into();
+    }
+
+    /// Returns a clone of the current input buffer.
+    pub fn get_buffer(&self) -> String {
+        self.lock().buffer.clone()
+    }
+
+    /// Replaces the input buffer and cursor position.
+    pub fn set_buffer(&self, text: String, cursor: usize) {
+        let mut st = self.lock();
+        st.cursor = cursor.min(text.len());
+        st.buffer = text;
     }
 
     /// Updates the right prompt.
@@ -254,6 +290,7 @@ impl Term {
             history: Vec::new(),
             above_active: Vec::new(),
             above_sticky: Vec::new(),
+            suggestions: Vec::new(),
             below: Vec::new(),
             left_prompt: left_prompt.into(),
             right_prompt: StyledText::new(),
@@ -377,11 +414,13 @@ impl Term {
             }
 
             KeyCode::Char('c') if ctrl => {
-                {
-                    let mut st = self.state.lock().expect("term state mutex poisoned");
-                    st.buffer.clear();
-                    st.cursor = 0;
+                let mut st = self.state.lock().expect("term state mutex poisoned");
+                if st.buffer.is_empty() {
+                    return Ok(Some(Event::Eof));
                 }
+                st.buffer.clear();
+                st.cursor = 0;
+                drop(st);
                 return Ok(Some(Event::BufferChanged));
             }
 
@@ -508,6 +547,18 @@ impl Term {
                 st.cursor = st.buffer.len();
             }
 
+            KeyCode::Tab => {
+                return Ok(Some(Event::Tab));
+            }
+
+            KeyCode::BackTab => {
+                return Ok(Some(Event::BackTab));
+            }
+
+            KeyCode::Esc => {
+                return Ok(Some(Event::Escape));
+            }
+
             _ => {}
         }
 
@@ -584,6 +635,7 @@ fn layout_all(st: &SharedState) -> LayoutAll {
     let cursor_col = cursor_chars % width;
 
     all_lines.extend(input_lines);
+    layout_id_list(&st.suggestions, &st.blocks, width, &mut all_lines);
     layout_id_list(&st.below, &st.blocks, width, &mut all_lines);
 
     LayoutAll {
@@ -627,6 +679,7 @@ fn render_live(stdout: &mut impl Write, screen: &mut Screen, st: &SharedState) -
     let cursor_row = above_row_count + cursor_chars / width;
     let cursor_col = cursor_chars % width;
 
+    layout_id_list(&st.suggestions, &st.blocks, width, &mut desired);
     layout_id_list(&st.below, &st.blocks, width, &mut desired);
 
     screen.update(stdout, &desired, (cursor_row, cursor_col))

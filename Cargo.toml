@@ -12,6 +12,7 @@ members = [
   "crates/tau-blocking-notify-channel",
   "crates/tau-test-support",
   "crates/tau-cli-term-raw",
+  "crates/tau-cli-term",
   "crates/tau",
 ]
 resolver = "2"
