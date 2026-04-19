@@ -9,12 +9,12 @@ license.workspace = true
 workspace = true
 
 [dependencies]
-crossterm = "0.28"
-tau-blocking-notify-channel = { path = "../tau-blocking-notify-channel" }
+crossterm.workspace = true
+tau-blocking-notify-channel.workspace = true
 
 [[bin]]
 name = "tau-cli-term-raw-demo"
 path = "src/main.rs"
 
 [dev-dependencies]
-vt100 = "0.16"
+vt100.workspace = true

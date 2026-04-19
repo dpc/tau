@@ -152,9 +152,10 @@ impl Receiver {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::thread;
     use std::time::Duration;
+
+    use super::*;
 
     #[test]
     fn single_notify_wakes_receiver() {

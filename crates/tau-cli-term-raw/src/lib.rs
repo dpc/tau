@@ -623,7 +623,7 @@ fn layout_all(st: &SharedState) -> LayoutAll {
         if needed <= width && input_lines.len() == 1 {
             let padding = width - first_line.len() - right_cells.len();
             let mut padded = first_line.clone();
-            padded.extend(std::iter::repeat(Cell::plain(' ')).take(padding));
+            padded.extend(std::iter::repeat_n(Cell::plain(' '), padding));
             padded.extend(right_cells);
             input_lines[0] = padded;
         }
@@ -666,7 +666,7 @@ fn render_live(stdout: &mut impl Write, screen: &mut Screen, st: &SharedState) -
         if needed <= width && input_lines.len() == 1 {
             let padding = width - first_line.len() - right_cells.len();
             let mut padded = first_line.clone();
-            padded.extend(std::iter::repeat(Cell::plain(' ')).take(padding));
+            padded.extend(std::iter::repeat_n(Cell::plain(' '), padding));
             padded.extend(right_cells);
             input_lines[0] = padded;
         }

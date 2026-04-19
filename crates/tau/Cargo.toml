@@ -9,4 +9,4 @@ license.workspace = true
 workspace = true
 
 [dependencies]
-tau-cli = { path = "../tau-cli" }
+tau-cli.workspace = true

@@ -9,5 +9,5 @@ license.workspace = true
 workspace = true
 
 [dependencies]
-tau-core = { path = "../tau-core" }
-tau-proto = { path = "../tau-proto" }
+tau-core.workspace = true
+tau-proto.workspace = true

@@ -9,16 +9,17 @@ license.workspace = true
 workspace = true
 
 [dependencies]
-clap = { version = "4", features = ["derive"] }
-dirs = "6"
-tau-agent = { path = "../tau-agent" }
-tau-config = { path = "../tau-config" }
-tau-core = { path = "../tau-core" }
-tau-ext-fs = { path = "../tau-ext-fs" }
-tau-ext-shell = { path = "../tau-ext-shell" }
-tau-proto = { path = "../tau-proto" }
-tau-socket = { path = "../tau-socket" }
-tau-supervisor = { path = "../tau-supervisor" }
+clap.workspace = true
+dirs.workspace = true
+tau-agent.workspace = true
+tau-cli-term.workspace = true
+tau-config.workspace = true
+tau-core.workspace = true
+tau-ext-fs.workspace = true
+tau-ext-shell.workspace = true
+tau-proto.workspace = true
+tau-socket.workspace = true
+tau-supervisor.workspace = true
 
 [dev-dependencies]
-tempfile = "3"
+tempfile.workspace = true

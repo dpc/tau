@@ -979,37 +979,58 @@ pub fn run_interactive_with_config(
 }
 
 fn interactive_loop(harness: &mut Harness, session_id: &str) -> Result<(), CliError> {
-    use std::io::Write;
+    use tau_cli_term::{Event, HighTerm, SlashCommand, Span, Style, StyledBlock, StyledText};
 
-    let stdin = io::stdin();
-    let mut stdout = io::stdout();
+    let commands = vec![SlashCommand::new("/quit", "Exit the chat session")];
+
+    let (mut term, handle) = HighTerm::new("> ", commands)?;
+    handle.redraw();
 
     loop {
-        print!("> ");
-        stdout.flush()?;
-
-        let mut line = String::new();
-        let bytes_read = stdin.read_line(&mut line)?;
-        if bytes_read == 0 {
-            break;
-        }
-
-        let text = line.trim();
-        if text.is_empty() {
-            continue;
-        }
-
-        match harness.send_user_message(session_id, text, None) {
-            Ok(outcome) => {
-                for progress in &outcome.progress_messages {
-                    println!("progress: {progress}");
+        match term.get_next_event()? {
+            Event::Line(line) => {
+                let text = line.trim();
+                if text.is_empty() {
+                    continue;
                 }
-                println!("agent: {}", outcome.response);
+
+                if text == "/quit" {
+                    break;
+                }
+
+                // Echo user message.
+                term.print_output(StyledBlock::new(StyledText::from(vec![
+                    Span::new("> ", Style::default().fg(tau_cli_term::Color::DarkGrey)),
+                    Span::plain(text),
+                ])));
+
+                match harness.send_user_message(session_id, text, None) {
+                    Ok(outcome) => {
+                        for progress in &outcome.progress_messages {
+                            term.print_output(StyledBlock::new(StyledText::from(Span::new(
+                                format!("progress: {progress}"),
+                                Style::default().fg(tau_cli_term::Color::DarkYellow),
+                            ))));
+                        }
+                        term.print_output(StyledBlock::new(StyledText::from(vec![
+                            Span::new(
+                                "agent: ",
+                                Style::default().fg(tau_cli_term::Color::DarkCyan).bold(),
+                            ),
+                            Span::plain(&outcome.response),
+                        ])));
+                    }
+                    Err(CliError::ResponseTimeout) => {
+                        term.print_output(StyledBlock::new(StyledText::from(Span::new(
+                            "error: timed out waiting for agent response",
+                            Style::default().fg(tau_cli_term::Color::Red),
+                        ))));
+                    }
+                    Err(error) => return Err(error),
+                }
             }
-            Err(CliError::ResponseTimeout) => {
-                eprintln!("error: timed out waiting for agent response");
-            }
-            Err(error) => return Err(error),
+            Event::Eof => break,
+            Event::Resize { .. } | Event::BufferChanged => {}
         }
     }
 

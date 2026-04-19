@@ -283,7 +283,7 @@ pub fn layout_lines(content: &StyledText, width: usize) -> Vec<Vec<Cell>> {
             } else {
                 logical_lines
                     .last_mut()
-                    .unwrap()
+                    .expect("logical_lines always has at least one entry")
                     .push(Cell::new(ch, span.style));
             }
         }
@@ -338,7 +338,7 @@ pub fn layout_block(block: &StyledBlock, width: usize) -> Vec<Vec<Cell>> {
             let mut row = Vec::with_capacity(width);
 
             // Left margin (always default bg, not block bg).
-            row.extend(std::iter::repeat(Cell::plain(' ')).take(ml));
+            row.extend(std::iter::repeat_n(Cell::plain(' '), ml));
 
             // Content with alignment.
             let cw = line.len();
@@ -346,19 +346,19 @@ pub fn layout_block(block: &StyledBlock, width: usize) -> Vec<Vec<Cell>> {
             match block.align {
                 Align::Left => {
                     row.extend(line.iter().copied());
-                    row.extend(std::iter::repeat(fill).take(padding));
+                    row.extend(std::iter::repeat_n(fill, padding));
                 }
                 Align::Center => {
                     let left = padding / 2;
                     let right = padding - left;
-                    row.extend(std::iter::repeat(fill).take(left));
+                    row.extend(std::iter::repeat_n(fill, left));
                     row.extend(line.iter().copied());
-                    row.extend(std::iter::repeat(fill).take(right));
+                    row.extend(std::iter::repeat_n(fill, right));
                 }
             }
 
             // Right margin (always default bg).
-            row.extend(std::iter::repeat(Cell::plain(' ')).take(mr));
+            row.extend(std::iter::repeat_n(Cell::plain(' '), mr));
 
             // Apply block bg to content cells that don't set their own.
             if let Some(bg) = block.bg {
@@ -617,12 +617,12 @@ mod tests {
         assert_eq!(t.row_text(0), "hi world");
 
         // "hi " should be default style.
-        let cell_h = t.term.screen().cell(0, 0).unwrap();
+        let cell_h = t.term.screen().cell(0, 0).expect("cell exists");
         assert!(!cell_h.bold());
         assert_eq!(cell_h.fgcolor(), vt100::Color::Default);
 
         // "world" should be blue (crossterm Blue = bright blue = Idx(12)).
-        let cell_w = t.term.screen().cell(0, 3).unwrap();
+        let cell_w = t.term.screen().cell(0, 3).expect("cell exists");
         assert_eq!(cell_w.fgcolor(), vt100::Color::Idx(12));
     }
 
@@ -643,7 +643,7 @@ mod tests {
         t.term.process(&buf);
 
         assert_eq!(t.row_text(0), "hello");
-        let cell = t.term.screen().cell(0, 0).unwrap();
+        let cell = t.term.screen().cell(0, 0).expect("cell exists");
         assert!(cell.bold());
     }
 
@@ -682,7 +682,7 @@ mod tests {
             if needed <= width && input_lines.len() == 1 {
                 let padding = width - first.len() - right_cells.len();
                 let mut padded = first.clone();
-                padded.extend(std::iter::repeat(Cell::plain(' ')).take(padding));
+                padded.extend(std::iter::repeat_n(Cell::plain(' '), padding));
                 padded.extend(right_cells);
                 input_lines[0] = padded;
             }

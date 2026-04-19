@@ -31,6 +31,32 @@ dbg_macro = "deny"
 todo = "deny"
 unwrap_used = "deny"
 
+[workspace.dependencies]
+# Internal crates
+tau-agent = { path = "crates/tau-agent" }
+tau-blocking-notify-channel = { path = "crates/tau-blocking-notify-channel" }
+tau-cli = { path = "crates/tau-cli" }
+tau-cli-term = { path = "crates/tau-cli-term" }
+tau-cli-term-raw = { path = "crates/tau-cli-term-raw" }
+tau-config = { path = "crates/tau-config" }
+tau-core = { path = "crates/tau-core" }
+tau-ext-fs = { path = "crates/tau-ext-fs" }
+tau-ext-shell = { path = "crates/tau-ext-shell" }
+tau-proto = { path = "crates/tau-proto" }
+tau-socket = { path = "crates/tau-socket" }
+tau-supervisor = { path = "crates/tau-supervisor" }
+tau-test-support = { path = "crates/tau-test-support" }
+
+# External crates
+ciborium = "0.2.2"
+clap = { version = "4", features = ["derive"] }
+crossterm = "0.28"
+dirs = "6"
+serde = { version = "1", features = ["derive"] }
+tempfile = "3"
+toml = "0.9"
+vt100 = "0.16"
+
 [profile.ci]
 debug = "line-tables-only"
 incremental = false

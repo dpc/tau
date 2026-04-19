@@ -645,6 +645,7 @@ dependencies = [
  "clap",
  "dirs",
  "tau-agent",
+ "tau-cli-term",
  "tau-config",
  "tau-core",
  "tau-ext-fs",

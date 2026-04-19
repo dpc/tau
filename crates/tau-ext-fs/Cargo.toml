@@ -9,7 +9,7 @@ license.workspace = true
 workspace = true
 
 [dependencies]
-tau-proto = { path = "../tau-proto" }
+tau-proto.workspace = true
 
 [dev-dependencies]
-tempfile = "3"
+tempfile.workspace = true
