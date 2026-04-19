@@ -14,9 +14,10 @@ use std::io::{BufReader, BufWriter, Read, Write};
 
 use tau_config::settings::{self, ModelRegistry, Settings};
 use tau_proto::{
-    AgentPromptRequest, AgentPromptResponse, AgentToolCall, CborValue, ClientKind, ContentBlock,
-    ConversationRole, Event, EventName, EventReader, EventSelector, EventWriter, LifecycleHello,
-    LifecycleReady, LifecycleSubscribe, PROTOCOL_VERSION,
+    AgentPromptRequest, AgentPromptResponse, AgentResponseEnd, AgentResponseStart,
+    AgentResponseUpdate, AgentToolCall, CborValue, ClientKind, ContentBlock, ConversationRole,
+    Event, EventName, EventReader, EventSelector, EventWriter, LifecycleHello, LifecycleReady,
+    LifecycleSubscribe, PROTOCOL_VERSION,
 };
 
 use crate::openai::OpenAiConfig;
@@ -65,14 +66,17 @@ where
         };
         match event {
             Event::AgentPromptRequest(request) => {
-                let response = match &backend {
-                    Backend::Llm(config) => handle_llm_request(config, &request),
+                match &backend {
+                    Backend::Llm(config) => {
+                        handle_llm_request(config, &request, &mut writer)?;
+                    }
                     Backend::Deterministic => {
-                        handle_deterministic_request(&request, &mut next_call_number)
+                        let response =
+                            handle_deterministic_request(&request, &mut next_call_number);
+                        writer.write_event(&Event::AgentPromptResponse(response))?;
+                        writer.flush()?;
                     }
                 };
-                writer.write_event(&Event::AgentPromptResponse(response))?;
-                writer.flush()?;
             }
             Event::LifecycleDisconnect(_) => return Ok(()),
             _ => {}
@@ -121,19 +125,69 @@ fn resolve_llm_config(settings: &Settings, models: &ModelRegistry) -> Option<Ope
 // LLM backend
 // ---------------------------------------------------------------------------
 
-fn handle_llm_request(config: &OpenAiConfig, request: &AgentPromptRequest) -> AgentPromptResponse {
-    match openai::chat_completion(config, request) {
-        Ok(response) => response,
-        Err(error) => {
-            // Return the error as text so the user sees it.
-            AgentPromptResponse {
+fn handle_llm_request<W: std::io::Write>(
+    config: &OpenAiConfig,
+    request: &AgentPromptRequest,
+    writer: &mut EventWriter<std::io::BufWriter<W>>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Signal streaming start.
+    writer.write_event(&Event::AgentResponseStart(AgentResponseStart {
+        turn_id: request.turn_id.clone(),
+        session_id: request.session_id.clone(),
+    }))?;
+    writer.flush()?;
+
+    match openai::chat_completion_stream(config, request, |text_so_far| {
+        // Send accumulated text on each chunk.
+        let _ = writer.write_event(&Event::AgentResponseUpdate(AgentResponseUpdate {
+            turn_id: request.turn_id.clone(),
+            session_id: request.session_id.clone(),
+            text: text_so_far.to_owned(),
+        }));
+        let _ = writer.flush();
+    }) {
+        Ok(state) => {
+            let text = if state.text.is_empty() {
+                None
+            } else {
+                Some(state.text.clone())
+            };
+            let tool_calls = state.into_tool_calls();
+
+            // Send final response (also as AgentPromptResponse for
+            // the harness's agentic loop).
+            writer.write_event(&Event::AgentResponseEnd(AgentResponseEnd {
                 turn_id: request.turn_id.clone(),
                 session_id: request.session_id.clone(),
-                text: Some(format!("LLM error: {error}")),
+                text: text.clone(),
+                tool_calls: tool_calls.clone(),
+            }))?;
+            writer.write_event(&Event::AgentPromptResponse(AgentPromptResponse {
+                turn_id: request.turn_id.clone(),
+                session_id: request.session_id.clone(),
+                text,
+                tool_calls,
+            }))?;
+            writer.flush()?;
+        }
+        Err(error) => {
+            let error_text = format!("LLM error: {error}");
+            writer.write_event(&Event::AgentResponseEnd(AgentResponseEnd {
+                turn_id: request.turn_id.clone(),
+                session_id: request.session_id.clone(),
+                text: Some(error_text.clone()),
                 tool_calls: Vec::new(),
-            }
+            }))?;
+            writer.write_event(&Event::AgentPromptResponse(AgentPromptResponse {
+                turn_id: request.turn_id.clone(),
+                session_id: request.session_id.clone(),
+                text: Some(error_text),
+                tool_calls: Vec::new(),
+            }))?;
+            writer.flush()?;
         }
     }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------

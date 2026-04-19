@@ -3,10 +3,12 @@
 //! Works with any endpoint speaking the OpenAI chat completions API:
 //! llama.cpp, vLLM, Ollama, OpenAI, etc.
 
+use std::io::BufRead;
+
 use serde::{Deserialize, Serialize};
 use tau_proto::{
-    AgentPromptRequest, AgentPromptResponse, AgentToolCall, CborValue, ContentBlock,
-    ConversationMessage, ConversationRole, ToolDefinition,
+    AgentPromptRequest, AgentToolCall, CborValue, ContentBlock, ConversationMessage,
+    ConversationRole, ToolDefinition,
 };
 
 /// Configuration for the OpenAI-compatible backend.
@@ -39,17 +41,58 @@ impl std::fmt::Display for OpenAiError {
 
 impl std::error::Error for OpenAiError {}
 
-/// Calls the chat completions endpoint and returns the response.
-pub fn chat_completion(
+/// Accumulated streaming state.
+pub struct StreamState {
+    pub text: String,
+    pub tool_calls: Vec<ToolCallAccumulator>,
+}
+
+/// Accumulates one tool call across streaming chunks.
+pub struct ToolCallAccumulator {
+    pub id: String,
+    pub name: String,
+    pub arguments_json: String,
+}
+
+impl StreamState {
+    fn new() -> Self {
+        Self {
+            text: String::new(),
+            tool_calls: Vec::new(),
+        }
+    }
+
+    /// Returns the final tool calls with parsed arguments.
+    pub fn into_tool_calls(self) -> Vec<AgentToolCall> {
+        self.tool_calls
+            .into_iter()
+            .map(|tc| {
+                let args: serde_json::Value = serde_json::from_str(&tc.arguments_json)
+                    .unwrap_or(serde_json::Value::Null);
+                AgentToolCall {
+                    id: tc.id,
+                    name: tc.name,
+                    arguments: json_to_cbor(&args),
+                }
+            })
+            .collect()
+    }
+}
+
+/// Calls the chat completions endpoint with streaming. Invokes the
+/// callback with the accumulated text on each content delta.
+/// Returns the final state (text + tool calls).
+pub fn chat_completion_stream(
     config: &OpenAiConfig,
     request: &AgentPromptRequest,
-) -> Result<AgentPromptResponse, OpenAiError> {
+    mut on_update: impl FnMut(&str),
+) -> Result<StreamState, OpenAiError> {
     let url = format!(
         "{}/chat/completions",
         config.base_url.trim_end_matches('/')
     );
 
-    let body = build_request(config, request);
+    let body = build_request(config, request, true);
     let body_str = serde_json::to_string(&body).map_err(OpenAiError::Json)?;
 
     let response = ureq::post(&url)
@@ -58,11 +101,67 @@ pub fn chat_completion(
         .send_string(&body_str)
         .map_err(|e| OpenAiError::Http(Box::new(e)))?;
 
-    let response_str = response.into_string().map_err(OpenAiError::Io)?;
-    let parsed: CompletionResponse =
-        serde_json::from_str(&response_str).map_err(OpenAiError::Json)?;
+    let reader = std::io::BufReader::new(response.into_reader());
+    let mut state = StreamState::new();
 
-    parse_response(parsed, request)
+    for line in reader.lines() {
+        let line = line.map_err(OpenAiError::Io)?;
+
+        // SSE format: lines starting with "data: "
+        let Some(data) = line.strip_prefix("data: ") else {
+            continue;
+        };
+
+        if data == "[DONE]" {
+            break;
+        }
+
+        let chunk: StreamChunk = match serde_json::from_str(data) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+
+        let Some(choice) = chunk.choices.into_iter().next() else {
+            continue;
+        };
+
+        // Accumulate text content.
+        if let Some(content) = choice.delta.content {
+            state.text.push_str(&content);
+            on_update(&state.text);
+        }
+
+        // Accumulate tool calls.
+        if let Some(tool_calls) = choice.delta.tool_calls {
+            for tc in tool_calls {
+                let index = tc.index.unwrap_or(0) as usize;
+
+                // Extend the list if needed.
+                while state.tool_calls.len() <= index {
+                    state.tool_calls.push(ToolCallAccumulator {
+                        id: String::new(),
+                        name: String::new(),
+                        arguments_json: String::new(),
+                    });
+                }
+
+                let acc = &mut state.tool_calls[index];
+                if let Some(id) = tc.id {
+                    acc.id = id;
+                }
+                if let Some(function) = tc.function {
+                    if let Some(name) = function.name {
+                        acc.name = name;
+                    }
+                    if let Some(args) = function.arguments {
+                        acc.arguments_json.push_str(&args);
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(state)
 }
 
 // ---------------------------------------------------------------------------
@@ -77,6 +176,7 @@ struct CompletionRequest {
     tools: Vec<ApiTool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_choice: Option<String>,
+    stream: bool,
 }
 
 #[derive(Serialize)]
@@ -123,10 +223,13 @@ struct ApiToolFunction {
     description: Option<String>,
 }
 
-fn build_request(config: &OpenAiConfig, request: &AgentPromptRequest) -> CompletionRequest {
+fn build_request(
+    config: &OpenAiConfig,
+    request: &AgentPromptRequest,
+    stream: bool,
+) -> CompletionRequest {
     let mut messages = Vec::new();
 
-    // System prompt.
     if !request.system_prompt.is_empty() {
         messages.push(ApiMessage {
             role: "system".to_owned(),
@@ -137,18 +240,11 @@ fn build_request(config: &OpenAiConfig, request: &AgentPromptRequest) -> Complet
         });
     }
 
-    // Conversation messages.
     for msg in &request.messages {
         convert_message(msg, &mut messages);
     }
 
-    // Tool definitions.
-    let tools: Vec<ApiTool> = request
-        .tools
-        .iter()
-        .map(|t| convert_tool_definition(t))
-        .collect();
-
+    let tools: Vec<ApiTool> = request.tools.iter().map(convert_tool_definition).collect();
     let tool_choice = if tools.is_empty() {
         None
     } else {
@@ -160,6 +256,7 @@ fn build_request(config: &OpenAiConfig, request: &AgentPromptRequest) -> Complet
         messages,
         tools,
         tool_choice,
+        stream,
     }
 }
 
@@ -256,65 +353,36 @@ fn convert_tool_definition(tool: &ToolDefinition) -> ApiTool {
 }
 
 // ---------------------------------------------------------------------------
-// Response parsing
+// Streaming response parsing
 // ---------------------------------------------------------------------------
 
 #[derive(Deserialize)]
-struct CompletionResponse {
-    choices: Vec<CompletionChoice>,
+struct StreamChunk {
+    choices: Vec<StreamChoice>,
 }
 
 #[derive(Deserialize)]
-struct CompletionChoice {
-    message: CompletionMessage,
+struct StreamChoice {
+    delta: StreamDelta,
 }
 
 #[derive(Deserialize)]
-struct CompletionMessage {
+struct StreamDelta {
     content: Option<String>,
-    #[serde(default)]
-    tool_calls: Vec<ResponseToolCall>,
+    tool_calls: Option<Vec<StreamToolCall>>,
 }
 
 #[derive(Deserialize)]
-struct ResponseToolCall {
-    id: String,
-    function: ResponseFunction,
+struct StreamToolCall {
+    index: Option<u32>,
+    id: Option<String>,
+    function: Option<StreamFunction>,
 }
 
 #[derive(Deserialize)]
-struct ResponseFunction {
-    name: String,
-    arguments: String,
-}
-
-fn parse_response(
-    response: CompletionResponse,
-    request: &AgentPromptRequest,
-) -> Result<AgentPromptResponse, OpenAiError> {
-    let choice = response.choices.into_iter().next().ok_or(OpenAiError::NoChoices)?;
-
-    let tool_calls: Vec<AgentToolCall> = choice
-        .message
-        .tool_calls
-        .into_iter()
-        .map(|tc| {
-            let args: serde_json::Value =
-                serde_json::from_str(&tc.function.arguments).unwrap_or(serde_json::Value::Null);
-            AgentToolCall {
-                id: tc.id,
-                name: tc.function.name,
-                arguments: json_to_cbor(&args),
-            }
-        })
-        .collect();
-
-    Ok(AgentPromptResponse {
-        turn_id: request.turn_id.clone(),
-        session_id: request.session_id.clone(),
-        text: choice.message.content,
-        tool_calls,
-    })
+struct StreamFunction {
+    name: Option<String>,
+    arguments: Option<String>,
 }
 
 // ---------------------------------------------------------------------------

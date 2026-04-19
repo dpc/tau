@@ -401,16 +401,18 @@ impl SubscriptionPolicy for DefaultSubscriptionPolicy {
                         name.starts_with("message.")
                             || name.starts_with("tool.")
                             || name.starts_with("extension.")
+                            || name.starts_with("agent.")
                     }
                     EventSelector::Prefix(prefix) => {
                         prefix.starts_with("message.")
                             || prefix.starts_with("tool.")
                             || prefix.starts_with("extension.")
+                            || prefix.starts_with("agent.")
                     }
                 };
                 if !allowed {
                     return Err(SubscriptionPolicyError::new(
-                        "socket clients may only subscribe to message.*, tool.*, or extension.*",
+                        "socket clients may only subscribe to message.*, tool.*, extension.*, or agent.*",
                     ));
                 }
             }
@@ -1839,7 +1841,7 @@ mod tests {
             error,
             RouteError::SubscriptionDenied {
                 connection_id,
-                reason: "socket clients may only subscribe to message.*, tool.*, or extension.*"
+                reason: "socket clients may only subscribe to message.*, tool.*, extension.*, or agent.*"
                     .to_owned(),
             }
         );

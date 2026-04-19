@@ -146,6 +146,7 @@ fn run_chat(session_id: &str) -> Result<(), CliError> {
                 EventSelector::Prefix("message.".to_owned()),
                 EventSelector::Prefix("tool.".to_owned()),
                 EventSelector::Prefix("extension.".to_owned()),
+                EventSelector::Prefix("agent.".to_owned()),
             ],
         }))
         .map_err(CliError::Encode)?;
@@ -178,8 +179,9 @@ fn run_chat(session_id: &str) -> Result<(), CliError> {
     let renderer_handle = handle.clone();
     let renderer_rx = event_rx;
     let _renderer = std::thread::spawn(move || {
+        let mut renderer = EventRenderer::new(renderer_handle);
         while let Ok(event) = renderer_rx.recv() {
-            render_event(&renderer_handle, &event);
+            renderer.handle(&event);
         }
     });
 
@@ -240,79 +242,146 @@ fn terminal_input_loop(
     Ok(())
 }
 
-fn render_event(handle: &tau_cli_term::TermHandle, event: &Event) {
-    use tau_cli_term::{Color, Span, Style, StyledBlock, StyledText};
+/// Stateful event renderer that tracks the current streaming block.
+struct EventRenderer {
+    handle: tau_cli_term::TermHandle,
+    /// Block ID for the in-progress streaming response (updated in-place).
+    streaming_block: Option<tau_cli_term::BlockId>,
+}
 
-    match event {
-        Event::MessageUser(msg) => {
-            handle.print_output(
-                StyledBlock::new(StyledText::from(vec![
-                    Span::new("> ", Style::default().fg(Color::White)),
-                    Span::new(&msg.text, Style::default().fg(Color::White)),
-                ]))
-                .bg(Color::Rgb {
-                    r: 40,
-                    g: 40,
-                    b: 55,
-                }),
-            );
+impl EventRenderer {
+    fn new(handle: tau_cli_term::TermHandle) -> Self {
+        Self {
+            handle,
+            streaming_block: None,
         }
-        Event::MessageAgent(msg) => {
-            handle.print_output(
-                StyledBlock::new(StyledText::from(vec![
-                    Span::new("  ", Style::default().fg(Color::White)),
-                    Span::new(&msg.text, Style::default().fg(Color::White)),
-                    Span::new("  ", Style::default().fg(Color::White)),
-                ]))
+    }
+
+    fn handle(&mut self, event: &Event) {
+        use tau_cli_term::{Color, Span, Style, StyledBlock, StyledText};
+
+        match event {
+            Event::MessageUser(msg) => {
+                self.handle.print_output(
+                    StyledBlock::new(StyledText::from(vec![
+                        Span::new("> ", Style::default().fg(Color::White)),
+                        Span::new(&msg.text, Style::default().fg(Color::White)),
+                    ]))
+                    .bg(Color::Rgb {
+                        r: 40,
+                        g: 40,
+                        b: 55,
+                    }),
+                );
+            }
+            Event::AgentResponseStart(_) => {
+                // Create a block for the streaming response.
+                let block = StyledBlock::new(StyledText::from(Span::new(
+                    "  ...",
+                    Style::default().fg(Color::DarkGrey),
+                )))
                 .bg(Color::Rgb {
                     r: 25,
                     g: 35,
                     b: 45,
-                }),
-            );
+                });
+                let id = self.handle.print_output(block);
+                self.streaming_block = Some(id);
+            }
+            Event::AgentResponseUpdate(update) => {
+                if let Some(id) = self.streaming_block {
+                    let block = StyledBlock::new(StyledText::from(vec![
+                        Span::new("  ", Style::default().fg(Color::White)),
+                        Span::new(&update.text, Style::default().fg(Color::White)),
+                        Span::new("  ", Style::default().fg(Color::White)),
+                    ]))
+                    .bg(Color::Rgb {
+                        r: 25,
+                        g: 35,
+                        b: 45,
+                    });
+                    self.handle.set_block(id, block);
+                    self.handle.redraw();
+                }
+            }
+            Event::AgentResponseEnd(end) => {
+                if let Some(id) = self.streaming_block.take() {
+                    // Finalize the block with the complete text.
+                    let text = end.text.as_deref().unwrap_or("");
+                    let block = StyledBlock::new(StyledText::from(vec![
+                        Span::new("  ", Style::default().fg(Color::White)),
+                        Span::new(text, Style::default().fg(Color::White)),
+                        Span::new("  ", Style::default().fg(Color::White)),
+                    ]))
+                    .bg(Color::Rgb {
+                        r: 25,
+                        g: 35,
+                        b: 45,
+                    });
+                    self.handle.set_block(id, block);
+                    self.handle.redraw();
+                }
+            }
+            Event::MessageAgent(msg) => {
+                // Only render if not already handled by streaming.
+                if self.streaming_block.is_none() {
+                    self.handle.print_output(
+                        StyledBlock::new(StyledText::from(vec![
+                            Span::new("  ", Style::default().fg(Color::White)),
+                            Span::new(&msg.text, Style::default().fg(Color::White)),
+                            Span::new("  ", Style::default().fg(Color::White)),
+                        ]))
+                        .bg(Color::Rgb {
+                            r: 25,
+                            g: 35,
+                            b: 45,
+                        }),
+                    );
+                }
+            }
+            Event::ToolProgress(progress) => {
+                let text = tau_harness::format_tool_progress(progress);
+                self.handle.print_output(
+                    StyledBlock::new(StyledText::from(Span::new(
+                        format!("  {text}  "),
+                        Style::default().fg(Color::DarkYellow),
+                    )))
+                    .bg(Color::Rgb {
+                        r: 50,
+                        g: 45,
+                        b: 20,
+                    }),
+                );
+            }
+            Event::ExtensionStarting(_)
+            | Event::ExtensionReady(_)
+            | Event::ExtensionExited(_)
+            | Event::ExtensionRestarting(_) => {
+                let text = tau_harness::format_extension_event(event);
+                self.handle.print_output(
+                    StyledBlock::new(StyledText::from(Span::new(
+                        format!("  {text}  "),
+                        Style::default().fg(Color::DarkGrey),
+                    )))
+                    .bg(Color::Rgb {
+                        r: 30,
+                        g: 30,
+                        b: 30,
+                    }),
+                );
+            }
+            Event::LifecycleDisconnect(disconnect) => {
+                let reason = disconnect.reason.as_deref().unwrap_or("disconnected");
+                self.handle.print_output(
+                    StyledBlock::new(StyledText::from(Span::new(
+                        format!("  {reason}  "),
+                        Style::default().fg(Color::White),
+                    )))
+                    .bg(Color::DarkRed),
+                );
+            }
+            _ => {}
         }
-        Event::ToolProgress(progress) => {
-            let text = tau_harness::format_tool_progress(progress);
-            handle.print_output(
-                StyledBlock::new(StyledText::from(Span::new(
-                    format!("  {text}  "),
-                    Style::default().fg(Color::DarkYellow),
-                )))
-                .bg(Color::Rgb {
-                    r: 50,
-                    g: 45,
-                    b: 20,
-                }),
-            );
-        }
-        Event::ExtensionStarting(_)
-        | Event::ExtensionReady(_)
-        | Event::ExtensionExited(_)
-        | Event::ExtensionRestarting(_) => {
-            let text = tau_harness::format_extension_event(event);
-            handle.print_output(
-                StyledBlock::new(StyledText::from(Span::new(
-                    format!("  {text}  "),
-                    Style::default().fg(Color::DarkGrey),
-                )))
-                .bg(Color::Rgb {
-                    r: 30,
-                    g: 30,
-                    b: 30,
-                }),
-            );
-        }
-        Event::LifecycleDisconnect(disconnect) => {
-            let reason = disconnect.reason.as_deref().unwrap_or("disconnected");
-            handle.print_output(
-                StyledBlock::new(StyledText::from(Span::new(
-                    format!("  {reason}  "),
-                    Style::default().fg(Color::White),
-                )))
-                .bg(Color::DarkRed),
-            );
-        }
-        _ => {}
     }
 }
 

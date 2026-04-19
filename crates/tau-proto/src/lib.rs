@@ -86,6 +86,12 @@ pub enum EventName {
     AgentPromptRequest,
     #[serde(rename = "agent.prompt_response")]
     AgentPromptResponse,
+    #[serde(rename = "agent.response_start")]
+    AgentResponseStart,
+    #[serde(rename = "agent.response_update")]
+    AgentResponseUpdate,
+    #[serde(rename = "agent.response_end")]
+    AgentResponseEnd,
 }
 
 impl EventName {
@@ -114,6 +120,9 @@ impl EventName {
             Self::ExtensionRestarting => "extension.restarting",
             Self::AgentPromptRequest => "agent.prompt_request",
             Self::AgentPromptResponse => "agent.prompt_response",
+            Self::AgentResponseStart => "agent.response_start",
+            Self::AgentResponseUpdate => "agent.response_update",
+            Self::AgentResponseEnd => "agent.response_end",
         }
     }
 }
@@ -150,6 +159,9 @@ impl FromStr for EventName {
             "extension.restarting" => Ok(Self::ExtensionRestarting),
             "agent.prompt_request" => Ok(Self::AgentPromptRequest),
             "agent.prompt_response" => Ok(Self::AgentPromptResponse),
+            "agent.response_start" => Ok(Self::AgentResponseStart),
+            "agent.response_update" => Ok(Self::AgentResponseUpdate),
+            "agent.response_end" => Ok(Self::AgentResponseEnd),
             _ => Err(ParseEventNameError {
                 invalid_name: value.to_owned(),
             }),
@@ -390,6 +402,34 @@ pub struct AgentPromptResponse {
     pub tool_calls: Vec<AgentToolCall>,
 }
 
+/// Signals the start of a streaming agent response.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AgentResponseStart {
+    pub turn_id: String,
+    pub session_id: String,
+}
+
+/// Carries the full accumulated text so far during streaming.
+/// Each update replaces the previous content (not a delta).
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AgentResponseUpdate {
+    pub turn_id: String,
+    pub session_id: String,
+    pub text: String,
+}
+
+/// Signals the end of a streaming response. Carries the final
+/// complete response including any tool calls.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AgentResponseEnd {
+    pub turn_id: String,
+    pub session_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_calls: Vec<AgentToolCall>,
+}
+
 // ---------------------------------------------------------------------------
 // Chat messages
 // ---------------------------------------------------------------------------
@@ -483,6 +523,12 @@ pub enum Event {
     AgentPromptRequest(AgentPromptRequest),
     #[serde(rename = "agent.prompt_response")]
     AgentPromptResponse(AgentPromptResponse),
+    #[serde(rename = "agent.response_start")]
+    AgentResponseStart(AgentResponseStart),
+    #[serde(rename = "agent.response_update")]
+    AgentResponseUpdate(AgentResponseUpdate),
+    #[serde(rename = "agent.response_end")]
+    AgentResponseEnd(AgentResponseEnd),
 }
 
 impl Event {
@@ -511,6 +557,9 @@ impl Event {
             Self::ExtensionRestarting(_) => EventName::ExtensionRestarting,
             Self::AgentPromptRequest(_) => EventName::AgentPromptRequest,
             Self::AgentPromptResponse(_) => EventName::AgentPromptResponse,
+            Self::AgentResponseStart(_) => EventName::AgentResponseStart,
+            Self::AgentResponseUpdate(_) => EventName::AgentResponseUpdate,
+            Self::AgentResponseEnd(_) => EventName::AgentResponseEnd,
         }
     }
 }

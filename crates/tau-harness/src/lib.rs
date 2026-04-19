@@ -661,6 +661,12 @@ impl Harness {
             Event::AgentPromptResponse(response) => {
                 self.handle_agent_prompt_response(response)?;
             }
+            Event::AgentResponseStart(_)
+            | Event::AgentResponseUpdate(_)
+            | Event::AgentResponseEnd(_) => {
+                // Forward streaming events to all subscribers (UI clients).
+                let _ = self.bus.publish_from(Some(source_id), event);
+            }
             other => {
                 let _ = self.bus.publish_from(Some(source_id), other);
             }
