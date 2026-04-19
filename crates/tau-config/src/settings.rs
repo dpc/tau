@@ -46,7 +46,7 @@ pub struct ModelRegistry {
 }
 
 /// One LLM provider configuration.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct ProviderConfig {
     /// Base URL for the API endpoint.
@@ -66,19 +66,6 @@ pub struct ProviderConfig {
     /// Models available from this provider.
     #[serde(default)]
     pub models: Vec<ModelConfig>,
-}
-
-impl Default for ProviderConfig {
-    fn default() -> Self {
-        Self {
-            base_url: None,
-            api: None,
-            api_key: None,
-            headers: None,
-            compat: ProviderCompat::default(),
-            models: Vec::new(),
-        }
-    }
 }
 
 /// Compatibility flags for providers that don't support all features.

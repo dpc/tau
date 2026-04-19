@@ -836,11 +836,7 @@ fn print_new_history(
 // --- Input reader thread ---
 
 fn term_input_reader_loop(tx: std::sync::mpsc::Sender<RawEvent>) {
-    loop {
-        let ev = match event::read() {
-            Ok(ev) => ev,
-            Err(_) => break,
-        };
+    while let Ok(ev) = event::read() {
         let raw = match ev {
             CtEvent::Key(key) => RawEvent::Key(key),
             CtEvent::Resize(w, h) => RawEvent::Resize(w, h),

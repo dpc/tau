@@ -25,6 +25,7 @@ pub enum OpenAiError {
     Http(Box<ureq::Error>),
     Io(std::io::Error),
     Json(serde_json::Error),
+    #[allow(dead_code)]
     NoChoices,
 }
 

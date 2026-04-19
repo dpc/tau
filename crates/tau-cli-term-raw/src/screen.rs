@@ -85,10 +85,10 @@ impl Screen {
 
         let desired_count = desired_lines.len();
 
-        for row in 0..desired_count {
+        for (row, desired_line) in desired_lines.iter().enumerate() {
             let actual_line = self.lines.get(row);
             let actual_slice = actual_line.map(|l| l.as_slice()).unwrap_or(&[]);
-            let desired_slice = desired_lines[row].as_slice();
+            let desired_slice = desired_line.as_slice();
 
             // Find the first column where actual and desired differ.
             let common_prefix = actual_slice

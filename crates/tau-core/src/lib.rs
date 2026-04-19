@@ -729,10 +729,7 @@ impl ToolRegistry {
             .tools_by_connection
             .entry(connection_id.to_owned())
             .or_default();
-        if !connection_tools
-            .iter()
-            .any(|existing| *existing == tool_name)
-        {
+        if !connection_tools.contains(&tool_name) {
             connection_tools.push(tool_name);
         }
 

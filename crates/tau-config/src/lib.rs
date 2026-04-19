@@ -18,19 +18,10 @@ use std::{fmt, fs, io};
 use serde::Deserialize;
 
 /// The resolved harness configuration after layering user and project config.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Config {
     pub core: CoreConfig,
     pub extensions: Vec<ExtensionConfig>,
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            core: CoreConfig::default(),
-            extensions: Vec::new(),
-        }
-    }
 }
 
 impl Config {

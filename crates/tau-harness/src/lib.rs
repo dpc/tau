@@ -331,8 +331,6 @@ impl Harness {
         let store = SessionStore::open(store_path)?;
 
         let mut extensions = Vec::new();
-        let agent_connection_id;
-
         // Agent
         let (conn_id, thread) = spawn_in_process(
             "agent",
@@ -341,7 +339,7 @@ impl Harness {
             &mut bus,
             &tx,
         )?;
-        agent_connection_id = conn_id.clone();
+        let agent_connection_id = conn_id.clone();
         extensions.push(ExtensionEntry {
             name: "agent".to_owned(),
             connection_id: conn_id,
@@ -875,7 +873,7 @@ impl Harness {
     fn send_prompt_to_agent(&mut self, session_id: &str) {
         let tree = self.store.session(session_id);
         let messages = tree
-            .map(|t| assemble_conversation(t))
+            .map(assemble_conversation)
             .unwrap_or_default();
         let tools = self.gather_tool_definitions();
         let turn_id = format!("turn-{}", self.next_turn_id);
