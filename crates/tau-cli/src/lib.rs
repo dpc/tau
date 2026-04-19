@@ -12,9 +12,11 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use tau_harness::runtime_dir;
+use std::collections::HashMap;
+
 use tau_proto::{
-    ChatMessage, ClientKind, Event, EventReader, EventSelector, EventWriter, LifecycleDisconnect,
-    LifecycleHello, LifecycleSubscribe, PROTOCOL_VERSION,
+    ClientKind, Event, EventReader, EventSelector, EventWriter, LifecycleDisconnect,
+    LifecycleHello, LifecycleSubscribe, PROTOCOL_VERSION, UiPromptSubmitted,
 };
 
 const DAEMON_START_TIMEOUT: Duration = Duration::from_secs(5);
@@ -143,10 +145,11 @@ fn run_chat(session_id: &str) -> Result<(), CliError> {
     writer
         .write_event(&Event::LifecycleSubscribe(LifecycleSubscribe {
             selectors: vec![
-                EventSelector::Prefix("message.".to_owned()),
+                EventSelector::Prefix("ui.".to_owned()),
+                EventSelector::Prefix("session.".to_owned()),
+                EventSelector::Prefix("agent.".to_owned()),
                 EventSelector::Prefix("tool.".to_owned()),
                 EventSelector::Prefix("extension.".to_owned()),
-                EventSelector::Prefix("agent.".to_owned()),
             ],
         }))
         .map_err(CliError::Encode)?;
@@ -222,8 +225,8 @@ fn terminal_input_loop(
                 }
 
                 if writer
-                    .write_event(&Event::MessageUser(ChatMessage {
-                        session_id: Some(session_id.to_owned()),
+                    .write_event(&Event::UiPromptSubmitted(UiPromptSubmitted {
+                        session_id: session_id.to_owned(),
                         text: text.to_owned(),
                     }))
                     .is_err()
@@ -242,21 +245,18 @@ fn terminal_input_loop(
     Ok(())
 }
 
-/// Stateful event renderer that tracks the current streaming block.
+/// Event renderer. Maps session_prompt_id → block_id for in-place
+/// updates. No flags, no suppression — just ID-based lookups.
 struct EventRenderer {
     handle: tau_cli_term::TermHandle,
-    /// Block ID for the in-progress streaming response (updated in-place).
-    streaming_block: Option<tau_cli_term::BlockId>,
-    /// Suppress the next MessageAgent (streaming already delivered it).
-    suppress_next_message_agent: bool,
+    prompt_blocks: HashMap<String, tau_cli_term::BlockId>,
 }
 
 impl EventRenderer {
     fn new(handle: tau_cli_term::TermHandle) -> Self {
         Self {
             handle,
-            streaming_block: None,
-            suppress_next_message_agent: false,
+            prompt_blocks: HashMap::new(),
         }
     }
 
@@ -264,86 +264,51 @@ impl EventRenderer {
         use tau_cli_term::{Color, Span, Style, StyledBlock, StyledText};
 
         match event {
-            Event::MessageUser(msg) => {
+            Event::UiPromptSubmitted(prompt) => {
                 self.handle.print_output(
                     StyledBlock::new(StyledText::from(Span::new(
-                        format!("> {}", msg.text),
+                        format!("> {}", prompt.text),
                         Style::default().fg(Color::White),
                     )))
-                    .bg(Color::Rgb {
-                        r: 40,
-                        g: 40,
-                        b: 55,
-                    }),
+                    .bg(Color::Rgb { r: 40, g: 40, b: 55 }),
                 );
             }
-            Event::AgentResponseStart(_) => {
-                // Create a block in the live area (above_active) so
-                // it gets re-rendered on every redraw. History blocks
-                // are only painted once.
+            Event::SessionPromptCreated(prompt) => {
                 let block = StyledBlock::new(StyledText::from(Span::new(
                     "...",
                     Style::default().fg(Color::DarkGrey),
                 )))
-                .bg(Color::Rgb {
-                    r: 25,
-                    g: 35,
-                    b: 45,
-                });
+                .bg(Color::Rgb { r: 25, g: 35, b: 45 });
                 let id = self.handle.new_block(block);
                 self.handle.push_above_active(id);
                 self.handle.redraw();
-                self.streaming_block = Some(id);
+                self.prompt_blocks.insert(prompt.session_prompt_id.clone(), id);
             }
-            Event::AgentResponseUpdate(update) => {
-                if let Some(id) = self.streaming_block {
+            Event::AgentResponseUpdated(update) => {
+                if let Some(&bid) = self.prompt_blocks.get(&update.session_prompt_id) {
                     let block = StyledBlock::new(StyledText::from(Span::new(
                         &update.text,
                         Style::default().fg(Color::White),
                     )))
-                    .bg(Color::Rgb {
-                        r: 25,
-                        g: 35,
-                        b: 45,
-                    });
-                    self.handle.set_block(id, block);
+                    .bg(Color::Rgb { r: 25, g: 35, b: 45 });
+                    self.handle.set_block(bid, block);
                     self.handle.redraw();
                 }
             }
-            Event::AgentResponseEnd(end) => {
-                if let Some(id) = self.streaming_block.take() {
-                    // Move from live area to history for permanence.
-                    self.handle.remove_above_active(id);
-                    let text = end.text.as_deref().unwrap_or("");
-                    let block = StyledBlock::new(StyledText::from(Span::new(
-                        text,
-                        Style::default().fg(Color::White),
-                    )))
-                    .bg(Color::Rgb {
-                        r: 25,
-                        g: 35,
-                        b: 45,
-                    });
-                    self.handle.set_block(id, block);
-                    self.handle.push_history(id);
-                    self.handle.redraw();
-                    self.suppress_next_message_agent = true;
-                }
-            }
-            Event::MessageAgent(msg) => {
-                if self.suppress_next_message_agent {
-                    self.suppress_next_message_agent = false;
-                } else if self.streaming_block.is_none() {
+            Event::AgentResponseFinished(finished) => {
+                if let Some(bid) = self.prompt_blocks.remove(&finished.session_prompt_id) {
+                    // Remove the live streaming block entirely and
+                    // print a new permanent history block. Moving
+                    // blocks between zones causes rendering artifacts.
+                    self.handle.remove_above_active(bid);
+                    self.handle.remove_block(bid);
+                    let text = finished.text.as_deref().unwrap_or("");
                     self.handle.print_output(
                         StyledBlock::new(StyledText::from(Span::new(
-                            &msg.text,
+                            text,
                             Style::default().fg(Color::White),
                         )))
-                        .bg(Color::Rgb {
-                            r: 25,
-                            g: 35,
-                            b: 45,
-                        }),
+                        .bg(Color::Rgb { r: 25, g: 35, b: 45 }),
                     );
                 }
             }
@@ -354,11 +319,7 @@ impl EventRenderer {
                         format!("  {text}  "),
                         Style::default().fg(Color::DarkYellow),
                     )))
-                    .bg(Color::Rgb {
-                        r: 50,
-                        g: 45,
-                        b: 20,
-                    }),
+                    .bg(Color::Rgb { r: 50, g: 45, b: 20 }),
                 );
             }
             Event::ExtensionStarting(_)
@@ -371,11 +332,7 @@ impl EventRenderer {
                         format!("  {text}  "),
                         Style::default().fg(Color::DarkGrey),
                     )))
-                    .bg(Color::Rgb {
-                        r: 30,
-                        g: 30,
-                        b: 30,
-                    }),
+                    .bg(Color::Rgb { r: 30, g: 30, b: 30 }),
                 );
             }
             Event::LifecycleDisconnect(disconnect) => {

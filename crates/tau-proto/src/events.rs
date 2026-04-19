@@ -1,21 +1,27 @@
 //! Protocol event types and payloads.
 //!
 //! All event definitions live here so `grep events.rs` finds them.
+//!
+//! Events are facts — each component broadcasts what happened.
+//! There are no requests or responses, only announcements.
 
 use std::fmt;
 use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{CborValue, ConnectionId, ExtensionName, SessionId, ToolCallId, ToolName};
+use crate::{
+    CborValue, ConnectionId, ExtensionName, SessionId, SessionPromptId, ToolCallId, ToolName,
+};
 
 // ---------------------------------------------------------------------------
 // Event names
 // ---------------------------------------------------------------------------
 
-/// Known dotted event names for the initial protocol surface.
+/// Known dotted event names for the protocol surface.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
 pub enum EventName {
+    // Lifecycle
     #[serde(rename = "lifecycle.hello")]
     LifecycleHello,
     #[serde(rename = "lifecycle.subscribe")]
@@ -24,6 +30,8 @@ pub enum EventName {
     LifecycleReady,
     #[serde(rename = "lifecycle.disconnect")]
     LifecycleDisconnect,
+
+    // Tools
     #[serde(rename = "tool.register")]
     ToolRegister,
     #[serde(rename = "tool.unregister")]
@@ -42,10 +50,8 @@ pub enum EventName {
     ToolCancel,
     #[serde(rename = "tool.cancelled")]
     ToolCancelled,
-    #[serde(rename = "message.user")]
-    MessageUser,
-    #[serde(rename = "message.agent")]
-    MessageAgent,
+
+    // Extension supervision
     #[serde(rename = "extension.starting")]
     ExtensionStarting,
     #[serde(rename = "extension.ready")]
@@ -54,16 +60,22 @@ pub enum EventName {
     ExtensionExited,
     #[serde(rename = "extension.restarting")]
     ExtensionRestarting,
-    #[serde(rename = "agent.prompt_request")]
-    AgentPromptRequest,
-    #[serde(rename = "agent.prompt_response")]
-    AgentPromptResponse,
-    #[serde(rename = "agent.response_start")]
-    AgentResponseStart,
-    #[serde(rename = "agent.response_update")]
-    AgentResponseUpdate,
-    #[serde(rename = "agent.response_end")]
-    AgentResponseEnd,
+
+    // UI events — facts from the UI
+    #[serde(rename = "ui.prompt_submitted")]
+    UiPromptSubmitted,
+
+    // Session events — facts from the harness session tracker
+    #[serde(rename = "session.prompt_created")]
+    SessionPromptCreated,
+
+    // Agent events — facts from the agent backend
+    #[serde(rename = "agent.prompt_submitted")]
+    AgentPromptSubmitted,
+    #[serde(rename = "agent.response_updated")]
+    AgentResponseUpdated,
+    #[serde(rename = "agent.response_finished")]
+    AgentResponseFinished,
 }
 
 impl EventName {
@@ -84,17 +96,15 @@ impl EventName {
             Self::ToolProgress => "tool.progress",
             Self::ToolCancel => "tool.cancel",
             Self::ToolCancelled => "tool.cancelled",
-            Self::MessageUser => "message.user",
-            Self::MessageAgent => "message.agent",
             Self::ExtensionStarting => "extension.starting",
             Self::ExtensionReady => "extension.ready",
             Self::ExtensionExited => "extension.exited",
             Self::ExtensionRestarting => "extension.restarting",
-            Self::AgentPromptRequest => "agent.prompt_request",
-            Self::AgentPromptResponse => "agent.prompt_response",
-            Self::AgentResponseStart => "agent.response_start",
-            Self::AgentResponseUpdate => "agent.response_update",
-            Self::AgentResponseEnd => "agent.response_end",
+            Self::UiPromptSubmitted => "ui.prompt_submitted",
+            Self::SessionPromptCreated => "session.prompt_created",
+            Self::AgentPromptSubmitted => "agent.prompt_submitted",
+            Self::AgentResponseUpdated => "agent.response_updated",
+            Self::AgentResponseFinished => "agent.response_finished",
         }
     }
 }
@@ -123,17 +133,15 @@ impl FromStr for EventName {
             "tool.progress" => Ok(Self::ToolProgress),
             "tool.cancel" => Ok(Self::ToolCancel),
             "tool.cancelled" => Ok(Self::ToolCancelled),
-            "message.user" => Ok(Self::MessageUser),
-            "message.agent" => Ok(Self::MessageAgent),
             "extension.starting" => Ok(Self::ExtensionStarting),
             "extension.ready" => Ok(Self::ExtensionReady),
             "extension.exited" => Ok(Self::ExtensionExited),
             "extension.restarting" => Ok(Self::ExtensionRestarting),
-            "agent.prompt_request" => Ok(Self::AgentPromptRequest),
-            "agent.prompt_response" => Ok(Self::AgentPromptResponse),
-            "agent.response_start" => Ok(Self::AgentResponseStart),
-            "agent.response_update" => Ok(Self::AgentResponseUpdate),
-            "agent.response_end" => Ok(Self::AgentResponseEnd),
+            "ui.prompt_submitted" => Ok(Self::UiPromptSubmitted),
+            "session.prompt_created" => Ok(Self::SessionPromptCreated),
+            "agent.prompt_submitted" => Ok(Self::AgentPromptSubmitted),
+            "agent.response_updated" => Ok(Self::AgentResponseUpdated),
+            "agent.response_finished" => Ok(Self::AgentResponseFinished),
             _ => Err(ParseEventNameError {
                 invalid_name: value.to_owned(),
             }),
@@ -148,7 +156,6 @@ pub struct ParseEventNameError {
 }
 
 impl ParseEventNameError {
-    /// Returns the unknown event name that failed to parse.
     #[must_use]
     pub fn invalid_name(&self) -> &str {
         &self.invalid_name
@@ -226,19 +233,16 @@ pub struct ToolSpec {
     pub description: Option<String>,
 }
 
-/// Registers one live tool provider.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ToolRegister {
     pub tool: ToolSpec,
 }
 
-/// Removes one live tool provider.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ToolUnregister {
     pub tool_name: ToolName,
 }
 
-/// Requests a tool invocation from the harness.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ToolRequest {
     pub call_id: ToolCallId,
@@ -246,7 +250,6 @@ pub struct ToolRequest {
     pub arguments: CborValue,
 }
 
-/// Directs a selected provider to run one tool invocation.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ToolInvoke {
     pub call_id: ToolCallId,
@@ -254,7 +257,6 @@ pub struct ToolInvoke {
     pub arguments: CborValue,
 }
 
-/// Reports a successful tool result.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ToolResult {
     pub call_id: ToolCallId,
@@ -262,7 +264,6 @@ pub struct ToolResult {
     pub result: CborValue,
 }
 
-/// Reports a failed tool result.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ToolError {
     pub call_id: ToolCallId,
@@ -272,7 +273,6 @@ pub struct ToolError {
     pub details: Option<CborValue>,
 }
 
-/// Reports progress from an in-flight tool invocation.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ProgressUpdate {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -281,7 +281,6 @@ pub struct ProgressUpdate {
     pub total: Option<u64>,
 }
 
-/// Emits progress for an in-flight tool invocation.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ToolProgress {
     pub call_id: ToolCallId,
@@ -292,14 +291,12 @@ pub struct ToolProgress {
     pub progress: Option<ProgressUpdate>,
 }
 
-/// Requests cancellation of a running tool invocation.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ToolCancel {
     pub call_id: ToolCallId,
     pub tool_name: ToolName,
 }
 
-/// Reports that a running tool invocation was cancelled.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ToolCancelled {
     pub call_id: ToolCallId,
@@ -307,19 +304,104 @@ pub struct ToolCancelled {
 }
 
 // ---------------------------------------------------------------------------
-// Chat messages
+// Extension supervision events
 // ---------------------------------------------------------------------------
 
-/// Common message payload used by user and agent messages.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct ChatMessage {
+pub struct ExtensionStarting {
+    pub extension_name: ExtensionName,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub argv: Vec<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ExtensionReady {
+    pub extension_name: ExtensionName,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub session_id: Option<SessionId>,
+    pub connection_id: Option<ConnectionId>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ExtensionExited {
+    pub extension_name: ExtensionName,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signal: Option<i32>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ExtensionRestarting {
+    pub extension_name: ExtensionName,
+    pub attempt: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
+// UI events — facts from the user interface
+// ---------------------------------------------------------------------------
+
+/// The user submitted a prompt in the UI.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct UiPromptSubmitted {
+    pub session_id: SessionId,
     pub text: String,
 }
 
 // ---------------------------------------------------------------------------
-// Agent prompt protocol
+// Session events — facts from the harness session tracker
+// ---------------------------------------------------------------------------
+
+/// The harness persisted a user prompt and assigned it an ID.
+/// Also carries the assembled conversation context for the agent.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SessionPromptCreated {
+    pub session_prompt_id: SessionPromptId,
+    pub session_id: SessionId,
+    pub system_prompt: String,
+    pub messages: Vec<ConversationMessage>,
+    pub tools: Vec<ToolDefinition>,
+}
+
+// ---------------------------------------------------------------------------
+// Agent events — facts from the agent backend
+// ---------------------------------------------------------------------------
+
+/// The agent accepted a prompt and began processing it.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AgentPromptSubmitted {
+    pub session_prompt_id: SessionPromptId,
+}
+
+/// The agent has new accumulated response text for a prompt.
+/// Each update carries the full text so far (replace, not delta).
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AgentResponseUpdated {
+    pub session_prompt_id: SessionPromptId,
+    pub text: String,
+}
+
+/// One tool call the agent wants to make.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AgentToolCall {
+    pub id: String,
+    pub name: String,
+    pub arguments: CborValue,
+}
+
+/// The agent finished processing a prompt.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AgentResponseFinished {
+    pub session_prompt_id: SessionPromptId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_calls: Vec<AgentToolCall>,
+}
+
+// ---------------------------------------------------------------------------
+// Conversation types (used in SessionPromptCreated)
 // ---------------------------------------------------------------------------
 
 /// Role of a participant in the conversation history.
@@ -350,7 +432,7 @@ pub enum ContentBlock {
     },
 }
 
-/// One message in the conversation history sent to the agent.
+/// One message in the conversation history.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ConversationMessage {
     pub role: ConversationRole,
@@ -365,106 +447,6 @@ pub struct ToolDefinition {
     pub description: Option<String>,
 }
 
-/// Fully assembled prompt sent by the harness to the agent.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct AgentPromptRequest {
-    pub turn_id: String,
-    pub session_id: String,
-    pub system_prompt: String,
-    pub messages: Vec<ConversationMessage>,
-    pub tools: Vec<ToolDefinition>,
-}
-
-/// One tool call requested by the agent in its response.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct AgentToolCall {
-    pub id: String,
-    pub name: String,
-    pub arguments: CborValue,
-}
-
-/// Agent's response to a prompt request.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct AgentPromptResponse {
-    pub turn_id: String,
-    pub session_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub text: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub tool_calls: Vec<AgentToolCall>,
-}
-
-// ---------------------------------------------------------------------------
-// Agent streaming events
-// ---------------------------------------------------------------------------
-
-/// Signals the start of a streaming agent response.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct AgentResponseStart {
-    pub turn_id: String,
-    pub session_id: String,
-}
-
-/// Carries the full accumulated text so far during streaming.
-/// Each update replaces the previous content (not a delta).
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct AgentResponseUpdate {
-    pub turn_id: String,
-    pub session_id: String,
-    pub text: String,
-}
-
-/// Signals the end of a streaming response. Carries the final
-/// complete response including any tool calls.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct AgentResponseEnd {
-    pub turn_id: String,
-    pub session_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub text: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub tool_calls: Vec<AgentToolCall>,
-}
-
-// ---------------------------------------------------------------------------
-// Extension supervision events
-// ---------------------------------------------------------------------------
-
-/// Supervision event emitted before the harness starts an extension.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct ExtensionStarting {
-    pub extension_name: ExtensionName,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub argv: Vec<String>,
-}
-
-/// Supervision event emitted when an extension becomes ready.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct ExtensionReady {
-    pub extension_name: ExtensionName,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub connection_id: Option<ConnectionId>,
-}
-
-/// Supervision event emitted when an extension exits.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct ExtensionExited {
-    pub extension_name: ExtensionName,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub exit_code: Option<i32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub signal: Option<i32>,
-}
-
-/// Supervision event emitted before the harness retries an extension.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct ExtensionRestarting {
-    pub extension_name: ExtensionName,
-    pub attempt: u32,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reason: Option<String>,
-}
-
 // ---------------------------------------------------------------------------
 // Top-level event envelope
 // ---------------------------------------------------------------------------
@@ -473,6 +455,7 @@ pub struct ExtensionRestarting {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "event", content = "payload")]
 pub enum Event {
+    // Lifecycle
     #[serde(rename = "lifecycle.hello")]
     LifecycleHello(LifecycleHello),
     #[serde(rename = "lifecycle.subscribe")]
@@ -481,6 +464,8 @@ pub enum Event {
     LifecycleReady(LifecycleReady),
     #[serde(rename = "lifecycle.disconnect")]
     LifecycleDisconnect(LifecycleDisconnect),
+
+    // Tools
     #[serde(rename = "tool.register")]
     ToolRegister(ToolRegister),
     #[serde(rename = "tool.unregister")]
@@ -499,10 +484,8 @@ pub enum Event {
     ToolCancel(ToolCancel),
     #[serde(rename = "tool.cancelled")]
     ToolCancelled(ToolCancelled),
-    #[serde(rename = "message.user")]
-    MessageUser(ChatMessage),
-    #[serde(rename = "message.agent")]
-    MessageAgent(ChatMessage),
+
+    // Extension supervision
     #[serde(rename = "extension.starting")]
     ExtensionStarting(ExtensionStarting),
     #[serde(rename = "extension.ready")]
@@ -511,16 +494,22 @@ pub enum Event {
     ExtensionExited(ExtensionExited),
     #[serde(rename = "extension.restarting")]
     ExtensionRestarting(ExtensionRestarting),
-    #[serde(rename = "agent.prompt_request")]
-    AgentPromptRequest(AgentPromptRequest),
-    #[serde(rename = "agent.prompt_response")]
-    AgentPromptResponse(AgentPromptResponse),
-    #[serde(rename = "agent.response_start")]
-    AgentResponseStart(AgentResponseStart),
-    #[serde(rename = "agent.response_update")]
-    AgentResponseUpdate(AgentResponseUpdate),
-    #[serde(rename = "agent.response_end")]
-    AgentResponseEnd(AgentResponseEnd),
+
+    // UI
+    #[serde(rename = "ui.prompt_submitted")]
+    UiPromptSubmitted(UiPromptSubmitted),
+
+    // Session
+    #[serde(rename = "session.prompt_created")]
+    SessionPromptCreated(SessionPromptCreated),
+
+    // Agent
+    #[serde(rename = "agent.prompt_submitted")]
+    AgentPromptSubmitted(AgentPromptSubmitted),
+    #[serde(rename = "agent.response_updated")]
+    AgentResponseUpdated(AgentResponseUpdated),
+    #[serde(rename = "agent.response_finished")]
+    AgentResponseFinished(AgentResponseFinished),
 }
 
 impl Event {
@@ -541,17 +530,15 @@ impl Event {
             Self::ToolProgress(_) => EventName::ToolProgress,
             Self::ToolCancel(_) => EventName::ToolCancel,
             Self::ToolCancelled(_) => EventName::ToolCancelled,
-            Self::MessageUser(_) => EventName::MessageUser,
-            Self::MessageAgent(_) => EventName::MessageAgent,
             Self::ExtensionStarting(_) => EventName::ExtensionStarting,
             Self::ExtensionReady(_) => EventName::ExtensionReady,
             Self::ExtensionExited(_) => EventName::ExtensionExited,
             Self::ExtensionRestarting(_) => EventName::ExtensionRestarting,
-            Self::AgentPromptRequest(_) => EventName::AgentPromptRequest,
-            Self::AgentPromptResponse(_) => EventName::AgentPromptResponse,
-            Self::AgentResponseStart(_) => EventName::AgentResponseStart,
-            Self::AgentResponseUpdate(_) => EventName::AgentResponseUpdate,
-            Self::AgentResponseEnd(_) => EventName::AgentResponseEnd,
+            Self::UiPromptSubmitted(_) => EventName::UiPromptSubmitted,
+            Self::SessionPromptCreated(_) => EventName::SessionPromptCreated,
+            Self::AgentPromptSubmitted(_) => EventName::AgentPromptSubmitted,
+            Self::AgentResponseUpdated(_) => EventName::AgentResponseUpdated,
+            Self::AgentResponseFinished(_) => EventName::AgentResponseFinished,
         }
     }
 }

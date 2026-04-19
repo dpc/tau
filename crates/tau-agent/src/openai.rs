@@ -7,9 +7,15 @@ use std::io::BufRead;
 
 use serde::{Deserialize, Serialize};
 use tau_proto::{
-    AgentPromptRequest, AgentToolCall, CborValue, ContentBlock, ConversationMessage,
-    ConversationRole, ToolDefinition,
+    AgentToolCall, CborValue, ContentBlock, ConversationMessage, ConversationRole, ToolDefinition,
 };
+
+/// The parts of a prompt needed by the OpenAI client.
+pub struct PromptPayload<'a> {
+    pub system_prompt: &'a str,
+    pub messages: &'a [ConversationMessage],
+    pub tools: &'a [ToolDefinition],
+}
 
 /// Configuration for the OpenAI-compatible backend.
 #[derive(Clone, Debug)]
@@ -85,7 +91,7 @@ impl StreamState {
 /// Returns the final state (text + tool calls).
 pub fn chat_completion_stream(
     config: &OpenAiConfig,
-    request: &AgentPromptRequest,
+    request: &PromptPayload<'_>,
     mut on_update: impl FnMut(&str),
 ) -> Result<StreamState, OpenAiError> {
     let url = format!(
@@ -226,7 +232,7 @@ struct ApiToolFunction {
 
 fn build_request(
     config: &OpenAiConfig,
-    request: &AgentPromptRequest,
+    request: &PromptPayload<'_>,
     stream: bool,
 ) -> CompletionRequest {
     let mut messages = Vec::new();
@@ -234,14 +240,14 @@ fn build_request(
     if !request.system_prompt.is_empty() {
         messages.push(ApiMessage {
             role: "system".to_owned(),
-            content: Some(request.system_prompt.clone()),
+            content: Some(request.system_prompt.to_owned()),
             tool_calls: None,
             tool_call_id: None,
             name: None,
         });
     }
 
-    for msg in &request.messages {
+    for msg in request.messages {
         convert_message(msg, &mut messages);
     }
 

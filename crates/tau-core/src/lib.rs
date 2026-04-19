@@ -402,17 +402,21 @@ impl SubscriptionPolicy for DefaultSubscriptionPolicy {
                             || name.starts_with("tool.")
                             || name.starts_with("extension.")
                             || name.starts_with("agent.")
+                            || name.starts_with("session.")
+                            || name.starts_with("ui.")
                     }
                     EventSelector::Prefix(prefix) => {
                         prefix.starts_with("message.")
                             || prefix.starts_with("tool.")
                             || prefix.starts_with("extension.")
                             || prefix.starts_with("agent.")
+                            || prefix.starts_with("session.")
+                            || prefix.starts_with("ui.")
                     }
                 };
                 if !allowed {
                     return Err(SubscriptionPolicyError::new(
-                        "socket clients may only subscribe to message.*, tool.*, extension.*, or agent.*",
+                        "socket clients may only subscribe to allowed event families",
                     ));
                 }
             }
@@ -1353,8 +1357,8 @@ mod tests {
     use std::thread;
 
     use tau_proto::{
-        CborValue, ChatMessage, EventName, EventReader, EventWriter, LifecycleSubscribe,
-        ToolRegister,
+        AgentResponseFinished, CborValue, EventName, EventReader, EventWriter,
+        LifecycleSubscribe, SessionPromptCreated, ToolRegister, UiPromptSubmitted,
     };
     use tempfile::TempDir;
 
@@ -1412,14 +1416,14 @@ mod tests {
 
         bus.set_subscriptions(
             &agent_id,
-            vec![EventSelector::Exact(EventName::MessageUser)],
+            vec![EventSelector::Exact(EventName::UiPromptSubmitted)],
         )
         .expect("agent subscriptions should be stored");
         bus.set_subscriptions(&ui_id, vec![EventSelector::Prefix("tool.".to_owned())])
             .expect("ui subscriptions should be stored");
 
-        let report = bus.publish(Event::MessageUser(ChatMessage {
-            session_id: Some("session-1".to_owned()),
+        let report = bus.publish(Event::UiPromptSubmitted(UiPromptSubmitted {
+            session_id: "s1".to_owned(),
             text: "hello".to_owned(),
         }));
 
@@ -1444,14 +1448,14 @@ mod tests {
         let report = bus.publish_from(
             Some(&connection_id),
             Event::LifecycleSubscribe(LifecycleSubscribe {
-                selectors: vec![EventSelector::Exact(EventName::MessageUser)],
+                selectors: vec![EventSelector::Exact(EventName::UiPromptSubmitted)],
             }),
         );
 
         assert_eq!(report.delivered_to, Vec::<ConnectionId>::new());
         assert_eq!(
             bus.subscriptions(&connection_id),
-            Some([EventSelector::Exact(EventName::MessageUser)].as_slice())
+            Some([EventSelector::Exact(EventName::UiPromptSubmitted)].as_slice())
         );
         assert!(inbox.snapshot().is_empty());
     }
@@ -1476,9 +1480,10 @@ mod tests {
             .send_to(
                 &ui_id,
                 Some(&tool_id),
-                Event::MessageAgent(ChatMessage {
-                    session_id: None,
-                    text: "hidden".to_owned(),
+                Event::AgentResponseFinished(AgentResponseFinished {
+                    session_prompt_id: "sp-1".to_owned(),
+                    text: Some("hidden".to_owned()),
+                    tool_calls: Vec::new(),
                 }),
             )
             .expect("directed route should succeed");
@@ -1512,7 +1517,7 @@ mod tests {
 
         bus.set_subscriptions(
             &agent_id,
-            vec![EventSelector::Prefix("message.".to_owned())],
+            vec![EventSelector::Prefix("agent.".to_owned())],
         )
         .expect("agent subscriptions should be stored");
         bus.set_subscriptions(&tool_id, vec![EventSelector::Prefix("tool.".to_owned())])
@@ -1525,9 +1530,10 @@ mod tests {
         }));
         assert_eq!(first_report.delivered_to, vec![tool_id.clone()]);
 
-        let second_report = bus.publish(Event::MessageAgent(ChatMessage {
-            session_id: Some("session-1".to_owned()),
-            text: "done".to_owned(),
+        let second_report = bus.publish(Event::AgentResponseFinished(AgentResponseFinished {
+            session_prompt_id: "sp-1".to_owned(),
+            text: Some("done".to_owned()),
+            tool_calls: Vec::new(),
         }));
         assert_eq!(second_report.delivered_to, vec![agent_id.clone()]);
 
@@ -1838,7 +1844,7 @@ mod tests {
             error,
             RouteError::SubscriptionDenied {
                 connection_id,
-                reason: "socket clients may only subscribe to message.*, tool.*, extension.*, or agent.*"
+                reason: "socket clients may only subscribe to allowed event families"
                     .to_owned(),
             }
         );
@@ -1919,8 +1925,11 @@ mod tests {
 
         let (ui_connection, ui_inbox) = memory_connection("ui", ClientKind::Ui);
         let ui_id = bus.connect(ui_connection);
-        bus.set_subscriptions(&ui_id, vec![EventSelector::Exact(EventName::MessageAgent)])
-            .expect("ui subscription should be stored");
+        bus.set_subscriptions(
+            &ui_id,
+            vec![EventSelector::Exact(EventName::AgentResponseFinished)],
+        )
+        .expect("ui subscription should be stored");
 
         let agent_hello = agent_reader
             .read_event()
@@ -1966,14 +1975,11 @@ mod tests {
         assert!(registered_tool_names.iter().any(|name| name == "demo.echo"));
         assert!(registered_tool_names.iter().any(|name| name == "fs.read"));
 
-        // Send an AgentPromptRequest to the agent (new protocol).
-        use tau_proto::{
-            AgentPromptRequest, ContentBlock, ConversationMessage, ConversationRole,
-            ToolDefinition,
-        };
+        // Send a SessionPromptCreated to the agent (new protocol).
+        use tau_proto::{ContentBlock, ConversationMessage, ConversationRole, ToolDefinition};
 
-        let prompt = AgentPromptRequest {
-            turn_id: "turn-1".to_owned(),
+        let prompt = SessionPromptCreated {
+            session_prompt_id: "sp-1".to_owned(),
             session_id: "session-1".to_owned(),
             system_prompt: "You are helpful.".to_owned(),
             messages: vec![ConversationMessage {
@@ -1987,14 +1993,18 @@ mod tests {
                 description: None,
             }],
         };
-        let _ = bus.send_to(&agent_id, None, Event::AgentPromptRequest(prompt));
+        let _ = bus.send_to(&agent_id, None, Event::SessionPromptCreated(prompt));
 
-        let response = agent_reader
-            .read_event()
-            .expect("read")
-            .expect("agent response should arrive");
-        let Event::AgentPromptResponse(response) = response else {
-            panic!("expected agent prompt response");
+        // Read events until we get AgentResponseFinished (skip
+        // AgentPromptSubmitted and AgentResponseUpdated).
+        let response = loop {
+            let ev = agent_reader
+                .read_event()
+                .expect("read")
+                .expect("agent event should arrive");
+            if let Event::AgentResponseFinished(r) = ev {
+                break r;
+            }
         };
         assert!(response.text.is_none());
         assert_eq!(response.tool_calls.len(), 1);
@@ -2024,8 +2034,8 @@ mod tests {
         };
 
         // Send a second prompt with the tool result in history.
-        let prompt2 = AgentPromptRequest {
-            turn_id: "turn-2".to_owned(),
+        let prompt2 = SessionPromptCreated {
+            session_prompt_id: "sp-2".to_owned(),
             session_id: "session-1".to_owned(),
             system_prompt: "You are helpful.".to_owned(),
             messages: vec![
@@ -2057,14 +2067,16 @@ mod tests {
                 description: None,
             }],
         };
-        let _ = bus.send_to(&agent_id, None, Event::AgentPromptRequest(prompt2));
+        let _ = bus.send_to(&agent_id, None, Event::SessionPromptCreated(prompt2));
 
-        let response2 = agent_reader
-            .read_event()
-            .expect("read")
-            .expect("agent text response should arrive");
-        let Event::AgentPromptResponse(response2) = response2 else {
-            panic!("expected agent prompt response");
+        let response2 = loop {
+            let ev = agent_reader
+                .read_event()
+                .expect("read")
+                .expect("agent event should arrive");
+            if let Event::AgentResponseFinished(r) = ev {
+                break r;
+            }
         };
         assert!(response2.text.is_some());
         assert!(response2.tool_calls.is_empty());

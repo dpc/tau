@@ -84,16 +84,30 @@ and the socket is bound. Finding it guarantees the harness is ready.
 ## Event protocol
 
 CBOR-encoded events over self-delimiting streams (stdio pipes or Unix
-sockets). Same protocol regardless of transport. Event families:
+sockets). Same protocol regardless of transport.
 
-- `lifecycle.*` — hello, subscribe, ready, disconnect
-- `tool.*` — register, unregister, request, invoke, result, error,
-  progress, cancel, cancelled
-- `message.*` — user, agent
-- `extension.*` — starting, ready, exited, restarting
+**Events are facts, not requests.** Each component broadcasts what it
+did; other components decide whether to react. There are no
+request/response pairs — only announcements. Event names are prefixed
+with the component responsible for emitting them:
 
-The bus routes events to subscribed connections. Tool requests are
-resolved to a live provider and forwarded as directed invocations.
+- `ui.*` — facts from the user interface (e.g. `ui.prompt_submitted`)
+- `session.*` — facts from the harness session tracker
+  (e.g. `session.prompt_created`)
+- `agent.*` — facts from the agent backend
+  (e.g. `agent.response_updated`, `agent.response_finished`)
+- `tool.*` — tool registration, invocation, results
+- `extension.*` — supervised process lifecycle
+- `lifecycle.*` — connection handshake and teardown
+
+A `session_prompt_id` flows through the entire prompt lifecycle:
+allocated by the harness in `session.prompt_created`, carried in
+every agent event, used by the UI to map updates to the correct
+display block. No flags or state machines needed — just ID-based
+correlation.
+
+The bus routes events to subscribed connections. Tool invocations are
+resolved to a live provider and forwarded as directed events.
 
 ## Extension model
 

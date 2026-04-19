@@ -35,6 +35,9 @@ pub type ToolCallId = String;
 /// Convenience alias for connection identifiers.
 pub type ConnectionId = String;
 
+/// Unique identifier for one prompt within a session.
+pub type SessionPromptId = String;
+
 /// Convenience alias for extension identifiers.
 pub type ExtensionName = String;
 
@@ -169,7 +172,7 @@ mod tests {
             }),
             Event::LifecycleSubscribe(LifecycleSubscribe {
                 selectors: vec![
-                    EventSelector::Exact(EventName::MessageUser),
+                    EventSelector::Exact(EventName::UiPromptSubmitted),
                     EventSelector::Prefix("tool.".to_owned()),
                 ],
             }),
@@ -212,13 +215,29 @@ mod tests {
                     total: Some(10),
                 }),
             }),
-            Event::MessageUser(ChatMessage {
-                session_id: Some("session-1".to_owned()),
+            Event::UiPromptSubmitted(UiPromptSubmitted {
+                session_id: "s1".to_owned(),
                 text: "hello".to_owned(),
             }),
-            Event::MessageAgent(ChatMessage {
-                session_id: Some("session-1".to_owned()),
-                text: "hi there".to_owned(),
+            Event::SessionPromptCreated(SessionPromptCreated {
+                session_prompt_id: "sp-1".to_owned(),
+                session_id: "s1".to_owned(),
+                system_prompt: "You are helpful.".to_owned(),
+                messages: vec![ConversationMessage {
+                    role: ConversationRole::User,
+                    content: vec![ContentBlock::Text {
+                        text: "hello".to_owned(),
+                    }],
+                }],
+                tools: vec![ToolDefinition {
+                    name: "fs.read".to_owned(),
+                    description: Some("Read a file".to_owned()),
+                }],
+            }),
+            Event::AgentResponseFinished(AgentResponseFinished {
+                session_prompt_id: "sp-1".to_owned(),
+                text: Some("Hi there".to_owned()),
+                tool_calls: Vec::new(),
             }),
             Event::ExtensionStarting(ExtensionStarting {
                 extension_name: "fs".to_owned(),
@@ -240,27 +259,6 @@ mod tests {
             }),
             Event::LifecycleDisconnect(LifecycleDisconnect {
                 reason: Some("shutdown".to_owned()),
-            }),
-            Event::AgentPromptRequest(AgentPromptRequest {
-                turn_id: "turn-1".to_owned(),
-                session_id: "s1".to_owned(),
-                system_prompt: "You are helpful.".to_owned(),
-                messages: vec![ConversationMessage {
-                    role: ConversationRole::User,
-                    content: vec![ContentBlock::Text {
-                        text: "hello".to_owned(),
-                    }],
-                }],
-                tools: vec![ToolDefinition {
-                    name: "fs.read".to_owned(),
-                    description: Some("Read a file".to_owned()),
-                }],
-            }),
-            Event::AgentPromptResponse(AgentPromptResponse {
-                turn_id: "turn-1".to_owned(),
-                session_id: "s1".to_owned(),
-                text: Some("Hi there".to_owned()),
-                tool_calls: Vec::new(),
             }),
         ]
     }

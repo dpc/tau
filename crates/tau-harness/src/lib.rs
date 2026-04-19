@@ -28,11 +28,11 @@ use tau_core::{
     SessionStoreError, ToolActivityOutcome, ToolActivityRecord, ToolRegistry, ToolRouteError,
 };
 use tau_proto::{
-    AgentPromptRequest, AgentPromptResponse, AgentToolCall, ChatMessage, ClientKind,
-    ContentBlock, ConversationMessage, ConversationRole, DecodeError, Event, EventName,
-    EventReader, EventSelector, EventWriter, LifecycleDisconnect, LifecycleHello,
-    LifecycleSubscribe, PROTOCOL_VERSION, ProgressUpdate, ToolDefinition, ToolError,
-    ToolProgress, ToolRegister, ToolRequest, ToolResult,
+    AgentResponseFinished, AgentToolCall, ClientKind, ContentBlock, ConversationMessage,
+    ConversationRole, DecodeError, Event, EventReader, EventSelector, EventWriter,
+    LifecycleDisconnect, LifecycleHello, LifecycleSubscribe, PROTOCOL_VERSION, ProgressUpdate,
+    SessionPromptCreated, ToolDefinition, ToolError, ToolProgress, ToolRegister, ToolRequest,
+    ToolResult, UiPromptSubmitted,
 };
 use tau_socket::{SocketPeer, SocketTransportError};
 
@@ -309,13 +309,11 @@ struct Harness {
     lifecycle_messages: Vec<String>,
     extensions: Vec<ExtensionEntry>,
     agent_connection_id: String,
-    next_turn_id: u64,
+    next_session_prompt_id: u64,
+    /// Maps session_prompt_id → session_id for in-flight prompts.
+    prompt_sessions: std::collections::HashMap<String, String>,
     /// Pending agent turn: session_id + remaining tool call IDs.
-    /// When all calls resolve, the harness sends a new prompt.
     pending_agent_turn: Option<PendingAgentTurn>,
-    /// True when the current turn used streaming (AgentResponseStart
-    /// was received). Suppresses duplicate MessageAgent publish.
-    turn_was_streamed: bool,
 }
 
 impl Harness {
@@ -386,9 +384,9 @@ impl Harness {
             lifecycle_messages: Vec::new(),
             agent_connection_id,
             extensions,
-            next_turn_id: 0,
+            next_session_prompt_id: 0,
+            prompt_sessions: std::collections::HashMap::new(),
             pending_agent_turn: None,
-            turn_was_streamed: false,
         };
 
         let n = harness.extensions.len();
@@ -448,9 +446,9 @@ impl Harness {
             lifecycle_messages: Vec::new(),
             agent_connection_id,
             extensions,
-            next_turn_id: 0,
+            next_session_prompt_id: 0,
+            prompt_sessions: std::collections::HashMap::new(),
             pending_agent_turn: None,
-            turn_was_streamed: false,
         };
 
         let n = harness.extensions.len();
@@ -652,24 +650,15 @@ impl Harness {
                     .bus
                     .publish_from(Some(source_id), Event::ToolProgress(progress));
             }
-            Event::MessageAgent(message) => {
-                if let Some(session_id) = &message.session_id {
-                    self.store
-                        .append_agent_message(session_id.clone(), message.text.clone())?;
-                }
-                let _ = self
-                    .bus
-                    .publish_from(Some(source_id), Event::MessageAgent(message));
-            }
-            Event::AgentPromptResponse(response) => {
-                self.handle_agent_prompt_response(response)?;
-            }
-            Event::AgentResponseStart(_) => {
-                self.turn_was_streamed = true;
+            Event::AgentPromptSubmitted(_)
+            | Event::AgentResponseUpdated(_) => {
+                // Forward agent events to all subscribers (UI).
                 let _ = self.bus.publish_from(Some(source_id), event);
             }
-            Event::AgentResponseUpdate(_) | Event::AgentResponseEnd(_) => {
-                let _ = self.bus.publish_from(Some(source_id), event);
+            Event::AgentResponseFinished(response) => {
+                // Forward to subscribers first, then handle internally.
+                let _ = self.bus.publish(Event::AgentResponseFinished(response.clone()));
+                self.handle_agent_response_finished(response)?;
             }
             other => {
                 let _ = self.bus.publish_from(Some(source_id), other);
@@ -719,18 +708,14 @@ impl Harness {
                     Err(other) => Err(HarnessError::Route(other)),
                 }
             }
-            Event::MessageUser(message) => {
-                let session_id = message
-                    .session_id
-                    .clone()
-                    .unwrap_or_else(|| "default".to_owned());
+            Event::UiPromptSubmitted(prompt) => {
                 self.store
-                    .append_user_message(session_id.clone(), message.text.clone())?;
+                    .append_user_message(&prompt.session_id, prompt.text.clone())?;
+                // Publish the fact, then assemble and dispatch to agent.
                 let _ = self
                     .bus
-                    .publish_from(Some(client_id), Event::MessageUser(message));
-                // Assemble full prompt and send to agent.
-                self.send_prompt_to_agent(&session_id);
+                    .publish_from(Some(client_id), Event::UiPromptSubmitted(prompt.clone()));
+                self.send_prompt_to_agent(&prompt.session_id);
                 Ok(true)
             }
             Event::LifecycleDisconnect(_) => Ok(false),
@@ -870,25 +855,25 @@ impl Harness {
     // Agent prompt assembly
     // -----------------------------------------------------------------------
 
-    fn send_prompt_to_agent(&mut self, session_id: &str) {
+    fn send_prompt_to_agent(&mut self, session_id: &str) -> String {
         let tree = self.store.session(session_id);
-        let messages = tree
-            .map(assemble_conversation)
-            .unwrap_or_default();
+        let messages = tree.map(assemble_conversation).unwrap_or_default();
         let tools = self.gather_tool_definitions();
-        let turn_id = format!("turn-{}", self.next_turn_id);
-        self.next_turn_id += 1;
-        let _ = self.bus.send_to(
-            &self.agent_connection_id,
-            None,
-            Event::AgentPromptRequest(AgentPromptRequest {
-                turn_id,
-                session_id: session_id.to_owned(),
-                system_prompt: build_system_prompt(&tools),
-                messages,
-                tools,
-            }),
-        );
+        let session_prompt_id = format!("sp-{}", self.next_session_prompt_id);
+        self.next_session_prompt_id += 1;
+        self.prompt_sessions
+            .insert(session_prompt_id.clone(), session_id.to_owned());
+
+        // Publish SessionPromptCreated — both the agent and UI see it.
+        let _ = self.bus.publish(Event::SessionPromptCreated(SessionPromptCreated {
+            session_prompt_id: session_prompt_id.clone(),
+            session_id: session_id.to_owned(),
+            system_prompt: build_system_prompt(&tools),
+            messages,
+            tools,
+        }));
+
+        session_prompt_id
     }
 
     fn gather_tool_definitions(&self) -> Vec<ToolDefinition> {
@@ -902,26 +887,20 @@ impl Harness {
             .collect()
     }
 
-    fn handle_agent_prompt_response(
+    fn handle_agent_response_finished(
         &mut self,
-        response: AgentPromptResponse,
+        response: AgentResponseFinished,
     ) -> Result<(), HarnessError> {
-        let session_id = response.session_id.clone();
+        let session_id = self
+            .prompt_sessions
+            .remove(&response.session_prompt_id)
+            .unwrap_or_else(|| "default".to_owned());
 
         // Persist agent text if present.
         if let Some(ref text) = response.text {
             self.store
                 .append_agent_message(&session_id, text.clone())?;
-            // Only publish MessageAgent if the turn wasn't streamed —
-            // streaming events already delivered the text to the UI.
-            if !self.turn_was_streamed {
-                let _ = self.bus.publish(Event::MessageAgent(ChatMessage {
-                    session_id: Some(session_id.clone()),
-                    text: text.clone(),
-                }));
-            }
         }
-        self.turn_was_streamed = false;
 
         // Execute tool calls if any.
         if !response.tool_calls.is_empty() {
@@ -1018,11 +997,6 @@ impl Harness {
     ) -> Result<InteractionOutcome, HarnessError> {
         self.store
             .append_user_message(session_id.to_owned(), text.to_owned())?;
-        let _ = self.bus.publish(Event::MessageUser(ChatMessage {
-            session_id: Some(session_id.to_owned()),
-            text: text.to_owned(),
-        }));
-        // Assemble prompt and send to agent.
         self.send_prompt_to_agent(session_id);
 
         let started_at = Instant::now();
@@ -1043,18 +1017,17 @@ impl Harness {
                     if let Event::ToolProgress(ref progress) = event {
                         progress_messages.push(format_tool_progress(progress));
                     }
-                    // Check if this is an agent response with no tool
-                    // calls (final response for this turn).
-                    let is_final_response =
-                        matches!(&event, Event::AgentPromptResponse(r) if r.tool_calls.is_empty());
-                    let final_text =
-                        if let Event::AgentPromptResponse(ref r) = event {
-                            r.text.clone()
-                        } else {
-                            None
-                        };
+                    let is_final = matches!(
+                        &event,
+                        Event::AgentResponseFinished(r) if r.tool_calls.is_empty()
+                    );
+                    let final_text = if let Event::AgentResponseFinished(ref r) = event {
+                        r.text.clone()
+                    } else {
+                        None
+                    };
                     self.handle_extension_event(&connection_id, event)?;
-                    if is_final_response {
+                    if is_final {
                         return Ok(InteractionOutcome {
                             lifecycle_messages: Vec::new(),
                             progress_messages,
@@ -1617,13 +1590,14 @@ pub fn send_daemon_message_with_trace(
     }))?;
     peer.send(&Event::LifecycleSubscribe(LifecycleSubscribe {
         selectors: vec![
-            EventSelector::Exact(EventName::MessageAgent),
-            EventSelector::Exact(EventName::ToolProgress),
+            EventSelector::Prefix("agent.".to_owned()),
+            EventSelector::Prefix("session.".to_owned()),
+            EventSelector::Prefix("tool.".to_owned()),
             EventSelector::Prefix("extension.".to_owned()),
         ],
     }))?;
-    peer.send(&Event::MessageUser(ChatMessage {
-        session_id: Some(session_id.to_owned()),
+    peer.send(&Event::UiPromptSubmitted(UiPromptSubmitted {
+        session_id: session_id.to_owned(),
         text: message.to_owned(),
     }))?;
 
@@ -1643,14 +1617,14 @@ pub fn send_daemon_message_with_trace(
                 | Event::ExtensionRestarting(_) => {
                     lifecycle_messages.push(format_extension_event(&event));
                 }
-                Event::MessageAgent(msg) => {
+                Event::AgentResponseFinished(finished) if finished.tool_calls.is_empty() => {
                     peer.send(&Event::LifecycleDisconnect(LifecycleDisconnect {
                         reason: Some("done".to_owned()),
                     }))?;
                     return Ok(InteractionOutcome {
                         lifecycle_messages,
                         progress_messages,
-                        response: msg.text,
+                        response: finished.text.unwrap_or_default(),
                     });
                 }
                 Event::LifecycleDisconnect(d) => {
