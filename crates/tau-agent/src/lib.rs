@@ -1,19 +1,24 @@
 //! First-party deterministic agent process.
 //!
+//! Receives `AgentPromptRequest` from the harness with a fully
+//! assembled prompt and returns `AgentPromptResponse`.
+//!
 //! The current behavior is intentionally simple and command-like:
 //!
-//! - `read <path>` -> `fs.read`
-//! - `shell <command>` -> `shell.exec`
-//! - anything else -> `demo.echo`
+//! - `read <path>` -> tool call to `fs.read`
+//! - `shell <command>` -> tool call to `shell.exec`
+//! - anything else -> tool call to `demo.echo`
+//!
+//! When the harness sends a prompt containing a tool result (from a
+//! previous turn), the agent formats and returns it as text.
 
-use std::collections::HashMap;
 use std::error::Error;
 use std::io::{BufReader, BufWriter, Read, Write};
 
 use tau_proto::{
-    CborValue, ChatMessage, ClientKind, Event, EventName, EventReader, EventSelector, EventWriter,
-    LifecycleHello, LifecycleReady, LifecycleSubscribe, PROTOCOL_VERSION, ToolError, ToolRequest,
-    ToolResult,
+    AgentPromptResponse, AgentToolCall, CborValue, ClientKind, ContentBlock, ConversationRole,
+    Event, EventName, EventReader, EventSelector, EventWriter, LifecycleHello, LifecycleReady,
+    LifecycleSubscribe, PROTOCOL_VERSION,
 };
 
 /// Runs the agent on stdin/stdout.
@@ -30,7 +35,6 @@ where
     let mut reader = EventReader::new(BufReader::new(reader));
     let mut writer = EventWriter::new(BufWriter::new(writer));
     let mut next_call_number = 1_u64;
-    let mut pending_sessions = HashMap::new();
 
     writer.write_event(&Event::LifecycleHello(LifecycleHello {
         protocol_version: PROTOCOL_VERSION,
@@ -39,9 +43,7 @@ where
     }))?;
     writer.write_event(&Event::LifecycleSubscribe(LifecycleSubscribe {
         selectors: vec![
-            EventSelector::Exact(EventName::MessageUser),
-            EventSelector::Exact(EventName::ToolResult),
-            EventSelector::Exact(EventName::ToolError),
+            EventSelector::Exact(EventName::AgentPromptRequest),
             EventSelector::Exact(EventName::LifecycleDisconnect),
         ],
     }))?;
@@ -55,37 +57,9 @@ where
             return Ok(());
         };
         match event {
-            Event::MessageUser(message) => {
-                let call_id = format!("call-{next_call_number}");
-                next_call_number += 1;
-                pending_sessions.insert(call_id.clone(), message.session_id.clone());
-                let request = request_for_user_message(call_id, message.text);
-                writer.write_event(&Event::ToolRequest(request))?;
-                writer.flush()?;
-            }
-            Event::ToolResult(ToolResult {
-                call_id,
-                tool_name,
-                result,
-            }) => {
-                let session_id = pending_sessions.remove(&call_id).unwrap_or_default();
-                writer.write_event(&Event::MessageAgent(ChatMessage {
-                    session_id,
-                    text: format_tool_result(&tool_name, &result),
-                }))?;
-                writer.flush()?;
-            }
-            Event::ToolError(ToolError {
-                call_id,
-                tool_name,
-                message,
-                details,
-            }) => {
-                let session_id = pending_sessions.remove(&call_id).unwrap_or_default();
-                writer.write_event(&Event::MessageAgent(ChatMessage {
-                    session_id,
-                    text: format_tool_error(&tool_name, &message, details.as_ref()),
-                }))?;
+            Event::AgentPromptRequest(request) => {
+                let response = handle_prompt_request(&request, &mut next_call_number);
+                writer.write_event(&Event::AgentPromptResponse(response))?;
                 writer.flush()?;
             }
             Event::LifecycleDisconnect(_) => return Ok(()),
@@ -94,11 +68,69 @@ where
     }
 }
 
-fn request_for_user_message(call_id: String, text: String) -> ToolRequest {
+fn handle_prompt_request(
+    request: &tau_proto::AgentPromptRequest,
+    next_call_number: &mut u64,
+) -> AgentPromptResponse {
+    // Look at the last message in the conversation.
+    let last_message = request.messages.last();
+
+    // If the last message is a tool result, format it as text.
+    if let Some(msg) = last_message {
+        if msg.role == ConversationRole::User {
+            for block in &msg.content {
+                if let ContentBlock::ToolResult {
+                    content, is_error, ..
+                } = block
+                {
+                    let text = if *is_error {
+                        format!("Tool error: {content}")
+                    } else {
+                        content.clone()
+                    };
+                    return AgentPromptResponse {
+                        turn_id: request.turn_id.clone(),
+                        session_id: request.session_id.clone(),
+                        text: Some(text),
+                        tool_calls: Vec::new(),
+                    };
+                }
+            }
+        }
+    }
+
+    // Find the last user text message.
+    let user_text = request
+        .messages
+        .iter()
+        .rev()
+        .find(|m| m.role == ConversationRole::User)
+        .and_then(|m| {
+            m.content.iter().find_map(|b| match b {
+                ContentBlock::Text { text } => Some(text.clone()),
+                _ => None,
+            })
+        })
+        .unwrap_or_default();
+
+    // Determine which tool to call.
+    let call_id = format!("call-{next_call_number}");
+    *next_call_number += 1;
+    let tool_call = tool_call_for_text(&call_id, &user_text);
+
+    AgentPromptResponse {
+        turn_id: request.turn_id.clone(),
+        session_id: request.session_id.clone(),
+        text: None,
+        tool_calls: vec![tool_call],
+    }
+}
+
+fn tool_call_for_text(call_id: &str, text: &str) -> AgentToolCall {
     if let Some(path) = text.strip_prefix("read ") {
-        return ToolRequest {
-            call_id,
-            tool_name: "fs.read".to_owned(),
+        return AgentToolCall {
+            id: call_id.to_owned(),
+            name: "fs.read".to_owned(),
             arguments: CborValue::Map(vec![(
                 CborValue::Text("path".to_owned()),
                 CborValue::Text(path.trim().to_owned()),
@@ -106,92 +138,19 @@ fn request_for_user_message(call_id: String, text: String) -> ToolRequest {
         };
     }
     if let Some(command) = text.strip_prefix("shell ") {
-        return ToolRequest {
-            call_id,
-            tool_name: "shell.exec".to_owned(),
+        return AgentToolCall {
+            id: call_id.to_owned(),
+            name: "shell.exec".to_owned(),
             arguments: CborValue::Map(vec![(
                 CborValue::Text("command".to_owned()),
                 CborValue::Text(command.trim().to_owned()),
             )]),
         };
     }
-    ToolRequest {
-        call_id,
-        tool_name: "demo.echo".to_owned(),
-        arguments: CborValue::Text(text),
-    }
-}
-
-fn format_tool_result(tool_name: &str, result: &CborValue) -> String {
-    match tool_name {
-        "fs.read" => {
-            let path = map_text(result, "path").unwrap_or_else(|| "<unknown>".to_owned());
-            let content = map_text(result, "content").unwrap_or_else(|| format!("{result:?}"));
-            format!("fs.read {path}:\n{content}")
-        }
-        "shell.exec" => {
-            let status = map_integer(result, "status")
-                .map(|value| value.to_string())
-                .unwrap_or_else(|| "unknown".to_owned());
-            let stdout = map_text(result, "stdout").unwrap_or_default();
-            let stderr = map_text(result, "stderr").unwrap_or_default();
-            let mut text = format!("shell.exec status {status}");
-            if !stdout.is_empty() {
-                text.push_str(&format!("\nstdout:\n{stdout}"));
-            }
-            if !stderr.is_empty() {
-                text.push_str(&format!("\nstderr:\n{stderr}"));
-            }
-            text
-        }
-        _ => format!("{tool_name} returned: {result:?}"),
-    }
-}
-
-fn format_tool_error(tool_name: &str, message: &str, details: Option<&CborValue>) -> String {
-    if tool_name == "shell.exec" {
-        if let Some(details) = details {
-            let stderr = map_text(details, "stderr").unwrap_or_default();
-            if stderr.is_empty() {
-                return format!("{tool_name} failed: {message}");
-            }
-            return format!("{tool_name} failed: {message}\nstderr:\n{stderr}");
-        }
-    }
-    format!("{tool_name} failed: {message}")
-}
-
-fn map_text(value: &CborValue, key: &str) -> Option<String> {
-    match value {
-        CborValue::Map(entries) => {
-            entries
-                .iter()
-                .find_map(|(entry_key, entry_value)| match (entry_key, entry_value) {
-                    (CborValue::Text(entry_key), CborValue::Text(text)) if entry_key == key => {
-                        Some(text.clone())
-                    }
-                    _ => None,
-                })
-        }
-        _ => None,
-    }
-}
-
-fn map_integer(value: &CborValue, key: &str) -> Option<i128> {
-    match value {
-        CborValue::Map(entries) => {
-            entries
-                .iter()
-                .find_map(|(entry_key, entry_value)| match (entry_key, entry_value) {
-                    (CborValue::Text(entry_key), CborValue::Integer(number))
-                        if entry_key == key =>
-                    {
-                        i128::try_from(*number).ok()
-                    }
-                    _ => None,
-                })
-        }
-        _ => None,
+    AgentToolCall {
+        id: call_id.to_owned(),
+        name: "demo.echo".to_owned(),
+        arguments: CborValue::Text(text.to_owned()),
     }
 }
 
@@ -201,10 +160,10 @@ mod tests {
 
     #[test]
     fn user_message_routes_to_fs_read_when_requested() {
-        let request = request_for_user_message("call-1".to_owned(), "read Cargo.toml".to_owned());
-        assert_eq!(request.tool_name, "fs.read");
+        let call = tool_call_for_text("call-1", "read Cargo.toml");
+        assert_eq!(call.name, "fs.read");
         assert_eq!(
-            request.arguments,
+            call.arguments,
             CborValue::Map(vec![(
                 CborValue::Text("path".to_owned()),
                 CborValue::Text("Cargo.toml".to_owned()),
@@ -214,7 +173,7 @@ mod tests {
 
     #[test]
     fn user_message_routes_to_shell_exec_when_requested() {
-        let request = request_for_user_message("call-1".to_owned(), "shell printf hi".to_owned());
-        assert_eq!(request.tool_name, "shell.exec");
+        let call = tool_call_for_text("call-1", "shell printf hi");
+        assert_eq!(call.name, "shell.exec");
     }
 }

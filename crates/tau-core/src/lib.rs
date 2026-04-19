@@ -784,6 +784,21 @@ impl ToolRegistry {
             .unwrap_or_default()
     }
 
+    /// Returns all unique tool names currently registered.
+    #[must_use]
+    pub fn all_tool_names(&self) -> Vec<&ToolName> {
+        self.providers_by_tool.keys().collect()
+    }
+
+    /// Returns all unique tool specs, one per tool name (first provider wins).
+    #[must_use]
+    pub fn all_tools(&self) -> Vec<&ToolSpec> {
+        self.providers_by_tool
+            .values()
+            .filter_map(|providers| providers.first().map(|p| &p.tool))
+            .collect()
+    }
+
     /// Picks one currently live provider for a tool name.
     #[must_use]
     pub fn resolve_provider(&self, tool_name: &str) -> Option<&ToolProvider> {
@@ -1952,79 +1967,108 @@ mod tests {
         assert!(registered_tool_names.iter().any(|name| name == "demo.echo"));
         assert!(registered_tool_names.iter().any(|name| name == "fs.read"));
 
-        store
-            .append_user_message("session-1", "hello")
-            .expect("user message should persist");
-        let published = bus.publish_from(
-            Some(&ui_id),
-            Event::MessageUser(ChatMessage {
-                session_id: Some("session-1".to_owned()),
-                text: "hello".to_owned(),
-            }),
-        );
-        assert_eq!(published.delivered_to, vec![agent_id.clone()]);
-
-        let request = agent_reader
-            .read_event()
-            .expect("read")
-            .expect("tool request should arrive");
-        let Event::ToolRequest(request) = request else {
-            panic!("expected tool request from agent");
+        // Send an AgentPromptRequest to the agent (new protocol).
+        use tau_proto::{
+            AgentPromptRequest, ContentBlock, ConversationMessage, ConversationRole,
+            ToolDefinition,
         };
-        store
-            .append_tool_activity(
-                "session-1",
-                ToolActivityRecord {
-                    call_id: request.call_id.clone(),
-                    tool_name: request.tool_name.clone(),
-                    outcome: ToolActivityOutcome::Requested {
-                        arguments: request.arguments.clone(),
-                    },
-                },
-            )
-            .expect("tool request should persist");
-        let routed = registry
-            .route_tool_request(&mut bus, &agent_id, request)
-            .expect("tool request should route");
-        assert_eq!(routed.provider_connection_id, tool_id.clone());
 
-        let result = tool_reader.read_event().expect("read").expect("tool result should arrive");
-        let Event::ToolResult(result) = result else {
-            panic!("expected tool result from tool extension");
+        let prompt = AgentPromptRequest {
+            turn_id: "turn-1".to_owned(),
+            session_id: "session-1".to_owned(),
+            system_prompt: "You are helpful.".to_owned(),
+            messages: vec![ConversationMessage {
+                role: ConversationRole::User,
+                content: vec![ContentBlock::Text {
+                    text: "hello".to_owned(),
+                }],
+            }],
+            tools: vec![ToolDefinition {
+                name: "demo.echo".to_owned(),
+                description: None,
+            }],
         };
-        store
-            .append_tool_activity(
-                "session-1",
-                ToolActivityRecord {
-                    call_id: result.call_id.clone(),
-                    tool_name: result.tool_name.clone(),
-                    outcome: ToolActivityOutcome::Result {
-                        result: result.result.clone(),
-                    },
-                },
-            )
-            .expect("tool result should persist");
-        let _ = bus.publish_from(Some(&tool_id), Event::ToolResult(result));
+        let _ = bus.send_to(&agent_id, None, Event::AgentPromptRequest(prompt));
 
         let response = agent_reader
             .read_event()
             .expect("read")
             .expect("agent response should arrive");
-        let Event::MessageAgent(response_message) = response else {
-            panic!("expected agent message");
+        let Event::AgentPromptResponse(response) = response else {
+            panic!("expected agent prompt response");
         };
-        store
-            .append_agent_message("session-1", response_message.text.clone())
-            .expect("agent message should persist");
-        let delivered = bus.publish_from(Some(&agent_id), Event::MessageAgent(response_message));
-        assert_eq!(delivered.delivered_to, vec![ui_id.clone()]);
-        assert_eq!(ui_inbox.snapshot().len(), 1);
+        assert!(response.text.is_none());
+        assert_eq!(response.tool_calls.len(), 1);
+        let call = &response.tool_calls[0];
+        assert_eq!(call.name, "demo.echo");
 
-        let reopened = SessionStore::open(&store_path).expect("store should reopen");
-        let session = reopened
-            .session("session-1")
-            .expect("session should reload");
-        assert_eq!(session.current_branch().len(), 4);
+        // Route the tool call to the tool provider.
+        let routed = registry
+            .route_tool_request(
+                &mut bus,
+                &agent_id,
+                tau_proto::ToolRequest {
+                    call_id: call.id.clone(),
+                    tool_name: call.name.clone(),
+                    arguments: call.arguments.clone(),
+                },
+            )
+            .expect("tool request should route");
+        assert_eq!(routed.provider_connection_id, tool_id.clone());
+
+        let result = tool_reader
+            .read_event()
+            .expect("read")
+            .expect("tool result should arrive");
+        let Event::ToolResult(result) = result else {
+            panic!("expected tool result from tool extension");
+        };
+
+        // Send a second prompt with the tool result in history.
+        let prompt2 = AgentPromptRequest {
+            turn_id: "turn-2".to_owned(),
+            session_id: "session-1".to_owned(),
+            system_prompt: "You are helpful.".to_owned(),
+            messages: vec![
+                ConversationMessage {
+                    role: ConversationRole::User,
+                    content: vec![ContentBlock::Text {
+                        text: "hello".to_owned(),
+                    }],
+                },
+                ConversationMessage {
+                    role: ConversationRole::Assistant,
+                    content: vec![ContentBlock::ToolUse {
+                        id: call.id.clone(),
+                        name: call.name.clone(),
+                        input: call.arguments.clone(),
+                    }],
+                },
+                ConversationMessage {
+                    role: ConversationRole::User,
+                    content: vec![ContentBlock::ToolResult {
+                        tool_use_id: call.id.clone(),
+                        content: format!("{:?}", result.result),
+                        is_error: false,
+                    }],
+                },
+            ],
+            tools: vec![ToolDefinition {
+                name: "demo.echo".to_owned(),
+                description: None,
+            }],
+        };
+        let _ = bus.send_to(&agent_id, None, Event::AgentPromptRequest(prompt2));
+
+        let response2 = agent_reader
+            .read_event()
+            .expect("read")
+            .expect("agent text response should arrive");
+        let Event::AgentPromptResponse(response2) = response2 else {
+            panic!("expected agent prompt response");
+        };
+        assert!(response2.text.is_some());
+        assert!(response2.tool_calls.is_empty());
 
         bus.send_to(
             &agent_id,

@@ -82,6 +82,10 @@ pub enum EventName {
     ExtensionExited,
     #[serde(rename = "extension.restarting")]
     ExtensionRestarting,
+    #[serde(rename = "agent.prompt_request")]
+    AgentPromptRequest,
+    #[serde(rename = "agent.prompt_response")]
+    AgentPromptResponse,
 }
 
 impl EventName {
@@ -108,6 +112,8 @@ impl EventName {
             Self::ExtensionReady => "extension.ready",
             Self::ExtensionExited => "extension.exited",
             Self::ExtensionRestarting => "extension.restarting",
+            Self::AgentPromptRequest => "agent.prompt_request",
+            Self::AgentPromptResponse => "agent.prompt_response",
         }
     }
 }
@@ -142,6 +148,8 @@ impl FromStr for EventName {
             "extension.ready" => Ok(Self::ExtensionReady),
             "extension.exited" => Ok(Self::ExtensionExited),
             "extension.restarting" => Ok(Self::ExtensionRestarting),
+            "agent.prompt_request" => Ok(Self::AgentPromptRequest),
+            "agent.prompt_response" => Ok(Self::AgentPromptResponse),
             _ => Err(ParseEventNameError {
                 invalid_name: value.to_owned(),
             }),
@@ -306,6 +314,86 @@ pub struct ToolCancelled {
     pub tool_name: ToolName,
 }
 
+// ---------------------------------------------------------------------------
+// Agent prompt protocol
+// ---------------------------------------------------------------------------
+
+/// Role of a participant in the conversation history.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConversationRole {
+    User,
+    Assistant,
+}
+
+/// One block of content within a conversation message.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ContentBlock {
+    Text {
+        text: String,
+    },
+    ToolUse {
+        id: String,
+        name: String,
+        input: CborValue,
+    },
+    ToolResult {
+        tool_use_id: String,
+        content: String,
+        #[serde(default)]
+        is_error: bool,
+    },
+}
+
+/// One message in the conversation history sent to the agent.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ConversationMessage {
+    pub role: ConversationRole,
+    pub content: Vec<ContentBlock>,
+}
+
+/// A tool definition available for the agent to use.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ToolDefinition {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+/// Fully assembled prompt sent by the harness to the agent.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AgentPromptRequest {
+    pub turn_id: String,
+    pub session_id: String,
+    pub system_prompt: String,
+    pub messages: Vec<ConversationMessage>,
+    pub tools: Vec<ToolDefinition>,
+}
+
+/// One tool call requested by the agent in its response.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AgentToolCall {
+    pub id: String,
+    pub name: String,
+    pub arguments: CborValue,
+}
+
+/// Agent's response to a prompt request.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AgentPromptResponse {
+    pub turn_id: String,
+    pub session_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_calls: Vec<AgentToolCall>,
+}
+
+// ---------------------------------------------------------------------------
+// Chat messages
+// ---------------------------------------------------------------------------
+
 /// Common message payload used by user and agent messages.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ChatMessage {
@@ -391,6 +479,10 @@ pub enum Event {
     ExtensionExited(ExtensionExited),
     #[serde(rename = "extension.restarting")]
     ExtensionRestarting(ExtensionRestarting),
+    #[serde(rename = "agent.prompt_request")]
+    AgentPromptRequest(AgentPromptRequest),
+    #[serde(rename = "agent.prompt_response")]
+    AgentPromptResponse(AgentPromptResponse),
 }
 
 impl Event {
@@ -417,6 +509,8 @@ impl Event {
             Self::ExtensionReady(_) => EventName::ExtensionReady,
             Self::ExtensionExited(_) => EventName::ExtensionExited,
             Self::ExtensionRestarting(_) => EventName::ExtensionRestarting,
+            Self::AgentPromptRequest(_) => EventName::AgentPromptRequest,
+            Self::AgentPromptResponse(_) => EventName::AgentPromptResponse,
         }
     }
 }
@@ -623,6 +717,27 @@ mod tests {
             }),
             Event::LifecycleDisconnect(LifecycleDisconnect {
                 reason: Some("shutdown".to_owned()),
+            }),
+            Event::AgentPromptRequest(AgentPromptRequest {
+                turn_id: "turn-1".to_owned(),
+                session_id: "s1".to_owned(),
+                system_prompt: "You are helpful.".to_owned(),
+                messages: vec![ConversationMessage {
+                    role: ConversationRole::User,
+                    content: vec![ContentBlock::Text {
+                        text: "hello".to_owned(),
+                    }],
+                }],
+                tools: vec![ToolDefinition {
+                    name: "fs.read".to_owned(),
+                    description: Some("Read a file".to_owned()),
+                }],
+            }),
+            Event::AgentPromptResponse(AgentPromptResponse {
+                turn_id: "turn-1".to_owned(),
+                session_id: "s1".to_owned(),
+                text: Some("Hi there".to_owned()),
+                tool_calls: Vec::new(),
             }),
         ]
     }
