@@ -647,12 +647,10 @@ dependencies = [
  "tau-agent",
  "tau-cli-term",
  "tau-config",
- "tau-core",
  "tau-ext-fs",
  "tau-ext-shell",
+ "tau-harness",
  "tau-proto",
- "tau-socket",
- "tau-supervisor",
  "tempfile",
 ]
 
@@ -710,6 +708,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "tau-harness"
+version = "0.1.0"
+dependencies = [
+ "dirs",
+ "tau-agent",
+ "tau-config",
+ "tau-core",
+ "tau-ext-fs",
+ "tau-ext-shell",
+ "tau-proto",
+ "tau-socket",
+ "tau-supervisor",
+ "tempfile",
+]
+
+[[package]]
 name = "tau-proto"
 version = "0.1.0"
 dependencies = [
@@ -738,8 +752,8 @@ dependencies = [
 name = "tau-test-support"
 version = "0.1.0"
 dependencies = [
- "tau-cli",
  "tau-core",
+ "tau-harness",
  "tempfile",
 ]
 

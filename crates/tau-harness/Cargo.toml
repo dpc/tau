@@ -1,5 +1,5 @@
 [package]
-name = "tau-cli"
+name = "tau-harness"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,17 +9,15 @@ license.workspace = true
 workspace = true
 
 [dependencies]
-clap.workspace = true
 dirs.workspace = true
-tau-cli-term.workspace = true
-tau-config.workspace = true
-tau-harness.workspace = true
-tau-proto.workspace = true
-
-# Still needed for component dispatch
 tau-agent.workspace = true
+tau-config.workspace = true
+tau-core.workspace = true
 tau-ext-fs.workspace = true
 tau-ext-shell.workspace = true
+tau-proto.workspace = true
+tau-socket.workspace = true
+tau-supervisor.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

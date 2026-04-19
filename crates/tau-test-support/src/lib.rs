@@ -4,11 +4,11 @@ use std::path::{Path, PathBuf};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use tau_cli::{
-    CliError, ServeOptions, open_policy_store, open_session_store, run_daemon,
+use tau_core::{PolicyStore, SessionStore};
+use tau_harness::{
+    HarnessError, ServeOptions, open_policy_store, open_session_store, run_daemon,
     run_embedded_message, send_daemon_message,
 };
-use tau_core::{PolicyStore, SessionStore};
 use tempfile::TempDir;
 
 /// Temporary runtime paths for end-to-end tests.
@@ -33,7 +33,11 @@ impl TestRuntime {
     }
 
     /// Runs one embedded interaction and returns the agent response.
-    pub fn run_embedded(&self, session_id: &str, message: &str) -> Result<String, CliError> {
+    pub fn run_embedded(
+        &self,
+        session_id: &str,
+        message: &str,
+    ) -> Result<String, HarnessError> {
         run_embedded_message(&self.session_store_path, session_id, message)
     }
 
@@ -61,17 +65,21 @@ impl TestRuntime {
     }
 
     /// Sends one message to a running daemon.
-    pub fn send_daemon_message(&self, session_id: &str, message: &str) -> Result<String, CliError> {
+    pub fn send_daemon_message(
+        &self,
+        session_id: &str,
+        message: &str,
+    ) -> Result<String, HarnessError> {
         send_daemon_message(&self.socket_path, session_id, message)
     }
 
     /// Opens the session store for assertions.
-    pub fn open_session_store(&self) -> Result<SessionStore, CliError> {
+    pub fn open_session_store(&self) -> Result<SessionStore, HarnessError> {
         open_session_store(&self.session_store_path)
     }
 
     /// Opens the policy store for assertions.
-    pub fn open_policy_store(&self) -> Result<PolicyStore, CliError> {
+    pub fn open_policy_store(&self) -> Result<PolicyStore, HarnessError> {
         open_policy_store(&self.policy_store_path)
     }
 }
@@ -79,15 +87,15 @@ impl TestRuntime {
 /// A running daemon thread handle.
 #[derive(Debug)]
 pub struct DaemonHandle {
-    join_handle: JoinHandle<Result<(), CliError>>,
+    join_handle: JoinHandle<Result<(), HarnessError>>,
 }
 
 impl DaemonHandle {
     /// Waits for the daemon thread to finish.
-    pub fn join(self) -> Result<(), CliError> {
+    pub fn join(self) -> Result<(), HarnessError> {
         self.join_handle
             .join()
-            .map_err(|_| CliError::ThreadJoin("daemon".to_owned()))?
+            .map_err(|_| HarnessError::ThreadJoin("daemon".to_owned()))?
     }
 }
 

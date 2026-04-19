@@ -31,8 +31,8 @@ dispatch mechanism used by the harness, not a user-facing command.
 2. `main_with_args()` uses clap to parse arguments. The hidden `Component`
    subcommand dispatches to the appropriate extension's `run_stdio()`
    entry point (e.g. `tau_agent::run_stdio()`).
-3. All other subcommands (`chat`, `embedded`, `serve`, `send`, etc.) go
-   through the normal CLI path.
+3. All other subcommands (`chat`, `session-list`, etc.) go through
+   the normal CLI path.
 4. When no config file is found, a default configuration is generated that
    points extension commands to `tau component <name>` using the current
    binary's path.
@@ -59,8 +59,10 @@ whether the binary is the unified `tau` or a standalone extension.
 | Crate | Role |
 |---|---|
 | `tau` | Unified binary (thin wrapper) |
-| `tau-cli` | CLI argument parsing, harness runtime, public API |
+| `tau-cli` | CLI parsing, chat as socket client, component dispatch |
+| `tau-cli-term` | Higher-level terminal prompt with fish-like completion |
 | `tau-cli-term-raw` | Low-level terminal prompt with async output and diff rendering |
+| `tau-harness` | Harness daemon: extensions, event bus, sessions, socket server |
 | `tau-proto` | CBOR event protocol types and codec |
 | `tau-config` | TOML config loading and path resolution |
 | `tau-core` | Event bus, tool registry, session store, policy store |

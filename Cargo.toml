@@ -6,6 +6,7 @@ members = [
   "crates/tau-core",
   "crates/tau-ext-fs",
   "crates/tau-ext-shell",
+  "crates/tau-harness",
   "crates/tau-proto",
   "crates/tau-socket",
   "crates/tau-supervisor",
@@ -42,6 +43,7 @@ tau-config = { path = "crates/tau-config" }
 tau-core = { path = "crates/tau-core" }
 tau-ext-fs = { path = "crates/tau-ext-fs" }
 tau-ext-shell = { path = "crates/tau-ext-shell" }
+tau-harness = { path = "crates/tau-harness" }
 tau-proto = { path = "crates/tau-proto" }
 tau-socket = { path = "crates/tau-socket" }
 tau-supervisor = { path = "crates/tau-supervisor" }
