@@ -29,6 +29,7 @@ pub struct OpenAiConfig {
 #[derive(Debug)]
 pub enum OpenAiError {
     Http(Box<ureq::Error>),
+    HttpStatus(u16, String),
     Io(std::io::Error),
     Json(serde_json::Error),
     #[allow(dead_code)]
@@ -39,6 +40,7 @@ impl std::fmt::Display for OpenAiError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Http(e) => write!(f, "HTTP error: {e}"),
+            Self::HttpStatus(code, body) => write!(f, "HTTP {code}: {body}"),
             Self::Io(e) => write!(f, "I/O error: {e}"),
             Self::Json(e) => write!(f, "JSON error: {e}"),
             Self::NoChoices => f.write_str("API returned no choices"),
@@ -103,7 +105,13 @@ pub fn chat_completion_stream(
         .set("Content-Type", "application/json")
         .set("Authorization", &format!("Bearer {}", config.api_key))
         .send_string(&body_str)
-        .map_err(|e| OpenAiError::Http(Box::new(e)))?;
+        .map_err(|e| match e {
+            ureq::Error::Status(code, resp) => {
+                let body = resp.into_string().unwrap_or_default();
+                OpenAiError::HttpStatus(code, body)
+            }
+            other => OpenAiError::Http(Box::new(other)),
+        })?;
 
     let reader = std::io::BufReader::new(response.into_reader());
     let mut state = StreamState::new();

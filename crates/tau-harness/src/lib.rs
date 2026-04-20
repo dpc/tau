@@ -383,7 +383,8 @@ struct Harness {
     // before the next LLM call, allowing the user to redirect the
     // agent while it's working. See PI_PROMPT_QUEUEING.md for Pi's
     // two-tier (steering + follow-up) design.
-    pending_prompts: VecDeque<String>,
+    /// (session_id, text) — text is persisted when dispatched.
+    pending_prompts: VecDeque<(String, String)>,
     /// Append-only event debug log.
     event_log: Option<EventLog>,
 }
@@ -795,24 +796,24 @@ impl Harness {
                 }
             }
             Event::UiPromptSubmitted(prompt) => {
-                self.store
-                    .append_user_message(&prompt.session_id, prompt.text.clone())?;
                 // Publish the fact so the UI echoes the user message.
                 let _ = self
                     .bus
                     .publish_from(Some(client_id), Event::UiPromptSubmitted(prompt.clone()));
 
                 if self.agent_busy {
-                    // Agent is processing — queue for later dispatch.
-                    // The message is already persisted; context will
-                    // be assembled fresh when it's dequeued (so it
-                    // includes the current response).
+                    // Queue for later — do NOT persist yet. If we
+                    // persist now, the user message appears in the
+                    // session tree before the current response,
+                    // breaking role alternation for the LLM API.
+                    // The text is persisted when dispatched.
                     //
                     // Future: support "steering" mode where the
                     // message is injected mid-turn (after the current
                     // tool calls finish but before the next LLM call)
                     // rather than waiting for the full turn to end.
-                    self.pending_prompts.push_back(prompt.session_id.clone());
+                    self.pending_prompts
+                        .push_back((prompt.session_id.clone(), prompt.text.clone()));
                     let _ = self
                         .bus
                         .publish(Event::SessionPromptQueued(SessionPromptQueued {
@@ -820,6 +821,9 @@ impl Harness {
                             text: prompt.text.clone(),
                         }));
                 } else {
+                    // Persist and dispatch immediately.
+                    self.store
+                        .append_user_message(&prompt.session_id, prompt.text.clone())?;
                     self.agent_busy = true;
                     self.send_prompt_to_agent(&prompt.session_id);
                 }
@@ -1044,9 +1048,11 @@ impl Harness {
 
     /// Dispatches the next queued prompt or marks the agent as idle.
     fn dispatch_next_or_idle(&mut self, _completed_session_id: &str) {
-        if let Some(session_id) = self.pending_prompts.pop_front() {
-            // Context is assembled fresh here, so it includes all
-            // responses from the just-finished turn.
+        if let Some((session_id, text)) = self.pending_prompts.pop_front() {
+            // Persist now — the user message is placed after the
+            // response from the just-finished turn, maintaining
+            // correct role alternation.
+            let _ = self.store.append_user_message(&session_id, text);
             self.send_prompt_to_agent(&session_id);
             // agent_busy stays true
         } else {

@@ -420,7 +420,22 @@ pub fn main_with_args() -> std::process::ExitCode {
             cli::Command::Chat {
                 session_id,
                 config: _config,
-            } => run_chat(&session_id),
+            } => {
+                // Generate a unique session ID per run to avoid
+                // accumulating stale history across daemon restarts.
+                let session_id = if session_id == tau_harness::default_session_id() {
+                    format!(
+                        "chat-{}",
+                        std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_millis())
+                            .unwrap_or(0)
+                    )
+                } else {
+                    session_id
+                };
+                run_chat(&session_id)
+            }
 
             cli::Command::SessionList { session_store } => {
                 for line in tau_harness::session_list_lines(session_store)? {
@@ -505,7 +520,12 @@ mod tests {
         }
 
         fn screen_text(&self, w: u16) -> Vec<String> {
-            self.parser.lock().expect("vt").screen().rows(0, w).collect()
+            self.parser
+                .lock()
+                .expect("vt")
+                .screen()
+                .rows(0, w)
+                .collect()
         }
 
         fn screen_contains(&self, w: u16, needle: &str) -> bool {
@@ -765,15 +785,16 @@ mod tests {
         sync(&handle);
 
         // Count how many rows contain "hello!".
-        let count = vt.screen_text(80)
+        let count = vt
+            .screen_text(80)
             .iter()
             .filter(|r| r.contains("hello!"))
             .count();
         assert_eq!(
-            count, 1,
+            count,
+            1,
             "response should appear exactly once, got {count}: {:?}",
             vt.screen_text(80)
         );
     }
 }
-
