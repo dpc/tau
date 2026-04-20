@@ -314,7 +314,10 @@ struct PendingAgentTurn {
 
 struct ExtensionEntry {
     name: String,
+    instance_id: tau_proto::ExtensionInstanceId,
     connection_id: String,
+    /// PID of supervised child process, or current process for in-process.
+    pid: Option<u32>,
     /// In-process extension thread handle (for join on shutdown).
     in_process_thread: Option<JoinHandle<Result<(), String>>>,
 }
@@ -394,6 +397,7 @@ struct Harness {
     lifecycle_messages: Vec<String>,
     extensions: Vec<ExtensionEntry>,
     agent_connection_id: String,
+    next_instance_id: tau_proto::ExtensionInstanceId,
     next_session_prompt_id: u64,
     /// Maps session_prompt_id → session_id for in-flight prompts.
     prompt_sessions: std::collections::HashMap<String, String>,
@@ -430,6 +434,9 @@ impl Harness {
         ));
         let store = SessionStore::open(store_path)?;
 
+        let own_pid = std::process::id();
+        let mut next_instance_id: tau_proto::ExtensionInstanceId = 0;
+
         let mut extensions = Vec::new();
         // Agent
         let (conn_id, thread) = spawn_in_process(
@@ -440,9 +447,13 @@ impl Harness {
             &tx,
         )?;
         let agent_connection_id = conn_id.clone();
+        let iid = next_instance_id;
+        next_instance_id += 1;
         extensions.push(ExtensionEntry {
             name: "agent".to_owned(),
+            instance_id: iid,
             connection_id: conn_id,
+            pid: Some(own_pid),
             in_process_thread: Some(thread),
         });
 
@@ -454,9 +465,13 @@ impl Harness {
             &mut bus,
             &tx,
         )?;
+        let iid = next_instance_id;
+        next_instance_id += 1;
         extensions.push(ExtensionEntry {
             name: "tools".to_owned(),
+            instance_id: iid,
             connection_id: conn_id,
+            pid: Some(own_pid),
             in_process_thread: Some(thread),
         });
 
@@ -473,6 +488,7 @@ impl Harness {
             lifecycle_messages: Vec::new(),
             agent_connection_id,
             extensions,
+            next_instance_id,
             next_session_prompt_id: 0,
             prompt_sessions: std::collections::HashMap::new(),
             pending_agent_turn: None,
@@ -504,6 +520,7 @@ impl Harness {
         let store = SessionStore::open(store_path)?;
 
         let mut extensions = Vec::new();
+        let mut next_instance_id: tau_proto::ExtensionInstanceId = 0;
         let mut agent_connection_id = None;
 
         for ext_config in &config.extensions {
@@ -512,14 +529,18 @@ impl Harness {
                 _ => ClientKind::Tool,
             };
 
-            let conn_id = spawn_supervised(ext_config, kind.clone(), &mut bus, &tx)?;
+            let (conn_id, child_pid) = spawn_supervised(ext_config, kind.clone(), &mut bus, &tx)?;
 
             if kind == ClientKind::Agent {
                 agent_connection_id = Some(conn_id.clone());
             }
+            let iid = next_instance_id;
+            next_instance_id += 1;
             extensions.push(ExtensionEntry {
                 name: ext_config.name.clone(),
+                instance_id: iid,
                 connection_id: conn_id,
+                pid: Some(child_pid),
                 in_process_thread: None,
             });
         }
@@ -539,6 +560,7 @@ impl Harness {
             lifecycle_messages: Vec::new(),
             agent_connection_id,
             extensions,
+            next_instance_id,
             next_session_prompt_id: 0,
             prompt_sessions: std::collections::HashMap::new(),
             pending_agent_turn: None,
@@ -908,40 +930,65 @@ impl Harness {
     // Lifecycle helpers
     // -----------------------------------------------------------------------
 
+    fn find_extension_by_name(&self, name: &str) -> Option<&ExtensionEntry> {
+        self.extensions.iter().find(|e| e.name == name)
+    }
+
+    fn find_extension_by_connection(&self, connection_id: &str) -> Option<&ExtensionEntry> {
+        self.extensions
+            .iter()
+            .find(|e| e.connection_id == connection_id)
+    }
+
     fn emit_extension_starting(&mut self, extension_name: &str) {
+        let (iid, pid) = self
+            .find_extension_by_name(extension_name)
+            .map(|e| (e.instance_id, e.pid))
+            .unwrap_or((0, None));
         self.lifecycle_messages
             .push(format!("extension {extension_name} starting"));
         self.publish_event(
             Some("harness"),
             Event::ExtensionStarting(tau_proto::ExtensionStarting {
+                instance_id: iid,
                 extension_name: extension_name.to_owned(),
-                argv: Vec::new(),
+                pid,
             }),
         );
     }
 
     fn emit_extension_ready(&mut self, connection_id: &str) {
-        let Some(connection) = self.bus.connection(connection_id).cloned() else {
+        let Some(ext) = self.find_extension_by_connection(connection_id) else {
             return;
         };
+        let name = ext.name.clone();
+        let iid = ext.instance_id;
+        let pid = ext.pid;
         self.lifecycle_messages
-            .push(format!("extension {} ready", connection.name));
+            .push(format!("extension {name} ready"));
         self.publish_event(
             Some("harness"),
             Event::ExtensionReady(tau_proto::ExtensionReady {
-                extension_name: connection.name.clone(),
-                connection_id: Some(connection.id),
+                instance_id: iid,
+                extension_name: name,
+                pid,
             }),
         );
     }
 
     fn emit_extension_exited(&mut self, extension_name: &str) {
+        let (iid, pid) = self
+            .find_extension_by_name(extension_name)
+            .map(|e| (e.instance_id, e.pid))
+            .unwrap_or((0, None));
         self.lifecycle_messages
             .push(format!("extension {extension_name} exited"));
         self.publish_event(
             Some("harness"),
             Event::ExtensionExited(tau_proto::ExtensionExited {
+                instance_id: iid,
                 extension_name: extension_name.to_owned(),
+                pid,
                 exit_code: None,
                 signal: None,
             }),
@@ -1285,7 +1332,7 @@ fn spawn_supervised(
     kind: ClientKind,
     bus: &mut EventBus,
     tx: &Sender<HarnessEvent>,
-) -> Result<String, HarnessError> {
+) -> Result<(String, u32), HarnessError> {
     let mut child = Command::new(&config.command)
         .args(&config.args)
         .stdin(Stdio::piped())
@@ -1294,6 +1341,7 @@ fn spawn_supervised(
         .spawn()
         .map_err(HarnessError::Io)?;
 
+    let child_pid = child.id();
     let stdin = child
         .stdin
         .take()
@@ -1316,7 +1364,7 @@ fn spawn_supervised(
 
     spawn_reader_thread(conn_id.clone(), stdout, tx.clone());
 
-    Ok(conn_id)
+    Ok((conn_id, child_pid))
 }
 
 /// Builds the system prompt from available tools and environment.

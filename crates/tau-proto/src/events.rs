@@ -10,9 +10,7 @@ use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{
-    CborValue, ConnectionId, ExtensionName, SessionId, SessionPromptId, ToolCallId, ToolName,
-};
+use crate::{CborValue, ExtensionName, SessionId, SessionPromptId, ToolCallId, ToolName};
 
 // ---------------------------------------------------------------------------
 // Event names
@@ -332,21 +330,26 @@ pub struct ToolCancelled {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ExtensionStarting {
+    pub instance_id: crate::ExtensionInstanceId,
     pub extension_name: ExtensionName,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub argv: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pid: Option<u32>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ExtensionReady {
+    pub instance_id: crate::ExtensionInstanceId,
     pub extension_name: ExtensionName,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub connection_id: Option<ConnectionId>,
+    pub pid: Option<u32>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ExtensionExited {
+    pub instance_id: crate::ExtensionInstanceId,
     pub extension_name: ExtensionName,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pid: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exit_code: Option<i32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -355,7 +358,10 @@ pub struct ExtensionExited {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ExtensionRestarting {
+    pub instance_id: crate::ExtensionInstanceId,
     pub extension_name: ExtensionName,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pid: Option<u32>,
     pub attempt: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,

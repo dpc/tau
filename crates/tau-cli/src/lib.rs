@@ -407,9 +407,9 @@ struct EventRenderer {
     /// Live tool-call blocks keyed by call_id. Shown in
     /// above_active while running, moved to history on completion.
     tool_blocks: HashMap<String, tau_cli_term::BlockId>,
-    /// Live extension blocks keyed by extension_name. Shown in
+    /// Live extension blocks keyed by instance_id. Shown in
     /// above_active while starting, moved to history when ready.
-    extension_blocks: HashMap<String, tau_cli_term::BlockId>,
+    extension_blocks: HashMap<tau_proto::ExtensionInstanceId, tau_cli_term::BlockId>,
 }
 
 impl EventRenderer {
@@ -620,11 +620,10 @@ impl EventRenderer {
                 let id = self.handle.new_block(block);
                 self.handle.push_above_active(id);
                 self.handle.redraw();
-                self.extension_blocks
-                    .insert(starting.extension_name.clone(), id);
+                self.extension_blocks.insert(starting.instance_id, id);
             }
             Event::ExtensionReady(ready) => {
-                if let Some(bid) = self.extension_blocks.remove(&ready.extension_name) {
+                if let Some(bid) = self.extension_blocks.remove(&ready.instance_id) {
                     self.handle.remove_block(bid);
                 }
                 self.handle
@@ -634,7 +633,7 @@ impl EventRenderer {
                     ))));
             }
             Event::ExtensionExited(exited) => {
-                if let Some(bid) = self.extension_blocks.remove(&exited.extension_name) {
+                if let Some(bid) = self.extension_blocks.remove(&exited.instance_id) {
                     self.handle.remove_block(bid);
                 }
                 self.handle

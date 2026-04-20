@@ -14,8 +14,8 @@ use std::{fmt, thread};
 
 use tau_core::{ToolRegistry, ToolRouteError};
 use tau_proto::{
-    ConnectionId, DecodeError, Event, EventReader, EventWriter, ExtensionExited, ExtensionName,
-    ExtensionReady, ExtensionStarting, ToolName,
+    DecodeError, Event, EventReader, EventWriter, ExtensionExited, ExtensionName, ExtensionReady,
+    ExtensionStarting, ToolName,
 };
 
 /// One configured supervised extension command.
@@ -38,10 +38,15 @@ impl ExtensionCommand {
 
     /// Creates the lifecycle event emitted before the child starts.
     #[must_use]
-    pub fn starting_event(&self) -> Event {
+    pub fn starting_event(
+        &self,
+        instance_id: tau_proto::ExtensionInstanceId,
+        pid: Option<u32>,
+    ) -> Event {
         Event::ExtensionStarting(ExtensionStarting {
+            instance_id,
             extension_name: self.name.clone(),
-            argv: self.argv(),
+            pid,
         })
     }
 }
@@ -157,12 +162,23 @@ impl SupervisedChild {
         &self.command
     }
 
+    /// Returns the child process ID.
+    #[must_use]
+    pub fn pid(&self) -> u32 {
+        self.child.id()
+    }
+
     /// Creates the lifecycle event emitted when the child becomes connected.
     #[must_use]
-    pub fn ready_event(&self, connection_id: Option<ConnectionId>) -> Event {
+    pub fn ready_event(
+        &self,
+        instance_id: tau_proto::ExtensionInstanceId,
+        pid: Option<u32>,
+    ) -> Event {
         Event::ExtensionReady(ExtensionReady {
+            instance_id,
             extension_name: self.command.name.clone(),
-            connection_id,
+            pid,
         })
     }
 
@@ -210,9 +226,16 @@ impl SupervisedChild {
 
     /// Creates the lifecycle event emitted when the child exits.
     #[must_use]
-    pub fn exited_event(&self, exit: &ChildExit) -> Event {
+    pub fn exited_event(
+        &self,
+        instance_id: tau_proto::ExtensionInstanceId,
+        pid: Option<u32>,
+        exit: &ChildExit,
+    ) -> Event {
         Event::ExtensionExited(ExtensionExited {
+            instance_id,
             extension_name: self.command.name.clone(),
+            pid,
             exit_code: exit.exit_code,
             signal: exit.signal,
         })
@@ -221,13 +244,15 @@ impl SupervisedChild {
     /// Removes tools owned by the disconnected child and emits an exit event.
     pub fn cleanup_disconnect(
         &self,
+        instance_id: tau_proto::ExtensionInstanceId,
+        pid: Option<u32>,
         registry: &mut ToolRegistry,
         connection_id: &str,
         exit: &ChildExit,
     ) -> DisconnectCleanup {
         DisconnectCleanup {
             removed_tools: registry.unregister_connection(connection_id),
-            lifecycle_event: self.exited_event(exit),
+            lifecycle_event: self.exited_event(instance_id, pid, exit),
         }
     }
 }

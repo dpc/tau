@@ -38,6 +38,9 @@ pub type ConnectionId = String;
 /// Unique identifier for one prompt within a session.
 pub type SessionPromptId = String;
 
+/// Unique identifier for one extension instance (monotonic counter).
+pub type ExtensionInstanceId = u64;
+
 /// Convenience alias for extension identifiers.
 pub type ExtensionName = String;
 
@@ -242,20 +245,26 @@ mod tests {
                 tool_calls: Vec::new(),
             }),
             Event::ExtensionStarting(ExtensionStarting {
+                instance_id: 1,
                 extension_name: "fs".to_owned(),
-                argv: vec!["tau-ext-fs".to_owned()],
+                pid: Some(1234),
             }),
             Event::ExtensionReady(ExtensionReady {
+                instance_id: 1,
                 extension_name: "fs".to_owned(),
-                connection_id: Some("conn-1".to_owned()),
+                pid: Some(1234),
             }),
             Event::ExtensionExited(ExtensionExited {
+                instance_id: 1,
                 extension_name: "fs".to_owned(),
+                pid: Some(1234),
                 exit_code: Some(0),
                 signal: None,
             }),
             Event::ExtensionRestarting(ExtensionRestarting {
+                instance_id: 1,
                 extension_name: "fs".to_owned(),
+                pid: Some(1234),
                 attempt: 2,
                 reason: Some("hot reload".to_owned()),
             }),
