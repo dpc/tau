@@ -11,6 +11,7 @@ workspace = true
 [dependencies]
 crossterm.workspace = true
 tau-blocking-notify-channel.workspace = true
+unicode-width.workspace = true
 
 [[bin]]
 name = "tau-cli-term-raw-demo"

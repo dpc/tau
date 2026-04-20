@@ -27,6 +27,11 @@ use crossterm::terminal::{self, ClearType};
 
 use crate::style::{Align, Cell, Style, StyledBlock, StyledText};
 
+/// Column width of a cell slice (sum of individual display widths).
+fn cols(cells: &[Cell]) -> usize {
+    cells.iter().map(|c| c.col_width()).sum()
+}
+
 /// Virtual screen state with diff-based updates.
 pub struct Screen {
     /// What we believe is currently displayed on the terminal.
@@ -90,7 +95,7 @@ impl Screen {
             let actual_slice = actual_line.map(|l| l.as_slice()).unwrap_or(&[]);
             let desired_slice = desired_line.as_slice();
 
-            // Find the first column where actual and desired differ.
+            // Find the first cell index where actual and desired differ.
             let common_prefix = actual_slice
                 .iter()
                 .zip(desired_slice.iter())
@@ -98,7 +103,7 @@ impl Screen {
                 .count();
 
             let is_last_desired = row == desired_count - 1;
-            let actual_longer = actual_slice.len() > desired_slice.len();
+            let actual_wider = cols(actual_slice) > cols(desired_slice);
             let has_extra_actual_below = is_last_desired && self.lines.len() > desired_count;
 
             // Skip if this line is completely unchanged and we don't need
@@ -110,25 +115,27 @@ impl Screen {
                 continue;
             }
 
+            // Compute column offset for the first changed cell.
+            // Done here (before move_to) to avoid borrowing self.lines
+            // across the mutable self.move_to call.
+            let prefix_cols = cols(&desired_slice[..common_prefix]);
+
             // Move to the first changed column on this row.
-            self.move_to(w, row, common_prefix)?;
+            self.move_to(w, row, prefix_cols)?;
 
             // Print the new content from the first difference onward.
             if common_prefix < desired_slice.len() {
                 emit_styled_cells(w, &desired_slice[common_prefix..])?;
-                // layout_lines guarantees each line is at most `width`
-                // chars. At exactly `width`, the terminal enters a
-                // "pending wrap" state — the cursor is still on the
-                // current row at column `width`, not yet on the next
-                // row. We track this accurately so move_to computes
-                // correct relative movement.
-                self.cursor_col = desired_slice.len();
+                // Track cursor column as the total column width of the
+                // line (not cell count). At exactly `width` columns,
+                // the terminal enters "pending wrap" state.
+                self.cursor_col = cols(desired_slice);
             }
 
             // Clear trailing characters / lines below as needed.
             if has_extra_actual_below {
                 w.queue(terminal::Clear(ClearType::FromCursorDown))?;
-            } else if actual_longer {
+            } else if actual_wider {
                 w.queue(terminal::Clear(ClearType::UntilNewLine))?;
             }
         }
@@ -294,14 +301,27 @@ pub fn layout_lines(content: &StyledText, width: usize) -> Vec<Vec<Cell>> {
         logical_lines.pop();
     }
 
-    // Wrap each logical line at width.
+    // Wrap each logical line at width (measured in terminal columns,
+    // not cell count — wide chars like emoji occupy 2 columns).
     let mut result: Vec<Vec<Cell>> = Vec::new();
     for line in logical_lines {
         if line.is_empty() {
             result.push(Vec::new());
         } else {
-            for chunk in line.chunks(width) {
-                result.push(chunk.to_vec());
+            let mut row = Vec::new();
+            let mut col = 0usize;
+            for cell in line {
+                let w = cell.col_width();
+                if col + w > width && !row.is_empty() {
+                    result.push(row);
+                    row = Vec::new();
+                    col = 0;
+                }
+                row.push(cell);
+                col += w;
+            }
+            if !row.is_empty() {
+                result.push(row);
             }
         }
     }
@@ -340,8 +360,8 @@ pub fn layout_block(block: &StyledBlock, width: usize) -> Vec<Vec<Cell>> {
             // Left margin (always default bg, not block bg).
             row.extend(std::iter::repeat_n(Cell::plain(' '), ml));
 
-            // Content with alignment.
-            let cw = line.len();
+            // Content with alignment (column width, not cell count).
+            let cw = cols(line);
             let padding = content_width.saturating_sub(cw);
             match block.align {
                 Align::Left => {
@@ -361,8 +381,11 @@ pub fn layout_block(block: &StyledBlock, width: usize) -> Vec<Vec<Cell>> {
             row.extend(std::iter::repeat_n(Cell::plain(' '), mr));
 
             // Apply block bg to content cells that don't set their own.
+            // Use cell indices (not column count) to avoid
+            // overrun when wide chars reduce the cell count.
             if let Some(bg) = block.bg {
-                for cell in &mut row[ml..ml + content_width] {
+                let content_end = row.len().saturating_sub(mr);
+                for cell in &mut row[ml..content_end] {
                     if cell.style.bg.is_none() {
                         cell.style.bg = Some(bg);
                     }
@@ -751,15 +774,13 @@ mod tests {
         width: usize,
     ) -> (Vec<Vec<Cell>>, (usize, usize)) {
         let mut desired: Vec<Vec<Cell>> = Vec::new();
-        let above_row_count;
-
-        if above.is_empty() {
-            above_row_count = 0;
+        let above_row_count = if above.is_empty() {
+            0
         } else {
             let above_styled: StyledText = above.into();
             desired.extend(layout_lines(&above_styled, width));
-            above_row_count = desired.len();
-        }
+            desired.len()
+        };
 
         let content = format!("{left}{input}");
         let content_styled: StyledText = content.into();
@@ -770,9 +791,11 @@ mod tests {
             let first = &input_lines[0];
             let right_styled: StyledText = right.into();
             let right_cells = right_styled.to_cells();
-            let needed = first.len() + 1 + right_cells.len();
+            let first_cols = cols(first);
+            let right_cols = cols(&right_cells);
+            let needed = first_cols + 1 + right_cols;
             if needed <= width && input_lines.len() == 1 {
-                let padding = width - first.len() - right_cells.len();
+                let padding = width - first_cols - right_cols;
                 let mut padded = first.clone();
                 padded.extend(std::iter::repeat_n(Cell::plain(' '), padding));
                 padded.extend(right_cells);
@@ -782,9 +805,13 @@ mod tests {
 
         desired.extend(input_lines);
 
-        let cursor_chars = left.chars().count() + input.chars().count();
-        let cursor_row = above_row_count + cursor_chars / width;
-        let cursor_col = cursor_chars % width;
+        let cursor_cols: usize = left
+            .chars()
+            .chain(input.chars())
+            .map(|c| unicode_width::UnicodeWidthChar::width(c).unwrap_or(0))
+            .sum();
+        let cursor_row = above_row_count + cursor_cols / width;
+        let cursor_col = cursor_cols % width;
 
         (desired, (cursor_row, cursor_col))
     }

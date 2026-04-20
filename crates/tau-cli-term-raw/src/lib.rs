@@ -78,9 +78,12 @@ struct SharedState {
     height: usize,
     /// Set by Term::drop to signal the redraw thread to exit.
     shutdown: bool,
-    /// One-shot senders waiting for the next render to complete.
-    /// The redraw thread drains these after each render.
-    sync_waiters: Vec<std::sync::mpsc::SyncSender<()>>,
+    /// Generation counter for `redraw_sync`. Caller bumps
+    /// `sync_requested`; redraw thread sets `sync_completed =
+    /// sync_requested` atomically with going idle (right before
+    /// blocking on recv).
+    sync_requested: u64,
+    sync_completed: u64,
 }
 
 impl SharedState {
@@ -109,9 +112,6 @@ pub enum Event {
     Escape,
 }
 
-// (RenderSync removed — sync is handled via one-shot channels
-// in SharedState.sync_waiters, drained by the redraw thread.)
-
 /// A cloneable handle for mutating prompt zones from any thread.
 ///
 /// Setters update the shared state but do **not** trigger a redraw.
@@ -119,6 +119,7 @@ pub enum Event {
 #[derive(Clone)]
 pub struct TermHandle {
     state: Arc<Mutex<SharedState>>,
+    sync_condvar: Arc<std::sync::Condvar>,
     redraw: tau_blocking_notify_channel::Sender,
 }
 
@@ -135,17 +136,23 @@ impl TermHandle {
         self.redraw.notify();
     }
 
-    /// Triggers a redraw and blocks until the redraw thread finishes
-    /// processing it. Useful in tests to avoid sleep-based waits.
+    /// Triggers a redraw and blocks until the redraw thread has
+    /// processed it. Uses a generation counter: the caller bumps
+    /// `sync_requested`, the redraw thread sets `sync_completed`
+    /// atomically with going idle (right before blocking on recv).
     pub fn redraw_sync(&self) {
-        let (tx, rx) = std::sync::mpsc::sync_channel(0);
-        {
-            let mut st = self.lock();
-            st.sync_waiters.push(tx);
-        }
+        let mut st = self.lock();
+        st.sync_requested += 1;
+        let target = st.sync_requested;
+        drop(st);
+
         self.redraw.notify();
-        // Block until the redraw thread signals completion.
-        let _ = rx.recv();
+
+        let st = self.state.lock().expect("term state mutex poisoned");
+        let _st = self
+            .sync_condvar
+            .wait_while(st, |s| s.sync_completed < target)
+            .expect("term state mutex poisoned");
     }
 
     // --- Block management ---
@@ -322,17 +329,20 @@ impl Term {
             width,
             height,
             shutdown: false,
-            sync_waiters: Vec::new(),
+            sync_requested: 0,
+            sync_completed: 0,
         }));
 
         let (redraw_tx, redraw_rx) = tau_blocking_notify_channel::channel();
+        let sync_condvar = Arc::new(std::sync::Condvar::new());
 
         terminal::enable_raw_mode()?;
 
         let redraw_state = Arc::clone(&state);
         let redraw_writer: Box<dyn Write + Send> = Box::new(io::stdout());
+        let redraw_sync_cv = Arc::clone(&sync_condvar);
         let redraw_thread = thread::spawn(move || {
-            redraw_loop(redraw_state, redraw_rx, redraw_writer);
+            redraw_loop(redraw_state, redraw_rx, redraw_writer, &redraw_sync_cv);
         });
 
         let (term_input_tx, term_input_rx) = std::sync::mpsc::channel();
@@ -342,6 +352,7 @@ impl Term {
 
         let handle = TermHandle {
             state: Arc::clone(&state),
+            sync_condvar,
             redraw: redraw_tx.clone(),
         };
 
@@ -386,20 +397,24 @@ impl Term {
             width,
             height,
             shutdown: false,
-            sync_waiters: Vec::new(),
+            sync_requested: 0,
+            sync_completed: 0,
         }));
 
         let (redraw_tx, redraw_rx) = tau_blocking_notify_channel::channel();
+        let sync_condvar = Arc::new(std::sync::Condvar::new());
 
         let redraw_state = Arc::clone(&state);
+        let redraw_sync_cv = Arc::clone(&sync_condvar);
         let redraw_thread = thread::spawn(move || {
-            redraw_loop(redraw_state, redraw_rx, output);
+            redraw_loop(redraw_state, redraw_rx, output, &redraw_sync_cv);
         });
 
         let (term_input_tx, term_input_rx) = std::sync::mpsc::channel();
 
         let handle = TermHandle {
             state: Arc::clone(&state),
+            sync_condvar,
             redraw: redraw_tx.clone(),
         };
 
@@ -725,9 +740,11 @@ fn layout_all(st: &SharedState) -> LayoutAll {
     if !st.right_prompt.is_empty() && !input_lines.is_empty() {
         let first_line = &input_lines[0];
         let right_cells = st.right_prompt.to_cells();
-        let needed = first_line.len() + 1 + right_cells.len();
+        let first_cols: usize = first_line.iter().map(|c| c.col_width()).sum();
+        let right_cols: usize = right_cells.iter().map(|c| c.col_width()).sum();
+        let needed = first_cols + 1 + right_cols;
         if needed <= width && input_lines.len() == 1 {
-            let padding = width - first_line.len() - right_cells.len();
+            let padding = width - first_cols - right_cols;
             let mut padded = first_line.clone();
             padded.extend(std::iter::repeat_n(Cell::plain(' '), padding));
             padded.extend(right_cells);
@@ -758,6 +775,7 @@ fn redraw_loop(
     state: Arc<Mutex<SharedState>>,
     notify_rx: tau_blocking_notify_channel::Receiver,
     mut writer: Box<dyn Write + Send>,
+    sync_condvar: &std::sync::Condvar,
 ) {
     let (w, h) = {
         let st = state.lock().expect("term state mutex poisoned");
@@ -789,22 +807,35 @@ fn redraw_loop(
                 let _ = writer.flush();
                 {
                     let mut st = state.lock().expect("term state mutex poisoned");
-                    for waiter in st.sync_waiters.drain(..) {
-                        let _ = waiter.send(());
-                    }
+                    st.sync_completed = st.sync_requested;
                 }
+                sync_condvar.notify_all();
                 break;
             }
         }
 
-        if notify_rx.recv().is_err() {
-            break;
+        // If a sync was requested but not yet completed, skip
+        // blocking on recv and render immediately. Otherwise block
+        // until the next notification arrives.
+        {
+            let st = state.lock().expect("term state mutex poisoned");
+            if st.sync_completed >= st.sync_requested {
+                drop(st);
+                if notify_rx.recv().is_err() {
+                    break;
+                }
+            }
         }
 
         let st = state.lock().expect("term state mutex poisoned");
         let width = st.width;
         let height = st.height.max(1);
         let size_changed = prev_width != width || prev_height != height;
+        // Capture the sync generation we're rendering against.
+        // We must not advance sync_completed beyond this value,
+        // because a later bump to sync_requested may have arrived
+        // with state changes we haven't read yet.
+        let sync_gen = st.sync_requested;
 
         let layout = layout_all(&st);
         drop(st);
@@ -829,12 +860,16 @@ fn redraw_loop(
 
         prev_width = width;
         prev_height = height;
+
+        // Advance sync_completed to the generation we captured
+        // before rendering.  Using max() is defensive — renders
+        // are sequential so sync_gen is monotonically increasing,
+        // but max() makes the invariant explicit.
         {
             let mut st = state.lock().expect("term state mutex poisoned");
-            for waiter in st.sync_waiters.drain(..) {
-                let _ = waiter.send(());
-            }
+            st.sync_completed = st.sync_completed.max(sync_gen);
         }
+        sync_condvar.notify_all();
     }
 }
 
@@ -923,11 +958,13 @@ fn term_input_reader_loop(tx: std::sync::mpsc::Sender<RawEvent>) {
 // --- Helpers ---
 
 fn move_cursor_vertical(st: &SharedState, delta: isize) -> Option<usize> {
+    use unicode_width::UnicodeWidthChar;
+
     let width = st.width;
-    let left_chars = st.left_prompt.char_count();
-    let cursor_chars = left_chars + char_count_for_bytes(&st.buffer, st.cursor);
-    let current_row = cursor_chars / width;
-    let current_col = cursor_chars % width;
+    let left_cols = st.left_prompt.char_count();
+    let cursor_cols = left_cols + char_count_for_bytes(&st.buffer, st.cursor);
+    let current_row = cursor_cols / width;
+    let current_col = cursor_cols % width;
 
     let target_row = current_row as isize + delta;
     if target_row < 0 {
@@ -935,19 +972,23 @@ fn move_cursor_vertical(st: &SharedState, delta: isize) -> Option<usize> {
     }
     let target_row = target_row as usize;
 
-    let total_chars = left_chars + st.buffer.chars().count();
-    let max_row = if total_chars == 0 {
+    let total_cols: usize = left_cols
+        + st.buffer
+            .chars()
+            .map(|c| c.width().unwrap_or(0))
+            .sum::<usize>();
+    let max_row = if total_cols == 0 {
         0
     } else {
-        (total_chars.saturating_sub(1)) / width
+        (total_cols.saturating_sub(1)) / width
     };
     if target_row > max_row {
         return None;
     }
 
-    let target_offset = (target_row * width + current_col).min(total_chars);
-    let target_buffer_chars = target_offset.saturating_sub(left_chars);
-    let new_cursor = char_offset_to_byte(&st.buffer, target_buffer_chars);
+    let target_offset = (target_row * width + current_col).min(total_cols);
+    let target_buffer_cols = target_offset.saturating_sub(left_cols);
+    let new_cursor = col_offset_to_byte(&st.buffer, target_buffer_cols);
     Some(new_cursor)
 }
 
@@ -958,7 +999,8 @@ fn term_size() -> (usize, usize) {
 }
 
 fn char_count_for_bytes(s: &str, byte_pos: usize) -> usize {
-    s[..byte_pos].chars().count()
+    use unicode_width::UnicodeWidthChar;
+    s[..byte_pos].chars().map(|c| c.width().unwrap_or(0)).sum()
 }
 
 fn prev_char_boundary(s: &str, pos: usize) -> usize {
@@ -977,11 +1019,17 @@ fn next_char_boundary(s: &str, pos: usize) -> usize {
     p
 }
 
-fn char_offset_to_byte(s: &str, n: usize) -> usize {
-    s.char_indices()
-        .nth(n)
-        .map(|(byte, _)| byte)
-        .unwrap_or(s.len())
+/// Converts a column offset (in terminal columns) to a byte offset.
+fn col_offset_to_byte(s: &str, target_cols: usize) -> usize {
+    use unicode_width::UnicodeWidthChar;
+    let mut cols = 0usize;
+    for (byte, ch) in s.char_indices() {
+        if cols >= target_cols {
+            return byte;
+        }
+        cols += ch.width().unwrap_or(0);
+    }
+    s.len()
 }
 
 #[cfg(test)]
@@ -1105,8 +1153,8 @@ mod tests {
         assert_eq!(vis[1], "> hi");
         assert_eq!(vis[2], "below");
         // Rest is empty.
-        for i in 3..10 {
-            assert_eq!(vis[i], "", "row {i} should be blank");
+        for (i, row) in vis.iter().enumerate().take(10).skip(3) {
+            assert_eq!(row, "", "row {i} should be blank");
         }
     }
 
@@ -1377,6 +1425,230 @@ mod tests {
             !screen_contains(&parser, 80, "partial response"),
             "partial should be gone, got: {:?}",
             vt100_rows(&parser, 80)
+        );
+    }
+
+    /// Calling redraw_sync immediately after creating a virtual
+    /// terminal must not deadlock.  Before the fix, if the redraw
+    /// thread hadn't consumed the initial notification yet, the
+    /// sync check saw `sync_completed < sync_requested` and did
+    /// `continue`, looping forever without rendering.
+    #[test]
+    fn redraw_sync_does_not_deadlock_on_fresh_term() {
+        for _ in 0..50 {
+            let buf = SharedBuffer::new();
+            let mut parser = vt100::Parser::new(10, 40, 0);
+            let (term, handle, _input_tx) = Term::new_virtual(40, 10, "> ", Box::new(buf.clone()));
+
+            // This would hang before the fix.
+            handle.redraw_sync();
+            buf.drain_into(&mut parser);
+            assert!(screen_contains(&parser, 40, "> "));
+
+            drop(term);
+        }
+    }
+
+    /// Multiple concurrent redraw_sync calls must all complete.
+    #[test]
+    fn concurrent_redraw_syncs_all_complete() {
+        let buf = SharedBuffer::new();
+        let (_term, handle, _input_tx) = Term::new_virtual(40, 10, "> ", Box::new(buf.clone()));
+
+        // Warm up — make sure redraw thread has done its first cycle.
+        handle.redraw_sync();
+
+        let barrier = Arc::new(std::sync::Barrier::new(4));
+        let threads: Vec<_> = (0..4)
+            .map(|_| {
+                let h = handle.clone();
+                let b = barrier.clone();
+                thread::spawn(move || {
+                    b.wait();
+                    h.redraw_sync();
+                })
+            })
+            .collect();
+
+        for t in threads {
+            t.join().expect("redraw_sync thread panicked");
+        }
+    }
+
+    /// A writer that can block on flush() and counts completed
+    /// flushes. Each flush corresponds to one render cycle.
+    #[derive(Clone)]
+    struct GatedWriter {
+        inner: Arc<Mutex<GatedWriterInner>>,
+        condvar: Arc<std::sync::Condvar>,
+    }
+
+    struct GatedWriterInner {
+        /// When true, flush() blocks until gate is opened.
+        gate_closed: bool,
+        /// The writer is currently blocked inside flush().
+        blocked: bool,
+        /// Total number of flush() calls that have completed.
+        flush_count: u64,
+    }
+
+    impl GatedWriter {
+        fn new() -> Self {
+            Self {
+                inner: Arc::new(Mutex::new(GatedWriterInner {
+                    gate_closed: false,
+                    blocked: false,
+                    flush_count: 0,
+                })),
+                condvar: Arc::new(std::sync::Condvar::new()),
+            }
+        }
+
+        /// Close the gate — the next flush() will block.
+        fn close_gate(&self) {
+            self.inner
+                .lock()
+                .expect("gated writer poisoned")
+                .gate_closed = true;
+        }
+
+        /// Block until the writer is actually stuck inside flush().
+        fn wait_until_blocked(&self) {
+            let guard = self.inner.lock().expect("gated writer poisoned");
+            let _g = self
+                .condvar
+                .wait_while(guard, |s| !s.blocked)
+                .expect("gated writer poisoned");
+        }
+
+        /// Open the gate — unblocks a stuck flush() and keeps it open.
+        fn open_gate(&self) {
+            let mut s = self.inner.lock().expect("gated writer poisoned");
+            s.gate_closed = false;
+            self.condvar.notify_all();
+        }
+
+        /// How many flush() calls have completed so far.
+        fn flush_count(&self) -> u64 {
+            self.inner
+                .lock()
+                .expect("gated writer poisoned")
+                .flush_count
+        }
+    }
+
+    impl io::Write for GatedWriter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            let mut s = self.inner.lock().expect("gated writer poisoned");
+            if s.gate_closed {
+                s.blocked = true;
+                self.condvar.notify_all();
+                s = self
+                    .condvar
+                    .wait_while(s, |s| s.gate_closed)
+                    .expect("gated writer poisoned");
+                s.blocked = false;
+            }
+            s.flush_count += 1;
+            self.condvar.notify_all();
+            Ok(())
+        }
+    }
+
+    /// Verify that notifications coalesce: while the redraw thread
+    /// is blocked mid-render, many notifications pile up and produce
+    /// at most one additional render after unblocking.
+    ///
+    /// Uses the gated writer to create deterministic windows where
+    /// notifications must accumulate:
+    ///
+    /// 1. Close gate → trigger render → redraw thread blocks in flush
+    /// 2. Fire N notifications (all coalesce into one pending flag)
+    /// 3. Open gate → blocked render completes → one coalesced render
+    /// 4. redraw_sync settles any remaining async renders
+    ///
+    /// Per round we expect at most 3 flushes (blocked + coalesced +
+    /// sync). Without coalescing we'd see N+2 per round.
+    #[test]
+    fn notifications_coalesce_while_rendering() {
+        let writer = GatedWriter::new();
+        let (_term, handle, _input_tx) = Term::new_virtual(40, 10, "> ", Box::new(writer.clone()));
+
+        // Let the initial render finish so the redraw thread is idle
+        // at recv(). The gate is open, so the render completes.
+        handle.redraw_sync();
+
+        const ROUNDS: usize = 5;
+        const NOTIFICATIONS_PER_ROUND: usize = 10;
+
+        for round in 0..ROUNDS {
+            let before = writer.flush_count();
+
+            // Close the gate so the next render blocks in flush().
+            writer.close_gate();
+
+            // Trigger a render — the redraw thread wakes from recv(),
+            // renders, enters flush(), and blocks.
+            handle.set_buffer(format!("r{round}"), 0);
+            handle.redraw();
+            writer.wait_until_blocked();
+
+            // Redraw thread is stuck in flush. Fire many notifications.
+            // They all coalesce into a single pending flag in the
+            // notify channel.
+            for j in 0..NOTIFICATIONS_PER_ROUND {
+                handle.set_buffer(format!("r{round}-{j}"), 0);
+                handle.redraw();
+            }
+
+            // Open the gate. The blocked flush completes, the loop
+            // picks up the coalesced notification and renders once
+            // more.
+            writer.open_gate();
+
+            // Settle: redraw_sync guarantees at least one render
+            // after this point completes, draining any stragglers.
+            handle.redraw_sync();
+
+            let after = writer.flush_count();
+            let renders = after - before;
+
+            // Without coalescing we'd see NOTIFICATIONS_PER_ROUND + 2
+            // (= 12) renders. With coalescing: the blocked render (1)
+            // + the coalesced render (1) + possibly the sync render
+            // (1) = at most 3.
+            assert!(
+                renders <= 3,
+                "round {round}: expected ≤3 renders, got {renders}. \
+                 Without coalescing this would be {}.",
+                NOTIFICATIONS_PER_ROUND + 2,
+            );
+        }
+    }
+
+    /// Coalescing still works after sync: many async redraws followed
+    /// by a sync should reflect the final state, not spin.
+    #[test]
+    fn coalescing_preserved_after_sync() {
+        let buf = SharedBuffer::new();
+        let mut parser = vt100::Parser::new(10, 40, 0);
+        let (_term, handle, _input_tx) = Term::new_virtual(40, 10, "> ", Box::new(buf.clone()));
+
+        // Fire a bunch of async redraws, then one sync.
+        for i in 0..20 {
+            handle.set_buffer(format!("v{i}"), 2);
+            handle.redraw();
+        }
+        handle.set_buffer("final".into(), 5);
+        flush_redraws(&handle, &buf, &mut parser);
+        assert!(
+            screen_contains(&parser, 40, "> final"),
+            "expected '> final', got: {:?}",
+            vt100_rows(&parser, 40)
         );
     }
 }

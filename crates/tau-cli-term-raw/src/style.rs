@@ -6,6 +6,7 @@
 //! in the data model.
 
 pub use crossterm::style::Color;
+use unicode_width::UnicodeWidthChar;
 
 /// Visual attributes for a single character cell.
 #[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
@@ -62,6 +63,12 @@ impl Cell {
             style: Style::default(),
         }
     }
+
+    /// Display width in terminal columns (1 for ASCII, 2 for wide
+    /// chars like emoji/CJK, 0 for zero-width combiners).
+    pub fn col_width(&self) -> usize {
+        self.ch.width().unwrap_or(0)
+    }
 }
 
 /// A run of text with a uniform style.
@@ -109,9 +116,15 @@ impl StyledText {
         &self.spans
     }
 
-    /// Total display width in characters.
+    /// Total display width in terminal columns.
+    ///
+    /// Wide characters (emoji, CJK) count as 2 columns.
     pub fn char_count(&self) -> usize {
-        self.spans.iter().map(|s| s.text.chars().count()).sum()
+        self.spans
+            .iter()
+            .flat_map(|s| s.text.chars())
+            .map(|ch| ch.width().unwrap_or(0))
+            .sum()
     }
 
     /// Returns `true` if there is no text content.

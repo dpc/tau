@@ -995,6 +995,7 @@ version = "0.1.0"
 dependencies = [
  "crossterm",
  "tau-blocking-notify-channel",
+ "unicode-width",
  "vt100",
 ]
 
