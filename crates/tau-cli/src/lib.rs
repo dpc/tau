@@ -177,7 +177,7 @@ fn run_chat(session_id: &str) -> Result<(), CliError> {
     let (mut term, handle) = HighTerm::new("> ", commands)?;
 
     // Show logo if enabled.
-    let settings = tau_config::settings::load_settings().unwrap_or_default();
+    let settings = tau_config::settings::load_cli_settings().unwrap_or_default();
     if settings.show_logo {
         use tau_cli_term::{Color, Span, Style, StyledBlock, StyledText};
         let now = chrono::Local::now();

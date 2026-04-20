@@ -1,6 +1,9 @@
-//! User settings loaded from `~/.config/tau/settings.json5` with
-//! `.d/` directory overrides, and model registry from
-//! `~/.config/tau/models.json5` with `.d/` overrides.
+//! User settings loaded from `~/.config/tau/` with `.d/` directory
+//! overrides. Three config files:
+//!
+//! - `cli.json5` — CLI display preferences
+//! - `harness.json5` — harness/agent settings (default model, etc.)
+//! - `models.json5` — LLM provider and model registry
 //!
 //! Uses the `config` crate for layered JSON5 loading.
 
@@ -11,27 +14,44 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 
 // ---------------------------------------------------------------------------
-// Settings
+// CLI settings
 // ---------------------------------------------------------------------------
 
-/// Top-level user settings.
+/// CLI display settings loaded from `cli.json5`.
 #[derive(Clone, Debug, Deserialize)]
 #[serde(default)]
-pub struct Settings {
+pub struct CliSettings {
     /// Show a greeting message on startup.
     pub greeting: bool,
     /// Show the tau ASCII logo on startup.
     pub show_logo: bool,
+}
+
+impl Default for CliSettings {
+    fn default() -> Self {
+        Self {
+            greeting: true,
+            show_logo: true,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Harness settings
+// ---------------------------------------------------------------------------
+
+/// Harness/agent settings loaded from `harness.json5`.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default)]
+pub struct HarnessSettings {
     /// Default model provider/model to use (e.g.
     /// "anthropic/claude-sonnet-4-20250514").
     pub default_model: Option<String>,
 }
 
-impl Default for Settings {
+impl Default for HarnessSettings {
     fn default() -> Self {
         Self {
-            greeting: true,
-            show_logo: true,
             default_model: None,
         }
     }
@@ -144,13 +164,22 @@ pub fn config_dir() -> Option<PathBuf> {
     dirs::config_dir().map(|d| d.join("tau"))
 }
 
-/// Loads settings from `~/.config/tau/settings.json5` with
-/// `settings.d/*.json5` overrides.
-pub fn load_settings() -> Result<Settings, SettingsError> {
+/// Loads CLI settings from `~/.config/tau/cli.json5` with
+/// `cli.d/*.json5` overrides.
+pub fn load_cli_settings() -> Result<CliSettings, SettingsError> {
     let Some(dir) = config_dir() else {
-        return Ok(Settings::default());
+        return Ok(CliSettings::default());
     };
-    load_json5_layered(&dir, "settings")
+    load_json5_layered(&dir, "cli")
+}
+
+/// Loads harness settings from `~/.config/tau/harness.json5` with
+/// `harness.d/*.json5` overrides.
+pub fn load_harness_settings() -> Result<HarnessSettings, SettingsError> {
+    let Some(dir) = config_dir() else {
+        return Ok(HarnessSettings::default());
+    };
+    load_json5_layered(&dir, "harness")
 }
 
 /// Loads the model registry from `~/.config/tau/models.json5` with
@@ -169,7 +198,7 @@ fn load_json5_layered<T: for<'de> Deserialize<'de> + Default>(
     dir: &Path,
     name: &str,
 ) -> Result<T, SettingsError> {
-    let base_path = dir.join(format!("{name}.json"));
+    let base_path = dir.join(format!("{name}.json5"));
     let drop_dir = dir.join(format!("{name}.d"));
 
     let mut builder = config::Config::builder();
@@ -189,7 +218,7 @@ fn load_json5_layered<T: for<'de> Deserialize<'de> + Default>(
             .into_iter()
             .flatten()
             .filter_map(|e| e.ok().map(|e| e.path()))
-            .filter(|p| p.extension().is_some_and(|ext| ext == "json"))
+            .filter(|p| p.extension().is_some_and(|ext| ext == "json5"))
             .collect();
         paths.sort();
         for path in paths {
@@ -218,24 +247,40 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_settings_have_greeting_enabled() {
-        let s = Settings::default();
+    fn default_cli_settings_have_logo_enabled() {
+        let s = CliSettings::default();
         assert!(s.greeting);
+        assert!(s.show_logo);
+    }
+
+    #[test]
+    fn default_harness_settings_have_no_model() {
+        let s = HarnessSettings::default();
         assert!(s.default_model.is_none());
     }
 
     #[test]
-    fn settings_load_from_json5_file() {
+    fn cli_settings_load_from_json5_file() {
+        let td = TempDir::new().expect("tempdir");
+        let dir = td.path();
+        std::fs::write(dir.join("cli.json5"), r#"{ greeting: false }"#).expect("write");
+
+        let s: CliSettings = load_json5_layered(dir, "cli").expect("load");
+        assert!(!s.greeting);
+        assert!(s.show_logo); // default
+    }
+
+    #[test]
+    fn harness_settings_load_from_json5_file() {
         let td = TempDir::new().expect("tempdir");
         let dir = td.path();
         std::fs::write(
-            dir.join("settings.json"),
-            r#"{ greeting: false, default_model: "anthropic/claude-sonnet-4-20250514" }"#,
+            dir.join("harness.json5"),
+            r#"{ default_model: "anthropic/claude-sonnet-4-20250514" }"#,
         )
         .expect("write");
 
-        let s: Settings = load_json5_layered(dir, "settings").expect("load");
-        assert!(!s.greeting);
+        let s: HarnessSettings = load_json5_layered(dir, "harness").expect("load");
         assert_eq!(
             s.default_model.as_deref(),
             Some("anthropic/claude-sonnet-4-20250514")
@@ -243,18 +288,18 @@ mod tests {
     }
 
     #[test]
-    fn settings_d_overrides_base() {
+    fn drop_in_overrides_base() {
         let td = TempDir::new().expect("tempdir");
         let dir = td.path();
-        std::fs::write(dir.join("settings.json"), r#"{ greeting: true }"#).expect("write");
-        std::fs::create_dir(dir.join("settings.d")).expect("mkdir");
+        std::fs::write(dir.join("cli.json5"), r#"{ greeting: true }"#).expect("write");
+        std::fs::create_dir(dir.join("cli.d")).expect("mkdir");
         std::fs::write(
-            dir.join("settings.d").join("01-override.json"),
+            dir.join("cli.d").join("01-override.json5"),
             r#"{ greeting: false }"#,
         )
         .expect("write");
 
-        let s: Settings = load_json5_layered(dir, "settings").expect("load");
+        let s: CliSettings = load_json5_layered(dir, "cli").expect("load");
         assert!(!s.greeting);
     }
 
@@ -263,7 +308,7 @@ mod tests {
         let td = TempDir::new().expect("tempdir");
         let dir = td.path();
         std::fs::write(
-            dir.join("models.json"),
+            dir.join("models.json5"),
             r#"{
                 providers: {
                     local: {
@@ -288,8 +333,10 @@ mod tests {
     #[test]
     fn missing_files_return_defaults() {
         let td = TempDir::new().expect("tempdir");
-        let s: Settings = load_json5_layered(td.path(), "settings").expect("load");
+        let s: CliSettings = load_json5_layered(td.path(), "cli").expect("load");
         assert!(s.greeting);
+        let h: HarnessSettings = load_json5_layered(td.path(), "harness").expect("load");
+        assert!(h.default_model.is_none());
         let m: ModelRegistry = load_json5_layered(td.path(), "models").expect("load");
         assert!(m.providers.is_empty());
     }

@@ -8,7 +8,7 @@ mod openai;
 use std::error::Error;
 use std::io::{BufReader, BufWriter, Read, Write};
 
-use tau_config::settings::{self, ModelRegistry, Settings};
+use tau_config::settings::{self, HarnessSettings, ModelRegistry};
 use tau_proto::{
     AgentPromptSubmitted, AgentResponseFinished, AgentResponseUpdated, AgentToolCall, CborValue,
     ClientKind, ContentBlock, ConversationRole, Event, EventName, EventReader, EventSelector,
@@ -112,7 +112,7 @@ enum Backend {
 }
 
 fn resolve_backend() -> Backend {
-    let settings = settings::load_settings().unwrap_or_default();
+    let settings = settings::load_harness_settings().unwrap_or_default();
     let models = settings::load_models().unwrap_or_default();
     if let Some(config) = resolve_llm_config(&settings, &models) {
         Backend::Llm(config)
@@ -121,7 +121,7 @@ fn resolve_backend() -> Backend {
     }
 }
 
-fn resolve_llm_config(settings: &Settings, models: &ModelRegistry) -> Option<OpenAiConfig> {
+fn resolve_llm_config(settings: &HarnessSettings, models: &ModelRegistry) -> Option<OpenAiConfig> {
     let default_model = settings.default_model.as_ref()?;
     let (provider_name, model_id) = default_model.split_once('/')?;
     let provider = models.providers.get(provider_name)?;
@@ -275,7 +275,7 @@ mod tests {
 
     #[test]
     fn no_config_means_deterministic() {
-        let settings = Settings::default();
+        let settings = HarnessSettings::default();
         let models = ModelRegistry::default();
         assert!(resolve_llm_config(&settings, &models).is_none());
     }
