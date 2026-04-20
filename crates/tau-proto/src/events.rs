@@ -66,6 +66,8 @@ pub enum EventName {
     UiPromptSubmitted,
 
     // Session events — facts from the harness session tracker
+    #[serde(rename = "session.prompt_queued")]
+    SessionPromptQueued,
     #[serde(rename = "session.prompt_created")]
     SessionPromptCreated,
 
@@ -101,6 +103,7 @@ impl EventName {
             Self::ExtensionExited => "extension.exited",
             Self::ExtensionRestarting => "extension.restarting",
             Self::UiPromptSubmitted => "ui.prompt_submitted",
+            Self::SessionPromptQueued => "session.prompt_queued",
             Self::SessionPromptCreated => "session.prompt_created",
             Self::AgentPromptSubmitted => "agent.prompt_submitted",
             Self::AgentResponseUpdated => "agent.response_updated",
@@ -138,6 +141,7 @@ impl FromStr for EventName {
             "extension.exited" => Ok(Self::ExtensionExited),
             "extension.restarting" => Ok(Self::ExtensionRestarting),
             "ui.prompt_submitted" => Ok(Self::UiPromptSubmitted),
+            "session.prompt_queued" => Ok(Self::SessionPromptQueued),
             "session.prompt_created" => Ok(Self::SessionPromptCreated),
             "agent.prompt_submitted" => Ok(Self::AgentPromptSubmitted),
             "agent.response_updated" => Ok(Self::AgentResponseUpdated),
@@ -353,6 +357,13 @@ pub struct UiPromptSubmitted {
 // Session events — facts from the harness session tracker
 // ---------------------------------------------------------------------------
 
+/// The harness queued a user prompt because the agent is busy.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct SessionPromptQueued {
+    pub session_id: SessionId,
+    pub text: String,
+}
+
 /// The harness persisted a user prompt and assigned it an ID.
 /// Also carries the assembled conversation context for the agent.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -500,6 +511,8 @@ pub enum Event {
     UiPromptSubmitted(UiPromptSubmitted),
 
     // Session
+    #[serde(rename = "session.prompt_queued")]
+    SessionPromptQueued(SessionPromptQueued),
     #[serde(rename = "session.prompt_created")]
     SessionPromptCreated(SessionPromptCreated),
 
@@ -535,6 +548,7 @@ impl Event {
             Self::ExtensionExited(_) => EventName::ExtensionExited,
             Self::ExtensionRestarting(_) => EventName::ExtensionRestarting,
             Self::UiPromptSubmitted(_) => EventName::UiPromptSubmitted,
+            Self::SessionPromptQueued(_) => EventName::SessionPromptQueued,
             Self::SessionPromptCreated(_) => EventName::SessionPromptCreated,
             Self::AgentPromptSubmitted(_) => EventName::AgentPromptSubmitted,
             Self::AgentResponseUpdated(_) => EventName::AgentResponseUpdated,

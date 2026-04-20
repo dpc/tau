@@ -30,6 +30,7 @@ use tau_core::{
 use tau_proto::{
     AgentResponseFinished, AgentToolCall, ClientKind, ContentBlock, ConversationMessage,
     ConversationRole, DecodeError, Event, EventReader, EventSelector, EventWriter,
+    SessionPromptQueued,
     LifecycleDisconnect, LifecycleHello, LifecycleSubscribe, PROTOCOL_VERSION, ProgressUpdate,
     SessionPromptCreated, ToolDefinition, ToolError, ToolProgress, ToolRegister, ToolRequest,
     ToolResult, UiPromptSubmitted,
@@ -370,6 +371,20 @@ struct Harness {
     prompt_sessions: std::collections::HashMap<String, String>,
     /// Pending agent turn: session_id + remaining tool call IDs.
     pending_agent_turn: Option<PendingAgentTurn>,
+    /// True while the agent is processing a prompt (between
+    /// SessionPromptCreated and the final AgentResponseFinished
+    /// with no tool calls).
+    agent_busy: bool,
+    /// Queued user prompts waiting for the current turn to finish.
+    /// Each entry is (session_id, text) — already persisted in the
+    /// session tree, just waiting for dispatch.
+    //
+    // Future: add a steering queue for mid-turn injection. Steering
+    // messages would be injected after tool-call turns complete but
+    // before the next LLM call, allowing the user to redirect the
+    // agent while it's working. See PI_PROMPT_QUEUEING.md for Pi's
+    // two-tier (steering + follow-up) design.
+    pending_prompts: VecDeque<String>,
     /// Append-only event debug log.
     event_log: Option<EventLog>,
 }
@@ -445,6 +460,8 @@ impl Harness {
             next_session_prompt_id: 0,
             prompt_sessions: std::collections::HashMap::new(),
             pending_agent_turn: None,
+            agent_busy: false,
+            pending_prompts: VecDeque::new(),
             event_log: None,
         };
 
@@ -508,6 +525,8 @@ impl Harness {
             next_session_prompt_id: 0,
             prompt_sessions: std::collections::HashMap::new(),
             pending_agent_turn: None,
+            agent_busy: false,
+            pending_prompts: VecDeque::new(),
             event_log: None,
         };
 
@@ -786,11 +805,33 @@ impl Harness {
             Event::UiPromptSubmitted(prompt) => {
                 self.store
                     .append_user_message(&prompt.session_id, prompt.text.clone())?;
-                // Publish the fact, then assemble and dispatch to agent.
+                // Publish the fact so the UI echoes the user message.
                 let _ = self
                     .bus
                     .publish_from(Some(client_id), Event::UiPromptSubmitted(prompt.clone()));
-                self.send_prompt_to_agent(&prompt.session_id);
+
+                if self.agent_busy {
+                    // Agent is processing — queue for later dispatch.
+                    // The message is already persisted; context will
+                    // be assembled fresh when it's dequeued (so it
+                    // includes the current response).
+                    //
+                    // Future: support "steering" mode where the
+                    // message is injected mid-turn (after the current
+                    // tool calls finish but before the next LLM call)
+                    // rather than waiting for the full turn to end.
+                    self.pending_prompts
+                        .push_back(prompt.session_id.clone());
+                    let _ = self.bus.publish(Event::SessionPromptQueued(
+                        SessionPromptQueued {
+                            session_id: prompt.session_id.clone(),
+                            text: prompt.text.clone(),
+                        },
+                    ));
+                } else {
+                    self.agent_busy = true;
+                    self.send_prompt_to_agent(&prompt.session_id);
+                }
                 Ok(true)
             }
             Event::LifecycleDisconnect(_) => Ok(false),
@@ -977,8 +1018,15 @@ impl Harness {
                 .append_agent_message(&session_id, text.clone())?;
         }
 
-        // Execute tool calls if any.
         if !response.tool_calls.is_empty() {
+            // Tool calls to execute — agent stays busy. After all
+            // tools complete, maybe_complete_agent_turn will send
+            // a new prompt with the results.
+            //
+            // Future: check the steering queue here and inject any
+            // steering messages into the next prompt alongside the
+            // tool results, allowing the user to redirect the agent
+            // mid-turn.
             let call_ids: Vec<String> =
                 response.tool_calls.iter().map(|c| c.id.clone()).collect();
             self.pending_agent_turn = Some(PendingAgentTurn {
@@ -988,9 +1036,25 @@ impl Harness {
             for call in &response.tool_calls {
                 self.execute_agent_tool_call(&session_id, call)?;
             }
+        } else {
+            // No tool calls — turn is done. Dispatch next queued
+            // prompt if any, otherwise mark agent as idle.
+            self.dispatch_next_or_idle(&session_id);
         }
 
         Ok(())
+    }
+
+    /// Dispatches the next queued prompt or marks the agent as idle.
+    fn dispatch_next_or_idle(&mut self, _completed_session_id: &str) {
+        if let Some(session_id) = self.pending_prompts.pop_front() {
+            // Context is assembled fresh here, so it includes all
+            // responses from the just-finished turn.
+            self.send_prompt_to_agent(&session_id);
+            // agent_busy stays true
+        } else {
+            self.agent_busy = false;
+        }
     }
 
     fn maybe_complete_agent_turn(&mut self, completed_call_id: &str) {
@@ -1072,6 +1136,7 @@ impl Harness {
     ) -> Result<InteractionOutcome, HarnessError> {
         self.store
             .append_user_message(session_id.to_owned(), text.to_owned())?;
+        self.agent_busy = true;
         self.send_prompt_to_agent(session_id);
 
         let started_at = Instant::now();

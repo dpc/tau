@@ -250,6 +250,8 @@ fn terminal_input_loop(
 struct EventRenderer {
     handle: tau_cli_term::TermHandle,
     prompt_blocks: HashMap<String, tau_cli_term::BlockId>,
+    /// Block ID of the last user message (for restyling on queue).
+    last_user_block: Option<tau_cli_term::BlockId>,
 }
 
 impl EventRenderer {
@@ -257,6 +259,7 @@ impl EventRenderer {
         Self {
             handle,
             prompt_blocks: HashMap::new(),
+            last_user_block: None,
         }
     }
 
@@ -265,13 +268,30 @@ impl EventRenderer {
 
         match event {
             Event::UiPromptSubmitted(prompt) => {
-                self.handle.print_output(
+                // Render immediately — if queued, SessionPromptQueued
+                // will re-style it.
+                let id = self.handle.print_output(
                     StyledBlock::new(StyledText::from(Span::new(
                         format!("> {}", prompt.text),
                         Style::default().fg(Color::White),
                     )))
                     .bg(Color::Rgb { r: 40, g: 40, b: 55 }),
                 );
+                // Track by session_id so SessionPromptQueued can
+                // restyle it.
+                self.last_user_block = Some(id);
+            }
+            Event::SessionPromptQueued(queued) => {
+                // Restyle the user message block to show it's queued.
+                if let Some(id) = self.last_user_block.take() {
+                    let block = StyledBlock::new(StyledText::from(Span::new(
+                        format!("> {} (queued)", queued.text),
+                        Style::default().fg(Color::DarkGrey),
+                    )))
+                    .bg(Color::Rgb { r: 35, g: 35, b: 40 });
+                    self.handle.set_block(id, block);
+                    self.handle.redraw();
+                }
             }
             Event::SessionPromptCreated(prompt) => {
                 let block = StyledBlock::new(StyledText::from(Span::new(
