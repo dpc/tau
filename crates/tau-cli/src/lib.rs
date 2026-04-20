@@ -149,6 +149,7 @@ fn run_chat(session_id: &str) -> Result<(), CliError> {
                 EventSelector::Prefix("agent.".to_owned()),
                 EventSelector::Prefix("tool.".to_owned()),
                 EventSelector::Prefix("extension.".to_owned()),
+                EventSelector::Prefix("harness.".to_owned()),
             ],
         }))
         .map_err(CliError::Encode)?;
@@ -591,22 +592,12 @@ impl EventRenderer {
                     }),
                 );
             }
-            Event::ExtensionStarting(_)
-            | Event::ExtensionReady(_)
-            | Event::ExtensionExited(_)
-            | Event::ExtensionRestarting(_) => {
-                let text = tau_harness::format_extension_event(event);
-                self.handle.print_output(
-                    StyledBlock::new(StyledText::from(Span::new(
-                        text,
+            Event::HarnessInfo(info) => {
+                self.handle
+                    .print_output(StyledBlock::new(StyledText::from(Span::new(
+                        &info.message,
                         Style::default().fg(Color::DarkGrey),
-                    )))
-                    .bg(Color::Rgb {
-                        r: 30,
-                        g: 30,
-                        b: 30,
-                    }),
-                );
+                    ))));
             }
             Event::LifecycleDisconnect(disconnect) => {
                 let reason = disconnect.reason.as_deref().unwrap_or("disconnected");

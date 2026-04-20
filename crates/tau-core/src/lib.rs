@@ -404,6 +404,7 @@ impl SubscriptionPolicy for DefaultSubscriptionPolicy {
                             || name.starts_with("agent.")
                             || name.starts_with("session.")
                             || name.starts_with("ui.")
+                            || name.starts_with("harness.")
                     }
                     EventSelector::Prefix(prefix) => {
                         prefix.starts_with("message.")
@@ -412,6 +413,7 @@ impl SubscriptionPolicy for DefaultSubscriptionPolicy {
                             || prefix.starts_with("agent.")
                             || prefix.starts_with("session.")
                             || prefix.starts_with("ui.")
+                            || prefix.starts_with("harness.")
                     }
                 };
                 if !allowed {

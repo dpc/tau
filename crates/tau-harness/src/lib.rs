@@ -906,8 +906,10 @@ impl Harness {
         });
         self.extension_statuses
             .insert(extension_name.to_owned(), event.clone());
-        self.lifecycle_messages.push(format_extension_event(&event));
+        let msg = format_extension_event(&event);
+        self.lifecycle_messages.push(msg.clone());
         let _ = self.bus.publish(event);
+        self.emit_info(&msg);
     }
 
     fn emit_extension_ready(&mut self, connection_id: &str) {
@@ -920,8 +922,10 @@ impl Harness {
         });
         self.extension_statuses
             .insert(connection.name, event.clone());
-        self.lifecycle_messages.push(format_extension_event(&event));
+        let msg = format_extension_event(&event);
+        self.lifecycle_messages.push(msg.clone());
         let _ = self.bus.publish(event);
+        self.emit_info(&msg);
     }
 
     fn emit_extension_exited(&mut self, extension_name: &str) {
@@ -932,8 +936,16 @@ impl Harness {
         });
         self.extension_statuses
             .insert(extension_name.to_owned(), event.clone());
-        self.lifecycle_messages.push(format_extension_event(&event));
+        let msg = format_extension_event(&event);
+        self.lifecycle_messages.push(msg.clone());
         let _ = self.bus.publish(event);
+        self.emit_info(&msg);
+    }
+
+    fn emit_info(&mut self, message: &str) {
+        let _ = self.bus.publish(Event::HarnessInfo(tau_proto::HarnessInfo {
+            message: message.to_owned(),
+        }));
     }
 
     fn replay_extension_statuses(&mut self, client_id: &str) -> Result<(), HarnessError> {
@@ -1792,7 +1804,7 @@ pub fn run_harness_daemon(
     // Enable event debug log.
     let log_dir = project_root.join(".tau");
     match harness.enable_event_log(&log_dir) {
-        Ok(path) => eprintln!("event log: {}", path.display()),
+        Ok(path) => harness.emit_info(&format!("event log: {}", path.display())),
         Err(e) => eprintln!("warning: could not create event log: {e}"),
     }
 

@@ -61,6 +61,10 @@ pub enum EventName {
     #[serde(rename = "extension.restarting")]
     ExtensionRestarting,
 
+    // Harness informational messages
+    #[serde(rename = "harness.info")]
+    HarnessInfo,
+
     // UI events — facts from the UI
     #[serde(rename = "ui.prompt_submitted")]
     UiPromptSubmitted,
@@ -102,6 +106,7 @@ impl EventName {
             Self::ExtensionReady => "extension.ready",
             Self::ExtensionExited => "extension.exited",
             Self::ExtensionRestarting => "extension.restarting",
+            Self::HarnessInfo => "harness.info",
             Self::UiPromptSubmitted => "ui.prompt_submitted",
             Self::SessionPromptQueued => "session.prompt_queued",
             Self::SessionPromptCreated => "session.prompt_created",
@@ -140,6 +145,7 @@ impl FromStr for EventName {
             "extension.ready" => Ok(Self::ExtensionReady),
             "extension.exited" => Ok(Self::ExtensionExited),
             "extension.restarting" => Ok(Self::ExtensionRestarting),
+            "harness.info" => Ok(Self::HarnessInfo),
             "ui.prompt_submitted" => Ok(Self::UiPromptSubmitted),
             "session.prompt_queued" => Ok(Self::SessionPromptQueued),
             "session.prompt_created" => Ok(Self::SessionPromptCreated),
@@ -223,6 +229,16 @@ pub struct LifecycleReady {
 pub struct LifecycleDisconnect {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
+// Harness informational messages
+// ---------------------------------------------------------------------------
+
+/// An informational message from the harness displayed to the user.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct HarnessInfo {
+    pub message: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -512,6 +528,10 @@ pub enum Event {
     #[serde(rename = "extension.restarting")]
     ExtensionRestarting(ExtensionRestarting),
 
+    // Harness info
+    #[serde(rename = "harness.info")]
+    HarnessInfo(HarnessInfo),
+
     // UI
     #[serde(rename = "ui.prompt_submitted")]
     UiPromptSubmitted(UiPromptSubmitted),
@@ -553,6 +573,7 @@ impl Event {
             Self::ExtensionReady(_) => EventName::ExtensionReady,
             Self::ExtensionExited(_) => EventName::ExtensionExited,
             Self::ExtensionRestarting(_) => EventName::ExtensionRestarting,
+            Self::HarnessInfo(_) => EventName::HarnessInfo,
             Self::UiPromptSubmitted(_) => EventName::UiPromptSubmitted,
             Self::SessionPromptQueued(_) => EventName::SessionPromptQueued,
             Self::SessionPromptCreated(_) => EventName::SessionPromptCreated,
