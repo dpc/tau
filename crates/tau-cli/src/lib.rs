@@ -297,11 +297,10 @@ impl EventRenderer {
             }
             Event::AgentResponseFinished(finished) => {
                 if let Some(bid) = self.prompt_blocks.remove(&finished.session_prompt_id) {
-                    // Remove the live streaming block entirely and
-                    // print a new permanent history block. Moving
-                    // blocks between zones causes rendering artifacts.
-                    self.handle.remove_above_active(bid);
+                    // Remove the live block (from all zones + storage),
+                    // then print the final text to history.
                     self.handle.remove_block(bid);
+
                     let text = finished.text.as_deref().unwrap_or("");
                     self.handle.print_output(
                         StyledBlock::new(StyledText::from(Span::new(

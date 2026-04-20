@@ -294,6 +294,62 @@ struct ExtensionEntry {
 }
 
 // ---------------------------------------------------------------------------
+// Event debug log
+// ---------------------------------------------------------------------------
+
+/// Append-only JSON event log for debugging.
+struct EventLog {
+    path: PathBuf,
+    file: std::fs::File,
+}
+
+impl EventLog {
+    fn open(dir: &Path) -> Result<Self, HarnessError> {
+        std::fs::create_dir_all(dir)?;
+        let path = dir.join("events.jsonl");
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)?;
+        Ok(Self { path, file })
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+
+    fn log_harness_event(&mut self, harness_event: &HarnessEvent) {
+        use std::io::Write;
+        let entry = match harness_event {
+            HarnessEvent::FromConnection {
+                connection_id,
+                event,
+            } => {
+                let event_json = serde_json::to_value(event).unwrap_or_default();
+                serde_json::json!({
+                    "type": "from_connection",
+                    "connection_id": connection_id,
+                    "event_name": event.name().as_str(),
+                    "event": event_json,
+                })
+            }
+            HarnessEvent::Disconnected { connection_id } => {
+                serde_json::json!({
+                    "type": "disconnected",
+                    "connection_id": connection_id,
+                })
+            }
+            HarnessEvent::NewClient(_) => {
+                serde_json::json!({ "type": "new_client" })
+            }
+        };
+        let _ = serde_json::to_writer(&mut self.file, &entry);
+        let _ = self.file.write_all(b"\n");
+        let _ = self.file.flush();
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Harness
 // ---------------------------------------------------------------------------
 
@@ -314,6 +370,8 @@ struct Harness {
     prompt_sessions: std::collections::HashMap<String, String>,
     /// Pending agent turn: session_id + remaining tool call IDs.
     pending_agent_turn: Option<PendingAgentTurn>,
+    /// Append-only event debug log.
+    event_log: Option<EventLog>,
 }
 
 impl Harness {
@@ -387,6 +445,7 @@ impl Harness {
             next_session_prompt_id: 0,
             prompt_sessions: std::collections::HashMap::new(),
             pending_agent_turn: None,
+            event_log: None,
         };
 
         let n = harness.extensions.len();
@@ -449,6 +508,7 @@ impl Harness {
             next_session_prompt_id: 0,
             prompt_sessions: std::collections::HashMap::new(),
             pending_agent_turn: None,
+            event_log: None,
         };
 
         let n = harness.extensions.len();
@@ -458,6 +518,19 @@ impl Harness {
         }
         harness.wait_for_startup(n)?;
         Ok(harness)
+    }
+
+    fn log_event(&mut self, harness_event: &HarnessEvent) {
+        if let Some(log) = &mut self.event_log {
+            log.log_harness_event(harness_event);
+        }
+    }
+
+    fn enable_event_log(&mut self, dir: &Path) -> Result<PathBuf, HarnessError> {
+        let log = EventLog::open(dir)?;
+        let path = log.path().to_path_buf();
+        self.event_log = Some(log);
+        Ok(path)
     }
 
     // -----------------------------------------------------------------------
@@ -475,6 +548,7 @@ impl Harness {
                 .rx
                 .recv_timeout(remaining)
                 .map_err(|_| HarnessError::StartupTimeout)?;
+            self.log_event(&event);
             match event {
                 HarnessEvent::FromConnection {
                     connection_id,
@@ -513,6 +587,7 @@ impl Harness {
                 break;
             }
             let Ok(event) = self.rx.recv() else { break };
+            self.log_event(&event);
             match event {
                 HarnessEvent::FromConnection {
                     connection_id,
@@ -1009,6 +1084,7 @@ impl Harness {
                 .rx
                 .recv_timeout(remaining)
                 .map_err(|_| HarnessError::ResponseTimeout)?;
+            self.log_event(&event);
             match event {
                 HarnessEvent::FromConnection {
                     connection_id,
@@ -1668,6 +1744,13 @@ pub fn run_harness_daemon(
         .unwrap_or_else(|| project_root.join(".tau").join("policy.cbor"));
 
     let mut harness = Harness::from_config(config, &session_store_path, &policy_store_path)?;
+
+    // Enable event debug log.
+    let log_dir = project_root.join(".tau");
+    match harness.enable_event_log(&log_dir) {
+        Ok(path) => eprintln!("event log: {}", path.display()),
+        Err(e) => eprintln!("warning: could not create event log: {e}"),
+    }
 
     // Write marker AFTER extensions are ready.
     daemon_dir.write_marker()?;
