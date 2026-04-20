@@ -244,6 +244,10 @@
     }
 
     /* Architecture diagram */
+    .arch-narrow {
+      display: none;
+    }
+
     .arch-diagram {
       background: var(--base02);
       border-radius: 6px;
@@ -354,6 +358,14 @@
 
     /* Responsive */
     @media (max-width: 640px) {
+      .arch-wide {
+        display: none;
+      }
+
+      .arch-narrow {
+        display: block;
+      }
+
       .features {
         grid-template-columns: 1fr;
       }
@@ -427,14 +439,26 @@
     <p>All components (UI, harness, LLM API, extensions) run as
       standalone POSIX processes, communicating over stdio.
       No Node. No npm. Just processes, pipes and sockets.</p>
-    <div class="arch-diagram"><code><span class="c">┌─────────┐    unix socket    ┌───────────┐</span>
-<span class="c">│</span><span class="h">   CLI   </span><span class="c">│───────────────────│</span><span class="h">  Harness  </span><span class="c">│</span>
+    <div class="arch-diagram arch-wide"><code><span class="c">┌─────────┐    unix socket    ┌───────────┐</span>
+<span class="c">│</span><span class="h">   cli   </span><span class="c">│───────────────────│</span><span class="h">  harness  </span><span class="c">│</span>
 <span class="c">└─────────┘                   └─────┬─────┘</span>
-<span class="c">                     ┌──────────────┼──────────────┐</span>
+<span class="c">                     ┌─────────┬────┼────┬─────────┐</span>
 <span class="c">                   stdio     stdio     stdio     stdio</span>
 <span class="c">                 ┌───┴───┐ ┌───┴───┐ ┌───┴───┐ ┌───┴───┐</span>
-<span class="c">                 │</span><span class="h"> Agent </span><span class="c">│ │</span><span class="h"> tools </span><span class="c">│ │</span><span class="h">  ext  </span><span class="c">│ │</span><span class="h">  ext  </span><span class="c">│</span>
+<span class="c">                 │</span><span class="h"> agent </span><span class="c">│ │</span><span class="h"> tools </span><span class="c">│ │</span><span class="h">  ext  </span><span class="c">│ │</span><span class="h">  ext  </span><span class="c">│</span>
 <span class="c">                 └───────┘ └───────┘ └───────┘ └───────┘</span></code></div>
+    <div class="arch-diagram arch-narrow"><code><span class="c">    ┌───────┐</span>
+<span class="c">    │</span><span class="h">  cli  </span><span class="c">│</span>
+<span class="c">    └───┬───┘</span>
+<span class="c">        │ unix socket</span>
+<span class="c">   ┌────┴────┐</span>
+<span class="c">   │</span><span class="h"> harness </span><span class="c">│</span>
+<span class="c">   └────┬────┘</span>
+<span class="c">        │</span>
+<span class="c">        ├── </span><span class="h">agent</span><span class="c"> (stdio)</span>
+<span class="c">        ├── </span><span class="h">tools</span><span class="c"> (stdio)</span>
+<span class="c">        ├── </span><span class="h">ext</span><span class="c">   (stdio)</span>
+<span class="c">        └── </span><span class="h">ext</span><span class="c">   (stdio)</span></code></div>
   </section>
 
   <hr class="divider">
