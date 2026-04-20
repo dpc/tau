@@ -278,6 +278,31 @@ fn spawn_writer_thread(
 }
 
 // ---------------------------------------------------------------------------
+// Follower thread — reads from EventLog, filters, sends to writer channel
+// ---------------------------------------------------------------------------
+
+fn spawn_follower_thread(
+    log: std::sync::Arc<EventLog>,
+    mut cursor: tau_core::EventSeq,
+    selectors: std::sync::Arc<std::sync::Mutex<Vec<EventSelector>>>,
+    writer_tx: Sender<Event>,
+) -> JoinHandle<()> {
+    thread::spawn(move || {
+        loop {
+            let entry = log.wait_next_from(cursor);
+            cursor = entry.seq + 1;
+            let sels = selectors.lock().expect("selectors mutex poisoned");
+            if selector_matches_event(&sels, &entry.event) {
+                drop(sels);
+                if writer_tx.send(entry.event).is_err() {
+                    return;
+                }
+            }
+        }
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Extension tracking
 // ---------------------------------------------------------------------------
 
@@ -363,6 +388,9 @@ struct Harness {
     pending_request_sessions: VecDeque<String>,
     pending_tool_sessions: std::collections::HashMap<String, String>,
     event_log: std::sync::Arc<EventLog>,
+    /// Writer channels for socket clients, keyed by connection ID.
+    /// Used to start follower threads for log-based replay + delivery.
+    client_writers: std::collections::HashMap<String, Sender<Event>>,
     lifecycle_messages: Vec<String>,
     extensions: Vec<ExtensionEntry>,
     agent_connection_id: String,
@@ -441,6 +469,7 @@ impl Harness {
             pending_request_sessions: VecDeque::new(),
             pending_tool_sessions: std::collections::HashMap::new(),
             event_log: EventLog::new(),
+            client_writers: std::collections::HashMap::new(),
             lifecycle_messages: Vec::new(),
             agent_connection_id,
             extensions,
@@ -505,6 +534,7 @@ impl Harness {
             pending_request_sessions: VecDeque::new(),
             pending_tool_sessions: std::collections::HashMap::new(),
             event_log: EventLog::new(),
+            client_writers: std::collections::HashMap::new(),
             lifecycle_messages: Vec::new(),
             agent_connection_id,
             extensions,
@@ -650,6 +680,7 @@ impl Harness {
     fn accept_client(&mut self, stream: UnixStream) -> Result<(), HarnessError> {
         let write_stream = stream.try_clone()?;
         let writer_tx = spawn_writer_thread(write_stream, WriterShutdown::CloseStream);
+        let writer_tx_for_follower = writer_tx.clone();
         let conn_id = self.bus.connect(Connection::new(
             ConnectionMetadata {
                 id: String::new(),
@@ -659,6 +690,8 @@ impl Harness {
             },
             Box::new(ChannelSink { tx: writer_tx }),
         ));
+        self.client_writers
+            .insert(conn_id.clone(), writer_tx_for_follower);
         spawn_reader_thread(conn_id, stream, self.tx.clone());
         Ok(())
     }
@@ -744,6 +777,7 @@ impl Harness {
                 Ok(true)
             }
             Event::LifecycleSubscribe(subscribe) => {
+                // Policy check via the bus.
                 match self
                     .bus
                     .set_subscriptions(client_id, subscribe.selectors.clone())
@@ -751,7 +785,7 @@ impl Harness {
                     Ok(()) => {
                         let selectors_for_replay = subscribe.selectors.clone();
                         self.publish_event(Some(client_id), Event::LifecycleSubscribe(subscribe));
-                        self.replay_log_to_client(client_id, &selectors_for_replay)?;
+                        self.replay_harness_info(client_id, &selectors_for_replay);
                         Ok(true)
                     }
                     Err(RouteError::SubscriptionDenied { reason, .. }) => {
@@ -902,27 +936,19 @@ impl Harness {
         );
     }
 
-    /// Replays HarnessInfo events from the event log to a late-joining client.
-    fn replay_log_to_client(
-        &mut self,
-        client_id: &str,
-        selectors: &[EventSelector],
-    ) -> Result<(), HarnessError> {
+    /// Replays HarnessInfo events from the log to a late-joining client.
+    fn replay_harness_info(&mut self, client_id: &str, selectors: &[EventSelector]) {
         let mut cursor = 0;
         while let Some(entry) = self.event_log.get_next_from(cursor) {
             cursor = entry.seq + 1;
-            // Only replay HarnessInfo for now — full conversation replay
-            // will come with follower threads in a later phase.
-            if !matches!(entry.event, Event::HarnessInfo(_)) {
-                continue;
-            }
-            if selector_matches_event(selectors, &entry.event) {
+            if matches!(entry.event, Event::HarnessInfo(_))
+                && selector_matches_event(selectors, &entry.event)
+            {
                 let _ = self
                     .bus
-                    .send_to(client_id, entry.source.as_deref(), entry.event)?;
+                    .send_to(client_id, entry.source.as_deref(), entry.event);
             }
         }
-        Ok(())
     }
 
     // -----------------------------------------------------------------------
