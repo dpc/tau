@@ -66,6 +66,10 @@ and terminal UI are being actively built.
 
 [![asciicast](https://asciinema.org/a/952851.svg)](https://asciinema.org/a/952851)
 
+## License
+
+[Mozilla Public License 2.0](LICENSE)
+
 ## AI usage disclosure
 
 [I use LLMs when working on my projects.](https://dpc.pw/posts/personal-ai-usage-disclosure/),
