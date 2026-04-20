@@ -49,9 +49,10 @@ This architecture has important benefits:
 
 ## Status
 
-Prototyping the core UI part:
+Tau is in early development. The core architecture, event protocol,
+and terminal UI are being actively built.
 
-[![asciicast](https://asciinema.org/a/KCpgTfSOQGEEuWJ1.svg)](https://asciinema.org/a/KCpgTfSOQGEEuWJ1)
+[![asciicast](https://asciinema.org/a/951709.svg)](https://asciinema.org/a/951709)
 
 ## AI usage disclosure
 
