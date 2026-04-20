@@ -524,17 +524,17 @@ impl EventBus {
             .get(connection_id)
             .map(|entry| entry.metadata.clone())
             .ok_or_else(|| RouteError::UnknownConnection {
-                connection_id: connection_id.to_owned(),
+                connection_id: connection_id.into(),
             })?;
         self.subscription_policy
             .evaluate(&metadata, &selectors)
             .map_err(|error| RouteError::SubscriptionDenied {
-                connection_id: connection_id.to_owned(),
+                connection_id: connection_id.into(),
                 reason: error.reason().to_owned(),
             })?;
         let entry = self.connections.get_mut(connection_id).ok_or_else(|| {
             RouteError::UnknownConnection {
-                connection_id: connection_id.to_owned(),
+                connection_id: connection_id.into(),
             }
         })?;
         entry.subscriptions.replace(selectors);
@@ -560,7 +560,7 @@ impl EventBus {
             self.maybe_update_subscriptions(source_id, &event);
         }
 
-        let routed_event = RoutedEvent::new(source_id.map(ToOwned::to_owned), event);
+        let routed_event = RoutedEvent::new(source_id.map(ConnectionId::from), event);
         let mut report = RouteReport::default();
 
         for (connection_id, entry) in &mut self.connections {
@@ -592,24 +592,24 @@ impl EventBus {
         source_id: Option<&str>,
         event: Event,
     ) -> Result<RouteReport, RouteError> {
-        let routed_event = RoutedEvent::new(source_id.map(ToOwned::to_owned), event);
+        let routed_event = RoutedEvent::new(source_id.map(ConnectionId::from), event);
         let entry =
             self.connections
                 .get_mut(target_id)
                 .ok_or_else(|| RouteError::UnknownConnection {
-                    connection_id: target_id.to_owned(),
+                    connection_id: target_id.into(),
                 })?;
 
         let mut report = RouteReport::default();
         if !entry.visibility_filter.allows(&routed_event) {
-            report.blocked_by_filter.push(target_id.to_owned());
+            report.blocked_by_filter.push(target_id.into());
             return Ok(report);
         }
 
         match entry.sink.send(routed_event) {
-            Ok(()) => report.delivered_to.push(target_id.to_owned()),
+            Ok(()) => report.delivered_to.push(target_id.into()),
             Err(error) => report.failed_deliveries.push(DeliveryFailure {
-                connection_id: target_id.to_owned(),
+                connection_id: target_id.into(),
                 error,
             }),
         }
@@ -619,7 +619,7 @@ impl EventBus {
 
     fn allocate_connection_id(&mut self) -> ConnectionId {
         self.next_connection_id += 1;
-        format!("conn-{}", self.next_connection_id)
+        format!("conn-{}", self.next_connection_id).into()
     }
 
     fn maybe_update_subscriptions(&mut self, source_id: &str, event: &Event) {
@@ -727,14 +727,14 @@ impl ToolRegistry {
             existing_provider.tool = tool;
         } else {
             providers.push(ToolProvider {
-                connection_id: connection_id.to_owned(),
+                connection_id: connection_id.into(),
                 tool,
             });
         }
 
         let connection_tools = self
             .tools_by_connection
-            .entry(connection_id.to_owned())
+            .entry(connection_id.into())
             .or_default();
         if !connection_tools.contains(&tool_name) {
             connection_tools.push(tool_name);
@@ -1438,7 +1438,7 @@ pub fn memory_connection(name: impl Into<String>, kind: ClientKind) -> (Connecti
     let inbox = MemoryInbox::default();
     let connection = Connection::new(
         ConnectionMetadata {
-            id: String::new(),
+            id: ConnectionId::default(),
             name: name.into(),
             kind,
             origin: ConnectionOrigin::InMemory,
@@ -1492,7 +1492,7 @@ mod tests {
             .expect("stream clone for writer should succeed");
         let connection = Connection::new(
             ConnectionMetadata {
-                id: String::new(),
+                id: ConnectionId::default(),
                 name: name.to_owned(),
                 kind,
                 origin: ConnectionOrigin::InMemory,
@@ -1525,7 +1525,7 @@ mod tests {
             .expect("ui subscriptions should be stored");
 
         let report = bus.publish(Event::UiPromptSubmitted(UiPromptSubmitted {
-            session_id: "s1".to_owned(),
+            session_id: "s1".into(),
             text: "hello".to_owned(),
         }));
 
@@ -1583,7 +1583,7 @@ mod tests {
                 &ui_id,
                 Some(&tool_id),
                 Event::AgentResponseFinished(AgentResponseFinished {
-                    session_prompt_id: "sp-1".to_owned(),
+                    session_prompt_id: "sp-1".into(),
                     text: Some("hidden".to_owned()),
                     tool_calls: Vec::new(),
                 }),
@@ -1597,8 +1597,8 @@ mod tests {
                 &ui_id,
                 Some(&tool_id),
                 Event::ToolInvoke(tau_proto::ToolInvoke {
-                    call_id: "call-1".to_owned(),
-                    tool_name: "demo.echo".to_owned(),
+                    call_id: "call-1".into(),
+                    tool_name: "demo.echo".into(),
                     arguments: CborValue::Null,
                 }),
             )
@@ -1623,14 +1623,14 @@ mod tests {
             .expect("tool subscriptions should be stored");
 
         let first_report = bus.publish(Event::ToolResult(tau_proto::ToolResult {
-            call_id: "call-1".to_owned(),
-            tool_name: "demo.echo".to_owned(),
+            call_id: "call-1".into(),
+            tool_name: "demo.echo".into(),
             result: CborValue::Text("done".to_owned()),
         }));
         assert_eq!(first_report.delivered_to, vec![tool_id.clone()]);
 
         let second_report = bus.publish(Event::AgentResponseFinished(AgentResponseFinished {
-            session_prompt_id: "sp-1".to_owned(),
+            session_prompt_id: "sp-1".into(),
             text: Some("done".to_owned()),
             tool_calls: Vec::new(),
         }));
@@ -1653,7 +1653,7 @@ mod tests {
         let register_report = registry.register(
             &tool_id,
             ToolSpec {
-                name: "demo.echo".to_owned(),
+                name: "demo.echo".into(),
                 description: Some("Echo a payload".to_owned()),
                 parameters: None,
             },
@@ -1665,8 +1665,8 @@ mod tests {
                 &mut bus,
                 &agent_id,
                 ToolRequest {
-                    call_id: "call-1".to_owned(),
-                    tool_name: "demo.echo".to_owned(),
+                    call_id: "call-1".into(),
+                    tool_name: "demo.echo".into(),
                     arguments: CborValue::Text("hello".to_owned()),
                 },
             )
@@ -1685,8 +1685,8 @@ mod tests {
         assert_eq!(
             delivered_events[0].event,
             Event::ToolInvoke(tau_proto::ToolInvoke {
-                call_id: "call-1".to_owned(),
-                tool_name: "demo.echo".to_owned(),
+                call_id: "call-1".into(),
+                tool_name: "demo.echo".into(),
                 arguments: CborValue::Text("hello".to_owned()),
             })
         );
@@ -1699,7 +1699,7 @@ mod tests {
         let first_report = registry.register(
             "conn-a",
             ToolSpec {
-                name: "demo.echo".to_owned(),
+                name: "demo.echo".into(),
                 description: Some("Echo".to_owned()),
                 parameters: None,
             },
@@ -1709,7 +1709,7 @@ mod tests {
         let second_report = registry.register(
             "conn-b",
             ToolSpec {
-                name: "demo.echo".to_owned(),
+                name: "demo.echo".into(),
                 description: Some("Echo from another provider".to_owned()),
                 parameters: None,
             },
@@ -1718,8 +1718,8 @@ mod tests {
         assert_eq!(
             second_report.warnings[0],
             ToolRegistryWarning::DuplicateRegistration {
-                tool_name: "demo.echo".to_owned(),
-                existing_provider_ids: vec!["conn-a".to_owned()],
+                tool_name: "demo.echo".into(),
+                existing_provider_ids: vec!["conn-a".into()],
             }
         );
 
@@ -1742,7 +1742,7 @@ mod tests {
         registry.register(
             &first_id,
             ToolSpec {
-                name: "demo.echo".to_owned(),
+                name: "demo.echo".into(),
                 description: None,
                 parameters: None,
             },
@@ -1750,7 +1750,7 @@ mod tests {
         registry.register(
             &second_id,
             ToolSpec {
-                name: "demo.echo".to_owned(),
+                name: "demo.echo".into(),
                 description: None,
                 parameters: None,
             },
@@ -1758,7 +1758,7 @@ mod tests {
         registry.register(
             &first_id,
             ToolSpec {
-                name: "demo.upper".to_owned(),
+                name: "demo.upper".into(),
                 description: None,
                 parameters: None,
             },
@@ -1793,7 +1793,7 @@ mod tests {
             "conn-tool",
             ToolRegister {
                 tool: ToolSpec {
-                    name: "demo.echo".to_owned(),
+                    name: "demo.echo".into(),
                     description: Some("Echo".to_owned()),
                     parameters: None,
                 },
@@ -1901,7 +1901,7 @@ mod tests {
                 "session-1",
                 ToolActivityRecord {
                     call_id: "call-1".to_owned(),
-                    tool_name: "fs.read".to_owned(),
+                    tool_name: "fs.read".into(),
                     outcome: ToolActivityOutcome::Result {
                         result: CborValue::Text("README".to_owned()),
                     },
@@ -1919,7 +1919,7 @@ mod tests {
             *branch[1],
             SessionEntry::ToolActivity(ToolActivityRecord {
                 call_id: "call-1".to_owned(),
-                tool_name: "fs.read".to_owned(),
+                tool_name: "fs.read".into(),
                 outcome: ToolActivityOutcome::Result {
                     result: CborValue::Text("README".to_owned()),
                 },
@@ -1933,7 +1933,7 @@ mod tests {
         let inbox = MemoryInbox::default();
         let connection = Connection::new(
             ConnectionMetadata {
-                id: String::new(),
+                id: ConnectionId::default(),
                 name: "socket-ui".to_owned(),
                 kind: ClientKind::Ui,
                 origin: ConnectionOrigin::Socket,
@@ -1968,7 +1968,7 @@ mod tests {
         let inbox = MemoryInbox::default();
         let connection = Connection::new(
             ConnectionMetadata {
-                id: String::new(),
+                id: ConnectionId::default(),
                 name: "socket-ui".to_owned(),
                 kind: ClientKind::Ui,
                 origin: ConnectionOrigin::Socket,
@@ -1999,7 +1999,7 @@ mod tests {
     fn deterministic_agent_and_tool_complete_one_vertical_slice() {
         let tempdir = TempDir::new().expect("tempdir should exist");
         let store_path = tempdir.path().join("session-store.bin");
-        let mut store = SessionStore::open(&store_path).expect("store should open");
+        let _store = SessionStore::open(&store_path).expect("store should open");
         let mut bus = EventBus::new();
         let mut registry = ToolRegistry::new();
 
@@ -2030,7 +2030,7 @@ mod tests {
         let agent_id = bus.connect(agent_connection);
         let tool_id = bus.connect(tool_connection);
 
-        let (ui_connection, ui_inbox) = memory_connection("ui", ClientKind::Ui);
+        let (ui_connection, _ui_inbox) = memory_connection("ui", ClientKind::Ui);
         let ui_id = bus.connect(ui_connection);
         bus.set_subscriptions(
             &ui_id,
@@ -2089,8 +2089,8 @@ mod tests {
         use tau_proto::{ContentBlock, ConversationMessage, ConversationRole, ToolDefinition};
 
         let prompt = SessionPromptCreated {
-            session_prompt_id: "sp-1".to_owned(),
-            session_id: "session-1".to_owned(),
+            session_prompt_id: "sp-1".into(),
+            session_id: "session-1".into(),
             system_prompt: "You are helpful.".to_owned(),
             messages: vec![ConversationMessage {
                 role: ConversationRole::User,
@@ -2128,8 +2128,8 @@ mod tests {
                 &mut bus,
                 &agent_id,
                 tau_proto::ToolRequest {
-                    call_id: call.id.clone(),
-                    tool_name: call.name.clone(),
+                    call_id: call.id.clone().into(),
+                    tool_name: call.name.clone().into(),
                     arguments: call.arguments.clone(),
                 },
             )
@@ -2146,8 +2146,8 @@ mod tests {
 
         // Send a second prompt with the tool result in history.
         let prompt2 = SessionPromptCreated {
-            session_prompt_id: "sp-2".to_owned(),
-            session_id: "session-1".to_owned(),
+            session_prompt_id: "sp-2".into(),
+            session_id: "session-1".into(),
             system_prompt: "You are helpful.".to_owned(),
             messages: vec![
                 ConversationMessage {
@@ -2222,7 +2222,7 @@ mod tests {
     fn event_log_append_and_get() {
         let log = EventLog::new();
         let seq = log.append(
-            Some("conn-1".to_owned()),
+            Some("conn-1".into()),
             Event::HarnessInfo(tau_proto::HarnessInfo {
                 message: "hello".to_owned(),
             }),
@@ -2232,7 +2232,7 @@ mod tests {
 
         let entry = log.get_next_from(0).expect("entry should exist");
         assert_eq!(entry.seq, 0);
-        assert_eq!(entry.source, Some("conn-1".to_owned()));
+        assert_eq!(entry.source, Some("conn-1".into()));
 
         assert!(log.get_next_from(1).is_none());
     }

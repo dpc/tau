@@ -242,7 +242,7 @@ fn terminal_input_loop(
 
                 if writer
                     .write_event(&Event::UiPromptSubmitted(UiPromptSubmitted {
-                        session_id: session_id.to_owned(),
+                        session_id: session_id.into(),
                         text: text.to_owned(),
                     }))
                     .is_err()
@@ -497,10 +497,10 @@ impl EventRenderer {
                 self.handle.push_above_active(id);
                 self.handle.redraw();
                 self.prompt_blocks
-                    .insert(prompt.session_prompt_id.clone(), id);
+                    .insert(prompt.session_prompt_id.to_string(), id);
             }
             Event::AgentResponseUpdated(update) => {
-                if let Some(&bid) = self.prompt_blocks.get(&update.session_prompt_id) {
+                if let Some(&bid) = self.prompt_blocks.get(update.session_prompt_id.as_str()) {
                     let block = StyledBlock::new(StyledText::from(Span::new(
                         &update.text,
                         Style::default().fg(Color::White),
@@ -515,7 +515,10 @@ impl EventRenderer {
                 }
             }
             Event::AgentResponseFinished(finished) => {
-                if let Some(bid) = self.prompt_blocks.remove(&finished.session_prompt_id) {
+                if let Some(bid) = self
+                    .prompt_blocks
+                    .remove(finished.session_prompt_id.as_str())
+                {
                     self.handle.remove_block(bid);
 
                     let text = finished.text.as_deref().unwrap_or("");
@@ -555,7 +558,7 @@ impl EventRenderer {
                 }
             }
             Event::ToolProgress(progress) => {
-                if self.tool_blocks.contains_key(&progress.call_id) {
+                if self.tool_blocks.contains_key(progress.call_id.as_str()) {
                     // Already tracking this call via a live block;
                     // skip the redundant progress line.
                 } else {
@@ -574,7 +577,7 @@ impl EventRenderer {
                 }
             }
             Event::ToolResult(result) => {
-                if let Some(bid) = self.tool_blocks.remove(&result.call_id) {
+                if let Some(bid) = self.tool_blocks.remove(result.call_id.as_str()) {
                     self.handle.remove_block(bid);
                 }
                 let label = format_tool_completion(&result.tool_name, &result.result, None);
@@ -591,7 +594,7 @@ impl EventRenderer {
                 );
             }
             Event::ToolError(error) => {
-                if let Some(bid) = self.tool_blocks.remove(&error.call_id) {
+                if let Some(bid) = self.tool_blocks.remove(error.call_id.as_str()) {
                     self.handle.remove_block(bid);
                 }
                 let cbor = error.details.as_ref();
@@ -1032,7 +1035,7 @@ mod tests {
 
         // Process all three sequentially, flushing between each.
         for i in 0..3 {
-            let spid = format!("sp-{i}");
+            let spid: tau_proto::SessionPromptId = format!("sp-{i}").into();
             if i > 0 {
                 renderer.handle(&Event::SessionPromptCreated(SessionPromptCreated {
                     session_prompt_id: spid.clone(),

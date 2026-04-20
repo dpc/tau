@@ -23,26 +23,101 @@ pub use events::*;
 /// First protocol version implemented by this crate.
 pub const PROTOCOL_VERSION: u32 = 1;
 
-/// Convenience alias for session identifiers.
-pub type SessionId = String;
+macro_rules! string_newtype {
+    ($(#[$meta:meta])* $name:ident) => {
+        $(#[$meta])*
+        #[derive(Clone, Debug, Default, Eq, PartialEq, Hash, serde::Serialize, serde::Deserialize)]
+        #[serde(transparent)]
+        pub struct $name(String);
 
-/// Convenience alias for tool names.
-pub type ToolName = String;
+        impl $name {
+            pub fn new(s: impl Into<String>) -> Self { Self(s.into()) }
+            pub fn as_str(&self) -> &str { &self.0 }
+            pub fn into_string(self) -> String { self.0 }
+            pub fn is_empty(&self) -> bool { self.0.is_empty() }
+        }
 
-/// Convenience alias for tool call identifiers.
-pub type ToolCallId = String;
+        impl std::ops::Deref for $name {
+            type Target = str;
+            fn deref(&self) -> &str { &self.0 }
+        }
 
-/// Convenience alias for connection identifiers.
-pub type ConnectionId = String;
+        impl std::fmt::Display for $name {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str(&self.0)
+            }
+        }
 
-/// Unique identifier for one prompt within a session.
-pub type SessionPromptId = String;
+        impl From<String> for $name {
+            fn from(s: String) -> Self { Self(s) }
+        }
+
+        impl From<&str> for $name {
+            fn from(s: &str) -> Self { Self(s.to_owned()) }
+        }
+
+        impl PartialEq<str> for $name {
+            fn eq(&self, other: &str) -> bool { self.0 == other }
+        }
+
+        impl PartialEq<&str> for $name {
+            fn eq(&self, other: &&str) -> bool { self.0 == *other }
+        }
+
+        impl PartialEq<String> for $name {
+            fn eq(&self, other: &String) -> bool { self.0 == *other }
+        }
+
+        impl std::borrow::Borrow<str> for $name {
+            fn borrow(&self) -> &str { &self.0 }
+        }
+
+        impl AsRef<str> for $name {
+            fn as_ref(&self) -> &str { &self.0 }
+        }
+    };
+}
+
+string_newtype!(/// Session identifier.
+    SessionId);
+string_newtype!(/// Tool name.
+    ToolName);
+string_newtype!(/// Tool call identifier.
+    ToolCallId);
+string_newtype!(/// Connection identifier.
+    ConnectionId);
+string_newtype!(/// Unique identifier for one prompt within a session.
+    SessionPromptId);
+string_newtype!(/// Extension name.
+    ExtensionName);
 
 /// Unique identifier for one extension instance (monotonic counter).
-pub type ExtensionInstanceId = u64;
+#[derive(
+    Clone, Copy, Debug, Default, Eq, PartialEq, Hash, serde::Serialize, serde::Deserialize,
+)]
+#[serde(transparent)]
+pub struct ExtensionInstanceId(u64);
 
-/// Convenience alias for extension identifiers.
-pub type ExtensionName = String;
+impl ExtensionInstanceId {
+    pub fn new(v: u64) -> Self {
+        Self(v)
+    }
+    pub fn get(self) -> u64 {
+        self.0
+    }
+}
+
+impl std::fmt::Display for ExtensionInstanceId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl From<u64> for ExtensionInstanceId {
+    fn from(v: u64) -> Self {
+        Self(v)
+    }
+}
 
 /// CBOR serialization error used by [`encode_event`] and [`EventWriter`].
 pub type EncodeError = ciborium::ser::Error<std::io::Error>;
@@ -184,35 +259,35 @@ mod tests {
             }),
             Event::ToolRegister(ToolRegister {
                 tool: ToolSpec {
-                    name: "demo.echo".to_owned(),
+                    name: "demo.echo".into(),
                     description: Some("Echo a payload".to_owned()),
                     parameters: None,
                 },
             }),
             Event::ToolRequest(ToolRequest {
-                call_id: "call-1".to_owned(),
-                tool_name: "demo.echo".to_owned(),
+                call_id: "call-1".into(),
+                tool_name: "demo.echo".into(),
                 arguments: CborValue::Text("hello".to_owned()),
             }),
             Event::ToolInvoke(ToolInvoke {
-                call_id: "call-1".to_owned(),
-                tool_name: "demo.echo".to_owned(),
+                call_id: "call-1".into(),
+                tool_name: "demo.echo".into(),
                 arguments: CborValue::Text("hello".to_owned()),
             }),
             Event::ToolResult(ToolResult {
-                call_id: "call-1".to_owned(),
-                tool_name: "demo.echo".to_owned(),
+                call_id: "call-1".into(),
+                tool_name: "demo.echo".into(),
                 result: CborValue::Text("hello".to_owned()),
             }),
             Event::ToolError(ToolError {
-                call_id: "call-1".to_owned(),
-                tool_name: "missing.tool".to_owned(),
+                call_id: "call-1".into(),
+                tool_name: "missing.tool".into(),
                 message: "no live provider".to_owned(),
                 details: None,
             }),
             Event::ToolProgress(ToolProgress {
-                call_id: "call-1".to_owned(),
-                tool_name: "shell.exec".to_owned(),
+                call_id: "call-1".into(),
+                tool_name: "shell.exec".into(),
                 message: Some("running".to_owned()),
                 progress: Some(ProgressUpdate {
                     current: Some(1),
@@ -220,12 +295,12 @@ mod tests {
                 }),
             }),
             Event::UiPromptSubmitted(UiPromptSubmitted {
-                session_id: "s1".to_owned(),
+                session_id: "s1".into(),
                 text: "hello".to_owned(),
             }),
             Event::SessionPromptCreated(SessionPromptCreated {
-                session_prompt_id: "sp-1".to_owned(),
-                session_id: "s1".to_owned(),
+                session_prompt_id: "sp-1".into(),
+                session_id: "s1".into(),
                 system_prompt: "You are helpful.".to_owned(),
                 messages: vec![ConversationMessage {
                     role: ConversationRole::User,
@@ -240,30 +315,30 @@ mod tests {
                 }],
             }),
             Event::AgentResponseFinished(AgentResponseFinished {
-                session_prompt_id: "sp-1".to_owned(),
+                session_prompt_id: "sp-1".into(),
                 text: Some("Hi there".to_owned()),
                 tool_calls: Vec::new(),
             }),
             Event::ExtensionStarting(ExtensionStarting {
-                instance_id: 1,
-                extension_name: "fs".to_owned(),
+                instance_id: 1.into(),
+                extension_name: "fs".into(),
                 pid: Some(1234),
             }),
             Event::ExtensionReady(ExtensionReady {
-                instance_id: 1,
-                extension_name: "fs".to_owned(),
+                instance_id: 1.into(),
+                extension_name: "fs".into(),
                 pid: Some(1234),
             }),
             Event::ExtensionExited(ExtensionExited {
-                instance_id: 1,
-                extension_name: "fs".to_owned(),
+                instance_id: 1.into(),
+                extension_name: "fs".into(),
                 pid: Some(1234),
                 exit_code: Some(0),
                 signal: None,
             }),
             Event::ExtensionRestarting(ExtensionRestarting {
-                instance_id: 1,
-                extension_name: "fs".to_owned(),
+                instance_id: 1.into(),
+                extension_name: "fs".into(),
                 pid: Some(1234),
                 attempt: 2,
                 reason: Some("hot reload".to_owned()),

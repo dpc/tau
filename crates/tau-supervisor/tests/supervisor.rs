@@ -15,7 +15,7 @@ fn test_child_path() -> PathBuf {
 #[test]
 fn supervised_child_exchanges_protocol_events_over_stdio() {
     let command = ExtensionCommand {
-        name: "test-child".to_owned(),
+        name: "test-child".into(),
         program: test_child_path(),
         args: Vec::new(),
     };
@@ -23,10 +23,10 @@ fn supervised_child_exchanges_protocol_events_over_stdio() {
 
     assert_eq!(child.command(), &command);
     assert_eq!(
-        child.command().starting_event(42, Some(child.pid())),
+        child.command().starting_event(42.into(), Some(child.pid())),
         Event::ExtensionStarting(tau_proto::ExtensionStarting {
-            instance_id: 42,
-            extension_name: "test-child".to_owned(),
+            instance_id: 42.into(),
+            extension_name: "test-child".into(),
             pid: Some(child.pid()),
         })
     );
@@ -63,10 +63,10 @@ fn supervised_child_exchanges_protocol_events_over_stdio() {
         })
     );
     assert_eq!(
-        child.ready_event(42, Some(child.pid())),
+        child.ready_event(42.into(), Some(child.pid())),
         Event::ExtensionReady(tau_proto::ExtensionReady {
-            instance_id: 42,
-            extension_name: "test-child".to_owned(),
+            instance_id: 42.into(),
+            extension_name: "test-child".into(),
             pid: Some(child.pid()),
         })
     );
@@ -79,7 +79,7 @@ fn supervised_child_exchanges_protocol_events_over_stdio() {
         register,
         Event::ToolRegister(ToolRegister {
             tool: tau_proto::ToolSpec {
-                name: "demo.echo".to_owned(),
+                name: "demo.echo".into(),
                 description: Some("Echo test payloads".to_owned()),
                 parameters: None,
             },
@@ -88,8 +88,8 @@ fn supervised_child_exchanges_protocol_events_over_stdio() {
 
     child
         .send(&Event::ToolInvoke(ToolInvoke {
-            call_id: "call-1".to_owned(),
-            tool_name: "demo.echo".to_owned(),
+            call_id: "call-1".into(),
+            tool_name: "demo.echo".into(),
             arguments: CborValue::Text("hello".to_owned()),
         }))
         .expect("tool invoke should be sent");
@@ -100,8 +100,8 @@ fn supervised_child_exchanges_protocol_events_over_stdio() {
     assert_eq!(
         result,
         Event::ToolResult(tau_proto::ToolResult {
-            call_id: "call-1".to_owned(),
-            tool_name: "demo.echo".to_owned(),
+            call_id: "call-1".into(),
+            tool_name: "demo.echo".into(),
             result: CborValue::Text("hello".to_owned()),
         })
     );
@@ -116,10 +116,10 @@ fn supervised_child_exchanges_protocol_events_over_stdio() {
         .expect("child should exit");
     assert_eq!(exit.exit_code, Some(0));
     assert_eq!(
-        child.exited_event(42, None, &exit),
+        child.exited_event(42.into(), None, &exit),
         Event::ExtensionExited(tau_proto::ExtensionExited {
-            instance_id: 42,
-            extension_name: "test-child".to_owned(),
+            instance_id: 42.into(),
+            extension_name: "test-child".into(),
             pid: None,
             exit_code: Some(0),
             signal: None,
@@ -130,7 +130,7 @@ fn supervised_child_exchanges_protocol_events_over_stdio() {
 #[test]
 fn disconnect_cleanup_removes_registered_tools_after_child_exit() {
     let command = ExtensionCommand {
-        name: "test-child".to_owned(),
+        name: "test-child".into(),
         program: test_child_path(),
         args: Vec::new(),
     };
@@ -171,15 +171,18 @@ fn disconnect_cleanup_removes_registered_tools_after_child_exit() {
     let exit = child
         .wait_for_exit(Duration::from_secs(2))
         .expect("child should exit");
-    let cleanup = child.cleanup_disconnect(0, None, &mut registry, connection_id, &exit);
+    let cleanup = child.cleanup_disconnect(0.into(), None, &mut registry, connection_id, &exit);
 
-    assert_eq!(cleanup.removed_tools, vec!["demo.echo".to_owned()]);
+    assert_eq!(
+        cleanup.removed_tools,
+        vec![tau_proto::ToolName::from("demo.echo")]
+    );
     assert!(registry.providers_for("demo.echo").is_empty());
     assert_eq!(
         cleanup.lifecycle_event,
         Event::ExtensionExited(tau_proto::ExtensionExited {
-            instance_id: 0,
-            extension_name: "test-child".to_owned(),
+            instance_id: 0.into(),
+            extension_name: "test-child".into(),
             pid: None,
             exit_code: Some(0),
             signal: None,
@@ -190,7 +193,7 @@ fn disconnect_cleanup_removes_registered_tools_after_child_exit() {
 #[test]
 fn restarted_child_can_reregister_after_disconnect_cleanup() {
     let command = ExtensionCommand {
-        name: "test-child".to_owned(),
+        name: "test-child".into(),
         program: test_child_path(),
         args: Vec::new(),
     };
@@ -231,8 +234,11 @@ fn restarted_child_can_reregister_after_disconnect_cleanup() {
         let exit = child
             .wait_for_exit(Duration::from_secs(2))
             .expect("child should exit");
-        let cleanup = child.cleanup_disconnect(0, None, &mut registry, connection_id, &exit);
-        assert_eq!(cleanup.removed_tools, vec!["demo.echo".to_owned()]);
+        let cleanup = child.cleanup_disconnect(0.into(), None, &mut registry, connection_id, &exit);
+        assert_eq!(
+            cleanup.removed_tools,
+            vec![tau_proto::ToolName::from("demo.echo")]
+        );
         assert!(registry.providers_for("demo.echo").is_empty());
     }
 }

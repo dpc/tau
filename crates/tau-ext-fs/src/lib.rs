@@ -47,12 +47,12 @@ where
     }))?;
     for tool in [
         ToolSpec {
-            name: DEMO_ECHO_TOOL_NAME.to_owned(),
+            name: DEMO_ECHO_TOOL_NAME.into(),
             description: Some("Echo the provided payload unchanged".to_owned()),
             parameters: None,
         },
         ToolSpec {
-            name: FS_READ_TOOL_NAME.to_owned(),
+            name: FS_READ_TOOL_NAME.into(),
             description: Some(
                 "Read the contents of a file. Returns the file path and text content. \
                  Use this instead of shell commands like cat or head."
@@ -70,7 +70,7 @@ where
             })),
         },
         ToolSpec {
-            name: FS_WRITE_TOOL_NAME.to_owned(),
+            name: FS_WRITE_TOOL_NAME.into(),
             description: Some(
                 "Write content to a file, creating it if it does not exist. \
                  Returns the path and bytes written."
@@ -92,7 +92,7 @@ where
             })),
         },
         ToolSpec {
-            name: SHELL_EXEC_TOOL_NAME.to_owned(),
+            name: SHELL_EXEC_TOOL_NAME.into(),
             description: Some(
                 "Execute a bash command in the current working directory. \
                  Returns stdout, stderr, and exit status. \
@@ -434,8 +434,8 @@ mod tests {
 
         writer
             .write_event(&Event::ToolInvoke(ToolInvoke {
-                call_id: "call-1".to_owned(),
-                tool_name: FS_READ_TOOL_NAME.to_owned(),
+                call_id: "call-1".into(),
+                tool_name: FS_READ_TOOL_NAME.into(),
                 arguments: CborValue::Map(vec![(
                     CborValue::Text("path".to_owned()),
                     CborValue::Text(file_path.display().to_string()),
@@ -469,8 +469,8 @@ mod tests {
 
         writer
             .write_event(&Event::ToolInvoke(ToolInvoke {
-                call_id: "call-1".to_owned(),
-                tool_name: FS_READ_TOOL_NAME.to_owned(),
+                call_id: "call-1".into(),
+                tool_name: FS_READ_TOOL_NAME.into(),
                 arguments: CborValue::Map(vec![(
                     CborValue::Text("path".to_owned()),
                     CborValue::Text("/definitely/missing/file.txt".to_owned()),
@@ -503,8 +503,8 @@ mod tests {
 
         writer
             .write_event(&Event::ToolInvoke(ToolInvoke {
-                call_id: "call-1".to_owned(),
-                tool_name: FS_WRITE_TOOL_NAME.to_owned(),
+                call_id: "call-1".into(),
+                tool_name: FS_WRITE_TOOL_NAME.into(),
                 arguments: CborValue::Map(vec![
                     (
                         CborValue::Text("path".to_owned()),
@@ -547,8 +547,8 @@ mod tests {
 
         writer
             .write_event(&Event::ToolInvoke(ToolInvoke {
-                call_id: "call-1".to_owned(),
-                tool_name: FS_WRITE_TOOL_NAME.to_owned(),
+                call_id: "call-1".into(),
+                tool_name: FS_WRITE_TOOL_NAME.into(),
                 arguments: CborValue::Map(vec![
                     (
                         CborValue::Text("path".to_owned()),
@@ -585,8 +585,8 @@ mod tests {
 
         writer
             .write_event(&Event::ToolInvoke(ToolInvoke {
-                call_id: "call-1".to_owned(),
-                tool_name: SHELL_EXEC_TOOL_NAME.to_owned(),
+                call_id: "call-1".into(),
+                tool_name: SHELL_EXEC_TOOL_NAME.into(),
                 arguments: CborValue::Map(vec![(
                     CborValue::Text("command".to_owned()),
                     CborValue::Text("printf hello".to_owned()),
@@ -623,8 +623,8 @@ mod tests {
 
         writer
             .write_event(&Event::ToolInvoke(ToolInvoke {
-                call_id: "call-1".to_owned(),
-                tool_name: SHELL_EXEC_TOOL_NAME.to_owned(),
+                call_id: "call-1".into(),
+                tool_name: SHELL_EXEC_TOOL_NAME.into(),
                 arguments: CborValue::Map(vec![(
                     CborValue::Text("command".to_owned()),
                     CborValue::Text("exit 7".to_owned()),

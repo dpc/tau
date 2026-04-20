@@ -153,7 +153,7 @@ fn handle_llm<W: Write>(
 
     match openai::chat_completion_stream(config, &request, |text_so_far| {
         let _ = writer.write_event(&Event::AgentResponseUpdated(AgentResponseUpdated {
-            session_prompt_id: session_prompt_id.to_owned(),
+            session_prompt_id: session_prompt_id.into(),
             text: text_so_far.to_owned(),
         }));
         let _ = writer.flush();
@@ -165,7 +165,7 @@ fn handle_llm<W: Write>(
                 Some(state.text.clone())
             };
             writer.write_event(&Event::AgentResponseFinished(AgentResponseFinished {
-                session_prompt_id: session_prompt_id.to_owned(),
+                session_prompt_id: session_prompt_id.into(),
                 text,
                 tool_calls: state.into_tool_calls(),
             }))?;
@@ -173,7 +173,7 @@ fn handle_llm<W: Write>(
         }
         Err(error) => {
             writer.write_event(&Event::AgentResponseFinished(AgentResponseFinished {
-                session_prompt_id: session_prompt_id.to_owned(),
+                session_prompt_id: session_prompt_id.into(),
                 text: Some(format!("LLM error: {error}")),
                 tool_calls: Vec::new(),
             }))?;

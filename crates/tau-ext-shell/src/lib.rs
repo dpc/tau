@@ -40,7 +40,7 @@ where
     }))?;
     writer.write_event(&Event::ToolRegister(ToolRegister {
         tool: ToolSpec {
-            name: SHELL_EXEC_TOOL_NAME.to_owned(),
+            name: SHELL_EXEC_TOOL_NAME.into(),
             description: Some(
                 "Execute a bash command in the current working directory. \
                  Returns stdout, stderr, and exit status. \
@@ -238,8 +238,8 @@ mod tests {
 
         writer
             .write_event(&Event::ToolInvoke(tau_proto::ToolInvoke {
-                call_id: "call-1".to_owned(),
-                tool_name: SHELL_EXEC_TOOL_NAME.to_owned(),
+                call_id: "call-1".into(),
+                tool_name: SHELL_EXEC_TOOL_NAME.into(),
                 arguments: CborValue::Map(vec![(
                     CborValue::Text("command".to_owned()),
                     CborValue::Text("printf hello".to_owned()),
@@ -286,8 +286,8 @@ mod tests {
 
         writer
             .write_event(&Event::ToolInvoke(tau_proto::ToolInvoke {
-                call_id: "call-1".to_owned(),
-                tool_name: SHELL_EXEC_TOOL_NAME.to_owned(),
+                call_id: "call-1".into(),
+                tool_name: SHELL_EXEC_TOOL_NAME.into(),
                 arguments: CborValue::Map(vec![(
                     CborValue::Text("command".to_owned()),
                     CborValue::Text("exit 7".to_owned()),

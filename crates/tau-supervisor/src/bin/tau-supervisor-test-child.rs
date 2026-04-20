@@ -30,7 +30,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 }))?;
                 writer.write_event(&Event::ToolRegister(ToolRegister {
                     tool: ToolSpec {
-                        name: "demo.echo".to_owned(),
+                        name: "demo.echo".into(),
                         description: Some("Echo test payloads".to_owned()),
                         parameters: None,
                     },

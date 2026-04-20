@@ -154,9 +154,14 @@ impl From<ToolRouteError> for HarnessError {
 
 enum HarnessEvent {
     /// Decoded event from any connection (extension or client).
-    FromConnection { connection_id: String, event: Event },
+    FromConnection {
+        connection_id: tau_proto::ConnectionId,
+        event: Event,
+    },
     /// A connection's reader hit EOF or decode error.
-    Disconnected { connection_id: String },
+    Disconnected {
+        connection_id: tau_proto::ConnectionId,
+    },
     /// Socket listener accepted a new client.
     NewClient(UnixStream),
 }
@@ -182,7 +187,7 @@ impl ConnectionSink for ChannelSink {
 // ---------------------------------------------------------------------------
 
 fn spawn_reader_thread(
-    connection_id: String,
+    connection_id: tau_proto::ConnectionId,
     stream: impl io::Read + Send + 'static,
     tx: Sender<HarnessEvent>,
 ) {
@@ -278,31 +283,6 @@ fn spawn_writer_thread(
 }
 
 // ---------------------------------------------------------------------------
-// Follower thread — reads from EventLog, filters, sends to writer channel
-// ---------------------------------------------------------------------------
-
-fn spawn_follower_thread(
-    log: std::sync::Arc<EventLog>,
-    mut cursor: tau_core::EventSeq,
-    selectors: std::sync::Arc<std::sync::Mutex<Vec<EventSelector>>>,
-    writer_tx: Sender<Event>,
-) -> JoinHandle<()> {
-    thread::spawn(move || {
-        loop {
-            let entry = log.wait_next_from(cursor);
-            cursor = entry.seq + 1;
-            let sels = selectors.lock().expect("selectors mutex poisoned");
-            if selector_matches_event(&sels, &entry.event) {
-                drop(sels);
-                if writer_tx.send(entry.event).is_err() {
-                    return;
-                }
-            }
-        }
-    })
-}
-
-// ---------------------------------------------------------------------------
 // Extension tracking
 // ---------------------------------------------------------------------------
 
@@ -315,7 +295,7 @@ struct PendingAgentTurn {
 struct ExtensionEntry {
     name: String,
     instance_id: tau_proto::ExtensionInstanceId,
-    connection_id: String,
+    connection_id: tau_proto::ConnectionId,
     /// PID of supervised child process, or current process for in-process.
     pid: Option<u32>,
     /// In-process extension thread handle (for join on shutdown).
@@ -393,11 +373,11 @@ struct Harness {
     event_log: std::sync::Arc<EventLog>,
     /// Writer channels for socket clients, keyed by connection ID.
     /// Used to start follower threads for log-based replay + delivery.
-    client_writers: std::collections::HashMap<String, Sender<Event>>,
+    client_writers: std::collections::HashMap<tau_proto::ConnectionId, Sender<Event>>,
     lifecycle_messages: Vec<String>,
     extensions: Vec<ExtensionEntry>,
-    agent_connection_id: String,
-    next_instance_id: tau_proto::ExtensionInstanceId,
+    agent_connection_id: tau_proto::ConnectionId,
+    _next_instance_counter: u64,
     next_session_prompt_id: u64,
     /// Maps session_prompt_id → session_id for in-flight prompts.
     prompt_sessions: std::collections::HashMap<String, String>,
@@ -435,7 +415,7 @@ impl Harness {
         let store = SessionStore::open(store_path)?;
 
         let own_pid = std::process::id();
-        let mut next_instance_id: tau_proto::ExtensionInstanceId = 0;
+        let mut _next_instance_counter: u64 = 0;
 
         let mut extensions = Vec::new();
         // Agent
@@ -447,8 +427,8 @@ impl Harness {
             &tx,
         )?;
         let agent_connection_id = conn_id.clone();
-        let iid = next_instance_id;
-        next_instance_id += 1;
+        let iid = tau_proto::ExtensionInstanceId::new(_next_instance_counter);
+        _next_instance_counter += 1;
         extensions.push(ExtensionEntry {
             name: "agent".to_owned(),
             instance_id: iid,
@@ -465,8 +445,8 @@ impl Harness {
             &mut bus,
             &tx,
         )?;
-        let iid = next_instance_id;
-        next_instance_id += 1;
+        let iid = tau_proto::ExtensionInstanceId::new(_next_instance_counter);
+        _next_instance_counter += 1;
         extensions.push(ExtensionEntry {
             name: "tools".to_owned(),
             instance_id: iid,
@@ -488,7 +468,7 @@ impl Harness {
             lifecycle_messages: Vec::new(),
             agent_connection_id,
             extensions,
-            next_instance_id,
+            _next_instance_counter,
             next_session_prompt_id: 0,
             prompt_sessions: std::collections::HashMap::new(),
             pending_agent_turn: None,
@@ -520,7 +500,7 @@ impl Harness {
         let store = SessionStore::open(store_path)?;
 
         let mut extensions = Vec::new();
-        let mut next_instance_id: tau_proto::ExtensionInstanceId = 0;
+        let mut _next_instance_counter: u64 = 0;
         let mut agent_connection_id = None;
 
         for ext_config in &config.extensions {
@@ -534,8 +514,8 @@ impl Harness {
             if kind == ClientKind::Agent {
                 agent_connection_id = Some(conn_id.clone());
             }
-            let iid = next_instance_id;
-            next_instance_id += 1;
+            let iid = tau_proto::ExtensionInstanceId::new(_next_instance_counter);
+            _next_instance_counter += 1;
             extensions.push(ExtensionEntry {
                 name: ext_config.name.clone(),
                 instance_id: iid,
@@ -560,7 +540,7 @@ impl Harness {
             lifecycle_messages: Vec::new(),
             agent_connection_id,
             extensions,
-            next_instance_id,
+            _next_instance_counter,
             next_session_prompt_id: 0,
             prompt_sessions: std::collections::HashMap::new(),
             pending_agent_turn: None,
@@ -588,7 +568,7 @@ impl Harness {
     /// Publishes an event to both the event bus and the event log.
     fn publish_event(&mut self, source: Option<&str>, event: Event) {
         self.event_log
-            .append(source.map(ToOwned::to_owned), event.clone());
+            .append(source.map(tau_proto::ConnectionId::from), event.clone());
         let _ = self.bus.publish_from(source, event);
     }
 
@@ -630,7 +610,7 @@ impl Harness {
                         .bus
                         .connection(&connection_id)
                         .map(|m| m.name.clone())
-                        .unwrap_or_else(|| connection_id.clone());
+                        .unwrap_or_else(|| connection_id.to_string());
                     self.handle_disconnect(&connection_id);
                     return Err(HarnessError::Participant(format!(
                         "{name} disconnected during startup"
@@ -707,7 +687,7 @@ impl Harness {
         let writer_tx_for_follower = writer_tx.clone();
         let conn_id = self.bus.connect(Connection::new(
             ConnectionMetadata {
-                id: String::new(),
+                id: tau_proto::ConnectionId::default(),
                 name: "socket-ui".to_owned(),
                 kind: ClientKind::Ui,
                 origin: ConnectionOrigin::Socket,
@@ -767,13 +747,13 @@ impl Harness {
             }
             Event::ToolResult(result) => {
                 self.persist_tool_result(&result)?;
-                let call_id = result.call_id.clone();
+                let call_id = result.call_id.to_string();
                 self.publish_event(Some(source_id), Event::ToolResult(result));
                 self.maybe_complete_agent_turn(&call_id);
             }
             Event::ToolError(error) => {
                 self.persist_tool_error(&error)?;
-                let call_id = error.call_id.clone();
+                let call_id = error.call_id.to_string();
                 self.publish_event(Some(source_id), Event::ToolError(error));
                 self.maybe_complete_agent_turn(&call_id);
             }
@@ -830,7 +810,7 @@ impl Harness {
 
                 if self.agent_busy {
                     self.pending_prompts
-                        .push_back((prompt.session_id.clone(), prompt.text.clone()));
+                        .push_back((prompt.session_id.to_string(), prompt.text.clone()));
                     self.publish_event(
                         None,
                         Event::SessionPromptQueued(SessionPromptQueued {
@@ -840,7 +820,7 @@ impl Harness {
                     );
                 } else {
                     self.store
-                        .append_user_message(&prompt.session_id, prompt.text.clone())?;
+                        .append_user_message(prompt.session_id.as_str(), prompt.text.clone())?;
                     self.agent_busy = true;
                     self.send_prompt_to_agent(&prompt.session_id);
                 }
@@ -875,11 +855,11 @@ impl Harness {
             .pop_front()
             .unwrap_or_else(|| "default".to_owned());
         self.pending_tool_sessions
-            .insert(request.call_id.clone(), session_id.clone());
+            .insert(request.call_id.to_string(), session_id.clone());
         self.store.append_tool_activity(
             session_id,
             ToolActivityRecord {
-                call_id: request.call_id.clone(),
+                call_id: request.call_id.to_string(),
                 tool_name: request.tool_name.clone(),
                 outcome: ToolActivityOutcome::Requested {
                     arguments: request.arguments.clone(),
@@ -892,12 +872,12 @@ impl Harness {
     fn persist_tool_result(&mut self, result: &ToolResult) -> Result<(), HarnessError> {
         let session_id = self
             .pending_tool_sessions
-            .remove(&result.call_id)
+            .remove(result.call_id.as_str())
             .unwrap_or_else(|| "default".to_owned());
         self.store.append_tool_activity(
             session_id,
             ToolActivityRecord {
-                call_id: result.call_id.clone(),
+                call_id: result.call_id.to_string(),
                 tool_name: result.tool_name.clone(),
                 outcome: ToolActivityOutcome::Result {
                     result: result.result.clone(),
@@ -910,12 +890,12 @@ impl Harness {
     fn persist_tool_error(&mut self, error: &ToolError) -> Result<(), HarnessError> {
         let session_id = self
             .pending_tool_sessions
-            .remove(&error.call_id)
+            .remove(error.call_id.as_str())
             .unwrap_or_else(|| "default".to_owned());
         self.store.append_tool_activity(
             session_id,
             ToolActivityRecord {
-                call_id: error.call_id.clone(),
+                call_id: error.call_id.to_string(),
                 tool_name: error.tool_name.clone(),
                 outcome: ToolActivityOutcome::Error {
                     message: error.message.clone(),
@@ -944,14 +924,14 @@ impl Harness {
         let (iid, pid) = self
             .find_extension_by_name(extension_name)
             .map(|e| (e.instance_id, e.pid))
-            .unwrap_or((0, None));
+            .unwrap_or((0.into(), None));
         self.lifecycle_messages
             .push(format!("extension {extension_name} starting"));
         self.publish_event(
             Some("harness"),
             Event::ExtensionStarting(tau_proto::ExtensionStarting {
                 instance_id: iid,
-                extension_name: extension_name.to_owned(),
+                extension_name: extension_name.into(),
                 pid,
             }),
         );
@@ -970,7 +950,7 @@ impl Harness {
             Some("harness"),
             Event::ExtensionReady(tau_proto::ExtensionReady {
                 instance_id: iid,
-                extension_name: name,
+                extension_name: name.into(),
                 pid,
             }),
         );
@@ -980,14 +960,14 @@ impl Harness {
         let (iid, pid) = self
             .find_extension_by_name(extension_name)
             .map(|e| (e.instance_id, e.pid))
-            .unwrap_or((0, None));
+            .unwrap_or((0.into(), None));
         self.lifecycle_messages
             .push(format!("extension {extension_name} exited"));
         self.publish_event(
             Some("harness"),
             Event::ExtensionExited(tau_proto::ExtensionExited {
                 instance_id: iid,
-                extension_name: extension_name.to_owned(),
+                extension_name: extension_name.into(),
                 pid,
                 exit_code: None,
                 signal: None,
@@ -1048,8 +1028,8 @@ impl Harness {
 
         // Publish SessionPromptCreated — both the agent and UI see it.
         let event = Event::SessionPromptCreated(SessionPromptCreated {
-            session_prompt_id: session_prompt_id.clone(),
-            session_id: session_id.to_owned(),
+            session_prompt_id: session_prompt_id.clone().into(),
+            session_id: session_id.into(),
             system_prompt: build_system_prompt(&tools),
             messages,
             tools,
@@ -1064,7 +1044,7 @@ impl Harness {
             .all_tools()
             .into_iter()
             .map(|spec| ToolDefinition {
-                name: spec.name.clone(),
+                name: spec.name.to_string(),
                 description: spec.description.clone(),
                 parameters: spec.parameters.clone(),
             })
@@ -1077,7 +1057,7 @@ impl Harness {
     ) -> Result<(), HarnessError> {
         let session_id = self
             .prompt_sessions
-            .remove(&response.session_prompt_id)
+            .remove(response.session_prompt_id.as_str())
             .unwrap_or_else(|| "default".to_owned());
 
         // Persist agent text if present.
@@ -1152,7 +1132,7 @@ impl Harness {
             session_id,
             ToolActivityRecord {
                 call_id: call.id.clone(),
-                tool_name: call.name.clone(),
+                tool_name: call.name.clone().into(),
                 outcome: ToolActivityOutcome::Requested {
                     arguments: call.arguments.clone(),
                 },
@@ -1161,8 +1141,8 @@ impl Harness {
 
         // Route to tool provider.
         let request = ToolRequest {
-            call_id: call.id.clone(),
-            tool_name: call.name.clone(),
+            call_id: call.id.clone().into(),
+            tool_name: call.name.clone().into(),
             arguments: call.arguments.clone(),
         };
 
@@ -1177,7 +1157,7 @@ impl Harness {
             Ok(_) => {}
             Err(ToolRouteError::NoProvider { tool_name }) => {
                 let error = ToolError {
-                    call_id: call.id.clone(),
+                    call_id: call.id.clone().into(),
                     tool_name,
                     message: "no live provider available".to_owned(),
                     details: None,
@@ -1301,7 +1281,7 @@ fn spawn_in_process<F>(
     run: F,
     bus: &mut EventBus,
     tx: &Sender<HarnessEvent>,
-) -> Result<(String, JoinHandle<Result<(), String>>), HarnessError>
+) -> Result<(tau_proto::ConnectionId, JoinHandle<Result<(), String>>), HarnessError>
 where
     F: FnOnce(UnixStream, UnixStream) -> Result<(), String> + Send + 'static,
 {
@@ -1313,7 +1293,7 @@ where
     let writer_tx = spawn_writer_thread(harness_write, WriterShutdown::CloseStream);
     let conn_id = bus.connect(Connection::new(
         ConnectionMetadata {
-            id: String::new(),
+            id: tau_proto::ConnectionId::default(),
             name: name.to_owned(),
             kind,
             origin: ConnectionOrigin::Supervised,
@@ -1332,7 +1312,7 @@ fn spawn_supervised(
     kind: ClientKind,
     bus: &mut EventBus,
     tx: &Sender<HarnessEvent>,
-) -> Result<(String, u32), HarnessError> {
+) -> Result<(tau_proto::ConnectionId, u32), HarnessError> {
     let mut child = Command::new(&config.command)
         .args(&config.args)
         .stdin(Stdio::piped())
@@ -1354,7 +1334,7 @@ fn spawn_supervised(
     let writer_tx = spawn_writer_thread(stdin, WriterShutdown::KillChild(child));
     let conn_id = bus.connect(Connection::new(
         ConnectionMetadata {
-            id: String::new(),
+            id: tau_proto::ConnectionId::default(),
             name: config.name.clone(),
             kind,
             origin: ConnectionOrigin::Supervised,
@@ -1489,7 +1469,7 @@ fn assemble_conversation(tree: &tau_core::SessionTree) -> Vec<ConversationMessag
                     if let Some(last) = messages.last_mut() {
                         last.content.push(ContentBlock::ToolUse {
                             id: activity.call_id.clone(),
-                            name: activity.tool_name.clone(),
+                            name: activity.tool_name.to_string(),
                             input: arguments.clone(),
                         });
                     }
@@ -1582,7 +1562,7 @@ fn bind_listener(path: &Path) -> Result<UnixListener, HarnessError> {
 /// Formats a tool progress event for display.
 #[must_use]
 pub fn format_tool_progress(progress: &ToolProgress) -> String {
-    let mut text = progress.tool_name.clone();
+    let mut text = progress.tool_name.to_string();
     if let Some(message) = &progress.message {
         text.push_str(": ");
         text.push_str(message);
@@ -1798,7 +1778,7 @@ pub fn send_daemon_message_with_trace(
         ],
     }))?;
     peer.send(&Event::UiPromptSubmitted(UiPromptSubmitted {
-        session_id: session_id.to_owned(),
+        session_id: session_id.into(),
         text: message.to_owned(),
     }))?;
 
