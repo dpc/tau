@@ -3,7 +3,7 @@
 
 pub mod cli;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::io::{self, BufReader, BufWriter};
 use std::os::unix::net::UnixStream;
@@ -249,8 +249,12 @@ fn terminal_input_loop(
 struct EventRenderer {
     handle: tau_cli_term::TermHandle,
     prompt_blocks: HashMap<String, tau_cli_term::BlockId>,
-    /// Block ID of the last user message (for restyling on queue).
+    /// Block ID of the last user message (for moving on queue).
     last_user_block: Option<tau_cli_term::BlockId>,
+    /// Queued user-message blocks (in above_sticky zone).
+    /// When `SessionPromptCreated` fires for a dequeued prompt,
+    /// the first entry is popped and moved back to history.
+    queued_user_blocks: VecDeque<(tau_cli_term::BlockId, String)>,
 }
 
 impl EventRenderer {
@@ -259,6 +263,7 @@ impl EventRenderer {
             handle,
             prompt_blocks: HashMap::new(),
             last_user_block: None,
+            queued_user_blocks: VecDeque::new(),
         }
     }
 
@@ -267,8 +272,8 @@ impl EventRenderer {
 
         match event {
             Event::UiPromptSubmitted(prompt) => {
-                // Render immediately — if queued, SessionPromptQueued
-                // will re-style it.
+                // Render immediately in history. If the agent is busy,
+                // SessionPromptQueued will move it to above_sticky.
                 let id = self.handle.print_output(
                     StyledBlock::new(StyledText::from(Span::new(
                         format!("> {}", prompt.text),
@@ -280,14 +285,14 @@ impl EventRenderer {
                         b: 55,
                     }),
                 );
-                // Track by session_id so SessionPromptQueued can
-                // restyle it.
                 self.last_user_block = Some(id);
             }
             Event::SessionPromptQueued(queued) => {
-                // Restyle the user message block to show it's queued.
+                // Move the user message from history to above_sticky
+                // (below the streaming response) with queued styling.
                 if let Some(id) = self.last_user_block.take() {
-                    let block = StyledBlock::new(StyledText::from(Span::new(
+                    self.handle.remove_block(id);
+                    let queued_block = StyledBlock::new(StyledText::from(Span::new(
                         format!("> {} (queued)", queued.text),
                         Style::default().fg(Color::DarkGrey),
                     )))
@@ -296,11 +301,32 @@ impl EventRenderer {
                         g: 35,
                         b: 40,
                     });
-                    self.handle.set_block(id, block);
+                    let queued_id = self.handle.new_block(queued_block);
+                    self.handle.push_above_sticky(queued_id);
                     self.handle.redraw();
+                    self.queued_user_blocks
+                        .push_back((queued_id, queued.text.clone()));
                 }
             }
             Event::SessionPromptCreated(prompt) => {
+                // If this prompt was previously queued, move its
+                // user-message block from above_sticky back to
+                // history with normal styling.
+                if let Some((queued_id, text)) = self.queued_user_blocks.pop_front() {
+                    self.handle.remove_block(queued_id);
+                    self.handle.print_output(
+                        StyledBlock::new(StyledText::from(Span::new(
+                            format!("> {text}"),
+                            Style::default().fg(Color::White),
+                        )))
+                        .bg(Color::Rgb {
+                            r: 40,
+                            g: 40,
+                            b: 55,
+                        }),
+                    );
+                }
+
                 let block = StyledBlock::new(StyledText::from(Span::new(
                     "...",
                     Style::default().fg(Color::DarkGrey),
@@ -495,7 +521,7 @@ pub fn main_with_args() -> std::process::ExitCode {
 mod tests {
     use std::sync::{Arc, Mutex};
 
-    use tau_cli_term::{Span, StyledBlock, StyledText, TermHandle};
+    use tau_cli_term::TermHandle;
     use tau_cli_term_raw::Term;
     use tau_proto::{
         AgentResponseFinished, AgentResponseUpdated, Event, SessionPromptCreated,
@@ -552,11 +578,7 @@ mod tests {
         (term, handle, vt)
     }
 
-    /// Force a sync redraw. Two syncs guarantee that any async
-    /// redraws triggered by print_output etc. have completed and
-    /// our final render sees the latest state.
     fn sync(handle: &TermHandle) {
-        handle.redraw_sync();
         handle.redraw_sync();
     }
 
@@ -649,7 +671,7 @@ mod tests {
         sync(&handle);
         assert!(vt.screen_contains(80, "response one"));
 
-        // Second dispatched.
+        // Second dispatched — "(queued)" should be removed.
         renderer.handle(&Event::SessionPromptCreated(SessionPromptCreated {
             session_prompt_id: "sp-1".into(),
             session_id: "s1".into(),
@@ -657,6 +679,18 @@ mod tests {
             messages: Vec::new(),
             tools: Vec::new(),
         }));
+        sync(&handle);
+        assert!(
+            !vt.screen_contains(80, "(queued)"),
+            "queued indicator should be gone after dispatch, got: {:?}",
+            vt.screen_text(80)
+        );
+        assert!(
+            vt.screen_contains(80, "> second"),
+            "dispatched prompt should show normally, got: {:?}",
+            vt.screen_text(80)
+        );
+
         renderer.handle(&Event::AgentResponseUpdated(AgentResponseUpdated {
             session_prompt_id: "sp-1".into(),
             text: "response two".into(),
@@ -795,6 +829,245 @@ mod tests {
             1,
             "response should appear exactly once, got {count}: {:?}",
             vt.screen_text(80)
+        );
+    }
+
+    /// Reproduces the user-reported bug: send 3 prompts during the
+    /// first response's streaming. After all responses complete, the
+    /// prompt must be visible and all 3 responses rendered.
+    #[test]
+    fn three_prompts_during_streaming_all_render_correctly() {
+        let (_term, handle, vt) = setup(80, 24);
+        let mut renderer = EventRenderer::new(handle.clone());
+
+        // User sends first prompt.
+        renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
+            session_id: "s1".into(),
+            text: "hi".into(),
+        }));
+        renderer.handle(&Event::SessionPromptCreated(SessionPromptCreated {
+            session_prompt_id: "sp-0".into(),
+            session_id: "s1".into(),
+            system_prompt: String::new(),
+            messages: Vec::new(),
+            tools: Vec::new(),
+        }));
+
+        // Agent starts streaming response 1.
+        renderer.handle(&Event::AgentResponseUpdated(AgentResponseUpdated {
+            session_prompt_id: "sp-0".into(),
+            text: "Hello".into(),
+        }));
+        sync(&handle);
+        assert!(
+            vt.screen_contains(80, "Hello"),
+            "streaming should show, got: {:?}",
+            vt.screen_text(80)
+        );
+
+        // User sends 2nd and 3rd prompts while streaming.
+        renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
+            session_id: "s1".into(),
+            text: "hi".into(),
+        }));
+        renderer.handle(&Event::SessionPromptQueued(SessionPromptQueued {
+            session_id: "s1".into(),
+            text: "hi".into(),
+        }));
+        renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
+            session_id: "s1".into(),
+            text: "hi".into(),
+        }));
+        renderer.handle(&Event::SessionPromptQueued(SessionPromptQueued {
+            session_id: "s1".into(),
+            text: "hi".into(),
+        }));
+
+        // More streaming updates (multi-line, like a real LLM).
+        renderer.handle(&Event::AgentResponseUpdated(AgentResponseUpdated {
+            session_prompt_id: "sp-0".into(),
+            text: "Hello!\n\nHow can I help you today?".into(),
+        }));
+        sync(&handle);
+
+        // Response 1 finishes.
+        renderer.handle(&Event::AgentResponseFinished(AgentResponseFinished {
+            session_prompt_id: "sp-0".into(),
+            text: Some("Hello!\n\nHow can I help you today?".into()),
+            tool_calls: Vec::new(),
+        }));
+        sync(&handle);
+        assert!(
+            vt.screen_contains(80, "How can I help you today?"),
+            "response 1 should be in history, got: {:?}",
+            vt.screen_text(80)
+        );
+
+        // Second prompt dispatched.
+        renderer.handle(&Event::SessionPromptCreated(SessionPromptCreated {
+            session_prompt_id: "sp-1".into(),
+            session_id: "s1".into(),
+            system_prompt: String::new(),
+            messages: Vec::new(),
+            tools: Vec::new(),
+        }));
+        renderer.handle(&Event::AgentResponseUpdated(AgentResponseUpdated {
+            session_prompt_id: "sp-1".into(),
+            text: "Hello again!\n\nHow can I help you?".into(),
+        }));
+        renderer.handle(&Event::AgentResponseFinished(AgentResponseFinished {
+            session_prompt_id: "sp-1".into(),
+            text: Some("Hello again!\n\nHow can I help you?".into()),
+            tool_calls: Vec::new(),
+        }));
+        sync(&handle);
+        assert!(
+            vt.screen_contains(80, "How can I help you?"),
+            "response 2 should be visible, got: {:?}",
+            vt.screen_text(80)
+        );
+
+        // Third prompt dispatched.
+        renderer.handle(&Event::SessionPromptCreated(SessionPromptCreated {
+            session_prompt_id: "sp-2".into(),
+            session_id: "s1".into(),
+            system_prompt: String::new(),
+            messages: Vec::new(),
+            tools: Vec::new(),
+        }));
+        renderer.handle(&Event::AgentResponseUpdated(AgentResponseUpdated {
+            session_prompt_id: "sp-2".into(),
+            text: "Hi there!\n\nWhat can I help you with?".into(),
+        }));
+        renderer.handle(&Event::AgentResponseFinished(AgentResponseFinished {
+            session_prompt_id: "sp-2".into(),
+            text: Some("Hi there!\n\nWhat can I help you with?".into()),
+            tool_calls: Vec::new(),
+        }));
+        sync(&handle);
+
+        // All three responses should be visible.
+        assert!(
+            vt.screen_contains(80, "How can I help you today?"),
+            "response 1 missing, got: {:?}",
+            vt.screen_text(80)
+        );
+        assert!(
+            vt.screen_contains(80, "How can I help you?"),
+            "response 2 missing, got: {:?}",
+            vt.screen_text(80)
+        );
+        assert!(
+            vt.screen_contains(80, "What can I help you with?"),
+            "response 3 missing, got: {:?}",
+            vt.screen_text(80)
+        );
+
+        // The prompt must be visible at the bottom.
+        assert!(
+            vt.screen_contains(80, "> "),
+            "prompt should be visible after all responses, got: {:?}",
+            vt.screen_text(80)
+        );
+
+        // No stale streaming blocks should remain.
+        assert!(
+            !vt.screen_contains(80, "..."),
+            "no '...' should remain, got: {:?}",
+            vt.screen_text(80)
+        );
+    }
+
+    /// Emoji (wide characters) in responses must not corrupt the
+    /// layout. Each emoji occupies 2 terminal columns; if we count
+    /// them as 1, text after the emoji shifts right and wraps
+    /// incorrectly.
+    #[test]
+    fn emoji_in_response_renders_correctly() {
+        let (_term, handle, vt) = setup(40, 24);
+        let mut renderer = EventRenderer::new(handle.clone());
+
+        renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
+            session_id: "s1".into(),
+            text: "hi".into(),
+        }));
+        renderer.handle(&Event::SessionPromptCreated(SessionPromptCreated {
+            session_prompt_id: "sp-0".into(),
+            session_id: "s1".into(),
+            system_prompt: String::new(),
+            messages: Vec::new(),
+            tools: Vec::new(),
+        }));
+
+        // Response with emoji followed by text on next line.
+        let response = "Hello! 👋\n\nHow can I help you today?";
+        renderer.handle(&Event::AgentResponseUpdated(AgentResponseUpdated {
+            session_prompt_id: "sp-0".into(),
+            text: response.into(),
+        }));
+        renderer.handle(&Event::AgentResponseFinished(AgentResponseFinished {
+            session_prompt_id: "sp-0".into(),
+            text: Some(response.into()),
+            tool_calls: Vec::new(),
+        }));
+        sync(&handle);
+
+        let text = vt.screen_text(40);
+
+        // "Hello! 👋" should be on its own line, not merged with the
+        // next line.
+        assert!(
+            vt.screen_contains(40, "Hello!"),
+            "emoji line missing, got: {:?}",
+            text
+        );
+        // The text after \n\n should start at column 0, not offset.
+        assert!(
+            text.iter().any(|r| r.starts_with("How can I help")),
+            "text after emoji should start at column 0, got: {:?}",
+            text
+        );
+        // Prompt must be visible.
+        assert!(
+            vt.screen_contains(40, "> "),
+            "prompt missing, got: {:?}",
+            text
+        );
+    }
+
+    /// Multiple emoji in a single line must not cause column drift.
+    #[test]
+    fn multiple_emoji_no_column_drift() {
+        let (_term, handle, vt) = setup(40, 24);
+        let mut renderer = EventRenderer::new(handle.clone());
+
+        renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
+            session_id: "s1".into(),
+            text: "hi".into(),
+        }));
+        renderer.handle(&Event::SessionPromptCreated(SessionPromptCreated {
+            session_prompt_id: "sp-0".into(),
+            session_id: "s1".into(),
+            system_prompt: String::new(),
+            messages: Vec::new(),
+            tools: Vec::new(),
+        }));
+
+        // 3 emoji = 6 columns + "end" = 9 columns total.
+        let response = "🎉🎊🎈end\nnext line here";
+        renderer.handle(&Event::AgentResponseFinished(AgentResponseFinished {
+            session_prompt_id: "sp-0".into(),
+            text: Some(response.into()),
+            tool_calls: Vec::new(),
+        }));
+        sync(&handle);
+
+        let text = vt.screen_text(40);
+        // "next line here" should start at column 0.
+        assert!(
+            text.iter().any(|r| r.starts_with("next line here")),
+            "line after emoji should start at col 0, got: {:?}",
+            text
         );
     }
 }
