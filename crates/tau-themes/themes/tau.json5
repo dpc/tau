@@ -1,0 +1,39 @@
+// Built-in "tau" theme.
+//
+// Style names use dot-separated hierarchy:
+//   category.element[.variant]
+{
+  styles: {
+    // -- User input --
+    "user.prompt":          { bold: true },
+    "user.prompt.queued":   { fg: "dark_grey" },
+
+    // -- Agent responses --
+    "agent.response":       {},
+    "agent.pending":        { fg: "dark_grey" },
+
+    // -- Tool execution --
+    "tool.running":         { fg: "dark_cyan" },
+    "tool.result":          { fg: "dark_green" },
+    "tool.error":           { fg: "dark_red" },
+    "tool.progress":        { fg: "dark_yellow" },
+
+    // -- Extensions --
+    "extension.lifecycle":  { fg: "dark_grey" },
+
+    // -- System --
+    "system.info":          { fg: "dark_grey" },
+    "system.disconnect":    { fg: "red", bold: true },
+
+    // -- Model status --
+    "model.status":         { fg: "dark_grey" },
+
+    // -- Completion menu --
+    "completion.label":     { fg: "green" },
+    "completion.desc":      { fg: "dark_grey" },
+    "completion.selected":  { fg: "white", bg: "dark_blue", bold: true },
+
+    // -- Banner --
+    "banner.accent":        { fg: "yellow" },
+  }
+}

@@ -15,6 +15,7 @@ members = [
   "crates/tau-test-support",
   "crates/tau-cli-term-raw",
   "crates/tau-cli-term",
+  "crates/tau-themes",
   "crates/tau",
 ]
 resolver = "2"
@@ -51,6 +52,7 @@ tau-provider = { path = "crates/tau-provider" }
 tau-socket = { path = "crates/tau-socket" }
 tau-supervisor = { path = "crates/tau-supervisor" }
 tau-test-support = { path = "crates/tau-test-support" }
+tau-themes = { path = "crates/tau-themes" }
 
 # External crates
 base64 = "0.22"
