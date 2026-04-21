@@ -177,7 +177,7 @@ fn run_chat(session_id: &str) -> Result<(), CliError> {
         SlashCommand::new("/quit", "Exit the chat session"),
         SlashCommand::new("/model", "Switch model (e.g. /model provider/model-id)"),
     ];
-    let (mut term, handle) = HighTerm::new("> ", commands)?;
+    let (mut term, handle, completion_data) = HighTerm::new("> ", commands)?;
 
     // Show logo if enabled.
     let settings = tau_config::settings::load_cli_settings().unwrap_or_default();
@@ -200,8 +200,9 @@ fn run_chat(session_id: &str) -> Result<(), CliError> {
     // the thread-safe TermHandle.
     let renderer_handle = handle.clone();
     let renderer_rx = event_rx;
+    let renderer_completion_data = completion_data;
     let _renderer = std::thread::spawn(move || {
-        let mut renderer = EventRenderer::new(renderer_handle);
+        let mut renderer = EventRenderer::new(renderer_handle, renderer_completion_data);
         while let Ok(event) = renderer_rx.recv() {
             renderer.handle(&event);
         }
@@ -416,6 +417,7 @@ fn format_shell_completion(details: &CborValue) -> String {
 /// updates. No flags, no suppression — just ID-based lookups.
 struct EventRenderer {
     handle: tau_cli_term::TermHandle,
+    completion_data: tau_cli_term::CompletionData,
     prompt_blocks: HashMap<String, tau_cli_term::BlockId>,
     /// Block ID of the last user message (for moving on queue).
     last_user_block: Option<tau_cli_term::BlockId>,
@@ -431,21 +433,22 @@ struct EventRenderer {
     extension_blocks: HashMap<tau_proto::ExtensionInstanceId, tau_cli_term::BlockId>,
     /// Persistent status bar block showing the current model.
     model_status_block: Option<tau_cli_term::BlockId>,
-    /// Available models for slash-command completion.
-    available_models: Vec<String>,
 }
 
 impl EventRenderer {
-    fn new(handle: tau_cli_term::TermHandle) -> Self {
+    fn new(
+        handle: tau_cli_term::TermHandle,
+        completion_data: tau_cli_term::CompletionData,
+    ) -> Self {
         Self {
             handle,
+            completion_data,
             prompt_blocks: HashMap::new(),
             last_user_block: None,
             queued_user_blocks: VecDeque::new(),
             tool_blocks: HashMap::new(),
             extension_blocks: HashMap::new(),
             model_status_block: None,
-            available_models: Vec::new(),
         }
     }
 
@@ -678,7 +681,15 @@ impl EventRenderer {
                     ))));
             }
             Event::HarnessModelsAvailable(models) => {
-                self.available_models = models.models.clone();
+                let items: Vec<tau_cli_term::CompletionItem> = models
+                    .models
+                    .iter()
+                    .map(|m| tau_cli_term::CompletionItem::plain(m))
+                    .collect();
+                self.completion_data.set_arg_completions(
+                    tau_cli_term::CommandName::new("/model"),
+                    items,
+                );
             }
             Event::HarnessModelSelected(selected) => {
                 let label = if selected.model.is_empty() {
@@ -922,7 +933,7 @@ mod tests {
     #[test]
     fn single_prompt_response_cycle() {
         let (_term, handle, vt) = setup(80, 24);
-        let mut renderer = EventRenderer::new(handle.clone());
+        let mut renderer = EventRenderer::new(handle.clone(), tau_cli_term::CompletionData::new());
 
         // User submits prompt.
         renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
@@ -969,7 +980,7 @@ mod tests {
     #[test]
     fn queued_prompt_renders_after_first_completes() {
         let (_term, handle, vt) = setup(80, 24);
-        let mut renderer = EventRenderer::new(handle.clone());
+        let mut renderer = EventRenderer::new(handle.clone(), tau_cli_term::CompletionData::new());
 
         // First prompt.
         renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
@@ -1065,7 +1076,7 @@ mod tests {
     #[test]
     fn three_queued_prompts_render_sequentially() {
         let (_term, handle, vt) = setup(80, 24);
-        let mut renderer = EventRenderer::new(handle.clone());
+        let mut renderer = EventRenderer::new(handle.clone(), tau_cli_term::CompletionData::new());
 
         // Three rapid prompts.
         for i in 0..3 {
@@ -1136,7 +1147,7 @@ mod tests {
     #[test]
     fn streaming_block_does_not_duplicate_on_finish() {
         let (_term, handle, vt) = setup(80, 24);
-        let mut renderer = EventRenderer::new(handle.clone());
+        let mut renderer = EventRenderer::new(handle.clone(), tau_cli_term::CompletionData::new());
 
         renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
             session_id: "s1".into(),
@@ -1181,7 +1192,7 @@ mod tests {
     #[test]
     fn three_prompts_during_streaming_all_render_correctly() {
         let (_term, handle, vt) = setup(80, 24);
-        let mut renderer = EventRenderer::new(handle.clone());
+        let mut renderer = EventRenderer::new(handle.clone(), tau_cli_term::CompletionData::new());
 
         // User sends first prompt.
         renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
@@ -1331,7 +1342,7 @@ mod tests {
     #[test]
     fn emoji_in_response_renders_correctly() {
         let (_term, handle, vt) = setup(40, 24);
-        let mut renderer = EventRenderer::new(handle.clone());
+        let mut renderer = EventRenderer::new(handle.clone(), tau_cli_term::CompletionData::new());
 
         renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
             session_id: "s1".into(),
@@ -1386,7 +1397,7 @@ mod tests {
     #[test]
     fn multiple_emoji_no_column_drift() {
         let (_term, handle, vt) = setup(40, 24);
-        let mut renderer = EventRenderer::new(handle.clone());
+        let mut renderer = EventRenderer::new(handle.clone(), tau_cli_term::CompletionData::new());
 
         renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
             session_id: "s1".into(),

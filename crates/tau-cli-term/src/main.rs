@@ -14,7 +14,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         SlashCommand::new("/quit", "Exit the application"),
     ];
 
-    let (mut term, handle) = HighTerm::new("> ", commands)?;
+    let (mut term, handle, _completion_data) = HighTerm::new("> ", commands)?;
 
     // Header.
     let header_id = handle.new_block(
