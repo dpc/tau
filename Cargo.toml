@@ -8,6 +8,7 @@ members = [
   "crates/tau-ext-shell",
   "crates/tau-harness",
   "crates/tau-proto",
+  "crates/tau-provider",
   "crates/tau-socket",
   "crates/tau-supervisor",
   "crates/tau-blocking-notify-channel",
@@ -46,16 +47,24 @@ tau-ext-fs = { path = "crates/tau-ext-fs" }
 tau-ext-shell = { path = "crates/tau-ext-shell" }
 tau-harness = { path = "crates/tau-harness" }
 tau-proto = { path = "crates/tau-proto" }
+tau-provider = { path = "crates/tau-provider" }
 tau-socket = { path = "crates/tau-socket" }
 tau-supervisor = { path = "crates/tau-supervisor" }
 tau-test-support = { path = "crates/tau-test-support" }
 
 # External crates
+base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
+comfy-table = "7"
 ciborium = "0.2.2"
 config = { version = "0.15", default-features = false, features = ["json5"] }
+dialoguer = "0.11"
+json5 = "0.4"
+rand = "0.8"
 serde_json = "1"
+sha2 = "0.10"
 ureq = { version = "2", default-features = false }
+url = "2"
 clap = { version = "4", features = ["derive"] }
 crossterm = "0.28"
 unicode-width = "0.2"

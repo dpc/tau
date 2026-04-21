@@ -16,6 +16,7 @@ tau-cli-term.workspace = true
 tau-config.workspace = true
 tau-harness.workspace = true
 tau-proto.workspace = true
+tau-provider.workspace = true
 
 # Still needed for component dispatch
 tau-agent.workspace = true

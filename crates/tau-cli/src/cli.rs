@@ -55,6 +55,13 @@ pub enum Command {
         force: bool,
     },
 
+    /// Manage LLM providers (add, login, list-models)
+    Provider {
+        /// Subcommand and arguments (e.g. add, login [name], list-models [name])
+        #[arg(trailing_var_arg = true)]
+        args: Vec<String>,
+    },
+
     /// Run an internal component as a standalone process (used by the
     /// harness to spawn extensions from the unified binary).
     #[command(hide = true)]

@@ -772,6 +772,9 @@ pub fn main_with_args() -> std::process::ExitCode {
 
             cli::Command::Init { force } => run_init(force),
 
+            cli::Command::Provider { args } => tau_provider::run(&args)
+                .map_err(|e| CliError::Participant(e.to_string())),
+
             cli::Command::Component { name } => {
                 let runner: fn() -> Result<(), Box<dyn std::error::Error>> = match name.as_str() {
                     "agent" => tau_agent::run_stdio,

@@ -78,6 +78,9 @@ pub struct ProviderConfig {
     pub base_url: Option<String>,
     /// API protocol: "anthropic", "openai-completions", etc.
     pub api: Option<String>,
+    /// Authentication method: "api-key" (default when `apiKey` is set),
+    /// "openai-codex", "github-copilot", or "none".
+    pub auth: Option<String>,
     /// API key or environment variable name. Prefix with `!` for
     /// shell command execution (Pi convention).
     #[serde(rename = "apiKey")]
@@ -203,16 +206,18 @@ fn load_json5_layered<T: for<'de> Deserialize<'de> + Default>(
 
     let mut builder = config::Config::builder();
 
-    // Base file (optional).
+    // Base file is optional, but parse errors must surface.
+    // We guard on exists() and use required(true) so a missing file
+    // is fine but a malformed one is an error.
     if base_path.exists() {
         builder = builder.add_source(
             config::File::from(base_path)
                 .format(config::FileFormat::Json5)
-                .required(false),
+                .required(true),
         );
     }
 
-    // Drop-in directory (optional, sorted).
+    // Drop-in files: same — optional to have, but must parse.
     if drop_dir.is_dir() {
         let mut paths: Vec<PathBuf> = std::fs::read_dir(&drop_dir)
             .into_iter()
@@ -225,7 +230,7 @@ fn load_json5_layered<T: for<'de> Deserialize<'de> + Default>(
             builder = builder.add_source(
                 config::File::from(path)
                     .format(config::FileFormat::Json5)
-                    .required(false),
+                    .required(true),
             );
         }
     }
