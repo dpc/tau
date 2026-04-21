@@ -2103,11 +2103,11 @@ mod tests {
                 description: None,
                 parameters: None,
             }],
+            model: None,
         };
         let _ = bus.send_to(&agent_id, None, Event::SessionPromptCreated(prompt));
 
-        // Read events until we get AgentResponseFinished (skip
-        // AgentPromptSubmitted and AgentResponseUpdated).
+        // Without a model, the agent should report an error.
         let response = loop {
             let ev = agent_reader
                 .read_event()
@@ -2117,81 +2117,8 @@ mod tests {
                 break r;
             }
         };
-        assert!(response.text.is_none());
-        assert_eq!(response.tool_calls.len(), 1);
-        let call = &response.tool_calls[0];
-        assert_eq!(call.name, "demo.echo");
-
-        // Route the tool call to the tool provider.
-        let routed = registry
-            .route_tool_request(
-                &mut bus,
-                &agent_id,
-                tau_proto::ToolRequest {
-                    call_id: call.id.clone().into(),
-                    tool_name: call.name.clone().into(),
-                    arguments: call.arguments.clone(),
-                },
-            )
-            .expect("tool request should route");
-        assert_eq!(routed.provider_connection_id, tool_id.clone());
-
-        let result = tool_reader
-            .read_event()
-            .expect("read")
-            .expect("tool result should arrive");
-        let Event::ToolResult(result) = result else {
-            panic!("expected tool result from tool extension");
-        };
-
-        // Send a second prompt with the tool result in history.
-        let prompt2 = SessionPromptCreated {
-            session_prompt_id: "sp-2".into(),
-            session_id: "session-1".into(),
-            system_prompt: "You are helpful.".to_owned(),
-            messages: vec![
-                ConversationMessage {
-                    role: ConversationRole::User,
-                    content: vec![ContentBlock::Text {
-                        text: "hello".to_owned(),
-                    }],
-                },
-                ConversationMessage {
-                    role: ConversationRole::Assistant,
-                    content: vec![ContentBlock::ToolUse {
-                        id: call.id.clone(),
-                        name: call.name.clone(),
-                        input: call.arguments.clone(),
-                    }],
-                },
-                ConversationMessage {
-                    role: ConversationRole::User,
-                    content: vec![ContentBlock::ToolResult {
-                        tool_use_id: call.id.clone(),
-                        content: format!("{:?}", result.result),
-                        is_error: false,
-                    }],
-                },
-            ],
-            tools: vec![ToolDefinition {
-                name: "demo.echo".to_owned(),
-                description: None,
-                parameters: None,
-            }],
-        };
-        let _ = bus.send_to(&agent_id, None, Event::SessionPromptCreated(prompt2));
-
-        let response2 = loop {
-            let ev = agent_reader
-                .read_event()
-                .expect("read")
-                .expect("agent event should arrive");
-            if let Event::AgentResponseFinished(r) = ev {
-                break r;
-            }
-        };
-        assert!(response2.text.is_some());
-        assert!(response2.tool_calls.is_empty());
+        assert!(response.text.as_deref().unwrap_or("").contains("no model"));
+        assert!(response.tool_calls.is_empty());
 
         bus.send_to(
             &agent_id,

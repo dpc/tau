@@ -173,7 +173,10 @@ fn run_chat(session_id: &str) -> Result<(), CliError> {
     });
 
     // Terminal setup.
-    let commands = vec![SlashCommand::new("/quit", "Exit the chat session")];
+    let commands = vec![
+        SlashCommand::new("/quit", "Exit the chat session"),
+        SlashCommand::new("/model", "Switch model (e.g. /model provider/model-id)"),
+    ];
     let (mut term, handle) = HighTerm::new("> ", commands)?;
 
     // Show logo if enabled.
@@ -238,6 +241,22 @@ fn terminal_input_loop(
                 }
                 if text == "/quit" {
                     break;
+                }
+                if let Some(model) = text.strip_prefix("/model ") {
+                    let model = model.trim();
+                    if !model.is_empty() {
+                        let _ = writer.write_event(&Event::UiModelSelect(
+                            tau_proto::UiModelSelect {
+                                model: model.to_owned(),
+                            },
+                        ));
+                        let _ = writer.flush();
+                    }
+                    continue;
+                }
+                if text == "/model" {
+                    // No argument — just a reminder.
+                    continue;
                 }
 
                 if writer
@@ -410,6 +429,10 @@ struct EventRenderer {
     /// Live extension blocks keyed by instance_id. Shown in
     /// above_active while starting, moved to history when ready.
     extension_blocks: HashMap<tau_proto::ExtensionInstanceId, tau_cli_term::BlockId>,
+    /// Persistent status bar block showing the current model.
+    model_status_block: Option<tau_cli_term::BlockId>,
+    /// Available models for slash-command completion.
+    available_models: Vec<String>,
 }
 
 impl EventRenderer {
@@ -421,6 +444,8 @@ impl EventRenderer {
             queued_user_blocks: VecDeque::new(),
             tool_blocks: HashMap::new(),
             extension_blocks: HashMap::new(),
+            model_status_block: None,
+            available_models: Vec::new(),
         }
     }
 
@@ -651,6 +676,31 @@ impl EventRenderer {
                         &info.message,
                         Style::default().fg(Color::DarkGrey),
                     ))));
+            }
+            Event::HarnessModelsAvailable(models) => {
+                self.available_models = models.models.clone();
+            }
+            Event::HarnessModelSelected(selected) => {
+                let label = if selected.model.is_empty() {
+                    "no model selected".to_string()
+                } else {
+                    selected.model.clone()
+                };
+                let block = StyledBlock::new(StyledText::from(Span::new(
+                    label,
+                    Style::default().fg(Color::DarkGrey),
+                )));
+                match self.model_status_block {
+                    Some(bid) => {
+                        self.handle.set_block(bid, block);
+                    }
+                    None => {
+                        let bid = self.handle.new_block(block);
+                        self.handle.push_below(bid);
+                        self.model_status_block = Some(bid);
+                    }
+                }
+                self.handle.redraw();
             }
             Event::LifecycleDisconnect(disconnect) => {
                 let reason = disconnect.reason.as_deref().unwrap_or("disconnected");
@@ -889,6 +939,7 @@ mod tests {
             system_prompt: String::new(),
             messages: Vec::new(),
             tools: Vec::new(),
+            model: None,
         }));
         sync(&handle);
         assert!(vt.screen_contains(80, "..."));
@@ -931,6 +982,7 @@ mod tests {
             system_prompt: String::new(),
             messages: Vec::new(),
             tools: Vec::new(),
+            model: None,
         }));
 
         // Second prompt queued.
@@ -965,6 +1017,7 @@ mod tests {
             system_prompt: String::new(),
             messages: Vec::new(),
             tools: Vec::new(),
+            model: None,
         }));
         sync(&handle);
         assert!(
@@ -1027,6 +1080,7 @@ mod tests {
                     system_prompt: String::new(),
                     messages: Vec::new(),
                     tools: Vec::new(),
+                    model: None,
                 }));
             } else {
                 renderer.handle(&Event::SessionPromptQueued(SessionPromptQueued {
@@ -1046,6 +1100,7 @@ mod tests {
                     system_prompt: String::new(),
                     messages: Vec::new(),
                     tools: Vec::new(),
+                    model: None,
                 }));
             }
             renderer.handle(&Event::AgentResponseUpdated(AgentResponseUpdated {
@@ -1093,6 +1148,7 @@ mod tests {
             system_prompt: String::new(),
             messages: Vec::new(),
             tools: Vec::new(),
+            model: None,
         }));
         renderer.handle(&Event::AgentResponseUpdated(AgentResponseUpdated {
             session_prompt_id: "sp-0".into(),
@@ -1138,6 +1194,7 @@ mod tests {
             system_prompt: String::new(),
             messages: Vec::new(),
             tools: Vec::new(),
+            model: None,
         }));
 
         // Agent starts streaming response 1.
@@ -1197,6 +1254,7 @@ mod tests {
             system_prompt: String::new(),
             messages: Vec::new(),
             tools: Vec::new(),
+            model: None,
         }));
         renderer.handle(&Event::AgentResponseUpdated(AgentResponseUpdated {
             session_prompt_id: "sp-1".into(),
@@ -1221,6 +1279,7 @@ mod tests {
             system_prompt: String::new(),
             messages: Vec::new(),
             tools: Vec::new(),
+            model: None,
         }));
         renderer.handle(&Event::AgentResponseUpdated(AgentResponseUpdated {
             session_prompt_id: "sp-2".into(),
@@ -1284,6 +1343,7 @@ mod tests {
             system_prompt: String::new(),
             messages: Vec::new(),
             tools: Vec::new(),
+            model: None,
         }));
 
         // Response with emoji followed by text on next line.
@@ -1338,6 +1398,7 @@ mod tests {
             system_prompt: String::new(),
             messages: Vec::new(),
             tools: Vec::new(),
+            model: None,
         }));
 
         // 3 emoji = 6 columns + "end" = 9 columns total.

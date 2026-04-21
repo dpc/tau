@@ -8,11 +8,11 @@ mod openai;
 use std::error::Error;
 use std::io::{BufReader, BufWriter, Read, Write};
 
-use tau_config::settings::{self, HarnessSettings, ModelRegistry};
+use tau_config::settings::{self, ModelRegistry, ProviderConfig};
 use tau_proto::{
-    AgentPromptSubmitted, AgentResponseFinished, AgentResponseUpdated, AgentToolCall, CborValue,
-    ClientKind, ContentBlock, ConversationRole, Event, EventName, EventReader, EventSelector,
-    EventWriter, LifecycleHello, LifecycleReady, LifecycleSubscribe, PROTOCOL_VERSION,
+    AgentPromptSubmitted, AgentResponseFinished, AgentResponseUpdated, ClientKind, Event,
+    EventName, EventReader, EventSelector, EventWriter, LifecycleHello, LifecycleReady,
+    LifecycleSubscribe, PROTOCOL_VERSION,
 };
 
 use crate::openai::OpenAiConfig;
@@ -31,7 +31,8 @@ where
     let mut reader = EventReader::new(BufReader::new(reader));
     let mut writer = EventWriter::new(BufWriter::new(writer));
 
-    let backend = resolve_backend();
+    let model_registry = settings::load_models().unwrap_or_default();
+    let auth_store = tau_provider::storage::load().unwrap_or_default();
 
     writer.write_event(&Event::LifecycleHello(LifecycleHello {
         protocol_version: PROTOCOL_VERSION,
@@ -45,16 +46,9 @@ where
         ],
     }))?;
     writer.write_event(&Event::LifecycleReady(LifecycleReady {
-        message: Some(match &backend {
-            Backend::Llm(config) => {
-                format!("agent ready ({}:{})", config.base_url, config.model_id)
-            }
-            Backend::Deterministic => "agent ready (deterministic)".to_owned(),
-        }),
+        message: Some("agent ready".to_owned()),
     }))?;
     writer.flush()?;
-
-    let mut next_call_number = 1_u64;
 
     loop {
         let Some(event) = reader.read_event()? else {
@@ -70,26 +64,26 @@ where
                 }))?;
                 writer.flush()?;
 
-                match &backend {
-                    Backend::Llm(config) => {
-                        handle_llm(&session_prompt_id, config, &prompt, &mut writer)?;
+                // Resolve config from the model specified in the prompt.
+                let config = prompt
+                    .model
+                    .as_deref()
+                    .and_then(|m| resolve_model_config(m, &model_registry, &auth_store));
+
+                match config {
+                    Some(cfg) => {
+                        handle_llm(&session_prompt_id, &cfg, &prompt, &mut writer)?;
                     }
-                    Backend::Deterministic => {
-                        let (text, tool_calls) =
-                            handle_deterministic(&prompt, &mut next_call_number);
-                        if let Some(ref t) = text {
-                            writer.write_event(&Event::AgentResponseUpdated(
-                                AgentResponseUpdated {
-                                    session_prompt_id: session_prompt_id.clone(),
-                                    text: t.clone(),
-                                },
-                            ))?;
-                        }
+                    None => {
+                        let msg = match &prompt.model {
+                            Some(m) => format!("cannot resolve model config for: {m}"),
+                            None => "no model specified".to_owned(),
+                        };
                         writer.write_event(&Event::AgentResponseFinished(
                             AgentResponseFinished {
                                 session_prompt_id,
-                                text,
-                                tool_calls,
+                                text: Some(msg),
+                                tool_calls: Vec::new(),
                             },
                         ))?;
                         writer.flush()?;
@@ -103,34 +97,89 @@ where
 }
 
 // ---------------------------------------------------------------------------
-// Backend resolution
+// Model config resolution
 // ---------------------------------------------------------------------------
 
-enum Backend {
-    Llm(OpenAiConfig),
-    Deterministic,
-}
-
-fn resolve_backend() -> Backend {
-    let settings = settings::load_harness_settings().unwrap_or_default();
-    let models = settings::load_models().unwrap_or_default();
-    if let Some(config) = resolve_llm_config(&settings, &models) {
-        Backend::Llm(config)
-    } else {
-        Backend::Deterministic
-    }
-}
-
-fn resolve_llm_config(settings: &HarnessSettings, models: &ModelRegistry) -> Option<OpenAiConfig> {
-    let default_model = settings.default_model.as_ref()?;
-    let (provider_name, model_id) = default_model.split_once('/')?;
+/// Resolve a `"provider/model_id"` string into an `OpenAiConfig`.
+///
+/// Checks models.json5 for base_url/api_key first, then falls back to
+/// auth.json for OAuth credentials with default base URLs per auth type.
+fn resolve_model_config(
+    model: &str,
+    models: &ModelRegistry,
+    auth_store: &tau_provider::storage::AuthStore,
+) -> Option<OpenAiConfig> {
+    let (provider_name, model_id) = model.split_once('/')?;
     let provider = models.providers.get(provider_name)?;
+
+    // Try direct config (base_url + api_key in models.json5).
+    if let Some(config) = resolve_from_provider_config(provider, model_id) {
+        return Some(config);
+    }
+
+    // Try OAuth credentials from auth.json.
+    resolve_from_auth(provider_name, provider, model_id, auth_store)
+}
+
+/// Resolve from models.json5 provider config (has base_url + api_key).
+fn resolve_from_provider_config(provider: &ProviderConfig, model_id: &str) -> Option<OpenAiConfig> {
     let base_url = provider.base_url.as_ref()?;
     Some(OpenAiConfig {
         base_url: base_url.clone(),
         api_key: provider.api_key.clone().unwrap_or_default(),
         model_id: model_id.to_owned(),
     })
+}
+
+/// Resolve from auth.json OAuth credentials.
+fn resolve_from_auth(
+    provider_name: &str,
+    provider: &ProviderConfig,
+    model_id: &str,
+    auth_store: &tau_provider::storage::AuthStore,
+) -> Option<OpenAiConfig> {
+    use tau_provider::storage::Credentials;
+
+    let creds = auth_store.providers.get(provider_name)?;
+    match creds {
+        Credentials::Oauth { access_token, .. } => {
+            let base_url = match provider.auth.as_deref() {
+                Some("openai-codex") => "https://api.openai.com/v1".to_owned(),
+                Some("github-copilot") => {
+                    // Extract proxy-ep from token if possible.
+                    extract_copilot_base_url(access_token)
+                        .unwrap_or_else(|| {
+                            "https://api.individual.githubcopilot.com".to_owned()
+                        })
+                }
+                _ => return None,
+            };
+            Some(OpenAiConfig {
+                base_url,
+                api_key: access_token.clone(),
+                model_id: model_id.to_owned(),
+            })
+        }
+        Credentials::ApiKey { api_key, .. } => {
+            // api_key in auth.json but no base_url in models.json5 — use OpenAI default.
+            Some(OpenAiConfig {
+                base_url: "https://api.openai.com/v1".to_owned(),
+                api_key: api_key.clone(),
+                model_id: model_id.to_owned(),
+            })
+        }
+        Credentials::None { .. } => None,
+    }
+}
+
+/// Parse `proxy-ep` from a Copilot token string.
+fn extract_copilot_base_url(token: &str) -> Option<String> {
+    for part in token.split(';') {
+        if let Some(ep) = part.strip_prefix("proxy-ep=") {
+            return Some(format!("https://{ep}"));
+        }
+    }
+    None
 }
 
 // ---------------------------------------------------------------------------
@@ -143,8 +192,6 @@ fn handle_llm<W: Write>(
     prompt: &tau_proto::SessionPromptCreated,
     writer: &mut EventWriter<BufWriter<W>>,
 ) -> Result<(), Box<dyn Error>> {
-    // Build a minimal AgentPromptRequest-like struct for the openai
-    // client (it needs system_prompt, messages, tools).
     let request = openai::PromptPayload {
         system_prompt: &prompt.system_prompt,
         messages: &prompt.messages,
@@ -184,76 +231,130 @@ fn handle_llm<W: Write>(
 }
 
 // ---------------------------------------------------------------------------
-// Deterministic backend
+// Echo agent (for tests)
 // ---------------------------------------------------------------------------
 
-fn handle_deterministic(
-    prompt: &tau_proto::SessionPromptCreated,
-    next_call_number: &mut u64,
-) -> (Option<String>, Vec<AgentToolCall>) {
-    // If the last message is a tool result, return it as text.
-    if let Some(msg) = prompt.messages.last() {
-        if msg.role == ConversationRole::User {
-            for block in &msg.content {
-                if let ContentBlock::ToolResult {
-                    content, is_error, ..
-                } = block
-                {
-                    let text = if *is_error {
-                        format!("Tool error: {content}")
+/// A simple echo agent for integration tests. Echoes user text back
+/// as a `demo.echo` tool call, or returns tool results as text.
+pub fn run_echo<R, W>(reader: R, writer: W) -> Result<(), Box<dyn Error>>
+where
+    R: Read,
+    W: Write,
+{
+    use tau_proto::{
+        AgentToolCall, CborValue, ContentBlock, ConversationRole,
+    };
+
+    let mut reader = EventReader::new(BufReader::new(reader));
+    let mut writer = EventWriter::new(BufWriter::new(writer));
+
+    writer.write_event(&Event::LifecycleHello(LifecycleHello {
+        protocol_version: PROTOCOL_VERSION,
+        client_name: "tau-agent-echo".to_owned(),
+        client_kind: ClientKind::Agent,
+    }))?;
+    writer.write_event(&Event::LifecycleSubscribe(LifecycleSubscribe {
+        selectors: vec![
+            EventSelector::Exact(EventName::SessionPromptCreated),
+            EventSelector::Exact(EventName::LifecycleDisconnect),
+        ],
+    }))?;
+    writer.write_event(&Event::LifecycleReady(LifecycleReady {
+        message: Some("echo agent ready".to_owned()),
+    }))?;
+    writer.flush()?;
+
+    let mut next_call = 1_u64;
+
+    loop {
+        let Some(event) = reader.read_event()? else {
+            return Ok(());
+        };
+        match event {
+            Event::SessionPromptCreated(prompt) => {
+                let spid = prompt.session_prompt_id.clone();
+                writer.write_event(&Event::AgentPromptSubmitted(AgentPromptSubmitted {
+                    session_prompt_id: spid.clone(),
+                }))?;
+
+                // If last message is a tool result, return it as text.
+                let is_tool_result = prompt.messages.last().is_some_and(|m| {
+                    m.role == ConversationRole::User
+                        && m.content
+                            .iter()
+                            .any(|b| matches!(b, ContentBlock::ToolResult { .. }))
+                });
+                if is_tool_result {
+                    let text = prompt
+                        .messages
+                        .last()
+                        .and_then(|m| {
+                            m.content.iter().find_map(|b| match b {
+                                ContentBlock::ToolResult { content, .. } => Some(content.clone()),
+                                _ => None,
+                            })
+                        })
+                        .unwrap_or_default();
+                    writer.write_event(&Event::AgentResponseFinished(AgentResponseFinished {
+                        session_prompt_id: spid,
+                        text: Some(text),
+                        tool_calls: Vec::new(),
+                    }))?;
+                } else {
+                    // Find user text and make a tool call.
+                    let user_text = prompt
+                        .messages
+                        .iter()
+                        .rev()
+                        .find(|m| m.role == ConversationRole::User)
+                        .and_then(|m| {
+                            m.content.iter().find_map(|b| match b {
+                                ContentBlock::Text { text } => Some(text.clone()),
+                                _ => None,
+                            })
+                        })
+                        .unwrap_or_default();
+
+                    let call_id = format!("call-{next_call}");
+                    next_call += 1;
+
+                    let tool_call = if let Some(path) = user_text.strip_prefix("read ") {
+                        AgentToolCall {
+                            id: call_id,
+                            name: "fs.read".to_owned(),
+                            arguments: CborValue::Map(vec![(
+                                CborValue::Text("path".to_owned()),
+                                CborValue::Text(path.trim().to_owned()),
+                            )]),
+                        }
+                    } else if let Some(cmd) = user_text.strip_prefix("shell ") {
+                        AgentToolCall {
+                            id: call_id,
+                            name: "shell.exec".to_owned(),
+                            arguments: CborValue::Map(vec![(
+                                CborValue::Text("command".to_owned()),
+                                CborValue::Text(cmd.trim().to_owned()),
+                            )]),
+                        }
                     } else {
-                        content.clone()
+                        AgentToolCall {
+                            id: call_id,
+                            name: "demo.echo".to_owned(),
+                            arguments: CborValue::Text(user_text),
+                        }
                     };
-                    return (Some(text), Vec::new());
+
+                    writer.write_event(&Event::AgentResponseFinished(AgentResponseFinished {
+                        session_prompt_id: spid,
+                        text: None,
+                        tool_calls: vec![tool_call],
+                    }))?;
                 }
+                writer.flush()?;
             }
+            Event::LifecycleDisconnect(_) => return Ok(()),
+            _ => {}
         }
-    }
-
-    // Find the last user text and decide which tool to call.
-    let user_text = prompt
-        .messages
-        .iter()
-        .rev()
-        .find(|m| m.role == ConversationRole::User)
-        .and_then(|m| {
-            m.content.iter().find_map(|b| match b {
-                ContentBlock::Text { text } => Some(text.clone()),
-                _ => None,
-            })
-        })
-        .unwrap_or_default();
-
-    let call_id = format!("call-{next_call_number}");
-    *next_call_number += 1;
-    (None, vec![tool_call_for_text(&call_id, &user_text)])
-}
-
-fn tool_call_for_text(call_id: &str, text: &str) -> AgentToolCall {
-    if let Some(path) = text.strip_prefix("read ") {
-        return AgentToolCall {
-            id: call_id.to_owned(),
-            name: "fs.read".to_owned(),
-            arguments: CborValue::Map(vec![(
-                CborValue::Text("path".to_owned()),
-                CborValue::Text(path.trim().to_owned()),
-            )]),
-        };
-    }
-    if let Some(command) = text.strip_prefix("shell ") {
-        return AgentToolCall {
-            id: call_id.to_owned(),
-            name: "shell.exec".to_owned(),
-            arguments: CborValue::Map(vec![(
-                CborValue::Text("command".to_owned()),
-                CborValue::Text(command.trim().to_owned()),
-            )]),
-        };
-    }
-    AgentToolCall {
-        id: call_id.to_owned(),
-        name: "demo.echo".to_owned(),
-        arguments: CborValue::Text(text.to_owned()),
     }
 }
 
@@ -262,21 +363,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn user_message_routes_to_fs_read() {
-        let call = tool_call_for_text("call-1", "read Cargo.toml");
-        assert_eq!(call.name, "fs.read");
-    }
-
-    #[test]
-    fn user_message_routes_to_shell_exec() {
-        let call = tool_call_for_text("call-1", "shell printf hi");
-        assert_eq!(call.name, "shell.exec");
-    }
-
-    #[test]
-    fn no_config_means_deterministic() {
-        let settings = HarnessSettings::default();
+    fn no_config_resolves_none() {
         let models = ModelRegistry::default();
-        assert!(resolve_llm_config(&settings, &models).is_none());
+        let auth = tau_provider::storage::AuthStore::default();
+        assert!(resolve_model_config("fake/model", &models, &auth).is_none());
     }
 }

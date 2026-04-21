@@ -313,6 +313,7 @@ mod tests {
                     description: Some("Read a file".to_owned()),
                     parameters: None,
                 }],
+                model: None,
             }),
             Event::AgentResponseFinished(AgentResponseFinished {
                 session_prompt_id: "sp-1".into(),

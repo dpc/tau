@@ -62,10 +62,16 @@ pub enum EventName {
     // Harness informational messages
     #[serde(rename = "harness.info")]
     HarnessInfo,
+    #[serde(rename = "harness.models_available")]
+    HarnessModelsAvailable,
+    #[serde(rename = "harness.model_selected")]
+    HarnessModelSelected,
 
     // UI events — facts from the UI
     #[serde(rename = "ui.prompt_submitted")]
     UiPromptSubmitted,
+    #[serde(rename = "ui.model_select")]
+    UiModelSelect,
 
     // Session events — facts from the harness session tracker
     #[serde(rename = "session.prompt_queued")]
@@ -105,7 +111,10 @@ impl EventName {
             Self::ExtensionExited => "extension.exited",
             Self::ExtensionRestarting => "extension.restarting",
             Self::HarnessInfo => "harness.info",
+            Self::HarnessModelsAvailable => "harness.models_available",
+            Self::HarnessModelSelected => "harness.model_selected",
             Self::UiPromptSubmitted => "ui.prompt_submitted",
+            Self::UiModelSelect => "ui.model_select",
             Self::SessionPromptQueued => "session.prompt_queued",
             Self::SessionPromptCreated => "session.prompt_created",
             Self::AgentPromptSubmitted => "agent.prompt_submitted",
@@ -144,7 +153,10 @@ impl FromStr for EventName {
             "extension.exited" => Ok(Self::ExtensionExited),
             "extension.restarting" => Ok(Self::ExtensionRestarting),
             "harness.info" => Ok(Self::HarnessInfo),
+            "harness.models_available" => Ok(Self::HarnessModelsAvailable),
+            "harness.model_selected" => Ok(Self::HarnessModelSelected),
             "ui.prompt_submitted" => Ok(Self::UiPromptSubmitted),
+            "ui.model_select" => Ok(Self::UiModelSelect),
             "session.prompt_queued" => Ok(Self::SessionPromptQueued),
             "session.prompt_created" => Ok(Self::SessionPromptCreated),
             "agent.prompt_submitted" => Ok(Self::AgentPromptSubmitted),
@@ -237,6 +249,20 @@ pub struct LifecycleDisconnect {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct HarnessInfo {
     pub message: String,
+}
+
+/// The harness announces all available models as `provider/model` strings.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct HarnessModelsAvailable {
+    /// Each entry is `"provider_name/model_id"`.
+    pub models: Vec<String>,
+}
+
+/// The harness announces which model is currently selected.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct HarnessModelSelected {
+    /// `"provider_name/model_id"`, or empty if none.
+    pub model: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -378,6 +404,13 @@ pub struct UiPromptSubmitted {
     pub text: String,
 }
 
+/// The user requests switching to a different model.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct UiModelSelect {
+    /// `"provider_name/model_id"`.
+    pub model: String,
+}
+
 // ---------------------------------------------------------------------------
 // Session events — facts from the harness session tracker
 // ---------------------------------------------------------------------------
@@ -398,6 +431,9 @@ pub struct SessionPromptCreated {
     pub system_prompt: String,
     pub messages: Vec<ConversationMessage>,
     pub tools: Vec<ToolDefinition>,
+    /// Currently selected model as `"provider/model_id"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -537,10 +573,16 @@ pub enum Event {
     // Harness info
     #[serde(rename = "harness.info")]
     HarnessInfo(HarnessInfo),
+    #[serde(rename = "harness.models_available")]
+    HarnessModelsAvailable(HarnessModelsAvailable),
+    #[serde(rename = "harness.model_selected")]
+    HarnessModelSelected(HarnessModelSelected),
 
     // UI
     #[serde(rename = "ui.prompt_submitted")]
     UiPromptSubmitted(UiPromptSubmitted),
+    #[serde(rename = "ui.model_select")]
+    UiModelSelect(UiModelSelect),
 
     // Session
     #[serde(rename = "session.prompt_queued")]
@@ -580,7 +622,10 @@ impl Event {
             Self::ExtensionExited(_) => EventName::ExtensionExited,
             Self::ExtensionRestarting(_) => EventName::ExtensionRestarting,
             Self::HarnessInfo(_) => EventName::HarnessInfo,
+            Self::HarnessModelsAvailable(_) => EventName::HarnessModelsAvailable,
+            Self::HarnessModelSelected(_) => EventName::HarnessModelSelected,
             Self::UiPromptSubmitted(_) => EventName::UiPromptSubmitted,
+            Self::UiModelSelect(_) => EventName::UiModelSelect,
             Self::SessionPromptQueued(_) => EventName::SessionPromptQueued,
             Self::SessionPromptCreated(_) => EventName::SessionPromptCreated,
             Self::AgentPromptSubmitted(_) => EventName::AgentPromptSubmitted,
