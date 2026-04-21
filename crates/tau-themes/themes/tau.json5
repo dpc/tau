@@ -9,12 +9,12 @@
     "user.prompt.queued":   { fg: "dark_grey" },
 
     // -- Agent responses --
-    "agent.response":       { italic: true },
+    "agent.response":       { fg: "cyan", italic: true },
     "agent.pending":        { fg: "dark_grey" },
 
     // -- Tool execution --
-    "tool.running":         { fg: "dark_cyan" },
-    "tool.result":          { fg: "dark_green" },
+    "tool.running":         { fg: "yellow" },
+    "tool.result":          { fg: "yellow" },
     "tool.error":           { fg: "dark_red" },
     "tool.progress":        { fg: "dark_yellow" },
 

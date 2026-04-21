@@ -10,7 +10,7 @@ use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{CborValue, ExtensionName, SessionId, SessionPromptId, ToolCallId, ToolName};
+use crate::{CborValue, ExtensionName, ModelId, SessionId, SessionPromptId, ToolCallId, ToolName};
 
 // ---------------------------------------------------------------------------
 // Event names
@@ -255,14 +255,14 @@ pub struct HarnessInfo {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct HarnessModelsAvailable {
     /// Each entry is `"provider_name/model_id"`.
-    pub models: Vec<String>,
+    pub models: Vec<ModelId>,
 }
 
 /// The harness announces which model is currently selected.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct HarnessModelSelected {
     /// `"provider_name/model_id"`, or empty if none.
-    pub model: String,
+    pub model: ModelId,
 }
 
 // ---------------------------------------------------------------------------
@@ -408,7 +408,7 @@ pub struct UiPromptSubmitted {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct UiModelSelect {
     /// `"provider_name/model_id"`.
-    pub model: String,
+    pub model: ModelId,
 }
 
 // ---------------------------------------------------------------------------
@@ -433,7 +433,7 @@ pub struct SessionPromptCreated {
     pub tools: Vec<ToolDefinition>,
     /// Currently selected model as `"provider/model_id"`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub model: Option<String>,
+    pub model: Option<ModelId>,
 }
 
 // ---------------------------------------------------------------------------

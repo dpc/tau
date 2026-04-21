@@ -252,7 +252,7 @@ fn terminal_input_loop(
                     if !model.is_empty() {
                         let _ =
                             writer.write_event(&Event::UiModelSelect(tau_proto::UiModelSelect {
-                                model: model.to_owned(),
+                                model: model.into(),
                             }));
                         let _ = writer.flush();
                     }
@@ -319,7 +319,7 @@ fn format_tool_call(tool_name: &str, arguments: &CborValue) -> String {
     match tool_name {
         "shell.exec" => {
             let cmd = cbor_text_field(arguments, "command").unwrap_or_default();
-            format!("$ {cmd}")
+            format!("shell {cmd}")
         }
         "fs.read" => {
             let path = cbor_text_field(arguments, "path").unwrap_or_default();
@@ -333,17 +333,27 @@ fn format_tool_call(tool_name: &str, arguments: &CborValue) -> String {
     }
 }
 
-/// Formats a completed tool call (result or error) for display.
+/// Completed tool display: a styled label and optional unstyled output.
+struct ToolCompletionDisplay {
+    /// Summary line (e.g. `shell ls [0]`, `read foo.rs (42 lines, 1200
+    /// bytes)`).
+    label: String,
+    /// Optional output text shown below the label in default style
+    /// (e.g. shell stdout/stderr).
+    output: Option<String>,
+}
+
+/// Formats a completed tool call for display.
 fn format_tool_completion(
     tool_name: &str,
     details: &CborValue,
     error_message: Option<&str>,
-) -> String {
+) -> ToolCompletionDisplay {
     match tool_name {
         "shell.exec" => format_shell_completion(details),
         "fs.read" => {
             let path = cbor_text_field(details, "path");
-            if let Some(msg) = error_message {
+            let label = if let Some(msg) = error_message {
                 match path {
                     Some(p) => format!("read {p}: {msg}"),
                     None => format!("read: {msg}"),
@@ -354,11 +364,15 @@ fn format_tool_completion(
                 let line_count = content.lines().count();
                 let byte_count = content.len();
                 format!("read {path} ({line_count} lines, {byte_count} bytes)")
+            };
+            ToolCompletionDisplay {
+                label,
+                output: None,
             }
         }
         "fs.write" => {
             let path = cbor_text_field(details, "path");
-            if let Some(msg) = error_message {
+            let label = if let Some(msg) = error_message {
                 match path {
                     Some(p) => format!("write {p}: {msg}"),
                     None => format!("write: {msg}"),
@@ -367,37 +381,48 @@ fn format_tool_completion(
                 let path = path.unwrap_or_default();
                 let bytes = cbor_int_field(details, "bytes_written").unwrap_or(0);
                 format!("write {path} ({bytes} bytes)")
+            };
+            ToolCompletionDisplay {
+                label,
+                output: None,
             }
         }
         _ => {
-            if let Some(msg) = error_message {
+            let label = if let Some(msg) = error_message {
                 format!("{tool_name}: {msg}")
             } else {
                 format!("{tool_name}: done")
+            };
+            ToolCompletionDisplay {
+                label,
+                output: None,
             }
         }
     }
 }
 
-fn format_shell_completion(details: &CborValue) -> String {
+fn format_shell_completion(details: &CborValue) -> ToolCompletionDisplay {
     let cmd = cbor_text_field(details, "command").unwrap_or_default();
     let status = cbor_int_field(details, "status");
     let stdout = cbor_text_field(details, "stdout").unwrap_or_default();
     let stderr = cbor_text_field(details, "stderr").unwrap_or_default();
 
-    let mut text = format!("$ {cmd}");
+    let mut label = format!("shell {cmd}");
     if let Some(code) = status {
-        text.push_str(&format!(" [{code}]"));
+        label.push_str(&format!(" [{code}]"));
     }
 
-    let output = if !stderr.trim().is_empty() {
+    let raw_output = if !stderr.trim().is_empty() {
         stderr
     } else {
         stdout
     };
-    let trimmed = output.trim();
-    if !trimmed.is_empty() {
-        text.push('\n');
+    let trimmed = raw_output.trim();
+
+    let output = if trimmed.is_empty() {
+        None
+    } else {
+        let mut text = String::new();
         let mut chars = 0;
         for (lines, line) in trimmed.lines().enumerate() {
             if lines >= 5 || chars + line.len() > 500 {
@@ -410,8 +435,10 @@ fn format_shell_completion(details: &CborValue) -> String {
             text.push_str(line);
             chars += line.len();
         }
-    }
-    text
+        Some(text)
+    };
+
+    ToolCompletionDisplay { label, output }
 }
 
 /// Event renderer. Maps session_prompt_id → block_id for in-place
@@ -548,22 +575,36 @@ impl EventRenderer {
                 if let Some(bid) = self.tool_blocks.remove(result.call_id.as_str()) {
                     self.handle.remove_block(bid);
                 }
-                let label = format_tool_completion(&result.tool_name, &result.result, None);
-                self.handle
-                    .print_output(themed_block(&self.theme, names::TOOL_RESULT, label));
+                let display = format_tool_completion(&result.tool_name, &result.result, None);
+                self.handle.print_output(themed_block(
+                    &self.theme,
+                    names::TOOL_RESULT,
+                    display.label,
+                ));
+                if let Some(output) = display.output {
+                    self.handle
+                        .print_output(tau_cli_term::StyledBlock::new(output));
+                }
             }
             Event::ToolError(error) => {
                 if let Some(bid) = self.tool_blocks.remove(error.call_id.as_str()) {
                     self.handle.remove_block(bid);
                 }
                 let cbor = error.details.as_ref();
-                let label = format_tool_completion(
+                let display = format_tool_completion(
                     &error.tool_name,
                     cbor.unwrap_or(&CborValue::Null),
                     Some(&error.message),
                 );
-                self.handle
-                    .print_output(themed_block(&self.theme, names::TOOL_ERROR, label));
+                self.handle.print_output(themed_block(
+                    &self.theme,
+                    names::TOOL_ERROR,
+                    display.label,
+                ));
+                if let Some(output) = display.output {
+                    self.handle
+                        .print_output(tau_cli_term::StyledBlock::new(output));
+                }
             }
             Event::ExtensionStarting(starting) => {
                 let block = themed_block(
@@ -607,7 +648,7 @@ impl EventRenderer {
                 let items: Vec<tau_cli_term::CompletionItem> = models
                     .models
                     .iter()
-                    .map(tau_cli_term::CompletionItem::plain)
+                    .map(|m| tau_cli_term::CompletionItem::plain(m.as_str()))
                     .collect();
                 self.completion_data
                     .set_arg_completions(tau_cli_term::CommandName::new("/model"), items);
@@ -616,7 +657,7 @@ impl EventRenderer {
                 let label = if selected.model.is_empty() {
                     "no model selected".to_string()
                 } else {
-                    selected.model.clone()
+                    selected.model.to_string()
                 };
                 let block = themed_block(&self.theme, names::MODEL_STATUS, label);
                 match self.model_status_block {

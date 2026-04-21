@@ -16,8 +16,8 @@ use std::sync::{Arc, Condvar, Mutex};
 
 use serde::{Deserialize, Serialize};
 use tau_proto::{
-    ClientKind, ConnectionId, Event, EventSelector, LifecycleSubscribe, ToolName, ToolRequest,
-    ToolSpec,
+    ClientKind, ConnectionId, Event, EventSelector, LifecycleSubscribe, SessionId, ToolCallId,
+    ToolName, ToolRequest, ToolSpec,
 };
 
 /// The origin class of one live connection.
@@ -867,7 +867,7 @@ pub enum SessionEntry {
 /// One persisted tool activity record associated with a session.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ToolActivityRecord {
-    pub call_id: String,
+    pub call_id: ToolCallId,
     pub tool_name: ToolName,
     pub outcome: ToolActivityOutcome,
 }
@@ -906,7 +906,7 @@ pub struct SessionNode {
 /// earlier node; the next append creates a new branch.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct SessionTree {
-    session_id: String,
+    session_id: SessionId,
     nodes: Vec<SessionNode>,
     head: Option<NodeId>,
 }
@@ -977,7 +977,7 @@ impl SessionTree {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 struct PersistedSessionRecord {
-    session_id: String,
+    session_id: SessionId,
     kind: RecordKind,
 }
 
@@ -1188,7 +1188,7 @@ impl Default for EventLog {
 #[derive(Debug)]
 pub struct SessionStore {
     path: PathBuf,
-    sessions: HashMap<String, SessionTree>,
+    sessions: HashMap<SessionId, SessionTree>,
 }
 
 impl SessionStore {
@@ -1222,18 +1222,19 @@ impl SessionStore {
         session_id: &str,
         entry: SessionEntry,
     ) -> Result<NodeId, SessionStoreError> {
+        let sid: SessionId = session_id.into();
         let tree = self
             .sessions
-            .entry(session_id.to_owned())
+            .entry(sid.clone())
             .or_insert_with(|| SessionTree {
-                session_id: session_id.to_owned(),
+                session_id: sid.clone(),
                 nodes: Vec::new(),
                 head: None,
             });
         let parent_id = tree.head;
         let id = tree.append_node(entry.clone());
         let record = PersistedSessionRecord {
-            session_id: session_id.to_owned(),
+            session_id: sid,
             kind: RecordKind::Node {
                 id,
                 parent_id,
@@ -1255,7 +1256,7 @@ impl SessionStore {
             })?;
         tree.head = Some(node_id);
         let record = PersistedSessionRecord {
-            session_id: session_id.to_owned(),
+            session_id: session_id.into(),
             kind: RecordKind::SetHead { node_id },
         };
         append_record(&self.path, &record)
@@ -1310,7 +1311,7 @@ impl SessionStore {
 fn load_records(
     path: &Path,
     reader: &mut File,
-    sessions: &mut HashMap<String, SessionTree>,
+    sessions: &mut HashMap<SessionId, SessionTree>,
 ) -> Result<(), SessionStoreError> {
     loop {
         let mut length_bytes = [0_u8; 8];
@@ -1900,7 +1901,7 @@ mod tests {
             .append_tool_activity(
                 "session-1",
                 ToolActivityRecord {
-                    call_id: "call-1".to_owned(),
+                    call_id: "call-1".into(),
                     tool_name: "fs.read".into(),
                     outcome: ToolActivityOutcome::Result {
                         result: CborValue::Text("README".to_owned()),
@@ -1918,7 +1919,7 @@ mod tests {
         assert_eq!(
             *branch[1],
             SessionEntry::ToolActivity(ToolActivityRecord {
-                call_id: "call-1".to_owned(),
+                call_id: "call-1".into(),
                 tool_name: "fs.read".into(),
                 outcome: ToolActivityOutcome::Result {
                     result: CborValue::Text("README".to_owned()),

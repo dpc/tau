@@ -32,9 +32,9 @@ use tau_proto::{
     AgentResponseFinished, AgentToolCall, ClientKind, ContentBlock, ConversationMessage,
     ConversationRole, DecodeError, Event, EventReader, EventSelector, EventWriter,
     HarnessModelSelected, HarnessModelsAvailable, LifecycleDisconnect, LifecycleHello,
-    LifecycleSubscribe, PROTOCOL_VERSION, ProgressUpdate, SessionPromptCreated,
-    SessionPromptQueued, ToolDefinition, ToolError, ToolProgress, ToolRegister, ToolRequest,
-    ToolResult, UiPromptSubmitted,
+    LifecycleSubscribe, ModelId, PROTOCOL_VERSION, ProgressUpdate, SessionId, SessionPromptCreated,
+    SessionPromptId, SessionPromptQueued, ToolCallId, ToolDefinition, ToolError, ToolProgress,
+    ToolRegister, ToolRequest, ToolResult, UiPromptSubmitted,
 };
 use tau_socket::{SocketPeer, SocketTransportError};
 
@@ -289,8 +289,8 @@ fn spawn_writer_thread(
 
 /// Tracks an in-progress agent turn waiting for tool results.
 struct PendingAgentTurn {
-    session_id: String,
-    remaining_calls: Vec<String>,
+    session_id: SessionId,
+    remaining_calls: Vec<ToolCallId>,
 }
 
 struct ExtensionEntry {
@@ -369,8 +369,8 @@ struct Harness {
     bus: EventBus,
     registry: ToolRegistry,
     store: SessionStore,
-    pending_request_sessions: VecDeque<String>,
-    pending_tool_sessions: std::collections::HashMap<String, String>,
+    pending_request_sessions: VecDeque<SessionId>,
+    pending_tool_sessions: std::collections::HashMap<ToolCallId, SessionId>,
     event_log: std::sync::Arc<EventLog>,
     /// Writer channels for socket clients, keyed by connection ID.
     /// Used to start follower threads for log-based replay + delivery.
@@ -381,7 +381,7 @@ struct Harness {
     _next_instance_counter: u64,
     next_session_prompt_id: u64,
     /// Maps session_prompt_id → session_id for in-flight prompts.
-    prompt_sessions: std::collections::HashMap<String, String>,
+    prompt_sessions: std::collections::HashMap<SessionPromptId, SessionId>,
     /// Pending agent turn: session_id + remaining tool call IDs.
     pending_agent_turn: Option<PendingAgentTurn>,
     /// True while the agent is processing a prompt (between
@@ -398,13 +398,13 @@ struct Harness {
     // agent while it's working. See PI_PROMPT_QUEUEING.md for Pi's
     // two-tier (steering + follow-up) design.
     /// (session_id, text) — text is persisted when dispatched.
-    pending_prompts: VecDeque<(String, String)>,
+    pending_prompts: VecDeque<(SessionId, String)>,
     /// Append-only event debug log.
     debug_log: Option<DebugEventLog>,
     /// All available models as `"provider/model_id"` strings.
-    available_models: Vec<String>,
+    available_models: Vec<ModelId>,
     /// Currently selected model as `"provider/model_id"`.
-    selected_model: String,
+    selected_model: ModelId,
 }
 
 type AgentRunner = fn(UnixStream, UnixStream) -> Result<(), String>;
@@ -858,7 +858,7 @@ impl Harness {
 
                 if self.selected_model.is_empty() || self.agent_busy {
                     self.pending_prompts
-                        .push_back((prompt.session_id.to_string(), prompt.text.clone()));
+                        .push_back((prompt.session_id.clone(), prompt.text.clone()));
                     self.publish_event(
                         None,
                         Event::SessionPromptQueued(SessionPromptQueued {
@@ -904,13 +904,13 @@ impl Harness {
         let session_id = self
             .pending_request_sessions
             .pop_front()
-            .unwrap_or_else(|| "default".to_owned());
+            .unwrap_or_else(|| "default".into());
         self.pending_tool_sessions
-            .insert(request.call_id.to_string(), session_id.clone());
+            .insert(request.call_id.clone(), session_id.clone());
         self.store.append_tool_activity(
-            session_id,
+            session_id.into_string(),
             ToolActivityRecord {
-                call_id: request.call_id.to_string(),
+                call_id: request.call_id.clone(),
                 tool_name: request.tool_name.clone(),
                 outcome: ToolActivityOutcome::Requested {
                     arguments: request.arguments.clone(),
@@ -924,11 +924,11 @@ impl Harness {
         let session_id = self
             .pending_tool_sessions
             .remove(result.call_id.as_str())
-            .unwrap_or_else(|| "default".to_owned());
+            .unwrap_or_else(|| "default".into());
         self.store.append_tool_activity(
-            session_id,
+            session_id.into_string(),
             ToolActivityRecord {
-                call_id: result.call_id.to_string(),
+                call_id: result.call_id.clone(),
                 tool_name: result.tool_name.clone(),
                 outcome: ToolActivityOutcome::Result {
                     result: result.result.clone(),
@@ -942,11 +942,11 @@ impl Harness {
         let session_id = self
             .pending_tool_sessions
             .remove(error.call_id.as_str())
-            .unwrap_or_else(|| "default".to_owned());
+            .unwrap_or_else(|| "default".into());
         self.store.append_tool_activity(
-            session_id,
+            session_id.into_string(),
             ToolActivityRecord {
-                call_id: error.call_id.to_string(),
+                call_id: error.call_id.clone(),
                 tool_name: error.tool_name.clone(),
                 outcome: ToolActivityOutcome::Error {
                     message: error.message.clone(),
@@ -1082,14 +1082,15 @@ impl Harness {
     // Agent prompt assembly
     // -----------------------------------------------------------------------
 
-    fn send_prompt_to_agent(&mut self, session_id: &str) -> String {
+    fn send_prompt_to_agent(&mut self, session_id: &str) -> SessionPromptId {
         let tree = self.store.session(session_id);
         let messages = tree.map(assemble_conversation).unwrap_or_default();
         let tools = self.gather_tool_definitions();
-        let session_prompt_id = format!("sp-{}", self.next_session_prompt_id);
+        let session_prompt_id: SessionPromptId =
+            format!("sp-{}", self.next_session_prompt_id).into();
         self.next_session_prompt_id += 1;
         self.prompt_sessions
-            .insert(session_prompt_id.clone(), session_id.to_owned());
+            .insert(session_prompt_id.clone(), session_id.into());
 
         // Publish SessionPromptCreated — both the agent and UI see it.
         let model = if self.selected_model.is_empty() {
@@ -1098,7 +1099,7 @@ impl Harness {
             Some(self.selected_model.clone())
         };
         let event = Event::SessionPromptCreated(SessionPromptCreated {
-            session_prompt_id: session_prompt_id.clone().into(),
+            session_prompt_id: session_prompt_id.clone(),
             session_id: session_id.into(),
             system_prompt: build_system_prompt(&tools),
             messages,
@@ -1126,14 +1127,15 @@ impl Harness {
         &mut self,
         response: AgentResponseFinished,
     ) -> Result<(), HarnessError> {
-        let session_id = self
+        let session_id: SessionId = self
             .prompt_sessions
             .remove(response.session_prompt_id.as_str())
-            .unwrap_or_else(|| "default".to_owned());
+            .unwrap_or_else(|| "default".into());
 
         // Persist agent text if present.
         if let Some(ref text) = response.text {
-            self.store.append_agent_message(&session_id, text.clone())?;
+            self.store
+                .append_agent_message(&*session_id, text.clone())?;
         }
 
         if !response.tool_calls.is_empty() {
@@ -1145,7 +1147,11 @@ impl Harness {
             // steering messages into the next prompt alongside the
             // tool results, allowing the user to redirect the agent
             // mid-turn.
-            let call_ids: Vec<String> = response.tool_calls.iter().map(|c| c.id.clone()).collect();
+            let call_ids: Vec<ToolCallId> = response
+                .tool_calls
+                .iter()
+                .map(|c| c.id.clone().into())
+                .collect();
             self.pending_agent_turn = Some(PendingAgentTurn {
                 session_id: session_id.clone(),
                 remaining_calls: call_ids,
@@ -1168,7 +1174,7 @@ impl Harness {
             return;
         }
         if let Some((session_id, text)) = self.pending_prompts.pop_front() {
-            let _ = self.store.append_user_message(&session_id, text);
+            let _ = self.store.append_user_message(&*session_id, text);
             self.agent_busy = true;
             self.send_prompt_to_agent(&session_id);
         }
@@ -1180,7 +1186,7 @@ impl Harness {
             // Persist now — the user message is placed after the
             // response from the just-finished turn, maintaining
             // correct role alternation.
-            let _ = self.store.append_user_message(&session_id, text);
+            let _ = self.store.append_user_message(&*session_id, text);
             self.send_prompt_to_agent(&session_id);
             // agent_busy stays true
         } else {
@@ -1210,11 +1216,13 @@ impl Harness {
         session_id: &str,
         call: &AgentToolCall,
     ) -> Result<(), HarnessError> {
+        let call_id: ToolCallId = call.id.clone().into();
+
         // Persist the request.
         self.store.append_tool_activity(
             session_id,
             ToolActivityRecord {
-                call_id: call.id.clone(),
+                call_id: call_id.clone(),
                 tool_name: call.name.clone().into(),
                 outcome: ToolActivityOutcome::Requested {
                     arguments: call.arguments.clone(),
@@ -1224,14 +1232,14 @@ impl Harness {
 
         // Route to tool provider.
         let request = ToolRequest {
-            call_id: call.id.clone().into(),
+            call_id: call_id.clone(),
             tool_name: call.name.clone().into(),
             arguments: call.arguments.clone(),
         };
 
         // Track which session this call belongs to.
         self.pending_tool_sessions
-            .insert(call.id.clone(), session_id.to_owned());
+            .insert(call_id.clone(), session_id.into());
 
         match self
             .registry
@@ -1240,7 +1248,7 @@ impl Harness {
             Ok(_) => {}
             Err(ToolRouteError::NoProvider { tool_name }) => {
                 let error = ToolError {
-                    call_id: call.id.clone().into(),
+                    call_id: call_id.clone(),
                     tool_name,
                     message: "no live provider available".to_owned(),
                     details: None,
@@ -1435,20 +1443,25 @@ fn spawn_supervised(
 ///
 /// Priority: default_model from harness.json5 → last used from state →
 /// first available → empty (no model).
-fn load_model_list() -> (Vec<String>, String) {
+fn load_model_list() -> (Vec<ModelId>, ModelId) {
     let model_registry = tau_config::settings::load_models().unwrap_or_default();
     let harness_settings = tau_config::settings::load_harness_settings().unwrap_or_default();
-    let mut available: Vec<String> = Vec::new();
+    let mut available: Vec<ModelId> = Vec::new();
     for (provider_name, provider_cfg) in &model_registry.providers {
         for model in &provider_cfg.models {
-            available.push(format!("{provider_name}/{}", model.id));
+            available.push(format!("{provider_name}/{}", model.id).into());
         }
     }
-    available.sort();
+    available.sort_by(|a, b| a.as_str().cmp(b.as_str()));
     let selected = harness_settings
         .default_model
-        .filter(|m| available.contains(m))
-        .or_else(|| load_last_selected_model().filter(|m| available.contains(m)))
+        .filter(|m| available.iter().any(|a| **a == **m))
+        .map(ModelId::from)
+        .or_else(|| {
+            load_last_selected_model()
+                .filter(|m| available.iter().any(|a| **a == **m))
+                .map(ModelId::from)
+        })
         .or_else(|| available.first().cloned())
         .unwrap_or_default();
     (available, selected)
@@ -1603,7 +1616,7 @@ fn assemble_conversation(tree: &tau_core::SessionTree) -> Vec<ConversationMessag
                     }
                     if let Some(last) = messages.last_mut() {
                         last.content.push(ContentBlock::ToolUse {
-                            id: activity.call_id.clone(),
+                            id: activity.call_id.to_string(),
                             name: activity.tool_name.to_string(),
                             input: arguments.clone(),
                         });
@@ -1613,7 +1626,7 @@ fn assemble_conversation(tree: &tau_core::SessionTree) -> Vec<ConversationMessag
                     messages.push(ConversationMessage {
                         role: ConversationRole::User,
                         content: vec![ContentBlock::ToolResult {
-                            tool_use_id: activity.call_id.clone(),
+                            tool_use_id: activity.call_id.to_string(),
                             content: cbor_to_text(result),
                             is_error: false,
                         }],
@@ -1623,7 +1636,7 @@ fn assemble_conversation(tree: &tau_core::SessionTree) -> Vec<ConversationMessag
                     messages.push(ConversationMessage {
                         role: ConversationRole::User,
                         content: vec![ContentBlock::ToolResult {
-                            tool_use_id: activity.call_id.clone(),
+                            tool_use_id: activity.call_id.to_string(),
                             content: message.clone(),
                             is_error: true,
                         }],

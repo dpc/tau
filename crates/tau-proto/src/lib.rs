@@ -90,6 +90,10 @@ string_newtype!(/// Unique identifier for one prompt within a session.
     SessionPromptId);
 string_newtype!(/// Extension name.
     ExtensionName);
+string_newtype!(/// Qualified model identifier (e.g. `"openai/gpt-4o"`).
+    ModelId);
+string_newtype!(/// Provider name (e.g. `"openai"`, `"anthropic"`).
+    ProviderName);
 
 /// Unique identifier for one extension instance (monotonic counter).
 #[derive(
