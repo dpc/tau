@@ -249,15 +249,22 @@ fn finish_stream<W: Write>(
     state: openai::StreamState,
     writer: &mut EventWriter<BufWriter<W>>,
 ) -> Result<(), Box<dyn Error>> {
-    let text = if state.text.is_empty() {
-        None
+    let text_empty = state.text.is_empty();
+    let text_content = state.text.clone();
+    let tool_calls = state.into_tool_calls();
+    let text = if text_empty {
+        if tool_calls.is_empty() {
+            Some("(agent returned an empty response)".to_owned())
+        } else {
+            None
+        }
     } else {
-        Some(state.text.clone())
+        Some(text_content)
     };
     writer.write_event(&Event::AgentResponseFinished(AgentResponseFinished {
         session_prompt_id: session_prompt_id.into(),
         text,
-        tool_calls: state.into_tool_calls(),
+        tool_calls,
     }))?;
     writer.flush()?;
     Ok(())

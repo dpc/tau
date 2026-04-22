@@ -112,12 +112,42 @@ pub fn responses_stream(
                     }
                 }
             }
-            "response.completed"
-            | "response.incomplete"
-            | "response.failed"
-            | "response.done"
-            | "error" => {
+            "response.completed" | "response.done" => {
                 break;
+            }
+            "response.incomplete" => {
+                let reason = event
+                    .get("response")
+                    .and_then(|r| r["incomplete_details"]["reason"].as_str())
+                    .unwrap_or("unknown reason");
+                return Err(OpenAiError::HttpStatus(
+                    0,
+                    format!("response incomplete: {reason}"),
+                ));
+            }
+            "response.failed" => {
+                let detail = event
+                    .get("response")
+                    .and_then(|r| {
+                        r["error"]["message"]
+                            .as_str()
+                            .or_else(|| r["error"]["code"].as_str())
+                    })
+                    .unwrap_or("unknown error");
+                return Err(OpenAiError::HttpStatus(
+                    0,
+                    format!("response failed: {detail}"),
+                ));
+            }
+            "error" => {
+                let detail = event["error"]["message"]
+                    .as_str()
+                    .or_else(|| event["message"].as_str())
+                    .unwrap_or("unknown error");
+                return Err(OpenAiError::HttpStatus(
+                    0,
+                    format!("stream error: {detail}"),
+                ));
             }
             _ => {}
         }

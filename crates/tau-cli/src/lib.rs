@@ -354,6 +354,10 @@ fn format_tool_call(tool_name: &str, arguments: &CborValue) -> String {
             let path = cbor_text_field(arguments, "path").unwrap_or_default();
             format!("edit {path}")
         }
+        "skill" => {
+            let name = cbor_text_field(arguments, "name").unwrap_or_default();
+            format!("skill {name}")
+        }
         _ => tool_name.to_owned(),
     }
 }
@@ -423,6 +427,22 @@ fn format_tool_completion(
                 let path = path.unwrap_or_default();
                 let count = cbor_int_field(details, "edits_applied").unwrap_or(0);
                 format!("edit {path} ({count} edits applied)")
+            };
+            ToolCompletionDisplay {
+                label,
+                output: None,
+            }
+        }
+        "skill" => {
+            let name = cbor_text_field(details, "name");
+            let label = if let Some(msg) = error_message {
+                match name {
+                    Some(n) => format!("skill {n}: {msg}"),
+                    None => format!("skill: {msg}"),
+                }
+            } else {
+                let name = name.unwrap_or_default();
+                format!("skill {name} loaded")
             };
             ToolCompletionDisplay {
                 label,
