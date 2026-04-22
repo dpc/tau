@@ -52,8 +52,8 @@ impl Drop for SemaphoreGuard<'_> {
 }
 
 use tau_proto::{
-    CborValue, ClientKind, Event, EventReader, EventSelector, EventWriter, LifecycleHello,
-    LifecycleReady, LifecycleSubscribe, PROTOCOL_VERSION, SessionContextRequested, ToolError,
+    Ack, CborValue, ClientKind, Event, EventReader, EventSelector, EventWriter, LifecycleHello,
+    LifecycleReady, LifecycleSubscribe, LogEventId, PROTOCOL_VERSION, SessionStarted, ToolError,
     ToolProgress, ToolRegister, ToolResult, ToolSpec,
 };
 
@@ -103,7 +103,7 @@ where
     writer.write_event(&Event::LifecycleSubscribe(LifecycleSubscribe {
         selectors: vec![
             EventSelector::Exact(tau_proto::EventName::ToolInvoke),
-            EventSelector::Exact(tau_proto::EventName::SessionContextRequested),
+            EventSelector::Exact(tau_proto::EventName::SessionStarted),
             EventSelector::Exact(tau_proto::EventName::LifecycleDisconnect),
         ],
     }))?;
@@ -337,11 +337,19 @@ where
     });
 
     // Reader loop: dispatch each tool invocation to a worker thread.
+    //
+    // ToolInvoke is sent point-to-point (not via the harness event log)
+    // so it carries no `LogEventId` and needs no ack — the
+    // ToolResult/ToolError correlated by call_id is the implicit reply.
+    //
+    // Other subscribed events (SessionStarted) come wrapped as
+    // `Event::LogEvent` and require an `Ack` after processing.
     loop {
         let Some(event) = reader.read_event()? else {
             break;
         };
-        match event {
+        let (log_id, inner) = event.peel_log();
+        match inner {
             Event::ToolInvoke(invoke) => {
                 let tx = tx.clone();
                 let sem = Arc::clone(&sem);
@@ -350,11 +358,14 @@ where
                     dispatch_tool_invoke(invoke, include_echo, &tx);
                 });
             }
-            Event::SessionContextRequested(request) => {
-                dispatch_session_context_request(request, &tx);
+            Event::SessionStarted(started) => {
+                dispatch_session_started(started, &tx);
             }
             Event::LifecycleDisconnect(_) => break,
             _ => {}
+        }
+        if let Some(id) = log_id {
+            ack_log_event(id, &tx);
         }
     }
 
@@ -379,13 +390,17 @@ fn dispatch_tool_invoke(
     }
 }
 
-fn dispatch_session_context_request(request: SessionContextRequested, tx: &mpsc::Sender<Event>) {
-    for event in build_session_context_events(request) {
+fn dispatch_session_started(started: SessionStarted, tx: &mpsc::Sender<Event>) {
+    for event in build_session_started_events(started) {
         let _ = tx.send(event);
     }
 }
 
-fn build_session_context_events(request: SessionContextRequested) -> Vec<Event> {
+fn ack_log_event(id: LogEventId, tx: &mpsc::Sender<Event>) {
+    let _ = tx.send(Event::Ack(Ack { up_to: id }));
+}
+
+fn build_session_started_events(started: SessionStarted) -> Vec<Event> {
     let mut events = Vec::new();
 
     let mut skill_dirs = Vec::new();
@@ -414,16 +429,18 @@ fn build_session_context_events(request: SessionContextRequested) -> Vec<Event> 
 
     if let Ok(cwd) = std::env::current_dir() {
         for agents_file in discover_agents_files_from(&cwd) {
-            events.push(Event::ExtAgentsAvailable(tau_proto::ExtAgentsAvailable {
-                file_path: agents_file.file_path.display().to_string(),
-                content: agents_file.content,
-            }));
+            events.push(Event::ExtAgentsMdAvailable(
+                tau_proto::ExtAgentsMdAvailable {
+                    file_path: agents_file.file_path.display().to_string(),
+                    content: agents_file.content,
+                },
+            ));
         }
     }
 
     events.push(Event::ExtensionContextReady(
         tau_proto::ExtensionContextReady {
-            session_id: request.session_id,
+            session_id: started.session_id,
         },
     ));
     events
@@ -1620,12 +1637,12 @@ mod tests {
     }
 
     #[test]
-    fn session_context_request_emits_ready_after_startup() {
+    fn session_started_emits_ready_after_startup() {
         let (mut reader, mut writer) = spawn_extension();
         drain_startup(&mut reader);
 
         writer
-            .write_event(&Event::SessionContextRequested(SessionContextRequested {
+            .write_event(&Event::SessionStarted(SessionStarted {
                 session_id: "s1".into(),
             }))
             .expect("request");

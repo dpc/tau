@@ -419,7 +419,7 @@ mod tests {
                 session_id: "s1".into(),
                 text: "hello".to_owned(),
             }),
-            Event::SessionContextRequested(SessionContextRequested {
+            Event::SessionStarted(SessionStarted {
                 session_id: "s1".into(),
             }),
             Event::SessionPromptCreated(SessionPromptCreated {
@@ -474,12 +474,21 @@ mod tests {
                 file_path: "/home/user/.agents/skills/brave-search/SKILL.md".to_owned(),
                 add_to_prompt: true,
             }),
-            Event::ExtAgentsAvailable(ExtAgentsAvailable {
+            Event::ExtAgentsMdAvailable(ExtAgentsMdAvailable {
                 file_path: "/home/user/src/project/AGENTS.md".to_owned(),
                 content: "# Project instructions\n- Run tests".to_owned(),
             }),
             Event::ExtensionContextReady(ExtensionContextReady {
                 session_id: "s1".into(),
+            }),
+            Event::LogEvent(LogEvent {
+                id: LogEventId::new(42),
+                event: Box::new(Event::SessionStarted(SessionStarted {
+                    session_id: "s1".into(),
+                })),
+            }),
+            Event::Ack(Ack {
+                up_to: LogEventId::new(42),
             }),
             Event::LifecycleDisconnect(LifecycleDisconnect {
                 reason: Some("shutdown".to_owned()),

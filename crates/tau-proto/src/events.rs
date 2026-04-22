@@ -60,8 +60,8 @@ pub enum EventName {
     ExtensionRestarting,
     #[serde(rename = "extension.skill_available")]
     ExtSkillAvailable,
-    #[serde(rename = "extension.agents_available")]
-    ExtAgentsAvailable,
+    #[serde(rename = "extension.agents_md_available")]
+    ExtAgentsMdAvailable,
     #[serde(rename = "extension.context_ready")]
     ExtensionContextReady,
 
@@ -82,8 +82,8 @@ pub enum EventName {
     // Session events — facts from the harness session tracker
     #[serde(rename = "session.prompt_queued")]
     SessionPromptQueued,
-    #[serde(rename = "session.context_requested")]
-    SessionContextRequested,
+    #[serde(rename = "session.started")]
+    SessionStarted,
     #[serde(rename = "session.prompt_created")]
     SessionPromptCreated,
 
@@ -94,6 +94,12 @@ pub enum EventName {
     AgentResponseUpdated,
     #[serde(rename = "agent.response_finished")]
     AgentResponseFinished,
+
+    // Wire-level transport (at-least-once delivery)
+    #[serde(rename = "wire.log_event")]
+    LogEvent,
+    #[serde(rename = "wire.ack")]
+    Ack,
 }
 
 impl EventName {
@@ -119,7 +125,7 @@ impl EventName {
             Self::ExtensionExited => "extension.exited",
             Self::ExtensionRestarting => "extension.restarting",
             Self::ExtSkillAvailable => "extension.skill_available",
-            Self::ExtAgentsAvailable => "extension.agents_available",
+            Self::ExtAgentsMdAvailable => "extension.agents_md_available",
             Self::ExtensionContextReady => "extension.context_ready",
             Self::HarnessInfo => "harness.info",
             Self::HarnessModelsAvailable => "harness.models_available",
@@ -127,11 +133,13 @@ impl EventName {
             Self::UiPromptSubmitted => "ui.prompt_submitted",
             Self::UiModelSelect => "ui.model_select",
             Self::SessionPromptQueued => "session.prompt_queued",
-            Self::SessionContextRequested => "session.context_requested",
+            Self::SessionStarted => "session.started",
             Self::SessionPromptCreated => "session.prompt_created",
             Self::AgentPromptSubmitted => "agent.prompt_submitted",
             Self::AgentResponseUpdated => "agent.response_updated",
             Self::AgentResponseFinished => "agent.response_finished",
+            Self::LogEvent => "wire.log_event",
+            Self::Ack => "wire.ack",
         }
     }
 }
@@ -165,7 +173,7 @@ impl FromStr for EventName {
             "extension.exited" => Ok(Self::ExtensionExited),
             "extension.restarting" => Ok(Self::ExtensionRestarting),
             "extension.skill_available" => Ok(Self::ExtSkillAvailable),
-            "extension.agents_available" => Ok(Self::ExtAgentsAvailable),
+            "extension.agents_md_available" => Ok(Self::ExtAgentsMdAvailable),
             "extension.context_ready" => Ok(Self::ExtensionContextReady),
             "harness.info" => Ok(Self::HarnessInfo),
             "harness.models_available" => Ok(Self::HarnessModelsAvailable),
@@ -173,11 +181,13 @@ impl FromStr for EventName {
             "ui.prompt_submitted" => Ok(Self::UiPromptSubmitted),
             "ui.model_select" => Ok(Self::UiModelSelect),
             "session.prompt_queued" => Ok(Self::SessionPromptQueued),
-            "session.context_requested" => Ok(Self::SessionContextRequested),
+            "session.started" => Ok(Self::SessionStarted),
             "session.prompt_created" => Ok(Self::SessionPromptCreated),
             "agent.prompt_submitted" => Ok(Self::AgentPromptSubmitted),
             "agent.response_updated" => Ok(Self::AgentResponseUpdated),
             "agent.response_finished" => Ok(Self::AgentResponseFinished),
+            "wire.log_event" => Ok(Self::LogEvent),
+            "wire.ack" => Ok(Self::Ack),
             _ => Err(ParseEventNameError {
                 invalid_name: value.to_owned(),
             }),
@@ -423,7 +433,7 @@ pub struct ExtSkillAvailable {
 /// An extension discovered one AGENTS.md file and is advertising it to the
 /// harness.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct ExtAgentsAvailable {
+pub struct ExtAgentsMdAvailable {
     /// Absolute path to the AGENTS.md file.
     pub file_path: String,
     /// Full file contents, sent eagerly so the harness can inject them
@@ -435,6 +445,58 @@ pub struct ExtAgentsAvailable {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ExtensionContextReady {
     pub session_id: SessionId,
+}
+
+// ---------------------------------------------------------------------------
+// Wire transport — at-least-once delivery for event-log entries
+// ---------------------------------------------------------------------------
+
+/// Monotonic id assigned by the harness when an event is appended to its
+/// event log. Receivers acknowledge processing by returning the same id
+/// in [`Ack::up_to`].
+#[derive(
+    Clone, Copy, Debug, Default, Eq, PartialEq, Hash, serde::Serialize, serde::Deserialize,
+)]
+#[serde(transparent)]
+pub struct LogEventId(pub u64);
+
+impl LogEventId {
+    #[must_use]
+    pub fn new(v: u64) -> Self {
+        Self(v)
+    }
+
+    #[must_use]
+    pub fn get(self) -> u64 {
+        self.0
+    }
+}
+
+impl fmt::Display for LogEventId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+/// A bus event delivered through the harness's event log. Receivers
+/// must process the inner event and then send an [`Ack`] referencing
+/// `id` (or any later id, since acks are cumulative).
+///
+/// `event` is boxed because `Event` is recursive through this variant.
+/// It is never another `LogEvent` or `Ack` — only "real" payload
+/// events (e.g., `SessionStarted`, `ExtensionReady`).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct LogEvent {
+    pub id: LogEventId,
+    pub event: Box<Event>,
+}
+
+/// Receiver → sender acknowledgement that all log events with id
+/// `<= up_to` have been processed. Cumulative — newer acks supersede
+/// older ones.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct Ack {
+    pub up_to: LogEventId,
 }
 
 // ---------------------------------------------------------------------------
@@ -466,9 +528,11 @@ pub struct SessionPromptQueued {
     pub text: String,
 }
 
-/// The harness is asking extensions to refresh prompt context for one session.
+/// The harness created a new session. Extensions that subscribe react by
+/// performing per-session setup (e.g. discovering AGENTS.md) and signal
+/// completion with `ExtensionContextReady`.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct SessionContextRequested {
+pub struct SessionStarted {
     pub session_id: SessionId,
 }
 
@@ -621,8 +685,8 @@ pub enum Event {
     ExtensionRestarting(ExtensionRestarting),
     #[serde(rename = "extension.skill_available")]
     ExtSkillAvailable(ExtSkillAvailable),
-    #[serde(rename = "extension.agents_available")]
-    ExtAgentsAvailable(ExtAgentsAvailable),
+    #[serde(rename = "extension.agents_md_available")]
+    ExtAgentsMdAvailable(ExtAgentsMdAvailable),
     #[serde(rename = "extension.context_ready")]
     ExtensionContextReady(ExtensionContextReady),
 
@@ -643,8 +707,8 @@ pub enum Event {
     // Session
     #[serde(rename = "session.prompt_queued")]
     SessionPromptQueued(SessionPromptQueued),
-    #[serde(rename = "session.context_requested")]
-    SessionContextRequested(SessionContextRequested),
+    #[serde(rename = "session.started")]
+    SessionStarted(SessionStarted),
     #[serde(rename = "session.prompt_created")]
     SessionPromptCreated(SessionPromptCreated),
 
@@ -655,6 +719,12 @@ pub enum Event {
     AgentResponseUpdated(AgentResponseUpdated),
     #[serde(rename = "agent.response_finished")]
     AgentResponseFinished(AgentResponseFinished),
+
+    // Wire transport
+    #[serde(rename = "wire.log_event")]
+    LogEvent(LogEvent),
+    #[serde(rename = "wire.ack")]
+    Ack(Ack),
 }
 
 impl Event {
@@ -680,7 +750,7 @@ impl Event {
             Self::ExtensionExited(_) => EventName::ExtensionExited,
             Self::ExtensionRestarting(_) => EventName::ExtensionRestarting,
             Self::ExtSkillAvailable(_) => EventName::ExtSkillAvailable,
-            Self::ExtAgentsAvailable(_) => EventName::ExtAgentsAvailable,
+            Self::ExtAgentsMdAvailable(_) => EventName::ExtAgentsMdAvailable,
             Self::ExtensionContextReady(_) => EventName::ExtensionContextReady,
             Self::HarnessInfo(_) => EventName::HarnessInfo,
             Self::HarnessModelsAvailable(_) => EventName::HarnessModelsAvailable,
@@ -688,11 +758,25 @@ impl Event {
             Self::UiPromptSubmitted(_) => EventName::UiPromptSubmitted,
             Self::UiModelSelect(_) => EventName::UiModelSelect,
             Self::SessionPromptQueued(_) => EventName::SessionPromptQueued,
-            Self::SessionContextRequested(_) => EventName::SessionContextRequested,
+            Self::SessionStarted(_) => EventName::SessionStarted,
             Self::SessionPromptCreated(_) => EventName::SessionPromptCreated,
             Self::AgentPromptSubmitted(_) => EventName::AgentPromptSubmitted,
             Self::AgentResponseUpdated(_) => EventName::AgentResponseUpdated,
             Self::AgentResponseFinished(_) => EventName::AgentResponseFinished,
+            Self::LogEvent(_) => EventName::LogEvent,
+            Self::Ack(_) => EventName::Ack,
+        }
+    }
+
+    /// Peels off a `LogEvent` envelope, returning `(Some(id), inner)`
+    /// for log-delivered events and `(None, self)` for direct ones.
+    /// Receivers that want at-least-once semantics ack the returned id
+    /// after processing the inner event.
+    #[must_use]
+    pub fn peel_log(self) -> (Option<LogEventId>, Self) {
+        match self {
+            Self::LogEvent(env) => (Some(env.id), *env.event),
+            other => (None, other),
         }
     }
 }

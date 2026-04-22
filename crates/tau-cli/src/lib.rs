@@ -196,7 +196,11 @@ fn run_chat(session_id: &str) -> Result<(), CliError> {
         loop {
             match reader.read_event() {
                 Ok(Some(event)) => {
-                    if event_tx.send(event).is_err() {
+                    // Peel the LogEvent wrapper so downstream renderers
+                    // see the inner payload directly. The UI is a
+                    // best-effort consumer and does not ack.
+                    let (_log_id, inner) = event.peel_log();
+                    if event_tx.send(inner).is_err() {
                         return;
                     }
                 }

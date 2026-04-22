@@ -11,7 +11,7 @@ use std::io::{BufReader, BufWriter, Read, Write};
 
 use tau_config::settings::{self, ModelRegistry};
 use tau_proto::{
-    AgentPromptSubmitted, AgentResponseFinished, AgentResponseUpdated, ClientKind, Event,
+    Ack, AgentPromptSubmitted, AgentResponseFinished, AgentResponseUpdated, ClientKind, Event,
     EventName, EventReader, EventSelector, EventWriter, LifecycleHello, LifecycleReady,
     LifecycleSubscribe, PROTOCOL_VERSION,
 };
@@ -53,7 +53,11 @@ where
         let Some(event) = reader.read_event()? else {
             return Ok(());
         };
-        match event {
+        // Peel the LogEvent envelope. The agent processes one prompt at
+        // a time (serial), so acks are trivially in order: ack right
+        // after handling whatever is inside.
+        let (log_id, inner) = event.peel_log();
+        match inner {
             Event::SessionPromptCreated(prompt) => {
                 let session_prompt_id = prompt.session_prompt_id.clone();
 
@@ -94,6 +98,10 @@ where
             }
             Event::LifecycleDisconnect(_) => return Ok(()),
             _ => {}
+        }
+        if let Some(id) = log_id {
+            writer.write_event(&Event::Ack(Ack { up_to: id }))?;
+            writer.flush()?;
         }
     }
 }
@@ -322,7 +330,8 @@ where
         let Some(event) = reader.read_event()? else {
             return Ok(());
         };
-        match event {
+        let (log_id, inner) = event.peel_log();
+        match inner {
             Event::SessionPromptCreated(prompt) => {
                 let spid = prompt.session_prompt_id.clone();
                 writer.write_event(&Event::AgentPromptSubmitted(AgentPromptSubmitted {
@@ -406,6 +415,10 @@ where
             }
             Event::LifecycleDisconnect(_) => return Ok(()),
             _ => {}
+        }
+        if let Some(id) = log_id {
+            writer.write_event(&Event::Ack(Ack { up_to: id }))?;
+            writer.flush()?;
         }
     }
 }

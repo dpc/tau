@@ -136,9 +136,15 @@ impl SubscriptionSet {
 }
 
 fn selector_matches(selector: &EventSelector, event: &Event) -> bool {
+    // For event-log deliveries, match against the inner event's name —
+    // subscribers like to subscribe to "session.started", not "wire.log_event".
+    let target_name = match event {
+        Event::LogEvent(env) => env.event.name(),
+        _ => event.name(),
+    };
     match selector {
-        EventSelector::Exact(name) => *name == event.name(),
-        EventSelector::Prefix(prefix) => event.name().as_str().starts_with(prefix),
+        EventSelector::Exact(name) => *name == target_name,
+        EventSelector::Prefix(prefix) => target_name.as_str().starts_with(prefix),
     }
 }
 
