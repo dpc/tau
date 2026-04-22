@@ -1311,8 +1311,10 @@ dependencies = [
 name = "tau-ext-fs"
 version = "0.1.0"
 dependencies = [
+ "dirs",
  "serde_json",
  "tau-proto",
+ "tau-skills",
  "tempfile",
 ]
 
@@ -1327,6 +1329,7 @@ dependencies = [
  "tau-core",
  "tau-ext-fs",
  "tau-proto",
+ "tau-skills",
  "tau-socket",
  "tau-supervisor",
  "tempfile",
@@ -1357,6 +1360,13 @@ dependencies = [
  "tau-config",
  "ureq",
  "url",
+]
+
+[[package]]
+name = "tau-skills"
+version = "0.1.0"
+dependencies = [
+ "tempfile",
 ]
 
 [[package]]

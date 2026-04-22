@@ -465,6 +465,12 @@ mod tests {
                 attempt: 2,
                 reason: Some("hot reload".to_owned()),
             }),
+            Event::ExtSkillAvailable(ExtSkillAvailable {
+                name: "brave-search".to_owned(),
+                description: "Web search via Brave API".to_owned(),
+                file_path: "/home/user/.agents/skills/brave-search/SKILL.md".to_owned(),
+                add_to_prompt: true,
+            }),
             Event::LifecycleDisconnect(LifecycleDisconnect {
                 reason: Some("shutdown".to_owned()),
             }),

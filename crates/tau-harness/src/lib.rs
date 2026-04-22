@@ -29,12 +29,12 @@ use tau_core::{
     ToolRouteError,
 };
 use tau_proto::{
-    AgentResponseFinished, AgentToolCall, ClientKind, ContentBlock, ConversationMessage,
+    AgentResponseFinished, AgentToolCall, CborValue, ClientKind, ContentBlock, ConversationMessage,
     ConversationRole, DecodeError, Event, EventReader, EventSelector, EventWriter,
     HarnessModelSelected, HarnessModelsAvailable, LifecycleDisconnect, LifecycleHello,
     LifecycleSubscribe, ModelId, PROTOCOL_VERSION, ProgressUpdate, SessionId, SessionPromptCreated,
-    SessionPromptId, SessionPromptQueued, ToolCallId, ToolDefinition, ToolError, ToolProgress,
-    ToolRegister, ToolRequest, ToolResult, UiPromptSubmitted,
+    SessionPromptId, SessionPromptQueued, ToolCallId, ToolDefinition, ToolError, ToolName,
+    ToolProgress, ToolRegister, ToolRequest, ToolResult, UiPromptSubmitted,
 };
 use tau_socket::{SocketPeer, SocketTransportError};
 
@@ -377,6 +377,16 @@ impl DebugEventLog {
 // Harness
 // ---------------------------------------------------------------------------
 
+/// A skill discovered by an extension.
+struct DiscoveredSkill {
+    description: String,
+    file_path: std::path::PathBuf,
+    add_to_prompt: bool,
+}
+
+/// Connection ID used for harness-owned tools (e.g. the `skill` tool).
+const HARNESS_CONNECTION_ID: &str = "__harness__";
+
 struct Harness {
     tx: Sender<HarnessEvent>,
     rx: Receiver<HarnessEvent>,
@@ -415,6 +425,8 @@ struct Harness {
     available_models: Vec<ModelId>,
     /// Currently selected model as `"provider/model_id"`.
     selected_model: ModelId,
+    /// Skills discovered by extensions, keyed by name.
+    discovered_skills: std::collections::HashMap<String, DiscoveredSkill>,
 }
 
 type AgentRunner = fn(UnixStream, UnixStream) -> Result<(), String>;
@@ -503,6 +515,7 @@ impl Harness {
             debug_log: None,
             available_models,
             selected_model,
+            discovered_skills: std::collections::HashMap::new(),
         };
 
         let n = harness.extensions.len();
@@ -511,6 +524,7 @@ impl Harness {
             harness.emit_extension_starting(&name);
         }
         harness.wait_for_startup(n)?;
+        harness.register_harness_tools();
         harness.check_config_exists();
         Ok(harness)
     }
@@ -578,6 +592,7 @@ impl Harness {
             debug_log: None,
             available_models,
             selected_model,
+            discovered_skills: std::collections::HashMap::new(),
         };
 
         let n = harness.extensions.len();
@@ -586,6 +601,7 @@ impl Harness {
             harness.emit_extension_starting(&name);
         }
         harness.wait_for_startup(n)?;
+        harness.register_harness_tools();
         harness.check_config_exists();
         Ok(harness)
     }
@@ -777,19 +793,44 @@ impl Harness {
                 }
             }
             Event::ToolResult(result) => {
-                self.persist_tool_result(&result)?;
-                let call_id = result.call_id.to_string();
-                self.publish_event(Some(source_id), Event::ToolResult(result));
-                self.maybe_complete_agent_turn(&call_id);
+                if self.pending_tool_sessions.contains_key(&result.call_id) {
+                    self.persist_tool_result(&result)?;
+                    let call_id = result.call_id.to_string();
+                    self.publish_event(Some(source_id), Event::ToolResult(result));
+                    self.maybe_complete_agent_turn(&call_id);
+                } else {
+                    self.emit_info(&format!(
+                        "discarding duplicate tool result for call_id={}",
+                        result.call_id
+                    ));
+                }
             }
             Event::ToolError(error) => {
-                self.persist_tool_error(&error)?;
-                let call_id = error.call_id.to_string();
-                self.publish_event(Some(source_id), Event::ToolError(error));
-                self.maybe_complete_agent_turn(&call_id);
+                if self.pending_tool_sessions.contains_key(&error.call_id) {
+                    self.persist_tool_error(&error)?;
+                    let call_id = error.call_id.to_string();
+                    self.publish_event(Some(source_id), Event::ToolError(error));
+                    self.maybe_complete_agent_turn(&call_id);
+                } else {
+                    self.emit_info(&format!(
+                        "discarding duplicate tool error for call_id={}",
+                        error.call_id
+                    ));
+                }
             }
             Event::ToolProgress(progress) => {
                 self.publish_event(Some(source_id), Event::ToolProgress(progress));
+            }
+            Event::ExtSkillAvailable(ref skill) => {
+                self.discovered_skills.insert(
+                    skill.name.clone(),
+                    DiscoveredSkill {
+                        description: skill.description.clone(),
+                        file_path: std::path::PathBuf::from(&skill.file_path),
+                        add_to_prompt: skill.add_to_prompt,
+                    },
+                );
+                self.publish_event(Some(source_id), event);
             }
             Event::AgentPromptSubmitted(_) | Event::AgentResponseUpdated(_) => {
                 self.publish_event(Some(source_id), event);
@@ -1112,7 +1153,7 @@ impl Harness {
         let event = Event::SessionPromptCreated(SessionPromptCreated {
             session_prompt_id: session_prompt_id.clone(),
             session_id: session_id.into(),
-            system_prompt: build_system_prompt(&tools),
+            system_prompt: build_system_prompt(&tools, &self.discovered_skills),
             messages,
             tools,
             model,
@@ -1238,6 +1279,11 @@ impl Harness {
         session_id: &str,
         call: &AgentToolCall,
     ) -> Result<(), HarnessError> {
+        // Handle harness-owned tools directly.
+        if call.name == "skill" {
+            return self.handle_skill_tool_call(session_id, call);
+        }
+
         let call_id: ToolCallId = call.id.clone().into();
 
         // Persist the request.
@@ -1281,6 +1327,111 @@ impl Harness {
             }
             Err(error) => return Err(HarnessError::ToolRoute(error)),
         }
+
+        Ok(())
+    }
+
+    /// Register harness-owned tools (e.g. `skill`).
+    fn register_harness_tools(&mut self) {
+        let _ = self.registry.register(
+            HARNESS_CONNECTION_ID,
+            tau_proto::ToolSpec {
+                name: "skill".into(),
+                description: Some(
+                    "Load a skill's full content by name. Use this when a task \
+                     matches an available skill's description."
+                        .to_owned(),
+                ),
+                parameters: Some(serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "name": {
+                            "type": "string",
+                            "description": "Name of the skill to load"
+                        }
+                    },
+                    "required": ["name"]
+                })),
+            },
+        );
+    }
+
+    /// Handle the harness-owned `skill` tool call inline.
+    fn handle_skill_tool_call(
+        &mut self,
+        session_id: &str,
+        call: &AgentToolCall,
+    ) -> Result<(), HarnessError> {
+        let call_id: ToolCallId = call.id.clone().into();
+        let tool_name: ToolName = "skill".into();
+
+        // Persist the request and track the session mapping.
+        self.store.append_tool_activity(
+            session_id,
+            ToolActivityRecord {
+                call_id: call_id.clone(),
+                tool_name: tool_name.clone(),
+                outcome: ToolActivityOutcome::Requested {
+                    arguments: call.arguments.clone(),
+                },
+            },
+        )?;
+        self.pending_tool_sessions
+            .insert(call_id.clone(), session_id.into());
+
+        // Extract the skill name from arguments.
+        let skill_name = cbor_map_text(&call.arguments, "name");
+
+        let result_event = match skill_name {
+            Some(name) => match self.discovered_skills.get(name) {
+                Some(skill) => match std::fs::read_to_string(&skill.file_path) {
+                    Ok(content) => {
+                        let body = tau_skills::strip_frontmatter(&content);
+                        Event::ToolResult(tau_proto::ToolResult {
+                            call_id: call_id.clone(),
+                            tool_name: tool_name.clone(),
+                            result: CborValue::Map(vec![
+                                (
+                                    CborValue::Text("name".to_owned()),
+                                    CborValue::Text(name.to_owned()),
+                                ),
+                                (
+                                    CborValue::Text("content".to_owned()),
+                                    CborValue::Text(body.to_owned()),
+                                ),
+                            ]),
+                        })
+                    }
+                    Err(e) => Event::ToolError(tau_proto::ToolError {
+                        call_id: call_id.clone(),
+                        tool_name: tool_name.clone(),
+                        message: format!("failed to read skill file: {e}"),
+                        details: None,
+                    }),
+                },
+                None => Event::ToolError(tau_proto::ToolError {
+                    call_id: call_id.clone(),
+                    tool_name: tool_name.clone(),
+                    message: format!("unknown skill: {name}"),
+                    details: None,
+                }),
+            },
+            None => Event::ToolError(tau_proto::ToolError {
+                call_id: call_id.clone(),
+                tool_name: tool_name.clone(),
+                message: "missing required argument: name".to_owned(),
+                details: None,
+            }),
+        };
+
+        // Persist, publish, and complete the tool call.
+        match &result_event {
+            Event::ToolResult(r) => self.persist_tool_result(r)?,
+            Event::ToolError(e) => self.persist_tool_error(e)?,
+            _ => {}
+        }
+        self.publish_event(None, result_event);
+        self.maybe_complete_agent_turn(&call.id);
 
         Ok(())
     }
@@ -1519,8 +1670,11 @@ fn save_last_selected_model(model: &str) {
         .and_then(|s| std::fs::write(&path, s).ok());
 }
 
-/// Builds the system prompt from available tools and environment.
-fn build_system_prompt(tools: &[ToolDefinition]) -> String {
+/// Builds the system prompt from available tools, skills, and environment.
+fn build_system_prompt(
+    tools: &[ToolDefinition],
+    skills: &std::collections::HashMap<String, DiscoveredSkill>,
+) -> String {
     let mut prompt = String::from(
         "You are an expert coding assistant operating inside tau, \
          a coding agent harness. You help users by reading files, \
@@ -1545,6 +1699,27 @@ fn build_system_prompt(tools: &[ToolDefinition]) -> String {
          - When asked to read a file, use the read tool.\n\
          - When asked to run a command, use the bash tool.\n",
     );
+
+    // Available skills section.
+    let prompt_skills: Vec<_> = skills
+        .iter()
+        .filter(|(_, s)| s.add_to_prompt)
+        .collect();
+    if !prompt_skills.is_empty() {
+        prompt.push_str(
+            "\nThe following skills provide specialized instructions for specific tasks.\n\
+             Use the skill tool to load a skill when the task matches its description.\n\n\
+             <available_skills>\n",
+        );
+        for (name, skill) in &prompt_skills {
+            prompt.push_str(&format!(
+                "  <skill>\n    <name>{name}</name>\n    \
+                 <description>{}</description>\n  </skill>\n",
+                skill.description
+            ));
+        }
+        prompt.push_str("</available_skills>\n");
+    }
 
     // Date and CWD.
     let now = chrono_free_date();
@@ -1671,6 +1846,17 @@ fn assemble_conversation(tree: &tau_core::SessionTree) -> Vec<ConversationMessag
     }
 
     messages
+}
+
+/// Extract a string value from a CBOR map by key.
+fn cbor_map_text<'a>(map: &'a CborValue, key: &str) -> Option<&'a str> {
+    match map {
+        CborValue::Map(entries) => entries.iter().find_map(|(k, v)| match (k, v) {
+            (CborValue::Text(k), CborValue::Text(v)) if k == key => Some(v.as_str()),
+            _ => None,
+        }),
+        _ => None,
+    }
 }
 
 /// Converts a CBOR value to human-readable text for tool results.
@@ -2573,5 +2759,173 @@ mod tests {
             .expect_err("should get disconnect");
         assert!(matches!(&err, HarnessError::Participant(r) if r == "test disconnect"));
         server.join().expect("join");
+    }
+
+    // -- Skills --
+
+    #[test]
+    fn build_system_prompt_includes_skills() {
+        let mut skills = std::collections::HashMap::new();
+        skills.insert(
+            "brave-search".to_owned(),
+            DiscoveredSkill {
+                description: "Web search via Brave API".to_owned(),
+                file_path: PathBuf::from("/skills/brave-search/SKILL.md"),
+                add_to_prompt: true,
+            },
+        );
+        let prompt = build_system_prompt(&[], &skills);
+        assert!(prompt.contains("<available_skills>"));
+        assert!(prompt.contains("<name>brave-search</name>"));
+        assert!(prompt.contains("Web search via Brave API"));
+    }
+
+    #[test]
+    fn build_system_prompt_excludes_hidden_skills() {
+        let mut skills = std::collections::HashMap::new();
+        skills.insert(
+            "hidden".to_owned(),
+            DiscoveredSkill {
+                description: "Should not appear".to_owned(),
+                file_path: PathBuf::from("/skills/hidden/SKILL.md"),
+                add_to_prompt: false,
+            },
+        );
+        let prompt = build_system_prompt(&[], &skills);
+        assert!(!prompt.contains("<available_skills>"));
+        assert!(!prompt.contains("hidden"));
+    }
+
+    #[test]
+    fn skill_tool_reads_file_content() {
+        let td = TempDir::new().expect("tempdir");
+        let sp = td.path().join("sessions.cbor");
+        let pp = td.path().join("policy.cbor");
+
+        let skill_dir = td.path().join("my-skill");
+        std::fs::create_dir_all(&skill_dir).expect("mkdir");
+        let skill_file = skill_dir.join("SKILL.md");
+        std::fs::write(
+            &skill_file,
+            "---\nname: my-skill\ndescription: A test skill\n---\n# Instructions\nDo the thing.",
+        )
+        .expect("write");
+
+        let mut h = echo_harness(&sp, &pp).expect("start");
+
+        // Manually insert a discovered skill.
+        h.discovered_skills.insert(
+            "my-skill".to_owned(),
+            DiscoveredSkill {
+                description: "A test skill".to_owned(),
+                file_path: skill_file,
+                add_to_prompt: true,
+            },
+        );
+
+        // Directly invoke the skill tool handler.
+        h.store
+            .append_user_message("s1", "load skill".to_owned())
+            .expect("append");
+        h.turn_state = TurnState::ToolsRunning {
+            session_id: "s1".into(),
+            remaining_calls: vec!["call-skill".into()],
+        };
+        let call = AgentToolCall {
+            id: "call-skill".to_owned(),
+            name: "skill".to_owned(),
+            arguments: CborValue::Map(vec![(
+                CborValue::Text("name".to_owned()),
+                CborValue::Text("my-skill".to_owned()),
+            )]),
+        };
+        h.handle_skill_tool_call("s1", &call).expect("skill call");
+
+        // Verify the tool result was persisted.
+        let branch = h.store.session("s1").expect("session").current_branch();
+        let has_skill_result = branch.iter().any(|entry| {
+            matches!(
+                entry,
+                SessionEntry::ToolActivity(ToolActivityRecord {
+                    outcome: ToolActivityOutcome::Result { .. },
+                    ..
+                })
+            )
+        });
+        assert!(has_skill_result, "expected skill tool result in session");
+    }
+
+    #[test]
+    fn skill_tool_returns_error_for_unknown_skill() {
+        let td = TempDir::new().expect("tempdir");
+        let sp = td.path().join("sessions.cbor");
+        let pp = td.path().join("policy.cbor");
+
+        let mut h = echo_harness(&sp, &pp).expect("start");
+        h.store
+            .append_user_message("s1", "load skill".to_owned())
+            .expect("append");
+        h.turn_state = TurnState::ToolsRunning {
+            session_id: "s1".into(),
+            remaining_calls: vec!["call-missing".into()],
+        };
+        let call = AgentToolCall {
+            id: "call-missing".to_owned(),
+            name: "skill".to_owned(),
+            arguments: CborValue::Map(vec![(
+                CborValue::Text("name".to_owned()),
+                CborValue::Text("nonexistent".to_owned()),
+            )]),
+        };
+        h.handle_skill_tool_call("s1", &call).expect("skill call");
+
+        // Verify a tool error was persisted.
+        let branch = h.store.session("s1").expect("session").current_branch();
+        let has_skill_error = branch.iter().any(|entry| {
+            matches!(
+                entry,
+                SessionEntry::ToolActivity(ToolActivityRecord {
+                    outcome: ToolActivityOutcome::Error { .. },
+                    ..
+                })
+            )
+        });
+        assert!(has_skill_error, "expected skill tool error in session");
+    }
+
+    #[test]
+    fn skill_tool_registered_in_tool_list() {
+        let td = TempDir::new().expect("tempdir");
+        let sp = td.path().join("sessions.cbor");
+        let pp = td.path().join("policy.cbor");
+
+        let h = echo_harness(&sp, &pp).expect("start");
+        let defs = h.gather_tool_definitions();
+        assert!(
+            defs.iter().any(|d| d.name == "skill"),
+            "skill tool should be registered; got: {:?}",
+            defs.iter().map(|d| &d.name).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn duplicate_tool_result_is_discarded() {
+        let td = TempDir::new().expect("tempdir");
+        let sp = td.path().join("sessions.cbor");
+        let pp = td.path().join("policy.cbor");
+
+        let mut h = echo_harness(&sp, &pp).expect("start");
+
+        // Fabricate a tool result for a call_id that is not in pending_tool_sessions.
+        let result = h.handle_extension_event(
+            "fake-ext",
+            Event::ToolResult(ToolResult {
+                call_id: "orphan-call".into(),
+                tool_name: "read".into(),
+                result: tau_proto::CborValue::Text("stale data".to_owned()),
+            }),
+        );
+        // Should not error — just emits a warning and discards.
+        assert!(result.is_ok());
     }
 }

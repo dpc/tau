@@ -58,6 +58,8 @@ pub enum EventName {
     ExtensionExited,
     #[serde(rename = "extension.restarting")]
     ExtensionRestarting,
+    #[serde(rename = "extension.skill_available")]
+    ExtSkillAvailable,
 
     // Harness informational messages
     #[serde(rename = "harness.info")]
@@ -110,6 +112,7 @@ impl EventName {
             Self::ExtensionReady => "extension.ready",
             Self::ExtensionExited => "extension.exited",
             Self::ExtensionRestarting => "extension.restarting",
+            Self::ExtSkillAvailable => "extension.skill_available",
             Self::HarnessInfo => "harness.info",
             Self::HarnessModelsAvailable => "harness.models_available",
             Self::HarnessModelSelected => "harness.model_selected",
@@ -152,6 +155,7 @@ impl FromStr for EventName {
             "extension.ready" => Ok(Self::ExtensionReady),
             "extension.exited" => Ok(Self::ExtensionExited),
             "extension.restarting" => Ok(Self::ExtensionRestarting),
+            "extension.skill_available" => Ok(Self::ExtSkillAvailable),
             "harness.info" => Ok(Self::HarnessInfo),
             "harness.models_available" => Ok(Self::HarnessModelsAvailable),
             "harness.model_selected" => Ok(Self::HarnessModelSelected),
@@ -393,6 +397,17 @@ pub struct ExtensionRestarting {
     pub reason: Option<String>,
 }
 
+/// An extension discovered a skill and is advertising it to the harness.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ExtSkillAvailable {
+    pub name: String,
+    pub description: String,
+    /// Absolute path to the skill file so the harness can read it.
+    pub file_path: String,
+    /// When true the harness should include this skill in the system prompt.
+    pub add_to_prompt: bool,
+}
+
 // ---------------------------------------------------------------------------
 // UI events — facts from the user interface
 // ---------------------------------------------------------------------------
@@ -569,6 +584,8 @@ pub enum Event {
     ExtensionExited(ExtensionExited),
     #[serde(rename = "extension.restarting")]
     ExtensionRestarting(ExtensionRestarting),
+    #[serde(rename = "extension.skill_available")]
+    ExtSkillAvailable(ExtSkillAvailable),
 
     // Harness info
     #[serde(rename = "harness.info")]
@@ -621,6 +638,7 @@ impl Event {
             Self::ExtensionReady(_) => EventName::ExtensionReady,
             Self::ExtensionExited(_) => EventName::ExtensionExited,
             Self::ExtensionRestarting(_) => EventName::ExtensionRestarting,
+            Self::ExtSkillAvailable(_) => EventName::ExtSkillAvailable,
             Self::HarnessInfo(_) => EventName::HarnessInfo,
             Self::HarnessModelsAvailable(_) => EventName::HarnessModelsAvailable,
             Self::HarnessModelSelected(_) => EventName::HarnessModelSelected,

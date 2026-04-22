@@ -201,6 +201,33 @@ where
     ] {
         writer.write_event(&Event::ToolRegister(ToolRegister { tool }))?;
     }
+
+    // Discover and announce skills.
+    {
+        let mut skill_dirs = Vec::new();
+        if let Ok(cwd) = std::env::current_dir() {
+            skill_dirs.push(cwd.join(".agents").join("skills"));
+        }
+        if let Some(home) = dirs::home_dir() {
+            skill_dirs.push(home.join(".agents").join("skills"));
+        }
+        let result = tau_skills::load_skills_from_dirs(&skill_dirs);
+        for skill in &result.skills {
+            let file_path = skill
+                .file_path
+                .canonicalize()
+                .unwrap_or_else(|_| skill.file_path.clone())
+                .display()
+                .to_string();
+            writer.write_event(&Event::ExtSkillAvailable(tau_proto::ExtSkillAvailable {
+                name: skill.name.clone(),
+                description: skill.description.clone(),
+                file_path,
+                add_to_prompt: skill.add_to_prompt,
+            }))?;
+        }
+    }
+
     writer.write_event(&Event::LifecycleReady(LifecycleReady {
         message: Some("filesystem and shell tools ready".to_owned()),
     }))?;
