@@ -10,7 +10,7 @@ use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use tau_harness::runtime_dir;
 use tau_proto::{
@@ -19,6 +19,19 @@ use tau_proto::{
 };
 
 const DAEMON_START_TIMEOUT: Duration = Duration::from_secs(5);
+
+const STARTUP_PUNS: &[&str] = &[
+    "Tau is like Pi, but twice as much.",
+    "A new angle on coding agents.",
+    "Tau day is every day if you care about circles enough.",
+    "Come for the agent, stay for the circumference discourse.",
+    "Tau users don’t think outside the box; they think around the circle.",
+    "Tau is the irrational choice for rational Unix hackers.",
+    "Some projects revolve around hype. This one revolves around Tau.",
+    "Small tools, loosely joined — that’s the Tau of Unix.",
+    "Everything is a process, and every process deserves a full turn.",
+    "In Tau, what goes around comes around over stdio.",
+];
 
 // ---------------------------------------------------------------------------
 // Error type
@@ -187,13 +200,13 @@ fn run_chat(session_id: &str) -> Result<(), CliError> {
     if settings.show_logo {
         use tau_cli_term::{Span, StyledBlock, StyledText};
         let accent = tau_cli_term::resolve::resolve(&theme, tau_themes::names::BANNER_ACCENT);
-        let now = chrono::Local::now();
+        let pun = random_startup_pun();
         let banner = StyledText::from(vec![
             Span::new("▀█▀▀ ", accent),
             Span::plain(format!("tau {}", env!("CARGO_PKG_VERSION"))),
             Span::new("\n", Default::default()),
             Span::new(" █▄  ", accent),
-            Span::plain(now.format("%Y-%m-%d %H:%M").to_string()),
+            Span::plain(pun),
         ]);
         handle.print_output(StyledBlock::new(banner));
     }
@@ -228,6 +241,14 @@ fn run_chat(session_id: &str) -> Result<(), CliError> {
     drop(daemon);
 
     result
+}
+
+fn random_startup_pun() -> &'static str {
+    let idx = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.subsec_nanos() as usize % STARTUP_PUNS.len())
+        .unwrap_or(0);
+    STARTUP_PUNS[idx]
 }
 
 fn terminal_input_loop(
@@ -443,19 +464,15 @@ fn format_shell_completion(details: &CborValue) -> ToolCompletionDisplay {
     let output = if trimmed.is_empty() {
         None
     } else {
-        let mut text = String::new();
-        let mut chars = 0;
-        for (lines, line) in trimmed.lines().enumerate() {
-            if lines >= 5 || chars + line.len() > 500 {
-                text.push_str("...");
-                break;
-            }
-            if lines > 0 {
-                text.push('\n');
-            }
-            text.push_str(line);
-            chars += line.len();
-        }
+        let all_lines: Vec<&str> = trimmed.lines().collect();
+        let total = all_lines.len();
+        let text = if total > 7 {
+            let head = all_lines[..3].join("\n");
+            let tail = all_lines[total - 3..].join("\n");
+            format!("{head}\n… {total} lines total …\n{tail}")
+        } else {
+            all_lines.join("\n")
+        };
         Some(text)
     };
 
@@ -543,7 +560,7 @@ impl EventRenderer {
                     ));
                 }
 
-                let block = themed_block(&self.theme, names::AGENT_PENDING, "...");
+                let block = themed_block(&self.theme, names::AGENT_PENDING, " …");
                 let id = self.handle.new_block(block);
                 self.handle.push_above_active(id);
                 self.handle.redraw();
@@ -552,7 +569,8 @@ impl EventRenderer {
             }
             Event::AgentResponseUpdated(update) => {
                 if let Some(&bid) = self.prompt_blocks.get(update.session_prompt_id.as_str()) {
-                    let block = themed_block(&self.theme, names::AGENT_RESPONSE, &update.text);
+                    let text = format!("{} …", update.text);
+                    let block = themed_block(&self.theme, names::AGENT_RESPONSE, text);
                     self.handle.set_block(bid, block);
                     self.handle.redraw();
                 }
@@ -774,8 +792,8 @@ pub fn main_with_args() -> std::process::ExitCode {
                 let session_id = if session_id == tau_harness::default_session_id() {
                     format!(
                         "chat-{}",
-                        std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
+                        SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
                             .map(|d| d.as_millis())
                             .unwrap_or(0)
                     )
@@ -936,7 +954,7 @@ mod tests {
             model: None,
         }));
         sync(&handle);
-        assert!(vt.screen_contains(80, "..."));
+        assert!(vt.screen_contains(80, " …"));
 
         // Agent streams response.
         renderer.handle(&Event::AgentResponseUpdated(AgentResponseUpdated {
@@ -1129,10 +1147,47 @@ mod tests {
         }
         // No stale "..." blocks.
         assert!(
-            !vt.screen_contains(80, "..."),
-            "no '...' should remain, got: {:?}",
+            !vt.screen_contains(80, " …"),
+            "no ' …' should remain, got: {:?}",
             vt.screen_text(80)
         );
+    }
+
+    #[test]
+    fn streaming_indicator_appends_during_updates() {
+        let (_term, handle, vt) = setup(80, 24);
+        let mut renderer = EventRenderer::new(
+            handle.clone(),
+            tau_cli_term::CompletionData::new(),
+            tau_themes::Theme::builtin(),
+        );
+
+        renderer.handle(&Event::SessionPromptCreated(SessionPromptCreated {
+            session_prompt_id: "sp-0".into(),
+            session_id: "s1".into(),
+            system_prompt: String::new(),
+            messages: Vec::new(),
+            tools: Vec::new(),
+            model: None,
+        }));
+        sync(&handle);
+        assert!(vt.screen_contains(80, " …"));
+
+        renderer.handle(&Event::AgentResponseUpdated(AgentResponseUpdated {
+            session_prompt_id: "sp-0".into(),
+            text: "Hello".into(),
+        }));
+        sync(&handle);
+        assert!(vt.screen_contains(80, "Hello …"));
+
+        renderer.handle(&Event::AgentResponseFinished(AgentResponseFinished {
+            session_prompt_id: "sp-0".into(),
+            text: Some("Hello".into()),
+            tool_calls: Vec::new(),
+        }));
+        sync(&handle);
+        assert!(vt.screen_contains(80, "Hello"));
+        assert!(!vt.screen_contains(80, "Hello …"));
     }
 
     #[test]
@@ -1328,8 +1383,8 @@ mod tests {
 
         // No stale streaming blocks should remain.
         assert!(
-            !vt.screen_contains(80, "..."),
-            "no '...' should remain, got: {:?}",
+            !vt.screen_contains(80, " …"),
+            "no ' …' should remain, got: {:?}",
             vt.screen_text(80)
         );
     }
