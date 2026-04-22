@@ -1769,11 +1769,7 @@ mod tests {
         assert!(disconnected.is_some());
         let removed_tools = registry.unregister_connection(&first_id);
         assert_eq!(removed_tools.len(), 2);
-        assert!(
-            removed_tools
-                .iter()
-                .any(|tool_name| tool_name == "echo")
-        );
+        assert!(removed_tools.iter().any(|tool_name| tool_name == "echo"));
         assert!(
             removed_tools
                 .iter()

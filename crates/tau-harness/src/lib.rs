@@ -1261,12 +1261,11 @@ impl Harness {
             false
         };
         if should_send {
-            let session_id =
-                if let TurnState::ToolsRunning { session_id, .. } = &self.turn_state {
-                    session_id.clone()
-                } else {
-                    unreachable!("just checked")
-                };
+            let session_id = if let TurnState::ToolsRunning { session_id, .. } = &self.turn_state {
+                session_id.clone()
+            } else {
+                unreachable!("just checked")
+            };
             self.turn_state = TurnState::AgentThinking {
                 _session_id: session_id.clone(),
             };
@@ -1701,10 +1700,7 @@ fn build_system_prompt(
     );
 
     // Available skills section.
-    let prompt_skills: Vec<_> = skills
-        .iter()
-        .filter(|(_, s)| s.add_to_prompt)
-        .collect();
+    let prompt_skills: Vec<_> = skills.iter().filter(|(_, s)| s.add_to_prompt).collect();
     if !prompt_skills.is_empty() {
         prompt.push_str(
             "\nThe following skills provide specialized instructions for specific tasks.\n\
@@ -2602,10 +2598,7 @@ mod tests {
         let td = TempDir::new().expect("tempdir");
         let sp = td.path().join("sessions.cbor");
         let o = run_embedded_message_with_echo(&sp, "s1", "shell printf hi").expect("ok");
-        assert_eq!(
-            o.progress_messages,
-            vec!["shell: running shell command"]
-        );
+        assert_eq!(o.progress_messages, vec!["shell: running shell command"]);
         assert!(!o.response.is_empty(), "shell response should not be empty");
     }
 
@@ -2648,10 +2641,7 @@ mod tests {
                 .iter()
                 .any(|m| m == "extension tools ready")
         );
-        assert_eq!(
-            o.progress_messages,
-            vec!["shell: running shell command"]
-        );
+        assert_eq!(o.progress_messages, vec!["shell: running shell command"]);
         assert!(!o.response.is_empty(), "shell response should not be empty");
         server.join().expect("join").expect("clean exit");
     }

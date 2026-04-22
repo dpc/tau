@@ -9,8 +9,7 @@ use std::fs;
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::PathBuf;
 use std::process::Command;
-use std::sync::mpsc;
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, mpsc};
 
 // ---------------------------------------------------------------------------
 // Simple counting semaphore
@@ -722,8 +721,7 @@ fn run_grep(arguments: &CborValue) -> Result<CborValue, String> {
     let glob = optional_argument_text(arguments, "glob");
     let ignore_case = optional_argument_bool(arguments, "ignoreCase").unwrap_or(false);
     let literal = optional_argument_bool(arguments, "literal").unwrap_or(false);
-    let context = optional_argument_int(arguments, "context")
-        .map(|v| v.max(0) as usize);
+    let context = optional_argument_int(arguments, "context").map(|v| v.max(0) as usize);
     let limit = optional_argument_int(arguments, "limit")
         .map(|v| v.max(1) as usize)
         .unwrap_or(DEFAULT_GREP_LIMIT);
@@ -1025,7 +1023,11 @@ fn wait_with_timeout(
         Ok((stdout, stderr)) => {
             // Pipes closed → child exited. Reap it.
             let status = child.wait().expect("child already exited");
-            Some(WaitResult { status, stdout, stderr })
+            Some(WaitResult {
+                status,
+                stdout,
+                stderr,
+            })
         }
         Err(mpsc::RecvTimeoutError::Timeout) => None,
         Err(mpsc::RecvTimeoutError::Disconnected) => None,
@@ -1037,7 +1039,6 @@ struct WaitResult {
     stdout: String,
     stderr: String,
 }
-
 
 fn read_pipe(pipe: Option<impl std::io::Read>) -> String {
     let Some(mut pipe) = pipe else {
@@ -1467,7 +1468,11 @@ mod tests {
         let input = lines.join("\n");
         let result = truncate_tail(&input);
         assert!(result.was_truncated);
-        assert!(result.content.contains(&format!("line {}", MAX_OUTPUT_LINES + 500)));
+        assert!(
+            result
+                .content
+                .contains(&format!("line {}", MAX_OUTPUT_LINES + 500))
+        );
         assert!(result.content.contains("[Showing lines"));
         // Should not contain the very first line.
         assert!(!result.content.contains("line 1\n"));

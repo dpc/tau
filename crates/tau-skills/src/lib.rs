@@ -1,5 +1,4 @@
-use std::collections::BTreeMap;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -122,8 +121,7 @@ fn parse_frontmatter_line(line: &str) -> Option<(&str, &str)> {
 
 fn strip_quotes(s: &str) -> &str {
     if s.len() >= 2
-        && ((s.starts_with('"') && s.ends_with('"'))
-            || (s.starts_with('\'') && s.ends_with('\'')))
+        && ((s.starts_with('"') && s.ends_with('"')) || (s.starts_with('\'') && s.ends_with('\'')))
     {
         return &s[1..s.len() - 1];
     }
@@ -142,9 +140,7 @@ fn validate_name(name: &str, parent_dir_name: Option<&str>, path: &Path) -> Vec<
             diagnostics.push(SkillDiagnostic {
                 path: path.to_owned(),
                 kind: DiagnosticKind::Warning,
-                message: format!(
-                    "name \"{name}\" does not match parent directory \"{parent}\""
-                ),
+                message: format!("name \"{name}\" does not match parent directory \"{parent}\""),
             });
         }
     }
@@ -153,14 +149,14 @@ fn validate_name(name: &str, parent_dir_name: Option<&str>, path: &Path) -> Vec<
         diagnostics.push(SkillDiagnostic {
             path: path.to_owned(),
             kind: DiagnosticKind::Warning,
-            message: format!(
-                "name exceeds {MAX_NAME_LENGTH} characters ({})",
-                name.len()
-            ),
+            message: format!("name exceeds {MAX_NAME_LENGTH} characters ({})", name.len()),
         });
     }
 
-    if !name.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-') {
+    if !name
+        .bytes()
+        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+    {
         diagnostics.push(SkillDiagnostic {
             path: path.to_owned(),
             kind: DiagnosticKind::Warning,
@@ -282,8 +278,8 @@ pub fn load_skill_from_content(
 ///
 /// 1. If a directory contains `SKILL.md`, that file is the skill — stop
 ///    recursing into that directory.
-/// 2. Otherwise, at root level only, treat direct `.md` children as
-///    individual skills.
+/// 2. Otherwise, at root level only, treat direct `.md` children as individual
+///    skills.
 /// 3. Recurse into subdirectories to find `SKILL.md`.
 /// 4. Skip dot-prefixed entries and `node_modules`.
 pub fn discover_skill_paths(root: &Path) -> Vec<PathBuf> {
@@ -418,7 +414,10 @@ mod tests {
         let content = "---\nname: my-skill\ndescription: Does things\n---\n# Body\n";
         let (fm, body) = parse_frontmatter(content);
         assert_eq!(fm.get("name").map(String::as_str), Some("my-skill"));
-        assert_eq!(fm.get("description").map(String::as_str), Some("Does things"));
+        assert_eq!(
+            fm.get("description").map(String::as_str),
+            Some("Does things")
+        );
         assert_eq!(body, "# Body\n");
     }
 
@@ -511,7 +510,8 @@ mod tests {
 
     #[test]
     fn load_skill_disable_model_invocation() {
-        let content = "---\nname: hidden\ndescription: A hidden skill\ndisable-model-invocation: true\n---\n";
+        let content =
+            "---\nname: hidden\ndescription: A hidden skill\ndisable-model-invocation: true\n---\n";
         let path = Path::new("/skills/hidden/SKILL.md");
         let (skill, _diags) = load_skill_from_content(content, path);
         let skill = skill.expect("should load");
@@ -540,9 +540,11 @@ mod tests {
         let content = "---\nname: Bad_Name\ndescription: Invalid chars\n---\n";
         let path = Path::new("/skills/Bad_Name/SKILL.md");
         let (_skill, diags) = load_skill_from_content(content, path);
-        assert!(diags
-            .iter()
-            .any(|d| d.message.contains("invalid characters")));
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.message.contains("invalid characters"))
+        );
     }
 
     // -- Directory scanning -------------------------------------------------
@@ -661,10 +663,12 @@ mod tests {
         let result = load_skills_from_dirs(&[dir1.path().to_owned(), dir2.path().to_owned()]);
         assert_eq!(result.skills.len(), 1);
         assert_eq!(result.skills[0].description, "First");
-        assert!(result
-            .diagnostics
-            .iter()
-            .any(|d| d.kind == DiagnosticKind::Collision));
+        assert!(
+            result
+                .diagnostics
+                .iter()
+                .any(|d| d.kind == DiagnosticKind::Collision)
+        );
     }
 
     #[test]

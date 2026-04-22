@@ -5,9 +5,10 @@
 //! in this crate for the full rendering strategy.
 //!
 //! Three rendering paths (see `README.md`):
-//! - **Differential update** — common case, diffs visible viewport via [`Screen`]
-//! - **Scrolling render** — on overflow, diffs full content and renders
-//!   in order; `\r\n` at the bottom pushes content into scrollback
+//! - **Differential update** — common case, diffs visible viewport via
+//!   [`Screen`]
+//! - **Scrolling render** — on overflow, diffs full content and renders in
+//!   order; `\r\n` at the bottom pushes content into scrollback
 //! - **Full render** — on resize, clears screen and re-renders everything
 
 pub mod screen;
@@ -1725,9 +1726,8 @@ mod tests {
         let (_term, handle, _input_tx) = Term::new_virtual(40, 5, "> ", Box::new(buf.clone()));
         flush_redraws(&handle, &buf, &mut parser);
 
-        let block_id = handle.new_block(StyledBlock::new(StyledText::from(Span::plain(
-            "starting",
-        ))));
+        let block_id =
+            handle.new_block(StyledBlock::new(StyledText::from(Span::plain("starting"))));
         handle.push_above_active(block_id);
         flush_redraws(&handle, &buf, &mut parser);
 

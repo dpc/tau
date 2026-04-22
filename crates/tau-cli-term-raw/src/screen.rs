@@ -3,13 +3,12 @@
 //! [`Screen`] maintains an "actual" buffer representing what is
 //! currently on the terminal. Two rendering methods use it:
 //!
-//! - [`Screen::update()`] — **Path 1** (differential update): diffs
-//!   the visible viewport against the actual buffer and emits only
-//!   the escape sequences needed to update changed cells.
-//! - [`Screen::render_scrolling()`] — **Path 2** (scrolling render):
-//!   diffs the full content array, renders changed lines in order,
-//!   and lets `\r\n` at the bottom edge push content into the
-//!   terminal's scrollback buffer.
+//! - [`Screen::update()`] — **Path 1** (differential update): diffs the visible
+//!   viewport against the actual buffer and emits only the escape sequences
+//!   needed to update changed cells.
+//! - [`Screen::render_scrolling()`] — **Path 2** (scrolling render): diffs the
+//!   full content array, renders changed lines in order, and lets `\r\n` at the
+//!   bottom edge push content into the terminal's scrollback buffer.
 //!
 //! See `README.md` for the full rendering strategy.
 //!
@@ -285,10 +284,7 @@ impl Screen {
             if let Some(line) = all_lines.get(i) {
                 emit_styled_cells(w, line)?;
             }
-            self.cursor_col = all_lines
-                .get(i)
-                .map(|l| cols(l))
-                .unwrap_or(0);
+            self.cursor_col = all_lines.get(i).map(|l| cols(l)).unwrap_or(0);
         }
 
         // Clear any leftover lines below if content shrunk.
