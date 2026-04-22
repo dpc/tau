@@ -1,22 +1,25 @@
-//! Dual-buffer diff-based screen renderer.
+//! Screen state tracker and renderer.
 //!
-//! Maintains an "actual" buffer representing what is currently on the
-//! terminal and diffs it against a "desired" buffer to emit only the
-//! escape sequences needed to update changed characters. This minimizes
-//! terminal I/O, which matters over slow SSH connections.
+//! [`Screen`] maintains an "actual" buffer representing what is
+//! currently on the terminal. Two rendering methods use it:
 //!
-//! Approach borrowed from fish shell's `screen.rs`:
+//! - [`Screen::update()`] — **Path 1** (differential update): diffs
+//!   the visible viewport against the actual buffer and emits only
+//!   the escape sequences needed to update changed cells.
+//! - [`Screen::render_scrolling()`] — **Path 2** (scrolling render):
+//!   diffs the full content array, renders changed lines in order,
+//!   and lets `\r\n` at the bottom edge push content into the
+//!   terminal's scrollback buffer.
+//!
+//! See `README.md` for the full rendering strategy.
+//!
+//! Diff approach borrowed from fish shell's `screen.rs`:
 //! <https://github.com/fish-shell/fish-shell/blob/master/src/screen.rs>
 //!
-//! Key differences from fish:
-//! - We use a simpler line model (`Vec<Vec<Cell>>`) instead of fish's Line
-//!   struct with soft-wrap tracking.
-//! - We always use relative cursor movement (MoveUp, `\r`, `\n`, MoveToColumn)
-//!   — never absolute positioning.
-//!
-//! Downward movement uses `\n` rather than `MoveDown` because `\n`
-//! scrolls the terminal when at the bottom of the screen and creates
-//! new physical lines, while `MoveDown` silently stops at the edge.
+//! Key design choices:
+//! - Simple line model (`Vec<Vec<Cell>>`) — no soft-wrap tracking.
+//! - Relative cursor movement only (`MoveUp`, `\r`, `\n`, `MoveToColumn`).
+//! - `\n` for downward movement (scrolls at bottom edge, unlike `MoveDown`).
 
 use std::io::{self, Write};
 
@@ -62,6 +65,11 @@ impl Screen {
     /// Returns the current terminal width.
     pub fn width(&self) -> usize {
         self.width
+    }
+
+    /// Returns the current cursor row (relative to prompt start).
+    pub fn cursor_row(&self) -> usize {
+        self.cursor_row
     }
 
     /// Diffs the desired content against the actual screen state and emits
@@ -171,6 +179,141 @@ impl Screen {
             .queue(terminal::Clear(ClearType::FromCursorDown))?;
         self.cursor_row = 0;
         self.cursor_col = 0;
+        Ok(())
+    }
+
+    /// Renders all lines with scrolling support (Pi-style).
+    ///
+    /// Unlike `update()` which diffs only the visible viewport,
+    /// this method diffs against the full previous content and
+    /// renders changed lines in order. When rendering goes past
+    /// the bottom of the terminal, `\r\n` naturally pushes the
+    /// top row into the terminal's scrollback buffer.
+    ///
+    /// Call this instead of `update()` when `viewport_top`
+    /// increased (content overflowed the viewport).
+    ///
+    /// `all_lines` is the complete content (not just the visible
+    /// slice). `prev_viewport_top` is where the viewport was on
+    /// the previous frame. `height` is the terminal height.
+    /// `desired_cursor` is `(row, col)` in absolute line indices.
+    ///
+    /// Inspired by the Pi coding agent's TUI renderer.
+    pub fn render_scrolling(
+        &mut self,
+        w: &mut impl Write,
+        all_lines: &[Vec<Cell>],
+        prev_viewport_top: usize,
+        height: usize,
+        desired_cursor: (usize, usize),
+    ) -> io::Result<()> {
+        let total = all_lines.len();
+        let new_viewport_top = total.saturating_sub(height);
+
+        // Find first and last changed line across ALL content.
+        let max_idx = total.max(prev_viewport_top + self.lines.len());
+        let mut first_changed: Option<usize> = None;
+        let mut last_changed: Option<usize> = None;
+        for i in 0..max_idx {
+            let old = if i >= prev_viewport_top {
+                self.lines
+                    .get(i - prev_viewport_top)
+                    .map(|l| l.as_slice())
+                    .unwrap_or(&[])
+            } else {
+                &[]
+            };
+            let new = all_lines.get(i).map(|l| l.as_slice()).unwrap_or(&[]);
+            if old != new {
+                if first_changed.is_none() {
+                    first_changed = Some(i);
+                }
+                last_changed = Some(i);
+            }
+        }
+
+        let Some(first) = first_changed else {
+            // Nothing changed — just reposition cursor.
+            let cursor_screen = desired_cursor.0.saturating_sub(new_viewport_top);
+            self.move_to(w, cursor_screen, desired_cursor.1)?;
+            w.flush()?;
+            return Ok(());
+        };
+        let last = last_changed.unwrap_or(first);
+
+        // Clamp first to the previous viewport — we can't render
+        // above it (those rows aren't on the physical terminal).
+        let render_start = first.max(prev_viewport_top);
+
+        // Track the viewport top as it shifts during scrolling.
+        let mut viewport_top = prev_viewport_top;
+        let viewport_bottom = || viewport_top + height - 1;
+
+        // Move cursor to render_start's screen row. If it's past
+        // the viewport bottom, scroll first.
+        if render_start > viewport_bottom() {
+            let to_bottom = (height - 1).saturating_sub(self.cursor_row);
+            for _ in 0..to_bottom {
+                w.queue(Print("\n"))?;
+            }
+            let scroll = render_start - viewport_bottom();
+            for _ in 0..scroll {
+                w.queue(Print("\n"))?;
+            }
+            viewport_top += scroll;
+            self.cursor_row = height - 1;
+        }
+        let start_screen_row = render_start - viewport_top;
+        self.move_to(w, start_screen_row, 0)?;
+
+        // Render changed lines. \r\n between lines; scrolling
+        // happens naturally when the cursor is at the bottom.
+        for i in render_start..=last {
+            if i > render_start {
+                w.queue(Print("\r\n"))?;
+                let screen_row = self.cursor_row + 1;
+                if screen_row >= height {
+                    // The \r\n scrolled the terminal.
+                    viewport_top += 1;
+                    self.cursor_row = height - 1;
+                } else {
+                    self.cursor_row = screen_row;
+                }
+            }
+            // Clear the line and write new content.
+            w.queue(terminal::Clear(ClearType::UntilNewLine))?;
+            if let Some(line) = all_lines.get(i) {
+                emit_styled_cells(w, line)?;
+            }
+            self.cursor_col = all_lines
+                .get(i)
+                .map(|l| cols(l))
+                .unwrap_or(0);
+        }
+
+        // Clear any leftover lines below if content shrunk.
+        let rendered_up_to = last + 1;
+        let old_end = prev_viewport_top + self.lines.len();
+        if rendered_up_to < old_end {
+            for _ in rendered_up_to..old_end.min(viewport_top + height) {
+                w.queue(Print("\r\n"))?;
+                w.queue(terminal::Clear(ClearType::UntilNewLine))?;
+                if self.cursor_row + 1 < height {
+                    self.cursor_row += 1;
+                }
+            }
+        }
+
+        // Position cursor.
+        let cursor_screen = desired_cursor.0.saturating_sub(new_viewport_top);
+        self.move_to(w, cursor_screen, desired_cursor.1)?;
+        w.flush()?;
+
+        // Update tracked state to the new visible viewport.
+        self.lines = all_lines[new_viewport_top..].to_vec();
+        self.cursor_row = cursor_screen;
+        self.cursor_col = desired_cursor.1;
+
         Ok(())
     }
 

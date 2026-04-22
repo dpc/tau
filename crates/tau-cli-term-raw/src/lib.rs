@@ -1,39 +1,14 @@
 //! Terminal prompt with async output support.
 //!
-//! Provides a line-editing prompt that can be interrupted by async output
-//! without corrupting the display. No alternate screen mode — just
-//! diff-based rendering in the normal terminal buffer.
+//! Renders directly to the normal terminal buffer (no alternate screen)
+//! so the terminal's native scrollback is preserved. See `README.md`
+//! in this crate for the full rendering strategy.
 //!
-//! # Architecture
-//!
-//! Three threads cooperate:
-//!
-//! 1. **Input reader** (internal) — reads terminal events from crossterm and
-//!    forwards them to the downstream event loop.
-//! 2. **Redraw** (internal) — blocked on a coalescing notify channel; wakes up,
-//!    reads current shared state, and diff-renders to stdout.
-//! 3. **Downstream event loop** — the caller's thread. Calls
-//!    [`Term::get_next_event`] which blocks on input, handles editing
-//!    internally, updates shared state, and surfaces high-level events.
-//!
-//! Any thread holding a [`TermHandle`] can mutate prompt zones.
-//! After making changes, call [`TermHandle::redraw`] to trigger a
-//! repaint. Multiple redraws coalesce into one via the notify channel.
-//!
-//! # Layout
-//!
-//! All content blocks are stored in a central map keyed by [`BlockId`].
-//! Separate ordered lists reference them for rendering (top to bottom):
-//!
-//! 1. **History** — persistent output (append-only id list).
-//! 2. **Above active** — mutable blocks that can be reordered.
-//! 3. **Above sticky** — blocks pinned right above the prompt.
-//! 4. **Input area** — left-prompt + user input + right-prompt.
-//! 5. **Below** — blocks rendered below the input line.
-//!
-//! On terminal resize, the entire output (history + live area) is
-//! re-laid-out at the new width and re-rendered. The terminal's
-//! scrollback is rebuilt with correctly reflowed content.
+//! Three rendering paths (see `README.md`):
+//! - **Differential update** — common case, diffs visible viewport via [`Screen`]
+//! - **Scrolling render** — on overflow, diffs full content and renders
+//!   in order; `\r\n` at the bottom pushes content into scrollback
+//! - **Full render** — on resize, clears screen and re-renders everything
 
 pub mod screen;
 pub mod style;
@@ -784,6 +759,7 @@ fn redraw_loop(
     let mut screen = Screen::new(w);
     let mut prev_width = w;
     let mut prev_height = h;
+    let mut prev_visible_start: usize = 0;
 
     loop {
         // Check shutdown before blocking on the channel.
@@ -841,21 +817,43 @@ fn redraw_loop(
         drop(st);
 
         if size_changed {
+            // Path 2: Full render (resize). See README.md.
             if let Err(e) = full_render(&mut writer, &mut screen, &layout, width, height) {
                 eprintln!("redraw: full render error: {e}");
             }
+            prev_visible_start = layout.all_lines.len().saturating_sub(height);
         } else {
             let total = layout.all_lines.len();
             let visible_start = total.saturating_sub(height);
-            let visible = &layout.all_lines[visible_start..];
-            let cursor_in_visible = layout.cursor_row.saturating_sub(visible_start);
 
             screen.set_width(width);
-            if let Err(e) =
-                screen.update(&mut writer, visible, (cursor_in_visible, layout.cursor_col))
-            {
-                eprintln!("redraw: update error: {e}");
+
+            if visible_start > prev_visible_start {
+                // Content pushed lines off the top. Use the
+                // scrolling renderer (Pi-style) which renders
+                // changed lines in order and lets \r\n at the
+                // bottom naturally push content into scrollback.
+                // See README.md.
+                if let Err(e) = screen.render_scrolling(
+                    &mut writer,
+                    &layout.all_lines,
+                    prev_visible_start,
+                    height,
+                    (layout.cursor_row, layout.cursor_col),
+                ) {
+                    eprintln!("redraw: scroll render error: {e}");
+                }
+            } else {
+                // No overflow — normal differential update.
+                let visible = &layout.all_lines[visible_start..];
+                let cursor_in_visible = layout.cursor_row.saturating_sub(visible_start);
+                if let Err(e) =
+                    screen.update(&mut writer, visible, (cursor_in_visible, layout.cursor_col))
+                {
+                    eprintln!("redraw: update error: {e}");
+                }
             }
+            prev_visible_start = visible_start;
         }
 
         prev_width = width;
@@ -890,7 +888,8 @@ fn full_render(
     let total = all_lines.len();
 
     stdout.queue(terminal::BeginSynchronizedUpdate)?;
-    // Clear screen + scrollback and home cursor.
+    // Clear screen, home cursor, and clear scrollback. The
+    // scrollback is rebuilt by the overflow lines below.
     stdout.queue(Print("\x1b[2J\x1b[H\x1b[3J"))?;
 
     // Output all lines starting at the top. Overflow scrolls into
@@ -1649,6 +1648,69 @@ mod tests {
             screen_contains(&parser, 40, "> final"),
             "expected '> final', got: {:?}",
             vt100_rows(&parser, 40)
+        );
+    }
+
+    /// full_render pushes overflow lines into terminal scrollback.
+    #[test]
+    fn full_render_populates_scrollback() {
+        // Exact same params as the passing overflow test — only
+        // line contents differ.
+        let lines = plain_lines(&[
+            "line 0", "line 1", "line 2", "line 3", "line 4", "line 5", "> prompt",
+        ]);
+        let (mut term, _screen) = run_full_render(5, 30, lines, 3, 5, 7);
+
+        // Scroll back 2 lines (the overflow amount).
+        term.screen_mut().set_scrollback(2);
+        let sb = visible_rows(&term);
+        assert_eq!(
+            sb[0], "line 0",
+            "line 0 should be in scrollback, got: {sb:?}"
+        );
+        assert_eq!(
+            sb[1], "line 1",
+            "line 1 should be in scrollback, got: {sb:?}"
+        );
+    }
+
+    /// Diff-path scrolling: history that overflows the viewport
+    /// during normal operation enters the terminal scrollback.
+    #[test]
+    fn diff_update_scrolls_overflow_into_scrollback() {
+        let buf = SharedBuffer::new();
+        // 5-row terminal with scrollback capacity.
+        let mut parser = vt100::Parser::new(5, 40, 50);
+
+        let (_term, handle, _input_tx) = Term::new_virtual(40, 5, "> ", Box::new(buf.clone()));
+        flush_redraws(&handle, &buf, &mut parser);
+
+        // Add 6 history lines — total is 7 (6 + prompt), viewport
+        // is 5, so 2 lines overflow.
+        for i in 0..6 {
+            handle.print_output(StyledBlock::new(StyledText::from(Span::plain(format!(
+                "line {i}"
+            )))));
+        }
+        flush_redraws(&handle, &buf, &mut parser);
+
+        // The prompt + last few history lines are visible.
+        assert!(
+            screen_contains(&parser, 40, "> "),
+            "prompt should be visible, got: {:?}",
+            vt100_rows(&parser, 40)
+        );
+
+        // The earliest lines should be in terminal scrollback.
+        parser.screen_mut().set_scrollback(2);
+        let sb_rows = vt100_rows(&parser, 40);
+        assert!(
+            sb_rows[0].contains("line 0"),
+            "line 0 should be in scrollback, got: {sb_rows:?}"
+        );
+        assert!(
+            sb_rows[1].contains("line 1"),
+            "line 1 should be in scrollback, got: {sb_rows:?}"
         );
     }
 }
