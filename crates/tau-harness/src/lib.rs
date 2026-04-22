@@ -287,10 +287,24 @@ fn spawn_writer_thread(
 // Extension tracking
 // ---------------------------------------------------------------------------
 
-/// Tracks an in-progress agent turn waiting for tool results.
-struct PendingAgentTurn {
-    session_id: SessionId,
-    remaining_calls: Vec<ToolCallId>,
+/// Tracks whose turn it is in the agent interaction loop.
+enum TurnState {
+    /// Waiting for user input (or queued prompt dispatch).
+    Idle,
+    /// Agent is processing a prompt; we are waiting for its response.
+    AgentThinking { _session_id: SessionId },
+    /// Agent requested tool calls; waiting for all results before
+    /// sending the next prompt.
+    ToolsRunning {
+        session_id: SessionId,
+        remaining_calls: Vec<ToolCallId>,
+    },
+}
+
+impl TurnState {
+    fn is_idle(&self) -> bool {
+        matches!(self, TurnState::Idle)
+    }
 }
 
 struct ExtensionEntry {
@@ -382,12 +396,8 @@ struct Harness {
     next_session_prompt_id: u64,
     /// Maps session_prompt_id → session_id for in-flight prompts.
     prompt_sessions: std::collections::HashMap<SessionPromptId, SessionId>,
-    /// Pending agent turn: session_id + remaining tool call IDs.
-    pending_agent_turn: Option<PendingAgentTurn>,
-    /// True while the agent is processing a prompt (between
-    /// SessionPromptCreated and the final AgentResponseFinished
-    /// with no tool calls).
-    agent_busy: bool,
+    /// Whose turn it is in the agent interaction loop.
+    turn_state: TurnState,
     /// Queued user prompts waiting for the current turn to finish.
     /// Each entry is (session_id, text) — already persisted in the
     /// session tree, just waiting for dispatch.
@@ -487,8 +497,7 @@ impl Harness {
             _next_instance_counter,
             next_session_prompt_id: 0,
             prompt_sessions: std::collections::HashMap::new(),
-            pending_agent_turn: None,
-            agent_busy: false,
+            turn_state: TurnState::Idle,
             pending_prompts: VecDeque::new(),
             debug_log: None,
             available_models,
@@ -563,8 +572,7 @@ impl Harness {
             _next_instance_counter,
             next_session_prompt_id: 0,
             prompt_sessions: std::collections::HashMap::new(),
-            pending_agent_turn: None,
-            agent_busy: false,
+            turn_state: TurnState::Idle,
             pending_prompts: VecDeque::new(),
             debug_log: None,
             available_models,
@@ -840,7 +848,7 @@ impl Harness {
                     );
                     // If we just went from no-model to having one,
                     // drain queued prompts.
-                    if was_empty && !self.agent_busy {
+                    if was_empty && self.turn_state.is_idle() {
                         self.try_dispatch_queued();
                     }
                 } else {
@@ -856,7 +864,7 @@ impl Harness {
             Event::UiPromptSubmitted(prompt) => {
                 self.publish_event(Some(client_id), Event::UiPromptSubmitted(prompt.clone()));
 
-                if self.selected_model.is_empty() || self.agent_busy {
+                if self.selected_model.is_empty() || !self.turn_state.is_idle() {
                     self.pending_prompts
                         .push_back((prompt.session_id.clone(), prompt.text.clone()));
                     self.publish_event(
@@ -872,7 +880,9 @@ impl Harness {
                 } else {
                     self.store
                         .append_user_message(prompt.session_id.as_str(), prompt.text.clone())?;
-                    self.agent_busy = true;
+                    self.turn_state = TurnState::AgentThinking {
+                        _session_id: prompt.session_id.clone(),
+                    };
                     self.send_prompt_to_agent(&prompt.session_id);
                 }
                 Ok(true)
@@ -1152,10 +1162,10 @@ impl Harness {
                 .iter()
                 .map(|c| c.id.clone().into())
                 .collect();
-            self.pending_agent_turn = Some(PendingAgentTurn {
+            self.turn_state = TurnState::ToolsRunning {
                 session_id: session_id.clone(),
                 remaining_calls: call_ids,
-            });
+            };
             for call in &response.tool_calls {
                 self.execute_agent_tool_call(&session_id, call)?;
             }
@@ -1170,12 +1180,14 @@ impl Harness {
 
     /// Try to dispatch the first queued prompt (if any and model is set).
     fn try_dispatch_queued(&mut self) {
-        if self.selected_model.is_empty() || self.agent_busy {
+        if self.selected_model.is_empty() || !self.turn_state.is_idle() {
             return;
         }
         if let Some((session_id, text)) = self.pending_prompts.pop_front() {
             let _ = self.store.append_user_message(&*session_id, text);
-            self.agent_busy = true;
+            self.turn_state = TurnState::AgentThinking {
+                _session_id: session_id.clone(),
+            };
             self.send_prompt_to_agent(&session_id);
         }
     }
@@ -1187,26 +1199,35 @@ impl Harness {
             // response from the just-finished turn, maintaining
             // correct role alternation.
             let _ = self.store.append_user_message(&*session_id, text);
+            self.turn_state = TurnState::AgentThinking {
+                _session_id: session_id.clone(),
+            };
             self.send_prompt_to_agent(&session_id);
-            // agent_busy stays true
         } else {
-            self.agent_busy = false;
+            self.turn_state = TurnState::Idle;
         }
     }
 
     fn maybe_complete_agent_turn(&mut self, completed_call_id: &str) {
-        let should_send = if let Some(turn) = &mut self.pending_agent_turn {
-            turn.remaining_calls.retain(|id| id != completed_call_id);
-            turn.remaining_calls.is_empty()
+        let should_send = if let TurnState::ToolsRunning {
+            remaining_calls, ..
+        } = &mut self.turn_state
+        {
+            remaining_calls.retain(|id| id != completed_call_id);
+            remaining_calls.is_empty()
         } else {
             false
         };
         if should_send {
-            let session_id = self
-                .pending_agent_turn
-                .take()
-                .expect("just checked")
-                .session_id;
+            let session_id =
+                if let TurnState::ToolsRunning { session_id, .. } = &self.turn_state {
+                    session_id.clone()
+                } else {
+                    unreachable!("just checked")
+                };
+            self.turn_state = TurnState::AgentThinking {
+                _session_id: session_id.clone(),
+            };
             self.send_prompt_to_agent(&session_id);
         }
     }
@@ -1275,7 +1296,9 @@ impl Harness {
     ) -> Result<InteractionOutcome, HarnessError> {
         self.store
             .append_user_message(session_id.to_owned(), text.to_owned())?;
-        self.agent_busy = true;
+        self.turn_state = TurnState::AgentThinking {
+            _session_id: session_id.to_owned().into(),
+        };
         self.send_prompt_to_agent(session_id);
 
         let started_at = Instant::now();
