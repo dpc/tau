@@ -240,9 +240,10 @@ where
         ToolSpec {
             name: FIND_TOOL_NAME.into(),
             description: Some(
-                "Search for files by glob pattern. Returns matching file paths relative to the \
-                 search directory. Respects .gitignore. Output is truncated to 1000 results or \
-                 50KB (whichever is hit first)."
+                "Search for files by glob pattern. Returns only file paths (directories are \
+                 never included, even with '**/*') relative to the search directory. Respects \
+                 .gitignore. Output is truncated to 1000 results or 50KB (whichever is hit \
+                 first). Use the ls tool if you want to see directory entries."
                     .to_owned(),
             ),
             parameters: Some(serde_json::json!({
@@ -250,7 +251,7 @@ where
                 "properties": {
                     "pattern": {
                         "type": "string",
-                        "description": "Glob pattern to match files, e.g. '*.rs' or '**/*.md'"
+                        "description": "Glob pattern matched against file paths relative to `path`. Examples: '*.rs' (top-level Rust files), '**/*.md' (all Markdown files, any depth). Directories are not returned."
                     },
                     "path": {
                         "type": "string",
@@ -1281,34 +1282,39 @@ fn run_ls(arguments: &CborValue) -> Result<CborValue, String> {
     ]))
 }
 
-/// Check if a line is a grep match line (vs a context line).
-/// Match lines have the format `path:number:content`.
-/// Context lines use `-` separator: `path-number-content`.
+/// Classify a ripgrep output line as a match (true) or context (false).
+///
+/// rg emits match lines as `PATH:LINE:CONTENT` and context lines as
+/// `PATH-LINE-CONTENT`. We scan for the leftmost `<sep><digits><sep>`
+/// run where both separators are the same `:` or `-` — that brackets
+/// the line number — and use the separator character to classify.
+///
+/// Requiring digits between two identical separators is what rules out
+/// bare dashes inside path segments (e.g. `tool-exercise/notes.md:2:…`):
+/// the first `-` has no digits after it, so we skip past it to find the
+/// real `:2:` separator.
+///
+/// Edge case: a path like `file-12-34.txt` contains `-\d+-` already in
+/// the path, so a match line for it would be misclassified as context.
+/// Rare enough to accept; `rg --json` would be the bulletproof fix if
+/// this ever matters.
 fn is_grep_match_line(line: &str) -> bool {
-    // Find the first `:` or `-` after what looks like a path:number pattern.
-    // A match line has at least two `:` separators: path:linenum:content
-    let mut colons = 0;
-    for (i, ch) in line.char_indices() {
-        if ch == ':' {
-            colons += 1;
-            if colons == 2 {
-                return true;
+    let bytes = line.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        let sep = bytes[i];
+        if sep == b':' || sep == b'-' {
+            let digits_start = i + 1;
+            let mut j = digits_start;
+            while j < bytes.len() && bytes[j].is_ascii_digit() {
+                j += 1;
             }
-        } else if ch == '-' && colons == 1 {
-            // path:linenum-content would be context line... but actually
-            // context uses path-linenum-content. Let's be more precise.
-            // If we've seen exactly one colon, this could still be valid.
-            // Actually rg without --json uses: `path:num:match` for matches
-            // and `path-num-match` for context. So a match line always has
-            // `:digit+:` after the filename.
-            return false;
+            if j > digits_start && j < bytes.len() && bytes[j] == sep {
+                return sep == b':';
+            }
         }
-        // Skip past what could be a Windows drive letter (C:)
-        if i > 2 && colons == 0 && ch == '-' {
-            return false;
-        }
+        i += 1;
     }
-    // Lines with fewer than 2 colons (like group separators `--`) aren't matches.
     false
 }
 
@@ -2075,6 +2081,30 @@ mod tests {
         assert!(result.was_truncated);
         assert!(result.content.starts_with("first"));
         assert!(result.content.contains("[Showing lines 1-"));
+    }
+
+    #[test]
+    fn is_grep_match_line_classifies_match_and_context_lines() {
+        // Basic match / context forms.
+        assert!(is_grep_match_line("foo/bar.rs:10:hello"));
+        assert!(!is_grep_match_line("foo/bar.rs-10-hello"));
+
+        // Paths containing `-` must not trip the classifier — the `-`
+        // in "tool-exercise" has no digits after it, so the scan skips
+        // past it to the real `:2:` separator.
+        assert!(is_grep_match_line(
+            "tmp/tool-exercise/beta/nested/notes.md:2:foo bar"
+        ));
+        assert!(!is_grep_match_line(
+            "tmp/tool-exercise/beta/nested/notes.md-2-foo bar"
+        ));
+        assert!(is_grep_match_line(
+            "tmp/tool-exercise/generated.txt:2:SECOND"
+        ));
+
+        // Group separator and blank lines are not matches.
+        assert!(!is_grep_match_line("--"));
+        assert!(!is_grep_match_line(""));
     }
 
     #[test]
