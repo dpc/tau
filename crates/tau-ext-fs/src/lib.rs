@@ -382,24 +382,145 @@ fn execute_tool(invoke: tau_proto::ToolInvoke, include_echo: bool) -> Vec<Event>
 }
 
 // ---------------------------------------------------------------------------
+// Output truncation
+// ---------------------------------------------------------------------------
+
+/// Maximum lines before truncation kicks in.
+const MAX_OUTPUT_LINES: usize = 2000;
+/// Maximum bytes before truncation kicks in.
+const MAX_OUTPUT_BYTES: usize = 50 * 1024;
+
+/// Result of a truncation operation.
+struct Truncated {
+    content: String,
+    was_truncated: bool,
+    total_lines: usize,
+    total_bytes: usize,
+}
+
+/// Truncate from the head (keep first lines).  Used by `read`.
+fn truncate_head(input: &str) -> Truncated {
+    let total_lines = input.lines().count();
+    let total_bytes = input.len();
+
+    if total_lines <= MAX_OUTPUT_LINES && total_bytes <= MAX_OUTPUT_BYTES {
+        return Truncated {
+            content: input.to_owned(),
+            was_truncated: false,
+            total_lines,
+            total_bytes,
+        };
+    }
+
+    let mut result = String::new();
+    let mut bytes = 0;
+    let mut kept_lines = 0;
+
+    for line in input.lines() {
+        if kept_lines >= MAX_OUTPUT_LINES || bytes + line.len() + 1 > MAX_OUTPUT_BYTES {
+            break;
+        }
+        if kept_lines > 0 {
+            result.push('\n');
+            bytes += 1;
+        }
+        result.push_str(line);
+        bytes += line.len();
+        kept_lines += 1;
+    }
+
+    result.push_str(&format!(
+        "\n\n[Showing lines 1-{kept_lines} of {total_lines} ({total_bytes} bytes total). \
+         Use offset to continue reading.]"
+    ));
+
+    Truncated {
+        content: result,
+        was_truncated: true,
+        total_lines,
+        total_bytes,
+    }
+}
+
+/// Truncate from the tail (keep last lines).  Used by `shell`.
+fn truncate_tail(input: &str) -> Truncated {
+    let all_lines: Vec<&str> = input.lines().collect();
+    let total_lines = all_lines.len();
+    let total_bytes = input.len();
+
+    if total_lines <= MAX_OUTPUT_LINES && total_bytes <= MAX_OUTPUT_BYTES {
+        return Truncated {
+            content: input.to_owned(),
+            was_truncated: false,
+            total_lines,
+            total_bytes,
+        };
+    }
+
+    // Walk backwards, accumulating lines until we hit a limit.
+    let mut kept: Vec<&str> = Vec::new();
+    let mut bytes = 0;
+
+    for &line in all_lines.iter().rev() {
+        if kept.len() >= MAX_OUTPUT_LINES || bytes + line.len() + 1 > MAX_OUTPUT_BYTES {
+            break;
+        }
+        bytes += line.len() + 1;
+        kept.push(line);
+    }
+    kept.reverse();
+
+    let first_kept = total_lines - kept.len() + 1;
+    let last_kept = total_lines;
+    let mut result = format!(
+        "[Showing lines {first_kept}-{last_kept} of {total_lines} ({total_bytes} bytes total)]\n\n"
+    );
+    result.push_str(&kept.join("\n"));
+
+    Truncated {
+        content: result,
+        was_truncated: true,
+        total_lines,
+        total_bytes,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // read
 // ---------------------------------------------------------------------------
 
 fn read_file(arguments: &CborValue) -> Result<CborValue, String> {
     let path = argument_text(arguments, "path")?;
     let path_buf = PathBuf::from(&path);
-    let content = fs::read_to_string(&path_buf)
+    let raw = fs::read_to_string(&path_buf)
         .map_err(|error| format!("failed to read {}: {error}", path_buf.display()))?;
-    Ok(CborValue::Map(vec![
+
+    let truncated = truncate_head(&raw);
+    let mut entries = vec![
         (
             CborValue::Text("path".to_owned()),
             CborValue::Text(path_buf.display().to_string()),
         ),
         (
             CborValue::Text("content".to_owned()),
-            CborValue::Text(content),
+            CborValue::Text(truncated.content),
         ),
-    ]))
+    ];
+    if truncated.was_truncated {
+        entries.push((
+            CborValue::Text("truncated".to_owned()),
+            CborValue::Bool(true),
+        ));
+        entries.push((
+            CborValue::Text("total_lines".to_owned()),
+            CborValue::Integer((truncated.total_lines as i64).into()),
+        ));
+        entries.push((
+            CborValue::Text("total_bytes".to_owned()),
+            CborValue::Integer((truncated.total_bytes as i64).into()),
+        ));
+    }
+    Ok(CborValue::Map(entries))
 }
 
 // ---------------------------------------------------------------------------
@@ -585,12 +706,18 @@ fn run_command(arguments: &CborValue) -> Result<CborValue, (String, Option<CborV
 
     let status_code = wait.status.code();
     let success = wait.status.success();
+
+    // Truncate stdout/stderr from the tail (keep last lines — errors and
+    // final results are at the end).
+    let stdout_trunc = truncate_tail(&wait.stdout);
+    let stderr_trunc = truncate_tail(&wait.stderr);
+
     let result = command_details_value(
         command.clone(),
         cwd.clone(),
         status_code,
-        wait.stdout,
-        wait.stderr,
+        stdout_trunc.content,
+        stderr_trunc.content,
     );
 
     if success {
@@ -1024,5 +1151,92 @@ mod tests {
             ))
             .expect("disconnect");
         writer.flush().expect("flush");
+    }
+
+    // -- Truncation ---------------------------------------------------------
+
+    #[test]
+    fn truncate_head_short_input_unchanged() {
+        let input = "line 1\nline 2\nline 3";
+        let result = truncate_head(input);
+        assert!(!result.was_truncated);
+        assert_eq!(result.content, input);
+    }
+
+    #[test]
+    fn truncate_head_limits_by_lines() {
+        let lines: Vec<String> = (1..=MAX_OUTPUT_LINES + 500)
+            .map(|i| format!("line {i}"))
+            .collect();
+        let input = lines.join("\n");
+        let result = truncate_head(&input);
+        assert!(result.was_truncated);
+        assert!(result.content.contains("line 1\n"));
+        assert!(result.content.contains("[Showing lines 1-"));
+        assert!(result.content.contains("Use offset to continue reading."));
+        // Should not contain lines beyond the limit.
+        let content_before_notice = result.content.split("\n\n[").next().unwrap_or("");
+        let kept_count = content_before_notice.lines().count();
+        assert!(kept_count <= MAX_OUTPUT_LINES);
+    }
+
+    #[test]
+    fn truncate_head_limits_by_bytes() {
+        // Create input that's within line count but exceeds byte limit.
+        let big_line = "x".repeat(MAX_OUTPUT_BYTES + 100);
+        let input = format!("first\n{big_line}\nthird");
+        let result = truncate_head(&input);
+        assert!(result.was_truncated);
+        assert!(result.content.starts_with("first"));
+        assert!(result.content.contains("[Showing lines 1-"));
+    }
+
+    #[test]
+    fn truncate_tail_short_input_unchanged() {
+        let input = "line 1\nline 2\nline 3";
+        let result = truncate_tail(input);
+        assert!(!result.was_truncated);
+        assert_eq!(result.content, input);
+    }
+
+    #[test]
+    fn truncate_tail_keeps_last_lines() {
+        let lines: Vec<String> = (1..=MAX_OUTPUT_LINES + 500)
+            .map(|i| format!("line {i}"))
+            .collect();
+        let input = lines.join("\n");
+        let result = truncate_tail(&input);
+        assert!(result.was_truncated);
+        assert!(result.content.contains(&format!("line {}", MAX_OUTPUT_LINES + 500)));
+        assert!(result.content.contains("[Showing lines"));
+        // Should not contain the very first line.
+        assert!(!result.content.contains("line 1\n"));
+    }
+
+    #[test]
+    fn truncate_tail_limits_by_bytes() {
+        let big_line = "x".repeat(MAX_OUTPUT_BYTES + 100);
+        let input = format!("first\nsecond\n{big_line}\nlast");
+        let result = truncate_tail(&input);
+        assert!(result.was_truncated);
+        assert!(result.content.contains("last"));
+        assert!(result.content.contains("[Showing lines"));
+    }
+
+    #[test]
+    fn read_file_truncates_large_output() {
+        let td = TempDir::new().expect("tempdir");
+        let path = td.path().join("big.txt");
+        let lines: Vec<String> = (1..=3000).map(|i| format!("line {i}")).collect();
+        std::fs::write(&path, lines.join("\n")).expect("write");
+
+        let args = CborValue::Map(vec![(
+            CborValue::Text("path".to_owned()),
+            CborValue::Text(path.display().to_string()),
+        )]);
+        let result = read_file(&args).expect("read");
+        let content = cbor_map_text(&result, "content").expect("content field");
+        assert!(content.contains("line 1\n"));
+        assert!(content.contains("[Showing lines 1-"));
     }
 }
