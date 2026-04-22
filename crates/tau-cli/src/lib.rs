@@ -776,6 +776,24 @@ impl EventRenderer {
                     format!("extension {} exited", exited.extension_name),
                 ));
             }
+            Event::ExtAgentsMdAvailable(agents) => {
+                let file_name = std::path::Path::new(agents.file_path.as_str())
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("AGENTS.md");
+                self.handle.print_output(themed_block(
+                    &self.theme,
+                    names::SYSTEM_INFO,
+                    format!("loaded {file_name}: {}", agents.file_path),
+                ));
+            }
+            Event::ExtensionContextReady(_) => {
+                self.handle.print_output(themed_block(
+                    &self.theme,
+                    names::SYSTEM_INFO,
+                    "session context ready".to_owned(),
+                ));
+            }
             Event::HarnessInfo(info) => {
                 self.handle.print_output(themed_block(
                     &self.theme,

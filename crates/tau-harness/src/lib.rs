@@ -317,6 +317,16 @@ impl TurnState {
     }
 }
 
+/// Outcome of `submit_user_prompt`: either the prompt was handed off to
+/// the agent immediately, or it was placed on `pending_prompts` and will
+/// be dispatched once the harness is ready (model selected, agent idle,
+/// extensions ready, session initialized).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PromptSubmission {
+    Dispatched,
+    Queued,
+}
+
 /// Lifecycle phase of a configured extension. Drives the
 /// `extensions_all_ready()` gate that keeps user prompts queued until
 /// every desired extension has finished its handshake.
@@ -330,9 +340,8 @@ enum ExtensionState {
     Handshaking,
     /// `LifecycleReady` received; the extension is fully online.
     Ready,
-    /// The connection dropped after at least reaching `Spawning`. New
-    /// user prompts queue until the extension is restarted (future
-    /// work) and reaches `Ready` again.
+    /// The connection dropped after at least reaching `Spawning`.
+    /// Fresh prompts continue with the remaining live providers.
     Disconnected,
 }
 
@@ -474,6 +483,8 @@ struct Harness {
     discovered_skills: std::collections::HashMap<String, DiscoveredSkill>,
     /// AGENTS.md files discovered by extensions, in delivery order.
     discovered_agents_files: Vec<DiscoveredAgentsFile>,
+    /// Sessions whose AGENTS/skill discovery has completed.
+    initialized_sessions: std::collections::HashSet<SessionId>,
     /// Session prompt IDs that have already been completed by the agent.
     /// Used to dedupe duplicate `AgentResponseFinished` events that can
     /// arise under at-least-once delivery (e.g. an agent that reconnects
@@ -502,6 +513,7 @@ impl Harness {
             dirs,
             default_agent_runner,
             false,
+            None,
         )
     }
 
@@ -511,6 +523,7 @@ impl Harness {
         dirs: tau_config::settings::TauDirs,
         agent_runner: AgentRunner,
         include_echo: bool,
+        debug_log_dir: Option<&Path>,
     ) -> Result<Self, HarnessError> {
         let (tx, rx) = mpsc::channel();
         let mut bus = EventBus::with_subscription_policy(Box::new(
@@ -583,9 +596,14 @@ impl Harness {
             selected_model,
             discovered_skills: std::collections::HashMap::new(),
             discovered_agents_files: Vec::new(),
+            initialized_sessions: std::collections::HashSet::new(),
             completed_prompts: std::collections::HashSet::new(),
             dirs,
         };
+
+        if let Some(dir) = debug_log_dir {
+            let _path = harness.enable_debug_log(dir)?;
+        }
 
         for i in 0..harness.extensions.len() {
             let name = harness.extensions[i].name.clone();
@@ -594,8 +612,6 @@ impl Harness {
         harness.wait_for_extensions_ready()?;
         harness.register_harness_tools();
         harness.check_config_exists();
-        harness.start_session_init(default_session_id().into());
-        harness.wait_for_session_init()?;
         Ok(harness)
     }
 
@@ -605,6 +621,7 @@ impl Harness {
         store_path: impl Into<PathBuf>,
         policy_store_path: impl Into<PathBuf>,
         dirs: tau_config::settings::TauDirs,
+        debug_log_dir: Option<&Path>,
     ) -> Result<Self, HarnessError> {
         let (tx, rx) = mpsc::channel();
         let mut bus = EventBus::with_subscription_policy(Box::new(
@@ -667,9 +684,14 @@ impl Harness {
             selected_model,
             discovered_skills: std::collections::HashMap::new(),
             discovered_agents_files: Vec::new(),
+            initialized_sessions: std::collections::HashSet::new(),
             completed_prompts: std::collections::HashSet::new(),
             dirs,
         };
+
+        if let Some(dir) = debug_log_dir {
+            let _path = harness.enable_debug_log(dir)?;
+        }
 
         for i in 0..harness.extensions.len() {
             let name = harness.extensions[i].name.clone();
@@ -678,8 +700,6 @@ impl Harness {
         harness.wait_for_extensions_ready()?;
         harness.register_harness_tools();
         harness.check_config_exists();
-        harness.start_session_init(default_session_id().into());
-        harness.wait_for_session_init()?;
         Ok(harness)
     }
 
@@ -714,39 +734,6 @@ impl Harness {
     // -----------------------------------------------------------------------
     // Startup
     // -----------------------------------------------------------------------
-
-    /// Drives the event loop until the in-flight session initialization
-    /// completes (turn state returns to `Idle`). Called once at harness
-    /// startup after `start_session_init` for the default session.
-    fn wait_for_session_init(&mut self) -> Result<(), HarnessError> {
-        if self.turn_state.is_idle() {
-            return Ok(());
-        }
-        let started_at = Instant::now();
-        while !self.turn_state.is_idle() {
-            let remaining = STARTUP_TIMEOUT
-                .checked_sub(started_at.elapsed())
-                .unwrap_or(Duration::ZERO);
-            let event = self
-                .rx
-                .recv_timeout(remaining)
-                .map_err(|_| HarnessError::StartupTimeout)?;
-            self.log_event(&event);
-            match event {
-                HarnessEvent::FromConnection {
-                    connection_id,
-                    event,
-                } => {
-                    self.handle_extension_event(&connection_id, event)?;
-                }
-                HarnessEvent::Disconnected { connection_id } => {
-                    self.handle_disconnect(&connection_id);
-                }
-                HarnessEvent::NewClient(_) => {}
-            }
-        }
-        Ok(())
-    }
 
     /// Drives the event loop until every configured extension reaches
     /// `ExtensionState::Ready`. Replaces the old `wait_for_startup(n)`:
@@ -904,7 +891,7 @@ impl Harness {
                 self.emit_extension_ready(source_id);
                 self.publish_event(Some(source_id), Event::LifecycleReady(ready));
                 self.set_extension_state(source_id, ExtensionState::Ready);
-                self.try_dispatch_queued();
+                self.try_advance_queue();
             }
             Event::ToolRegister(ToolRegister { tool }) => {
                 let _ = self.registry.register(source_id, tool);
@@ -1048,7 +1035,7 @@ impl Harness {
                     // If we just went from no-model to having one,
                     // drain queued prompts.
                     if was_empty && self.turn_state.is_idle() {
-                        self.try_dispatch_queued();
+                        self.try_advance_queue();
                     }
                 } else {
                     self.publish_event(
@@ -1063,9 +1050,9 @@ impl Harness {
             Event::UiPromptSubmitted(prompt) => {
                 self.publish_event(Some(client_id), Event::UiPromptSubmitted(prompt.clone()));
 
-                if self.dispatch_blocked() {
-                    self.pending_prompts
-                        .push_back((prompt.session_id.clone(), prompt.text.clone()));
+                let submission =
+                    self.submit_user_prompt(prompt.session_id.clone(), prompt.text.clone())?;
+                if submission == PromptSubmission::Queued {
                     self.publish_event(
                         None,
                         Event::SessionPromptQueued(SessionPromptQueued {
@@ -1076,8 +1063,6 @@ impl Harness {
                     if self.selected_model.is_empty() {
                         self.emit_info("no model selected — use /model to pick one");
                     }
-                } else {
-                    self.dispatch_user_prompt(prompt.session_id, prompt.text)?;
                 }
                 Ok(true)
             }
@@ -1325,6 +1310,28 @@ impl Harness {
         Ok(())
     }
 
+    fn session_initialized(&self, session_id: &SessionId) -> bool {
+        self.initialized_sessions.contains(session_id)
+    }
+
+    /// Queue a prompt when it cannot be sent directly yet, or dispatch
+    /// it immediately when the session is initialized and the harness is
+    /// ready to talk to the agent.
+    fn submit_user_prompt(
+        &mut self,
+        session_id: SessionId,
+        text: String,
+    ) -> Result<PromptSubmission, HarnessError> {
+        if self.dispatch_blocked() || !self.session_initialized(&session_id) {
+            self.pending_prompts.push_back((session_id, text));
+            self.try_advance_queue();
+            return Ok(PromptSubmission::Queued);
+        }
+
+        self.dispatch_user_prompt(session_id, text)?;
+        Ok(PromptSubmission::Dispatched)
+    }
+
     /// Broadcasts `SessionStarted` for `session_id` and enters
     /// `InitializingSession` until every subscribed tool extension has
     /// acknowledged with `ExtensionContextReady` (or all of them have
@@ -1404,8 +1411,9 @@ impl Harness {
 
     fn complete_session_init(&mut self, session_id: SessionId) -> Result<(), HarnessError> {
         self.ensure_agents_context_inserted(session_id.as_str())?;
+        self.initialized_sessions.insert(session_id);
         self.turn_state = TurnState::Idle;
-        self.try_dispatch_queued();
+        self.try_advance_queue();
         Ok(())
     }
 
@@ -1525,13 +1533,30 @@ impl Harness {
         Ok(())
     }
 
-    /// Try to dispatch the first queued prompt, if any. No-op when
-    /// `dispatch_blocked` is true (model unset, agent busy, or some
-    /// extension not yet `Ready`).
-    fn try_dispatch_queued(&mut self) {
-        if self.dispatch_blocked() {
+    /// Advances the front of the prompt queue when possible.
+    ///
+    /// Session initialization happens before prompt dispatch, so a fresh
+    /// `chat-*` session can discover AGENTS.md and skills before the
+    /// agent sees the first user message.
+    fn try_advance_queue(&mut self) {
+        if !self.turn_state.is_idle() || !self.extensions_all_ready() {
             return;
         }
+
+        let Some((session_id, _)) = self.pending_prompts.front() else {
+            return;
+        };
+        let session_id = session_id.clone();
+
+        if !self.session_initialized(&session_id) {
+            self.start_session_init(session_id);
+            return;
+        }
+
+        if self.selected_model.is_empty() {
+            return;
+        }
+
         if let Some((session_id, text)) = self.pending_prompts.pop_front() {
             if let Err(error) = self.dispatch_user_prompt(session_id, text) {
                 self.emit_info(&format!("failed to dispatch queued prompt: {error}"));
@@ -1552,11 +1577,22 @@ impl Harness {
         self.selected_model.is_empty() || !self.turn_state.is_idle() || !self.extensions_all_ready()
     }
 
-    /// True iff every configured extension has reached `Ready`.
+    /// True iff every configured extension has either reached `Ready`
+    /// or dropped permanently.
+    ///
+    /// `Disconnected` counts as "no longer blocking": a dead extension
+    /// will never reach `Ready` on its own (auto-respawn is not wired
+    /// up), and we don't want it to wedge fresh prompt dispatch.
+    /// Session initialization for a still-live session with a dead
+    /// provider still completes correctly — `handle_disconnect`
+    /// removes the entry from the `waiting_on` set.
     fn extensions_all_ready(&self) -> bool {
-        self.extensions
-            .iter()
-            .all(|e| e.state == ExtensionState::Ready)
+        self.extensions.iter().all(|e| {
+            matches!(
+                e.state,
+                ExtensionState::Ready | ExtensionState::Disconnected
+            )
+        })
     }
 
     /// Update an extension's lifecycle state, looked up by connection id.
@@ -1573,14 +1609,8 @@ impl Harness {
 
     /// Dispatches the next queued prompt or marks the agent as idle.
     fn dispatch_next_or_idle(&mut self, _completed_session_id: &str) {
-        if let Some((session_id, text)) = self.pending_prompts.pop_front() {
-            if let Err(error) = self.dispatch_user_prompt(session_id, text) {
-                self.emit_info(&format!("failed to dispatch queued prompt: {error}"));
-                self.turn_state = TurnState::Idle;
-            }
-        } else {
-            self.turn_state = TurnState::Idle;
-        }
+        self.turn_state = TurnState::Idle;
+        self.try_advance_queue();
     }
 
     fn maybe_complete_agent_turn(&mut self, completed_call_id: &str) {
@@ -1778,6 +1808,12 @@ impl Harness {
         text: &str,
         _source_id: Option<&str>,
     ) -> Result<InteractionOutcome, HarnessError> {
+        // Synchronous test entrypoint: dispatch directly without going
+        // through `submit_user_prompt`'s queue. The embedded test harness
+        // has no model configured (nothing to select from) and no UI to
+        // drain a queued prompt, so the queued-until-model path would
+        // deadlock. AGENTS.md session init is exercised separately in
+        // unit tests via `submit_user_prompt` / manual turn-state setup.
         self.dispatch_user_prompt(session_id.into(), text.to_owned())?;
 
         let started_at = Instant::now();
@@ -2452,6 +2488,7 @@ fn run_embedded_message_impl(
         dirs,
         agent_runner,
         true,
+        None,
     )?;
     let mut outcome = harness.send_user_message(session_id, message, None)?;
     harness.shutdown()?;
@@ -2509,7 +2546,8 @@ pub fn run_daemon_with_config(
         .clone()
         .unwrap_or_else(|| default_policy_store_path_from(&session_store_path));
     let dirs = options.dirs.clone().unwrap_or_default();
-    let mut harness = Harness::from_config(config, session_store_path, policy_store_path, dirs)?;
+    let mut harness =
+        Harness::from_config(config, session_store_path, policy_store_path, dirs, None)?;
 
     let tx = harness.tx.clone();
     thread::spawn(move || {
@@ -2625,14 +2663,18 @@ pub fn run_harness_daemon(
         .unwrap_or_else(|| project_root.join(".tau").join("policy.cbor"));
 
     let dirs = options.dirs.clone().unwrap_or_default();
-    let mut harness = Harness::from_config(config, &session_store_path, &policy_store_path, dirs)?;
-
-    // Enable event debug log.
     let log_dir = project_root.join(".tau");
-    match harness.enable_debug_log(&log_dir) {
-        Ok(path) => harness.emit_info(&format!("event log: {}", path.display())),
-        Err(e) => eprintln!("warning: could not create event log: {e}"),
-    }
+    let mut harness = Harness::from_config(
+        config,
+        &session_store_path,
+        &policy_store_path,
+        dirs,
+        Some(&log_dir),
+    )?;
+    harness.emit_info(&format!(
+        "event log: {}",
+        log_dir.join("events.jsonl").display()
+    ));
 
     // Write marker AFTER extensions are ready.
     daemon_dir.write_marker()?;
@@ -2825,6 +2867,7 @@ mod tests {
             tau_config::settings::TauDirs::default(),
             echo_runner,
             true,
+            None,
         )
     }
 
@@ -3181,6 +3224,71 @@ mod tests {
             root_pos < pkg_pos,
             "broader file should appear before nested one"
         );
+
+        h.shutdown().expect("shutdown");
+    }
+
+    #[test]
+    fn first_prompt_initializes_custom_session_before_dispatch() {
+        let td = TempDir::new().expect("tempdir");
+        let sp = td.path().join("sessions.cbor");
+        let pp = td.path().join("policy.cbor");
+        let mut h = echo_harness(&sp, &pp).expect("start");
+        let tools_connection_id = h
+            .extension_connection_id("tools")
+            .expect("tools")
+            .to_owned();
+
+        h.selected_model = "test/model".into();
+        let submission = h
+            .submit_user_prompt("chat-1".into(), "hello".to_owned())
+            .expect("submit");
+        assert_eq!(
+            submission,
+            PromptSubmission::Queued,
+            "fresh session should initialize before dispatch"
+        );
+        assert!(h.pending_prompts.len() == 1, "prompt should remain queued");
+        assert!(
+            matches!(
+                &h.turn_state,
+                TurnState::InitializingSession { session_id, .. }
+                    if session_id == "chat-1"
+            ),
+            "expected custom session init, got different turn state"
+        );
+
+        h.handle_extension_event(
+            &tools_connection_id,
+            Event::ExtAgentsMdAvailable(tau_proto::ExtAgentsMdAvailable {
+                file_path: "/repo/AGENTS.md".to_owned(),
+                content: "# Root\n- root rule\n".to_owned(),
+            }),
+        )
+        .expect("agents");
+        h.handle_extension_event(
+            &tools_connection_id,
+            Event::ExtensionContextReady(tau_proto::ExtensionContextReady {
+                session_id: "chat-1".into(),
+            }),
+        )
+        .expect("ready");
+
+        assert!(h.initialized_sessions.contains("chat-1"));
+        assert!(
+            matches!(&h.turn_state, TurnState::AgentThinking { .. }),
+            "queued prompt should dispatch after init"
+        );
+
+        let branch = h.store.session("chat-1").expect("session").current_branch();
+        let SessionEntry::UserMessage { text: injected } = &branch[0] else {
+            panic!("expected injected AGENTS.md user message");
+        };
+        assert!(injected.starts_with("# AGENTS.md instructions"));
+        let SessionEntry::UserMessage { text: prompt } = &branch[1] else {
+            panic!("expected queued user prompt after AGENTS.md");
+        };
+        assert_eq!(prompt, "hello");
 
         h.shutdown().expect("shutdown");
     }

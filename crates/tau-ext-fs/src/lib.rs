@@ -427,15 +427,13 @@ fn build_session_started_events(started: SessionStarted) -> Vec<Event> {
         }));
     }
 
-    if let Ok(cwd) = std::env::current_dir() {
-        for agents_file in discover_agents_files_from(&cwd) {
-            events.push(Event::ExtAgentsMdAvailable(
-                tau_proto::ExtAgentsMdAvailable {
-                    file_path: agents_file.file_path.display().to_string(),
-                    content: agents_file.content,
-                },
-            ));
-        }
+    for agents_file in discover_session_agents_files() {
+        events.push(Event::ExtAgentsMdAvailable(
+            tau_proto::ExtAgentsMdAvailable {
+                file_path: agents_file.file_path.display().to_string(),
+                content: agents_file.content,
+            },
+        ));
     }
 
     events.push(Event::ExtensionContextReady(
@@ -1130,24 +1128,28 @@ fn path_to_slash(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
 }
 
-fn discover_agents_files_from(cwd: &Path) -> Vec<DiscoveredAgentsFile> {
-    let mut dirs = Vec::new();
-    let mut current = cwd.to_path_buf();
-    loop {
-        dirs.push(current.clone());
-        let Some(parent) = current.parent() else {
-            break;
-        };
-        if parent == current {
-            break;
-        }
-        current = parent.to_path_buf();
+fn discover_session_agents_files() -> Vec<DiscoveredAgentsFile> {
+    let mut roots = Vec::new();
+    if let Some(home) = dirs::home_dir() {
+        roots.push(home.join(".agents"));
     }
-    dirs.reverse();
+    if let Ok(cwd) = std::env::current_dir() {
+        roots.extend(ancestor_dirs(&cwd));
+    }
+    discover_agents_files_from_roots(roots)
+}
 
+#[cfg(test)]
+fn discover_agents_files_from(cwd: &Path) -> Vec<DiscoveredAgentsFile> {
+    discover_agents_files_from_roots(ancestor_dirs(cwd))
+}
+
+fn discover_agents_files_from_roots(
+    roots: impl IntoIterator<Item = PathBuf>,
+) -> Vec<DiscoveredAgentsFile> {
     let mut seen = std::collections::HashSet::new();
     let mut discovered = Vec::new();
-    for dir in dirs {
+    for dir in roots {
         let candidate = dir.join("AGENTS.md");
         let Ok(metadata) = fs::metadata(&candidate) else {
             continue;
@@ -1171,6 +1173,23 @@ fn discover_agents_files_from(cwd: &Path) -> Vec<DiscoveredAgentsFile> {
     }
 
     discovered
+}
+
+fn ancestor_dirs(cwd: &Path) -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    let mut current = cwd.to_path_buf();
+    loop {
+        dirs.push(current.clone());
+        let Some(parent) = current.parent() else {
+            break;
+        };
+        if parent == current {
+            break;
+        }
+        current = parent.to_path_buf();
+    }
+    dirs.reverse();
+    dirs
 }
 
 fn run_ls(arguments: &CborValue) -> Result<CborValue, String> {
@@ -1634,6 +1653,38 @@ mod tests {
         );
         assert!(discovered[0].content.contains("rule one"));
         assert!(discovered[1].content.contains("rule two"));
+    }
+
+    #[test]
+    fn discover_agents_files_from_roots_keeps_home_before_repo_chain() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let home = tempdir.path().join("home");
+        let repo = tempdir.path().join("repo");
+        fs::create_dir_all(home.join(".agents")).expect("home agents dir");
+        fs::create_dir_all(repo.join("pkg")).expect("repo pkg dir");
+
+        let home_agents = home.join(".agents").join("AGENTS.md");
+        let repo_agents = repo.join("AGENTS.md");
+        let pkg_agents = repo.join("pkg").join("AGENTS.md");
+        fs::write(&home_agents, "# Home\n- personal rule\n").expect("write home");
+        fs::write(&repo_agents, "# Repo\n- repo rule\n").expect("write repo");
+        fs::write(&pkg_agents, "# Package\n- package rule\n").expect("write pkg");
+
+        let discovered = discover_agents_files_from_roots(vec![
+            home.join(".agents"),
+            repo.clone(),
+            repo.join("pkg"),
+        ]);
+
+        let paths: Vec<PathBuf> = discovered.iter().map(|f| f.file_path.clone()).collect();
+        assert_eq!(
+            paths,
+            vec![
+                home_agents.canonicalize().expect("canonical home"),
+                repo_agents.canonicalize().expect("canonical repo"),
+                pkg_agents.canonicalize().expect("canonical pkg"),
+            ]
+        );
     }
 
     #[test]
