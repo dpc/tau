@@ -60,6 +60,7 @@ pub const READ_TOOL_NAME: &str = "read";
 pub const WRITE_TOOL_NAME: &str = "write";
 pub const EDIT_TOOL_NAME: &str = "edit";
 pub const SHELL_TOOL_NAME: &str = "shell";
+pub const GREP_TOOL_NAME: &str = "grep";
 
 /// Runs the extension on stdin/stdout (production, no echo).
 pub fn run_stdio() -> Result<(), Box<dyn Error>> {
@@ -173,6 +174,49 @@ where
                     }
                 },
                 "required": ["path", "edits"]
+            })),
+        },
+        ToolSpec {
+            name: GREP_TOOL_NAME.into(),
+            description: Some(
+                "Search file contents for a pattern using ripgrep. Returns matching lines with \
+                 file paths and line numbers. Respects .gitignore. Output is truncated to 100 \
+                 matches or 50KB (whichever is hit first). Long lines are truncated to 500 chars."
+                    .to_owned(),
+            ),
+            parameters: Some(serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "pattern": {
+                        "type": "string",
+                        "description": "Search pattern (regex or literal string)"
+                    },
+                    "path": {
+                        "type": "string",
+                        "description": "Directory or file to search (default: current directory)"
+                    },
+                    "glob": {
+                        "type": "string",
+                        "description": "Filter files by glob pattern, e.g. '*.ts' or '**/*.rs'"
+                    },
+                    "ignoreCase": {
+                        "type": "boolean",
+                        "description": "Case-insensitive search (default: false)"
+                    },
+                    "literal": {
+                        "type": "boolean",
+                        "description": "Treat pattern as literal string instead of regex (default: false)"
+                    },
+                    "context": {
+                        "type": "integer",
+                        "description": "Number of lines to show before and after each match (default: 0)"
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum number of matches to return (default: 100)"
+                    }
+                },
+                "required": ["pattern"]
             })),
         },
         ToolSpec {
@@ -336,6 +380,22 @@ fn execute_tool(invoke: tau_proto::ToolInvoke, include_echo: bool) -> Vec<Event>
 
     if invoke.tool_name == EDIT_TOOL_NAME {
         return match edit_file(&invoke.arguments) {
+            Ok(result) => vec![Event::ToolResult(ToolResult {
+                call_id: invoke.call_id,
+                tool_name: invoke.tool_name,
+                result,
+            })],
+            Err(error) => vec![Event::ToolError(ToolError {
+                call_id: invoke.call_id,
+                tool_name: invoke.tool_name,
+                message: error,
+                details: None,
+            })],
+        };
+    }
+
+    if invoke.tool_name == GREP_TOOL_NAME {
+        return match run_grep(&invoke.arguments) {
             Ok(result) => vec![Event::ToolResult(ToolResult {
                 call_id: invoke.call_id,
                 tool_name: invoke.tool_name,
@@ -650,6 +710,205 @@ fn truncate(s: &str, max: usize) -> &str {
 }
 
 // ---------------------------------------------------------------------------
+// grep (ripgrep)
+// ---------------------------------------------------------------------------
+
+const DEFAULT_GREP_LIMIT: usize = 100;
+const GREP_MAX_LINE_LENGTH: usize = 500;
+
+fn run_grep(arguments: &CborValue) -> Result<CborValue, String> {
+    let pattern = argument_text(arguments, "pattern")?;
+    let path = optional_argument_text(arguments, "path");
+    let glob = optional_argument_text(arguments, "glob");
+    let ignore_case = optional_argument_bool(arguments, "ignoreCase").unwrap_or(false);
+    let literal = optional_argument_bool(arguments, "literal").unwrap_or(false);
+    let context = optional_argument_int(arguments, "context")
+        .map(|v| v.max(0) as usize);
+    let limit = optional_argument_int(arguments, "limit")
+        .map(|v| v.max(1) as usize)
+        .unwrap_or(DEFAULT_GREP_LIMIT);
+
+    let search_path = path.as_deref().unwrap_or(".");
+
+    // Build ripgrep arguments.
+    let mut args: Vec<String> = vec![
+        "--line-number".to_owned(),
+        "--color=never".to_owned(),
+        "--hidden".to_owned(),
+    ];
+    if ignore_case {
+        args.push("--ignore-case".to_owned());
+    }
+    if literal {
+        args.push("--fixed-strings".to_owned());
+    }
+    if let Some(ref g) = glob {
+        args.push("--glob".to_owned());
+        args.push(g.clone());
+    }
+    if let Some(ctx) = context {
+        args.push(format!("--context={ctx}"));
+    }
+    args.push("--".to_owned());
+    args.push(pattern.clone());
+    args.push(search_path.to_owned());
+
+    let child = Command::new("rg")
+        .args(&args)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("failed to start ripgrep: {e}"))?;
+
+    let output = child
+        .wait_with_output()
+        .map_err(|e| format!("failed to wait for ripgrep: {e}"))?;
+
+    // rg exit codes: 0=matches found, 1=no matches, 2=error
+    if output.status.code() == Some(2) {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("ripgrep error: {}", stderr.trim()));
+    }
+
+    let raw_output = String::from_utf8_lossy(&output.stdout);
+    if raw_output.trim().is_empty() {
+        return Ok(CborValue::Map(vec![
+            (
+                CborValue::Text("matches".to_owned()),
+                CborValue::Integer(0.into()),
+            ),
+            (
+                CborValue::Text("output".to_owned()),
+                CborValue::Text("no matches found".to_owned()),
+            ),
+        ]));
+    }
+
+    // Process lines: count matches, truncate long lines, enforce match limit.
+    let mut result_lines = Vec::new();
+    let mut match_count: usize = 0;
+    let mut lines_truncated = false;
+    let mut match_limit_reached = false;
+
+    for line in raw_output.lines() {
+        // A match line looks like "path:123:content" (context lines use - instead of :)
+        // Count only actual match lines (not context lines).
+        let is_match = is_grep_match_line(line);
+        if is_match {
+            match_count += 1;
+            if match_count > limit {
+                match_limit_reached = true;
+                break;
+            }
+        }
+
+        // Per-line truncation.
+        if line.len() > GREP_MAX_LINE_LENGTH {
+            let truncated = truncate_line(line, GREP_MAX_LINE_LENGTH);
+            result_lines.push(truncated);
+            lines_truncated = true;
+        } else {
+            result_lines.push(line.to_owned());
+        }
+    }
+
+    let mut output_text = result_lines.join("\n");
+
+    // Apply byte-level truncation to the assembled output.
+    let byte_truncated = truncate_head(&output_text);
+    if byte_truncated.was_truncated {
+        output_text = byte_truncated.content;
+    }
+
+    // Build notices.
+    let mut notices = Vec::new();
+    if match_limit_reached {
+        notices.push(format!(
+            "{limit} matches limit reached. Use limit={} for more, or refine pattern.",
+            limit * 2
+        ));
+    }
+    if byte_truncated.was_truncated {
+        notices.push("50KB output limit reached.".to_owned());
+    }
+    if lines_truncated {
+        notices.push(format!(
+            "Some lines truncated to {GREP_MAX_LINE_LENGTH} chars. Use read tool to see full lines."
+        ));
+    }
+
+    if !notices.is_empty() {
+        output_text.push_str("\n\n[");
+        output_text.push_str(&notices.join(" "));
+        output_text.push(']');
+    }
+
+    Ok(CborValue::Map(vec![
+        (
+            CborValue::Text("matches".to_owned()),
+            CborValue::Integer((match_count as i64).into()),
+        ),
+        (
+            CborValue::Text("output".to_owned()),
+            CborValue::Text(output_text),
+        ),
+    ]))
+}
+
+/// Check if a line is a grep match line (vs a context line).
+/// Match lines have the format `path:number:content`.
+/// Context lines use `-` separator: `path-number-content`.
+fn is_grep_match_line(line: &str) -> bool {
+    // Find the first `:` or `-` after what looks like a path:number pattern.
+    // A match line has at least two `:` separators: path:linenum:content
+    let mut colons = 0;
+    for (i, ch) in line.char_indices() {
+        if ch == ':' {
+            colons += 1;
+            if colons == 2 {
+                return true;
+            }
+        } else if ch == '-' && colons == 1 {
+            // path:linenum-content would be context line... but actually
+            // context uses path-linenum-content. Let's be more precise.
+            // If we've seen exactly one colon, this could still be valid.
+            // Actually rg without --json uses: `path:num:match` for matches
+            // and `path-num-match` for context. So a match line always has
+            // `:digit+:` after the filename.
+            return false;
+        }
+        // Skip past what could be a Windows drive letter (C:)
+        if i > 2 && colons == 0 && ch == '-' {
+            return false;
+        }
+    }
+    // Lines with fewer than 2 colons (like group separators `--`) aren't matches.
+    false
+}
+
+/// Truncate a single line, appending a marker if truncated.
+fn truncate_line(line: &str, max: usize) -> String {
+    if line.len() <= max {
+        return line.to_owned();
+    }
+    let mut end = max;
+    while end > 0 && !line.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}... [truncated]", &line[..end])
+}
+
+fn optional_argument_bool(arguments: &CborValue, key: &str) -> Option<bool> {
+    match arguments {
+        CborValue::Map(entries) => entries.iter().find_map(|(k, v)| match (k, v) {
+            (CborValue::Text(k), CborValue::Bool(b)) if k == key => Some(*b),
+            _ => None,
+        }),
+        _ => None,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // shell
 // ---------------------------------------------------------------------------
 
@@ -910,11 +1169,12 @@ mod tests {
         for expected in [
             EventName::LifecycleHello,
             EventName::LifecycleSubscribe,
-            EventName::ToolRegister,
-            EventName::ToolRegister,
-            EventName::ToolRegister,
-            EventName::ToolRegister,
-            EventName::ToolRegister,
+            EventName::ToolRegister, // echo
+            EventName::ToolRegister, // read
+            EventName::ToolRegister, // write
+            EventName::ToolRegister, // edit
+            EventName::ToolRegister, // grep
+            EventName::ToolRegister, // shell
             EventName::LifecycleReady,
         ] {
             let event = reader
