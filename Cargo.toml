@@ -69,7 +69,7 @@ sha2 = "0.10"
 ureq = { version = "2", default-features = false }
 url = "2"
 clap = { version = "4", features = ["derive"] }
-crossterm = "0.28"
+crossterm = { version = "0.28", features = ["bracketed-paste"] }
 unicode-width = "0.2"
 dirs = "6"
 globset = "0.4"

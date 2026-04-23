@@ -267,6 +267,10 @@ impl TermHandle {
 pub enum RawEvent {
     Key(KeyEvent),
     Resize(u16, u16),
+    /// One bracketed paste. The whole pasted string is delivered
+    /// atomically so a multi-line paste doesn't trigger Enter on
+    /// embedded newlines.
+    Paste(String),
 }
 
 /// The terminal prompt engine.
@@ -318,6 +322,12 @@ impl Term {
         let sync_condvar = Arc::new(std::sync::Condvar::new());
 
         terminal::enable_raw_mode()?;
+        // Opt into bracketed paste so the terminal wraps pasted content
+        // in `ESC[200~` / `ESC[201~` and crossterm surfaces it as one
+        // `CtEvent::Paste(String)` instead of a stream of individual
+        // KeyEvents (which, without bracketed paste, leaked literal
+        // escape-sequence bytes into the input buffer).
+        let _ = crossterm::execute!(io::stdout(), crossterm::event::EnableBracketedPaste);
 
         let redraw_state = Arc::clone(&state);
         let redraw_writer: Box<dyn Write + Send> = Box::new(io::stdout());
@@ -449,6 +459,25 @@ impl Term {
                         width: w,
                         height: h,
                     });
+                }
+                RawEvent::Paste(text) => {
+                    // Insert the whole paste at the cursor in one go.
+                    // Going through the per-char path would re-trigger
+                    // the redraw thread N times and, more importantly,
+                    // would expose embedded `\n` bytes to the Enter
+                    // handler and submit the line mid-paste.
+                    if text.is_empty() {
+                        self.redraw.notify();
+                        continue;
+                    }
+                    {
+                        let mut st = self.state.lock().expect("term state mutex poisoned");
+                        let cursor = st.cursor;
+                        st.buffer.insert_str(cursor, &text);
+                        st.cursor = cursor + text.len();
+                    }
+                    self.redraw.notify();
+                    return Ok(Event::BufferChanged);
                 }
             }
         }
@@ -669,6 +698,10 @@ impl Drop for Term {
     fn drop(&mut self) {
         self.shutdown();
         if self.owns_raw_mode {
+            // Pair the `EnableBracketedPaste` we issued in `new`; the
+            // terminal would keep bracketing subsequent pastes in
+            // other programs until it's explicitly turned off.
+            let _ = crossterm::execute!(io::stdout(), crossterm::event::DisableBracketedPaste);
             let _ = terminal::disable_raw_mode();
         }
     }
@@ -952,6 +985,7 @@ fn term_input_reader_loop(tx: std::sync::mpsc::Sender<RawEvent>) {
         let raw = match ev {
             CtEvent::Key(key) => RawEvent::Key(key),
             CtEvent::Resize(w, h) => RawEvent::Resize(w, h),
+            CtEvent::Paste(text) => RawEvent::Paste(text),
             _ => continue,
         };
         if tx.send(raw).is_err() {
