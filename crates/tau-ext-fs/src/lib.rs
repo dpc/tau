@@ -105,6 +105,7 @@ where
         selectors: vec![
             EventSelector::Exact(tau_proto::EventName::ToolInvoke),
             EventSelector::Exact(tau_proto::EventName::SessionStarted),
+            EventSelector::Exact(tau_proto::EventName::UiShellCommand),
             EventSelector::Exact(tau_proto::EventName::LifecycleDisconnect),
         ],
     }))?;
@@ -367,6 +368,16 @@ where
             Event::SessionStarted(started) => {
                 dispatch_session_started(started, &tx);
             }
+            Event::UiShellCommand(cmd) => {
+                // User-initiated `!`/`!!` — run on a worker thread
+                // and stream chunks out via the same tx writer.
+                let tx = tx.clone();
+                let sem = Arc::clone(&sem);
+                std::thread::spawn(move || {
+                    let _permit = sem.acquire();
+                    dispatch_user_shell_command(cmd, &tx);
+                });
+            }
             Event::LifecycleDisconnect(_) => break,
             _ => {}
         }
@@ -400,6 +411,136 @@ fn dispatch_session_started(started: SessionStarted, tx: &mpsc::Sender<Event>) {
     for event in build_session_started_events(started) {
         let _ = tx.send(event);
     }
+}
+
+/// Run a user-initiated `!`/`!!` shell command, streaming stdout and
+/// stderr back as `ShellCommandProgress` chunks while they arrive and
+/// emitting `ShellCommandFinished` with the full (truncated-tail)
+/// output when the child exits.
+fn dispatch_user_shell_command(cmd: tau_proto::UiShellCommand, tx: &mpsc::Sender<Event>) {
+    use std::io::Read;
+
+    let mut child_cmd = Command::new("sh");
+    child_cmd
+        .arg("-c")
+        .arg(&cmd.command)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+
+    let mut child = match child_cmd.spawn() {
+        Ok(child) => child,
+        Err(err) => {
+            let _ = tx.send(Event::ShellCommandFinished(
+                tau_proto::ShellCommandFinished {
+                    command_id: cmd.command_id,
+                    session_id: cmd.session_id,
+                    command: cmd.command,
+                    include_in_context: cmd.include_in_context,
+                    output: format!("failed to start shell command: {err}"),
+                    exit_code: None,
+                    cancelled: false,
+                },
+            ));
+            return;
+        }
+    };
+
+    // Read each pipe on a dedicated thread. Each read chunk is both
+    // emitted as a `ShellCommandProgress` event (for live UI
+    // rendering) and accumulated into a buffer that we later truncate
+    // and send in `ShellCommandFinished` (for session-history
+    // injection when `include_in_context`).
+
+    fn pump<R: Read + Send + 'static>(
+        mut pipe: R,
+        stream: tau_proto::ShellStream,
+        command_id: tau_proto::ShellCommandId,
+        tx: mpsc::Sender<Event>,
+    ) -> std::thread::JoinHandle<String> {
+        std::thread::spawn(move || {
+            let mut captured = String::new();
+            let mut buf = [0u8; 4096];
+            loop {
+                match pipe.read(&mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        let chunk = String::from_utf8_lossy(&buf[..n]).into_owned();
+                        captured.push_str(&chunk);
+                        let _ = tx.send(Event::ShellCommandProgress(
+                            tau_proto::ShellCommandProgress {
+                                command_id: command_id.clone(),
+                                stream,
+                                chunk,
+                            },
+                        ));
+                    }
+                }
+            }
+            captured
+        })
+    }
+
+    let stdout_pipe = child.stdout.take();
+    let stderr_pipe = child.stderr.take();
+    let stdout_handle = stdout_pipe.map(|p| {
+        pump(
+            p,
+            tau_proto::ShellStream::Stdout,
+            cmd.command_id.clone(),
+            tx.clone(),
+        )
+    });
+    let stderr_handle = stderr_pipe.map(|p| {
+        pump(
+            p,
+            tau_proto::ShellStream::Stderr,
+            cmd.command_id.clone(),
+            tx.clone(),
+        )
+    });
+
+    let wait = child.wait();
+    let stdout = stdout_handle
+        .map(|h| h.join().unwrap_or_default())
+        .unwrap_or_default();
+    let stderr = stderr_handle
+        .map(|h| h.join().unwrap_or_default())
+        .unwrap_or_default();
+
+    let (exit_code, status_note) = match wait {
+        Ok(status) => (status.code(), None),
+        Err(err) => (None, Some(format!("wait failed: {err}"))),
+    };
+
+    // Interleave stdout + stderr in the final output the way the
+    // `shell` tool does: stderr follows stdout under a separator.
+    let mut merged = stdout;
+    if !stderr.is_empty() {
+        if !merged.is_empty() {
+            merged.push('\n');
+        }
+        merged.push_str("[stderr]\n");
+        merged.push_str(&stderr);
+    }
+    if let Some(note) = status_note {
+        if !merged.is_empty() {
+            merged.push('\n');
+        }
+        merged.push_str(&note);
+    }
+    let truncated = truncate_tail(&merged);
+
+    let _ = tx.send(Event::ShellCommandFinished(
+        tau_proto::ShellCommandFinished {
+            command_id: cmd.command_id,
+            session_id: cmd.session_id,
+            command: cmd.command,
+            include_in_context: cmd.include_in_context,
+            output: truncated.content,
+            exit_code,
+            cancelled: false,
+        },
+    ));
 }
 
 fn ack_log_event(id: LogEventId, tx: &mpsc::Sender<Event>) {

@@ -95,6 +95,9 @@ string_newtype!(/// Provider name (e.g. `"openai"`, `"anthropic"`).
     ProviderName);
 string_newtype!(/// Skill name (e.g. `"jujutsu"`, `"preview-site"`).
     SkillName);
+string_newtype!(/// Identifier correlating a user-initiated `!`/`!!` shell
+    /// command's lifecycle events (progress, finished).
+    ShellCommandId);
 
 // ---------------------------------------------------------------------------
 // ToolName (validated newtype)

@@ -83,6 +83,15 @@ pub enum EventName {
     UiModelSelect,
     #[serde(rename = "ui.detach_request")]
     UiDetachRequest,
+    #[serde(rename = "ui.shell_command")]
+    UiShellCommand,
+
+    // Shell events — facts from an extension running a user-initiated
+    // `!` / `!!` shell command on behalf of the UI
+    #[serde(rename = "shell.command_progress")]
+    ShellCommandProgress,
+    #[serde(rename = "shell.command_finished")]
+    ShellCommandFinished,
 
     // Session events — facts from the harness session tracker
     #[serde(rename = "session.prompt_queued")]
@@ -138,6 +147,9 @@ impl EventName {
             Self::UiPromptSubmitted => "ui.prompt_submitted",
             Self::UiModelSelect => "ui.model_select",
             Self::UiDetachRequest => "ui.detach_request",
+            Self::UiShellCommand => "ui.shell_command",
+            Self::ShellCommandProgress => "shell.command_progress",
+            Self::ShellCommandFinished => "shell.command_finished",
             Self::SessionPromptQueued => "session.prompt_queued",
             Self::SessionStarted => "session.started",
             Self::SessionPromptCreated => "session.prompt_created",
@@ -187,6 +199,9 @@ impl FromStr for EventName {
             "ui.prompt_submitted" => Ok(Self::UiPromptSubmitted),
             "ui.model_select" => Ok(Self::UiModelSelect),
             "ui.detach_request" => Ok(Self::UiDetachRequest),
+            "ui.shell_command" => Ok(Self::UiShellCommand),
+            "shell.command_progress" => Ok(Self::ShellCommandProgress),
+            "shell.command_finished" => Ok(Self::ShellCommandFinished),
             "session.prompt_queued" => Ok(Self::SessionPromptQueued),
             "session.started" => Ok(Self::SessionStarted),
             "session.prompt_created" => Ok(Self::SessionPromptCreated),
@@ -555,6 +570,59 @@ pub struct UiModelSelect {
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct UiDetachRequest {}
 
+/// Which stream a [`ShellCommandProgress`] chunk came from.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ShellStream {
+    Stdout,
+    Stderr,
+}
+
+/// The user submitted a `!`/`!!` shell command.
+///
+/// `include_in_context`: when `true` (from `!<cmd>`), the harness
+/// injects a tagged user message containing the command and its
+/// output into the session's conversation history on completion, so
+/// the agent sees it on its next turn. When `false` (from `!!<cmd>`),
+/// the result is UI-only and never reaches the model.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct UiShellCommand {
+    pub session_id: SessionId,
+    pub command_id: crate::ShellCommandId,
+    pub command: String,
+    pub include_in_context: bool,
+}
+
+/// A chunk of output from a running user-initiated shell command.
+/// Correlated to the request by `command_id`.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ShellCommandProgress {
+    pub command_id: crate::ShellCommandId,
+    pub stream: ShellStream,
+    pub chunk: String,
+}
+
+/// A user-initiated shell command completed (exited or was cancelled).
+///
+/// The extension echoes `command`, `session_id`, and
+/// `include_in_context` back from the originating `UiShellCommand`
+/// so the harness can act on the finished event without bookkeeping
+/// a per-command_id map.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ShellCommandFinished {
+    pub command_id: crate::ShellCommandId,
+    pub session_id: SessionId,
+    pub command: String,
+    pub include_in_context: bool,
+    /// Interleaved stdout + stderr (truncated), the same shape the
+    /// `shell` tool returns.
+    pub output: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    #[serde(default, skip_serializing_if = "core::ops::Not::not")]
+    pub cancelled: bool,
+}
+
 // ---------------------------------------------------------------------------
 // Session events — facts from the harness session tracker
 // ---------------------------------------------------------------------------
@@ -753,6 +821,14 @@ pub enum Event {
     UiModelSelect(UiModelSelect),
     #[serde(rename = "ui.detach_request")]
     UiDetachRequest(UiDetachRequest),
+    #[serde(rename = "ui.shell_command")]
+    UiShellCommand(UiShellCommand),
+
+    // Shell (user-initiated)
+    #[serde(rename = "shell.command_progress")]
+    ShellCommandProgress(ShellCommandProgress),
+    #[serde(rename = "shell.command_finished")]
+    ShellCommandFinished(ShellCommandFinished),
 
     // Session
     #[serde(rename = "session.prompt_queued")]
@@ -808,6 +884,9 @@ impl Event {
             Self::UiPromptSubmitted(_) => EventName::UiPromptSubmitted,
             Self::UiModelSelect(_) => EventName::UiModelSelect,
             Self::UiDetachRequest(_) => EventName::UiDetachRequest,
+            Self::UiShellCommand(_) => EventName::UiShellCommand,
+            Self::ShellCommandProgress(_) => EventName::ShellCommandProgress,
+            Self::ShellCommandFinished(_) => EventName::ShellCommandFinished,
             Self::SessionPromptQueued(_) => EventName::SessionPromptQueued,
             Self::SessionStarted(_) => EventName::SessionStarted,
             Self::SessionPromptCreated(_) => EventName::SessionPromptCreated,

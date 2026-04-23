@@ -245,6 +245,7 @@ fn run_chat(session_id: &str, attach: bool) -> Result<(), CliError> {
                 EventSelector::Prefix("tool.".to_owned()),
                 EventSelector::Prefix("extension.".to_owned()),
                 EventSelector::Prefix("harness.".to_owned()),
+                EventSelector::Prefix("shell.".to_owned()),
             ],
         }))
         .map_err(CliError::Encode)?;
@@ -408,6 +409,24 @@ fn terminal_input_loop(
                     continue;
                 }
 
+                // `!!<cmd>` / `!<cmd>`: run a shell command locally.
+                // `!!` excludes the result from the agent's context;
+                // `!` (single bang) includes it.
+                if let Some(command) = text.strip_prefix("!!") {
+                    let command = command.trim();
+                    if !command.is_empty() {
+                        let _ = send_shell_command(writer, session_id, command, false);
+                    }
+                    continue;
+                }
+                if let Some(command) = text.strip_prefix('!') {
+                    let command = command.trim();
+                    if !command.is_empty() {
+                        let _ = send_shell_command(writer, session_id, command, true);
+                    }
+                    continue;
+                }
+
                 if writer
                     .write_event(&Event::UiPromptSubmitted(UiPromptSubmitted {
                         session_id: session_id.into(),
@@ -425,6 +444,33 @@ fn terminal_input_loop(
             TermEvent::Resize { .. } | TermEvent::BufferChanged => {}
         }
     }
+}
+
+/// Mint a fresh `command_id` and emit a `UiShellCommand` for a
+/// `!`/`!!` line. Returns `Err` only on write failure (same caller
+/// pattern as the other slash commands — input loop keeps going).
+fn send_shell_command(
+    writer: &mut EventWriter<BufWriter<UnixStream>>,
+    session_id: &str,
+    command: &str,
+    include_in_context: bool,
+) -> Result<(), ()> {
+    let command_id = format!(
+        "ui-sh-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    );
+    writer
+        .write_event(&Event::UiShellCommand(tau_proto::UiShellCommand {
+            session_id: session_id.into(),
+            command_id: command_id.into(),
+            command: command.to_owned(),
+            include_in_context,
+        }))
+        .map_err(|_| ())?;
+    writer.flush().map_err(|_| ())
 }
 
 // ---------------------------------------------------------------------------
@@ -719,6 +765,50 @@ fn render_tool_block(
     StyledBlock::new(StyledText::from(spans))
 }
 
+/// Render a user `!`/`!!` shell block: a `shell <cmd>` header in the
+/// same three-span theme used for tool calls, with streaming output
+/// below in the default style.
+///
+/// `status_suffix`:
+///   - `Some("running")` while the command is in-flight (info style),
+///   - `Some("[0]")` / `Some("[N]")` on completion (success / error style,
+///     keyed off exit code),
+///   - `Some("cancelled")` on cancel (info style).
+fn render_shell_block(
+    theme: &tau_themes::Theme,
+    command: &str,
+    output: &str,
+    status_suffix: Option<&str>,
+) -> tau_cli_term::StyledBlock {
+    use tau_cli_term::resolve::resolve;
+    use tau_cli_term::{Span, StyledBlock, StyledText};
+    use tau_themes::names;
+
+    let name_style = resolve(theme, names::TOOL_NAME);
+    let args_style = resolve(theme, names::TOOL_ARGS);
+    let status_name = match status_suffix {
+        Some(s) if s.starts_with("[0]") => names::TOOL_STATUS_SUCCESS,
+        Some(s) if s.starts_with('[') => names::TOOL_STATUS_ERROR,
+        _ => names::TOOL_STATUS_INFO,
+    };
+    let status_style = resolve(theme, status_name);
+
+    let mut spans = vec![
+        Span::new("shell", name_style),
+        Span::new(" ", args_style),
+        Span::new(command.to_owned(), args_style),
+    ];
+    if let Some(suffix) = status_suffix {
+        spans.push(Span::new(" ", args_style));
+        spans.push(Span::new(suffix.to_owned(), status_style));
+    }
+    if !output.is_empty() {
+        spans.push(Span::new("\n", args_style));
+        spans.push(Span::new(output.to_owned(), args_style));
+    }
+    StyledBlock::new(StyledText::from(spans))
+}
+
 /// Event renderer. Maps session_prompt_id → block_id for in-place
 /// updates. No flags, no suppression — just ID-based lookups.
 struct EventRenderer {
@@ -735,11 +825,25 @@ struct EventRenderer {
     /// Live tool-call blocks keyed by call_id. Shown in
     /// above_active while running, moved to history on completion.
     tool_blocks: HashMap<String, tau_cli_term::BlockId>,
+    /// Live user-shell blocks (from `!`/`!!`) keyed by command_id.
+    /// Updated in place as progress chunks arrive, finalized on
+    /// `ShellCommandFinished`.
+    shell_blocks: HashMap<String, ShellBlockState>,
     /// Live extension blocks keyed by instance_id. Shown in
     /// above_active while starting, moved to history when ready.
     extension_blocks: HashMap<tau_proto::ExtensionInstanceId, tau_cli_term::BlockId>,
     /// Persistent status bar block showing the current model.
     model_status_block: Option<tau_cli_term::BlockId>,
+}
+
+/// In-flight state for a user `!`/`!!` shell block.
+struct ShellBlockState {
+    block_id: tau_cli_term::BlockId,
+    command: String,
+    include_in_context: bool,
+    /// Output accumulated from `ShellCommandProgress` chunks. Rendered
+    /// under the header each redraw.
+    output: String,
 }
 
 impl EventRenderer {
@@ -756,6 +860,7 @@ impl EventRenderer {
             last_user_block: None,
             queued_user_blocks: VecDeque::new(),
             tool_blocks: HashMap::new(),
+            shell_blocks: HashMap::new(),
             extension_blocks: HashMap::new(),
             model_status_block: None,
         }
@@ -870,6 +975,78 @@ impl EventRenderer {
                 );
                 self.handle
                     .print_output(render_tool_block(&self.theme, &display));
+            }
+            Event::UiShellCommand(cmd) => {
+                // Create a running block now; the harness will echo
+                // progress and a finished event back to us via the
+                // bus. Both bangs render the same; the context bit
+                // just labels the suffix.
+                let label = if cmd.include_in_context {
+                    "running".to_owned()
+                } else {
+                    "running [no context]".to_owned()
+                };
+                let block = render_shell_block(&self.theme, &cmd.command, "", Some(&label));
+                let block_id = self.handle.new_block(block);
+                self.handle.push_above_active(block_id);
+                self.handle.redraw();
+                self.shell_blocks.insert(
+                    cmd.command_id.to_string(),
+                    ShellBlockState {
+                        block_id,
+                        command: cmd.command.clone(),
+                        include_in_context: cmd.include_in_context,
+                        output: String::new(),
+                    },
+                );
+            }
+            Event::ShellCommandProgress(progress) => {
+                if let Some(state) = self.shell_blocks.get_mut(progress.command_id.as_str()) {
+                    state.output.push_str(&progress.chunk);
+                    let label = if state.include_in_context {
+                        "running".to_owned()
+                    } else {
+                        "running [no context]".to_owned()
+                    };
+                    let block = render_shell_block(
+                        &self.theme,
+                        &state.command,
+                        &state.output,
+                        Some(&label),
+                    );
+                    self.handle.set_block(state.block_id, block);
+                    self.handle.redraw();
+                }
+            }
+            Event::ShellCommandFinished(finished) => {
+                let Some(state) = self.shell_blocks.remove(finished.command_id.as_str()) else {
+                    return;
+                };
+                // Use the final, post-truncation output from the
+                // extension rather than our streaming buffer so the
+                // UI matches what the harness injected into context.
+                self.handle.remove_block(state.block_id);
+                let suffix = if finished.cancelled {
+                    "cancelled".to_owned()
+                } else {
+                    match finished.exit_code {
+                        Some(0) => "[0]".to_owned(),
+                        Some(code) => format!("[{code}]"),
+                        None => "[?]".to_owned(),
+                    }
+                };
+                let suffix = if state.include_in_context {
+                    suffix
+                } else {
+                    format!("{suffix} [no context]")
+                };
+                let block = render_shell_block(
+                    &self.theme,
+                    &finished.command,
+                    &finished.output,
+                    Some(&suffix),
+                );
+                self.handle.print_output(block);
             }
             Event::ExtensionStarting(starting) => {
                 let block = themed_block(

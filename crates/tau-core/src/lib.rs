@@ -401,26 +401,24 @@ impl SubscriptionPolicy for DefaultSubscriptionPolicy {
         selectors: &[EventSelector],
     ) -> Result<(), SubscriptionPolicyError> {
         if connection.origin == ConnectionOrigin::Socket {
+            const ALLOWED_FAMILIES: &[&str] = &[
+                "message.",
+                "tool.",
+                "extension.",
+                "agent.",
+                "session.",
+                "ui.",
+                "harness.",
+                "shell.",
+            ];
             for selector in selectors {
                 let allowed = match selector {
                     EventSelector::Exact(name) => {
                         let name = name.as_str();
-                        name.starts_with("message.")
-                            || name.starts_with("tool.")
-                            || name.starts_with("extension.")
-                            || name.starts_with("agent.")
-                            || name.starts_with("session.")
-                            || name.starts_with("ui.")
-                            || name.starts_with("harness.")
+                        ALLOWED_FAMILIES.iter().any(|fam| name.starts_with(fam))
                     }
                     EventSelector::Prefix(prefix) => {
-                        prefix.starts_with("message.")
-                            || prefix.starts_with("tool.")
-                            || prefix.starts_with("extension.")
-                            || prefix.starts_with("agent.")
-                            || prefix.starts_with("session.")
-                            || prefix.starts_with("ui.")
-                            || prefix.starts_with("harness.")
+                        ALLOWED_FAMILIES.iter().any(|fam| prefix.starts_with(fam))
                     }
                 };
                 if !allowed {

@@ -1088,6 +1088,21 @@ impl Harness {
             Event::ToolProgress(progress) => {
                 self.publish_event(Some(source_id), Event::ToolProgress(progress));
             }
+            Event::ShellCommandProgress(progress) => {
+                // Pass-through: the UI renders chunks as they arrive.
+                self.publish_event(Some(source_id), Event::ShellCommandProgress(progress));
+            }
+            Event::ShellCommandFinished(finished) => {
+                // Publish first so the UI finalizes its render block
+                // regardless of whether we inject into history.
+                self.publish_event(
+                    Some(source_id),
+                    Event::ShellCommandFinished(finished.clone()),
+                );
+                if finished.include_in_context {
+                    self.inject_user_shell_output(&finished)?;
+                }
+            }
             Event::ExtSkillAvailable(ref skill) => {
                 self.discovered_skills.insert(
                     skill.name.clone(),
@@ -1585,6 +1600,31 @@ impl Harness {
             .append_user_message(session_id.to_owned(), text)
             .map_err(HarnessError::from)?;
 
+        Ok(())
+    }
+
+    /// Persist a user-initiated `!` shell command's output as a
+    /// tagged user message so the agent sees it in the next prompt.
+    ///
+    /// The XML-ish `<user_shell>` envelope lets the model reliably
+    /// distinguish output the user pasted vs. output from its own
+    /// tool calls, and survives round-tripping through conversation
+    /// assembly.
+    fn inject_user_shell_output(
+        &mut self,
+        finished: &tau_proto::ShellCommandFinished,
+    ) -> Result<(), HarnessError> {
+        let exit = finished
+            .exit_code
+            .map(|c| c.to_string())
+            .unwrap_or_else(|| if finished.cancelled { "cancelled" } else { "?" }.to_owned());
+        let text = format!(
+            "<user_shell command={:?} exit_code={:?}>\n{}\n</user_shell>",
+            finished.command, exit, finished.output,
+        );
+        self.store
+            .append_user_message(finished.session_id.as_str().to_owned(), text)
+            .map_err(HarnessError::from)?;
         Ok(())
     }
 
