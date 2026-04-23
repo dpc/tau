@@ -458,6 +458,10 @@ struct Harness {
     agent_connection_id: tau_proto::ConnectionId,
     _next_instance_counter: u64,
     next_session_prompt_id: u64,
+    /// Monotonic counter used to mint synthetic `ToolCallId`s when
+    /// the agent emits a tool call with an empty id. See
+    /// `synthesize_call_id` for why.
+    next_synthetic_call_id: u64,
     /// Maps session_prompt_id → session_id for in-flight prompts.
     prompt_sessions: std::collections::HashMap<SessionPromptId, SessionId>,
     /// Whose turn it is in the agent interaction loop.
@@ -602,6 +606,7 @@ impl Harness {
             extensions,
             _next_instance_counter,
             next_session_prompt_id: 0,
+            next_synthetic_call_id: 0,
             prompt_sessions: std::collections::HashMap::new(),
             turn_state: TurnState::Idle,
             pending_prompts: VecDeque::new(),
@@ -719,6 +724,7 @@ impl Harness {
             extensions,
             _next_instance_counter,
             next_session_prompt_id: 0,
+            next_synthetic_call_id: 0,
             prompt_sessions: std::collections::HashMap::new(),
             turn_state: TurnState::Idle,
             pending_prompts: VecDeque::new(),
@@ -1627,22 +1633,41 @@ impl Harness {
             // steering messages into the next prompt alongside the
             // tool results, allowing the user to redirect the agent
             // mid-turn.
-            let call_ids: Vec<ToolCallId> = response
+            // Normalize empty call_ids to a synthetic one. Models
+            // sometimes emit hallucinated tool calls with both a
+            // missing name *and* a missing id; an empty id would
+            // collide with itself in `in_flight_tool_kinds` /
+            // `pending_tool_sessions`, and would later render into
+            // conversation history as an empty `call_id` which the
+            // OpenAI Responses API rejects with
+            // `input[N].call_id: empty string`. Fix it at the boundary.
+            let normalized_calls: Vec<(AgentToolCall, tau_proto::ToolSideEffects)> = response
                 .tool_calls
                 .iter()
-                .map(|c| c.id.clone().into())
+                .map(|call| {
+                    let mut call = call.clone();
+                    if call.id.as_str().is_empty() {
+                        call.id = self.synthesize_call_id();
+                    }
+                    let kind = self.resolve_tool_kind(call.name.as_str());
+                    (call, kind)
+                })
+                .collect();
+
+            let remaining_calls: Vec<ToolCallId> = normalized_calls
+                .iter()
+                .map(|(call, _)| call.id.clone())
                 .collect();
             self.turn_state = TurnState::ToolsRunning {
                 session_id: session_id.clone(),
-                remaining_calls: call_ids,
+                remaining_calls,
             };
-            // Classify each call and enqueue in the order the agent
-            // emitted them. Dispatch is done by `drain_pending_tool_invocations`,
-            // which respects the pure-vs-mutating ordering rule.
-            for call in &response.tool_calls {
-                let kind = self.resolve_tool_kind(call.name.as_str());
+            // Enqueue in the order the agent emitted them. Dispatch is
+            // done by `drain_pending_tool_invocations`, which respects
+            // the pure-vs-mutating ordering rule.
+            for (call, kind) in normalized_calls {
                 self.pending_tool_invocations
-                    .push_back((session_id.clone(), call.clone(), kind));
+                    .push_back((session_id.clone(), call, kind));
             }
             self.drain_pending_tool_invocations()?;
         } else {
@@ -1732,6 +1757,21 @@ impl Harness {
     fn dispatch_next_or_idle(&mut self, _completed_session_id: &str) {
         self.turn_state = TurnState::Idle;
         self.try_advance_queue();
+    }
+
+    /// Mint a fresh synthetic `ToolCallId` for a hallucinated tool
+    /// call that arrived with an empty id.
+    ///
+    /// The id has to be non-empty for two reasons:
+    /// - the harness uses it as a map key in `in_flight_tool_kinds` /
+    ///   `pending_tool_sessions`, and two empty ids would collide;
+    /// - the next prompt we send to the model includes the rejection as a
+    ///   `tool_use`/`tool_result` pair, and the OpenAI Responses API rejects
+    ///   empty `call_id` strings outright.
+    fn synthesize_call_id(&mut self) -> ToolCallId {
+        let id = format!("harness-synth-{}", self.next_synthetic_call_id);
+        self.next_synthetic_call_id += 1;
+        id.into()
     }
 
     /// Returns the side-effect class of a tool name.
@@ -3717,6 +3757,83 @@ mod tests {
             found_error,
             "rejected call should leave an Error ToolActivity on the session"
         );
+
+        h.shutdown().expect("shutdown");
+    }
+
+    #[test]
+    fn empty_tool_call_id_is_normalized_to_synthetic_id() {
+        // Models that hallucinate an invalid tool_call often drop the
+        // `call_id` too. An empty id breaks two things downstream:
+        // it collides with itself as a HashMap key, and it renders
+        // into the next prompt as `input[N].call_id: ""` which the
+        // OpenAI Responses API rejects outright. Normalize at the
+        // boundary.
+        let td = TempDir::new().expect("tempdir");
+        let sp = td.path().join("sessions.cbor");
+        let pp = td.path().join("policy.cbor");
+        let mut h = echo_harness(&sp, &pp).expect("start");
+
+        h.selected_model = "test/model".into();
+        h.turn_state = TurnState::AgentThinking {
+            _session_id: "s1".into(),
+        };
+        h.prompt_sessions.insert("sp-x".into(), "s1".into());
+
+        let response = AgentResponseFinished {
+            session_prompt_id: "sp-x".into(),
+            text: None,
+            tool_calls: vec![
+                AgentToolCall {
+                    id: "".into(),
+                    name: "".into(),
+                    arguments: CborValue::Map(Vec::new()),
+                },
+                AgentToolCall {
+                    id: "".into(),
+                    name: "".into(),
+                    arguments: CborValue::Map(Vec::new()),
+                },
+            ],
+        };
+
+        h.handle_agent_response_finished(response)
+            .expect("must not panic");
+
+        // Both calls were rejected and the turn is fully drained.
+        assert!(h.pending_tool_invocations.is_empty());
+        assert!(h.in_flight_tool_kinds.is_empty());
+
+        // Every persisted ToolActivityRecord must have a non-empty
+        // call_id — this is what the LLM serializer round-trips.
+        let branch = h.store.session("s1").expect("session").current_branch();
+        let activity_records: Vec<_> = branch
+            .iter()
+            .filter_map(|entry| match entry {
+                SessionEntry::ToolActivity(record) => Some(record),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            activity_records.len(),
+            2,
+            "expected one Error record per rejected call"
+        );
+        for record in &activity_records {
+            assert!(
+                !record.call_id.as_str().is_empty(),
+                "synthesized call_id must not be empty; got {:?}",
+                record.call_id
+            );
+            assert!(
+                record.call_id.as_str().starts_with("harness-synth-"),
+                "synthesized call_id should be clearly synthetic; got {:?}",
+                record.call_id
+            );
+        }
+        // And the two synthesized ids must differ — otherwise they'd
+        // collide in HashMap state.
+        assert_ne!(activity_records[0].call_id, activity_records[1].call_id);
 
         h.shutdown().expect("shutdown");
     }
