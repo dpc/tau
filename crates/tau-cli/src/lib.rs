@@ -934,19 +934,10 @@ pub fn main_with_args() -> std::process::ExitCode {
                 session_id,
                 config: _config,
             } => {
-                // Generate a unique session ID per run to avoid
-                // accumulating stale history across daemon restarts.
-                let session_id = if session_id == tau_harness::default_session_id() {
-                    format!(
-                        "chat-{}",
-                        SystemTime::now()
-                            .duration_since(UNIX_EPOCH)
-                            .map(|d| d.as_millis())
-                            .unwrap_or(0)
-                    )
-                } else {
-                    session_id
-                };
+                // The UI attaches to a session the harness already
+                // owns; it does not mint its own. Use whatever id the
+                // user passed (default: `default_session_id()`), which
+                // the harness has eagerly initialized at startup.
                 run_chat(&session_id)
             }
 
