@@ -476,6 +476,10 @@ fn format_tool_completion(
             }
         }
         "find" => {
+            // Like `ls` / `shell`: the label alone (pattern + path +
+            // match count) is the useful summary in the UI; the actual
+            // list of matching paths tends to be long and the agent
+            // already has it in its conversation history.
             let path = cbor_text_field(details, "path");
             let pattern = cbor_text_field(details, "pattern");
             let label = if let Some(msg) = error_message {
@@ -490,21 +494,15 @@ fn format_tool_completion(
                 let count = cbor_int_field(details, "matches").unwrap_or(0);
                 format!("find {pattern} in {path} ({count} matches)")
             };
-            let output = cbor_text_field(details, "output").and_then(|text| {
-                let trimmed = text.trim().to_owned();
-                if trimmed.is_empty() {
-                    None
-                } else {
-                    Some(trimmed)
-                }
-            });
-            ToolCompletionDisplay { label, output }
+            ToolCompletionDisplay {
+                label,
+                output: None,
+            }
         }
         "grep" => {
-            // Arguments get echoed back on the tool-result event when
-            // the harness persists them, so `pattern` / `path` / `glob`
-            // come from `details`. Match count comes from the tool's
-            // own response. Output is the ripgrep text body.
+            // Like `ls` / `find` / `shell`: only the one-line summary
+            // in the UI. The full ripgrep body can be very long and
+            // the agent already has it in its conversation history.
             let pattern = cbor_text_field(details, "pattern");
             let path = cbor_text_field(details, "path");
             let glob = cbor_text_field(details, "glob");
@@ -524,17 +522,16 @@ fn format_tool_completion(
                     None => format!("grep {pattern:?} in {path} ({count} {suffix})"),
                 }
             };
-            let output = cbor_text_field(details, "output").and_then(|text| {
-                let trimmed = text.trim().to_owned();
-                if trimmed.is_empty() || trimmed == "no matches found" {
-                    None
-                } else {
-                    Some(trimmed)
-                }
-            });
-            ToolCompletionDisplay { label, output }
+            ToolCompletionDisplay {
+                label,
+                output: None,
+            }
         }
         "ls" => {
+            // The label alone (path + entry count) is the useful
+            // summary in the UI; the actual listing tends to be long
+            // and the agent already has it in its conversation
+            // history.
             let path = cbor_text_field(details, "path");
             let label = if let Some(msg) = error_message {
                 match path {
@@ -546,15 +543,10 @@ fn format_tool_completion(
                 let count = cbor_int_field(details, "entries").unwrap_or(0);
                 format!("ls {path} ({count} entries)")
             };
-            let output = cbor_text_field(details, "output").and_then(|text| {
-                let trimmed = text.trim().to_owned();
-                if trimmed.is_empty() {
-                    None
-                } else {
-                    Some(trimmed)
-                }
-            });
-            ToolCompletionDisplay { label, output }
+            ToolCompletionDisplay {
+                label,
+                output: None,
+            }
         }
         "skill" => {
             let name = cbor_text_field(details, "name");
@@ -587,39 +579,21 @@ fn format_tool_completion(
 }
 
 fn format_shell_completion(details: &CborValue) -> ToolCompletionDisplay {
+    // The label alone (command + exit status) is usually enough in the
+    // UI transcript — stdout / stderr tend to be long and noisy and
+    // the agent already has the full body in its conversation history.
     let cmd = cbor_text_field(details, "command").unwrap_or_default();
     let status = cbor_int_field(details, "status");
-    let stdout = cbor_text_field(details, "stdout").unwrap_or_default();
-    let stderr = cbor_text_field(details, "stderr").unwrap_or_default();
 
     let mut label = format!("shell {cmd}");
     if let Some(code) = status {
         label.push_str(&format!(" [{code}]"));
     }
 
-    let raw_output = if !stderr.trim().is_empty() {
-        stderr
-    } else {
-        stdout
-    };
-    let trimmed = raw_output.trim();
-
-    let output = if trimmed.is_empty() {
-        None
-    } else {
-        let all_lines: Vec<&str> = trimmed.lines().collect();
-        let total = all_lines.len();
-        let text = if total > 7 {
-            let head = all_lines[..3].join("\n");
-            let tail = all_lines[total - 3..].join("\n");
-            format!("{head}\n… {total} lines total …\n{tail}")
-        } else {
-            all_lines.join("\n")
-        };
-        Some(text)
-    };
-
-    ToolCompletionDisplay { label, output }
+    ToolCompletionDisplay {
+        label,
+        output: None,
+    }
 }
 
 /// Event renderer. Maps session_prompt_id → block_id for in-place
