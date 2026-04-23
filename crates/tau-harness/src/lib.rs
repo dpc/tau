@@ -1885,6 +1885,7 @@ impl Harness {
                 self.reject_invalid_tool_call(
                     session_id,
                     &call.id,
+                    &call.arguments,
                     format!("invalid tool name {raw:?}: must be non-empty and match [a-zA-Z0-9_]+"),
                 )?;
                 return Ok(());
@@ -1945,22 +1946,43 @@ impl Harness {
 
     /// Synthesize a `ToolError` for a tool call whose name couldn't be
     /// accepted as a `ToolName` (e.g. empty string from a hallucinated
-    /// streaming response), persist it, publish it, and drive the
-    /// turn state-machine forward.
+    /// streaming response), persist both the request and the error,
+    /// publish the error, and drive the turn state-machine forward.
     ///
-    /// We use a placeholder `invalid_tool` name on the error itself
-    /// because `ToolError::tool_name` is still a validated `ToolName`;
-    /// the actual offending string is surfaced via the error message
-    /// so the agent sees it in its next conversation turn.
+    /// We use a placeholder `invalid_tool` name because
+    /// `ToolError::tool_name` is a validated `ToolName`; the actual
+    /// offending string is surfaced via the error message so the agent
+    /// sees it in its next conversation turn.
+    ///
+    /// Persisting a `Requested` activity alongside the `Error` is
+    /// load-bearing: `assemble_conversation` renders `Requested` as a
+    /// `ContentBlock::ToolUse` and `Error` as a matching
+    /// `ContentBlock::ToolResult`. Without the `Requested`, the next
+    /// prompt would include a `function_call_output` with no
+    /// corresponding `function_call`, which the OpenAI Responses API
+    /// rejects with "No tool call found for function call output with
+    /// call_id …".
     fn reject_invalid_tool_call(
         &mut self,
         session_id: &str,
         call_id: &str,
+        arguments: &CborValue,
         message: String,
     ) -> Result<(), HarnessError> {
         let placeholder: ToolName = "invalid_tool".into();
+        let call_id_owned: ToolCallId = call_id.to_owned().into();
+        self.store.append_tool_activity(
+            session_id,
+            ToolActivityRecord {
+                call_id: call_id_owned.clone(),
+                tool_name: placeholder.clone(),
+                outcome: ToolActivityOutcome::Requested {
+                    arguments: arguments.clone(),
+                },
+            },
+        )?;
         let error = ToolError {
-            call_id: call_id.to_owned().into(),
+            call_id: call_id_owned,
             tool_name: placeholder,
             message,
             details: None,
@@ -3743,19 +3765,35 @@ mod tests {
         assert!(h.in_flight_tool_kinds.is_empty());
 
         // The error should have been persisted on s1's history so the
-        // agent sees it on the next turn.
+        // agent sees it on the next turn — as a Requested + Error pair
+        // under the same call_id, so the Responses-API serializer can
+        // emit a matching `function_call` / `function_call_output`
+        // without the latter looking unpaired.
         let branch = h.store.session("s1").expect("session").current_branch();
-        let found_error = branch.iter().any(|entry| {
-            matches!(
-                entry,
-                SessionEntry::ToolActivity(record)
-                    if matches!(&record.outcome, ToolActivityOutcome::Error { message, .. }
-                        if message.contains("invalid tool name"))
-            )
-        });
+        let mut saw_request = false;
+        let mut saw_error = false;
+        for entry in branch.iter() {
+            let SessionEntry::ToolActivity(record) = entry else {
+                continue;
+            };
+            if record.call_id.as_str() != "c1" {
+                continue;
+            }
+            match &record.outcome {
+                ToolActivityOutcome::Requested { .. } => saw_request = true,
+                ToolActivityOutcome::Error { message, .. }
+                    if message.contains("invalid tool name") =>
+                {
+                    saw_error = true;
+                }
+                _ => {}
+            }
+        }
         assert!(
-            found_error,
-            "rejected call should leave an Error ToolActivity on the session"
+            saw_request && saw_error,
+            "rejected call should leave both a Requested and an Error \
+             ToolActivity so the model-facing conversation has a \
+             matching tool_use / tool_result pair"
         );
 
         h.shutdown().expect("shutdown");
@@ -3806,6 +3844,9 @@ mod tests {
 
         // Every persisted ToolActivityRecord must have a non-empty
         // call_id — this is what the LLM serializer round-trips.
+        // And each rejected call must appear TWICE (a Requested +
+        // Error pair) so the model-facing conversation has a
+        // matching function_call for the function_call_output.
         let branch = h.store.session("s1").expect("session").current_branch();
         let activity_records: Vec<_> = branch
             .iter()
@@ -3816,9 +3857,10 @@ mod tests {
             .collect();
         assert_eq!(
             activity_records.len(),
-            2,
-            "expected one Error record per rejected call"
+            4,
+            "expected two records per rejected call (Requested + Error)"
         );
+        let mut synth_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
         for record in &activity_records {
             assert!(
                 !record.call_id.as_str().is_empty(),
@@ -3830,10 +3872,14 @@ mod tests {
                 "synthesized call_id should be clearly synthetic; got {:?}",
                 record.call_id
             );
+            synth_ids.insert(record.call_id.as_str().to_owned());
         }
-        // And the two synthesized ids must differ — otherwise they'd
-        // collide in HashMap state.
-        assert_ne!(activity_records[0].call_id, activity_records[1].call_id);
+        // Exactly two distinct synthetic ids across the four records.
+        assert_eq!(
+            synth_ids.len(),
+            2,
+            "the two rejected calls must have distinct synthetic ids; got {synth_ids:?}"
+        );
 
         h.shutdown().expect("shutdown");
     }
