@@ -72,9 +72,19 @@ impl StreamState {
     }
 
     /// Returns the final tool calls with parsed arguments.
+    ///
+    /// Accumulators with an empty `name` are dropped as stream
+    /// artifacts. Both the Responses and Chat Completions paths
+    /// eagerly extend `tool_calls` from argument-delta events so the
+    /// index stays addressable; if the matching `output_item.added`
+    /// (or `function.name` delta) never arrives, the slot stays
+    /// nameless. Shipping it downstream would surface as an
+    /// `invalid_tool` rejection in the harness, but the real fix is
+    /// to not manufacture the call in the first place.
     pub fn into_tool_calls(self) -> Vec<AgentToolCall> {
         self.tool_calls
             .into_iter()
+            .filter(|tc| !tc.name.is_empty())
             .map(|tc| {
                 let args: serde_json::Value =
                     serde_json::from_str(&tc.arguments_json).unwrap_or(serde_json::Value::Null);
@@ -452,5 +462,41 @@ pub fn json_to_cbor(v: &serde_json::Value) -> CborValue {
                 .map(|(k, v)| (CborValue::Text(k.clone()), json_to_cbor(v)))
                 .collect(),
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn into_tool_calls_drops_nameless_accumulator_artifacts() {
+        // The streaming paths eagerly extend `tool_calls` from
+        // argument-delta events so the index stays addressable. If
+        // the matching name-carrying event never arrives (partial
+        // item, reasoning noise, stream cancellation), the slot stays
+        // nameless. Shipping it downstream would trigger a visible
+        // `invalid_tool` rejection in the harness and confuse the
+        // model, which never intended a second tool call.
+        let state = StreamState {
+            text: String::new(),
+            tool_calls: vec![
+                ToolCallAccumulator {
+                    id: String::new(),
+                    name: String::new(),
+                    arguments_json: String::from("{\"stray\": \"delta\"}"),
+                },
+                ToolCallAccumulator {
+                    id: "call_real".into(),
+                    name: "shell".into(),
+                    arguments_json: "{\"command\":\"ls\"}".into(),
+                },
+            ],
+        };
+
+        let calls = state.into_tool_calls();
+        assert_eq!(calls.len(), 1, "nameless accumulator must be dropped");
+        assert_eq!(calls[0].id.as_str(), "call_real");
+        assert_eq!(calls[0].name.as_str(), "shell");
     }
 }
