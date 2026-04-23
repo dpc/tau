@@ -1833,8 +1833,24 @@ impl Harness {
         session_id: &str,
         call: &AgentToolCall,
     ) -> Result<(), HarnessError> {
+        // Agent output is untrusted — hallucinated or streaming-
+        // artifact tool calls can arrive with empty or otherwise
+        // invalid names. Reject cleanly with a ToolError instead of
+        // panicking inside `ToolName::new`.
+        let Some(tool_name) = ToolName::try_new(call.name.clone()) else {
+            self.reject_invalid_tool_call(
+                session_id,
+                &call.id,
+                format!(
+                    "invalid tool name {:?}: must be non-empty and match [a-zA-Z0-9_]+",
+                    call.name
+                ),
+            )?;
+            return Ok(());
+        };
+
         // Handle harness-owned tools directly.
-        if call.name == "skill" {
+        if tool_name.as_str() == "skill" {
             return self.handle_skill_tool_call(session_id, call);
         }
 
@@ -1845,7 +1861,7 @@ impl Harness {
             session_id,
             ToolActivityRecord {
                 call_id: call_id.clone(),
-                tool_name: call.name.clone().into(),
+                tool_name: tool_name.clone(),
                 outcome: ToolActivityOutcome::Requested {
                     arguments: call.arguments.clone(),
                 },
@@ -1855,7 +1871,7 @@ impl Harness {
         // Route to tool provider.
         let request = ToolRequest {
             call_id: call_id.clone(),
-            tool_name: call.name.clone().into(),
+            tool_name: tool_name.clone(),
             arguments: call.arguments.clone(),
         };
 
@@ -1882,6 +1898,40 @@ impl Harness {
             Err(error) => return Err(HarnessError::ToolRoute(error)),
         }
 
+        Ok(())
+    }
+
+    /// Synthesize a `ToolError` for a tool call whose name couldn't be
+    /// accepted as a `ToolName` (e.g. empty string from a hallucinated
+    /// streaming response), persist it, publish it, and drive the
+    /// turn state-machine forward.
+    ///
+    /// We use a placeholder `invalid_tool` name on the error itself
+    /// because `ToolError::tool_name` is still a validated `ToolName`;
+    /// the actual offending string is surfaced via the error message
+    /// so the agent sees it in its next conversation turn.
+    fn reject_invalid_tool_call(
+        &mut self,
+        session_id: &str,
+        call_id: &str,
+        message: String,
+    ) -> Result<(), HarnessError> {
+        let placeholder: ToolName = "invalid_tool".into();
+        let error = ToolError {
+            call_id: call_id.to_owned().into(),
+            tool_name: placeholder,
+            message,
+            details: None,
+        };
+        // `persist_tool_error` looks the session up via
+        // `pending_tool_sessions` (normal path: inserted at dispatch
+        // time). A rejected call never got that far, so seed the
+        // mapping here so the error lands on the right session history.
+        self.pending_tool_sessions
+            .insert(error.call_id.clone(), session_id.into());
+        self.persist_tool_error(&error)?;
+        self.publish_event(None, Event::ToolError(error));
+        self.on_tool_call_complete(call_id);
         Ok(())
     }
 
@@ -3602,6 +3652,64 @@ mod tests {
         assert!(
             got_context_ready,
             "late UI client should replay ExtensionContextReady"
+        );
+
+        h.shutdown().expect("shutdown");
+    }
+
+    // -- Invalid tool call rejection --
+
+    #[test]
+    fn empty_tool_name_does_not_panic_and_surfaces_error() {
+        // Agents occasionally emit tool_calls with empty names
+        // (hallucinations, streaming-token splits, model bugs).
+        // `ToolName::new("")` panics by design, so the harness must
+        // reject these cleanly before that construction happens.
+        let td = TempDir::new().expect("tempdir");
+        let sp = td.path().join("sessions.cbor");
+        let pp = td.path().join("policy.cbor");
+        let mut h = echo_harness(&sp, &pp).expect("start");
+
+        // Pre-seed as if the agent had just been prompted and is now
+        // responding with tool_calls.
+        h.selected_model = "test/model".into();
+        h.turn_state = TurnState::AgentThinking {
+            _session_id: "s1".into(),
+        };
+        h.prompt_sessions.insert("sp-x".into(), "s1".into());
+
+        let response = AgentResponseFinished {
+            session_prompt_id: "sp-x".into(),
+            text: None,
+            tool_calls: vec![AgentToolCall {
+                id: "c1".into(),
+                name: String::new(),
+                arguments: CborValue::Map(Vec::new()),
+            }],
+        };
+
+        h.handle_agent_response_finished(response)
+            .expect("invalid tool call must not panic");
+
+        // The call must be gone from both the pending queue and the
+        // in-flight set — rejection fully completes it.
+        assert!(h.pending_tool_invocations.is_empty());
+        assert!(h.in_flight_tool_kinds.is_empty());
+
+        // The error should have been persisted on s1's history so the
+        // agent sees it on the next turn.
+        let branch = h.store.session("s1").expect("session").current_branch();
+        let found_error = branch.iter().any(|entry| {
+            matches!(
+                entry,
+                SessionEntry::ToolActivity(record)
+                    if matches!(&record.outcome, ToolActivityOutcome::Error { message, .. }
+                        if message.contains("invalid tool name"))
+            )
+        });
+        assert!(
+            found_error,
+            "rejected call should leave an Error ToolActivity on the session"
         );
 
         h.shutdown().expect("shutdown");
