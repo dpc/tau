@@ -209,7 +209,7 @@ where
                 "properties": {
                     "pattern": {
                         "type": "string",
-                        "description": "Search pattern (regex or literal string)"
+                        "description": "Search pattern. Treated as a literal string by default. Set `regex: true` to interpret as a regex."
                     },
                     "path": {
                         "type": "string",
@@ -223,9 +223,9 @@ where
                         "type": "boolean",
                         "description": "Case-insensitive search (default: false)"
                     },
-                    "literal": {
+                    "regex": {
                         "type": "boolean",
-                        "description": "Treat pattern as literal string instead of regex (default: false)"
+                        "description": "Interpret `pattern` as a regex instead of a literal string (default: false)"
                     },
                     "context": {
                         "type": "integer",
@@ -873,7 +873,12 @@ fn run_grep(arguments: &CborValue) -> Result<CborValue, String> {
     let path = optional_argument_text(arguments, "path");
     let glob = optional_argument_text(arguments, "glob");
     let ignore_case = optional_argument_bool(arguments, "ignoreCase").unwrap_or(false);
-    let literal = optional_argument_bool(arguments, "literal").unwrap_or(false);
+    // Literal matching is the default. Most callers are searching for
+    // an exact string and regex metacharacters in that string (`[`,
+    // `(`, `.`, `?`, `+`, `*`, `|`, `{`, `\`) would otherwise either
+    // fail to parse or silently match something unintended. Regex
+    // users opt in explicitly with `regex: true`.
+    let regex = optional_argument_bool(arguments, "regex").unwrap_or(false);
     let context = optional_argument_int(arguments, "context").map(|v| v.max(0) as usize);
     let limit = optional_argument_int(arguments, "limit")
         .map(|v| v.max(1) as usize)
@@ -890,7 +895,7 @@ fn run_grep(arguments: &CborValue) -> Result<CborValue, String> {
     if ignore_case {
         args.push("--ignore-case".to_owned());
     }
-    if literal {
+    if !regex {
         args.push("--fixed-strings".to_owned());
     }
     if let Some(ref g) = glob {
