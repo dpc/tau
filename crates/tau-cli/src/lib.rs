@@ -368,7 +368,7 @@ fn run_chat(session_id: &str, attach: bool) -> Result<(), CliError> {
     let renderer_completion_data = completion_data;
     // Pre-build the renderer so we can grab its `thinking_state`
     // handle for the input loop's Shift+Tab cycle.
-    let renderer = EventRenderer::new(renderer_handle, renderer_completion_data, theme);
+    let renderer = EventRenderer::new(renderer_handle, renderer_completion_data, theme.clone());
     let thinking_state = renderer.thinking_state();
     let _renderer = std::thread::spawn(move || {
         let mut renderer = renderer;
@@ -377,13 +377,17 @@ fn run_chat(session_id: &str, attach: bool) -> Result<(), CliError> {
         }
     });
 
-    // Terminal input loop — owns the writer, no locking needed.
+    // Terminal input loop — owns the writer, no locking needed. Theme
+    // clone is for printing local validation errors (e.g. `/thinking
+    // foo`) through the same TermHandle as remote events, so they
+    // don't garble the TUI like `eprintln!` would.
     let mut active_session_id = session_id.to_owned();
     let exit = terminal_input_loop(
         &mut term,
         &mut writer,
         &mut active_session_id,
         thinking_state,
+        theme,
     )?;
 
     // Send disconnect (best effort). Reason differs so the daemon's
@@ -438,7 +442,18 @@ fn terminal_input_loop(
     writer: &mut EventWriter<BufWriter<UnixStream>>,
     session_id: &mut String,
     thinking_state: std::sync::Arc<std::sync::atomic::AtomicU8>,
+    theme: tau_themes::Theme,
 ) -> Result<InputLoopExit, CliError> {
+    // Cloned `TermHandle` so we can `print_output` for client-side
+    // validation errors (`/thinking foo`, `/tree blah`) from this
+    // thread without borrowing `term` while the loop also holds
+    // `&mut term` for `get_next_event`.
+    let local_handle = term.handle().clone();
+    let print_local = |message: &str| {
+        use tau_cli_term::resolve::themed_block;
+        use tau_themes::names;
+        local_handle.print_output(themed_block(&theme, names::SYSTEM_INFO, message.to_owned()));
+    };
     use tau_cli_term::Event as TermEvent;
 
     loop {
@@ -492,7 +507,7 @@ fn terminal_input_loop(
                             let _ = writer.flush();
                         }
                         Err(_) => {
-                            eprintln!("`/tree <id>`: id must be a non-negative integer");
+                            print_local("/tree <id>: id must be a non-negative integer");
                         }
                     }
                     continue;
@@ -505,12 +520,14 @@ fn terminal_input_loop(
                             ));
                             let _ = writer.flush();
                         }
-                        Err(msg) => eprintln!("/thinking: {msg}"),
+                        Err(msg) => print_local(&format!("/thinking: {msg}")),
                     }
                     continue;
                 }
                 if text == "/thinking" {
-                    eprintln!("/thinking <level> — one of: off, minimal, low, medium, high, xhigh");
+                    print_local(
+                        "/thinking <level> — one of: off, minimal, low, medium, high, xhigh",
+                    );
                     continue;
                 }
                 if let Some(model) = text.strip_prefix("/model ") {
