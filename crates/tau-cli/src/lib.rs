@@ -1210,8 +1210,8 @@ pub fn main_with_args() -> std::process::ExitCode {
                 run_chat(&session_id, attach)
             }
 
-            cli::Command::SessionList { session_store } => {
-                for line in tau_harness::session_list_lines(session_store)? {
+            cli::Command::SessionList { state_dir } => {
+                for line in tau_harness::session_list_lines(state_dir)? {
                     println!("{line}");
                 }
                 Ok(())
@@ -1219,16 +1219,16 @@ pub fn main_with_args() -> std::process::ExitCode {
 
             cli::Command::SessionShow {
                 session_id,
-                session_store,
+                state_dir,
             } => {
-                for line in tau_harness::session_lines(session_store, &session_id)? {
+                for line in tau_harness::session_lines(state_dir, &session_id)? {
                     println!("{line}");
                 }
                 Ok(())
             }
 
-            cli::Command::PolicyShow { policy_store } => {
-                for line in tau_harness::policy_lines(policy_store)? {
+            cli::Command::PolicyShow { state_dir } => {
+                for line in tau_harness::policy_lines(state_dir.join("policy.cbor"))? {
                     println!("{line}");
                 }
                 Ok(())

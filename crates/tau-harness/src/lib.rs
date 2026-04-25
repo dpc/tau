@@ -61,7 +61,6 @@ pub struct ServeOptions {
     /// otherwise.
     #[builder(default)]
     pub exit_on_disconnect: bool,
-    pub policy_store_path: Option<PathBuf>,
     /// Directory layout (config + state) the harness reads. Defaults to
     /// [`tau_config::settings::TauDirs::default()`] on the call site.
     pub dirs: Option<tau_config::settings::TauDirs>,
@@ -532,33 +531,25 @@ fn default_agent_runner(r: UnixStream, w: UnixStream) -> Result<(), String> {
 impl Harness {
     /// Creates a harness with in-process extensions (agent, fs, shell).
     fn new(
-        store_path: impl Into<PathBuf>,
-        policy_store_path: impl Into<PathBuf>,
+        state_dir: impl Into<PathBuf>,
         dirs: tau_config::settings::TauDirs,
     ) -> Result<Self, HarnessError> {
-        Self::new_with_agent(
-            store_path,
-            policy_store_path,
-            dirs,
-            default_agent_runner,
-            false,
-            None,
-        )
+        Self::new_with_agent(state_dir, dirs, default_agent_runner, false)
     }
 
     fn new_with_agent(
-        store_path: impl Into<PathBuf>,
-        policy_store_path: impl Into<PathBuf>,
+        state_dir: impl Into<PathBuf>,
         dirs: tau_config::settings::TauDirs,
         agent_runner: AgentRunner,
         include_echo: bool,
-        debug_log_dir: Option<&Path>,
     ) -> Result<Self, HarnessError> {
+        let state_dir = state_dir.into();
         let (tx, rx) = mpsc::channel();
-        let mut bus = EventBus::with_subscription_policy(Box::new(
-            DefaultSubscriptionPolicy::with_store(PolicyStore::open(policy_store_path.into())?),
-        ));
-        let store = SessionStore::open(store_path)?;
+        let mut bus =
+            EventBus::with_subscription_policy(Box::new(DefaultSubscriptionPolicy::with_store(
+                PolicyStore::open(policy_store_path_from(&state_dir))?,
+            )));
+        let store = SessionStore::open(&state_dir)?;
 
         let own_pid = std::process::id();
         let mut _next_instance_counter: u64 = 0;
@@ -633,9 +624,11 @@ impl Harness {
             dirs,
         };
 
-        if let Some(dir) = debug_log_dir {
-            let _path = harness.enable_debug_log(dir)?;
-        }
+        // Debug log lives next to the eager-init session's log so a
+        // session dir is self-contained: `log.cbor` + `events.jsonl` +
+        // `meta.json` + `lock`.
+        let session_id = default_session_id();
+        let _ = harness.enable_debug_log(&state_dir.join(session_id))?;
 
         for i in 0..harness.extensions.len() {
             let name = harness.extensions[i].name.clone();
@@ -656,11 +649,10 @@ impl Harness {
         //    has already walked `~/.agents/` + the cwd ancestor chain once, so the
         //    second init is cache-warm.
         //
-        // 2. **Surface discovery before the first prompt.** The CLI prints "loaded
-        //    AGENTS.md: …" as events arrive; doing this at startup gives the user
-        //    visible confirmation that their AGENTS.md was found — before they type
-        //    anything — instead of bundling that feedback into the first agent
-        //    response.
+        // 2. **Surface discovery before the first prompt.** The CLI prints "loaded: …"
+        //    as events arrive; doing this at startup gives the user visible
+        //    confirmation that their AGENTS.md was found — before they type anything —
+        //    instead of bundling that feedback into the first agent response.
         //
         // 3. **Fail loudly at startup, not mid-first-turn.** If a provider hangs or the
         //    discovery logic panics, the process hits `StartupTimeout` here rather than
@@ -669,7 +661,7 @@ impl Harness {
         // Every past agent that touched this code has "noticed" that
         // the CLI uses `chat-<ts>` session ids and concluded the eager
         // init is wasted work. It isn't. Please resist the urge.
-        harness.start_session_init(default_session_id().into());
+        harness.start_session_init(session_id.into());
         harness.wait_for_session_init()?;
         Ok(harness)
     }
@@ -677,16 +669,16 @@ impl Harness {
     /// Creates a harness from configuration, spawning real child processes.
     fn from_config(
         config: &Config,
-        store_path: impl Into<PathBuf>,
-        policy_store_path: impl Into<PathBuf>,
+        state_dir: impl Into<PathBuf>,
         dirs: tau_config::settings::TauDirs,
-        debug_log_dir: Option<&Path>,
     ) -> Result<Self, HarnessError> {
+        let state_dir = state_dir.into();
         let (tx, rx) = mpsc::channel();
-        let mut bus = EventBus::with_subscription_policy(Box::new(
-            DefaultSubscriptionPolicy::with_store(PolicyStore::open(policy_store_path.into())?),
-        ));
-        let store = SessionStore::open(store_path)?;
+        let mut bus =
+            EventBus::with_subscription_policy(Box::new(DefaultSubscriptionPolicy::with_store(
+                PolicyStore::open(policy_store_path_from(&state_dir))?,
+            )));
+        let store = SessionStore::open(&state_dir)?;
 
         let mut extensions = Vec::new();
         let mut _next_instance_counter: u64 = 0;
@@ -751,9 +743,8 @@ impl Harness {
             dirs,
         };
 
-        if let Some(dir) = debug_log_dir {
-            let _path = harness.enable_debug_log(dir)?;
-        }
+        let session_id = default_session_id();
+        let _ = harness.enable_debug_log(&state_dir.join(session_id))?;
 
         for i in 0..harness.extensions.len() {
             let name = harness.extensions[i].name.clone();
@@ -763,31 +754,7 @@ impl Harness {
         harness.register_harness_tools();
         harness.check_config_exists();
 
-        // Eager session init for the default session. INTENTIONAL —
-        // do NOT "simplify" this to lazy-on-first-prompt.
-        //
-        // Reasons this is a design choice, not dead weight:
-        //
-        // 1. **Pre-warm AGENTS.md and skill discovery.** The default session is the
-        //    fallback when a caller (embedded or socket) doesn't specify one, and even
-        //    when callers pick their own `chat-<ts>` id they still benefit: ext-shell
-        //    has already walked `~/.agents/` + the cwd ancestor chain once, so the
-        //    second init is cache-warm.
-        //
-        // 2. **Surface discovery before the first prompt.** The CLI prints "loaded
-        //    AGENTS.md: …" as events arrive; doing this at startup gives the user
-        //    visible confirmation that their AGENTS.md was found — before they type
-        //    anything — instead of bundling that feedback into the first agent
-        //    response.
-        //
-        // 3. **Fail loudly at startup, not mid-first-turn.** If a provider hangs or the
-        //    discovery logic panics, the process hits `StartupTimeout` here rather than
-        //    appearing to accept the first prompt and then silently stalling.
-        //
-        // Every past agent that touched this code has "noticed" that
-        // the CLI uses `chat-<ts>` session ids and concluded the eager
-        // init is wasted work. It isn't. Please resist the urge.
-        harness.start_session_init(default_session_id().into());
+        harness.start_session_init(session_id.into());
         harness.wait_for_session_init()?;
         Ok(harness)
     }
@@ -2813,12 +2780,12 @@ pub struct EmbeddedOptions {
 /// Runs one embedded interaction and returns progress plus the final
 /// agent response.
 pub fn run_embedded_message_with_trace(
-    session_store_path: impl Into<PathBuf>,
+    state_dir: impl Into<PathBuf>,
     session_id: &str,
     message: &str,
 ) -> Result<InteractionOutcome, HarnessError> {
     run_embedded_message_impl(
-        session_store_path,
+        state_dir,
         session_id,
         message,
         default_agent_runner,
@@ -2828,23 +2795,23 @@ pub fn run_embedded_message_with_trace(
 
 /// Runs one embedded interaction and returns the final agent response.
 pub fn run_embedded_message(
-    session_store_path: impl Into<PathBuf>,
+    state_dir: impl Into<PathBuf>,
     session_id: &str,
     message: &str,
 ) -> Result<String, HarnessError> {
-    Ok(run_embedded_message_with_trace(session_store_path, session_id, message)?.response)
+    Ok(run_embedded_message_with_trace(state_dir, session_id, message)?.response)
 }
 
 /// Like [`run_embedded_message_with_trace`] but lets the caller override
 /// directory layout and other options.
 pub fn run_embedded_message_with_options(
-    session_store_path: impl Into<PathBuf>,
+    state_dir: impl Into<PathBuf>,
     session_id: &str,
     message: &str,
     options: EmbeddedOptions,
 ) -> Result<InteractionOutcome, HarnessError> {
     run_embedded_message_impl(
-        session_store_path,
+        state_dir,
         session_id,
         message,
         default_agent_runner,
@@ -2855,7 +2822,7 @@ pub fn run_embedded_message_with_options(
 /// Like [`run_embedded_message_with_trace`] but uses the echo agent for
 /// testing.
 pub fn run_embedded_message_with_echo(
-    session_store_path: impl Into<PathBuf>,
+    state_dir: impl Into<PathBuf>,
     session_id: &str,
     message: &str,
 ) -> Result<InteractionOutcome, HarnessError> {
@@ -2863,7 +2830,7 @@ pub fn run_embedded_message_with_echo(
         tau_agent::run_echo(r, w).map_err(|e| e.to_string())
     }
     run_embedded_message_impl(
-        session_store_path,
+        state_dir,
         session_id,
         message,
         echo_runner,
@@ -2872,22 +2839,15 @@ pub fn run_embedded_message_with_echo(
 }
 
 fn run_embedded_message_impl(
-    session_store_path: impl Into<PathBuf>,
+    state_dir: impl Into<PathBuf>,
     session_id: &str,
     message: &str,
     agent_runner: AgentRunner,
     options: EmbeddedOptions,
 ) -> Result<InteractionOutcome, HarnessError> {
-    let session_store_path = session_store_path.into();
+    let state_dir = state_dir.into();
     let dirs = options.dirs.unwrap_or_default();
-    let mut harness = Harness::new_with_agent(
-        session_store_path.clone(),
-        default_policy_store_path_from(&session_store_path),
-        dirs,
-        agent_runner,
-        true,
-        None,
-    )?;
+    let mut harness = Harness::new_with_agent(state_dir, dirs, agent_runner, true)?;
     let mut outcome = harness.send_user_message(session_id, message, None)?;
     harness.shutdown()?;
     outcome.lifecycle_messages = harness.lifecycle_messages;
@@ -2901,18 +2861,14 @@ fn run_embedded_message_impl(
 /// Runs a foreground daemon that accepts socket clients.
 pub fn run_daemon(
     socket_path: impl Into<PathBuf>,
-    session_store_path: impl Into<PathBuf>,
+    state_dir: impl Into<PathBuf>,
     options: ServeOptions,
 ) -> Result<(), HarnessError> {
     let socket_path = socket_path.into();
-    let session_store_path = session_store_path.into();
+    let state_dir = state_dir.into();
     let listener = bind_listener(&socket_path)?;
-    let policy_store_path = options
-        .policy_store_path
-        .clone()
-        .unwrap_or_else(|| default_policy_store_path_from(&session_store_path));
     let dirs = options.dirs.clone().unwrap_or_default();
-    let mut harness = Harness::new(session_store_path, policy_store_path, dirs)?;
+    let mut harness = Harness::new(state_dir, dirs)?;
 
     let tx = harness.tx.clone();
     thread::spawn(move || {
@@ -2933,19 +2889,14 @@ pub fn run_daemon(
 pub fn run_daemon_with_config(
     config: &Config,
     socket_path: impl Into<PathBuf>,
-    session_store_path: impl Into<PathBuf>,
+    state_dir: impl Into<PathBuf>,
     options: ServeOptions,
 ) -> Result<(), HarnessError> {
     let socket_path = socket_path.into();
-    let session_store_path = session_store_path.into();
+    let state_dir = state_dir.into();
     let listener = bind_listener(&socket_path)?;
-    let policy_store_path = options
-        .policy_store_path
-        .clone()
-        .unwrap_or_else(|| default_policy_store_path_from(&session_store_path));
     let dirs = options.dirs.clone().unwrap_or_default();
-    let mut harness =
-        Harness::from_config(config, session_store_path, policy_store_path, dirs, None)?;
+    let mut harness = Harness::from_config(config, state_dir, dirs)?;
 
     let tx = harness.tx.clone();
     thread::spawn(move || {
@@ -3054,24 +3005,13 @@ pub fn run_harness_daemon(
     let daemon_dir = runtime_dir::prepare_daemon_dir(project_root)?;
     let listener = bind_listener(&daemon_dir.socket_path())?;
 
-    let session_store_path = project_root.join(".tau").join("sessions.cbor");
-    let policy_store_path = options
-        .policy_store_path
-        .clone()
-        .unwrap_or_else(|| project_root.join(".tau").join("policy.cbor"));
-
+    let state_dir = default_state_dir();
     let dirs = options.dirs.clone().unwrap_or_default();
-    let log_dir = project_root.join(".tau");
-    let mut harness = Harness::from_config(
-        config,
-        &session_store_path,
-        &policy_store_path,
-        dirs,
-        Some(&log_dir),
-    )?;
+    let mut harness = Harness::from_config(config, &state_dir, dirs)?;
+    let session_id = default_session_id();
     harness.emit_info(&format!(
         "event log: {}",
-        log_dir.join("events.jsonl").display()
+        state_dir.join(session_id).join("events.jsonl").display()
     ));
 
     // Write marker AFTER extensions are ready.
@@ -3115,21 +3055,16 @@ pub fn run_component() -> Result<(), Box<dyn std::error::Error>> {
 // Path helpers
 // ---------------------------------------------------------------------------
 
+/// Returns the default per-state directory: `$XDG_STATE_HOME/tau` (typically
+/// `~/.local/state/tau` on Linux), or `.tau/state` if no state dir is
+/// available.
 #[must_use]
-pub fn default_session_store_path() -> PathBuf {
-    PathBuf::from(".tau").join("sessions.cbor")
+pub fn default_state_dir() -> PathBuf {
+    tau_config::settings::state_dir().unwrap_or_else(|| PathBuf::from(".tau").join("state"))
 }
 
-#[must_use]
-pub fn default_policy_store_path() -> PathBuf {
-    PathBuf::from(".tau").join("policy.cbor")
-}
-
-fn default_policy_store_path_from(session_store_path: &Path) -> PathBuf {
-    session_store_path
-        .parent()
-        .unwrap_or_else(|| Path::new("."))
-        .join("policy.cbor")
+fn policy_store_path_from(state_dir: &Path) -> PathBuf {
+    state_dir.join("policy.cbor")
 }
 
 #[must_use]
@@ -3253,24 +3188,19 @@ mod tests {
         tau_agent::run_echo(r, w).map_err(|e| e.to_string())
     }
 
-    fn echo_harness(
-        sp: impl Into<PathBuf>,
-        pp: impl Into<PathBuf>,
-    ) -> Result<Harness, HarnessError> {
+    fn echo_harness(state_dir: impl Into<PathBuf>) -> Result<Harness, HarnessError> {
         Harness::new_with_agent(
-            sp,
-            pp,
+            state_dir,
             tau_config::settings::TauDirs::default(),
             echo_runner,
             true,
-            None,
         )
     }
 
     #[test]
     fn embedded_mode_returns_agent_response_and_persists_history() {
         let td = TempDir::new().expect("tempdir");
-        let sp = td.path().join("sessions.cbor");
+        let sp = td.path().join("state");
         let r = run_embedded_message_with_echo(&sp, "s1", "hello")
             .expect("should succeed")
             .response;
@@ -3289,7 +3219,7 @@ mod tests {
     fn daemon_mode_accepts_later_clients() {
         let td = TempDir::new().expect("tempdir");
         let sock = td.path().join("daemon.sock");
-        let sp = td.path().join("sessions.cbor");
+        let sp = td.path().join("state");
 
         let server = thread::spawn({
             let sock = sock.clone();
@@ -3319,7 +3249,7 @@ mod tests {
     #[test]
     fn embedded_mode_can_read_files() {
         let td = TempDir::new().expect("tempdir");
-        let sp = td.path().join("sessions.cbor");
+        let sp = td.path().join("state");
         let fp = td.path().join("note.txt");
         std::fs::write(&fp, "hello from disk").expect("write fixture");
         let r = run_embedded_message_with_echo(&sp, "s1", &format!("read {}", fp.display()))
@@ -3332,7 +3262,7 @@ mod tests {
     #[test]
     fn embedded_mode_can_run_shell_commands() {
         let td = TempDir::new().expect("tempdir");
-        let sp = td.path().join("sessions.cbor");
+        let sp = td.path().join("state");
         let r = run_embedded_message_with_echo(&sp, "s1", "shell printf hi")
             .expect("should succeed")
             .response;
@@ -3342,9 +3272,8 @@ mod tests {
     #[test]
     fn unavailable_tool_is_reported_without_crashing() {
         let td = TempDir::new().expect("tempdir");
-        let sp = td.path().join("sessions.cbor");
-        let pp = td.path().join("policy.cbor");
-        let mut h = echo_harness(&sp, &pp).expect("start");
+        let sp = td.path().join("state");
+        let mut h = echo_harness(&sp).expect("start");
 
         let conn_id = h
             .extension_connection_id("shell")
@@ -3363,9 +3292,8 @@ mod tests {
     #[test]
     fn disconnected_tool_is_removed_cleanly() {
         let td = TempDir::new().expect("tempdir");
-        let sp = td.path().join("sessions.cbor");
-        let pp = td.path().join("policy.cbor");
-        let mut h = echo_harness(&sp, &pp).expect("start");
+        let sp = td.path().join("state");
+        let mut h = echo_harness(&sp).expect("start");
 
         let conn_id = h
             .extension_connection_id("shell")
@@ -3424,7 +3352,7 @@ mod tests {
     #[test]
     fn traced_embedded_reports_shell_progress() {
         let td = TempDir::new().expect("tempdir");
-        let sp = td.path().join("sessions.cbor");
+        let sp = td.path().join("state");
         let o = run_embedded_message_with_echo(&sp, "s1", "shell printf hi").expect("ok");
         assert_eq!(o.progress_messages, vec!["shell: running shell command"]);
         assert!(!o.response.is_empty(), "shell response should not be empty");
@@ -3435,7 +3363,7 @@ mod tests {
     fn traced_daemon_reports_shell_progress() {
         let td = TempDir::new().expect("tempdir");
         let sock = td.path().join("daemon.sock");
-        let sp = td.path().join("sessions.cbor");
+        let sp = td.path().join("state");
 
         let server = thread::spawn({
             let sock = sock.clone();
@@ -3468,7 +3396,7 @@ mod tests {
     #[test]
     fn traced_embedded_reports_lifecycle() {
         let td = TempDir::new().expect("tempdir");
-        let sp = td.path().join("sessions.cbor");
+        let sp = td.path().join("state");
         let o = run_embedded_message_with_echo(&sp, "s1", "hello").expect("ok");
         assert!(
             o.lifecycle_messages
@@ -3492,23 +3420,12 @@ mod tests {
     fn session_and_policy_lines_are_printable() {
         let td = TempDir::new().expect("tempdir");
         let sock = td.path().join("daemon.sock");
-        let sp = td.path().join("sessions.cbor");
-        let pp = td.path().join("policy.cbor");
+        let sp = td.path().join("state");
 
         let server = thread::spawn({
             let sock = sock.clone();
             let sp = sp.clone();
-            let pp = pp.clone();
-            move || {
-                run_daemon(
-                    sock,
-                    sp,
-                    ServeOptions::builder()
-                        .max_clients(1)
-                        .policy_store_path(pp)
-                        .build(),
-                )
-            }
+            move || run_daemon(sock, sp, ServeOptions::builder().max_clients(1).build())
         });
 
         let started = Instant::now();
@@ -3525,17 +3442,20 @@ mod tests {
         assert!(sl.iter().any(|l| l.contains("tool.request echo")));
         let sll = session_list_lines(&sp).expect("list");
         assert!(sll.iter().any(|l| l.contains("s1 (4 entries)")));
-        let pl = policy_lines(&pp).expect("policy");
+        let pl = policy_lines(&sp.join("policy.cbor")).expect("policy");
         assert!(pl.iter().any(|l| l.contains("socket-ui")));
     }
 
     #[test]
     fn empty_session_and_policy_views() {
         let td = TempDir::new().expect("tempdir");
-        let sp = td.path().join("sessions.cbor");
-        let pp = td.path().join("policy.cbor");
+        let sp = td.path().join("state");
+        std::fs::create_dir_all(&sp).expect("mkdir");
         assert_eq!(session_list_lines(&sp).expect("ok"), vec!["no sessions"]);
-        assert_eq!(policy_lines(&pp).expect("ok"), vec!["no policy approvals"]);
+        assert_eq!(
+            policy_lines(&sp.join("policy.cbor")).expect("ok"),
+            vec!["no policy approvals"]
+        );
         assert_eq!(
             session_lines(&sp, "x").expect("ok"),
             vec!["session x not found"]
@@ -3575,9 +3495,8 @@ mod tests {
     #[test]
     fn agents_context_is_injected_at_session_init() {
         let td = TempDir::new().expect("tempdir");
-        let sp = td.path().join("sessions.cbor");
-        let pp = td.path().join("policy.cbor");
-        let mut h = echo_harness(&sp, &pp).expect("start");
+        let sp = td.path().join("state");
+        let mut h = echo_harness(&sp).expect("start");
         let tools_connection_id = h
             .extension_connection_id("shell")
             .expect("shell")
@@ -3627,9 +3546,8 @@ mod tests {
     #[test]
     fn first_prompt_initializes_custom_session_before_dispatch() {
         let td = TempDir::new().expect("tempdir");
-        let sp = td.path().join("sessions.cbor");
-        let pp = td.path().join("policy.cbor");
-        let mut h = echo_harness(&sp, &pp).expect("start");
+        let sp = td.path().join("state");
+        let mut h = echo_harness(&sp).expect("start");
         let tools_connection_id = h
             .extension_connection_id("shell")
             .expect("shell")
@@ -3699,9 +3617,8 @@ mod tests {
         // default session before returning — see the design-choice
         // comment in the constructor for why.
         let td = TempDir::new().expect("tempdir");
-        let sp = td.path().join("sessions.cbor");
-        let pp = td.path().join("policy.cbor");
-        let h = echo_harness(&sp, &pp).expect("start");
+        let sp = td.path().join("state");
+        let h = echo_harness(&sp).expect("start");
 
         assert!(
             h.initialized_sessions.contains(default_session_id()),
@@ -3724,9 +3641,8 @@ mod tests {
         // still renders the "loaded: …" / "session context ready"
         // lines.
         let td = TempDir::new().expect("tempdir");
-        let sp = td.path().join("sessions.cbor");
-        let pp = td.path().join("policy.cbor");
-        let mut h = echo_harness(&sp, &pp).expect("start");
+        let sp = td.path().join("state");
+        let mut h = echo_harness(&sp).expect("start");
         let tools_conn = h
             .extension_connection_id("shell")
             .expect("shell")
@@ -3821,9 +3737,8 @@ mod tests {
         // `ToolName::new("")` panics by design, so the harness must
         // reject these cleanly before that construction happens.
         let td = TempDir::new().expect("tempdir");
-        let sp = td.path().join("sessions.cbor");
-        let pp = td.path().join("policy.cbor");
-        let mut h = echo_harness(&sp, &pp).expect("start");
+        let sp = td.path().join("state");
+        let mut h = echo_harness(&sp).expect("start");
 
         // Pre-seed as if the agent had just been prompted and is now
         // responding with tool_calls.
@@ -3897,9 +3812,8 @@ mod tests {
         // OpenAI Responses API rejects outright. Normalize at the
         // boundary.
         let td = TempDir::new().expect("tempdir");
-        let sp = td.path().join("sessions.cbor");
-        let pp = td.path().join("policy.cbor");
-        let mut h = echo_harness(&sp, &pp).expect("start");
+        let sp = td.path().join("state");
+        let mut h = echo_harness(&sp).expect("start");
 
         h.selected_model = "test/model".into();
         h.turn_state = TurnState::AgentThinking {
@@ -3980,9 +3894,8 @@ mod tests {
         use tau_proto::ToolSideEffects::{Mutating, Pure};
 
         let td = TempDir::new().expect("tempdir");
-        let sp = td.path().join("sessions.cbor");
-        let pp = td.path().join("policy.cbor");
-        let mut h = echo_harness(&sp, &pp).expect("start");
+        let sp = td.path().join("state");
+        let mut h = echo_harness(&sp).expect("start");
 
         // Pre-seed turn state as if the agent had just been prompted
         // and is about to respond with tool calls.
@@ -4111,9 +4024,8 @@ mod tests {
         // an Ack from an extension, that extension's `last_acked` field
         // reflects the highest acked id.
         let td = TempDir::new().expect("tempdir");
-        let sp = td.path().join("sessions.cbor");
-        let pp = td.path().join("policy.cbor");
-        let mut h = echo_harness(&sp, &pp).expect("start");
+        let sp = td.path().join("state");
+        let mut h = echo_harness(&sp).expect("start");
         let tools_id = h
             .extension_connection_id("shell")
             .expect("shell")
@@ -4139,9 +4051,8 @@ mod tests {
     #[test]
     fn duplicate_ack_is_ignored() {
         let td = TempDir::new().expect("tempdir");
-        let sp = td.path().join("sessions.cbor");
-        let pp = td.path().join("policy.cbor");
-        let mut h = echo_harness(&sp, &pp).expect("start");
+        let sp = td.path().join("state");
+        let mut h = echo_harness(&sp).expect("start");
         let tools_id = h
             .extension_connection_id("shell")
             .expect("shell")
@@ -4213,8 +4124,7 @@ mod tests {
     #[test]
     fn skill_tool_reads_file_content() {
         let td = TempDir::new().expect("tempdir");
-        let sp = td.path().join("sessions.cbor");
-        let pp = td.path().join("policy.cbor");
+        let sp = td.path().join("state");
 
         let skill_dir = td.path().join("my-skill");
         std::fs::create_dir_all(&skill_dir).expect("mkdir");
@@ -4225,7 +4135,7 @@ mod tests {
         )
         .expect("write");
 
-        let mut h = echo_harness(&sp, &pp).expect("start");
+        let mut h = echo_harness(&sp).expect("start");
 
         // Manually insert a discovered skill.
         h.discovered_skills.insert(
@@ -4273,10 +4183,9 @@ mod tests {
     #[test]
     fn skill_tool_returns_error_for_unknown_skill() {
         let td = TempDir::new().expect("tempdir");
-        let sp = td.path().join("sessions.cbor");
-        let pp = td.path().join("policy.cbor");
+        let sp = td.path().join("state");
 
-        let mut h = echo_harness(&sp, &pp).expect("start");
+        let mut h = echo_harness(&sp).expect("start");
         h.store
             .append_user_message("s1", "load skill".to_owned())
             .expect("append");
@@ -4311,10 +4220,9 @@ mod tests {
     #[test]
     fn skill_tool_registered_in_tool_list() {
         let td = TempDir::new().expect("tempdir");
-        let sp = td.path().join("sessions.cbor");
-        let pp = td.path().join("policy.cbor");
+        let sp = td.path().join("state");
 
-        let h = echo_harness(&sp, &pp).expect("start");
+        let h = echo_harness(&sp).expect("start");
         let defs = h.gather_tool_definitions();
         assert!(
             defs.iter().any(|d| d.name == "skill"),
@@ -4326,10 +4234,9 @@ mod tests {
     #[test]
     fn duplicate_tool_result_is_discarded() {
         let td = TempDir::new().expect("tempdir");
-        let sp = td.path().join("sessions.cbor");
-        let pp = td.path().join("policy.cbor");
+        let sp = td.path().join("state");
 
-        let mut h = echo_harness(&sp, &pp).expect("start");
+        let mut h = echo_harness(&sp).expect("start");
 
         // Fabricate a tool result for a call_id that is not in pending_tool_sessions.
         let result = h.handle_extension_event(

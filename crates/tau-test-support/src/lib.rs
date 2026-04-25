@@ -17,8 +17,8 @@ use tempfile::TempDir;
 pub struct TestRuntime {
     _tempdir: TempDir,
     pub socket_path: PathBuf,
-    pub session_store_path: PathBuf,
-    pub policy_store_path: PathBuf,
+    /// Per-state directory containing session subdirs and `policy.cbor`.
+    pub state_dir: PathBuf,
     /// Isolated `$XDG_CONFIG_HOME`/`$XDG_STATE_HOME` layout so tests don't
     /// leak into (or read from) the developer's real `~/.config/tau` and
     /// `~/.local/state/tau`.
@@ -45,8 +45,7 @@ impl TestRuntime {
         )?;
         Ok(Self {
             socket_path: tempdir.path().join("daemon.sock"),
-            session_store_path: tempdir.path().join("sessions.cbor"),
-            policy_store_path: tempdir.path().join("policy.cbor"),
+            state_dir: state_dir.clone(),
             dirs: TauDirs {
                 config_dir: Some(config_dir),
                 state_dir: Some(state_dir),
@@ -58,7 +57,7 @@ impl TestRuntime {
     /// Runs one embedded interaction and returns the agent response.
     pub fn run_embedded(&self, session_id: &str, message: &str) -> Result<String, HarnessError> {
         Ok(run_embedded_message_with_options(
-            &self.session_store_path,
+            &self.state_dir,
             session_id,
             message,
             EmbeddedOptions::builder().dirs(self.dirs.clone()).build(),
@@ -69,16 +68,12 @@ impl TestRuntime {
     /// Starts a foreground daemon in a background thread.
     pub fn spawn_daemon(&self, max_clients: Option<usize>) -> DaemonHandle {
         let socket_path = self.socket_path.clone();
-        let session_store_path = self.session_store_path.clone();
-        let policy_store_path = self.policy_store_path.clone();
+        let state_dir = self.state_dir.clone();
         let dirs = self.dirs.clone();
         let join_handle = thread::spawn(move || {
-            let mut options = ServeOptions::builder()
-                .policy_store_path(policy_store_path)
-                .dirs(dirs)
-                .build();
+            let mut options = ServeOptions::builder().dirs(dirs).build();
             options.max_clients = max_clients;
-            run_daemon(socket_path, session_store_path, options)
+            run_daemon(socket_path, state_dir, options)
         });
         DaemonHandle { join_handle }
     }
@@ -99,12 +94,12 @@ impl TestRuntime {
 
     /// Opens the session store for assertions.
     pub fn open_session_store(&self) -> Result<SessionStore, HarnessError> {
-        open_session_store(&self.session_store_path)
+        open_session_store(&self.state_dir)
     }
 
     /// Opens the policy store for assertions.
     pub fn open_policy_store(&self) -> Result<PolicyStore, HarnessError> {
-        open_policy_store(&self.policy_store_path)
+        open_policy_store(self.state_dir.join("policy.cbor"))
     }
 }
 

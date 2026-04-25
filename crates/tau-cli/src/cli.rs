@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
-use tau_harness::{default_policy_store_path, default_session_id, default_session_store_path};
+use tau_harness::{default_session_id, default_state_dir};
 
 #[derive(Parser)]
 #[command(name = "tau", about = "Unix-native LLM agent harness")]
@@ -37,9 +37,9 @@ pub enum Command {
 
     /// List all sessions
     SessionList {
-        /// Path to session store
-        #[arg(long, default_value_os_t = default_session_store_path())]
-        session_store: PathBuf,
+        /// Path to session state directory
+        #[arg(long, default_value_os_t = default_state_dir())]
+        state_dir: PathBuf,
     },
 
     /// Show a single session's history
@@ -48,16 +48,16 @@ pub enum Command {
         #[arg(long, default_value_t = default_session_id().to_owned())]
         session_id: String,
 
-        /// Path to session store
-        #[arg(long, default_value_os_t = default_session_store_path())]
-        session_store: PathBuf,
+        /// Path to session state directory
+        #[arg(long, default_value_os_t = default_state_dir())]
+        state_dir: PathBuf,
     },
 
     /// Show persisted policy approvals
     PolicyShow {
-        /// Path to policy store
-        #[arg(long, default_value_os_t = default_policy_store_path())]
-        policy_store: PathBuf,
+        /// Path to session state directory (policy.cbor lives inside)
+        #[arg(long, default_value_os_t = default_state_dir())]
+        state_dir: PathBuf,
     },
 
     /// Copy sample config files to ~/.config/tau/

@@ -72,6 +72,7 @@ clap = { version = "4", features = ["derive"] }
 crossterm = { version = "0.28", features = ["bracketed-paste"] }
 unicode-width = "0.2"
 dirs = "6"
+fs2 = "0.4"
 globset = "0.4"
 ignore = "0.4"
 serde = { version = "1", features = ["derive"] }

@@ -10,7 +10,9 @@ workspace = true
 
 [dependencies]
 ciborium.workspace = true
+fs2.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 tau-proto.workspace = true
 
 [dev-dependencies]
