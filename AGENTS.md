@@ -9,8 +9,7 @@
 - `crates/tau-harness` — harness daemon: extensions, bus, sessions, socket server
 - `crates/tau-cli` — CLI entrypoint: starts harness daemon, connects as socket client
 - `crates/tau-agent` — first-party agent process
-- `crates/tau-ext-fs` — filesystem-oriented extension
-- `crates/tau-ext-shell` — shell-oriented extension
+- `crates/tau-ext-shell` — shell- and filesystem-oriented extension
 
 ## Design docs
 

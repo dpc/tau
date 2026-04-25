@@ -2029,7 +2029,7 @@ mod tests {
             let tool_reader = tool_runtime_stream
                 .try_clone()
                 .expect("tool reader clone should succeed");
-            tau_ext_fs::run(tool_reader, tool_runtime_stream, true)
+            tau_ext_shell::run(tool_reader, tool_runtime_stream, true)
                 .expect("tool extension should run successfully");
         });
 

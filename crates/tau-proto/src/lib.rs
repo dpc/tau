@@ -541,24 +541,24 @@ mod tests {
             }),
             Event::ExtensionStarting(ExtensionStarting {
                 instance_id: 1.into(),
-                extension_name: "fs".into(),
+                extension_name: "shell".into(),
                 pid: Some(1234),
             }),
             Event::ExtensionReady(ExtensionReady {
                 instance_id: 1.into(),
-                extension_name: "fs".into(),
+                extension_name: "shell".into(),
                 pid: Some(1234),
             }),
             Event::ExtensionExited(ExtensionExited {
                 instance_id: 1.into(),
-                extension_name: "fs".into(),
+                extension_name: "shell".into(),
                 pid: Some(1234),
                 exit_code: Some(0),
                 signal: None,
             }),
             Event::ExtensionRestarting(ExtensionRestarting {
                 instance_id: 1.into(),
-                extension_name: "fs".into(),
+                extension_name: "shell".into(),
                 pid: Some(1234),
                 attempt: 2,
                 reason: Some("hot reload".to_owned()),

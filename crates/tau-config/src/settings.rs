@@ -49,7 +49,7 @@ pub struct HarnessSettings {
     pub default_model: Option<String>,
 
     /// Extension table, keyed by name. Built-in entries (`agent`,
-    /// `tools`) come pre-baked at the harness level; anything the
+    /// `shell`) come pre-baked at the harness level; anything the
     /// user writes here overrides those per-field, or adds a new
     /// extension.
     ///
@@ -57,8 +57,8 @@ pub struct HarnessSettings {
     /// ```json5
     /// {
     ///   extensions: {
-    ///     // disable the built-in tools extension
-    ///     tools: { enable: false },
+    ///     // disable the built-in shell extension
+    ///     shell: { enable: false },
     ///     // run the agent through ssh on a remote box
     ///     agent: { prefix: ["ssh", "user@host"] },
     ///     // a third-party extension
@@ -533,8 +533,8 @@ mod tests {
                 role: Some("agent"),
             },
             BuiltinExtension {
-                name: "tools",
-                command: vec!["tau".into(), "component".into(), "ext-fs".into()],
+                name: "shell",
+                command: vec!["tau".into(), "component".into(), "ext-shell".into()],
                 role: Some("tool"),
             },
         ]
@@ -549,14 +549,14 @@ mod tests {
         assert_eq!(resolved[0].command, "tau");
         assert_eq!(resolved[0].args, vec!["component", "agent"]);
         assert_eq!(resolved[0].role.as_deref(), Some("agent"));
-        assert_eq!(resolved[1].name, "tools");
+        assert_eq!(resolved[1].name, "shell");
     }
 
     #[test]
     fn resolve_extensions_disable_drops_entry() {
         let mut s = HarnessSettings::default();
         s.extensions.insert(
-            "tools".into(),
+            "shell".into(),
             ExtensionEntry {
                 enable: false,
                 ..Default::default()
@@ -647,7 +647,7 @@ mod tests {
             dir.join("harness.json5"),
             r#"{
                 extensions: {
-                    tools: { enable: false },
+                    shell: { enable: false },
                     agent: { prefix: ["ssh", "host"] },
                     mything: { command: ["/bin/foo"] },
                 },
@@ -658,7 +658,7 @@ mod tests {
         let s: HarnessSettings = load_json5_layered(dir, "harness").expect("load");
         let resolved = s.resolve_extensions(builtins()).expect("resolve");
         let names: Vec<&str> = resolved.iter().map(|e| e.name.as_str()).collect();
-        // tools dropped (disable). agent kept (prefix-wrapped).
+        // shell dropped (disable). agent kept (prefix-wrapped).
         // mything appended.
         assert_eq!(names, vec!["agent", "mything"]);
         let agent = &resolved[0];

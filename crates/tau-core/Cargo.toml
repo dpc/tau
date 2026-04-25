@@ -15,5 +15,5 @@ tau-proto.workspace = true
 
 [dev-dependencies]
 tau-agent.workspace = true
-tau-ext-fs.workspace = true
+tau-ext-shell.workspace = true
 tempfile.workspace = true

@@ -5,5 +5,5 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             std::env::set_current_dir(dir)?;
         }
     }
-    tau_ext_fs::run_stdio()
+    tau_ext_shell::run_stdio()
 }

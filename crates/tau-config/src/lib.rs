@@ -285,8 +285,8 @@ args = ["--model", "deterministic"]
 role = "agent"
 
 [[extensions]]
-name = "fs"
-command = "tau-ext-fs"
+name = "shell"
+command = "tau-ext-shell"
 role = "tool"
 "#;
 
@@ -296,7 +296,7 @@ mode = "daemon"
 
 [[extensions]]
 name = "extra_tools"
-command = "tau-ext-fs"
+command = "tau-ext-shell"
 args = ["--login"]
 role = "tool"
 "#;
@@ -349,7 +349,7 @@ role = "tool"
         assert_eq!(config.core.mode, CoreMode::Embedded);
         assert_eq!(config.extensions.len(), 2);
         assert_eq!(config.extensions[0].name, "agent");
-        assert_eq!(config.extensions[1].name, "fs");
+        assert_eq!(config.extensions[1].name, "shell");
     }
 
     #[test]
@@ -376,7 +376,7 @@ role = "tool"
         assert_eq!(config.core.mode, CoreMode::Daemon);
         assert_eq!(config.extensions.len(), 3);
         assert_eq!(config.extensions[0].name, "agent");
-        assert_eq!(config.extensions[1].name, "fs");
+        assert_eq!(config.extensions[1].name, "shell");
         assert_eq!(config.extensions[2].name, "extra_tools");
     }
 
@@ -404,6 +404,6 @@ role = "tool"
         assert_eq!(config.core.mode, CoreMode::Embedded);
         assert_eq!(config.extensions.len(), 2);
         assert_eq!(config.extensions[0].name, "agent");
-        assert_eq!(config.extensions[1].name, "fs");
+        assert_eq!(config.extensions[1].name, "shell");
     }
 }

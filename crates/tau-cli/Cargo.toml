@@ -20,7 +20,7 @@ tau-provider.workspace = true
 
 # Still needed for component dispatch
 tau-agent.workspace = true
-tau-ext-fs.workspace = true
+tau-ext-shell.workspace = true
 
 [dev-dependencies]
 tau-cli-term-raw = { workspace = true }

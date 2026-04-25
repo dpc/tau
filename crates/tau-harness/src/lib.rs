@@ -580,18 +580,18 @@ impl Harness {
             last_acked: tau_proto::LogEventId::default(),
         });
 
-        // Filesystem and shell tools
+        // Shell and filesystem tools
         let (conn_id, thread) = spawn_in_process(
-            "tools",
+            "shell",
             ClientKind::Tool,
-            move |r, w| tau_ext_fs::run(r, w, include_echo).map_err(|e| e.to_string()),
+            move |r, w| tau_ext_shell::run(r, w, include_echo).map_err(|e| e.to_string()),
             &mut bus,
             &tx,
         )?;
         let iid = tau_proto::ExtensionInstanceId::new(_next_instance_counter);
         _next_instance_counter += 1;
         extensions.push(ExtensionEntry {
-            name: "tools".to_owned(),
+            name: "shell".to_owned(),
             instance_id: iid,
             connection_id: conn_id,
             pid: Some(own_pid),
@@ -652,9 +652,9 @@ impl Harness {
         //
         // 1. **Pre-warm AGENTS.md and skill discovery.** The default session is the
         //    fallback when a caller (embedded or socket) doesn't specify one, and even
-        //    when callers pick their own `chat-<ts>` id they still benefit: ext-fs has
-        //    already walked `~/.agents/` + the cwd ancestor chain once, so the second
-        //    init is cache-warm.
+        //    when callers pick their own `chat-<ts>` id they still benefit: ext-shell
+        //    has already walked `~/.agents/` + the cwd ancestor chain once, so the
+        //    second init is cache-warm.
         //
         // 2. **Surface discovery before the first prompt.** The CLI prints "loaded
         //    AGENTS.md: …" as events arrive; doing this at startup gives the user
@@ -770,9 +770,9 @@ impl Harness {
         //
         // 1. **Pre-warm AGENTS.md and skill discovery.** The default session is the
         //    fallback when a caller (embedded or socket) doesn't specify one, and even
-        //    when callers pick their own `chat-<ts>` id they still benefit: ext-fs has
-        //    already walked `~/.agents/` + the cwd ancestor chain once, so the second
-        //    init is cache-warm.
+        //    when callers pick their own `chat-<ts>` id they still benefit: ext-shell
+        //    has already walked `~/.agents/` + the cwd ancestor chain once, so the
+        //    second init is cache-warm.
         //
         // 2. **Surface discovery before the first prompt.** The CLI prints "loaded
         //    AGENTS.md: …" as events arrive; doing this at startup gives the user
@@ -2755,7 +2755,7 @@ fn latest_agent_preview(session: &tau_core::SessionTree) -> Option<String> {
 ///
 /// Each entry's `command` is `[<current-exe>, "component", <name>]`,
 /// so a fresh `tau` install with no `harness.json5` runs the
-/// in-binary agent and ext-fs extensions out of the box. Users can
+/// in-binary agent and ext-shell extensions out of the box. Users can
 /// override individual fields (or set `enable: false`) per entry in
 /// `harness.json5` under `extensions: { name: { … } }`.
 pub fn builtin_extensions() -> Vec<tau_config::settings::BuiltinExtension> {
@@ -2776,8 +2776,8 @@ pub fn builtin_extensions() -> Vec<tau_config::settings::BuiltinExtension> {
             role: Some("agent"),
         },
         BuiltinExtension {
-            name: "tools",
-            command: vec![tau_binary, "component".to_owned(), "ext-fs".to_owned()],
+            name: "shell",
+            command: vec![tau_binary, "component".to_owned(), "ext-shell".to_owned()],
             role: Some("tool"),
         },
     ]
@@ -3347,8 +3347,8 @@ mod tests {
         let mut h = echo_harness(&sp, &pp).expect("start");
 
         let conn_id = h
-            .extension_connection_id("tools")
-            .expect("tools")
+            .extension_connection_id("shell")
+            .expect("shell")
             .to_owned();
         let removed = h.registry.unregister_connection(&conn_id);
         assert!(removed.iter().any(|t| t == "shell"));
@@ -3368,8 +3368,8 @@ mod tests {
         let mut h = echo_harness(&sp, &pp).expect("start");
 
         let conn_id = h
-            .extension_connection_id("tools")
-            .expect("tools")
+            .extension_connection_id("shell")
+            .expect("shell")
             .to_owned();
 
         // Send disconnect to the extension via the bus (through the
@@ -3411,7 +3411,7 @@ mod tests {
         assert!(
             h.lifecycle_messages
                 .iter()
-                .any(|m| m == "extension tools exited")
+                .any(|m| m == "extension shell exited")
         );
 
         let outcome = h
@@ -3458,7 +3458,7 @@ mod tests {
         assert!(
             o.lifecycle_messages
                 .iter()
-                .any(|m| m == "extension tools ready")
+                .any(|m| m == "extension shell ready")
         );
         assert_eq!(o.progress_messages, vec!["shell: running shell command"]);
         assert!(!o.response.is_empty(), "shell response should not be empty");
@@ -3579,8 +3579,8 @@ mod tests {
         let pp = td.path().join("policy.cbor");
         let mut h = echo_harness(&sp, &pp).expect("start");
         let tools_connection_id = h
-            .extension_connection_id("tools")
-            .expect("tools")
+            .extension_connection_id("shell")
+            .expect("shell")
             .to_owned();
 
         h.discovered_agents_files.push(DiscoveredAgentsFile {
@@ -3631,8 +3631,8 @@ mod tests {
         let pp = td.path().join("policy.cbor");
         let mut h = echo_harness(&sp, &pp).expect("start");
         let tools_connection_id = h
-            .extension_connection_id("tools")
-            .expect("tools")
+            .extension_connection_id("shell")
+            .expect("shell")
             .to_owned();
 
         h.selected_model = "test/model".into();
@@ -3728,11 +3728,11 @@ mod tests {
         let pp = td.path().join("policy.cbor");
         let mut h = echo_harness(&sp, &pp).expect("start");
         let tools_conn = h
-            .extension_connection_id("tools")
-            .expect("tools")
+            .extension_connection_id("shell")
+            .expect("shell")
             .to_owned();
 
-        // Inject synthetic discovery events as if ext-fs had reported
+        // Inject synthetic discovery events as if ext-shell had reported
         // them during eager init. publish_event appends to the log,
         // which is what `replay_harness_info` walks.
         h.publish_event(
@@ -4115,8 +4115,8 @@ mod tests {
         let pp = td.path().join("policy.cbor");
         let mut h = echo_harness(&sp, &pp).expect("start");
         let tools_id = h
-            .extension_connection_id("tools")
-            .expect("tools")
+            .extension_connection_id("shell")
+            .expect("shell")
             .to_owned();
 
         h.handle_extension_event(
@@ -4143,8 +4143,8 @@ mod tests {
         let pp = td.path().join("policy.cbor");
         let mut h = echo_harness(&sp, &pp).expect("start");
         let tools_id = h
-            .extension_connection_id("tools")
-            .expect("tools")
+            .extension_connection_id("shell")
+            .expect("shell")
             .to_owned();
         let before = h
             .extensions

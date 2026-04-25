@@ -98,7 +98,7 @@ where
 
     writer.write_event(&Event::LifecycleHello(LifecycleHello {
         protocol_version: PROTOCOL_VERSION,
-        client_name: "tau-ext-fs".into(),
+        client_name: "tau-ext-shell".into(),
         client_kind: ClientKind::Tool,
     }))?;
     writer.write_event(&Event::LifecycleSubscribe(LifecycleSubscribe {

@@ -1251,11 +1251,11 @@ pub fn main_with_args() -> std::process::ExitCode {
             cli::Command::Component { name } => {
                 let runner: fn() -> Result<(), Box<dyn std::error::Error>> = match name.as_str() {
                     "agent" => tau_agent::run_stdio,
-                    "ext-fs" => tau_ext_fs::run_stdio,
+                    "ext-shell" => tau_ext_shell::run_stdio,
                     "harness" => tau_harness::run_component,
                     _ => {
                         return Err(CliError::Participant(format!(
-                            "unknown component: {name}\navailable: agent, ext-fs, harness"
+                            "unknown component: {name}\navailable: agent, ext-shell, harness"
                         )));
                     }
                 };

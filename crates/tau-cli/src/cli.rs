@@ -79,7 +79,7 @@ pub enum Command {
     /// harness to spawn extensions from the unified binary).
     #[command(hide = true)]
     Component {
-        /// Component name (agent, ext-fs, harness)
+        /// Component name (agent, ext-shell, harness)
         name: String,
     },
 }

@@ -1339,7 +1339,7 @@ dependencies = [
  "tau-cli-term",
  "tau-cli-term-raw",
  "tau-config",
- "tau-ext-fs",
+ "tau-ext-shell",
  "tau-harness",
  "tau-proto",
  "tau-provider",
@@ -1384,13 +1384,13 @@ dependencies = [
  "ciborium",
  "serde",
  "tau-agent",
- "tau-ext-fs",
+ "tau-ext-shell",
  "tau-proto",
  "tempfile",
 ]
 
 [[package]]
-name = "tau-ext-fs"
+name = "tau-ext-shell"
 version = "0.1.0"
 dependencies = [
  "dirs",
@@ -1412,7 +1412,7 @@ dependencies = [
  "tau-agent",
  "tau-config",
  "tau-core",
- "tau-ext-fs",
+ "tau-ext-shell",
  "tau-proto",
  "tau-skills",
  "tau-socket",

@@ -8,7 +8,6 @@ extension as a child process, it invokes itself:
 
 ```
 tau component agent
-tau component ext-fs
 tau component ext-shell
 ```
 
@@ -39,9 +38,9 @@ dispatch mechanism used by the harness, not a user-facing command.
 
 ### Separate binaries are still possible
 
-Each component crate (`tau-agent`, `tau-ext-fs`, `tau-ext-shell`) has its
+Each component crate (`tau-agent`, `tau-ext-shell`) has its
 own `main.rs` that calls `run_stdio()`. These produce standalone binaries
-(`tau-agent`, `tau-ext-fs`, `tau-ext-shell`) that can be used independently
+(`tau-agent`, `tau-ext-shell`) that can be used independently
 — for example, in a config file:
 
 ```toml
@@ -69,6 +68,5 @@ whether the binary is the unified `tau` or a standalone extension.
 | `tau-supervisor` | Child process launch and lifecycle management |
 | `tau-socket` | Unix socket transport |
 | `tau-agent` | Deterministic agent extension |
-| `tau-ext-fs` | Filesystem tool extension (fs.read, demo.echo) |
-| `tau-ext-shell` | Shell tool extension (shell.exec) |
+| `tau-ext-shell` | Shell + filesystem tool extension (shell.exec, fs.read, demo.echo) |
 | `tau-test-support` | Test utilities and fixtures |
