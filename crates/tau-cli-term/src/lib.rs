@@ -33,6 +33,10 @@ pub enum Event {
     /// Shift+Tab pressed outside of completion — caller decides what
     /// to do with it (Pi-style: cycle thinking level).
     BackTab,
+    /// Ctrl+O / Ctrl+G pressed — caller is expected to drive the
+    /// external-editor flow (`Term::pause_for_external` →
+    /// spawn `$VISUAL`/`$EDITOR` → `resume_after_external`).
+    ExternalEditor,
 }
 
 /// Higher-level terminal prompt with completion support.
@@ -143,7 +147,33 @@ impl HighTerm {
                     self.handle.redraw();
                     return Ok(Event::Resize { width, height });
                 }
+
+                RawEvent::ExternalEditor => {
+                    self.completer.dismiss(&self.handle);
+                    return Ok(Event::ExternalEditor);
+                }
             }
         }
+    }
+
+    /// Returns a clone of the current input buffer.
+    pub fn get_buffer(&self) -> String {
+        self.handle.get_buffer()
+    }
+
+    /// Replaces the input buffer (cursor lands at end).
+    pub fn set_buffer(&self, text: String) {
+        let cursor = text.len();
+        self.handle.set_buffer(text, cursor);
+    }
+
+    /// Releases raw-mode for an external program (`$EDITOR`).
+    pub fn pause_for_external(&self) -> io::Result<()> {
+        self.term.pause_for_external()
+    }
+
+    /// Re-acquires raw-mode after an external program returns.
+    pub fn resume_after_external(&self) -> io::Result<()> {
+        self.term.resume_after_external()
     }
 }

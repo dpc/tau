@@ -86,6 +86,10 @@ pub enum Event {
     BackTab,
     /// The user pressed Escape.
     Escape,
+    /// The user requested an external editor (Ctrl-O / Ctrl-G).
+    /// Caller is expected to call [`Term::pause_for_external`], spawn
+    /// `$VISUAL`/`$EDITOR`, and call [`Term::resume_after_external`].
+    ExternalEditor,
 }
 
 /// A cloneable handle for mutating prompt zones from any thread.
@@ -483,6 +487,46 @@ impl Term {
         }
     }
 
+    /// Releases the terminal for an external program (e.g. `$EDITOR`):
+    /// disables raw mode and bracketed paste, and clears the screen
+    /// so the editor starts on a clean canvas. Pair with
+    /// [`Self::resume_after_external`] in a `try` / `finally`-style
+    /// flow — failing to resume leaves the terminal cooked.
+    pub fn pause_for_external(&self) -> io::Result<()> {
+        if !self.owns_raw_mode {
+            return Ok(());
+        }
+        let _ = crossterm::execute!(io::stdout(), crossterm::event::DisableBracketedPaste);
+        terminal::disable_raw_mode()?;
+        // Move cursor below current rendering and clear screen so the
+        // external editor doesn't have to overwrite our prompt + blocks.
+        let _ = crossterm::execute!(
+            io::stdout(),
+            crossterm::style::ResetColor,
+            crossterm::cursor::MoveTo(0, 0),
+            crossterm::terminal::Clear(crossterm::terminal::ClearType::All)
+        );
+        Ok(())
+    }
+
+    /// Re-acquires raw mode + bracketed paste after an external
+    /// program. Triggers a full redraw so the chat history reappears.
+    pub fn resume_after_external(&self) -> io::Result<()> {
+        if !self.owns_raw_mode {
+            return Ok(());
+        }
+        terminal::enable_raw_mode()?;
+        let _ = crossterm::execute!(io::stdout(), crossterm::event::EnableBracketedPaste);
+        // Force the redraw thread to repaint from scratch.
+        let _ = crossterm::execute!(
+            io::stdout(),
+            crossterm::terminal::Clear(crossterm::terminal::ClearType::All),
+            crossterm::cursor::MoveTo(0, 0)
+        );
+        self.redraw.notify();
+        Ok(())
+    }
+
     /// Creates a new block and appends it to the history.
     /// Triggers a redraw automatically.
     pub fn print_output(&self, block: impl Into<StyledBlock>) -> io::Result<BlockId> {
@@ -572,6 +616,10 @@ impl Term {
             KeyCode::Char('e') if ctrl => {
                 let mut st = self.state.lock().expect("term state mutex poisoned");
                 st.cursor = st.buffer.len();
+            }
+
+            KeyCode::Char('o' | 'g') if ctrl => {
+                return Ok(Some(Event::ExternalEditor));
             }
 
             KeyCode::Char(ch) => {
