@@ -214,6 +214,8 @@ impl EventName {
         Self::from_static(EventCategory::Harness, "model_selected");
     pub const HARNESS_THINKING_LEVEL_CHANGED: Self =
         Self::from_static(EventCategory::Harness, "thinking_level_changed");
+    pub const HARNESS_THINKING_LEVELS_AVAILABLE: Self =
+        Self::from_static(EventCategory::Harness, "thinking_levels_available");
 
     pub const UI_PROMPT_SUBMITTED: Self = Self::from_static(EventCategory::Ui, "prompt_submitted");
     pub const UI_MODEL_SELECT: Self = Self::from_static(EventCategory::Ui, "model_select");
@@ -458,6 +460,15 @@ impl std::fmt::Display for ThinkingLevel {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct HarnessThinkingLevelChanged {
     pub level: ThinkingLevel,
+}
+
+/// The harness announces which thinking levels are valid for the
+/// currently-selected model. Updated on startup and on every model
+/// switch. Empty list means thinking is not applicable (no model
+/// selected, or the provider doesn't support reasoning).
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct HarnessThinkingLevelsAvailable {
+    pub levels: Vec<ThinkingLevel>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1026,6 +1037,8 @@ pub enum Event {
     HarnessModelSelected(HarnessModelSelected),
     #[serde(rename = "harness.thinking_level_changed")]
     HarnessThinkingLevelChanged(HarnessThinkingLevelChanged),
+    #[serde(rename = "harness.thinking_levels_available")]
+    HarnessThinkingLevelsAvailable(HarnessThinkingLevelsAvailable),
 
     // UI
     #[serde(rename = "ui.prompt_submitted")]
@@ -1105,6 +1118,7 @@ impl Event {
             Self::HarnessModelsAvailable(_) => EventName::HARNESS_MODELS_AVAILABLE,
             Self::HarnessModelSelected(_) => EventName::HARNESS_MODEL_SELECTED,
             Self::HarnessThinkingLevelChanged(_) => EventName::HARNESS_THINKING_LEVEL_CHANGED,
+            Self::HarnessThinkingLevelsAvailable(_) => EventName::HARNESS_THINKING_LEVELS_AVAILABLE,
             Self::UiPromptSubmitted(_) => EventName::UI_PROMPT_SUBMITTED,
             Self::UiModelSelect(_) => EventName::UI_MODEL_SELECT,
             Self::UiSetThinkingLevel(_) => EventName::UI_SET_THINKING_LEVEL,

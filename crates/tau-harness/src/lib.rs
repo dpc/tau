@@ -504,6 +504,9 @@ struct Harness {
     selected_model: ModelId,
     /// Currently selected reasoning effort level.
     selected_thinking_level: tau_proto::ThinkingLevel,
+    /// Provider/model registry, kept for runtime lookups (e.g.
+    /// computing available thinking levels per current model).
+    model_registry: tau_config::settings::ModelRegistry,
     /// Skills discovered by extensions, keyed by name.
     discovered_skills: std::collections::HashMap<tau_proto::SkillName, DiscoveredSkill>,
     /// AGENTS.md files discovered by extensions, in delivery order.
@@ -614,7 +617,7 @@ impl Harness {
             last_acked: tau_proto::LogEventId::default(),
         });
 
-        let (available_models, selected_model) = load_model_list(&dirs);
+        let (available_models, selected_model, model_registry) = load_model_list(&dirs);
         let selected_thinking_level = load_last_thinking_level(&dirs);
 
         let mut harness = Self {
@@ -641,6 +644,7 @@ impl Harness {
             available_models,
             selected_model,
             selected_thinking_level,
+            model_registry,
             discovered_skills: std::collections::HashMap::new(),
             discovered_agents_files: Vec::new(),
             initialized_sessions: std::collections::HashSet::new(),
@@ -745,7 +749,7 @@ impl Harness {
 
         let agent_connection_id = agent_connection_id.ok_or(HarnessError::NoAgentConfigured)?;
 
-        let (available_models, selected_model) = load_model_list(&dirs);
+        let (available_models, selected_model, model_registry) = load_model_list(&dirs);
         let selected_thinking_level = load_last_thinking_level(&dirs);
 
         let mut harness = Self {
@@ -772,6 +776,7 @@ impl Harness {
             available_models,
             selected_model,
             selected_thinking_level,
+            model_registry,
             discovered_skills: std::collections::HashMap::new(),
             discovered_agents_files: Vec::new(),
             initialized_sessions: std::collections::HashSet::new(),
@@ -1201,6 +1206,17 @@ impl Harness {
                             model: self.selected_model.clone(),
                         }),
                     );
+                    // Levels depend on the new model's provider.
+                    let levels = thinking_levels_for_model(
+                        &self.model_registry,
+                        self.selected_model.as_str(),
+                    );
+                    self.publish_event(
+                        None,
+                        Event::HarnessThinkingLevelsAvailable(
+                            tau_proto::HarnessThinkingLevelsAvailable { levels },
+                        ),
+                    );
                     // If we just went from no-model to having one,
                     // drain queued prompts.
                     if was_empty && self.turn_state.is_idle() {
@@ -1484,6 +1500,14 @@ impl Harness {
             });
         if selector_matches_event(selectors, &thinking_event) {
             let _ = self.bus.send_to(client_id, None, thinking_event);
+        }
+        let levels = thinking_levels_for_model(&self.model_registry, self.selected_model.as_str());
+        let levels_event =
+            Event::HarnessThinkingLevelsAvailable(tau_proto::HarnessThinkingLevelsAvailable {
+                levels,
+            });
+        if selector_matches_event(selectors, &levels_event) {
+            let _ = self.bus.send_to(client_id, None, levels_event);
         }
     }
 
@@ -2550,7 +2574,9 @@ fn spawn_supervised(
 ///
 /// Priority: default_model from harness.json5 → last used from state →
 /// first available → empty (no model).
-fn load_model_list(dirs: &tau_config::settings::TauDirs) -> (Vec<ModelId>, ModelId) {
+fn load_model_list(
+    dirs: &tau_config::settings::TauDirs,
+) -> (Vec<ModelId>, ModelId, tau_config::settings::ModelRegistry) {
     let model_registry = tau_config::settings::load_models_in(dirs).unwrap_or_default();
     let harness_settings = tau_config::settings::load_harness_settings_in(dirs).unwrap_or_default();
     let mut available: Vec<ModelId> = Vec::new();
@@ -2571,7 +2597,32 @@ fn load_model_list(dirs: &tau_config::settings::TauDirs) -> (Vec<ModelId>, Model
         })
         .or_else(|| available.first().cloned())
         .unwrap_or_default();
-    (available, selected)
+    (available, selected, model_registry)
+}
+
+/// Returns the thinking levels valid for `model` (a `provider/model_id`
+/// string). Empty list means thinking is N/A — no model selected, or
+/// the provider doesn't support reasoning. Otherwise returns the
+/// canonical [Off, Minimal, Low, Medium, High] set; xhigh is gated on
+/// future per-model config (Pi only enables it for codex-max).
+fn thinking_levels_for_model(
+    registry: &tau_config::settings::ModelRegistry,
+    model: &str,
+) -> Vec<tau_proto::ThinkingLevel> {
+    use tau_proto::ThinkingLevel as L;
+    if model.is_empty() {
+        return Vec::new();
+    }
+    let Some((provider_name, _)) = model.split_once('/') else {
+        return Vec::new();
+    };
+    let Some(provider) = registry.providers.get(provider_name) else {
+        return Vec::new();
+    };
+    if !provider.compat.supports_reasoning_effort {
+        return vec![L::Off];
+    }
+    vec![L::Off, L::Minimal, L::Low, L::Medium, L::High]
 }
 
 /// Load the last-selected model from `<state_dir>/harness-state.json`.

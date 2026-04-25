@@ -1047,10 +1047,13 @@ impl EventRenderer {
         use tau_themes::names;
         let label = if self.current_model.is_empty() {
             "no model selected".to_string()
-        } else if matches!(self.current_thinking, tau_proto::ThinkingLevel::Off) {
-            self.current_model.to_string()
         } else {
-            format!("{} ({})", self.current_model, self.current_thinking)
+            let level = if matches!(self.current_thinking, tau_proto::ThinkingLevel::Off) {
+                "none".to_owned()
+            } else {
+                self.current_thinking.to_string()
+            };
+            format!("{} ({level})", self.current_model)
         };
         let block = themed_block(&self.theme, names::MODEL_STATUS, label);
         match self.model_status_block {
@@ -1320,6 +1323,15 @@ impl EventRenderer {
                     std::sync::atomic::Ordering::Relaxed,
                 );
                 self.render_model_status();
+            }
+            Event::HarnessThinkingLevelsAvailable(avail) => {
+                let items: Vec<tau_cli_term::CompletionItem> = avail
+                    .levels
+                    .iter()
+                    .map(|l| tau_cli_term::CompletionItem::plain(l.as_str()))
+                    .collect();
+                self.completion_data
+                    .set_arg_completions(tau_cli_term::CommandName::new("/thinking"), items);
             }
             Event::LifecycleDisconnect(disconnect) => {
                 let reason = disconnect.reason.as_deref().unwrap_or("disconnected");
