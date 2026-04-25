@@ -751,15 +751,19 @@ enum ToolStatus {
     Info,
 }
 
-/// Decomposed tool-call label, painted as three themed spans:
-/// `<tool_name> <args> <suffix>`. `suffix` is `None` while the tool is
-/// still running (nothing to say yet about the outcome).
+#[derive(Clone)]
+struct ToolSuffixSegment {
+    text: String,
+    status: ToolStatus,
+}
+
+/// Decomposed tool-call label, painted as themed spans:
+/// `<tool_name> <args> <suffix...>`. Running calls have no suffixes yet.
 #[derive(Clone)]
 struct ToolCallDisplay {
     tool_name: String,
     args: String,
-    suffix: Option<String>,
-    status: ToolStatus,
+    suffixes: Vec<ToolSuffixSegment>,
 }
 
 /// Builds the display record for a tool call that is still running.
@@ -788,9 +792,20 @@ fn format_tool_call(tool_name: &str, arguments: &CborValue) -> ToolCallDisplay {
     ToolCallDisplay {
         tool_name: tool_name.to_owned(),
         args,
-        suffix: None,
-        status: ToolStatus::Success,
+        suffixes: Vec::new(),
     }
+}
+
+fn tool_suffix(text: String, status: ToolStatus) -> ToolSuffixSegment {
+    ToolSuffixSegment { text, status }
+}
+
+fn info_suffix(text: String) -> ToolSuffixSegment {
+    tool_suffix(text, ToolStatus::Info)
+}
+
+fn output_stats_suffix(text: &str) -> ToolSuffixSegment {
+    info_suffix(format!("({} lines, {} bytes)", text.lines().count(), text.len()))
 }
 
 /// Error-path display: `<tool_name> <args>` with a `": <msg>"`
@@ -799,8 +814,7 @@ fn format_tool_error(tool_name: &str, args: String, error_message: &str) -> Tool
     ToolCallDisplay {
         tool_name: tool_name.to_owned(),
         args,
-        suffix: Some(format!(": {error_message}")),
-        status: ToolStatus::Error,
+        suffixes: vec![tool_suffix(format!(": {error_message}"), ToolStatus::Error)],
     }
 }
 
@@ -818,13 +832,10 @@ fn format_tool_completion(
                 format_tool_error("read", path, msg)
             } else {
                 let content = cbor_text_field(details, "content").unwrap_or_default();
-                let line_count = content.lines().count();
-                let byte_count = content.len();
                 ToolCallDisplay {
                     tool_name: "read".into(),
                     args: path,
-                    suffix: Some(format!("({line_count} lines, {byte_count} bytes)")),
-                    status: ToolStatus::Success,
+                    suffixes: vec![output_stats_suffix(&content)],
                 }
             }
         }
@@ -842,8 +853,7 @@ fn format_tool_completion(
                 ToolCallDisplay {
                     tool_name: "write".into(),
                     args: path,
-                    suffix: Some(suffix),
-                    status: ToolStatus::Success,
+                    suffixes: vec![tool_suffix(suffix, ToolStatus::Success)],
                 }
             }
         }
@@ -859,8 +869,7 @@ fn format_tool_completion(
                 ToolCallDisplay {
                     tool_name: "edit".into(),
                     args: path,
-                    suffix: Some(suffix),
-                    status: ToolStatus::Success,
+                    suffixes: vec![tool_suffix(suffix, ToolStatus::Info)],
                 }
             }
         }
@@ -875,13 +884,7 @@ fn format_tool_completion(
                 ToolCallDisplay {
                     tool_name: "find".into(),
                     args,
-                    suffix: Some(format!("({count} matches)")),
-                    // Zero matches is neutral informational, not a failure.
-                    status: if count == 0 {
-                        ToolStatus::Info
-                    } else {
-                        ToolStatus::Success
-                    },
+                    suffixes: vec![info_suffix(format!("({count} matches)"))],
                 }
             }
         }
@@ -897,16 +900,15 @@ fn format_tool_completion(
                 format_tool_error("grep", args, msg)
             } else {
                 let count = cbor_int_field(details, "matches").unwrap_or(0);
+                let output = cbor_text_field(details, "output").unwrap_or_default();
                 let suffix_word = if count == 1 { "match" } else { "matches" };
                 ToolCallDisplay {
                     tool_name: "grep".into(),
                     args,
-                    suffix: Some(format!("({count} {suffix_word})")),
-                    status: if count == 0 {
-                        ToolStatus::Info
-                    } else {
-                        ToolStatus::Success
-                    },
+                    suffixes: vec![
+                        info_suffix(format!("({count} {suffix_word})")),
+                        output_stats_suffix(&output),
+                    ],
                 }
             }
         }
@@ -919,8 +921,7 @@ fn format_tool_completion(
                 ToolCallDisplay {
                     tool_name: "ls".into(),
                     args: path,
-                    suffix: Some(format!("({count} entries)")),
-                    status: ToolStatus::Success,
+                    suffixes: vec![info_suffix(format!("({count} entries)"))],
                 }
             }
         }
@@ -932,22 +933,17 @@ fn format_tool_completion(
                 ToolCallDisplay {
                     tool_name: "skill".into(),
                     args: name,
-                    suffix: Some("loaded".to_owned()),
-                    status: ToolStatus::Success,
+                    suffixes: vec![info_suffix("loaded".to_owned())],
                 }
             }
         }
         _ => ToolCallDisplay {
             tool_name: tool_name.to_owned(),
             args: String::new(),
-            suffix: Some(match error_message {
-                Some(msg) => format!(": {msg}"),
-                None => "done".to_owned(),
-            }),
-            status: match error_message {
-                Some(_) => ToolStatus::Error,
-                None => ToolStatus::Info,
-            },
+            suffixes: vec![match error_message {
+                Some(msg) => tool_suffix(format!(": {msg}"), ToolStatus::Error),
+                None => info_suffix("done".to_owned()),
+            }],
         },
     }
 }
@@ -957,9 +953,22 @@ fn format_shell_completion(details: &CborValue, error_message: Option<&str>) -> 
     if let Some(msg) = error_message {
         return format_tool_error("shell", cmd, msg);
     }
+
+    let stdout = cbor_text_field(details, "stdout").unwrap_or_default();
+    let stderr = cbor_text_field(details, "stderr").unwrap_or_default();
+    let combined = if stdout.is_empty() {
+        stderr.clone()
+    } else if stderr.is_empty() {
+        stdout.clone()
+    } else {
+        format!("{stdout}\n{stderr}")
+    };
+
     let status = cbor_int_field(details, "status");
-    let (suffix, outcome) = match status {
-        Some(code) => (
+    let mut suffixes = Vec::new();
+    suffixes.push(output_stats_suffix(&combined));
+    suffixes.push(match status {
+        Some(code) => tool_suffix(
             format!("[{code}]"),
             if code == 0 {
                 ToolStatus::Success
@@ -967,19 +976,16 @@ fn format_shell_completion(details: &CborValue, error_message: Option<&str>) -> 
                 ToolStatus::Error
             },
         ),
-        None => ("[?]".to_owned(), ToolStatus::Info),
-    };
+        None => info_suffix("[?]".to_owned()),
+    });
     ToolCallDisplay {
         tool_name: "shell".into(),
         args: cmd,
-        suffix: Some(suffix),
-        status: outcome,
+        suffixes,
     }
 }
 
-/// Paints a [`ToolCallDisplay`] onto a three-span styled block:
-/// tool name in the name style, args in the args style, trailing
-/// status suffix (if any) in the success/error/info style.
+/// Paints a [`ToolCallDisplay`] onto a themed block.
 fn render_tool_block(
     theme: &tau_themes::Theme,
     display: &ToolCallDisplay,
@@ -990,25 +996,23 @@ fn render_tool_block(
 
     let name_style = resolve(theme, names::TOOL_NAME);
     let args_style = resolve(theme, names::TOOL_ARGS);
-    let status_name = match display.status {
-        ToolStatus::Success => names::TOOL_STATUS_SUCCESS,
-        ToolStatus::Error => names::TOOL_STATUS_ERROR,
-        ToolStatus::Info => names::TOOL_STATUS_INFO,
-    };
-    let status_style = resolve(theme, status_name);
 
     let mut spans = vec![Span::new(display.tool_name.clone(), name_style)];
     if !display.args.is_empty() {
         spans.push(Span::new(" ", args_style));
         spans.push(Span::new(display.args.clone(), args_style));
     }
-    if let Some(ref suffix) = display.suffix {
-        // The error prefix `": "` hugs the args, everything else gets
-        // a single space gap.
-        if !suffix.starts_with(':') {
+    for suffix in &display.suffixes {
+        let status_name = match suffix.status {
+            ToolStatus::Success => names::TOOL_STATUS_SUCCESS,
+            ToolStatus::Error => names::TOOL_STATUS_ERROR,
+            ToolStatus::Info => names::TOOL_STATUS_INFO,
+        };
+        let status_style = resolve(theme, status_name);
+        if !suffix.text.starts_with(':') {
             spans.push(Span::new(" ", args_style));
         }
-        spans.push(Span::new(suffix.clone(), status_style));
+        spans.push(Span::new(suffix.text.clone(), status_style));
     }
     StyledBlock::new(StyledText::from(spans))
 }
@@ -1730,7 +1734,7 @@ mod tests {
     use tau_cli_term::TermHandle;
     use tau_cli_term_raw::Term;
     use tau_proto::{
-        AgentResponseFinished, AgentResponseUpdated, Event, SessionPromptCreated,
+        AgentResponseFinished, AgentResponseUpdated, CborValue, Event, SessionPromptCreated,
         SessionPromptQueued, UiPromptSubmitted,
     };
 
@@ -2102,6 +2106,65 @@ mod tests {
             "response should appear exactly once, got {count}: {:?}",
             vt.screen_text(80)
         );
+    }
+
+    #[test]
+    fn grep_completion_uses_info_stats_and_shell_status_uses_exit_color() {
+        let grep_details = CborValue::Map(vec![
+            (
+                CborValue::Text("pattern".into()),
+                CborValue::Text("foo".into()),
+            ),
+            (CborValue::Text("path".into()), CborValue::Text(".".into())),
+            (CborValue::Text("matches".into()), CborValue::Integer(3.into())),
+            (
+                CborValue::Text("output".into()),
+                CborValue::Text("a\nb\n".into()),
+            ),
+        ]);
+        let grep = super::format_tool_completion("grep", &grep_details, None);
+        assert_eq!(grep.suffixes.len(), 2);
+        assert_eq!(grep.suffixes[0].text, "(3 matches)");
+        assert!(matches!(grep.suffixes[0].status, super::ToolStatus::Info));
+        assert_eq!(grep.suffixes[1].text, "(2 lines, 4 bytes)");
+        assert!(matches!(grep.suffixes[1].status, super::ToolStatus::Info));
+
+        let shell_details = CborValue::Map(vec![
+            (
+                CborValue::Text("command".into()),
+                CborValue::Text("echo hi".into()),
+            ),
+            (
+                CborValue::Text("stdout".into()),
+                CborValue::Text("hi\n".into()),
+            ),
+            (CborValue::Text("stderr".into()), CborValue::Text(String::new())),
+            (CborValue::Text("status".into()), CborValue::Integer(7.into())),
+        ]);
+        let shell = super::format_tool_completion("shell", &shell_details, None);
+        assert_eq!(shell.suffixes.len(), 2);
+        assert_eq!(shell.suffixes[0].text, "(1 lines, 3 bytes)");
+        assert!(matches!(shell.suffixes[0].status, super::ToolStatus::Info));
+        assert_eq!(shell.suffixes[1].text, "[7]");
+        assert!(matches!(shell.suffixes[1].status, super::ToolStatus::Error));
+
+        let edit_details = CborValue::Map(vec![
+            (
+                CborValue::Text("path".into()),
+                CborValue::Text("tmp/test-files/test1.txt".into()),
+            ),
+            (
+                CborValue::Text("diff".into()),
+                CborValue::Map(vec![
+                    (CborValue::Text("added".into()), CborValue::Integer(2.into())),
+                    (CborValue::Text("removed".into()), CborValue::Integer(1.into())),
+                ]),
+            ),
+        ]);
+        let edit = super::format_tool_completion("edit", &edit_details, None);
+        assert_eq!(edit.suffixes.len(), 1);
+        assert_eq!(edit.suffixes[0].text, "(+2/-1)");
+        assert!(matches!(edit.suffixes[0].status, super::ToolStatus::Info));
     }
 
     /// Reproduces the user-reported bug: send 3 prompts during the
