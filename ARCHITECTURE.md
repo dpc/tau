@@ -7,12 +7,13 @@ and all built-in tool extensions. When the harness needs to spawn an
 extension as a child process, it invokes itself:
 
 ```
-tau component agent
-tau component ext-shell
+tau ext agent
+tau ext ext-shell
 ```
 
-The `component` subcommand is hidden from `--help` — it's an internal
+The `ext` subcommand is hidden from `--help` — it's an internal
 dispatch mechanism used by the harness, not a user-facing command.
+(`tau component <name>` still works as an alias for back-compat.)
 
 ### Why a single binary
 
@@ -27,13 +28,13 @@ dispatch mechanism used by the harness, not a user-facing command.
 
 1. The `tau` crate (`crates/tau/`) is a thin binary that calls
    `tau_cli::main_with_args()`.
-2. `main_with_args()` uses clap to parse arguments. The hidden `Component`
+2. `main_with_args()` uses clap to parse arguments. The hidden `Ext`
    subcommand dispatches to the appropriate extension's `run_stdio()`
    entry point (e.g. `tau_agent::run_stdio()`).
 3. All other subcommands (`chat`, `session-list`, etc.) go through
    the normal CLI path.
 4. When no config file is found, a default configuration is generated that
-   points extension commands to `tau component <name>` using the current
+   points extension commands to `tau ext <name>` using the current
    binary's path.
 
 ### Separate binaries are still possible

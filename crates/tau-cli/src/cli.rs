@@ -80,11 +80,11 @@ pub enum Command {
         args: Vec<String>,
     },
 
-    /// Run an internal component as a standalone process (used by the
+    /// Run an internal extension as a standalone process (used by the
     /// harness to spawn extensions from the unified binary).
-    #[command(hide = true)]
-    Component {
-        /// Component name (agent, ext-shell, harness)
+    #[command(hide = true, alias = "component")]
+    Ext {
+        /// Extension name (agent, ext-shell, harness)
         name: String,
     },
 }

@@ -56,7 +56,7 @@ never as the primary dispatch mechanism.
 ## Process topology
 
 ```
-  tau chat ──(unix socket)──► tau component harness ──(stdio)──► extensions
+  tau chat ──(unix socket)──► tau ext harness ──(stdio)──► extensions
   (UI client)                  (daemon process)                  (agent, fs, shell)
 ```
 
@@ -123,5 +123,5 @@ provides each tool and routes requests accordingly.
 ## Single binary
 
 Tau ships as one binary containing CLI, harness, agent, and built-in
-tools. The hidden `tau component <name>` subcommand dispatches to
-extension entry points. See `ARCHITECTURE.md` for details.
+tools. The hidden `tau ext <name>` subcommand dispatches to extension
+entry points. See `ARCHITECTURE.md` for details.

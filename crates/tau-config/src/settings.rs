@@ -85,7 +85,7 @@ pub struct ExtensionEntry {
 
     /// argv of the extension itself. `command[0]` is the executable;
     /// the rest are arguments. For built-in extensions this defaults
-    /// to `[<current-exe>, "component", <name>]`; for new entries
+    /// to `[<current-exe>, "ext", <name>]`; for new entries
     /// this must be set explicitly.
     pub command: Vec<String>,
 
@@ -529,12 +529,12 @@ mod tests {
         vec![
             BuiltinExtension {
                 name: "agent",
-                command: vec!["tau".into(), "component".into(), "agent".into()],
+                command: vec!["tau".into(), "ext".into(), "agent".into()],
                 role: Some("agent"),
             },
             BuiltinExtension {
                 name: "shell",
-                command: vec!["tau".into(), "component".into(), "ext-shell".into()],
+                command: vec!["tau".into(), "ext".into(), "ext-shell".into()],
                 role: Some("tool"),
             },
         ]
@@ -547,7 +547,7 @@ mod tests {
         assert_eq!(resolved.len(), 2);
         assert_eq!(resolved[0].name, "agent");
         assert_eq!(resolved[0].command, "tau");
-        assert_eq!(resolved[0].args, vec!["component", "agent"]);
+        assert_eq!(resolved[0].args, vec!["ext", "agent"]);
         assert_eq!(resolved[0].role.as_deref(), Some("agent"));
         assert_eq!(resolved[1].name, "shell");
     }
@@ -581,7 +581,7 @@ mod tests {
         let agent = resolved.iter().find(|e| e.name == "agent").expect("agent");
         // argv[0] is the wrapper; original command moves into args.
         assert_eq!(agent.command, "ssh");
-        assert_eq!(agent.args, vec!["user@host", "tau", "component", "agent"]);
+        assert_eq!(agent.args, vec!["user@host", "tau", "ext", "agent"]);
     }
 
     #[test]
@@ -663,7 +663,7 @@ mod tests {
         assert_eq!(names, vec!["agent", "mything"]);
         let agent = &resolved[0];
         assert_eq!(agent.command, "ssh");
-        assert_eq!(agent.args, vec!["host", "tau", "component", "agent"]);
+        assert_eq!(agent.args, vec!["host", "tau", "ext", "agent"]);
     }
 
     #[test]

@@ -3031,16 +3031,14 @@ fn latest_agent_preview(session: &tau_core::SessionTree) -> Option<String> {
 // Public API — default config
 // ---------------------------------------------------------------------------
 
-/// Returns a default configuration that spawns built-in components via
-/// `tau component <name>`.
-#[must_use]
 /// The set of extensions the harness ships with by default.
 ///
-/// Each entry's `command` is `[<current-exe>, "component", <name>]`,
-/// so a fresh `tau` install with no `harness.json5` runs the
-/// in-binary agent and ext-shell extensions out of the box. Users can
-/// override individual fields (or set `enable: false`) per entry in
+/// Each entry's `command` is `[<current-exe>, "ext", <name>]`, so a
+/// fresh `tau` install with no `harness.json5` runs the in-binary
+/// agent and ext-shell extensions out of the box. Users can override
+/// individual fields (or set `enable: false`) per entry in
 /// `harness.json5` under `extensions: { name: { … } }`.
+#[must_use]
 pub fn builtin_extensions() -> Vec<tau_config::settings::BuiltinExtension> {
     use tau_config::settings::BuiltinExtension;
 
@@ -3051,16 +3049,12 @@ pub fn builtin_extensions() -> Vec<tau_config::settings::BuiltinExtension> {
     vec![
         BuiltinExtension {
             name: "agent",
-            command: vec![
-                tau_binary.clone(),
-                "component".to_owned(),
-                "agent".to_owned(),
-            ],
+            command: vec![tau_binary.clone(), "ext".to_owned(), "agent".to_owned()],
             role: Some("agent"),
         },
         BuiltinExtension {
             name: "shell",
-            command: vec![tau_binary, "component".to_owned(), "ext-shell".to_owned()],
+            command: vec![tau_binary, "ext".to_owned(), "ext-shell".to_owned()],
             role: Some("tool"),
         },
     ]
@@ -3359,13 +3353,13 @@ pub fn run_harness_daemon(
     result
 }
 
-/// Entrypoint for `tau component harness`.
+/// Entrypoint for `tau ext harness`.
 pub fn run_component() -> Result<(), Box<dyn std::error::Error>> {
     let project_root = std::env::current_dir()?;
     let config = resolve_config(None)?;
     // The CLI passes the minted/resumed session id via the harness's
     // SESSION_ID env var when spawning a daemon. Fallback to
-    // `default_session_id()` covers a bare `tau component harness`
+    // `default_session_id()` covers a bare `tau ext harness`
     // launched without a CLI in front of it.
     let eager_session_id =
         std::env::var("TAU_SESSION_ID").unwrap_or_else(|_| default_session_id().to_owned());

@@ -226,7 +226,7 @@ fn start_daemon(session_id: &str) -> Result<DaemonHandle, CliError> {
     let tau_binary = std::env::current_exe()?;
 
     let mut child = Command::new(&tau_binary)
-        .arg("component")
+        .arg("ext")
         .arg("harness")
         .env("TAU_SESSION_ID", session_id)
         .stdin(Stdio::null())
@@ -1483,14 +1483,14 @@ pub fn main_with_args() -> std::process::ExitCode {
                 tau_provider::run(&args).map_err(|e| CliError::Participant(e.to_string()))
             }
 
-            cli::Command::Component { name } => {
+            cli::Command::Ext { name } => {
                 let runner: fn() -> Result<(), Box<dyn std::error::Error>> = match name.as_str() {
                     "agent" => tau_agent::run_stdio,
                     "ext-shell" => tau_ext_shell::run_stdio,
                     "harness" => tau_harness::run_component,
                     _ => {
                         return Err(CliError::Participant(format!(
-                            "unknown component: {name}\navailable: agent, ext-shell, harness"
+                            "unknown extension: {name}\navailable: agent, ext-shell, harness"
                         )));
                     }
                 };
