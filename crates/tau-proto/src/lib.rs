@@ -13,11 +13,13 @@
 //! All event definitions live in [`events`] and are re-exported at the
 //! crate root.
 
+mod diff;
 mod events;
 
 use std::io::{Cursor, Read, Write};
 
 pub use ciborium::value::Value as CborValue;
+pub use diff::{DiffHunk, DiffLine, DiffSegment, DiffSummary};
 pub use events::*;
 
 /// First protocol version implemented by this crate.

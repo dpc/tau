@@ -677,6 +677,32 @@ fn cbor_int_field(value: &CborValue, key: &str) -> Option<i128> {
     None
 }
 
+/// Returns the sub-`CborValue` at `key` in a map, if present.
+fn cbor_field<'a>(value: &'a CborValue, key: &str) -> Option<&'a CborValue> {
+    if let CborValue::Map(entries) = value {
+        for (k, v) in entries {
+            if let CborValue::Text(k) = k {
+                if k == key {
+                    return Some(v);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Format the `+N/-M` chip from a `DiffSummary` sub-tree on a tool
+/// result. Returns `None` if the diff is missing or empty.
+fn format_diff_chip(details: &CborValue) -> Option<String> {
+    let diff = cbor_field(details, "diff")?;
+    let added = cbor_int_field(diff, "added").unwrap_or(0);
+    let removed = cbor_int_field(diff, "removed").unwrap_or(0);
+    if added == 0 && removed == 0 {
+        return None;
+    }
+    Some(format!("(+{added}/-{removed})"))
+}
+
 /// Formats a tool call for display while it is running.
 /// Which status-suffix style the completion block should use.
 #[derive(Clone, Copy)]
@@ -767,11 +793,16 @@ fn format_tool_completion(
             if let Some(msg) = error_message {
                 format_tool_error("write", path, msg)
             } else {
-                let bytes = cbor_int_field(details, "bytes_written").unwrap_or(0);
+                // Prefer the +N/-M diff chip; fall back to byte count
+                // for tools that don't ship a diff (or no-op writes).
+                let suffix = format_diff_chip(details).unwrap_or_else(|| {
+                    let bytes = cbor_int_field(details, "bytes_written").unwrap_or(0);
+                    format!("({bytes} bytes)")
+                });
                 ToolCallDisplay {
                     tool_name: "write".into(),
                     args: path,
-                    suffix: Some(format!("({bytes} bytes)")),
+                    suffix: Some(suffix),
                     status: ToolStatus::Success,
                 }
             }
@@ -781,11 +812,14 @@ fn format_tool_completion(
             if let Some(msg) = error_message {
                 format_tool_error("edit", path, msg)
             } else {
-                let count = cbor_int_field(details, "edits_applied").unwrap_or(0);
+                let suffix = format_diff_chip(details).unwrap_or_else(|| {
+                    let count = cbor_int_field(details, "edits_applied").unwrap_or(0);
+                    format!("({count} edits applied)")
+                });
                 ToolCallDisplay {
                     tool_name: "edit".into(),
                     args: path,
-                    suffix: Some(format!("({count} edits applied)")),
+                    suffix: Some(suffix),
                     status: ToolStatus::Success,
                 }
             }
