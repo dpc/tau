@@ -35,7 +35,7 @@ const STARTUP_PUNS: &[&str] = &[
     "Tau keeps the loop tight and the pipes honest.",
     "Every extension gets its turn in Tau.",
     "Tau speaks fluent stdio with a circular accent.",
-    "Agents, tools, sockets, loops: the Tau lineup is well-rounded.",
+    "Agents, tools, sockets, loops: a well-rounded lineup.",
     "Ready, set, Tau!",
     "Tau day to code.",
     "Tau-tal control.",
