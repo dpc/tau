@@ -1837,6 +1837,7 @@ impl Harness {
             messages,
             tools,
             model,
+            thinking_level: self.selected_thinking_level,
         });
         self.publish_event(None, event);
 

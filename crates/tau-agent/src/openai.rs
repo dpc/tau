@@ -15,6 +15,10 @@ pub struct PromptPayload<'a> {
     pub system_prompt: &'a str,
     pub messages: &'a [ConversationMessage],
     pub tools: &'a [ToolDefinition],
+    /// Reasoning effort. `Off` disables; otherwise rendered into
+    /// `reasoning_effort` (Chat Completions) or `reasoning.effort`
+    /// (Responses), iff the provider supports it.
+    pub thinking_level: tau_proto::ThinkingLevel,
 }
 
 /// Configuration for the OpenAI-compatible backend.
@@ -23,6 +27,9 @@ pub struct OpenAiConfig {
     pub base_url: String,
     pub api_key: String,
     pub model_id: String,
+    /// Whether the provider's API accepts a `reasoning_effort` field.
+    /// Read from `models.json5` provider compat flags.
+    pub supports_reasoning_effort: bool,
 }
 
 /// Error from the OpenAI client.
@@ -199,6 +206,11 @@ struct CompletionRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_choice: Option<String>,
     stream: bool,
+    /// Standard OpenAI Chat Completions reasoning control. Sent only
+    /// when the provider supports it and the user picked a non-Off
+    /// thinking level.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning_effort: Option<&'static str>,
 }
 
 #[derive(Serialize)]
@@ -275,12 +287,34 @@ fn build_request(
         Some("auto".to_owned())
     };
 
+    let reasoning_effort = if config.supports_reasoning_effort {
+        thinking_level_wire(request.thinking_level)
+    } else {
+        None
+    };
+
     CompletionRequest {
         model: config.model_id.clone(),
         messages,
         tools,
         tool_choice,
         stream,
+        reasoning_effort,
+    }
+}
+
+/// Maps `ThinkingLevel` to the wire string the OpenAI Responses /
+/// Chat Completions APIs accept. `Off` returns `None` so the field is
+/// omitted from the request entirely.
+pub(crate) fn thinking_level_wire(level: tau_proto::ThinkingLevel) -> Option<&'static str> {
+    use tau_proto::ThinkingLevel::*;
+    match level {
+        Off => None,
+        Minimal => Some("minimal"),
+        Low => Some("low"),
+        Medium => Some("medium"),
+        High => Some("high"),
+        XHigh => Some("xhigh"),
     }
 }
 

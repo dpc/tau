@@ -1573,6 +1573,7 @@ mod tests {
             messages: Vec::new(),
             tools: Vec::new(),
             model: None,
+            thinking_level: tau_proto::ThinkingLevel::Off,
         }));
         sync(&handle);
         assert!(vt.screen_contains(80, " …"));
@@ -1620,6 +1621,7 @@ mod tests {
             messages: Vec::new(),
             tools: Vec::new(),
             model: None,
+            thinking_level: tau_proto::ThinkingLevel::Off,
         }));
 
         // Second prompt queued.
@@ -1655,6 +1657,7 @@ mod tests {
             messages: Vec::new(),
             tools: Vec::new(),
             model: None,
+            thinking_level: tau_proto::ThinkingLevel::Off,
         }));
         sync(&handle);
         assert!(
@@ -1722,6 +1725,7 @@ mod tests {
                     messages: Vec::new(),
                     tools: Vec::new(),
                     model: None,
+                    thinking_level: tau_proto::ThinkingLevel::Off,
                 }));
             } else {
                 renderer.handle(&Event::SessionPromptQueued(SessionPromptQueued {
@@ -1742,6 +1746,7 @@ mod tests {
                     messages: Vec::new(),
                     tools: Vec::new(),
                     model: None,
+                    thinking_level: tau_proto::ThinkingLevel::Off,
                 }));
             }
             renderer.handle(&Event::AgentResponseUpdated(AgentResponseUpdated {
@@ -1790,6 +1795,7 @@ mod tests {
             messages: Vec::new(),
             tools: Vec::new(),
             model: None,
+            thinking_level: tau_proto::ThinkingLevel::Off,
         }));
         sync(&handle);
         assert!(vt.screen_contains(80, " …"));
@@ -1831,6 +1837,7 @@ mod tests {
             messages: Vec::new(),
             tools: Vec::new(),
             model: None,
+            thinking_level: tau_proto::ThinkingLevel::Off,
         }));
         renderer.handle(&Event::AgentResponseUpdated(AgentResponseUpdated {
             session_prompt_id: "sp-0".into(),
@@ -1881,6 +1888,7 @@ mod tests {
             messages: Vec::new(),
             tools: Vec::new(),
             model: None,
+            thinking_level: tau_proto::ThinkingLevel::Off,
         }));
 
         // Agent starts streaming response 1.
@@ -1941,6 +1949,7 @@ mod tests {
             messages: Vec::new(),
             tools: Vec::new(),
             model: None,
+            thinking_level: tau_proto::ThinkingLevel::Off,
         }));
         renderer.handle(&Event::AgentResponseUpdated(AgentResponseUpdated {
             session_prompt_id: "sp-1".into(),
@@ -1966,6 +1975,7 @@ mod tests {
             messages: Vec::new(),
             tools: Vec::new(),
             model: None,
+            thinking_level: tau_proto::ThinkingLevel::Off,
         }));
         renderer.handle(&Event::AgentResponseUpdated(AgentResponseUpdated {
             session_prompt_id: "sp-2".into(),
@@ -2034,6 +2044,7 @@ mod tests {
             messages: Vec::new(),
             tools: Vec::new(),
             model: None,
+            thinking_level: tau_proto::ThinkingLevel::Off,
         }));
 
         // Response with emoji followed by text on next line.
@@ -2093,6 +2104,7 @@ mod tests {
             messages: Vec::new(),
             tools: Vec::new(),
             model: None,
+            thinking_level: tau_proto::ThinkingLevel::Off,
         }));
 
         // 3 emoji = 6 columns + "end" = 9 columns total.
@@ -2136,6 +2148,7 @@ mod tests {
             messages: Vec::new(),
             tools: Vec::new(),
             model: None,
+            thinking_level: tau_proto::ThinkingLevel::Off,
         }));
 
         let partial = "stream 0\nstream 1\nstream 2\nstream 3\nPARTIAL ONLY";

@@ -534,6 +534,7 @@ mod tests {
                     parameters: None,
                 }],
                 model: None,
+                thinking_level: ThinkingLevel::Off,
             }),
             Event::AgentResponseFinished(AgentResponseFinished {
                 session_prompt_id: "sp-1".into(),

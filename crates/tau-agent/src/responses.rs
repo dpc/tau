@@ -18,6 +18,8 @@ pub struct ResponsesConfig {
     pub model_id: String,
     /// `chatgpt-account-id` header extracted from JWT.
     pub account_id: Option<String>,
+    /// Whether the provider's API accepts a `reasoning.effort` field.
+    pub supports_reasoning_effort: bool,
 }
 
 /// Calls the Codex Responses API with SSE streaming.
@@ -172,6 +174,13 @@ struct ResponsesRequest {
     tools: Vec<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_choice: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning: Option<ReasoningRequest>,
+}
+
+#[derive(Serialize)]
+struct ReasoningRequest {
+    effort: &'static str,
 }
 
 fn build_request(config: &ResponsesConfig, request: &PromptPayload<'_>) -> ResponsesRequest {
@@ -211,6 +220,13 @@ fn build_request(config: &ResponsesConfig, request: &PromptPayload<'_>) -> Respo
         Some("auto".to_owned())
     };
 
+    let reasoning = if config.supports_reasoning_effort {
+        crate::openai::thinking_level_wire(request.thinking_level)
+            .map(|effort| ReasoningRequest { effort })
+    } else {
+        None
+    };
+
     ResponsesRequest {
         model: config.model_id.clone(),
         instructions,
@@ -219,6 +235,7 @@ fn build_request(config: &ResponsesConfig, request: &PromptPayload<'_>) -> Respo
         store: false,
         tools,
         tool_choice,
+        reasoning,
     }
 }
 

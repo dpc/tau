@@ -150,6 +150,7 @@ fn resolve_backend(
                 api_key: access_token,
                 model_id: model_id.to_owned(),
                 account_id,
+                supports_reasoning_effort: provider.compat.supports_reasoning_effort,
             }))
         }
         "github-copilot" => {
@@ -166,6 +167,7 @@ fn resolve_backend(
                 base_url,
                 api_key: access_token,
                 model_id: model_id.to_owned(),
+                supports_reasoning_effort: provider.compat.supports_reasoning_effort,
             }))
         }
         "api-key" | "none" | _ => {
@@ -183,6 +185,7 @@ fn resolve_backend(
                 base_url,
                 api_key,
                 model_id: model_id.to_owned(),
+                supports_reasoning_effort: provider.compat.supports_reasoning_effort,
             }))
         }
     }
@@ -212,6 +215,7 @@ fn handle_chat_completions<W: Write>(
         system_prompt: &prompt.system_prompt,
         messages: &prompt.messages,
         tools: &prompt.tools,
+        thinking_level: prompt.thinking_level,
     };
 
     match openai::chat_completion_stream(config, &request, |text_so_far| {
@@ -237,6 +241,7 @@ fn handle_responses<W: Write>(
         system_prompt: &prompt.system_prompt,
         messages: &prompt.messages,
         tools: &prompt.tools,
+        thinking_level: prompt.thinking_level,
     };
 
     match responses::responses_stream(config, &request, |text_so_far| {

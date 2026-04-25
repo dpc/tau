@@ -862,6 +862,9 @@ pub struct SessionPromptCreated {
     /// Currently selected model as `"provider/model_id"`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<ModelId>,
+    /// Reasoning effort to request from the provider (if supported).
+    #[serde(default)]
+    pub thinking_level: ThinkingLevel,
 }
 
 // ---------------------------------------------------------------------------
