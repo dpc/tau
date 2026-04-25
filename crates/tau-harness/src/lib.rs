@@ -362,10 +362,16 @@ struct ExtensionEntry {
     name: String,
     instance_id: tau_proto::ExtensionInstanceId,
     connection_id: tau_proto::ConnectionId,
+    kind: ClientKind,
     /// PID of supervised child process, or current process for in-process.
     pid: Option<u32>,
     /// In-process extension thread handle (for join on shutdown).
     in_process_thread: Option<JoinHandle<Result<(), String>>>,
+    /// Original config for supervised extensions. Present only for
+    /// out-of-process children that the harness can respawn.
+    supervised_config: Option<ExtensionConfig>,
+    /// Number of restart attempts performed by the harness.
+    restart_attempt: u32,
     /// Current lifecycle state. See `extensions_all_ready` for how this
     /// gates dispatch.
     state: ExtensionState,
@@ -468,6 +474,8 @@ struct Harness {
     current_session_id: SessionId,
     pending_request_sessions: VecDeque<SessionId>,
     pending_tool_sessions: std::collections::HashMap<ToolCallId, SessionId>,
+    pending_tool_names: std::collections::HashMap<ToolCallId, ToolName>,
+    pending_tool_providers: std::collections::HashMap<ToolCallId, tau_proto::ConnectionId>,
     event_log: std::sync::Arc<EventLog>,
     /// Writer channels for socket clients, keyed by connection ID.
     /// Used to start follower threads for log-based replay + delivery.
@@ -591,8 +599,11 @@ impl Harness {
             name: "agent".to_owned(),
             instance_id: iid,
             connection_id: conn_id,
+            kind: ClientKind::Agent,
             pid: Some(own_pid),
             in_process_thread: Some(thread),
+            supervised_config: None,
+            restart_attempt: 0,
             state: ExtensionState::Spawning,
             last_acked: tau_proto::LogEventId::default(),
         });
@@ -611,8 +622,11 @@ impl Harness {
             name: "shell".to_owned(),
             instance_id: iid,
             connection_id: conn_id,
+            kind: ClientKind::Tool,
             pid: Some(own_pid),
             in_process_thread: Some(thread),
+            supervised_config: None,
+            restart_attempt: 0,
             state: ExtensionState::Spawning,
             last_acked: tau_proto::LogEventId::default(),
         });
@@ -635,6 +649,8 @@ impl Harness {
             current_session_id: eager_session_id.into(),
             pending_request_sessions: VecDeque::new(),
             pending_tool_sessions: std::collections::HashMap::new(),
+            pending_tool_names: std::collections::HashMap::new(),
+            pending_tool_providers: std::collections::HashMap::new(),
             event_log: EventLog::new(),
             client_writers: std::collections::HashMap::new(),
             lifecycle_messages: Vec::new(),
@@ -746,8 +762,11 @@ impl Harness {
                 name: ext_config.name.clone(),
                 instance_id: iid,
                 connection_id: conn_id,
+                kind: kind.clone(),
                 pid: Some(child_pid),
                 in_process_thread: None,
+                supervised_config: Some(ext_config.clone()),
+                restart_attempt: 0,
                 state: ExtensionState::Spawning,
                 last_acked: tau_proto::LogEventId::default(),
             });
@@ -773,6 +792,8 @@ impl Harness {
             current_session_id: eager_session_id.into(),
             pending_request_sessions: VecDeque::new(),
             pending_tool_sessions: std::collections::HashMap::new(),
+            pending_tool_names: std::collections::HashMap::new(),
+            pending_tool_providers: std::collections::HashMap::new(),
             event_log: EventLog::new(),
             client_writers: std::collections::HashMap::new(),
             lifecycle_messages: Vec::new(),
@@ -1069,7 +1090,10 @@ impl Harness {
                     .registry
                     .route_tool_request(&mut self.bus, source_id, request.clone())
                 {
-                    Ok(_) => {}
+                    Ok(route) => {
+                        self.pending_tool_providers
+                            .insert(request.call_id.clone(), route.provider_connection_id);
+                    }
                     Err(ToolRouteError::NoProvider { tool_name }) => {
                         let error = ToolError {
                             call_id: request.call_id,
@@ -1321,6 +1345,7 @@ impl Harness {
     fn handle_disconnect(&mut self, connection_id: &str) {
         self.remove_discovered_context(connection_id);
         self.maybe_complete_session_init_for_disconnect(connection_id);
+        self.fail_pending_tool_calls_for_connection(connection_id);
         self.set_extension_state(connection_id, ExtensionState::Disconnected);
         self.client_writers
             .remove(&tau_proto::ConnectionId::from(connection_id));
@@ -1332,6 +1357,91 @@ impl Harness {
             let _ = self.registry.unregister_connection(connection_id);
             self.emit_extension_exited(&meta.name);
         }
+        if meta.origin == ConnectionOrigin::Supervised {
+            if let Err(error) = self.try_respawn_supervised_extension(connection_id) {
+                self.emit_info(&format!(
+                    "failed to respawn extension {}: {error}",
+                    meta.name
+                ));
+            }
+        }
+    }
+
+    fn fail_pending_tool_calls_for_connection(&mut self, connection_id: &str) {
+        let failed_call_ids: Vec<ToolCallId> = self
+            .pending_tool_providers
+            .iter()
+            .filter_map(|(call_id, provider_id)| {
+                if provider_id.as_str() == connection_id {
+                    Some(call_id.clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        for call_id in failed_call_ids {
+            let tool_name = self
+                .pending_tool_names
+                .remove(&call_id)
+                .unwrap_or_else(|| ToolName::from("unknown_tool"));
+            self.pending_tool_providers.remove(&call_id);
+            let error = ToolError {
+                call_id: call_id.clone(),
+                tool_name,
+                message: "tool provider disconnected".to_owned(),
+                details: None,
+            };
+            if self.pending_tool_sessions.contains_key(&call_id) {
+                let _ = self.persist_tool_error(&error);
+            }
+            self.publish_event(None, Event::ToolError(error));
+            self.on_tool_call_complete(call_id.as_str());
+        }
+    }
+
+    fn try_respawn_supervised_extension(
+        &mut self,
+        connection_id: &str,
+    ) -> Result<(), HarnessError> {
+        let Some(index) = self
+            .extensions
+            .iter()
+            .position(|e| e.connection_id.as_str() == connection_id)
+        else {
+            return Ok(());
+        };
+        let Some(config) = self.extensions[index].supervised_config.clone() else {
+            return Ok(());
+        };
+        if self.extensions[index].kind == ClientKind::Agent {
+            return Ok(());
+        }
+
+        self.extensions[index].restart_attempt += 1;
+        let attempt = self.extensions[index].restart_attempt;
+        let instance_id = self.extensions[index].instance_id;
+        let name = self.extensions[index].name.clone();
+        self.publish_event(
+            Some("harness"),
+            Event::ExtensionRestarting(tau_proto::ExtensionRestarting {
+                instance_id,
+                extension_name: name.clone().into(),
+                pid: None,
+                attempt,
+                reason: Some("unexpected disconnect".to_owned()),
+            }),
+        );
+
+        let kind = self.extensions[index].kind.clone();
+        let (new_connection_id, child_pid) =
+            spawn_supervised(&config, kind, &mut self.bus, &self.tx)?;
+        self.extensions[index].connection_id = new_connection_id;
+        self.extensions[index].pid = Some(child_pid);
+        self.extensions[index].state = ExtensionState::Spawning;
+        self.extensions[index].last_acked = tau_proto::LogEventId::default();
+        self.emit_extension_starting(&name);
+        Ok(())
     }
 
     // -----------------------------------------------------------------------
@@ -1345,6 +1455,8 @@ impl Harness {
             .unwrap_or_else(|| "default".into());
         self.pending_tool_sessions
             .insert(request.call_id.clone(), session_id.clone());
+        self.pending_tool_names
+            .insert(request.call_id.clone(), request.tool_name.clone());
         self.store.append_tool_activity(
             session_id.into_string(),
             ToolActivityRecord {
@@ -1363,6 +1475,8 @@ impl Harness {
             .pending_tool_sessions
             .remove(result.call_id.as_str())
             .unwrap_or_else(|| "default".into());
+        self.pending_tool_names.remove(result.call_id.as_str());
+        self.pending_tool_providers.remove(result.call_id.as_str());
         self.store.append_tool_activity(
             session_id.into_string(),
             ToolActivityRecord {
@@ -1381,6 +1495,8 @@ impl Harness {
             .pending_tool_sessions
             .remove(error.call_id.as_str())
             .unwrap_or_else(|| "default".into());
+        self.pending_tool_names.remove(error.call_id.as_str());
+        self.pending_tool_providers.remove(error.call_id.as_str());
         self.store.append_tool_activity(
             session_id.into_string(),
             ToolActivityRecord {
@@ -2042,8 +2158,8 @@ impl Harness {
     /// or dropped permanently.
     ///
     /// `Disconnected` counts as "no longer blocking": a dead extension
-    /// will never reach `Ready` on its own (auto-respawn is not wired
-    /// up), and we don't want it to wedge fresh prompt dispatch.
+    /// may be on its way to being respawned, but the old connection is
+    /// gone and should not wedge fresh prompt dispatch.
     /// Session initialization for a still-live session with a dead
     /// provider still completes correctly — `handle_disconnect`
     /// removes the entry from the `waiting_on` set.
@@ -2236,12 +2352,17 @@ impl Harness {
         // Track which session this call belongs to.
         self.pending_tool_sessions
             .insert(call_id.clone(), session_id.into());
+        self.pending_tool_names
+            .insert(call_id.clone(), tool_name.clone());
 
         match self
             .registry
             .route_tool_request(&mut self.bus, &self.agent_connection_id, request)
         {
-            Ok(_) => {}
+            Ok(route) => {
+                self.pending_tool_providers
+                    .insert(call_id.clone(), route.provider_connection_id);
+            }
             Err(ToolRouteError::NoProvider { tool_name }) => {
                 let error = ToolError {
                     call_id: call_id.clone(),
@@ -3153,11 +3274,19 @@ pub fn builtin_extensions() -> Vec<tau_config::settings::BuiltinExtension> {
             name: "agent",
             command: vec![tau_binary.clone(), "ext".to_owned(), "agent".to_owned()],
             role: Some("agent"),
+            enable: true,
         },
         BuiltinExtension {
             name: "shell",
-            command: vec![tau_binary, "ext".to_owned(), "ext-shell".to_owned()],
+            command: vec![tau_binary.clone(), "ext".to_owned(), "ext-shell".to_owned()],
             role: Some("tool"),
+            enable: true,
+        },
+        BuiltinExtension {
+            name: "test_dummy",
+            command: vec![tau_binary, "ext".to_owned(), "ext-test-dummy".to_owned()],
+            role: Some("tool"),
+            enable: false,
         },
     ]
 }
@@ -3730,6 +3859,51 @@ mod tests {
             .send_user_message("s1", "shell printf hi", None)
             .expect("should succeed with error");
         assert!(outcome.response.contains("no live provider available"));
+        h.shutdown().expect("shutdown");
+    }
+
+    #[test]
+    fn disconnected_tool_completes_pending_call() {
+        let td = TempDir::new().expect("tempdir");
+        let sp = td.path().join("state");
+        let mut h = echo_harness(&sp).expect("start");
+
+        let conn_id = h
+            .extension_connection_id("shell")
+            .expect("shell")
+            .to_owned();
+        let call_id: ToolCallId = "call-1".into();
+        let tool_name: ToolName = "shell".into();
+        h.pending_tool_sessions.insert(call_id.clone(), "s1".into());
+        h.pending_tool_names
+            .insert(call_id.clone(), tool_name.clone());
+        h.pending_tool_providers
+            .insert(call_id.clone(), conn_id.clone().into());
+        h.in_flight_tool_kinds
+            .insert(call_id.clone(), tau_proto::ToolSideEffects::Mutating);
+        h.turn_state = TurnState::ToolsRunning {
+            session_id: "s1".into(),
+            remaining_calls: vec![call_id.clone()],
+        };
+
+        h.handle_disconnect(&conn_id);
+
+        assert!(!matches!(h.turn_state, TurnState::ToolsRunning { .. }));
+        assert!(!h.pending_tool_sessions.contains_key(&call_id));
+        assert!(!h.pending_tool_providers.contains_key(&call_id));
+
+        let branch = h.store.session("s1").expect("session").current_branch();
+        assert!(branch.iter().any(|entry| {
+            matches!(
+                entry,
+                SessionEntry::ToolActivity(ToolActivityRecord {
+                    call_id: logged_call_id,
+                    outcome: ToolActivityOutcome::Error { message, .. },
+                    ..
+                }) if logged_call_id == &call_id && message == "tool provider disconnected"
+            )
+        }));
+
         h.shutdown().expect("shutdown");
     }
 
