@@ -2751,31 +2751,50 @@ fn latest_agent_preview(session: &tau_core::SessionTree) -> Option<String> {
 /// Returns a default configuration that spawns built-in components via
 /// `tau component <name>`.
 #[must_use]
-pub fn default_config() -> Config {
-    use tau_config::{Config, CoreConfig, CoreMode, ExtensionConfig};
+/// The set of extensions the harness ships with by default.
+///
+/// Each entry's `command` is `[<current-exe>, "component", <name>]`,
+/// so a fresh `tau` install with no `harness.json5` runs the
+/// in-binary agent and ext-fs extensions out of the box. Users can
+/// override individual fields (or set `enable: false`) per entry in
+/// `harness.json5` under `extensions: { name: { … } }`.
+pub fn builtin_extensions() -> Vec<tau_config::settings::BuiltinExtension> {
+    use tau_config::settings::BuiltinExtension;
 
     let tau_binary = std::env::current_exe()
         .map(|p| p.display().to_string())
         .unwrap_or_else(|_| "tau".to_owned());
 
+    vec![
+        BuiltinExtension {
+            name: "agent",
+            command: vec![
+                tau_binary.clone(),
+                "component".to_owned(),
+                "agent".to_owned(),
+            ],
+            role: Some("agent"),
+        },
+        BuiltinExtension {
+            name: "tools",
+            command: vec![tau_binary, "component".to_owned(), "ext-fs".to_owned()],
+            role: Some("tool"),
+        },
+    ]
+}
+
+pub fn default_config() -> Config {
+    use tau_config::{Config, CoreConfig, CoreMode};
+
+    let extensions = tau_config::settings::HarnessSettings::default()
+        .resolve_extensions(builtin_extensions())
+        .expect("built-in extensions resolve cleanly");
+
     Config {
         core: CoreConfig {
             mode: CoreMode::Embedded,
         },
-        extensions: vec![
-            ExtensionConfig {
-                name: "agent".to_owned(),
-                command: tau_binary.clone(),
-                args: vec!["component".to_owned(), "agent".to_owned()],
-                role: Some("agent".to_owned()),
-            },
-            ExtensionConfig {
-                name: "tools".to_owned(),
-                command: tau_binary,
-                args: vec!["component".to_owned(), "ext-fs".to_owned()],
-                role: Some("tool".to_owned()),
-            },
-        ],
+        extensions,
     }
 }
 
@@ -3200,26 +3219,21 @@ pub fn policy_lines(path: impl AsRef<Path>) -> Result<Vec<String>, HarnessError>
 // Config resolution
 // ---------------------------------------------------------------------------
 
-fn resolve_config(explicit_path: Option<&Path>) -> Result<Config, Box<dyn std::error::Error>> {
-    use tau_config::LoadOptions;
+fn resolve_config(_explicit_path: Option<&Path>) -> Result<Config, Box<dyn std::error::Error>> {
+    use tau_config::{Config, CoreConfig, CoreMode};
 
-    let options = match explicit_path {
-        Some(path) => LoadOptions {
-            user_config_path: Some(path.to_owned()),
-            enable_project_config: false,
-            project_config_path: None,
+    // Extensions live in `harness.json5` under `extensions: { ... }`.
+    // We start from the built-in agent + tools defaults and apply the
+    // user's overrides on top; a malformed harness.json5 falls back
+    // to defaults rather than failing the whole startup.
+    let settings = tau_config::settings::load_harness_settings().unwrap_or_default();
+    let extensions = settings.resolve_extensions(builtin_extensions())?;
+    Ok(Config {
+        core: CoreConfig {
+            mode: CoreMode::Embedded,
         },
-        None => LoadOptions {
-            user_config_path: None,
-            enable_project_config: true,
-            project_config_path: None,
-        },
-    };
-
-    match tau_config::load(&options) {
-        Ok(config) if !config.extensions.is_empty() => Ok(config),
-        _ => Ok(default_config()),
-    }
+        extensions,
+    })
 }
 
 // ---------------------------------------------------------------------------

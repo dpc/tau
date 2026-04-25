@@ -41,21 +41,212 @@ impl Default for CliSettings {
 // ---------------------------------------------------------------------------
 
 /// Harness/agent settings loaded from `harness.json5`.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct HarnessSettings {
     /// Default model provider/model to use (e.g.
     /// "anthropic/claude-sonnet-4-20250514").
     pub default_model: Option<String>,
+
+    /// Extension table, keyed by name. Built-in entries (`agent`,
+    /// `tools`) come pre-baked at the harness level; anything the
+    /// user writes here overrides those per-field, or adds a new
+    /// extension.
+    ///
+    /// Example `harness.json5`:
+    /// ```json5
+    /// {
+    ///   extensions: {
+    ///     // disable the built-in tools extension
+    ///     tools: { enable: false },
+    ///     // run the agent through ssh on a remote box
+    ///     agent: { prefix: ["ssh", "user@host"] },
+    ///     // a third-party extension
+    ///     mything: { command: ["/usr/local/bin/my-tau-ext"] },
+    ///   },
+    /// }
+    /// ```
+    pub extensions: HashMap<String, ExtensionEntry>,
 }
 
-impl Default for HarnessSettings {
+/// One entry in the harness's `extensions` map.
+///
+/// All fields are optional in the on-disk form so users can override
+/// just the fields they care about for built-in extensions; the
+/// harness merges these with built-in defaults at startup.
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ExtensionEntry {
+    /// argv prefix prepended before `command`. Useful for wrappers
+    /// that don't change the inner command, e.g.
+    /// `["ssh", "user@host"]` to run remotely or
+    /// `["bwrap", "--ro-bind", "/", "/", "--"]` to sandbox.
+    pub prefix: Vec<String>,
+
+    /// argv of the extension itself. `command[0]` is the executable;
+    /// the rest are arguments. For built-in extensions this defaults
+    /// to `[<current-exe>, "component", <name>]`; for new entries
+    /// this must be set explicitly.
+    pub command: Vec<String>,
+
+    /// Whether to run this extension. Defaults to `true`. Set to
+    /// `false` to keep the entry in config but skip spawning.
+    pub enable: bool,
+
+    /// Role tag. Exactly one extension must have `role: "agent"`.
+    /// Built-in `agent` defaults to that; everything else is treated
+    /// as a tool extension.
+    pub role: Option<String>,
+}
+
+impl Default for ExtensionEntry {
     fn default() -> Self {
+        // `enable: true` so a user writing
+        // `extensions: { foo: { command: [...] } }` doesn't need to
+        // also write `enable: true` for the entry to actually run.
         Self {
-            default_model: None,
+            prefix: Vec::new(),
+            command: Vec::new(),
+            enable: true,
+            role: None,
         }
     }
 }
+
+/// Built-in extension shipped with `tau`. Used by
+/// [`HarnessSettings::resolve_extensions`] to seed the table before
+/// applying user overrides.
+pub struct BuiltinExtension {
+    pub name: &'static str,
+    pub command: Vec<String>,
+    pub role: Option<&'static str>,
+}
+
+impl HarnessSettings {
+    /// Merge user-provided `extensions` entries on top of the
+    /// supplied built-in extensions and produce a flat list of
+    /// [`crate::ExtensionConfig`]s ready for the harness to spawn.
+    ///
+    /// Per-key merging:
+    /// - Field-level overlay for built-in keys: any field the user set replaces
+    ///   the built-in's value; unset fields keep the built-in's defaults.
+    /// - User keys not in the built-in list are added as-is. They must specify
+    ///   a non-empty `command`.
+    /// - Entries with `enable: false` are dropped.
+    ///
+    /// Returns `Err` for entries that end up with an empty `command`
+    /// after the merge — only possible for user-added unknown keys.
+    pub fn resolve_extensions(
+        &self,
+        builtins: Vec<BuiltinExtension>,
+    ) -> Result<Vec<crate::ExtensionConfig>, ResolveExtensionsError> {
+        // Pass 1: seed an indexed map with built-ins, in order.
+        let mut order: Vec<String> = builtins.iter().map(|b| b.name.to_owned()).collect();
+        let mut entries: HashMap<String, ResolvedExtension> = builtins
+            .into_iter()
+            .map(|b| {
+                (
+                    b.name.to_owned(),
+                    ResolvedExtension {
+                        prefix: Vec::new(),
+                        command: b.command,
+                        enable: true,
+                        role: b.role.map(str::to_owned),
+                    },
+                )
+            })
+            .collect();
+
+        // Pass 2: overlay user entries. Sort user keys deterministically.
+        let mut user_keys: Vec<&String> = self.extensions.keys().collect();
+        user_keys.sort();
+        for name in user_keys {
+            let user = &self.extensions[name];
+            match entries.get_mut(name) {
+                Some(existing) => {
+                    if !user.prefix.is_empty() {
+                        existing.prefix = user.prefix.clone();
+                    }
+                    if !user.command.is_empty() {
+                        existing.command = user.command.clone();
+                    }
+                    existing.enable = user.enable;
+                    if user.role.is_some() {
+                        existing.role = user.role.clone();
+                    }
+                }
+                None => {
+                    if user.command.is_empty() {
+                        return Err(ResolveExtensionsError::EmptyCommand(name.clone()));
+                    }
+                    order.push(name.clone());
+                    entries.insert(
+                        name.clone(),
+                        ResolvedExtension {
+                            prefix: user.prefix.clone(),
+                            command: user.command.clone(),
+                            enable: user.enable,
+                            role: user.role.clone(),
+                        },
+                    );
+                }
+            }
+        }
+
+        // Pass 3: produce ExtensionConfigs in declared order, dropping
+        // disabled entries. argv = prefix ++ command; argv[0] is the
+        // executable, rest are args.
+        let mut out = Vec::new();
+        for name in order {
+            let entry = entries.remove(&name).expect("seeded above");
+            if !entry.enable {
+                continue;
+            }
+            let mut argv = entry.prefix;
+            argv.extend(entry.command);
+            let (program, args) = match argv.split_first() {
+                Some((first, rest)) => (first.clone(), rest.to_vec()),
+                None => return Err(ResolveExtensionsError::EmptyCommand(name)),
+            };
+            out.push(crate::ExtensionConfig {
+                name,
+                command: program,
+                args,
+                role: entry.role,
+            });
+        }
+        Ok(out)
+    }
+}
+
+#[derive(Debug)]
+struct ResolvedExtension {
+    prefix: Vec<String>,
+    command: Vec<String>,
+    enable: bool,
+    role: Option<String>,
+}
+
+/// Error returned by [`HarnessSettings::resolve_extensions`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ResolveExtensionsError {
+    /// A user-added extension entry has no `command` (and therefore
+    /// no executable to spawn).
+    EmptyCommand(String),
+}
+
+impl fmt::Display for ResolveExtensionsError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::EmptyCommand(name) => write!(
+                f,
+                "extension {name:?} has no `command` set; user-added entries must specify the executable",
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ResolveExtensionsError {}
 
 // ---------------------------------------------------------------------------
 // Model registry
@@ -332,6 +523,147 @@ mod tests {
             s.default_model.as_deref(),
             Some("anthropic/claude-sonnet-4-20250514")
         );
+    }
+
+    fn builtins() -> Vec<BuiltinExtension> {
+        vec![
+            BuiltinExtension {
+                name: "agent",
+                command: vec!["tau".into(), "component".into(), "agent".into()],
+                role: Some("agent"),
+            },
+            BuiltinExtension {
+                name: "tools",
+                command: vec!["tau".into(), "component".into(), "ext-fs".into()],
+                role: Some("tool"),
+            },
+        ]
+    }
+
+    #[test]
+    fn resolve_extensions_returns_builtins_when_user_config_empty() {
+        let s = HarnessSettings::default();
+        let resolved = s.resolve_extensions(builtins()).expect("resolve");
+        assert_eq!(resolved.len(), 2);
+        assert_eq!(resolved[0].name, "agent");
+        assert_eq!(resolved[0].command, "tau");
+        assert_eq!(resolved[0].args, vec!["component", "agent"]);
+        assert_eq!(resolved[0].role.as_deref(), Some("agent"));
+        assert_eq!(resolved[1].name, "tools");
+    }
+
+    #[test]
+    fn resolve_extensions_disable_drops_entry() {
+        let mut s = HarnessSettings::default();
+        s.extensions.insert(
+            "tools".into(),
+            ExtensionEntry {
+                enable: false,
+                ..Default::default()
+            },
+        );
+        let resolved = s.resolve_extensions(builtins()).expect("resolve");
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].name, "agent");
+    }
+
+    #[test]
+    fn resolve_extensions_prefix_wraps_builtin_command() {
+        let mut s = HarnessSettings::default();
+        s.extensions.insert(
+            "agent".into(),
+            ExtensionEntry {
+                prefix: vec!["ssh".into(), "user@host".into()],
+                ..Default::default()
+            },
+        );
+        let resolved = s.resolve_extensions(builtins()).expect("resolve");
+        let agent = resolved.iter().find(|e| e.name == "agent").expect("agent");
+        // argv[0] is the wrapper; original command moves into args.
+        assert_eq!(agent.command, "ssh");
+        assert_eq!(agent.args, vec!["user@host", "tau", "component", "agent"]);
+    }
+
+    #[test]
+    fn resolve_extensions_user_command_replaces_builtin_command() {
+        let mut s = HarnessSettings::default();
+        s.extensions.insert(
+            "agent".into(),
+            ExtensionEntry {
+                command: vec!["/usr/local/bin/my-agent".into(), "--flag".into()],
+                ..Default::default()
+            },
+        );
+        let resolved = s.resolve_extensions(builtins()).expect("resolve");
+        let agent = resolved.iter().find(|e| e.name == "agent").expect("agent");
+        assert_eq!(agent.command, "/usr/local/bin/my-agent");
+        assert_eq!(agent.args, vec!["--flag"]);
+        // Role is preserved from the built-in default.
+        assert_eq!(agent.role.as_deref(), Some("agent"));
+    }
+
+    #[test]
+    fn resolve_extensions_adds_user_extension_keys() {
+        let mut s = HarnessSettings::default();
+        s.extensions.insert(
+            "mything".into(),
+            ExtensionEntry {
+                command: vec!["/usr/local/bin/mything".into()],
+                ..Default::default()
+            },
+        );
+        let resolved = s.resolve_extensions(builtins()).expect("resolve");
+        assert_eq!(resolved.len(), 3);
+        let mything = resolved
+            .iter()
+            .find(|e| e.name == "mything")
+            .expect("mything");
+        assert_eq!(mything.command, "/usr/local/bin/mything");
+        assert!(mything.role.is_none());
+    }
+
+    #[test]
+    fn resolve_extensions_user_extension_without_command_errors() {
+        let mut s = HarnessSettings::default();
+        s.extensions.insert(
+            "broken".into(),
+            ExtensionEntry {
+                ..Default::default()
+            },
+        );
+        let err = s.resolve_extensions(builtins()).expect_err("must err");
+        match err {
+            ResolveExtensionsError::EmptyCommand(name) => assert_eq!(name, "broken"),
+        }
+    }
+
+    #[test]
+    fn resolve_extensions_loads_from_json5() {
+        // End-to-end: a realistic harness.json5 round-trips through
+        // load_json5_layered into the resolver.
+        let td = TempDir::new().expect("tempdir");
+        let dir = td.path();
+        std::fs::write(
+            dir.join("harness.json5"),
+            r#"{
+                extensions: {
+                    tools: { enable: false },
+                    agent: { prefix: ["ssh", "host"] },
+                    mything: { command: ["/bin/foo"] },
+                },
+            }"#,
+        )
+        .expect("write");
+
+        let s: HarnessSettings = load_json5_layered(dir, "harness").expect("load");
+        let resolved = s.resolve_extensions(builtins()).expect("resolve");
+        let names: Vec<&str> = resolved.iter().map(|e| e.name.as_str()).collect();
+        // tools dropped (disable). agent kept (prefix-wrapped).
+        // mything appended.
+        assert_eq!(names, vec!["agent", "mything"]);
+        let agent = &resolved[0];
+        assert_eq!(agent.command, "ssh");
+        assert_eq!(agent.args, vec!["host", "tau", "component", "agent"]);
     }
 
     #[test]
