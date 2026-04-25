@@ -212,9 +212,13 @@ impl EventName {
         Self::from_static(EventCategory::Harness, "models_available");
     pub const HARNESS_MODEL_SELECTED: Self =
         Self::from_static(EventCategory::Harness, "model_selected");
+    pub const HARNESS_THINKING_LEVEL_CHANGED: Self =
+        Self::from_static(EventCategory::Harness, "thinking_level_changed");
 
     pub const UI_PROMPT_SUBMITTED: Self = Self::from_static(EventCategory::Ui, "prompt_submitted");
     pub const UI_MODEL_SELECT: Self = Self::from_static(EventCategory::Ui, "model_select");
+    pub const UI_SET_THINKING_LEVEL: Self =
+        Self::from_static(EventCategory::Ui, "set_thinking_level");
     pub const UI_DETACH_REQUEST: Self = Self::from_static(EventCategory::Ui, "detach_request");
     pub const UI_SHELL_COMMAND: Self = Self::from_static(EventCategory::Ui, "shell_command");
     pub const UI_SWITCH_SESSION: Self = Self::from_static(EventCategory::Ui, "switch_session");
@@ -382,6 +386,78 @@ pub struct HarnessModelsAvailable {
 pub struct HarnessModelSelected {
     /// `"provider_name/model_id"`, or empty if none.
     pub model: ModelId,
+}
+
+/// Reasoning / "thinking" effort level. Maps to provider-specific
+/// reasoning controls (OpenAI `reasoning.effort`, Anthropic
+/// `thinking.budget_tokens`). `Off` disables it entirely.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ThinkingLevel {
+    #[default]
+    Off,
+    Minimal,
+    Low,
+    Medium,
+    High,
+    XHigh,
+}
+
+impl ThinkingLevel {
+    /// Cycles to the next level (wraps `XHigh → Off`).
+    #[must_use]
+    pub const fn next(self) -> Self {
+        match self {
+            Self::Off => Self::Minimal,
+            Self::Minimal => Self::Low,
+            Self::Low => Self::Medium,
+            Self::Medium => Self::High,
+            Self::High => Self::XHigh,
+            Self::XHigh => Self::Off,
+        }
+    }
+
+    /// Short label for status display (`off` / `low` / `high` / etc).
+    #[must_use]
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Minimal => "minimal",
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::XHigh => "xhigh",
+        }
+    }
+}
+
+impl std::str::FromStr for ThinkingLevel {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "off" => Ok(Self::Off),
+            "minimal" => Ok(Self::Minimal),
+            "low" => Ok(Self::Low),
+            "medium" => Ok(Self::Medium),
+            "high" => Ok(Self::High),
+            "xhigh" => Ok(Self::XHigh),
+            other => Err(format!(
+                "unknown thinking level `{other}`; expected off/minimal/low/medium/high/xhigh"
+            )),
+        }
+    }
+}
+
+impl std::fmt::Display for ThinkingLevel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// The harness announces the current thinking level.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct HarnessThinkingLevelChanged {
+    pub level: ThinkingLevel,
 }
 
 // ---------------------------------------------------------------------------
@@ -640,6 +716,12 @@ pub struct UiModelSelect {
 /// `false` on receipt.
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct UiDetachRequest {}
+
+/// The user requests a thinking-level change.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct UiSetThinkingLevel {
+    pub level: ThinkingLevel,
+}
 
 /// The user requests switching to a different session within the same
 /// daemon. Harness emits `SessionShutdown` for the current session,
@@ -939,12 +1021,16 @@ pub enum Event {
     HarnessModelsAvailable(HarnessModelsAvailable),
     #[serde(rename = "harness.model_selected")]
     HarnessModelSelected(HarnessModelSelected),
+    #[serde(rename = "harness.thinking_level_changed")]
+    HarnessThinkingLevelChanged(HarnessThinkingLevelChanged),
 
     // UI
     #[serde(rename = "ui.prompt_submitted")]
     UiPromptSubmitted(UiPromptSubmitted),
     #[serde(rename = "ui.model_select")]
     UiModelSelect(UiModelSelect),
+    #[serde(rename = "ui.set_thinking_level")]
+    UiSetThinkingLevel(UiSetThinkingLevel),
     #[serde(rename = "ui.detach_request")]
     UiDetachRequest(UiDetachRequest),
     #[serde(rename = "ui.shell_command")]
@@ -1015,8 +1101,10 @@ impl Event {
             Self::HarnessInfo(_) => EventName::HARNESS_INFO,
             Self::HarnessModelsAvailable(_) => EventName::HARNESS_MODELS_AVAILABLE,
             Self::HarnessModelSelected(_) => EventName::HARNESS_MODEL_SELECTED,
+            Self::HarnessThinkingLevelChanged(_) => EventName::HARNESS_THINKING_LEVEL_CHANGED,
             Self::UiPromptSubmitted(_) => EventName::UI_PROMPT_SUBMITTED,
             Self::UiModelSelect(_) => EventName::UI_MODEL_SELECT,
+            Self::UiSetThinkingLevel(_) => EventName::UI_SET_THINKING_LEVEL,
             Self::UiDetachRequest(_) => EventName::UI_DETACH_REQUEST,
             Self::UiShellCommand(_) => EventName::UI_SHELL_COMMAND,
             Self::UiSwitchSession(_) => EventName::UI_SWITCH_SESSION,

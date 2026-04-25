@@ -30,6 +30,9 @@ pub enum Event {
     Resize { width: u16, height: u16 },
     /// The input buffer changed.
     BufferChanged,
+    /// Shift+Tab pressed outside of completion — caller decides what
+    /// to do with it (Pi-style: cycle thinking level).
+    BackTab,
 }
 
 /// Higher-level terminal prompt with completion support.
@@ -106,8 +109,9 @@ impl HighTerm {
                     if self.completer.is_active() {
                         self.completer.cycle_selection(-1, &self.handle);
                         self.handle.redraw();
+                        continue;
                     }
-                    continue;
+                    return Ok(Event::BackTab);
                 }
 
                 RawEvent::Escape => {

@@ -333,6 +333,10 @@ fn run_chat(session_id: &str, attach: bool) -> Result<(), CliError> {
             "/tree",
             "Print the session tree (`/tree <id>` rewinds head to that node)",
         ),
+        SlashCommand::new(
+            "/thinking",
+            "Set reasoning effort: off, minimal, low, medium, high, xhigh (Shift+Tab to cycle)",
+        ),
     ];
     let theme = tau_themes::Theme::builtin();
     let prompt_style = tau_cli_term::resolve::resolve(&theme, tau_themes::names::PROMPT_MARKER);
@@ -362,8 +366,12 @@ fn run_chat(session_id: &str, attach: bool) -> Result<(), CliError> {
     let renderer_handle = handle.clone();
     let renderer_rx = event_rx;
     let renderer_completion_data = completion_data;
+    // Pre-build the renderer so we can grab its `thinking_state`
+    // handle for the input loop's Shift+Tab cycle.
+    let renderer = EventRenderer::new(renderer_handle, renderer_completion_data, theme);
+    let thinking_state = renderer.thinking_state();
     let _renderer = std::thread::spawn(move || {
-        let mut renderer = EventRenderer::new(renderer_handle, renderer_completion_data, theme);
+        let mut renderer = renderer;
         while let Ok(event) = renderer_rx.recv() {
             renderer.handle(&event);
         }
@@ -371,7 +379,12 @@ fn run_chat(session_id: &str, attach: bool) -> Result<(), CliError> {
 
     // Terminal input loop — owns the writer, no locking needed.
     let mut active_session_id = session_id.to_owned();
-    let exit = terminal_input_loop(&mut term, &mut writer, &mut active_session_id)?;
+    let exit = terminal_input_loop(
+        &mut term,
+        &mut writer,
+        &mut active_session_id,
+        thinking_state,
+    )?;
 
     // Send disconnect (best effort). Reason differs so the daemon's
     // debug log makes the distinction visible.
@@ -424,6 +437,7 @@ fn terminal_input_loop(
     term: &mut tau_cli_term::HighTerm,
     writer: &mut EventWriter<BufWriter<UnixStream>>,
     session_id: &mut String,
+    thinking_state: std::sync::Arc<std::sync::atomic::AtomicU8>,
 ) -> Result<InputLoopExit, CliError> {
     use tau_cli_term::Event as TermEvent;
 
@@ -483,6 +497,22 @@ fn terminal_input_loop(
                     }
                     continue;
                 }
+                if let Some(arg) = text.strip_prefix("/thinking ") {
+                    match arg.trim().parse::<tau_proto::ThinkingLevel>() {
+                        Ok(level) => {
+                            let _ = writer.write_event(&Event::UiSetThinkingLevel(
+                                tau_proto::UiSetThinkingLevel { level },
+                            ));
+                            let _ = writer.flush();
+                        }
+                        Err(msg) => eprintln!("/thinking: {msg}"),
+                    }
+                    continue;
+                }
+                if text == "/thinking" {
+                    eprintln!("/thinking <level> — one of: off, minimal, low, medium, high, xhigh");
+                    continue;
+                }
                 if let Some(model) = text.strip_prefix("/model ") {
                     let model = model.trim();
                     if !model.is_empty() {
@@ -532,7 +562,44 @@ fn terminal_input_loop(
             }
             TermEvent::Eof => return Ok(InputLoopExit::Quit),
             TermEvent::Resize { .. } | TermEvent::BufferChanged => {}
+            TermEvent::BackTab => {
+                // Pi-style: cycle thinking level. Read the current
+                // level from the shared atomic the renderer keeps in
+                // sync with `HarnessThinkingLevelChanged`, advance,
+                // send the request. The harness echoes back and the
+                // renderer updates the status block.
+                let current =
+                    thinking_from_u8(thinking_state.load(std::sync::atomic::Ordering::Relaxed));
+                let next = current.next();
+                let _ =
+                    writer.write_event(&Event::UiSetThinkingLevel(tau_proto::UiSetThinkingLevel {
+                        level: next,
+                    }));
+                let _ = writer.flush();
+            }
         }
+    }
+}
+
+fn thinking_to_u8(level: tau_proto::ThinkingLevel) -> u8 {
+    match level {
+        tau_proto::ThinkingLevel::Off => 0,
+        tau_proto::ThinkingLevel::Minimal => 1,
+        tau_proto::ThinkingLevel::Low => 2,
+        tau_proto::ThinkingLevel::Medium => 3,
+        tau_proto::ThinkingLevel::High => 4,
+        tau_proto::ThinkingLevel::XHigh => 5,
+    }
+}
+
+fn thinking_from_u8(value: u8) -> tau_proto::ThinkingLevel {
+    match value {
+        1 => tau_proto::ThinkingLevel::Minimal,
+        2 => tau_proto::ThinkingLevel::Low,
+        3 => tau_proto::ThinkingLevel::Medium,
+        4 => tau_proto::ThinkingLevel::High,
+        5 => tau_proto::ThinkingLevel::XHigh,
+        _ => tau_proto::ThinkingLevel::Off,
     }
 }
 
@@ -922,8 +989,16 @@ struct EventRenderer {
     /// Live extension blocks keyed by instance_id. Shown in
     /// above_active while starting, moved to history when ready.
     extension_blocks: HashMap<tau_proto::ExtensionInstanceId, tau_cli_term::BlockId>,
-    /// Persistent status bar block showing the current model.
+    /// Persistent status bar block showing the current model + thinking level.
     model_status_block: Option<tau_cli_term::BlockId>,
+    /// Current model id (cached so we can re-render the status bar
+    /// when the thinking level changes, and vice versa).
+    current_model: tau_proto::ModelId,
+    /// Current thinking level. Mirrored into `thinking_state` so the
+    /// input thread can read it for Shift+Tab cycling.
+    current_thinking: tau_proto::ThinkingLevel,
+    /// Shared thinking-level mirror for the input thread.
+    thinking_state: std::sync::Arc<std::sync::atomic::AtomicU8>,
 }
 
 /// In-flight state for a user `!`/`!!` shell block.
@@ -953,7 +1028,42 @@ impl EventRenderer {
             shell_blocks: HashMap::new(),
             extension_blocks: HashMap::new(),
             model_status_block: None,
+            current_model: tau_proto::ModelId::from(""),
+            current_thinking: tau_proto::ThinkingLevel::Off,
+            thinking_state: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(thinking_to_u8(
+                tau_proto::ThinkingLevel::Off,
+            ))),
         }
+    }
+
+    /// Returns a clone of the shared thinking-level mirror, used by the
+    /// input thread to read the current level for Shift+Tab cycling.
+    fn thinking_state(&self) -> std::sync::Arc<std::sync::atomic::AtomicU8> {
+        self.thinking_state.clone()
+    }
+
+    fn render_model_status(&mut self) {
+        use tau_cli_term::resolve::themed_block;
+        use tau_themes::names;
+        let label = if self.current_model.is_empty() {
+            "no model selected".to_string()
+        } else if matches!(self.current_thinking, tau_proto::ThinkingLevel::Off) {
+            self.current_model.to_string()
+        } else {
+            format!("{} ({})", self.current_model, self.current_thinking)
+        };
+        let block = themed_block(&self.theme, names::MODEL_STATUS, label);
+        match self.model_status_block {
+            Some(bid) => {
+                self.handle.set_block(bid, block);
+            }
+            None => {
+                let bid = self.handle.new_block(block);
+                self.handle.push_below(bid);
+                self.model_status_block = Some(bid);
+            }
+        }
+        self.handle.redraw();
     }
 
     fn handle(&mut self, event: &Event) {
@@ -1200,23 +1310,16 @@ impl EventRenderer {
                     .set_arg_completions(tau_cli_term::CommandName::new("/model"), items);
             }
             Event::HarnessModelSelected(selected) => {
-                let label = if selected.model.is_empty() {
-                    "no model selected".to_string()
-                } else {
-                    selected.model.to_string()
-                };
-                let block = themed_block(&self.theme, names::MODEL_STATUS, label);
-                match self.model_status_block {
-                    Some(bid) => {
-                        self.handle.set_block(bid, block);
-                    }
-                    None => {
-                        let bid = self.handle.new_block(block);
-                        self.handle.push_below(bid);
-                        self.model_status_block = Some(bid);
-                    }
-                }
-                self.handle.redraw();
+                self.current_model = selected.model.clone();
+                self.render_model_status();
+            }
+            Event::HarnessThinkingLevelChanged(changed) => {
+                self.current_thinking = changed.level;
+                self.thinking_state.store(
+                    thinking_to_u8(changed.level),
+                    std::sync::atomic::Ordering::Relaxed,
+                );
+                self.render_model_status();
             }
             Event::LifecycleDisconnect(disconnect) => {
                 let reason = disconnect.reason.as_deref().unwrap_or("disconnected");

@@ -502,6 +502,8 @@ struct Harness {
     available_models: Vec<ModelId>,
     /// Currently selected model as `"provider/model_id"`.
     selected_model: ModelId,
+    /// Currently selected reasoning effort level.
+    selected_thinking_level: tau_proto::ThinkingLevel,
     /// Skills discovered by extensions, keyed by name.
     discovered_skills: std::collections::HashMap<tau_proto::SkillName, DiscoveredSkill>,
     /// AGENTS.md files discovered by extensions, in delivery order.
@@ -613,6 +615,7 @@ impl Harness {
         });
 
         let (available_models, selected_model) = load_model_list(&dirs);
+        let selected_thinking_level = load_last_thinking_level(&dirs);
 
         let mut harness = Self {
             tx,
@@ -637,6 +640,7 @@ impl Harness {
             debug_log: None,
             available_models,
             selected_model,
+            selected_thinking_level,
             discovered_skills: std::collections::HashMap::new(),
             discovered_agents_files: Vec::new(),
             initialized_sessions: std::collections::HashSet::new(),
@@ -742,6 +746,7 @@ impl Harness {
         let agent_connection_id = agent_connection_id.ok_or(HarnessError::NoAgentConfigured)?;
 
         let (available_models, selected_model) = load_model_list(&dirs);
+        let selected_thinking_level = load_last_thinking_level(&dirs);
 
         let mut harness = Self {
             tx,
@@ -766,6 +771,7 @@ impl Harness {
             debug_log: None,
             available_models,
             selected_model,
+            selected_thinking_level,
             discovered_skills: std::collections::HashMap::new(),
             discovered_agents_files: Vec::new(),
             initialized_sessions: std::collections::HashSet::new(),
@@ -1184,7 +1190,11 @@ impl Harness {
                 if self.available_models.contains(&select.model) {
                     let was_empty = self.selected_model.is_empty();
                     self.selected_model = select.model.clone();
-                    save_last_selected_model(&self.dirs, &self.selected_model);
+                    save_harness_state(
+                        &self.dirs,
+                        self.selected_model.as_str(),
+                        self.selected_thinking_level,
+                    );
                     self.publish_event(
                         None,
                         Event::HarnessModelSelected(HarnessModelSelected {
@@ -1204,6 +1214,21 @@ impl Harness {
                         }),
                     );
                 }
+                Ok(true)
+            }
+            Event::UiSetThinkingLevel(req) => {
+                self.selected_thinking_level = req.level;
+                save_harness_state(
+                    &self.dirs,
+                    self.selected_model.as_str(),
+                    self.selected_thinking_level,
+                );
+                self.publish_event(
+                    None,
+                    Event::HarnessThinkingLevelChanged(tau_proto::HarnessThinkingLevelChanged {
+                        level: req.level,
+                    }),
+                );
                 Ok(true)
             }
             Event::UiPromptSubmitted(prompt) => {
@@ -1452,6 +1477,13 @@ impl Harness {
         });
         if selector_matches_event(selectors, &selected_event) {
             let _ = self.bus.send_to(client_id, None, selected_event);
+        }
+        let thinking_event =
+            Event::HarnessThinkingLevelChanged(tau_proto::HarnessThinkingLevelChanged {
+                level: self.selected_thinking_level,
+            });
+        if selector_matches_event(selectors, &thinking_event) {
+            let _ = self.bus.send_to(client_id, None, thinking_event);
         }
     }
 
@@ -2549,14 +2581,42 @@ fn load_last_selected_model(dirs: &tau_config::settings::TauDirs) -> Option<Stri
     json["last_selected_model"].as_str().map(String::from)
 }
 
-/// Persist the last-selected model to `<state_dir>/harness-state.json`.
-fn save_last_selected_model(dirs: &tau_config::settings::TauDirs, model: &str) {
+/// Load the last-selected thinking level (defaults to `Off`).
+fn load_last_thinking_level(dirs: &tau_config::settings::TauDirs) -> tau_proto::ThinkingLevel {
+    let Some(path) = dirs
+        .state_dir
+        .as_ref()
+        .map(|d| d.join("harness-state.json"))
+    else {
+        return tau_proto::ThinkingLevel::Off;
+    };
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return tau_proto::ThinkingLevel::Off;
+    };
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return tau_proto::ThinkingLevel::Off;
+    };
+    json["last_thinking_level"]
+        .as_str()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(tau_proto::ThinkingLevel::Off)
+}
+
+/// Persist model + thinking level to `<state_dir>/harness-state.json`.
+fn save_harness_state(
+    dirs: &tau_config::settings::TauDirs,
+    model: &str,
+    thinking: tau_proto::ThinkingLevel,
+) {
     let Some(dir) = dirs.state_dir.as_ref() else {
         return;
     };
     let path = dir.join("harness-state.json");
     let _ = std::fs::create_dir_all(dir);
-    let json = serde_json::json!({ "last_selected_model": model });
+    let json = serde_json::json!({
+        "last_selected_model": model,
+        "last_thinking_level": thinking.as_str(),
+    });
     let _ = serde_json::to_string_pretty(&json)
         .ok()
         .and_then(|s| std::fs::write(&path, s).ok());
