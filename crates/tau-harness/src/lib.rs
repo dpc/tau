@@ -1401,7 +1401,7 @@ impl Harness {
     /// `ExtAgentsMdAvailable` and `ExtensionContextReady` are replayed
     /// so that the CLI — which connects after the daemon's eager
     /// default-session init has already fired — still gets to render
-    /// the "loaded AGENTS.md: …" / "session context ready" lines.
+    /// the "loaded: …" / "session context ready" lines.
     /// Without replay the events arrive before the subscriber exists
     /// and would be silently dropped.
     fn replay_harness_info(&mut self, client_id: &str, selectors: &[EventSelector]) {
@@ -3721,8 +3721,8 @@ mod tests {
         // fired, so live subscription would miss `ExtAgentsMdAvailable`
         // and `ExtensionContextReady`. `replay_harness_info` must
         // replay them from the event log at subscribe time so the UI
-        // still renders the "loaded AGENTS.md: …" / "session context
-        // ready" lines.
+        // still renders the "loaded: …" / "session context ready"
+        // lines.
         let td = TempDir::new().expect("tempdir");
         let sp = td.path().join("sessions.cbor");
         let pp = td.path().join("policy.cbor");

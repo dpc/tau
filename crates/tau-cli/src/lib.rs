@@ -1080,15 +1080,10 @@ impl EventRenderer {
                 ));
             }
             Event::ExtAgentsMdAvailable(agents) => {
-                let file_name = agents
-                    .file_path
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .unwrap_or("AGENTS.md");
                 self.handle.print_output(themed_block(
                     &self.theme,
                     names::SYSTEM_INFO,
-                    format!("loaded {file_name}: {}", agents.file_path.display()),
+                    format!("loaded: {}", agents.file_path.display()),
                 ));
             }
             Event::ExtensionContextReady(_) => {
