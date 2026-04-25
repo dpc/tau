@@ -281,15 +281,23 @@ pub enum RawEvent {
 ///
 /// Owns the input event loop. Call [`Term::get_next_event`] in a loop to
 /// drive it.
+///
+/// Real terminals read from stdin synchronously inside `get_next_event`
+/// — there is intentionally **no** background reader thread, so there
+/// is nobody to race a foreground program (like `$EDITOR`) for stdin
+/// bytes. While the main thread is blocked in `event::read()`, the
+/// redraw thread keeps repainting on its own clock.
+///
+/// Virtual terminals (tests) use the injected channel branch.
 pub struct Term {
     /// Shared mutable state.
     state: Arc<Mutex<SharedState>>,
     /// Notifies the redraw thread that the screen needs updating.
     redraw: tau_blocking_notify_channel::Sender,
-    /// Receives raw terminal events from the input reader thread.
-    term_input_rx: std::sync::mpsc::Receiver<RawEvent>,
-    /// Input reader thread handle (kept alive for the lifetime of Term).
-    _term_input_thread: JoinHandle<()>,
+    /// For virtual terms only: receives events injected via the test
+    /// sender returned from `new_virtual`. Real terms leave this
+    /// `None` and read directly from crossterm.
+    term_input_rx: Option<std::sync::mpsc::Receiver<RawEvent>>,
     /// Redraw thread handle — taken and joined on drop.
     redraw_thread: Option<JoinHandle<()>>,
     /// Whether to disable raw mode on drop (false for virtual terms).
@@ -340,11 +348,6 @@ impl Term {
             redraw_loop(redraw_state, redraw_rx, redraw_writer, &redraw_sync_cv);
         });
 
-        let (term_input_tx, term_input_rx) = std::sync::mpsc::channel();
-        let term_input_thread = thread::spawn(move || {
-            term_input_reader_loop(term_input_tx);
-        });
-
         let handle = TermHandle {
             state: Arc::clone(&state),
             sync_condvar,
@@ -357,8 +360,7 @@ impl Term {
             Self {
                 state,
                 redraw: redraw_tx,
-                term_input_rx,
-                _term_input_thread: term_input_thread,
+                term_input_rx: None,
                 redraw_thread: Some(redraw_thread),
                 owns_raw_mode: true,
             },
@@ -418,8 +420,7 @@ impl Term {
         let term = Self {
             state,
             redraw: redraw_tx,
-            term_input_rx,
-            _term_input_thread: thread::spawn(|| {}),
+            term_input_rx: Some(term_input_rx),
             redraw_thread: Some(redraw_thread),
             owns_raw_mode: false,
         };
@@ -439,9 +440,9 @@ impl Term {
     /// a redraw before returning so internal state changes are visible.
     pub fn get_next_event(&self) -> io::Result<Event> {
         loop {
-            let raw = match self.term_input_rx.recv() {
-                Ok(ev) => ev,
-                Err(_) => return Ok(Event::Eof),
+            let raw = match self.next_raw() {
+                Some(ev) => ev,
+                None => return Ok(Event::Eof),
             };
 
             match raw {
@@ -487,19 +488,40 @@ impl Term {
         }
     }
 
+    /// Reads the next raw event, blocking until one arrives.
+    ///
+    /// Real terminals call `crossterm::event::read()` inline so there
+    /// is no background reader thread fighting a foreground program
+    /// (e.g. `$EDITOR`) for stdin bytes. Virtual terminals receive
+    /// from the test sender returned by `new_virtual`.
+    fn next_raw(&self) -> Option<RawEvent> {
+        if let Some(rx) = self.term_input_rx.as_ref() {
+            return rx.recv().ok();
+        }
+        match event::read().ok()? {
+            CtEvent::Key(key) => Some(RawEvent::Key(key)),
+            CtEvent::Resize(w, h) => Some(RawEvent::Resize(w, h)),
+            CtEvent::Paste(text) => Some(RawEvent::Paste(text)),
+            // Mouse / focus events: skip and recurse so the caller
+            // still observes the channel/stdin as "blocking".
+            _ => self.next_raw(),
+        }
+    }
+
     /// Releases the terminal for an external program (e.g. `$EDITOR`):
-    /// disables raw mode and bracketed paste, and clears the screen
-    /// so the editor starts on a clean canvas. Pair with
-    /// [`Self::resume_after_external`] in a `try` / `finally`-style
-    /// flow — failing to resume leaves the terminal cooked.
+    /// disables raw mode + bracketed paste and clears the screen so
+    /// the editor starts on a clean canvas.
+    ///
+    /// No reader-thread coordination is needed — the only reader is
+    /// the main thread, which is the same thread that drives the
+    /// external program via `Command::status`, so it can't be in
+    /// `event::read()` at the same time.
     pub fn pause_for_external(&self) -> io::Result<()> {
         if !self.owns_raw_mode {
             return Ok(());
         }
         let _ = crossterm::execute!(io::stdout(), crossterm::event::DisableBracketedPaste);
         terminal::disable_raw_mode()?;
-        // Move cursor below current rendering and clear screen so the
-        // external editor doesn't have to overwrite our prompt + blocks.
         let _ = crossterm::execute!(
             io::stdout(),
             crossterm::style::ResetColor,
@@ -517,7 +539,6 @@ impl Term {
         }
         terminal::enable_raw_mode()?;
         let _ = crossterm::execute!(io::stdout(), crossterm::event::EnableBracketedPaste);
-        // Force the redraw thread to repaint from scratch.
         let _ = crossterm::execute!(
             io::stdout(),
             crossterm::terminal::Clear(crossterm::terminal::ClearType::All),
@@ -1024,22 +1045,6 @@ fn full_render(
     screen.reset_to(visible_lines, cursor_in_visible, layout.cursor_col);
 
     Ok(())
-}
-
-// --- Input reader thread ---
-
-fn term_input_reader_loop(tx: std::sync::mpsc::Sender<RawEvent>) {
-    while let Ok(ev) = event::read() {
-        let raw = match ev {
-            CtEvent::Key(key) => RawEvent::Key(key),
-            CtEvent::Resize(w, h) => RawEvent::Resize(w, h),
-            CtEvent::Paste(text) => RawEvent::Paste(text),
-            _ => continue,
-        };
-        if tx.send(raw).is_err() {
-            break;
-        }
-    }
 }
 
 // --- Helpers ---
