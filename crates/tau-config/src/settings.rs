@@ -8,10 +8,11 @@
 //! Uses the `config` crate for layered JSON5 loading.
 
 use std::collections::HashMap;
+
+use serde::Deserialize;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-use serde::Deserialize;
 
 // ---------------------------------------------------------------------------
 // CLI settings
@@ -47,6 +48,9 @@ pub struct HarnessSettings {
     /// Default model provider/model to use (e.g.
     /// "anthropic/claude-sonnet-4-20250514").
     pub default_model: Option<String>,
+
+    /// Default thinking level per model (`provider/model` -> level).
+    pub default_thinking_levels: HashMap<String, tau_proto::ThinkingLevel>,
 
     /// Extension table, keyed by name. Built-in entries (`agent`,
     /// `shell`) come pre-baked at the harness level; anything the
@@ -495,6 +499,7 @@ mod tests {
     fn default_harness_settings_have_no_model() {
         let s = HarnessSettings::default();
         assert!(s.default_model.is_none());
+        assert!(s.default_thinking_levels.is_empty());
     }
 
     #[test]
@@ -514,7 +519,12 @@ mod tests {
         let dir = td.path();
         std::fs::write(
             dir.join("harness.json5"),
-            r#"{ default_model: "anthropic/claude-sonnet-4-20250514" }"#,
+            r#"{
+                default_model: "anthropic/claude-sonnet-4-20250514",
+                default_thinking_levels: {
+                    "anthropic/claude-sonnet-4-20250514": "high",
+                },
+            }"#,
         )
         .expect("write");
 
@@ -522,6 +532,12 @@ mod tests {
         assert_eq!(
             s.default_model.as_deref(),
             Some("anthropic/claude-sonnet-4-20250514")
+        );
+        assert_eq!(
+            s.default_thinking_levels
+                .get("anthropic/claude-sonnet-4-20250514")
+                .copied(),
+            Some(tau_proto::ThinkingLevel::High)
         );
     }
 
@@ -716,6 +732,7 @@ mod tests {
         assert!(s.greeting);
         let h: HarnessSettings = load_json5_layered(td.path(), "harness").expect("load");
         assert!(h.default_model.is_none());
+        assert!(h.default_thinking_levels.is_empty());
         let m: ModelRegistry = load_json5_layered(td.path(), "models").expect("load");
         assert!(m.providers.is_empty());
     }

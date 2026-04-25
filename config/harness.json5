@@ -2,4 +2,9 @@
   // Default model to use, in "provider/model-id" format.
   // The provider must be defined in models.json5.
   // default_model: "local/llama-3",
+
+  // Optional per-model default thinking levels.
+  // default_thinking_levels: {
+  //   "local/llama-3": "high",
+  // },
 }
