@@ -6,6 +6,7 @@
 //! - `tau.sock` — Unix socket for client connections
 //! - `tau.dir` — project root path (discovery marker)
 //! - `tau.pid` — daemon process ID
+//! - `tau.session_id` — bound session id (so `tau run -a` can resume it)
 //!
 //! Finding `tau.dir` guarantees the socket is already bound (the marker
 //! is written *after* binding the socket).
@@ -16,6 +17,7 @@ use std::path::{Path, PathBuf};
 const SOCK_FILENAME: &str = "tau.sock";
 const DIR_FILENAME: &str = "tau.dir";
 const PID_FILENAME: &str = "tau.pid";
+const SESSION_ID_FILENAME: &str = "tau.session_id";
 
 /// Returns the root runtime directory for all tau daemon instances.
 #[must_use]
@@ -68,10 +70,25 @@ impl DaemonDir {
         std::fs::write(self.path.join(PID_FILENAME), std::process::id().to_string())
     }
 
+    /// Writes the bound session id so `tau run -a` can join that
+    /// specific session instead of minting a fresh one.
+    pub fn write_session_id(&self, session_id: &str) -> Result<(), std::io::Error> {
+        std::fs::write(self.path.join(SESSION_ID_FILENAME), session_id.as_bytes())
+    }
+
     /// Removes the daemon directory.
     pub fn cleanup(&self) {
         let _ = std::fs::remove_dir_all(&self.path);
     }
+}
+
+/// Reads the session id a running daemon at `daemon_dir` is bound to.
+#[must_use]
+pub fn read_session_id(daemon_dir: &Path) -> Option<String> {
+    std::fs::read_to_string(daemon_dir.join(SESSION_ID_FILENAME))
+        .ok()
+        .map(|s| s.trim().to_owned())
+        .filter(|s| !s.is_empty())
 }
 
 /// Creates a new daemon directory for the current process.

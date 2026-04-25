@@ -3069,6 +3069,7 @@ pub fn run_harness_daemon(
     // Write marker AFTER extensions are ready.
     daemon_dir.write_marker()?;
     daemon_dir.write_pid()?;
+    daemon_dir.write_session_id(eager_session_id)?;
 
     let tx = harness.tx.clone();
     thread::spawn(move || {

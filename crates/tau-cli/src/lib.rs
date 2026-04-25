@@ -1251,7 +1251,28 @@ pub fn main_with_args() -> std::process::ExitCode {
                 config: _config,
                 attach,
             } => {
-                let session_id = resolve_run_session_id(resume.as_deref())?;
+                let session_id = if attach {
+                    let cwd = std::env::current_dir()?;
+                    let daemon_dir =
+                        runtime_dir::find_harness_for_dir(&cwd).ok_or(CliError::NoRunningDaemon)?;
+                    let daemon_session_id =
+                        runtime_dir::read_session_id(&daemon_dir).ok_or_else(|| {
+                            CliError::Participant(
+                                "running daemon did not publish its session id".to_owned(),
+                            )
+                        })?;
+                    if let Some(requested) = resume.as_deref().filter(|s| !s.is_empty()) {
+                        if requested != daemon_session_id {
+                            return Err(CliError::Participant(format!(
+                                "--attach: daemon is bound to session `{daemon_session_id}`, \
+                                 cannot resume `{requested}` (start a fresh daemon for that)"
+                            )));
+                        }
+                    }
+                    daemon_session_id
+                } else {
+                    resolve_run_session_id(resume.as_deref())?
+                };
                 run_chat(&session_id, attach)
             }
 
