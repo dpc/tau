@@ -1365,6 +1365,7 @@ version = "0.1.0"
 dependencies = [
  "tau-cli-term-raw",
  "tau-themes",
+ "tempfile",
 ]
 
 [[package]]

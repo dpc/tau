@@ -579,11 +579,6 @@ fn terminal_input_loop(
             }
             TermEvent::Eof => return Ok(InputLoopExit::Quit),
             TermEvent::Resize { .. } | TermEvent::BufferChanged => {}
-            TermEvent::ExternalEditor => {
-                if let Err(msg) = open_in_external_editor(term) {
-                    print_local(&format!("external editor: {msg}"));
-                }
-            }
             TermEvent::BackTab => {
                 // Pi-style: cycle thinking level. Read the current
                 // level from the shared atomic the renderer keeps in
@@ -601,62 +596,6 @@ fn terminal_input_loop(
             }
         }
     }
-}
-
-/// Spawns `$VISUAL || $EDITOR` synchronously with the current input
-/// buffer in a tempfile, releases raw mode while it runs, and replaces
-/// the buffer with the result on success. Pi-style.
-fn open_in_external_editor(term: &mut tau_cli_term::HighTerm) -> Result<(), String> {
-    let editor_cmd = std::env::var("VISUAL")
-        .ok()
-        .or_else(|| std::env::var("EDITOR").ok())
-        .filter(|s| !s.trim().is_empty())
-        .ok_or_else(|| "no editor configured ($VISUAL / $EDITOR not set)".to_owned())?;
-
-    let current = term.get_buffer();
-    let tmp = tempfile::Builder::new()
-        .prefix("tau-edit-")
-        .suffix(".tau.md")
-        .tempfile()
-        .map_err(|e| format!("could not create tempfile: {e}"))?;
-    std::fs::write(tmp.path(), current.as_bytes())
-        .map_err(|e| format!("could not write tempfile: {e}"))?;
-
-    // Split so callers can pass `code --wait` etc.
-    let mut parts = editor_cmd.split_whitespace();
-    let editor = parts
-        .next()
-        .expect("split_whitespace yields at least one part");
-    let editor_args: Vec<&str> = parts.collect();
-
-    term.pause_for_external()
-        .map_err(|e| format!("could not release terminal: {e}"))?;
-
-    // RAII so a panic / error in spawn still reaches resume_after_external below.
-    struct ResumeGuard<'a>(&'a tau_cli_term::HighTerm);
-    impl Drop for ResumeGuard<'_> {
-        fn drop(&mut self) {
-            let _ = self.0.resume_after_external();
-        }
-    }
-    let _guard = ResumeGuard(term);
-
-    let status = Command::new(editor)
-        .args(&editor_args)
-        .arg(tmp.path())
-        .status()
-        .map_err(|e| format!("could not spawn `{editor}`: {e}"))?;
-
-    if !status.success() {
-        return Err(format!("editor exited with {status}; buffer unchanged"));
-    }
-
-    let new_text =
-        std::fs::read_to_string(tmp.path()).map_err(|e| format!("could not read tempfile: {e}"))?;
-    // Trim a single trailing newline — editors append one almost universally.
-    let new_text = new_text.strip_suffix('\n').unwrap_or(&new_text).to_owned();
-    term.set_buffer(new_text);
-    Ok(())
 }
 
 fn thinking_to_u8(level: tau_proto::ThinkingLevel) -> u8 {

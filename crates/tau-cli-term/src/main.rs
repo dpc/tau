@@ -75,7 +75,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             Event::BufferChanged => {}
             Event::BackTab => {}
-            Event::ExternalEditor => {}
         }
     }
 
