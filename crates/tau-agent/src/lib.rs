@@ -40,8 +40,8 @@ where
     }))?;
     writer.write_event(&Event::LifecycleSubscribe(LifecycleSubscribe {
         selectors: vec![
-            EventSelector::Exact(EventName::SessionPromptCreated),
-            EventSelector::Exact(EventName::LifecycleDisconnect),
+            EventSelector::Exact(EventName::SESSION_PROMPT_CREATED),
+            EventSelector::Exact(EventName::LIFECYCLE_DISCONNECT),
         ],
     }))?;
     writer.write_event(&Event::LifecycleReady(LifecycleReady {
@@ -315,8 +315,8 @@ where
     }))?;
     writer.write_event(&Event::LifecycleSubscribe(LifecycleSubscribe {
         selectors: vec![
-            EventSelector::Exact(EventName::SessionPromptCreated),
-            EventSelector::Exact(EventName::LifecycleDisconnect),
+            EventSelector::Exact(EventName::SESSION_PROMPT_CREATED),
+            EventSelector::Exact(EventName::LIFECYCLE_DISCONNECT),
         ],
     }))?;
     writer.write_event(&Event::LifecycleReady(LifecycleReady {

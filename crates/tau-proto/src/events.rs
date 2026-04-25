@@ -19,205 +19,268 @@ use crate::{
 // Event names
 // ---------------------------------------------------------------------------
 
-/// Known dotted event names for the protocol surface.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
-pub enum EventName {
-    // Lifecycle
-    #[serde(rename = "lifecycle.hello")]
-    LifecycleHello,
-    #[serde(rename = "lifecycle.subscribe")]
-    LifecycleSubscribe,
-    #[serde(rename = "lifecycle.ready")]
-    LifecycleReady,
-    #[serde(rename = "lifecycle.disconnect")]
-    LifecycleDisconnect,
-
-    // Tools
-    #[serde(rename = "tool.register")]
-    ToolRegister,
-    #[serde(rename = "tool.unregister")]
-    ToolUnregister,
-    #[serde(rename = "tool.request")]
-    ToolRequest,
-    #[serde(rename = "tool.invoke")]
-    ToolInvoke,
-    #[serde(rename = "tool.result")]
-    ToolResult,
-    #[serde(rename = "tool.error")]
-    ToolError,
-    #[serde(rename = "tool.progress")]
-    ToolProgress,
-    #[serde(rename = "tool.cancel")]
-    ToolCancel,
-    #[serde(rename = "tool.cancelled")]
-    ToolCancelled,
-
-    // Extension supervision
-    #[serde(rename = "extension.starting")]
-    ExtensionStarting,
-    #[serde(rename = "extension.ready")]
-    ExtensionReady,
-    #[serde(rename = "extension.exited")]
-    ExtensionExited,
-    #[serde(rename = "extension.restarting")]
-    ExtensionRestarting,
-    #[serde(rename = "extension.skill_available")]
-    ExtSkillAvailable,
-    #[serde(rename = "extension.agents_md_available")]
-    ExtAgentsMdAvailable,
-    #[serde(rename = "extension.context_ready")]
-    ExtensionContextReady,
-
-    // Harness informational messages
-    #[serde(rename = "harness.info")]
-    HarnessInfo,
-    #[serde(rename = "harness.models_available")]
-    HarnessModelsAvailable,
-    #[serde(rename = "harness.model_selected")]
-    HarnessModelSelected,
-
-    // UI events — facts from the UI
-    #[serde(rename = "ui.prompt_submitted")]
-    UiPromptSubmitted,
-    #[serde(rename = "ui.model_select")]
-    UiModelSelect,
-    #[serde(rename = "ui.detach_request")]
-    UiDetachRequest,
-    #[serde(rename = "ui.shell_command")]
-    UiShellCommand,
-
-    // Shell events — facts from an extension running a user-initiated
-    // `!` / `!!` shell command on behalf of the UI
-    #[serde(rename = "shell.command_progress")]
-    ShellCommandProgress,
-    #[serde(rename = "shell.command_finished")]
-    ShellCommandFinished,
-
-    // Session events — facts from the harness session tracker
-    #[serde(rename = "session.prompt_queued")]
-    SessionPromptQueued,
-    #[serde(rename = "session.started")]
-    SessionStarted,
-    #[serde(rename = "session.prompt_created")]
-    SessionPromptCreated,
-
-    // Agent events — facts from the agent backend
-    #[serde(rename = "agent.prompt_submitted")]
-    AgentPromptSubmitted,
-    #[serde(rename = "agent.response_updated")]
-    AgentResponseUpdated,
-    #[serde(rename = "agent.response_finished")]
-    AgentResponseFinished,
-
-    // Wire-level transport (at-least-once delivery)
-    #[serde(rename = "wire.log_event")]
-    LogEvent,
-    #[serde(rename = "wire.ack")]
-    Ack,
+/// First segment of a dotted event name.
+///
+/// The well-known categories are enumerated so that subscription
+/// policies, routing, and other category-level logic can branch on a
+/// closed set. Unknown categories — e.g. from a future extension that
+/// invents its own family — round-trip through [`EventCategory::Other`]
+/// without losing fidelity.
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+pub enum EventCategory {
+    Lifecycle,
+    Tool,
+    Extension,
+    Harness,
+    Ui,
+    Shell,
+    Session,
+    Agent,
+    /// Wire-level transport, used for the at-least-once `LogEvent` /
+    /// `Ack` envelope.
+    Wire,
+    /// Any category we don't recognize, kept verbatim.
+    Other(String),
 }
 
-impl EventName {
-    /// Returns the dotted wire-format name for this event.
+impl EventCategory {
+    /// The wire string for this category (the part before the first
+    /// dot in the dotted name).
     #[must_use]
-    pub const fn as_str(self) -> &'static str {
+    pub fn as_str(&self) -> &str {
         match self {
-            Self::LifecycleHello => "lifecycle.hello",
-            Self::LifecycleSubscribe => "lifecycle.subscribe",
-            Self::LifecycleReady => "lifecycle.ready",
-            Self::LifecycleDisconnect => "lifecycle.disconnect",
-            Self::ToolRegister => "tool.register",
-            Self::ToolUnregister => "tool.unregister",
-            Self::ToolRequest => "tool.request",
-            Self::ToolInvoke => "tool.invoke",
-            Self::ToolResult => "tool.result",
-            Self::ToolError => "tool.error",
-            Self::ToolProgress => "tool.progress",
-            Self::ToolCancel => "tool.cancel",
-            Self::ToolCancelled => "tool.cancelled",
-            Self::ExtensionStarting => "extension.starting",
-            Self::ExtensionReady => "extension.ready",
-            Self::ExtensionExited => "extension.exited",
-            Self::ExtensionRestarting => "extension.restarting",
-            Self::ExtSkillAvailable => "extension.skill_available",
-            Self::ExtAgentsMdAvailable => "extension.agents_md_available",
-            Self::ExtensionContextReady => "extension.context_ready",
-            Self::HarnessInfo => "harness.info",
-            Self::HarnessModelsAvailable => "harness.models_available",
-            Self::HarnessModelSelected => "harness.model_selected",
-            Self::UiPromptSubmitted => "ui.prompt_submitted",
-            Self::UiModelSelect => "ui.model_select",
-            Self::UiDetachRequest => "ui.detach_request",
-            Self::UiShellCommand => "ui.shell_command",
-            Self::ShellCommandProgress => "shell.command_progress",
-            Self::ShellCommandFinished => "shell.command_finished",
-            Self::SessionPromptQueued => "session.prompt_queued",
-            Self::SessionStarted => "session.started",
-            Self::SessionPromptCreated => "session.prompt_created",
-            Self::AgentPromptSubmitted => "agent.prompt_submitted",
-            Self::AgentResponseUpdated => "agent.response_updated",
-            Self::AgentResponseFinished => "agent.response_finished",
-            Self::LogEvent => "wire.log_event",
-            Self::Ack => "wire.ack",
+            Self::Lifecycle => "lifecycle",
+            Self::Tool => "tool",
+            Self::Extension => "extension",
+            Self::Harness => "harness",
+            Self::Ui => "ui",
+            Self::Shell => "shell",
+            Self::Session => "session",
+            Self::Agent => "agent",
+            Self::Wire => "wire",
+            Self::Other(s) => s.as_str(),
+        }
+    }
+
+    /// Parse a category string. Always succeeds; unknown strings
+    /// become [`EventCategory::Other`].
+    #[must_use]
+    pub fn from_wire(s: &str) -> Self {
+        match s {
+            "lifecycle" => Self::Lifecycle,
+            "tool" => Self::Tool,
+            "extension" => Self::Extension,
+            "harness" => Self::Harness,
+            "ui" => Self::Ui,
+            "shell" => Self::Shell,
+            "session" => Self::Session,
+            "agent" => Self::Agent,
+            "wire" => Self::Wire,
+            other => Self::Other(other.to_owned()),
         }
     }
 }
 
-impl fmt::Display for EventName {
+impl fmt::Display for EventCategory {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_str())
+    }
+}
+
+/// Second segment of a dotted event name.
+///
+/// Open-ended: the wire format permits arbitrary identifiers after
+/// the first dot, so this is just a string newtype rather than a
+/// closed enum. Borrowed `&'static str` for the well-known constants
+/// declared on [`EventName`]; owned `String` for anything decoded
+/// from the wire or constructed at runtime.
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+pub struct EventCall(std::borrow::Cow<'static, str>);
+
+impl EventCall {
+    pub const fn from_static(s: &'static str) -> Self {
+        Self(std::borrow::Cow::Borrowed(s))
+    }
+
+    pub fn new(s: impl Into<String>) -> Self {
+        Self(std::borrow::Cow::Owned(s.into()))
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for EventCall {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl From<&'static str> for EventCall {
+    fn from(s: &'static str) -> Self {
+        Self::from_static(s)
+    }
+}
+
+impl From<String> for EventCall {
+    fn from(s: String) -> Self {
+        Self(std::borrow::Cow::Owned(s))
+    }
+}
+
+/// A dotted event name, split into a category and a call.
+///
+/// Wire format is `"<category>.<call>"`; serde and `Display` use that
+/// form. The well-known protocol events are exposed as `pub const`
+/// values directly on this type (`EventName::TOOL_REGISTER`, etc.) so
+/// match-arm-style call sites keep their compactness while gaining
+/// a typed `category` to branch on.
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+pub struct EventName {
+    pub category: EventCategory,
+    pub call: EventCall,
+}
+
+impl EventName {
+    pub const fn from_static(category: EventCategory, call: &'static str) -> Self {
+        Self {
+            category,
+            call: EventCall::from_static(call),
+        }
+    }
+
+    pub fn new(category: EventCategory, call: impl Into<EventCall>) -> Self {
+        Self {
+            category,
+            call: call.into(),
+        }
+    }
+
+    /// True iff the dotted form `"<category>.<call>"` starts with
+    /// `prefix`. Avoids allocating; handles category-only and
+    /// across-the-dot prefixes correctly.
+    #[must_use]
+    pub fn matches_prefix(&self, prefix: &str) -> bool {
+        let cat = self.category.as_str();
+        if prefix.len() <= cat.len() {
+            return cat.starts_with(prefix);
+        }
+        // prefix extends past the category — it must include the dot.
+        if !prefix.starts_with(cat) {
+            return false;
+        }
+        match prefix.as_bytes().get(cat.len()) {
+            Some(&b'.') => self.call.as_str().starts_with(&prefix[cat.len() + 1..]),
+            _ => false,
+        }
+    }
+
+    // -- Well-known event names ----------------------------------------
+
+    pub const LIFECYCLE_HELLO: Self = Self::from_static(EventCategory::Lifecycle, "hello");
+    pub const LIFECYCLE_SUBSCRIBE: Self = Self::from_static(EventCategory::Lifecycle, "subscribe");
+    pub const LIFECYCLE_READY: Self = Self::from_static(EventCategory::Lifecycle, "ready");
+    pub const LIFECYCLE_DISCONNECT: Self =
+        Self::from_static(EventCategory::Lifecycle, "disconnect");
+
+    pub const TOOL_REGISTER: Self = Self::from_static(EventCategory::Tool, "register");
+    pub const TOOL_UNREGISTER: Self = Self::from_static(EventCategory::Tool, "unregister");
+    pub const TOOL_REQUEST: Self = Self::from_static(EventCategory::Tool, "request");
+    pub const TOOL_INVOKE: Self = Self::from_static(EventCategory::Tool, "invoke");
+    pub const TOOL_RESULT: Self = Self::from_static(EventCategory::Tool, "result");
+    pub const TOOL_ERROR: Self = Self::from_static(EventCategory::Tool, "error");
+    pub const TOOL_PROGRESS: Self = Self::from_static(EventCategory::Tool, "progress");
+    pub const TOOL_CANCEL: Self = Self::from_static(EventCategory::Tool, "cancel");
+    pub const TOOL_CANCELLED: Self = Self::from_static(EventCategory::Tool, "cancelled");
+
+    pub const EXTENSION_STARTING: Self = Self::from_static(EventCategory::Extension, "starting");
+    pub const EXTENSION_READY: Self = Self::from_static(EventCategory::Extension, "ready");
+    pub const EXTENSION_EXITED: Self = Self::from_static(EventCategory::Extension, "exited");
+    pub const EXTENSION_RESTARTING: Self =
+        Self::from_static(EventCategory::Extension, "restarting");
+    pub const EXTENSION_SKILL_AVAILABLE: Self =
+        Self::from_static(EventCategory::Extension, "skill_available");
+    pub const EXTENSION_AGENTS_MD_AVAILABLE: Self =
+        Self::from_static(EventCategory::Extension, "agents_md_available");
+    pub const EXTENSION_CONTEXT_READY: Self =
+        Self::from_static(EventCategory::Extension, "context_ready");
+
+    pub const HARNESS_INFO: Self = Self::from_static(EventCategory::Harness, "info");
+    pub const HARNESS_MODELS_AVAILABLE: Self =
+        Self::from_static(EventCategory::Harness, "models_available");
+    pub const HARNESS_MODEL_SELECTED: Self =
+        Self::from_static(EventCategory::Harness, "model_selected");
+
+    pub const UI_PROMPT_SUBMITTED: Self = Self::from_static(EventCategory::Ui, "prompt_submitted");
+    pub const UI_MODEL_SELECT: Self = Self::from_static(EventCategory::Ui, "model_select");
+    pub const UI_DETACH_REQUEST: Self = Self::from_static(EventCategory::Ui, "detach_request");
+    pub const UI_SHELL_COMMAND: Self = Self::from_static(EventCategory::Ui, "shell_command");
+
+    pub const SHELL_COMMAND_PROGRESS: Self =
+        Self::from_static(EventCategory::Shell, "command_progress");
+    pub const SHELL_COMMAND_FINISHED: Self =
+        Self::from_static(EventCategory::Shell, "command_finished");
+
+    pub const SESSION_PROMPT_QUEUED: Self =
+        Self::from_static(EventCategory::Session, "prompt_queued");
+    pub const SESSION_STARTED: Self = Self::from_static(EventCategory::Session, "started");
+    pub const SESSION_PROMPT_CREATED: Self =
+        Self::from_static(EventCategory::Session, "prompt_created");
+
+    pub const AGENT_PROMPT_SUBMITTED: Self =
+        Self::from_static(EventCategory::Agent, "prompt_submitted");
+    pub const AGENT_RESPONSE_UPDATED: Self =
+        Self::from_static(EventCategory::Agent, "response_updated");
+    pub const AGENT_RESPONSE_FINISHED: Self =
+        Self::from_static(EventCategory::Agent, "response_finished");
+
+    pub const WIRE_LOG_EVENT: Self = Self::from_static(EventCategory::Wire, "log_event");
+    pub const WIRE_ACK: Self = Self::from_static(EventCategory::Wire, "ack");
+}
+
+impl fmt::Display for EventName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}.{}", self.category, self.call)
     }
 }
 
 impl FromStr for EventName {
     type Err = ParseEventNameError;
 
+    /// Always succeeds for well-formed `"a.b"` input. Unknown
+    /// categories survive as [`EventCategory::Other`]; unknown
+    /// `call` segments survive as owned strings. Errors only on
+    /// missing-dot input.
     fn from_str(value: &str) -> Result<Self, Self::Err> {
-        match value {
-            "lifecycle.hello" => Ok(Self::LifecycleHello),
-            "lifecycle.subscribe" => Ok(Self::LifecycleSubscribe),
-            "lifecycle.ready" => Ok(Self::LifecycleReady),
-            "lifecycle.disconnect" => Ok(Self::LifecycleDisconnect),
-            "tool.register" => Ok(Self::ToolRegister),
-            "tool.unregister" => Ok(Self::ToolUnregister),
-            "tool.request" => Ok(Self::ToolRequest),
-            "tool.invoke" => Ok(Self::ToolInvoke),
-            "tool.result" => Ok(Self::ToolResult),
-            "tool.error" => Ok(Self::ToolError),
-            "tool.progress" => Ok(Self::ToolProgress),
-            "tool.cancel" => Ok(Self::ToolCancel),
-            "tool.cancelled" => Ok(Self::ToolCancelled),
-            "extension.starting" => Ok(Self::ExtensionStarting),
-            "extension.ready" => Ok(Self::ExtensionReady),
-            "extension.exited" => Ok(Self::ExtensionExited),
-            "extension.restarting" => Ok(Self::ExtensionRestarting),
-            "extension.skill_available" => Ok(Self::ExtSkillAvailable),
-            "extension.agents_md_available" => Ok(Self::ExtAgentsMdAvailable),
-            "extension.context_ready" => Ok(Self::ExtensionContextReady),
-            "harness.info" => Ok(Self::HarnessInfo),
-            "harness.models_available" => Ok(Self::HarnessModelsAvailable),
-            "harness.model_selected" => Ok(Self::HarnessModelSelected),
-            "ui.prompt_submitted" => Ok(Self::UiPromptSubmitted),
-            "ui.model_select" => Ok(Self::UiModelSelect),
-            "ui.detach_request" => Ok(Self::UiDetachRequest),
-            "ui.shell_command" => Ok(Self::UiShellCommand),
-            "shell.command_progress" => Ok(Self::ShellCommandProgress),
-            "shell.command_finished" => Ok(Self::ShellCommandFinished),
-            "session.prompt_queued" => Ok(Self::SessionPromptQueued),
-            "session.started" => Ok(Self::SessionStarted),
-            "session.prompt_created" => Ok(Self::SessionPromptCreated),
-            "agent.prompt_submitted" => Ok(Self::AgentPromptSubmitted),
-            "agent.response_updated" => Ok(Self::AgentResponseUpdated),
-            "agent.response_finished" => Ok(Self::AgentResponseFinished),
-            "wire.log_event" => Ok(Self::LogEvent),
-            "wire.ack" => Ok(Self::Ack),
-            _ => Err(ParseEventNameError {
+        let Some((cat, call)) = value.split_once('.') else {
+            return Err(ParseEventNameError {
                 invalid_name: value.to_owned(),
-            }),
-        }
+            });
+        };
+        Ok(Self {
+            category: EventCategory::from_wire(cat),
+            call: EventCall::new(call),
+        })
     }
 }
 
-/// Error returned when parsing an unknown event name string.
+impl Serialize for EventName {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.collect_str(self)
+    }
+}
+
+impl<'de> Deserialize<'de> for EventName {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(d)?;
+        s.parse().map_err(serde::de::Error::custom)
+    }
+}
+
+/// Error returned when an event-name string lacks the required
+/// `<category>.<call>` shape (no dot separator).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ParseEventNameError {
     invalid_name: String,
@@ -232,7 +295,11 @@ impl ParseEventNameError {
 
 impl fmt::Display for ParseEventNameError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "unknown event name: {}", self.invalid_name)
+        write!(
+            f,
+            "malformed event name (expected 'category.call'): {}",
+            self.invalid_name
+        )
     }
 }
 
@@ -858,43 +925,43 @@ impl Event {
     #[must_use]
     pub const fn name(&self) -> EventName {
         match self {
-            Self::LifecycleHello(_) => EventName::LifecycleHello,
-            Self::LifecycleSubscribe(_) => EventName::LifecycleSubscribe,
-            Self::LifecycleReady(_) => EventName::LifecycleReady,
-            Self::LifecycleDisconnect(_) => EventName::LifecycleDisconnect,
-            Self::ToolRegister(_) => EventName::ToolRegister,
-            Self::ToolUnregister(_) => EventName::ToolUnregister,
-            Self::ToolRequest(_) => EventName::ToolRequest,
-            Self::ToolInvoke(_) => EventName::ToolInvoke,
-            Self::ToolResult(_) => EventName::ToolResult,
-            Self::ToolError(_) => EventName::ToolError,
-            Self::ToolProgress(_) => EventName::ToolProgress,
-            Self::ToolCancel(_) => EventName::ToolCancel,
-            Self::ToolCancelled(_) => EventName::ToolCancelled,
-            Self::ExtensionStarting(_) => EventName::ExtensionStarting,
-            Self::ExtensionReady(_) => EventName::ExtensionReady,
-            Self::ExtensionExited(_) => EventName::ExtensionExited,
-            Self::ExtensionRestarting(_) => EventName::ExtensionRestarting,
-            Self::ExtSkillAvailable(_) => EventName::ExtSkillAvailable,
-            Self::ExtAgentsMdAvailable(_) => EventName::ExtAgentsMdAvailable,
-            Self::ExtensionContextReady(_) => EventName::ExtensionContextReady,
-            Self::HarnessInfo(_) => EventName::HarnessInfo,
-            Self::HarnessModelsAvailable(_) => EventName::HarnessModelsAvailable,
-            Self::HarnessModelSelected(_) => EventName::HarnessModelSelected,
-            Self::UiPromptSubmitted(_) => EventName::UiPromptSubmitted,
-            Self::UiModelSelect(_) => EventName::UiModelSelect,
-            Self::UiDetachRequest(_) => EventName::UiDetachRequest,
-            Self::UiShellCommand(_) => EventName::UiShellCommand,
-            Self::ShellCommandProgress(_) => EventName::ShellCommandProgress,
-            Self::ShellCommandFinished(_) => EventName::ShellCommandFinished,
-            Self::SessionPromptQueued(_) => EventName::SessionPromptQueued,
-            Self::SessionStarted(_) => EventName::SessionStarted,
-            Self::SessionPromptCreated(_) => EventName::SessionPromptCreated,
-            Self::AgentPromptSubmitted(_) => EventName::AgentPromptSubmitted,
-            Self::AgentResponseUpdated(_) => EventName::AgentResponseUpdated,
-            Self::AgentResponseFinished(_) => EventName::AgentResponseFinished,
-            Self::LogEvent(_) => EventName::LogEvent,
-            Self::Ack(_) => EventName::Ack,
+            Self::LifecycleHello(_) => EventName::LIFECYCLE_HELLO,
+            Self::LifecycleSubscribe(_) => EventName::LIFECYCLE_SUBSCRIBE,
+            Self::LifecycleReady(_) => EventName::LIFECYCLE_READY,
+            Self::LifecycleDisconnect(_) => EventName::LIFECYCLE_DISCONNECT,
+            Self::ToolRegister(_) => EventName::TOOL_REGISTER,
+            Self::ToolUnregister(_) => EventName::TOOL_UNREGISTER,
+            Self::ToolRequest(_) => EventName::TOOL_REQUEST,
+            Self::ToolInvoke(_) => EventName::TOOL_INVOKE,
+            Self::ToolResult(_) => EventName::TOOL_RESULT,
+            Self::ToolError(_) => EventName::TOOL_ERROR,
+            Self::ToolProgress(_) => EventName::TOOL_PROGRESS,
+            Self::ToolCancel(_) => EventName::TOOL_CANCEL,
+            Self::ToolCancelled(_) => EventName::TOOL_CANCELLED,
+            Self::ExtensionStarting(_) => EventName::EXTENSION_STARTING,
+            Self::ExtensionReady(_) => EventName::EXTENSION_READY,
+            Self::ExtensionExited(_) => EventName::EXTENSION_EXITED,
+            Self::ExtensionRestarting(_) => EventName::EXTENSION_RESTARTING,
+            Self::ExtSkillAvailable(_) => EventName::EXTENSION_SKILL_AVAILABLE,
+            Self::ExtAgentsMdAvailable(_) => EventName::EXTENSION_AGENTS_MD_AVAILABLE,
+            Self::ExtensionContextReady(_) => EventName::EXTENSION_CONTEXT_READY,
+            Self::HarnessInfo(_) => EventName::HARNESS_INFO,
+            Self::HarnessModelsAvailable(_) => EventName::HARNESS_MODELS_AVAILABLE,
+            Self::HarnessModelSelected(_) => EventName::HARNESS_MODEL_SELECTED,
+            Self::UiPromptSubmitted(_) => EventName::UI_PROMPT_SUBMITTED,
+            Self::UiModelSelect(_) => EventName::UI_MODEL_SELECT,
+            Self::UiDetachRequest(_) => EventName::UI_DETACH_REQUEST,
+            Self::UiShellCommand(_) => EventName::UI_SHELL_COMMAND,
+            Self::ShellCommandProgress(_) => EventName::SHELL_COMMAND_PROGRESS,
+            Self::ShellCommandFinished(_) => EventName::SHELL_COMMAND_FINISHED,
+            Self::SessionPromptQueued(_) => EventName::SESSION_PROMPT_QUEUED,
+            Self::SessionStarted(_) => EventName::SESSION_STARTED,
+            Self::SessionPromptCreated(_) => EventName::SESSION_PROMPT_CREATED,
+            Self::AgentPromptSubmitted(_) => EventName::AGENT_PROMPT_SUBMITTED,
+            Self::AgentResponseUpdated(_) => EventName::AGENT_RESPONSE_UPDATED,
+            Self::AgentResponseFinished(_) => EventName::AGENT_RESPONSE_FINISHED,
+            Self::LogEvent(_) => EventName::WIRE_LOG_EVENT,
+            Self::Ack(_) => EventName::WIRE_ACK,
         }
     }
 

@@ -103,10 +103,10 @@ where
     }))?;
     writer.write_event(&Event::LifecycleSubscribe(LifecycleSubscribe {
         selectors: vec![
-            EventSelector::Exact(tau_proto::EventName::ToolInvoke),
-            EventSelector::Exact(tau_proto::EventName::SessionStarted),
-            EventSelector::Exact(tau_proto::EventName::UiShellCommand),
-            EventSelector::Exact(tau_proto::EventName::LifecycleDisconnect),
+            EventSelector::Exact(tau_proto::EventName::TOOL_INVOKE),
+            EventSelector::Exact(tau_proto::EventName::SESSION_STARTED),
+            EventSelector::Exact(tau_proto::EventName::UI_SHELL_COMMAND),
+            EventSelector::Exact(tau_proto::EventName::LIFECYCLE_DISCONNECT),
         ],
     }))?;
     if include_echo {
@@ -1789,17 +1789,17 @@ mod tests {
     /// Consumes startup events (hello, subscribe, registers, ready).
     fn drain_startup(reader: &mut EventReader<BufReader<UnixStream>>) {
         for expected in [
-            EventName::LifecycleHello,
-            EventName::LifecycleSubscribe,
-            EventName::ToolRegister, // echo
-            EventName::ToolRegister, // read
-            EventName::ToolRegister, // write
-            EventName::ToolRegister, // edit
-            EventName::ToolRegister, // grep
-            EventName::ToolRegister, // find
-            EventName::ToolRegister, // ls
-            EventName::ToolRegister, // shell
-            EventName::LifecycleReady,
+            EventName::LIFECYCLE_HELLO,
+            EventName::LIFECYCLE_SUBSCRIBE,
+            EventName::TOOL_REGISTER, // echo
+            EventName::TOOL_REGISTER, // read
+            EventName::TOOL_REGISTER, // write
+            EventName::TOOL_REGISTER, // edit
+            EventName::TOOL_REGISTER, // grep
+            EventName::TOOL_REGISTER, // find
+            EventName::TOOL_REGISTER, // ls
+            EventName::TOOL_REGISTER, // shell
+            EventName::LIFECYCLE_READY,
         ] {
             let event = reader
                 .read_event()
@@ -1884,7 +1884,7 @@ mod tests {
 
         loop {
             let event = reader.read_event().expect("read").expect("context event");
-            if event.name() == EventName::ExtensionContextReady {
+            if event.name() == EventName::EXTENSION_CONTEXT_READY {
                 let Event::ExtensionContextReady(ready) = event else {
                     unreachable!("matched on event name");
                 };

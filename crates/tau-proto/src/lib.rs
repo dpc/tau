@@ -465,7 +465,7 @@ mod tests {
             }),
             Event::LifecycleSubscribe(LifecycleSubscribe {
                 selectors: vec![
-                    EventSelector::Exact(EventName::UiPromptSubmitted),
+                    EventSelector::Exact(EventName::UI_PROMPT_SUBMITTED),
                     EventSelector::Prefix("tool.".to_owned()),
                 ],
             }),
@@ -595,7 +595,8 @@ mod tests {
     fn event_name_round_trips_from_string() {
         for event in representative_events() {
             let name = event.name();
-            assert_eq!(name.as_str().parse::<EventName>(), Ok(name));
+            let serialized = name.to_string();
+            assert_eq!(serialized.parse::<EventName>(), Ok(name));
         }
     }
 

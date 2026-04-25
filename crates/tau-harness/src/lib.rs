@@ -410,7 +410,7 @@ impl DebugEventLog {
                 serde_json::json!({
                     "type": "from_connection",
                     "source": connection_id,
-                    "event_name": event.name().as_str(),
+                    "event_name": event.name().to_string(),
                     "event": event_json,
                 })
             }
@@ -2659,10 +2659,9 @@ fn selector_matches_event(selectors: &[EventSelector], event: &Event) -> bool {
         Event::LogEvent(env) => env.event.name(),
         _ => event.name(),
     };
-    let name = target_name.as_str();
     selectors.iter().any(|selector| match selector {
         EventSelector::Exact(expected) => *expected == target_name,
-        EventSelector::Prefix(prefix) => name.starts_with(prefix),
+        EventSelector::Prefix(prefix) => target_name.matches_prefix(prefix),
     })
 }
 
@@ -3184,7 +3183,7 @@ pub fn policy_lines(path: impl AsRef<Path>) -> Result<Vec<String>, HarnessError>
                 .selectors
                 .iter()
                 .map(|s| match s {
-                    EventSelector::Exact(n) => n.as_str().to_owned(),
+                    EventSelector::Exact(n) => n.to_string(),
                     EventSelector::Prefix(p) => format!("{p}*"),
                 })
                 .collect::<Vec<_>>()

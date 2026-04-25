@@ -144,7 +144,7 @@ fn selector_matches(selector: &EventSelector, event: &Event) -> bool {
     };
     match selector {
         EventSelector::Exact(name) => *name == target_name,
-        EventSelector::Prefix(prefix) => target_name.as_str().starts_with(prefix),
+        EventSelector::Prefix(prefix) => target_name.matches_prefix(prefix),
     }
 }
 
@@ -401,24 +401,26 @@ impl SubscriptionPolicy for DefaultSubscriptionPolicy {
         selectors: &[EventSelector],
     ) -> Result<(), SubscriptionPolicyError> {
         if connection.origin == ConnectionOrigin::Socket {
-            const ALLOWED_FAMILIES: &[&str] = &[
-                "message.",
-                "tool.",
-                "extension.",
-                "agent.",
-                "session.",
-                "ui.",
-                "harness.",
-                "shell.",
-            ];
+            // Closed list of categories a socket client is allowed to
+            // subscribe to. The unknown `EventCategory::Other` and the
+            // wire-level `Wire` family are rejected outright — UI
+            // clients should not see at-least-once envelope plumbing.
+            fn category_allowed(category: &tau_proto::EventCategory) -> bool {
+                use tau_proto::EventCategory as C;
+                matches!(
+                    category,
+                    C::Tool | C::Extension | C::Agent | C::Session | C::Ui | C::Harness | C::Shell
+                )
+            }
             for selector in selectors {
                 let allowed = match selector {
-                    EventSelector::Exact(name) => {
-                        let name = name.as_str();
-                        ALLOWED_FAMILIES.iter().any(|fam| name.starts_with(fam))
-                    }
+                    EventSelector::Exact(name) => category_allowed(&name.category),
                     EventSelector::Prefix(prefix) => {
-                        ALLOWED_FAMILIES.iter().any(|fam| prefix.starts_with(fam))
+                        // The category portion of the prefix must
+                        // resolve to a known, allowed category.
+                        let category_str = prefix.split_once('.').map(|(c, _)| c).unwrap_or(prefix);
+                        let category = tau_proto::EventCategory::from_wire(category_str);
+                        category_allowed(&category)
                     }
                 };
                 if !allowed {
@@ -1523,7 +1525,7 @@ mod tests {
 
         bus.set_subscriptions(
             &agent_id,
-            vec![EventSelector::Exact(EventName::UiPromptSubmitted)],
+            vec![EventSelector::Exact(EventName::UI_PROMPT_SUBMITTED)],
         )
         .expect("agent subscriptions should be stored");
         bus.set_subscriptions(&ui_id, vec![EventSelector::Prefix("tool.".to_owned())])
@@ -1548,21 +1550,21 @@ mod tests {
         let connection_id = bus.connect(connection);
         bus.set_subscriptions(
             &connection_id,
-            vec![EventSelector::Exact(EventName::LifecycleSubscribe)],
+            vec![EventSelector::Exact(EventName::LIFECYCLE_SUBSCRIBE)],
         )
         .expect("initial subscriptions should be stored");
 
         let report = bus.publish_from(
             Some(&connection_id),
             Event::LifecycleSubscribe(LifecycleSubscribe {
-                selectors: vec![EventSelector::Exact(EventName::UiPromptSubmitted)],
+                selectors: vec![EventSelector::Exact(EventName::UI_PROMPT_SUBMITTED)],
             }),
         );
 
         assert_eq!(report.delivered_to, Vec::<ConnectionId>::new());
         assert_eq!(
             bus.subscriptions(&connection_id),
-            Some([EventSelector::Exact(EventName::UiPromptSubmitted)].as_slice())
+            Some([EventSelector::Exact(EventName::UI_PROMPT_SUBMITTED)].as_slice())
         );
         assert!(inbox.snapshot().is_empty());
     }
@@ -1574,7 +1576,7 @@ mod tests {
         let (ui_connection, ui_inbox) = memory_connection("ui", ClientKind::Ui);
         let filtered_connection =
             ui_connection.with_visibility_filter(Box::new(|event: &RoutedEvent| {
-                event.event.name() == EventName::ToolInvoke
+                event.event.name() == EventName::TOOL_INVOKE
             }));
         let ui_id = bus.connect(filtered_connection);
 
@@ -1987,7 +1989,7 @@ mod tests {
 
         bus.set_subscriptions(
             &connection_id,
-            vec![EventSelector::Prefix("message.".to_owned())],
+            vec![EventSelector::Prefix("tool.".to_owned())],
         )
         .expect("allowed socket subscription should persist");
 
@@ -1997,7 +1999,7 @@ mod tests {
             [SubscriptionApproval {
                 connection_name: "socket-ui".to_owned(),
                 connection_origin: ConnectionOrigin::Socket,
-                selectors: vec![EventSelector::Prefix("message.".to_owned())],
+                selectors: vec![EventSelector::Prefix("tool.".to_owned())],
             }]
             .as_slice()
         );
@@ -2042,7 +2044,7 @@ mod tests {
         let ui_id = bus.connect(ui_connection);
         bus.set_subscriptions(
             &ui_id,
-            vec![EventSelector::Exact(EventName::AgentResponseFinished)],
+            vec![EventSelector::Exact(EventName::AGENT_RESPONSE_FINISHED)],
         )
         .expect("ui subscription should be stored");
 
