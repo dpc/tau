@@ -296,8 +296,10 @@ where
         ToolSpec {
             name: SHELL_TOOL_NAME.into(),
             description: Some(
-                "Execute a shell command via `sh -c`. Returns stdout, stderr, and \
-                 exit status."
+                "Execute a shell command via `sh -c`. Returns stdout, stderr, \
+                 and exit status. Prefer the dedicated `read`/`write`/`edit`/\
+                 `grep`/`find`/`ls` tools when they fit — `sh` is for things \
+                 those tools can't do."
                     .to_owned(),
             ),
             parameters: Some(serde_json::json!({
