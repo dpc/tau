@@ -1685,6 +1685,8 @@ fn run_init(force: bool) -> Result<(), CliError> {
         }
     }
 
+    eprintln!("next: use `tau provider add` to log in to a hosted LLM provider");
+
     Ok(())
 }
 
