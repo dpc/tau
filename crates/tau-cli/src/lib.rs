@@ -2225,6 +2225,25 @@ mod tests {
     }
 
     #[test]
+    fn edit_completion_uses_path_on_error() {
+        let edit_error = super::format_tool_completion(
+            "edit",
+            &CborValue::Map(vec![(
+                CborValue::Text("path".into()),
+                CborValue::Text("tmp/test-files/test1.txt".into()),
+            )]),
+            Some("not found"),
+        );
+        assert_eq!(edit_error.args, "tmp/test-files/test1.txt");
+        assert_eq!(edit_error.suffixes.len(), 1);
+        assert_eq!(edit_error.suffixes[0].text, "err: not found");
+        assert!(matches!(
+            edit_error.suffixes[0].status,
+            super::ToolStatus::Error
+        ));
+    }
+
+    #[test]
     fn edit_completion_uses_diff_chip() {
         let edit_details = CborValue::Map(vec![
             (

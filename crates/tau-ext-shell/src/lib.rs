@@ -599,6 +599,8 @@ fn build_session_started_events(started: SessionStarted) -> Vec<Event> {
 
 /// Execute a tool and return the response event(s).
 fn execute_tool(invoke: tau_proto::ToolInvoke, include_echo: bool) -> Vec<Event> {
+    let error_details = standard_tool_error_details(&invoke.tool_name, &invoke.arguments);
+
     if include_echo && invoke.tool_name == ECHO_TOOL_NAME {
         return vec![Event::ToolResult(ToolResult {
             call_id: invoke.call_id,
@@ -618,7 +620,7 @@ fn execute_tool(invoke: tau_proto::ToolInvoke, include_echo: bool) -> Vec<Event>
                 call_id: invoke.call_id,
                 tool_name: invoke.tool_name,
                 message: error,
-                details: None,
+                details: error_details.clone(),
             })],
         };
     }
@@ -634,7 +636,7 @@ fn execute_tool(invoke: tau_proto::ToolInvoke, include_echo: bool) -> Vec<Event>
                 call_id: invoke.call_id,
                 tool_name: invoke.tool_name,
                 message: error,
-                details: None,
+                details: error_details.clone(),
             })],
         };
     }
@@ -650,7 +652,7 @@ fn execute_tool(invoke: tau_proto::ToolInvoke, include_echo: bool) -> Vec<Event>
                 call_id: invoke.call_id,
                 tool_name: invoke.tool_name,
                 message: error,
-                details: None,
+                details: error_details.clone(),
             })],
         };
     }
@@ -666,7 +668,7 @@ fn execute_tool(invoke: tau_proto::ToolInvoke, include_echo: bool) -> Vec<Event>
                 call_id: invoke.call_id,
                 tool_name: invoke.tool_name,
                 message: error,
-                details: None,
+                details: error_details.clone(),
             })],
         };
     }
@@ -682,7 +684,7 @@ fn execute_tool(invoke: tau_proto::ToolInvoke, include_echo: bool) -> Vec<Event>
                 call_id: invoke.call_id,
                 tool_name: invoke.tool_name,
                 message: error,
-                details: None,
+                details: error_details.clone(),
             })],
         };
     }
@@ -698,7 +700,7 @@ fn execute_tool(invoke: tau_proto::ToolInvoke, include_echo: bool) -> Vec<Event>
                 call_id: invoke.call_id,
                 tool_name: invoke.tool_name,
                 message: error,
-                details: None,
+                details: error_details.clone(),
             })],
         };
     }
@@ -732,6 +734,14 @@ fn execute_tool(invoke: tau_proto::ToolInvoke, include_echo: bool) -> Vec<Event>
         message: "unknown tool".to_owned(),
         details: None,
     })]
+}
+
+fn standard_tool_error_details(tool_name: &str, arguments: &CborValue) -> Option<CborValue> {
+    match tool_name {
+        READ_TOOL_NAME | WRITE_TOOL_NAME | EDIT_TOOL_NAME | GREP_TOOL_NAME | FIND_TOOL_NAME
+        | LS_TOOL_NAME => Some(arguments.clone()),
+        _ => None,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2439,6 +2449,60 @@ mod tests {
         };
         assert_eq!(error.tool_name, EDIT_TOOL_NAME);
         assert_eq!(error.message, "not found");
+
+        writer
+            .write_event(&Event::LifecycleDisconnect(
+                tau_proto::LifecycleDisconnect { reason: None },
+            ))
+            .expect("disconnect");
+        writer.flush().expect("flush");
+    }
+
+    #[test]
+    fn edit_errors_include_path_details() {
+        let tempdir = TempDir::new().expect("tempdir");
+        let file_path = tempdir.path().join("edit.txt");
+        fs::write(&file_path, "hello\nworld\n").expect("write");
+
+        let (mut reader, mut writer) = spawn_extension();
+        drain_startup(&mut reader);
+
+        writer
+            .write_event(&Event::ToolInvoke(ToolInvoke {
+                call_id: "call-1".into(),
+                tool_name: EDIT_TOOL_NAME.into(),
+                arguments: CborValue::Map(vec![
+                    (
+                        CborValue::Text("path".to_owned()),
+                        CborValue::Text(file_path.display().to_string()),
+                    ),
+                    (
+                        CborValue::Text("edits".to_owned()),
+                        CborValue::Array(vec![CborValue::Map(vec![
+                            (
+                                CborValue::Text("oldText".to_owned()),
+                                CborValue::Text("missing".to_owned()),
+                            ),
+                            (
+                                CborValue::Text("newText".to_owned()),
+                                CborValue::Text("x".to_owned()),
+                            ),
+                        ])]),
+                    ),
+                ]),
+            }))
+            .expect("invoke");
+        writer.flush().expect("flush");
+
+        let error = reader.read_event().expect("read").expect("error");
+        let Event::ToolError(error) = error else {
+            panic!("expected tool error");
+        };
+        assert_eq!(error.tool_name, EDIT_TOOL_NAME);
+        assert_eq!(error.message, "not found");
+        let details = error.details.expect("details");
+        let path = cbor_map_text(&details, "path").expect("path");
+        assert_eq!(path, file_path.display().to_string());
 
         writer
             .write_event(&Event::LifecycleDisconnect(
