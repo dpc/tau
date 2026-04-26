@@ -115,6 +115,12 @@ pub fn responses_stream(
                 }
             }
             "response.completed" | "response.done" => {
+                if state.input_tokens.is_none() {
+                    state.input_tokens = event
+                        .get("response")
+                        .and_then(|response| response["usage"]["input_tokens"].as_u64())
+                        .or_else(|| event["usage"]["input_tokens"].as_u64());
+                }
                 break;
             }
             "response.incomplete" => {

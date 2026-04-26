@@ -652,6 +652,26 @@ fn thinking_from_u8(value: u8) -> tau_proto::ThinkingLevel {
     }
 }
 
+fn format_token_count(tokens: u64) -> String {
+    if tokens < 1_000 {
+        return tokens.to_string();
+    }
+    if tokens < 1_000_000 {
+        let whole = tokens / 1_000;
+        let tenth = (tokens % 1_000) / 100;
+        if tenth == 0 {
+            return format!("{whole}k");
+        }
+        return format!("{whole}.{tenth}k");
+    }
+    let whole = tokens / 1_000_000;
+    let tenth = (tokens % 1_000_000) / 100_000;
+    if tenth == 0 {
+        return format!("{whole}m");
+    }
+    format!("{whole}.{tenth}m")
+}
+
 /// Mint a fresh `command_id` and emit a `UiShellCommand` for a
 /// `!`/`!!` line. Returns `Err` only on write failure (same caller
 /// pattern as the other slash commands — input loop keeps going).
@@ -1209,6 +1229,10 @@ struct EventRenderer {
     /// Current thinking level. Mirrored into `thinking_state` so the
     /// input thread can read it for Shift+Tab cycling.
     current_thinking: tau_proto::ThinkingLevel,
+    /// Current model context usage percent.
+    current_context_percent: u8,
+    /// Current model context window, in tokens, if known.
+    current_context_window: Option<u64>,
     /// Shared thinking-level mirror for the input thread.
     thinking_state: std::sync::Arc<std::sync::atomic::AtomicU8>,
 }
@@ -1253,6 +1277,8 @@ impl EventRenderer {
             diffs_expanded: false,
             current_model: tau_proto::ModelId::from(""),
             current_thinking: tau_proto::ThinkingLevel::Off,
+            current_context_percent: 0,
+            current_context_window: None,
             thinking_state: std::sync::Arc::new(std::sync::atomic::AtomicU8::new(thinking_to_u8(
                 tau_proto::ThinkingLevel::Off,
             ))),
@@ -1293,7 +1319,17 @@ impl EventRenderer {
             } else {
                 self.current_thinking.to_string()
             };
-            format!("{} ({level})", self.current_model)
+            let context = self
+                .current_context_window
+                .map(|window| {
+                    format!(
+                        " {}%/{}",
+                        self.current_context_percent,
+                        format_token_count(window)
+                    )
+                })
+                .unwrap_or_default();
+            format!("{} ({level}){context}", self.current_model)
         };
         let block = themed_block(&self.theme, names::MODEL_STATUS, label);
         match self.model_status_block {
@@ -1565,6 +1601,11 @@ impl EventRenderer {
             }
             Event::HarnessModelSelected(selected) => {
                 self.current_model = selected.model.clone();
+                self.current_context_window = selected.context_window;
+                self.render_model_status();
+            }
+            Event::HarnessContextUsageChanged(changed) => {
+                self.current_context_percent = changed.percent_used;
                 self.render_model_status();
             }
             Event::HarnessThinkingLevelChanged(changed) => {
@@ -1860,6 +1901,7 @@ mod tests {
             session_prompt_id: "sp-0".into(),
             text: Some("Hi there! How can I help?".into()),
             tool_calls: Vec::new(),
+            input_tokens: None,
         }));
         sync(&handle);
         assert!(
@@ -1914,6 +1956,7 @@ mod tests {
             session_prompt_id: "sp-0".into(),
             text: Some("response one".into()),
             tool_calls: Vec::new(),
+            input_tokens: None,
         }));
         sync(&handle);
         assert!(vt.screen_contains(80, "response one"));
@@ -1956,6 +1999,7 @@ mod tests {
             session_prompt_id: "sp-1".into(),
             text: Some("response two complete".into()),
             tool_calls: Vec::new(),
+            input_tokens: None,
         }));
         sync(&handle);
         assert!(
@@ -2026,6 +2070,7 @@ mod tests {
                 session_prompt_id: spid,
                 text: Some(format!("response-{i}")),
                 tool_calls: Vec::new(),
+                input_tokens: None,
             }));
             sync(&handle);
         }
@@ -2080,6 +2125,7 @@ mod tests {
             session_prompt_id: "sp-0".into(),
             text: Some("Hello".into()),
             tool_calls: Vec::new(),
+            input_tokens: None,
         }));
         sync(&handle);
         assert!(vt.screen_contains(80, "Hello"));
@@ -2106,6 +2152,7 @@ mod tests {
                     CborValue::Text("src/main.rs".into()),
                 )]),
             }],
+            input_tokens: None,
         }));
         sync(&handle);
         assert!(vt.screen_contains(80, "read src/main.rs …"));
@@ -2159,6 +2206,7 @@ mod tests {
             session_prompt_id: "sp-0".into(),
             text: Some("hello!".into()),
             tool_calls: Vec::new(),
+            input_tokens: None,
         }));
         sync(&handle);
 
@@ -2391,6 +2439,7 @@ mod tests {
             session_prompt_id: "sp-0".into(),
             text: Some("Hello!\n\nHow can I help you today?".into()),
             tool_calls: Vec::new(),
+            input_tokens: None,
         }));
         sync(&handle);
         assert!(
@@ -2417,6 +2466,7 @@ mod tests {
             session_prompt_id: "sp-1".into(),
             text: Some("Hello again!\n\nHow can I help you?".into()),
             tool_calls: Vec::new(),
+            input_tokens: None,
         }));
         sync(&handle);
         assert!(
@@ -2443,6 +2493,7 @@ mod tests {
             session_prompt_id: "sp-2".into(),
             text: Some("Hi there!\n\nWhat can I help you with?".into()),
             tool_calls: Vec::new(),
+            input_tokens: None,
         }));
         sync(&handle);
 
@@ -2515,6 +2566,7 @@ mod tests {
             session_prompt_id: "sp-0".into(),
             text: Some(response.into()),
             tool_calls: Vec::new(),
+            input_tokens: None,
         }));
         sync(&handle);
 
@@ -2571,6 +2623,7 @@ mod tests {
             session_prompt_id: "sp-0".into(),
             text: Some(response.into()),
             tool_calls: Vec::new(),
+            input_tokens: None,
         }));
         sync(&handle);
 
@@ -2626,6 +2679,7 @@ mod tests {
             session_prompt_id: "sp-0".into(),
             text: Some(final_text.into()),
             tool_calls: Vec::new(),
+            input_tokens: None,
         }));
         sync(&handle);
 

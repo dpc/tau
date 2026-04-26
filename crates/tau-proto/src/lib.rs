@@ -534,6 +534,7 @@ mod tests {
                 session_prompt_id: "sp-1".into(),
                 text: Some("Hi there".to_owned()),
                 tool_calls: Vec::new(),
+                input_tokens: None,
             }),
             Event::ExtensionStarting(ExtensionStarting {
                 instance_id: 1.into(),

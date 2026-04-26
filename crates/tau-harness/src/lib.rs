@@ -32,10 +32,10 @@ pub use tau_core::{SessionMeta, list_session_metas};
 use tau_proto::{
     AgentResponseFinished, AgentToolCall, CborValue, ClientKind, ContentBlock, ConversationMessage,
     ConversationRole, DecodeError, Event, EventReader, EventSelector, EventWriter,
-    HarnessModelSelected, HarnessModelsAvailable, LifecycleDisconnect, LifecycleHello,
-    LifecycleSubscribe, ModelId, PROTOCOL_VERSION, ProgressUpdate, SessionId, SessionPromptCreated,
-    SessionPromptId, SessionPromptQueued, ToolCallId, ToolDefinition, ToolError, ToolName,
-    ToolProgress, ToolRegister, ToolRequest, ToolResult, UiPromptSubmitted,
+    HarnessContextUsageChanged, HarnessModelSelected, HarnessModelsAvailable, LifecycleDisconnect,
+    LifecycleHello, LifecycleSubscribe, ModelId, PROTOCOL_VERSION, ProgressUpdate, SessionId,
+    SessionPromptCreated, SessionPromptId, SessionPromptQueued, ToolCallId, ToolDefinition,
+    ToolError, ToolName, ToolProgress, ToolRegister, ToolRequest, ToolResult, UiPromptSubmitted,
 };
 use tau_socket::{SocketPeer, SocketTransportError};
 
@@ -512,6 +512,8 @@ struct Harness {
     selected_model: ModelId,
     /// Currently selected reasoning effort level.
     selected_thinking_level: tau_proto::ThinkingLevel,
+    /// Percentage of the selected model's context window currently used.
+    context_percent_used: u8,
     /// Provider/model registry, kept for runtime lookups (e.g.
     /// computing available thinking levels per current model).
     model_registry: tau_config::settings::ModelRegistry,
@@ -666,6 +668,7 @@ impl Harness {
             available_models,
             selected_model,
             selected_thinking_level,
+            context_percent_used: 0,
             model_registry,
             discovered_skills: std::collections::HashMap::new(),
             discovered_agents_files: Vec::new(),
@@ -809,6 +812,7 @@ impl Harness {
             available_models,
             selected_model,
             selected_thinking_level,
+            context_percent_used: 0,
             model_registry,
             discovered_skills: std::collections::HashMap::new(),
             discovered_agents_files: Vec::new(),
@@ -1243,10 +1247,21 @@ impl Harness {
                         self.selected_model.as_str(),
                         self.selected_thinking_level,
                     );
+                    self.context_percent_used = 0;
                     self.publish_event(
                         None,
                         Event::HarnessModelSelected(HarnessModelSelected {
                             model: self.selected_model.clone(),
+                            context_window: model_context_window(
+                                &self.model_registry,
+                                self.selected_model.as_str(),
+                            ),
+                        }),
+                    );
+                    self.publish_event(
+                        None,
+                        Event::HarnessContextUsageChanged(HarnessContextUsageChanged {
+                            percent_used: self.context_percent_used,
                         }),
                     );
                     self.publish_event(
@@ -1635,9 +1650,19 @@ impl Harness {
         }
         let selected_event = Event::HarnessModelSelected(HarnessModelSelected {
             model: self.selected_model.clone(),
+            context_window: model_context_window(
+                &self.model_registry,
+                self.selected_model.as_str(),
+            ),
         });
         if selector_matches_event(selectors, &selected_event) {
             let _ = self.bus.send_to(client_id, None, selected_event);
+        }
+        let context_event = Event::HarnessContextUsageChanged(HarnessContextUsageChanged {
+            percent_used: self.context_percent_used,
+        });
+        if selector_matches_event(selectors, &context_event) {
+            let _ = self.bus.send_to(client_id, None, context_event);
         }
         let thinking_event =
             Event::HarnessThinkingLevelChanged(tau_proto::HarnessThinkingLevelChanged {
@@ -2029,6 +2054,9 @@ impl Harness {
         &mut self,
         response: AgentResponseFinished,
     ) -> Result<(), HarnessError> {
+        if let Some(input_tokens) = response.input_tokens {
+            self.update_context_usage(input_tokens);
+        }
         // Dedupe: under at-least-once delivery the agent may resend a
         // finished-response after a reconnect. The first delivery removed
         // the entry from `prompt_sessions`; later ones must be ignored
@@ -2106,6 +2134,23 @@ impl Harness {
         }
 
         Ok(())
+    }
+
+    fn update_context_usage(&mut self, input_tokens: u64) {
+        let Some(context_window) =
+            model_context_window(&self.model_registry, self.selected_model.as_str())
+        else {
+            return;
+        };
+        let percent_used = context_percent_used(input_tokens, context_window);
+        if self.context_percent_used == percent_used {
+            return;
+        }
+        self.context_percent_used = percent_used;
+        self.publish_event(
+            None,
+            Event::HarnessContextUsageChanged(HarnessContextUsageChanged { percent_used }),
+        );
     }
 
     /// Advances the front of the prompt queue when possible.
@@ -2779,6 +2824,27 @@ fn thinking_levels_for_model(
         return vec![L::Off];
     }
     vec![L::Off, L::Minimal, L::Low, L::Medium, L::High]
+}
+
+fn model_context_window(
+    registry: &tau_config::settings::ModelRegistry,
+    model: &str,
+) -> Option<u64> {
+    let (provider_name, model_id) = model.split_once('/')?;
+    let provider = registry.providers.get(provider_name)?;
+    provider
+        .models
+        .iter()
+        .find(|candidate| candidate.id == model_id)
+        .and_then(|candidate| candidate.context_window)
+}
+
+fn context_percent_used(input_tokens: u64, context_window: u64) -> u8 {
+    if context_window == 0 {
+        return 0;
+    }
+    let percent = input_tokens.saturating_mul(100) / context_window;
+    percent.min(100) as u8
 }
 
 fn clamp_thinking_level(
@@ -4419,6 +4485,7 @@ mod tests {
                 name: "".into(),
                 arguments: CborValue::Map(Vec::new()),
             }],
+            input_tokens: None,
         };
 
         h.handle_agent_response_finished(response)
@@ -4497,6 +4564,7 @@ mod tests {
                     arguments: CborValue::Map(Vec::new()),
                 },
             ],
+            input_tokens: None,
         };
 
         h.handle_agent_response_finished(response)
@@ -4604,6 +4672,7 @@ mod tests {
                     arguments: read_args,
                 },
             ],
+            input_tokens: None,
         };
 
         h.handle_agent_response_finished(response)

@@ -90,6 +90,7 @@ where
                                 session_prompt_id,
                                 text: Some(msg),
                                 tool_calls: Vec::new(),
+                                input_tokens: None,
                             },
                         ))?;
                         writer.flush()?;
@@ -264,6 +265,7 @@ fn finish_stream<W: Write>(
 ) -> Result<(), Box<dyn Error>> {
     let text_empty = state.text.is_empty();
     let text_content = state.text.clone();
+    let input_tokens = state.input_tokens;
     let tool_calls = state.into_tool_calls();
     let text = if text_empty {
         if tool_calls.is_empty() {
@@ -278,6 +280,7 @@ fn finish_stream<W: Write>(
         session_prompt_id: session_prompt_id.into(),
         text,
         tool_calls,
+        input_tokens,
     }))?;
     writer.flush()?;
     Ok(())
@@ -292,6 +295,7 @@ fn finish_error<W: Write>(
         session_prompt_id: session_prompt_id.into(),
         text: Some(format!("LLM error: {error}")),
         tool_calls: Vec::new(),
+        input_tokens: None,
     }))?;
     writer.flush()?;
     Ok(())
@@ -365,6 +369,7 @@ where
                         session_prompt_id: spid,
                         text: Some(text),
                         tool_calls: Vec::new(),
+                        input_tokens: None,
                     }))?;
                 } else {
                     // Find user text and make a tool call.
@@ -414,6 +419,7 @@ where
                         session_prompt_id: spid,
                         text: None,
                         tool_calls: vec![tool_call],
+                        input_tokens: None,
                     }))?;
                 }
                 writer.flush()?;

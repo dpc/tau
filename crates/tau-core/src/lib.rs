@@ -1807,6 +1807,7 @@ mod tests {
                     session_prompt_id: "sp-1".into(),
                     text: Some("hidden".to_owned()),
                     tool_calls: Vec::new(),
+                    input_tokens: None,
                 }),
             )
             .expect("directed route should succeed");
@@ -1854,6 +1855,7 @@ mod tests {
             session_prompt_id: "sp-1".into(),
             text: Some("done".to_owned()),
             tool_calls: Vec::new(),
+            input_tokens: None,
         }));
         assert_eq!(second_report.delivered_to, vec![agent_id.clone()]);
 

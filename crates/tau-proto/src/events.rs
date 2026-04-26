@@ -212,6 +212,8 @@ impl EventName {
         Self::from_static(EventCategory::Harness, "models_available");
     pub const HARNESS_MODEL_SELECTED: Self =
         Self::from_static(EventCategory::Harness, "model_selected");
+    pub const HARNESS_CONTEXT_USAGE_CHANGED: Self =
+        Self::from_static(EventCategory::Harness, "context_usage_changed");
     pub const HARNESS_THINKING_LEVEL_CHANGED: Self =
         Self::from_static(EventCategory::Harness, "thinking_level_changed");
     pub const HARNESS_THINKING_LEVELS_AVAILABLE: Self =
@@ -388,6 +390,16 @@ pub struct HarnessModelsAvailable {
 pub struct HarnessModelSelected {
     /// `"provider_name/model_id"`, or empty if none.
     pub model: ModelId,
+    /// Total context window size, in tokens, if known for the model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<u64>,
+}
+
+/// Current context usage for the selected model.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct HarnessContextUsageChanged {
+    /// Percentage of the context window currently used.
+    pub percent_used: u8,
 }
 
 /// Reasoning / "thinking" effort level. Maps to provider-specific
@@ -917,6 +929,10 @@ pub struct AgentResponseFinished {
     pub text: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tool_calls: Vec<AgentToolCall>,
+    /// Input tokens consumed by the final request, if the provider
+    /// reported usage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_tokens: Option<u64>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1035,6 +1051,8 @@ pub enum Event {
     HarnessModelsAvailable(HarnessModelsAvailable),
     #[serde(rename = "harness.model_selected")]
     HarnessModelSelected(HarnessModelSelected),
+    #[serde(rename = "harness.context_usage_changed")]
+    HarnessContextUsageChanged(HarnessContextUsageChanged),
     #[serde(rename = "harness.thinking_level_changed")]
     HarnessThinkingLevelChanged(HarnessThinkingLevelChanged),
     #[serde(rename = "harness.thinking_levels_available")]
@@ -1117,6 +1135,7 @@ impl Event {
             Self::HarnessInfo(_) => EventName::HARNESS_INFO,
             Self::HarnessModelsAvailable(_) => EventName::HARNESS_MODELS_AVAILABLE,
             Self::HarnessModelSelected(_) => EventName::HARNESS_MODEL_SELECTED,
+            Self::HarnessContextUsageChanged(_) => EventName::HARNESS_CONTEXT_USAGE_CHANGED,
             Self::HarnessThinkingLevelChanged(_) => EventName::HARNESS_THINKING_LEVEL_CHANGED,
             Self::HarnessThinkingLevelsAvailable(_) => EventName::HARNESS_THINKING_LEVELS_AVAILABLE,
             Self::UiPromptSubmitted(_) => EventName::UI_PROMPT_SUBMITTED,

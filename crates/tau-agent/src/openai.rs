@@ -61,6 +61,7 @@ impl std::error::Error for OpenAiError {}
 pub struct StreamState {
     pub text: String,
     pub tool_calls: Vec<ToolCallAccumulator>,
+    pub input_tokens: Option<u64>,
 }
 
 /// Accumulates one tool call across streaming chunks.
@@ -75,6 +76,7 @@ impl StreamState {
         Self {
             text: String::new(),
             tool_calls: Vec::new(),
+            input_tokens: None,
         }
     }
 
@@ -153,6 +155,10 @@ pub fn chat_completion_stream(
         let Some(choice) = chunk.choices.into_iter().next() else {
             continue;
         };
+
+        if state.input_tokens.is_none() {
+            state.input_tokens = chunk.usage.and_then(|usage| usage.prompt_tokens);
+        }
 
         // Accumulate text content.
         if let Some(content) = choice.delta.content {
@@ -418,6 +424,8 @@ fn convert_tool_definition(tool: &ToolDefinition) -> ApiTool {
 #[derive(Deserialize)]
 struct StreamChunk {
     choices: Vec<StreamChoice>,
+    #[serde(default)]
+    usage: Option<Usage>,
 }
 
 #[derive(Deserialize)]
@@ -442,6 +450,12 @@ struct StreamToolCall {
 struct StreamFunction {
     name: Option<String>,
     arguments: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct Usage {
+    #[serde(default)]
+    prompt_tokens: Option<u64>,
 }
 
 // ---------------------------------------------------------------------------
@@ -526,6 +540,7 @@ mod tests {
                     arguments_json: "{\"command\":\"ls\"}".into(),
                 },
             ],
+            input_tokens: None,
         };
 
         let calls = state.into_tool_calls();

@@ -61,6 +61,7 @@
 
             tests = craneLib.cargoNextest {
               cargoArtifacts = workspace;
+              cargoNextestExtraArgs = "--no-tests=pass";
             };
 
             clippy = craneLib.cargoClippy {

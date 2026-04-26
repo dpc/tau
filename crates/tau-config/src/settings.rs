@@ -326,6 +326,9 @@ pub struct ModelConfig {
     /// Max output tokens override.
     #[serde(rename = "maxOutputTokens")]
     pub max_output_tokens: Option<u64>,
+    /// Total context window size, in tokens.
+    #[serde(rename = "contextWindow")]
+    pub context_window: Option<u64>,
 }
 
 // ---------------------------------------------------------------------------
