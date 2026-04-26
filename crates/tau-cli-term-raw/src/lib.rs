@@ -547,7 +547,11 @@ impl Term {
             return Ok(());
         }
         terminal::enable_raw_mode()?;
-        let _ = crossterm::execute!(io::stdout(), crossterm::event::EnableBracketedPaste);
+        let _ = crossterm::execute!(
+            io::stdout(),
+            crossterm::event::EnableBracketedPaste,
+            crossterm::cursor::SetCursorStyle::DefaultUserShape
+        );
         let _ = crossterm::execute!(
             io::stdout(),
             crossterm::terminal::Clear(crossterm::terminal::ClearType::All),
