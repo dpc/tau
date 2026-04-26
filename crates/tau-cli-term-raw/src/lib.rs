@@ -26,6 +26,21 @@ use crossterm::{QueueableCommand, terminal};
 use screen::{Screen, emit_styled_cells, layout_block, layout_lines};
 pub use style::{Align, BlockId, Cell, Color, Span, Style, StyledBlock, StyledText};
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CursorShape {
+    Bar,
+    Block,
+}
+
+impl CursorShape {
+    fn crossterm_style(self) -> crossterm::cursor::SetCursorStyle {
+        match self {
+            Self::Bar => crossterm::cursor::SetCursorStyle::SteadyBar,
+            Self::Block => crossterm::cursor::SetCursorStyle::SteadyBlock,
+        }
+    }
+}
+
 /// Mutable state shared between the input loop, redraw thread, and
 /// any [`TermHandle`] holders.
 struct SharedState {
@@ -306,6 +321,7 @@ pub struct Term {
     redraw_thread: Option<JoinHandle<()>>,
     /// Whether to disable raw mode on drop (false for virtual terms).
     owns_raw_mode: bool,
+    cursor_shape: CursorShape,
 }
 
 impl Term {
@@ -313,7 +329,10 @@ impl Term {
     ///
     /// Enters raw mode, spawns the input reader and redraw threads.
     /// Returns the prompt engine and a cloneable [`TermHandle`].
-    pub fn new(left_prompt: impl Into<StyledText>) -> io::Result<(Self, TermHandle)> {
+    pub fn new(
+        left_prompt: impl Into<StyledText>,
+        cursor_shape: CursorShape,
+    ) -> io::Result<(Self, TermHandle)> {
         let (width, height) = term_size();
         let state = Arc::new(Mutex::new(SharedState {
             blocks: HashMap::new(),
@@ -344,7 +363,11 @@ impl Term {
         // `CtEvent::Paste(String)` instead of a stream of individual
         // KeyEvents (which, without bracketed paste, leaked literal
         // escape-sequence bytes into the input buffer).
-        let _ = crossterm::execute!(io::stdout(), crossterm::event::EnableBracketedPaste);
+        let _ = crossterm::execute!(
+            io::stdout(),
+            crossterm::event::EnableBracketedPaste,
+            cursor_shape.crossterm_style()
+        );
 
         let redraw_state = Arc::clone(&state);
         let redraw_writer: Box<dyn Write + Send> = Box::new(io::stdout());
@@ -368,6 +391,7 @@ impl Term {
                 term_input_rx: None,
                 redraw_thread: Some(redraw_thread),
                 owns_raw_mode: true,
+                cursor_shape,
             },
             handle,
         ))
@@ -383,6 +407,7 @@ impl Term {
         height: usize,
         left_prompt: impl Into<StyledText>,
         output: Box<dyn Write + Send>,
+        cursor_shape: CursorShape,
     ) -> (Self, TermHandle, std::sync::mpsc::Sender<RawEvent>) {
         let state = Arc::new(Mutex::new(SharedState {
             blocks: HashMap::new(),
@@ -429,6 +454,7 @@ impl Term {
             term_input_rx: Some(term_input_rx),
             redraw_thread: Some(redraw_thread),
             owns_raw_mode: false,
+            cursor_shape,
         };
 
         (term, handle, term_input_tx)
@@ -550,7 +576,7 @@ impl Term {
         let _ = crossterm::execute!(
             io::stdout(),
             crossterm::event::EnableBracketedPaste,
-            crossterm::cursor::SetCursorStyle::DefaultUserShape
+            self.cursor_shape.crossterm_style()
         );
         let _ = crossterm::execute!(
             io::stdout(),
@@ -1260,6 +1286,18 @@ mod tests {
     // --- full_render: content shorter than terminal ---
 
     #[test]
+    fn cursor_shape_maps_to_steady_styles() {
+        assert_eq!(
+            CursorShape::Bar.crossterm_style().to_string(),
+            crossterm::cursor::SetCursorStyle::SteadyBar.to_string()
+        );
+        assert_eq!(
+            CursorShape::Block.crossterm_style().to_string(),
+            crossterm::cursor::SetCursorStyle::SteadyBlock.to_string()
+        );
+    }
+
+    #[test]
     fn full_render_short_content_at_top() {
         // 0 history + 3 live = 3, 10-row terminal.
         // Content starts at the top (no blank padding).
@@ -1418,7 +1456,8 @@ mod tests {
         let buf = SharedBuffer::new();
         let mut parser = vt100::Parser::new(24, 80, 0);
 
-        let (term, handle, _input_tx) = Term::new_virtual(80, 24, "> ", Box::new(buf.clone()));
+        let (term, handle, _input_tx) =
+            Term::new_virtual(80, 24, "> ", Box::new(buf.clone()), CursorShape::Bar);
 
         flush_redraws(&handle, &buf, &mut parser);
 
@@ -1432,7 +1471,8 @@ mod tests {
         let buf = SharedBuffer::new();
         let mut parser = vt100::Parser::new(24, 80, 0);
 
-        let (_term, handle, _input_tx) = Term::new_virtual(80, 24, "> ", Box::new(buf.clone()));
+        let (_term, handle, _input_tx) =
+            Term::new_virtual(80, 24, "> ", Box::new(buf.clone()), CursorShape::Bar);
 
         // Simulate typing by setting the buffer directly (avoids
         // needing to drive the input event loop).
@@ -1451,7 +1491,8 @@ mod tests {
         let buf = SharedBuffer::new();
         let mut parser = vt100::Parser::new(24, 80, 0);
 
-        let (_term, handle, _input_tx) = Term::new_virtual(80, 24, "> ", Box::new(buf.clone()));
+        let (_term, handle, _input_tx) =
+            Term::new_virtual(80, 24, "> ", Box::new(buf.clone()), CursorShape::Bar);
 
         handle.print_output(StyledBlock::new(StyledText::from(Span::plain(
             "Hello from output",
@@ -1471,7 +1512,8 @@ mod tests {
         let buf = SharedBuffer::new();
         let mut parser = vt100::Parser::new(24, 80, 0);
 
-        let (_term, handle, _input_tx) = Term::new_virtual(80, 24, "> ", Box::new(buf.clone()));
+        let (_term, handle, _input_tx) =
+            Term::new_virtual(80, 24, "> ", Box::new(buf.clone()), CursorShape::Bar);
 
         // Create a block in above_active (live area).
         let block_id = handle.new_block(StyledBlock::new(StyledText::from(Span::plain(
@@ -1507,7 +1549,8 @@ mod tests {
         let buf = SharedBuffer::new();
         let mut parser = vt100::Parser::new(24, 80, 0);
 
-        let (_term, handle, _input_tx) = Term::new_virtual(80, 24, "> ", Box::new(buf.clone()));
+        let (_term, handle, _input_tx) =
+            Term::new_virtual(80, 24, "> ", Box::new(buf.clone()), CursorShape::Bar);
 
         // Simulate streaming: create live block, update, finalize.
         let block_id = handle.new_block(StyledBlock::new(StyledText::from(Span::plain(
@@ -1556,7 +1599,8 @@ mod tests {
         for _ in 0..50 {
             let buf = SharedBuffer::new();
             let mut parser = vt100::Parser::new(10, 40, 0);
-            let (term, handle, _input_tx) = Term::new_virtual(40, 10, "> ", Box::new(buf.clone()));
+            let (term, handle, _input_tx) =
+                Term::new_virtual(40, 10, "> ", Box::new(buf.clone()), CursorShape::Bar);
 
             // This would hang before the fix.
             handle.redraw_sync();
@@ -1571,7 +1615,8 @@ mod tests {
     #[test]
     fn concurrent_redraw_syncs_all_complete() {
         let buf = SharedBuffer::new();
-        let (_term, handle, _input_tx) = Term::new_virtual(40, 10, "> ", Box::new(buf.clone()));
+        let (_term, handle, _input_tx) =
+            Term::new_virtual(40, 10, "> ", Box::new(buf.clone()), CursorShape::Bar);
 
         // Warm up — make sure redraw thread has done its first cycle.
         handle.redraw_sync();
@@ -1694,7 +1739,8 @@ mod tests {
     #[test]
     fn notifications_coalesce_while_rendering() {
         let writer = GatedWriter::new();
-        let (_term, handle, _input_tx) = Term::new_virtual(40, 10, "> ", Box::new(writer.clone()));
+        let (_term, handle, _input_tx) =
+            Term::new_virtual(40, 10, "> ", Box::new(writer.clone()), CursorShape::Bar);
 
         // Let the initial render finish so the redraw thread is idle
         // at recv(). The gate is open, so the render completes.
@@ -1754,7 +1800,8 @@ mod tests {
     fn coalescing_preserved_after_sync() {
         let buf = SharedBuffer::new();
         let mut parser = vt100::Parser::new(10, 40, 0);
-        let (_term, handle, _input_tx) = Term::new_virtual(40, 10, "> ", Box::new(buf.clone()));
+        let (_term, handle, _input_tx) =
+            Term::new_virtual(40, 10, "> ", Box::new(buf.clone()), CursorShape::Bar);
 
         // Fire a bunch of async redraws, then one sync.
         for i in 0..20 {
@@ -1801,7 +1848,8 @@ mod tests {
         // 5-row terminal with scrollback capacity.
         let mut parser = vt100::Parser::new(5, 40, 50);
 
-        let (_term, handle, _input_tx) = Term::new_virtual(40, 5, "> ", Box::new(buf.clone()));
+        let (_term, handle, _input_tx) =
+            Term::new_virtual(40, 5, "> ", Box::new(buf.clone()), CursorShape::Bar);
         flush_redraws(&handle, &buf, &mut parser);
 
         // Add 6 history lines — total is 7 (6 + prompt), viewport
@@ -1841,7 +1889,8 @@ mod tests {
         let buf = SharedBuffer::new();
         let mut parser = vt100::Parser::new(5, 40, 50);
 
-        let (_term, handle, _input_tx) = Term::new_virtual(40, 5, "> ", Box::new(buf.clone()));
+        let (_term, handle, _input_tx) =
+            Term::new_virtual(40, 5, "> ", Box::new(buf.clone()), CursorShape::Bar);
         flush_redraws(&handle, &buf, &mut parser);
 
         let block_id =

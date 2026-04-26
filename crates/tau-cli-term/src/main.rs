@@ -2,7 +2,8 @@ use std::thread;
 use std::time::Duration;
 
 use tau_cli_term::{
-    Color, Event, HighTerm, SlashCommand, Span, Style, StyledBlock, StyledText, TermHandle,
+    Color, CursorShape, Event, HighTerm, SlashCommand, Span, Style, StyledBlock, StyledText,
+    TermHandle,
 };
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -14,8 +15,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         SlashCommand::new("/quit", "Exit the application"),
     ];
 
-    let (mut term, handle, _completion_data) =
-        HighTerm::new("> ", commands, tau_themes::Theme::builtin())?;
+    let (mut term, handle, _completion_data) = HighTerm::new(
+        "> ",
+        commands,
+        tau_themes::Theme::builtin(),
+        CursorShape::Bar,
+    )?;
 
     // Header.
     let header_id = handle.new_block(

@@ -3,11 +3,11 @@ use std::time::Duration;
 
 use crossterm::terminal;
 use tau_cli_term_raw::{
-    Align, Color, Event, Span, Style, StyledBlock, StyledText, Term, TermHandle,
+    Align, Color, CursorShape, Event, Span, Style, StyledBlock, StyledText, Term, TermHandle,
 };
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let (term, handle) = Term::new("> ")?;
+    let (term, handle) = Term::new("> ", CursorShape::Bar)?;
 
     // --- Above-sticky: header bar with background and center alignment ---
     let header_id = handle.new_block(

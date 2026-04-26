@@ -25,6 +25,9 @@ pub struct CliSettings {
     pub greeting: bool,
     /// Show the tau ASCII logo on startup.
     pub show_logo: bool,
+    /// Use a bar-shaped cursor in the CLI. When false, use a steady
+    /// block cursor instead.
+    pub bar_cursor: bool,
 }
 
 impl Default for CliSettings {
@@ -32,6 +35,7 @@ impl Default for CliSettings {
         Self {
             greeting: true,
             show_logo: true,
+            bar_cursor: true,
         }
     }
 }
@@ -493,6 +497,7 @@ mod tests {
         let s = CliSettings::default();
         assert!(s.greeting);
         assert!(s.show_logo);
+        assert!(s.bar_cursor);
     }
 
     #[test]
@@ -510,6 +515,19 @@ mod tests {
 
         let s: CliSettings = load_json5_layered(dir, "cli").expect("load");
         assert!(!s.greeting);
+        assert!(s.show_logo); // default
+        assert!(s.bar_cursor); // default
+    }
+
+    #[test]
+    fn cli_settings_can_disable_bar_cursor() {
+        let td = TempDir::new().expect("tempdir");
+        let dir = td.path();
+        std::fs::write(dir.join("cli.json5"), r#"{ bar_cursor: false }"#).expect("write");
+
+        let s: CliSettings = load_json5_layered(dir, "cli").expect("load");
+        assert!(!s.bar_cursor);
+        assert!(s.greeting); // default
         assert!(s.show_logo); // default
     }
 

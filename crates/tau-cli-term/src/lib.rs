@@ -16,7 +16,7 @@ use std::io;
 pub use completion::{CommandName, Completer, CompletionData, CompletionItem, SlashCommand};
 use tau_cli_term_raw::Event as RawEvent;
 pub use tau_cli_term_raw::{
-    Align, BlockId, Cell, Color, Span, Style, StyledBlock, StyledText, TermHandle,
+    Align, BlockId, Cell, Color, CursorShape, Span, Style, StyledBlock, StyledText, TermHandle,
 };
 use tau_themes::Theme;
 
@@ -53,8 +53,9 @@ impl HighTerm {
         left_prompt: impl Into<StyledText>,
         commands: Vec<SlashCommand>,
         theme: Theme,
+        cursor_shape: CursorShape,
     ) -> io::Result<(Self, TermHandle, CompletionData)> {
-        let (term, handle) = tau_cli_term_raw::Term::new(left_prompt)?;
+        let (term, handle) = tau_cli_term_raw::Term::new(left_prompt, cursor_shape)?;
         let handle_clone = handle.clone();
         let data = CompletionData::new();
         let data_clone = data.clone();

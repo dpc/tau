@@ -442,8 +442,13 @@ mod tests {
     use super::*;
 
     fn new_test_handle() -> (tau_cli_term_raw::Term, TermHandle) {
-        let (term, handle, _input_tx) =
-            tau_cli_term_raw::Term::new_virtual(80, 24, "> ", Box::new(std::io::sink()));
+        let (term, handle, _input_tx) = tau_cli_term_raw::Term::new_virtual(
+            80,
+            24,
+            "> ",
+            Box::new(std::io::sink()),
+            tau_cli_term_raw::CursorShape::Bar,
+        );
         (term, handle)
     }
 

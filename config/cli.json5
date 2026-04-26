@@ -4,4 +4,7 @@
 
   // Show a greeting message on startup.
   greeting: true,
+
+  // Use a bar-shaped cursor in the CLI. Set to false for a block cursor.
+  bar_cursor: true,
 }

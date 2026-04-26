@@ -347,12 +347,18 @@ fn run_chat(session_id: &str, attach: bool) -> Result<(), CliError> {
         ),
     ];
     let theme = tau_themes::Theme::builtin();
+    let settings = tau_config::settings::load_cli_settings().unwrap_or_default();
     let prompt_style = tau_cli_term::resolve::resolve(&theme, tau_themes::names::PROMPT_MARKER);
     let prompt = tau_cli_term::Span::new("> ", prompt_style);
-    let (mut term, handle, completion_data) = HighTerm::new(prompt, commands, theme.clone())?;
+    let cursor_shape = if settings.bar_cursor {
+        tau_cli_term::CursorShape::Bar
+    } else {
+        tau_cli_term::CursorShape::Block
+    };
+    let (mut term, handle, completion_data) =
+        HighTerm::new(prompt, commands, theme.clone(), cursor_shape)?;
 
     // Show logo if enabled.
-    let settings = tau_config::settings::load_cli_settings().unwrap_or_default();
     if settings.show_logo {
         use tau_cli_term::{Span, StyledBlock, StyledText};
         let accent = tau_cli_term::resolve::resolve(&theme, tau_themes::names::BANNER_ACCENT);
@@ -1793,8 +1799,13 @@ mod tests {
 
     fn setup(w: u16, h: u16) -> (Term, TermHandle, VtWriter) {
         let vt = VtWriter::new(vt100::Parser::new(h, w, 100));
-        let (term, handle, _input) =
-            Term::new_virtual(w as usize, h as usize, "> ", Box::new(vt.clone()));
+        let (term, handle, _input) = Term::new_virtual(
+            w as usize,
+            h as usize,
+            "> ",
+            Box::new(vt.clone()),
+            tau_cli_term::CursorShape::Bar,
+        );
         (term, handle, vt)
     }
 
