@@ -367,7 +367,7 @@ fn run_chat(session_id: &str, attach: bool) -> Result<(), CliError> {
             Span::new("▀█▀▀ ", accent),
             Span::plain(format!("tau {}", env!("CARGO_PKG_VERSION"))),
             Span::new("\n", Default::default()),
-            Span::new(" █▄  ", accent),
+            Span::new(" █▄▖ ", accent),
             Span::plain(pun),
         ]);
         handle.print_output(StyledBlock::new(banner));
