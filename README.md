@@ -35,6 +35,7 @@ Tau is still young, but the core functionality is working and it is ready for te
 
 Expect rough edges. If you try it, please report bugs, usability problems, and missing pieces.
 
+[![asciicast](https://asciinema.org/a/973826.svg)](https://asciinema.org/a/973826)
 
 ## Installing
 
@@ -66,8 +67,6 @@ You can edit `models.json5` to configure local models, and use `tau provider add
 By default, `tau` starts the harness daemon and the CLI UI.
 
 To explore other entry points, run `tau run -h`.
-
-[![asciicast](https://asciinema.org/a/973826.svg)](https://asciinema.org/a/973826)
 
 
 ## Contributing & Contact
