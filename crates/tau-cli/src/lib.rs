@@ -764,7 +764,7 @@ struct ToolSuffixSegment {
 }
 
 /// Decomposed tool-call label, painted as themed spans:
-/// `<tool_name> <args> <suffix...>`. Running calls have no suffixes yet.
+/// `<tool_name> <args> <suffix...>`.
 #[derive(Clone)]
 struct ToolCallDisplay {
     tool_name: String,
@@ -798,7 +798,7 @@ fn format_tool_call(tool_name: &str, arguments: &CborValue) -> ToolCallDisplay {
     ToolCallDisplay {
         tool_name: tool_name.to_owned(),
         args,
-        suffixes: Vec::new(),
+        suffixes: vec![running_suffix()],
     }
 }
 
@@ -808,6 +808,10 @@ fn tool_suffix(text: String, status: ToolStatus) -> ToolSuffixSegment {
 
 fn info_suffix(text: String) -> ToolSuffixSegment {
     tool_suffix(text, ToolStatus::Info)
+}
+
+fn running_suffix() -> ToolSuffixSegment {
+    info_suffix("…".to_owned())
 }
 
 fn ok_suffix() -> ToolSuffixSegment {
@@ -1751,7 +1755,7 @@ mod tests {
     use tau_cli_term_raw::Term;
     use tau_proto::{
         AgentResponseFinished, AgentResponseUpdated, CborValue, Event, SessionPromptCreated,
-        SessionPromptQueued, UiPromptSubmitted,
+        SessionPromptQueued, ToolResult, UiPromptSubmitted,
     };
 
     use super::EventRenderer;
@@ -2080,6 +2084,49 @@ mod tests {
         sync(&handle);
         assert!(vt.screen_contains(80, "Hello"));
         assert!(!vt.screen_contains(80, "Hello …"));
+    }
+
+    #[test]
+    fn running_tool_call_shows_ellipsis_until_result() {
+        let (_term, handle, vt) = setup(80, 24);
+        let mut renderer = EventRenderer::new(
+            handle.clone(),
+            tau_cli_term::CompletionData::new(),
+            tau_themes::Theme::builtin(),
+        );
+
+        renderer.handle(&Event::AgentResponseFinished(AgentResponseFinished {
+            session_prompt_id: "sp-0".into(),
+            text: None,
+            tool_calls: vec![tau_proto::AgentToolCall {
+                id: "call-1".into(),
+                name: "read".into(),
+                arguments: CborValue::Map(vec![(
+                    CborValue::Text("path".into()),
+                    CborValue::Text("src/main.rs".into()),
+                )]),
+            }],
+        }));
+        sync(&handle);
+        assert!(vt.screen_contains(80, "read src/main.rs …"));
+
+        renderer.handle(&Event::ToolResult(ToolResult {
+            call_id: "call-1".into(),
+            tool_name: "read".into(),
+            result: CborValue::Map(vec![
+                (
+                    CborValue::Text("path".into()),
+                    CborValue::Text("src/main.rs".into()),
+                ),
+                (
+                    CborValue::Text("content".into()),
+                    CborValue::Text("fn main() {}\n".into()),
+                ),
+            ]),
+        }));
+        sync(&handle);
+        assert!(vt.screen_contains(80, "read src/main.rs (1L, 13B) ok"));
+        assert!(!vt.screen_contains(80, "read src/main.rs …"));
     }
 
     #[test]
