@@ -257,25 +257,38 @@
       border-radius: 6px;
       padding: 1.5rem 2rem;
       margin-top: 1.5rem;
-      font-size: 1rem;
-      color: var(--base01);
-      overflow-x: auto;
-      white-space: pre;
-      line-height: 1.5;
       text-align: center;
     }
 
-    .arch-diagram code {
-      display: inline-block;
-      text-align: left;
+    /* Diagram is inline SVG with per-tspan absolute x coords so
+       whitespace between elements is irrelevant to rendering — an HTML
+       indenter cannot break alignment by reflowing the source. */
+    .arch-svg {
+      display: block;
+      width: 100%;
+      height: auto;
+      margin: 0 auto;
     }
 
-    .arch-diagram .h {
-      color: var(--cyan);
+    .arch-wide .arch-svg {
+      max-width: 480px;
     }
 
-    .arch-diagram .c {
-      color: var(--base00);
+    .arch-narrow .arch-svg {
+      max-width: 220px;
+    }
+
+    .arch-svg text {
+      font-family: "IBM Plex Mono", "JetBrains Mono", "Fira Code", "Source Code Pro", ui-monospace, monospace;
+      font-size: 14px;
+    }
+
+    .arch-svg .c {
+      fill: var(--base00);
+    }
+
+    .arch-svg .h {
+      fill: var(--cyan);
     }
 
     /* Status */
@@ -450,29 +463,34 @@
     <p>All components (UI, harness, LLM API, extensions) run as
       standalone POSIX processes, communicating over stdio.
       No Node. No npm. Just processes, pipes and sockets.</p>
-    <div class="arch-diagram arch-wide"><code><span class="c">┌─────────┐ unix socket ┌───────────┐</span>
-        <span class="c">│</span><span class="h"> cli </span><span class="c">│───────────────────│</span><span class="h">
-          harness </span><span class="c">│</span>
-        <span class="c">└─────────┘ └─────┬─────┘</span>
-        <span class="c"> ┌─────────┬────┼────┬─────────┐</span>
-        <span class="c"> stdio stdio stdio stdio</span>
-        <span class="c"> ┌───┴───┐ ┌───┴───┐ ┌───┴───┐ ┌───┴───┐</span>
-        <span class="c"> │</span><span class="h"> agent </span><span class="c">│ │</span><span class="h"> tools
-        </span><span class="c">│ │</span><span class="h"> ext </span><span class="c">│ │</span><span class="h"> ext
-        </span><span class="c">│</span>
-        <span class="c"> └───────┘ └───────┘ └───────┘ └───────┘</span></code></div>
-    <div class="arch-diagram arch-narrow"><code><span class="c"> ┌───────┐</span>
-        <span class="c"> │</span><span class="h"> cli </span><span class="c">│</span>
-        <span class="c"> └───┬───┘</span>
-        <span class="c"> │ unix socket</span>
-        <span class="c"> ┌────┴────┐</span>
-        <span class="c"> │</span><span class="h"> harness </span><span class="c">│</span>
-        <span class="c"> └────┬────┘</span>
-        <span class="c"> │</span>
-        <span class="c"> ├── </span><span class="h">agent</span><span class="c"> (stdio)</span>
-        <span class="c"> ├── </span><span class="h">tools</span><span class="c"> (stdio)</span>
-        <span class="c"> ├── </span><span class="h">ext</span><span class="c"> (stdio)</span>
-        <span class="c"> └── </span><span class="h">ext</span><span class="c"> (stdio)</span></code></div>
+    <div class="arch-diagram arch-wide">
+      <svg class="arch-svg" viewBox="0 0 480 175" xmlns="http://www.w3.org/2000/svg" aria-label="Architecture: cli connects via unix socket to harness, which spawns agent, tools, and extensions over stdio.">
+        <text x="0" y="14" xml:space="preserve" class="c">┌─────────┐    unix socket    ┌───────────┐</text>
+        <text y="35" xml:space="preserve"><tspan x="0" class="c">│</tspan><tspan x="8.4" class="h">   cli   </tspan><tspan x="84" class="c">│───────────────────│</tspan><tspan x="260.4" class="h">  harness  </tspan><tspan x="352.8" class="c">│</tspan></text>
+        <text x="0" y="56" xml:space="preserve" class="c">└─────────┘                   └─────┬─────┘</text>
+        <text x="0" y="77" xml:space="preserve" class="c">                     ┌─────────┬────┼────┬─────────┐</text>
+        <text x="0" y="98" xml:space="preserve" class="c">                   stdio     stdio     stdio     stdio</text>
+        <text x="0" y="119" xml:space="preserve" class="c">                 ┌───┴───┐ ┌───┴───┐ ┌───┴───┐ ┌───┴───┐</text>
+        <text y="140" xml:space="preserve"><tspan x="0" class="c">                 │</tspan><tspan x="151.2" class="h"> agent </tspan><tspan x="210" class="c">│ │</tspan><tspan x="235.2" class="h"> tools </tspan><tspan x="294" class="c">│ │</tspan><tspan x="319.2" class="h">  ext  </tspan><tspan x="378" class="c">│ │</tspan><tspan x="403.2" class="h">  ext  </tspan><tspan x="462" class="c">│</tspan></text>
+        <text x="0" y="161" xml:space="preserve" class="c">                 └───────┘ └───────┘ └───────┘ └───────┘</text>
+      </svg>
+    </div>
+    <div class="arch-diagram arch-narrow">
+      <svg class="arch-svg" viewBox="0 0 220 270" xmlns="http://www.w3.org/2000/svg" aria-label="Architecture: cli to harness via unix socket, harness spawns agent, tools, and extensions over stdio.">
+        <text x="0" y="14" xml:space="preserve" class="c">    ┌───────┐</text>
+        <text y="35" xml:space="preserve"><tspan x="0" class="c">    │</tspan><tspan x="42" class="h">  cli  </tspan><tspan x="100.8" class="c">│</tspan></text>
+        <text x="0" y="56" xml:space="preserve" class="c">    └───┬───┘</text>
+        <text x="0" y="77" xml:space="preserve" class="c">        │ unix socket</text>
+        <text x="0" y="98" xml:space="preserve" class="c">   ┌────┴────┐</text>
+        <text y="119" xml:space="preserve"><tspan x="0" class="c">   │</tspan><tspan x="33.6" class="h"> harness </tspan><tspan x="109.2" class="c">│</tspan></text>
+        <text x="0" y="140" xml:space="preserve" class="c">   └────┬────┘</text>
+        <text x="0" y="161" xml:space="preserve" class="c">        │</text>
+        <text y="182" xml:space="preserve"><tspan x="0" class="c">        ├── </tspan><tspan x="100.8" class="h">agent</tspan><tspan x="142.8" class="c"> (stdio)</tspan></text>
+        <text y="203" xml:space="preserve"><tspan x="0" class="c">        ├── </tspan><tspan x="100.8" class="h">tools</tspan><tspan x="142.8" class="c"> (stdio)</tspan></text>
+        <text y="224" xml:space="preserve"><tspan x="0" class="c">        ├── </tspan><tspan x="100.8" class="h">ext</tspan><tspan x="126" class="c">   (stdio)</tspan></text>
+        <text y="245" xml:space="preserve"><tspan x="0" class="c">        └── </tspan><tspan x="100.8" class="h">ext</tspan><tspan x="126" class="c">   (stdio)</tspan></text>
+      </svg>
+    </div>
   </section>
 
   <hr class="divider">
