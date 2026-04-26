@@ -3205,8 +3205,17 @@ fn format_session_entry(entry: &SessionEntry) -> String {
         SessionEntry::UserMessage { text } => format!("user: {text}"),
         SessionEntry::AgentMessage { text } => format!("agent: {text}"),
         SessionEntry::ToolActivity(a) => match &a.outcome {
-            ToolActivityOutcome::Requested { .. } => {
-                format!("tool.request {} ({})", a.tool_name, a.call_id)
+            ToolActivityOutcome::Requested { arguments } => {
+                if a.tool_name.as_str() == "skill" {
+                    let name = cbor_map_text(arguments, "name").unwrap_or_default();
+                    if name.is_empty() {
+                        "tool.request skill".to_owned()
+                    } else {
+                        format!("tool.request skill {name}")
+                    }
+                } else {
+                    format!("tool.request {}", a.tool_name)
+                }
             }
             ToolActivityOutcome::Result { result } => {
                 let text = cbor_to_text(result);
@@ -3215,10 +3224,10 @@ fn format_session_entry(entry: &SessionEntry) -> String {
                 } else {
                     text
                 };
-                format!("tool.result {} ({}) -> {preview}", a.tool_name, a.call_id)
+                format!("tool.result {} -> {preview}", a.tool_name)
             }
             ToolActivityOutcome::Error { message, .. } => {
-                format!("tool.error {} ({}) -> {message}", a.tool_name, a.call_id)
+                format!("tool.error {} -> {message}", a.tool_name)
             }
         },
     }
@@ -3761,6 +3770,45 @@ mod tests {
             true,
             session_id,
         )
+    }
+
+    #[test]
+    fn format_session_entry_tree_preview_hides_call_id_and_shows_skill_name() {
+        let skill_request = SessionEntry::ToolActivity(ToolActivityRecord {
+            call_id: "call_HC8dStLuLeEjHCxFZsBx6jfV".into(),
+            tool_name: "skill".into(),
+            outcome: ToolActivityOutcome::Requested {
+                arguments: CborValue::Map(vec![(
+                    CborValue::Text("name".to_owned()),
+                    CborValue::Text("jujutsu".to_owned()),
+                )]),
+            },
+        });
+        assert_eq!(
+            format_session_entry(&skill_request),
+            "tool.request skill jujutsu"
+        );
+
+        let read_request = SessionEntry::ToolActivity(ToolActivityRecord {
+            call_id: "call_ugly".into(),
+            tool_name: "read".into(),
+            outcome: ToolActivityOutcome::Requested {
+                arguments: CborValue::Map(vec![(
+                    CborValue::Text("path".to_owned()),
+                    CborValue::Text("foo.txt".to_owned()),
+                )]),
+            },
+        });
+        assert_eq!(format_session_entry(&read_request), "tool.request read");
+
+        let result = SessionEntry::ToolActivity(ToolActivityRecord {
+            call_id: "call_ugly".into(),
+            tool_name: "read".into(),
+            outcome: ToolActivityOutcome::Result {
+                result: CborValue::Text("hello".to_owned()),
+            },
+        });
+        assert_eq!(format_session_entry(&result), "tool.result read -> hello");
     }
 
     #[test]
