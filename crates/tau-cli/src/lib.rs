@@ -744,15 +744,40 @@ fn cbor_field<'a>(value: &'a CborValue, key: &str) -> Option<&'a CborValue> {
 }
 
 /// Format the `+N/-M` chip from a `DiffSummary` sub-tree on a tool
-/// result. Returns `None` if the diff is missing or empty.
-fn format_diff_chip(details: &CborValue) -> Option<String> {
+/// result as themed suffix segments. `+N` is painted with the
+/// diff-added style and `-M` with the diff-removed style, matching
+/// `git diff --shortstat`. The parens and slash stay in the muted info
+/// style. Returns `None` if the diff is missing or empty.
+fn format_diff_chip_segments(details: &CborValue) -> Option<Vec<ToolSuffixSegment>> {
     let diff = cbor_field(details, "diff")?;
     let added = cbor_int_field(diff, "added").unwrap_or(0);
     let removed = cbor_int_field(diff, "removed").unwrap_or(0);
     if added == 0 && removed == 0 {
         return None;
     }
-    Some(format!("(+{added}/-{removed})"))
+    Some(vec![
+        info_suffix("(".to_owned()),
+        ToolSuffixSegment {
+            text: format!("+{added}"),
+            status: ToolStatus::DiffAdded,
+            no_leading_space: true,
+        },
+        ToolSuffixSegment {
+            text: "/".to_owned(),
+            status: ToolStatus::Info,
+            no_leading_space: true,
+        },
+        ToolSuffixSegment {
+            text: format!("-{removed}"),
+            status: ToolStatus::DiffRemoved,
+            no_leading_space: true,
+        },
+        ToolSuffixSegment {
+            text: ")".to_owned(),
+            status: ToolStatus::Info,
+            no_leading_space: true,
+        },
+    ])
 }
 
 /// Decode a `DiffSummary` sub-tree from a tool result, if present and
@@ -775,12 +800,19 @@ enum ToolStatus {
     Success,
     Error,
     Info,
+    DiffAdded,
+    DiffRemoved,
 }
 
 #[derive(Clone)]
 struct ToolSuffixSegment {
     text: String,
     status: ToolStatus,
+    /// When true, suppress the implicit space the renderer normally
+    /// inserts before this segment. Used to glue parts of a multi-span
+    /// chip (e.g. the colored `+N/-M` diff stat) into one continuous
+    /// run.
+    no_leading_space: bool,
 }
 
 /// Decomposed tool-call label, painted as themed spans:
@@ -823,7 +855,11 @@ fn format_tool_call(tool_name: &str, arguments: &CborValue) -> ToolCallDisplay {
 }
 
 fn tool_suffix(text: String, status: ToolStatus) -> ToolSuffixSegment {
-    ToolSuffixSegment { text, status }
+    ToolSuffixSegment {
+        text,
+        status,
+        no_leading_space: false,
+    }
 }
 
 fn info_suffix(text: String) -> ToolSuffixSegment {
@@ -884,16 +920,18 @@ fn format_tool_completion(
             if let Some(msg) = error_message {
                 format_tool_error("write", path, msg)
             } else {
-                // Prefer the +N/-M diff chip; fall back to byte count
-                // for tools that don't ship a diff (or no-op writes).
-                let suffix = format_diff_chip(details).unwrap_or_else(|| {
+                // Prefer the colored +N/-M diff chip; fall back to byte
+                // count for tools that don't ship a diff (or no-op
+                // writes).
+                let mut suffixes = format_diff_chip_segments(details).unwrap_or_else(|| {
                     let bytes = cbor_int_field(details, "bytes_written").unwrap_or(0);
-                    format!("({bytes}B)")
+                    vec![info_suffix(format!("({bytes}B)"))]
                 });
+                suffixes.push(ok_suffix());
                 ToolCallDisplay {
                     tool_name: "write".into(),
                     args: path,
-                    suffixes: vec![info_suffix(suffix), ok_suffix()],
+                    suffixes,
                 }
             }
         }
@@ -902,14 +940,15 @@ fn format_tool_completion(
             if let Some(msg) = error_message {
                 format_tool_error("edit", path, msg)
             } else {
-                let suffix = format_diff_chip(details).unwrap_or_else(|| {
+                let mut suffixes = format_diff_chip_segments(details).unwrap_or_else(|| {
                     let count = cbor_int_field(details, "edits_applied").unwrap_or(0);
-                    format!("({count} edits applied)")
+                    vec![info_suffix(format!("({count} edits applied)"))]
                 });
+                suffixes.push(ok_suffix());
                 ToolCallDisplay {
                     tool_name: "edit".into(),
                     args: path,
-                    suffixes: vec![info_suffix(suffix), ok_suffix()],
+                    suffixes,
                 }
             }
         }
@@ -1046,9 +1085,11 @@ fn render_tool_block(
             ToolStatus::Success => names::TOOL_STATUS_SUCCESS,
             ToolStatus::Error => names::TOOL_STATUS_ERROR,
             ToolStatus::Info => names::TOOL_STATUS_INFO,
+            ToolStatus::DiffAdded => names::DIFF_ADDED,
+            ToolStatus::DiffRemoved => names::DIFF_REMOVED,
         };
         let status_style = resolve(theme, status_name);
-        if !suffix.text.starts_with(':') {
+        if !suffix.no_leading_space && !suffix.text.starts_with(':') {
             spans.push(Span::new(" ", args_style));
         }
         spans.push(Span::new(suffix.text.clone(), status_style));
@@ -2373,12 +2414,30 @@ mod tests {
             ),
         ]);
         let edit = super::format_tool_completion("edit", &edit_details, None);
-        assert_eq!(edit.suffixes.len(), 2);
-        assert_eq!(edit.suffixes[0].text, "(+2/-1)");
+        assert_eq!(edit.suffixes.len(), 6);
+        assert_eq!(edit.suffixes[0].text, "(");
         assert!(matches!(edit.suffixes[0].status, super::ToolStatus::Info));
-        assert_eq!(edit.suffixes[1].text, "ok");
+        assert_eq!(edit.suffixes[1].text, "+2");
         assert!(matches!(
             edit.suffixes[1].status,
+            super::ToolStatus::DiffAdded
+        ));
+        assert!(edit.suffixes[1].no_leading_space);
+        assert_eq!(edit.suffixes[2].text, "/");
+        assert!(matches!(edit.suffixes[2].status, super::ToolStatus::Info));
+        assert!(edit.suffixes[2].no_leading_space);
+        assert_eq!(edit.suffixes[3].text, "-1");
+        assert!(matches!(
+            edit.suffixes[3].status,
+            super::ToolStatus::DiffRemoved
+        ));
+        assert!(edit.suffixes[3].no_leading_space);
+        assert_eq!(edit.suffixes[4].text, ")");
+        assert!(matches!(edit.suffixes[4].status, super::ToolStatus::Info));
+        assert!(edit.suffixes[4].no_leading_space);
+        assert_eq!(edit.suffixes[5].text, "ok");
+        assert!(matches!(
+            edit.suffixes[5].status,
             super::ToolStatus::Success
         ));
     }
