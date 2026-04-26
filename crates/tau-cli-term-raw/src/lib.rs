@@ -65,6 +65,9 @@ struct SharedState {
     right_prompt: StyledText,
     buffer: String,
     cursor: usize,
+    input_history: Vec<String>,
+    history_nav_entries: Vec<String>,
+    history_nav_index: Option<usize>,
     width: usize,
     height: usize,
     /// Set by Term::drop to signal the redraw thread to exit.
@@ -86,6 +89,50 @@ impl SharedState {
         let id = BlockId(self.next_id);
         self.next_id += 1;
         id
+    }
+
+    fn reset_history_nav(&mut self) {
+        self.history_nav_entries.clear();
+        self.history_nav_index = None;
+    }
+
+    fn save_buffer_to_history_nav(&mut self) {
+        if let Some(index) = self.history_nav_index {
+            if index < self.history_nav_entries.len() {
+                self.history_nav_entries[index] = self.buffer.clone();
+            }
+        }
+    }
+
+    fn apply_history_nav_entry(&mut self, index: usize) {
+        self.buffer = self.history_nav_entries[index].clone();
+        self.cursor = self.buffer.len();
+        self.history_nav_index = Some(index);
+    }
+
+    fn navigate_history(&mut self, delta: isize) -> bool {
+        if self.input_history.is_empty() && self.history_nav_index.is_none() {
+            return false;
+        }
+
+        if self.history_nav_index.is_none() {
+            self.history_nav_entries = self.input_history.clone();
+            self.history_nav_entries.push(self.buffer.clone());
+            self.history_nav_index = Some(self.history_nav_entries.len() - 1);
+        } else {
+            self.save_buffer_to_history_nav();
+        }
+
+        let current = self
+            .history_nav_index
+            .expect("history nav index initialized");
+        let new_index = current as isize + delta;
+        if new_index < 0 || self.history_nav_entries.len() as isize <= new_index {
+            return false;
+        }
+
+        self.apply_history_nav_entry(new_index as usize);
+        true
     }
 }
 
@@ -278,6 +325,7 @@ impl TermHandle {
         let mut st = self.lock();
         st.cursor = cursor.min(text.len());
         st.buffer = text;
+        st.save_buffer_to_history_nav();
     }
 
     /// Updates the right prompt.
@@ -346,6 +394,9 @@ impl Term {
             right_prompt: StyledText::new(),
             buffer: String::new(),
             cursor: 0,
+            input_history: Vec::new(),
+            history_nav_entries: Vec::new(),
+            history_nav_index: None,
             width,
             height,
             shutdown: false,
@@ -421,6 +472,9 @@ impl Term {
             right_prompt: StyledText::new(),
             buffer: String::new(),
             cursor: 0,
+            input_history: Vec::new(),
+            history_nav_entries: Vec::new(),
+            history_nav_index: None,
             width,
             height,
             shutdown: false,
@@ -512,6 +566,7 @@ impl Term {
                         let cursor = st.cursor;
                         st.buffer.insert_str(cursor, &text);
                         st.cursor = cursor + text.len();
+                        st.save_buffer_to_history_nav();
                     }
                     self.redraw.notify();
                     return Ok(Event::BufferChanged);
@@ -613,6 +668,8 @@ impl Term {
                     st.cursor = st.buffer.len();
                     let line = std::mem::take(&mut st.buffer);
                     st.cursor = 0;
+                    st.reset_history_nav();
+                    st.input_history.push(line.clone());
                     line
                 };
                 return Ok(Some(Event::Line(line)));
@@ -637,6 +694,7 @@ impl Term {
                 }
                 st.buffer.clear();
                 st.cursor = 0;
+                st.reset_history_nav();
                 drop(st);
                 return Ok(Some(Event::BufferChanged));
             }
@@ -647,6 +705,7 @@ impl Term {
                     let cursor = st.cursor;
                     st.buffer.drain(..cursor);
                     st.cursor = 0;
+                    st.save_buffer_to_history_nav();
                 }
                 return Ok(Some(Event::BufferChanged));
             }
@@ -663,6 +722,7 @@ impl Term {
                         let cursor = st.cursor;
                         st.buffer.drain(new_end..cursor);
                         st.cursor = new_end;
+                        st.save_buffer_to_history_nav();
                         true
                     } else {
                         false
@@ -692,6 +752,7 @@ impl Term {
                     let cursor = st.cursor;
                     st.buffer.insert(cursor, ch);
                     st.cursor += ch.len_utf8();
+                    st.save_buffer_to_history_nav();
                 }
                 return Ok(Some(Event::BufferChanged));
             }
@@ -704,6 +765,7 @@ impl Term {
                         let cursor = st.cursor;
                         st.buffer.drain(prev..cursor);
                         st.cursor = prev;
+                        st.save_buffer_to_history_nav();
                         true
                     } else {
                         false
@@ -721,6 +783,7 @@ impl Term {
                         let next = next_char_boundary(&st.buffer, st.cursor);
                         let cursor = st.cursor;
                         st.buffer.drain(cursor..next);
+                        st.save_buffer_to_history_nav();
                         true
                     } else {
                         false
@@ -749,6 +812,8 @@ impl Term {
                 let mut st = self.state.lock().expect("term state mutex poisoned");
                 if let Some(new_cursor) = move_cursor_vertical(&st, -1) {
                     st.cursor = new_cursor;
+                } else {
+                    st.navigate_history(-1);
                 }
             }
 
@@ -756,6 +821,8 @@ impl Term {
                 let mut st = self.state.lock().expect("term state mutex poisoned");
                 if let Some(new_cursor) = move_cursor_vertical(&st, 1) {
                     st.cursor = new_cursor;
+                } else {
+                    st.navigate_history(1);
                 }
             }
 
@@ -1432,6 +1499,126 @@ mod tests {
             .expect("update should succeed");
 
         assert!(!buf2.is_empty(), "diff should produce output");
+    }
+
+    #[test]
+    fn input_history_navigates_submitted_and_draft_entries() {
+        let buf = SharedBuffer::new();
+        let mut parser = vt100::Parser::new(24, 80, 0);
+
+        let (term, handle, input_tx) =
+            Term::new_virtual(80, 24, "> ", Box::new(buf.clone()), CursorShape::Bar);
+
+        handle.set_buffer("first draft".to_owned(), "first draft".len());
+        flush_redraws(&handle, &buf, &mut parser);
+
+        input_tx
+            .send(RawEvent::Key(KeyEvent::new(
+                KeyCode::Up,
+                KeyModifiers::NONE,
+            )))
+            .expect("send up");
+        assert!(matches!(
+            term.get_next_event().expect("event"),
+            Event::BufferChanged
+        ));
+        assert_eq!(handle.get_buffer(), "first draft");
+
+        handle.set_buffer("one".to_owned(), 3);
+        input_tx
+            .send(RawEvent::Key(KeyEvent::new(
+                KeyCode::Enter,
+                KeyModifiers::NONE,
+            )))
+            .expect("send enter");
+        assert!(matches!(
+            term.get_next_event().expect("event"),
+            Event::Line(line) if line == "one"
+        ));
+
+        handle.set_buffer("two".to_owned(), 3);
+        input_tx
+            .send(RawEvent::Key(KeyEvent::new(
+                KeyCode::Enter,
+                KeyModifiers::NONE,
+            )))
+            .expect("send enter");
+        assert!(matches!(
+            term.get_next_event().expect("event"),
+            Event::Line(line) if line == "two"
+        ));
+
+        handle.set_buffer("draft".to_owned(), 5);
+
+        input_tx
+            .send(RawEvent::Key(KeyEvent::new(
+                KeyCode::Up,
+                KeyModifiers::NONE,
+            )))
+            .expect("send up");
+        assert!(matches!(
+            term.get_next_event().expect("event"),
+            Event::BufferChanged
+        ));
+        assert_eq!(handle.get_buffer(), "two");
+
+        input_tx
+            .send(RawEvent::Key(KeyEvent::new(
+                KeyCode::Up,
+                KeyModifiers::NONE,
+            )))
+            .expect("send up");
+        assert!(matches!(
+            term.get_next_event().expect("event"),
+            Event::BufferChanged
+        ));
+        assert_eq!(handle.get_buffer(), "one");
+
+        input_tx
+            .send(RawEvent::Key(KeyEvent::new(
+                KeyCode::Down,
+                KeyModifiers::NONE,
+            )))
+            .expect("send down");
+        assert!(matches!(
+            term.get_next_event().expect("event"),
+            Event::BufferChanged
+        ));
+        assert_eq!(handle.get_buffer(), "two");
+
+        input_tx
+            .send(RawEvent::Key(KeyEvent::new(
+                KeyCode::Down,
+                KeyModifiers::NONE,
+            )))
+            .expect("send down");
+        assert!(matches!(
+            term.get_next_event().expect("event"),
+            Event::BufferChanged
+        ));
+        assert_eq!(handle.get_buffer(), "draft");
+    }
+
+    #[test]
+    fn vertical_motion_stays_within_multiline_buffer_before_history() {
+        let buf = SharedBuffer::new();
+        let (term, handle, input_tx) =
+            Term::new_virtual(10, 5, "> ", Box::new(buf), CursorShape::Bar);
+
+        handle.set_buffer("abc\ndef".to_owned(), "abc\ndef".len());
+
+        input_tx
+            .send(RawEvent::Key(KeyEvent::new(
+                KeyCode::Up,
+                KeyModifiers::NONE,
+            )))
+            .expect("send up");
+        assert!(matches!(
+            term.get_next_event().expect("event"),
+            Event::BufferChanged
+        ));
+        assert_eq!(handle.get_buffer(), "abc\ndef");
+        assert_eq!(handle.get_cursor(), 3);
     }
 
     #[test]
