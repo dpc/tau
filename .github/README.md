@@ -6,8 +6,7 @@
 
 > Tau is like [Pi][pi], but twice as much.
 
-Tau is a Unix-native AI coding agent built on top the most venerable,
-powerful and ubiquitous runtime there is: Unix itself.
+Tau is a minimal Unix-first coding agent for people who want local control, simple process boundaries, and tooling that fits naturally into a command-line environment.
 
 [pi]: https://shittycodingagent.ai/
 
@@ -23,9 +22,9 @@ Head to [Tau's Radicle site][project-radicle] for an up-to-date version and more
 
 ## Contributing
 
-We encourage using [GitHub Discussions][discussions] for questions, ideas, and general conversation.
+Use [GitHub Discussions][discussions] for questions, ideas, and general conversation.
 
-We don't accept Pull Requests. See [I don't want your PRs anymore][no-prs] for the rationale.
+I do not accept pull requests. See [I don't want your PRs anymore][no-prs] for the rationale.
 
 [discussions]: https://github.com/dpc/tau/discussions
 [no-prs]: https://dpc.pw/posts/i-dont-want-your-prs-anymore/
