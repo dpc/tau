@@ -847,10 +847,11 @@ fn format_tool_call(tool_name: &str, arguments: &CborValue) -> ToolCallDisplay {
         "skill" => cbor_text_field(arguments, "name").unwrap_or_default(),
         _ => String::new(),
     };
+    let suffix = running_suffix_after(&args);
     ToolCallDisplay {
         tool_name: tool_name.to_owned(),
         args,
-        suffixes: vec![running_suffix()],
+        suffixes: vec![suffix],
     }
 }
 
@@ -866,8 +867,18 @@ fn info_suffix(text: String) -> ToolSuffixSegment {
     tool_suffix(text, ToolStatus::Info)
 }
 
-fn running_suffix() -> ToolSuffixSegment {
-    info_suffix("…".to_owned())
+/// Build the running-call ellipsis with the same leading-space rule
+/// [`append_streaming_indicator`] applies: skip the implicit space the
+/// renderer would otherwise insert when the preceding text (`args`)
+/// already ends in whitespace. Empty `args` keeps the space, since the
+/// label preceding the suffix is then the tool name (never whitespace).
+fn running_suffix_after(args: &str) -> ToolSuffixSegment {
+    let no_leading_space = args.chars().next_back().is_some_and(char::is_whitespace);
+    ToolSuffixSegment {
+        text: "…".to_owned(),
+        status: ToolStatus::Info,
+        no_leading_space,
+    }
 }
 
 fn ok_suffix() -> ToolSuffixSegment {
@@ -879,6 +890,18 @@ fn err_suffix(message: Option<&str>) -> ToolSuffixSegment {
         Some(msg) if !msg.is_empty() => tool_suffix(format!("err: {msg}"), ToolStatus::Error),
         _ => tool_suffix("err".to_owned(), ToolStatus::Error),
     }
+}
+
+/// Append the streaming-progress indicator (`…`) to `text`, prefixing
+/// a space only when needed so the indicator doesn't double up
+/// whitespace or get stranded one column off the left margin on a
+/// fresh line. The space is skipped when `text` is empty or its last
+/// character is whitespace (which includes newlines).
+fn append_streaming_indicator(text: &mut String) {
+    if text.chars().next_back().is_some_and(|c| !c.is_whitespace()) {
+        text.push(' ');
+    }
+    text.push('…');
 }
 
 fn output_stats_suffix(text: &str) -> ToolSuffixSegment {
@@ -1439,7 +1462,9 @@ impl EventRenderer {
                     ));
                 }
 
-                let block = themed_block(&self.theme, names::AGENT_PENDING, " …");
+                let mut pending = String::new();
+                append_streaming_indicator(&mut pending);
+                let block = themed_block(&self.theme, names::AGENT_PENDING, pending);
                 let id = self.handle.new_block(block);
                 self.handle.push_above_active(id);
                 self.handle.redraw();
@@ -1448,7 +1473,8 @@ impl EventRenderer {
             }
             Event::AgentResponseUpdated(update) => {
                 if let Some(&bid) = self.prompt_blocks.get(update.session_prompt_id.as_str()) {
-                    let text = format!("{} …", update.text);
+                    let mut text = update.text.clone();
+                    append_streaming_indicator(&mut text);
                     let block = themed_block(&self.theme, names::AGENT_RESPONSE, text);
                     self.handle.set_block(bid, block);
                     self.handle.redraw();
@@ -1940,7 +1966,7 @@ mod tests {
             thinking_level: tau_proto::ThinkingLevel::Off,
         }));
         sync(&handle);
-        assert!(vt.screen_contains(80, " …"));
+        assert!(vt.screen_contains(80, "…"));
 
         // Agent streams response.
         renderer.handle(&Event::AgentResponseUpdated(AgentResponseUpdated {
@@ -2141,8 +2167,8 @@ mod tests {
         }
         // No stale "..." blocks.
         assert!(
-            !vt.screen_contains(80, " …"),
-            "no ' …' should remain, got: {:?}",
+            !vt.screen_contains(80, "…"),
+            "no '…' should remain, got: {:?}",
             vt.screen_text(80)
         );
     }
@@ -2166,7 +2192,7 @@ mod tests {
             thinking_level: tau_proto::ThinkingLevel::Off,
         }));
         sync(&handle);
-        assert!(vt.screen_contains(80, " …"));
+        assert!(vt.screen_contains(80, "…"));
 
         renderer.handle(&Event::AgentResponseUpdated(AgentResponseUpdated {
             session_prompt_id: "sp-0".into(),
@@ -2393,6 +2419,23 @@ mod tests {
     }
 
     #[test]
+    fn append_streaming_indicator_handles_each_trailing_case() {
+        let cases = [
+            ("", "…"),
+            ("Hello", "Hello …"),
+            ("Hello ", "Hello …"),
+            ("Hello\t", "Hello\t…"),
+            ("line\n", "line\n…"),
+            ("line\n  ", "line\n  …"),
+        ];
+        for (input, expected) in cases {
+            let mut s = input.to_owned();
+            super::append_streaming_indicator(&mut s);
+            assert_eq!(s, expected, "input was {input:?}");
+        }
+    }
+
+    #[test]
     fn edit_completion_uses_diff_chip() {
         let edit_details = CborValue::Map(vec![
             (
@@ -2595,8 +2638,8 @@ mod tests {
 
         // No stale streaming blocks should remain.
         assert!(
-            !vt.screen_contains(80, " …"),
-            "no ' …' should remain, got: {:?}",
+            !vt.screen_contains(80, "…"),
+            "no '…' should remain, got: {:?}",
             vt.screen_text(80)
         );
     }
