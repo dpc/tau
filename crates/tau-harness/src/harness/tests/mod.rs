@@ -1176,18 +1176,7 @@ fn seed_agent_thinking(h: &mut Harness, cid: &crate::AgentId, spid: &str) {
     let model = h
         .model_for_agent_role(conv)
         .or_else(|| h.selected_model.clone());
-    let mut tool_specs = h.gather_effective_tool_specs_for_role_model(&role, model.as_ref());
-    for stage in h.extensions.activation_staging.values() {
-        for registration in &stage.tool_registrations {
-            if h.is_registered_tool_enabled_for_role(registration, &role)
-                && !tool_specs
-                    .iter()
-                    .any(|spec| spec.name == registration.tool.name)
-            {
-                tool_specs.push(registration.tool.clone());
-            }
-        }
-    }
+    let tool_specs = h.gather_effective_tool_specs_for_role_model(&role, model.as_ref());
     h.prompt_tool_specs.insert(spid.into(), tool_specs);
     let conv = h.agents.get_mut(cid).expect("conversation present");
     if let Some(next_index) = spid

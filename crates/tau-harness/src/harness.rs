@@ -9360,22 +9360,61 @@ impl Harness {
         &self,
         cid: &AgentId,
         requested_name: &ToolName,
-        _agent_prompt_id: Option<&AgentPromptId>,
+        agent_prompt_id: Option<&AgentPromptId>,
     ) -> bool {
+        let Some((internal_name, visible_name)) =
+            self.staged_wait_tool_names(cid, requested_name, agent_prompt_id)
+        else {
+            return false;
+        };
+        self.extensions.activation_staging.values().any(|stage| {
+            stage.tool_registrations.iter().any(|registration| {
+                registration.tool.name == internal_name
+                    || self.tool_model_visible_name(&registration.tool) == &visible_name
+            })
+        })
+    }
+
+    fn staged_wait_tool_names(
+        &self,
+        cid: &AgentId,
+        requested_name: &ToolName,
+        agent_prompt_id: Option<&AgentPromptId>,
+    ) -> Option<(ToolName, ToolName)> {
+        if let Some(agent_prompt_id) = agent_prompt_id {
+            let spec =
+                self.resolve_enabled_tool_spec_for_prompt(requested_name, agent_prompt_id)?;
+            if self.registry.resolve_provider(&spec.name).is_some() {
+                return None;
+            }
+            return Some((
+                spec.name.clone(),
+                self.tool_model_visible_name(spec).clone(),
+            ));
+        }
+
         let role_name = self.role_name_for_agent_id(cid);
         if self
             .resolve_enabled_tool_name_for_role(requested_name, &role_name)
             .is_some()
         {
-            return false;
+            return None;
         }
-        self.extensions.activation_staging.values().any(|stage| {
-            stage.tool_registrations.iter().any(|registration| {
+        self.extensions
+            .activation_staging
+            .values()
+            .flat_map(|stage| stage.tool_registrations.iter())
+            .find(|registration| {
                 self.is_registered_tool_enabled_for_role(registration, &role_name)
                     && (registration.tool.name == *requested_name
                         || self.tool_model_visible_name(&registration.tool) == requested_name)
             })
-        })
+            .map(|registration| {
+                (
+                    registration.tool.name.clone(),
+                    self.tool_model_visible_name(&registration.tool).clone(),
+                )
+            })
     }
 
     fn role_disables_alternative_set(&self, spec: &tau_proto::ToolSpec, role_name: &str) -> bool {

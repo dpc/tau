@@ -943,6 +943,90 @@ fn invalid_tool_arguments_are_rejected_before_logical_dispatch() {
     h.shutdown().expect("shutdown");
 }
 
+/// If an old prompt calls a tool that was advertised with a strict schema but
+/// whose provider has since disappeared, provider availability must be checked
+/// before schema validation. The model should receive the accurate NoProvider
+/// error instead of a misleading invalid-arguments error for a tool that cannot
+/// run anymore.
+#[test]
+fn old_prompt_missing_provider_wins_over_strict_schema_validation() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    h.selected_model = Some("test/model".into());
+
+    let tool_events = connect_test_tool(&mut h, "conn-strict-old-tool");
+    let mut spec = shared_test_tool_spec("strict_old_tool");
+    spec.parameters = Some(serde_json::json!({
+        "type": "object",
+        "properties": {
+            "allowed": { "type": "string" }
+        },
+        "required": ["allowed"],
+        "additionalProperties": false
+    }));
+    h.registry.register("conn-strict-old-tool", spec);
+
+    let cid = ensure_test_user_agent(&mut h);
+    let spid: AgentPromptId = "sp-strict-old-tool".into();
+    seed_agent_thinking(&mut h, &cid, spid.as_str());
+    h.prompt_agents.insert(spid.clone(), cid.clone());
+    h.registry.unregister_connection("conn-strict-old-tool");
+
+    h.handle_provider_response_finished(ProviderResponseFinished {
+        agent_prompt_id: spid,
+        agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
+        output_items: vec![ContextItem::ToolCall(ToolCallItem {
+            call_id: "missing-strict".into(),
+            name: ToolName::new("strict_old_tool"),
+            tool_type: tau_proto::ToolType::Function,
+            arguments: CborValue::Map(vec![(
+                CborValue::Text("extra".to_owned()),
+                CborValue::Text("nope".to_owned()),
+            )]),
+        })],
+        stop_reason: tau_proto::ProviderStopReason::ToolCalls,
+        error: None,
+        usage: None,
+        originator: tau_proto::PromptOriginator::User,
+        compaction_original_input_tokens: None,
+        compaction_compacted_input_tokens: None,
+        backend: None,
+        provider_response_id: None,
+        ws_pool_delta: None,
+    })
+    .expect("old prompt missing provider handled");
+
+    let expected = unavailable_tool_error_message(&ToolName::new("strict_old_tool"));
+    let mut provider_error = None;
+    let mut logical_events = Vec::new();
+    let mut seq = crate::event_log::EventLogSeq::new(0);
+    while let Some(entry) = h.event_log.get_next_from(seq) {
+        seq = entry.seq.next();
+        match &entry.event {
+            Event::ProviderToolError(error) if error.call_id.as_str() == "missing-strict" => {
+                provider_error = Some(error.message.clone());
+            }
+            Event::ToolRequest(request) if request.call_id.as_str() == "missing-strict" => {
+                logical_events.push("tool.request");
+            }
+            Event::ToolStarted(invoke) if invoke.call_id.as_str() == "missing-strict" => {
+                logical_events.push("tool.started");
+            }
+            Event::ToolError(error) if error.call_id.as_str() == "missing-strict" => {
+                logical_events.push("tool.error");
+            }
+            _ => {}
+        }
+    }
+
+    assert_eq!(provider_error.as_deref(), Some(expected.as_str()));
+    assert_eq!(logical_events, vec!["tool.request", "tool.error"]);
+    assert!(tool_invoke_call_ids(&tool_events).is_empty());
+
+    h.shutdown().expect("shutdown");
+}
+
 #[test]
 fn disconnect_with_multiple_inflight_tools_cleans_up_all_calls() {
     // Regression: disconnect cleanup must unregister the provider before it
@@ -5482,7 +5566,7 @@ fn start_agent_request_during_tool_call_branches_off_unresolved_tool_use() {
     );
     let cid = ensure_test_user_agent(&mut h);
     let spid: AgentPromptId = "sp-main".into();
-    seed_agent_thinking(&mut h, &cid, "sp-x");
+    seed_agent_thinking(&mut h, &cid, spid.as_str());
     h.prompt_agents.insert(spid.clone(), cid.clone());
     h.publish_for_agent(
         &cid,

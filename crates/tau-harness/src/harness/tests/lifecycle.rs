@@ -917,10 +917,10 @@ fn tool_prompt_fragment_heading_uses_model_visible_tool_name() {
 
 #[test]
 fn queued_tool_call_waits_for_staged_provider_until_ready() {
-    // Regression: a tool call can sit behind another in-flight call while a
-    // replacement/late extension is still handshaking. The staged provider must
-    // not receive the invoke until Ready, but the queued call should run once
-    // the staged registration is activated and still matches the request.
+    // Regression: prompt-owned calls must use the prompt's advertised tool
+    // snapshot, not current role policy. A tool can sit behind another
+    // in-flight call after the live provider disappears, current policy changes
+    // to disallow the tool, and a replacement provider is still handshaking.
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = quiet_provider_harness(&sp).expect("start");
@@ -929,6 +929,28 @@ fn queued_tool_call_waits_for_staged_provider_until_ready() {
     let blocking_sink = connect_test_tool(&mut h, "conn-blocking-tool");
     h.registry
         .register("conn-blocking-tool", staged_tool_spec("blocking_tool"));
+    let old_provider = connect_test_tool(&mut h, "conn-old-staged-tool");
+    h.registry
+        .register("conn-old-staged-tool", staged_tool_spec("staged_tool"));
+
+    let cid = ensure_test_user_agent(&mut h);
+    seed_agent_thinking(&mut h, &cid, "sp-staged-tools");
+    h.prompt_agents
+        .insert("sp-staged-tools".into(), cid.clone());
+    assert!(
+        h.prompt_tool_specs[&AgentPromptId::from("sp-staged-tools")]
+            .iter()
+            .any(|spec| spec.name == "staged_tool")
+    );
+
+    h.registry.unregister_connection("conn-old-staged-tool");
+    drop(old_provider);
+    h.available_roles
+        .get_mut(&h.selected_role)
+        .expect("selected role")
+        .disable_tools
+        .push(ToolName::new("staged_tool"));
+
     let staged_sink = connect_handshaking_tool(&mut h, "conn-staged-tool");
     h.handle_extension_event(
         "conn-staged-tool",
@@ -939,11 +961,6 @@ fn queued_tool_call_waits_for_staged_provider_until_ready() {
         })),
     )
     .expect("stage tool");
-
-    let cid = ensure_test_user_agent(&mut h);
-    seed_agent_thinking(&mut h, &cid, "sp-staged-tools");
-    h.prompt_agents
-        .insert("sp-staged-tools".into(), cid.clone());
     h.publish_for_agent(
         &cid,
         Event::UiPromptSubmitted(UiPromptSubmitted {
@@ -1021,6 +1038,88 @@ fn queued_tool_call_waits_for_staged_provider_until_ready() {
     )
     .expect("staged result");
     assert!(!h.pending_tool_providers.contains_key("call-staged"));
+
+    h.shutdown().expect("shutdown");
+}
+
+#[test]
+fn prompt_snapshot_does_not_expand_to_staged_registration() {
+    // Regression: a staged registration is not part of the prompt snapshot
+    // until Ready. If an old prompt calls such an unadvertised staged tool, the
+    // harness must close it as unavailable instead of waiting and effectively
+    // adding the staged tool to the original prompt.
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = quiet_provider_harness(&sp).expect("start");
+    h.selected_model = Some("test/model".into());
+
+    let staged_sink = connect_handshaking_tool(&mut h, "conn-unadvertised-staged-tool");
+    h.handle_extension_event(
+        "conn-unadvertised-staged-tool",
+        TestProtocolItem::Event(Event::ToolRegister(tau_proto::ToolRegister {
+            tool: staged_tool_spec("unadvertised_staged_tool"),
+            tool_group: None,
+            prompt_fragment: None,
+        })),
+    )
+    .expect("stage tool");
+
+    let cid = ensure_test_user_agent(&mut h);
+    seed_agent_thinking(&mut h, &cid, "sp-unadvertised-staged");
+    h.prompt_agents
+        .insert("sp-unadvertised-staged".into(), cid.clone());
+    assert!(
+        !h.prompt_tool_specs[&AgentPromptId::from("sp-unadvertised-staged")]
+            .iter()
+            .any(|spec| spec.name == "unadvertised_staged_tool")
+    );
+
+    h.handle_provider_response_finished(ProviderResponseFinished {
+        agent_prompt_id: "sp-unadvertised-staged".into(),
+        agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
+        output_items: vec![ContextItem::ToolCall(ToolCallItem {
+            call_id: "call-unadvertised".into(),
+            name: ToolName::new("unadvertised_staged_tool"),
+            tool_type: tau_proto::ToolType::Function,
+            arguments: CborValue::Map(Vec::new()),
+        })],
+        stop_reason: tau_proto::ProviderStopReason::ToolCalls,
+        error: None,
+        usage: None,
+        originator: tau_proto::PromptOriginator::User,
+        compaction_original_input_tokens: None,
+        compaction_compacted_input_tokens: None,
+        backend: None,
+        provider_response_id: None,
+        ws_pool_delta: None,
+    })
+    .expect("unadvertised staged call handled");
+
+    let expected = unavailable_tool_error_message(&ToolName::new("unadvertised_staged_tool"));
+    assert!(default_agent_tree(&h).nodes().iter().any(|node| {
+        matches!(
+            &node.entry,
+            AgentEntry::ToolResults { items }
+                if items.iter().any(|item| {
+                    item.call_id.as_str() == "call-unadvertised"
+                        && matches!(
+                            &item.status,
+                            ToolResultStatus::Error { message } if message == &expected
+                        )
+                })
+        )
+    }));
+    assert_eq!(h.tool_turn.pending_len(), 0);
+    assert!(!sink_has_tool_invoke(&staged_sink, "call-unadvertised"));
+
+    h.handle_extension_message(
+        "conn-unadvertised-staged-tool",
+        TestMessage::Ready(tau_proto::Ready {
+            message: Some("ready".to_owned()),
+        }),
+    )
+    .expect("ready");
+    assert!(!sink_has_tool_invoke(&staged_sink, "call-unadvertised"));
 
     h.shutdown().expect("shutdown");
 }
