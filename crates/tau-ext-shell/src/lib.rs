@@ -166,7 +166,7 @@ where
                 "additionalProperties": false
             })),
             format: None,
-            tags: tool_tags(&["test:echo"]),
+            tags: tool_tags(&["shell:read"]),
             enabled_by_default: true,
             background_support: None,
         },

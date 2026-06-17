@@ -363,6 +363,13 @@ fn startup_registers_echo_disabled_by_default_and_gpt_shell_visible_name() {
                     .map(|group| group.name.as_str()),
                 Some("shell")
             );
+            let tags = register
+                .tool
+                .tags
+                .iter()
+                .map(|tag| tag.as_str())
+                .collect::<Vec<_>>();
+            assert_eq!(tags, vec!["shell:read"]);
             let parameters = register.tool.parameters.as_ref().expect("parameters");
             let range_item = &parameters["properties"]["ranges"]["items"];
             assert_eq!(
