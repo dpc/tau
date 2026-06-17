@@ -53,4 +53,21 @@ model tags and role configuration.
 
 ## Skill and instruction discovery
 
-`tau-ext-shell` discovers local AGENTS.md files and Markdown skills from the working-directory and user skill roots, parses skill frontmatter through `tau-skills`, canonicalizes file paths, and announces candidates to the harness. The extension is only the filesystem discoverer: the harness owns skill-name validation at the protocol boundary, collision winner selection, model/user invocation filtering, and `/skill` prompt expansion policy.
+`tau-ext-shell` discovers local AGENTS.md files and Markdown skills from the
+working-directory and user roots, parses skill frontmatter through `tau-skills`,
+canonicalizes file paths, and announces candidates to the harness. User
+AGENTS.md roots are scanned before project roots in this order:
+`$HOME/.config/agents`, `$HOME/.config/agents.local`, legacy `$HOME/.agents`,
+and legacy `$HOME/.agents.local`. All readable, non-empty files from those roots
+are stacked; the XDG roots do not suppress legacy roots.
+
+Project skill roots stay first and are discovered from ancestor
+`.agents/skills` and `.agents.local/skills` directories. User skill roots follow
+as `$HOME/.config/agents/skills`, `$HOME/.config/agents.local/skills`, legacy
+`$HOME/.agents/skills`, and legacy `$HOME/.agents.local/skills`. The shell
+extension marks XDG user skill roots with higher source precedence than legacy
+user skill roots so duplicate user skill names prefer XDG before modified time.
+`tau-skills` deduplicates files found by this extension before announcement; the
+harness still owns skill-name validation at the protocol boundary, canonical
+winner selection among announced candidates from all sources, model/user
+invocation filtering, and `/skill` prompt expansion policy.

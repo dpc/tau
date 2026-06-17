@@ -23,3 +23,18 @@ selection, waiting progress, cancellation, force-unlock recovery, and same-owner
 reentry. Shell read-write inference must be tested through the dispatch path and
 through `DirLockManager` so stale or missing manual coverage cannot run as
 read-write.
+
+
+## Discovery coverage
+
+AGENTS.md discovery tests should cover ancestor ordering, `.agents.local`
+ordering, symlink and size-cap skips, and user-root ordering. User-root coverage
+must include `$HOME/.config/agents`, `$HOME/.config/agents.local`, legacy
+`$HOME/.agents`, and legacy `$HOME/.agents.local`, with all user roots preceding
+project roots.
+
+Skill discovery tests should cover project roots before user roots and XDG user
+skill roots before legacy user skill roots. Collision tests must exercise the
+`tau-skills` source-precedence path so duplicate user skills from
+`$HOME/.config/agents*` beat duplicate legacy `$HOME/.agents*` skills before
+modified-time comparison.

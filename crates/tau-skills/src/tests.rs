@@ -549,6 +549,55 @@ fn load_from_dirs_collision_winner_is_newest_modified() {
     );
 }
 
+/// Ensures callers can assign explicit root precedence for migrations, so a
+/// preferred root can beat a newer legacy-root duplicate without changing the
+/// default modified-time behavior for callers that omit precedence.
+#[test]
+fn load_from_skill_dirs_collision_prefers_explicit_root_precedence() {
+    let preferred = tempfile::tempdir().expect("preferred tempdir");
+    let legacy = tempfile::tempdir().expect("legacy tempdir");
+
+    let preferred_skill = preferred.path().join("same-skill");
+    fs::create_dir_all(&preferred_skill).expect("mkdir preferred");
+    fs::write(
+        preferred_skill.join("SKILL.md"),
+        "---\nname: same-skill\ndescription: Preferred\n---\n",
+    )
+    .expect("write preferred");
+    set_skill_mtime(&preferred_skill.join("SKILL.md"), 1_700_000_000);
+
+    let legacy_skill = legacy.path().join("same-skill");
+    fs::create_dir_all(&legacy_skill).expect("mkdir legacy");
+    fs::write(
+        legacy_skill.join("SKILL.md"),
+        "---\nname: same-skill\ndescription: Legacy\n---\n",
+    )
+    .expect("write legacy");
+    set_skill_mtime(&legacy_skill.join("SKILL.md"), 1_700_000_100);
+
+    let result = load_skills_from_skill_dirs(&[
+        SkillDir {
+            path: preferred.path().to_owned(),
+            add_to_prompt_by_default: false,
+            source_precedence: Some(0),
+        },
+        SkillDir {
+            path: legacy.path().to_owned(),
+            add_to_prompt_by_default: false,
+            source_precedence: Some(1),
+        },
+    ]);
+
+    assert_eq!(result.skills.len(), 1);
+    assert_eq!(result.skills[0].description, "Preferred");
+    assert!(
+        result
+            .diagnostics
+            .iter()
+            .any(|d| d.message.contains("higher-priority skill root"))
+    );
+}
+
 /// Ensures duplicate skills discovered in one root use modified time rather
 /// than path sorting as the winner heuristic.
 #[test]
@@ -782,6 +831,9 @@ fn built_in_tau_self_knowledge_skills_load_from_embedded_markdown() {
     assert!(debugging.content.contains("## Important paths"));
 }
 
+/// Ensures scoped skill directories still apply their configured default
+/// prompt visibility only when skill frontmatter omits an explicit advertise
+/// setting, preventing root-precedence metadata from changing prompt behavior.
 #[test]
 fn load_from_scoped_dirs_applies_prompt_default_when_advertise_is_omitted() {
     let tmp = tempfile::tempdir().expect("tempdir");
@@ -802,6 +854,7 @@ fn load_from_scoped_dirs_applies_prompt_default_when_advertise_is_omitted() {
     let result = load_skills_from_skill_dirs(&[SkillDir {
         path: tmp.path().to_owned(),
         add_to_prompt_by_default: true,
+        source_precedence: None,
     }]);
     let prompt_flag = |name: &str| {
         result

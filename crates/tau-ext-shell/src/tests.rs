@@ -12,7 +12,9 @@ use tau_proto::{
 use tempfile::TempDir;
 
 use super::*;
-use crate::agents::{discover_agents_files_from, discover_agents_files_from_roots};
+use crate::agents::{
+    discover_agents_files_from, discover_agents_files_from_roots, user_agents_roots,
+};
 use crate::argument::{
     cbor_map_int, cbor_map_text, optional_argument_bool, optional_argument_text,
 };
@@ -1988,32 +1990,51 @@ fn discover_agents_files_skips_oversized_candidates() {
     assert!(discovered[0].file_path.ends_with("AGENTS.ok.md"));
 }
 
+/// Ensures user instruction roots still load before project instructions, while
+/// preferring the XDG user directories over legacy `~/.agents` roots.
 #[test]
-fn discover_agents_files_from_roots_keeps_home_before_repo_chain() {
+fn user_agents_roots_prefer_config_agents_before_legacy_home_agents() {
     let tempdir = TempDir::new().expect("tempdir");
     let home = tempdir.path().join("home");
     let repo = tempdir.path().join("repo");
     fs::create_dir_all(home.join(".agents")).expect("home agents dir");
+    fs::create_dir_all(home.join(".agents.local")).expect("home local agents dir");
+    fs::create_dir_all(home.join(".config").join("agents")).expect("config agents dir");
+    fs::create_dir_all(home.join(".config").join("agents.local")).expect("config local agents dir");
     fs::create_dir_all(repo.join("pkg")).expect("repo pkg dir");
 
-    let home_agents = home.join(".agents").join("AGENTS.md");
+    let config_agents = home.join(".config").join("agents").join("AGENTS.md");
+    let config_local_agents = home.join(".config").join("agents.local").join("AGENTS.md");
+    let legacy_agents = home.join(".agents").join("AGENTS.md");
+    let legacy_local_agents = home.join(".agents.local").join("AGENTS.md");
     let repo_agents = repo.join("AGENTS.md");
     let pkg_agents = repo.join("pkg").join("AGENTS.md");
-    fs::write(&home_agents, "# Home\n- personal rule\n").expect("write home");
+    fs::write(&config_agents, "# Home config\n- preferred personal rule\n")
+        .expect("write config home");
+    fs::write(&config_local_agents, "# Home config local\n").expect("write config local home");
+    fs::write(&legacy_agents, "# Home legacy\n- legacy personal rule\n")
+        .expect("write legacy home");
+    fs::write(&legacy_local_agents, "# Home legacy local\n").expect("write legacy local home");
     fs::write(&repo_agents, "# Repo\n- repo rule\n").expect("write repo");
     fs::write(&pkg_agents, "# Package\n- package rule\n").expect("write pkg");
 
-    let discovered = discover_agents_files_from_roots(vec![
-        home.join(".agents"),
-        repo.clone(),
-        repo.join("pkg"),
-    ]);
+    let mut roots = user_agents_roots(&home);
+    roots.push(repo.clone());
+    roots.push(repo.join("pkg"));
+    let discovered = discover_agents_files_from_roots(roots);
 
     let paths: Vec<PathBuf> = discovered.iter().map(|f| f.file_path.clone()).collect();
     assert_eq!(
         paths,
         vec![
-            home_agents.canonicalize().expect("canonical home"),
+            config_agents.canonicalize().expect("canonical config home"),
+            config_local_agents
+                .canonicalize()
+                .expect("canonical config local home"),
+            legacy_agents.canonicalize().expect("canonical legacy home"),
+            legacy_local_agents
+                .canonicalize()
+                .expect("canonical legacy local home"),
             repo_agents.canonicalize().expect("canonical repo"),
             pkg_agents.canonicalize().expect("canonical pkg"),
         ]
@@ -2054,6 +2075,8 @@ fn discover_agents_files_includes_local_agent_dirs_after_regular_paths() {
     );
 }
 
+/// Ensures user skill roots keep project roots first, then assign XDG user
+/// roots higher collision precedence than legacy `~/.agents` roots.
 #[test]
 fn session_skill_dirs_include_config_agents() {
     let temp = TempDir::new().expect("tempdir");
@@ -2068,24 +2091,31 @@ fn session_skill_dirs_include_config_agents() {
         .iter()
         .map(|dir| dir.add_to_prompt_by_default)
         .collect();
+    let source_precedence: Vec<_> = dirs.iter().map(|dir| dir.source_precedence).collect();
 
     assert_eq!(
         paths,
         vec![
             cwd.join(".agents").join("skills"),
             cwd.join(".agents.local").join("skills"),
-            home.join(".agents").join("skills"),
-            home.join(".agents.local").join("skills"),
             home.join(".config").join("agents").join("skills"),
             home.join(".config").join("agents.local").join("skills"),
+            home.join(".agents").join("skills"),
+            home.join(".agents.local").join("skills"),
         ]
     );
     assert_eq!(
         prompt_defaults,
         vec![true, true, false, false, false, false]
     );
+    assert_eq!(
+        source_precedence,
+        vec![None, None, Some(0), Some(0), Some(1), Some(1)]
+    );
 }
 
+/// Ensures only existing project skill roots from the ancestor chain are
+/// advertised by default, and user roots are appended afterward.
 #[test]
 fn session_skill_dirs_include_existing_project_ancestors() {
     let temp = TempDir::new().expect("tempdir");
@@ -2107,14 +2137,16 @@ fn session_skill_dirs_include_existing_project_ancestors() {
         vec![
             repo_skills,
             pkg_local_skills,
-            home.join(".agents").join("skills"),
-            home.join(".agents.local").join("skills"),
             home.join(".config").join("agents").join("skills"),
             home.join(".config").join("agents.local").join("skills"),
+            home.join(".agents").join("skills"),
+            home.join(".agents.local").join("skills"),
         ]
     );
 }
 
+/// Ensures a home directory that contains the current working directory is not
+/// treated as a project-skill root, including the preferred XDG user roots.
 #[test]
 fn session_skill_dirs_do_not_treat_home_agents_as_project_skills() {
     let temp = TempDir::new().expect("tempdir");
@@ -2135,13 +2167,13 @@ fn session_skill_dirs_do_not_treat_home_agents_as_project_skills() {
         project_defaults,
         vec![
             (repo_skills, true),
-            (home_skills, false),
-            (home.join(".agents.local").join("skills"), false),
             (home.join(".config").join("agents").join("skills"), false),
             (
                 home.join(".config").join("agents.local").join("skills"),
                 false,
             ),
+            (home_skills, false),
+            (home.join(".agents.local").join("skills"), false),
         ]
     );
 }

@@ -1839,8 +1839,8 @@ impl Harness {
         // 1. **Pre-warm AGENTS.md and skill discovery.** The default session is the
         //    fallback when a caller (embedded or socket) doesn't specify one, and even
         //    when callers pick their own `chat-<ts>` id they still benefit: ext-shell
-        //    has already walked `~/.agents/` + the cwd ancestor chain once, so the
-        //    second init is cache-warm.
+        //    has already walked the user agent roots + the cwd ancestor chain once, so
+        //    the second init is cache-warm.
         //
         // 2. **Surface discovery before the first prompt.** The CLI prints "loaded: …"
         //    as events arrive; doing this at startup gives the user visible

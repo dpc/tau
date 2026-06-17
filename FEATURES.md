@@ -364,15 +364,20 @@ mode chip. User `!` commands are outside this agent-tool lock path. The
 extension also injects `/shell-dir-force-unlock DIRECTORY` so the user can clear
 manual locks that overlap a displayed waiting directory.
 
-Tau also discovers project and user agent context from conventional paths. It
-loads `AGENTS.md` and `AGENTS.*.md` from `$HOME/.agents/`, from each
-current-working-directory ancestor, and from matching `.agents.local/`
-directories. Skills are loaded from `.agents/skills` and `.agents.local/skills`
-under the current working directory, plus `$HOME/.agents*/skills` and
-`$HOME/.config/agents*/skills`. The `.local` variants are intended for
-machine- or user-specific instructions and skills that should usually be added
-to `.gitignore` instead of checked in. Skill frontmatter can make skills
-manual-only with `disable-model-invocation` and can add `/skill` completion
+Tau also discovers project and user agent context from conventional paths. User
+`AGENTS.md` files are stacked, not replaced: Tau loads `AGENTS.md` and
+`AGENTS.*.md` from `$HOME/.config/agents/`,
+`$HOME/.config/agents.local/`, legacy `$HOME/.agents/`, then legacy
+`$HOME/.agents.local/`, before current-working-directory ancestors and their
+matching `.agents.local/` directories. Skills are loaded from `.agents/skills`
+and `.agents.local/skills` under the current working directory, then
+`$HOME/.config/agents/skills`, `$HOME/.config/agents.local/skills`, legacy
+`$HOME/.agents/skills`, and legacy `$HOME/.agents.local/skills`. Duplicate
+user-skill names from XDG roots beat legacy user roots before modified-time
+tie-breaking. The `.local` variants are intended for machine- or user-specific
+instructions and skills that should usually be added to `.gitignore` instead of
+checked in. Skill frontmatter can make skills manual-only with
+`disable-model-invocation` and can add `/skill` completion
 argument hints with `argument-hint`.
 
 Prompt fragments are composable too: top-level `harness.yaml`

@@ -42,10 +42,16 @@ Inferred read-only shell mode is advisory unless `config.dir_lock.enforce_ro_bin
 
 `core-shell` discovers and publishes project/user instructions and skills:
 
-- `$HOME/.agents/AGENTS.md` and `$HOME/.agents/AGENTS.*.md`
-- `AGENTS.md` and `AGENTS.*.md` in current-working-directory ancestors
-- matching `.agents.local/AGENTS.md` and `.agents.local/AGENTS.*.md` files
-- skills under `.agents/skills`, `.agents.local/skills`, `$HOME/.agents*/skills`, and `$HOME/.config/agents*/skills`
+- `AGENTS.md` and `AGENTS.*.md` from `$HOME/.config/agents/`,
+  `$HOME/.config/agents.local/`, legacy `$HOME/.agents/`, then legacy
+  `$HOME/.agents.local/`; both XDG and legacy user files are stacked when present
+- `AGENTS.md` and `AGENTS.*.md` in current-working-directory ancestors, plus each
+  ancestor's matching `.agents.local/AGENTS.md` and `.agents.local/AGENTS.*.md`
+- skills under project `.agents/skills` and `.agents.local/skills`, followed by
+  `$HOME/.config/agents/skills`, `$HOME/.config/agents.local/skills`, legacy
+  `$HOME/.agents/skills`, and legacy `$HOME/.agents.local/skills`
+- duplicate user-skill names from XDG skill roots beat legacy user roots before
+  modified-time collision resolution
 
 `tau-ext-shell` parses skill `user-invocable`, `disable-model-invocation`, and `argument-hint` metadata and forwards it to the harness. The harness owns collision winner selection and policy: `disable-model-invocation` hides a skill from `<available_skills>` and the model `skill` tool and implies user invocation, while `/skill <name> [args]` (or `/skill:<name> [args]`) explicitly injects user-invocable skill content into the next prompt with arguments appended.
 

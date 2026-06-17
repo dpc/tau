@@ -54,11 +54,17 @@ pub struct Skill {
 /// from that root.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SkillDir {
+    /// Filesystem directory scanned for Markdown skills.
     pub path: PathBuf,
     /// When true, skills from this directory are added to the initial
     /// prompt when their frontmatter omits `advertise:`. Explicit
     /// `advertise: false` remains a hard opt-out.
     pub add_to_prompt_by_default: bool,
+    /// Optional root precedence used before modified-time collision
+    /// resolution when both colliding candidates provide one. Lower
+    /// values win. `None` keeps legacy modified-time-only selection for
+    /// callers that do not need explicit root precedence.
+    pub source_precedence: Option<u32>,
 }
 
 /// A skill bundled into Tau at compile time.
@@ -108,8 +114,9 @@ pub struct SkillDiagnostic {
 pub enum DiagnosticKind {
     /// Soft issue — the skill still loads.
     Warning,
-    /// Duplicate skill name; the loader selected a winner using modified-time
-    /// ordering with a stable tie-break.
+    /// Duplicate skill name; the loader selected a winner using explicit source
+    /// precedence when available, then modified-time ordering with a stable
+    /// tie-break.
     Collision,
     /// Fatal issue — the skill is not loaded.
     Skipped,
@@ -735,9 +742,15 @@ fn discover_skill_paths_inner(
     }
 }
 
+/// Skill candidate selected as the current winner for a skill name collision.
 struct SelectedSkill {
+    /// Parsed skill metadata and content for the winning candidate.
     skill: Skill,
+    /// Filesystem modification time used as the fallback collision tie-breaker.
     modified: Option<SystemTime>,
+    /// Optional root precedence where lower values beat higher values before
+    /// modification time is considered.
+    source_precedence: Option<u32>,
 }
 
 fn skill_modified_time(path: &Path) -> Option<SystemTime> {
@@ -753,6 +766,21 @@ fn compare_skill_modified(a: Option<SystemTime>, b: Option<SystemTime>) -> Order
         (None, Some(_)) => Ordering::Less,
         (None, None) => Ordering::Equal,
     }
+}
+
+fn compare_skill_candidate(
+    candidate_precedence: Option<u32>,
+    candidate_modified: Option<SystemTime>,
+    existing_precedence: Option<u32>,
+    existing_modified: Option<SystemTime>,
+) -> Ordering {
+    if let (Some(candidate), Some(existing)) = (candidate_precedence, existing_precedence) {
+        match candidate.cmp(&existing).reverse() {
+            Ordering::Equal => {}
+            ordering => return ordering,
+        }
+    }
+    compare_skill_modified(candidate_modified, existing_modified)
 }
 
 fn collision_message(name: &str, kept_path: &Path, ignored_path: &Path, reason: &str) -> String {
@@ -779,6 +807,7 @@ pub fn load_skills_from_dirs(dirs: &[PathBuf]) -> LoadSkillsResult {
         .map(|path| SkillDir {
             path,
             add_to_prompt_by_default: false,
+            source_precedence: None,
         })
         .collect::<Vec<_>>();
     load_skills_from_skill_dirs(&dirs)
@@ -788,7 +817,8 @@ pub fn load_skills_from_dirs(dirs: &[PathBuf]) -> LoadSkillsResult {
 ///
 /// Directory scope can force skills into the initial prompt, which is
 /// useful for project-local skills that are likely relevant to the
-/// current repository.
+/// current repository. When both colliding roots provide explicit source
+/// precedence, lower precedence wins before modified time is considered.
 pub fn load_skills_from_skill_dirs(dirs: &[SkillDir]) -> LoadSkillsResult {
     let mut skills_by_name: BTreeMap<String, SelectedSkill> = BTreeMap::new();
     let mut all_diagnostics = Vec::new();
@@ -817,22 +847,44 @@ pub fn load_skills_from_skill_dirs(dirs: &[SkillDir]) -> LoadSkillsResult {
                 }
                 let modified = skill_modified_time(&skill.file_path);
                 if let Some(existing) = skills_by_name.get_mut(&skill.name) {
-                    let ordering = compare_skill_modified(modified, existing.modified);
+                    let ordering = compare_skill_candidate(
+                        dir.source_precedence,
+                        modified,
+                        existing.source_precedence,
+                        existing.modified,
+                    );
                     if ordering == Ordering::Greater {
+                        let reason = if dir.source_precedence != existing.source_precedence
+                            && dir.source_precedence.is_some()
+                            && existing.source_precedence.is_some()
+                        {
+                            "higher-priority skill root"
+                        } else {
+                            "newer modified time"
+                        };
                         let message = collision_message(
                             &skill.name,
                             &skill.file_path,
                             &existing.skill.file_path,
-                            "newer modified time",
+                            reason,
                         );
                         all_diagnostics.push(SkillDiagnostic {
                             path: existing.skill.file_path.clone(),
                             kind: DiagnosticKind::Collision,
                             message,
                         });
-                        *existing = SelectedSkill { skill, modified };
+                        *existing = SelectedSkill {
+                            skill,
+                            modified,
+                            source_precedence: dir.source_precedence,
+                        };
                     } else {
-                        let reason = if ordering == Ordering::Equal {
+                        let reason = if dir.source_precedence != existing.source_precedence
+                            && dir.source_precedence.is_some()
+                            && existing.source_precedence.is_some()
+                        {
+                            "higher-priority skill root"
+                        } else if ordering == Ordering::Equal {
                             "same or unavailable modified time"
                         } else {
                             "newer modified time"
@@ -849,7 +901,14 @@ pub fn load_skills_from_skill_dirs(dirs: &[SkillDir]) -> LoadSkillsResult {
                         });
                     }
                 } else {
-                    skills_by_name.insert(skill.name.clone(), SelectedSkill { skill, modified });
+                    skills_by_name.insert(
+                        skill.name.clone(),
+                        SelectedSkill {
+                            skill,
+                            modified,
+                            source_precedence: dir.source_precedence,
+                        },
+                    );
                 }
             }
         }

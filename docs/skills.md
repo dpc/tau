@@ -8,12 +8,12 @@ Tau discovers Markdown skills at session start, advertises only the small set th
 Tau scans skills in priority order:
 
 1. Existing project `.agents/skills` and `.agents.local/skills` directories from the working directory's ancestors, broadest ancestor first and current directory last.
-2. `~/.agents/skills`
-3. `~/.agents.local/skills`
-4. `~/.config/agents/skills`
-5. `~/.config/agents.local/skills`
+2. `~/.config/agents/skills`
+3. `~/.config/agents.local/skills`
+4. Legacy `~/.agents/skills`
+5. Legacy `~/.agents.local/skills`
 
-When multiple skills use the same name, Tau keeps the candidate with the newest available modification time and reports the conflict as a collision. Skills with readable timestamps beat skills without timestamps. If timestamps are equal or unavailable, the earlier discovered candidate stays selected. Built-in skills use the harness binary build time as their timestamp, falling back to the executable file mtime when build metadata is unavailable.
+When multiple skills use the same name, Tau keeps the candidate with the newest available modification time and reports the conflict as a collision. Skills with readable timestamps beat skills without timestamps. If timestamps are equal or unavailable, the earlier discovered candidate stays selected. User XDG skill roots (`~/.config/agents*`) explicitly beat legacy user skill roots (`~/.agents*`) before modified time is considered. Built-in skills use the harness binary build time as their timestamp, falling back to the executable file mtime when build metadata is unavailable.
 
 Preferred layout:
 

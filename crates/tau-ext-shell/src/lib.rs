@@ -58,6 +58,8 @@ const SHELL_DIR_FORCE_UNLOCK_ACTION_ID: &str = "shell.dir.force_unlock";
 
 const SLOW_LOCK_WAIT_THRESHOLD_SECS: u64 = 5;
 const LOCK_WAIT_DURATION_SECONDS_HEADER: &str = "lock_wait_duration_seconds";
+const XDG_USER_SKILL_SOURCE_PRECEDENCE: u32 = 0;
+const LEGACY_USER_SKILL_SOURCE_PRECEDENCE: u32 = 1;
 
 /// Runs the extension on stdin/stdout.
 pub fn run_stdio() -> Result<(), Box<dyn Error>> {
@@ -1874,13 +1876,21 @@ fn session_skill_dirs(
         }
     }
     if let Some(home) = home {
-        skill_dirs.push(user_skill_dir(home.join(".agents").join("skills")));
-        skill_dirs.push(user_skill_dir(home.join(".agents.local").join("skills")));
-        skill_dirs.push(user_skill_dir(
+        skill_dirs.push(user_skill_dir_precedence(
             home.join(".config").join("agents").join("skills"),
+            XDG_USER_SKILL_SOURCE_PRECEDENCE,
         ));
-        skill_dirs.push(user_skill_dir(
+        skill_dirs.push(user_skill_dir_precedence(
             home.join(".config").join("agents.local").join("skills"),
+            XDG_USER_SKILL_SOURCE_PRECEDENCE,
+        ));
+        skill_dirs.push(user_skill_dir_precedence(
+            home.join(".agents").join("skills"),
+            LEGACY_USER_SKILL_SOURCE_PRECEDENCE,
+        ));
+        skill_dirs.push(user_skill_dir_precedence(
+            home.join(".agents.local").join("skills"),
+            LEGACY_USER_SKILL_SOURCE_PRECEDENCE,
         ));
     }
     skill_dirs
@@ -1915,12 +1925,17 @@ fn project_skill_dir(path: std::path::PathBuf) -> tau_skills::SkillDir {
     tau_skills::SkillDir {
         path,
         add_to_prompt_by_default: true,
+        source_precedence: None,
     }
 }
 
-fn user_skill_dir(path: std::path::PathBuf) -> tau_skills::SkillDir {
+fn user_skill_dir_precedence(
+    path: std::path::PathBuf,
+    source_precedence: u32,
+) -> tau_skills::SkillDir {
     tau_skills::SkillDir {
         path,
         add_to_prompt_by_default: false,
+        source_precedence: Some(source_precedence),
     }
 }

@@ -14,8 +14,7 @@ pub(crate) struct DiscoveredAgentsFile {
 pub(crate) fn discover_session_agents_files() -> Vec<DiscoveredAgentsFile> {
     let mut roots = Vec::new();
     if let Some(home) = dirs::home_dir() {
-        roots.push(home.join(".agents"));
-        roots.push(home.join(".agents.local"));
+        roots.extend(user_agents_roots(&home));
     }
     if let Ok(cwd) = std::env::current_dir() {
         roots.extend(ancestor_agents_roots(&cwd));
@@ -111,6 +110,15 @@ fn ancestor_agents_roots(cwd: &Path) -> Vec<PathBuf> {
         dirs.push(dir.join(".agents.local"));
     }
     dirs
+}
+
+pub(crate) fn user_agents_roots(home: &Path) -> Vec<PathBuf> {
+    vec![
+        home.join(".config").join("agents"),
+        home.join(".config").join("agents.local"),
+        home.join(".agents"),
+        home.join(".agents.local"),
+    ]
 }
 
 pub(crate) fn ancestor_dirs(cwd: &Path) -> Vec<PathBuf> {
