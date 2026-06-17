@@ -26,6 +26,15 @@ pub const REGISTER_TOOL_NAME: &str = "telegram_register";
 /// Internal tool name for sending a Telegram message from a registered agent.
 pub const SEND_TOOL_NAME: &str = "telegram_send";
 
+/// Tool group name shared by all Telegram bridge tools.
+pub const TOOL_GROUP_NAME: &str = "telegram";
+
+/// Tag marking tools that register an agent with the Telegram bridge.
+pub const REGISTER_TOOL_TAG: &str = "telegram:register";
+
+/// Tag marking tools that send messages through the Telegram bridge.
+pub const SEND_TOOL_TAG: &str = "telegram:send";
+
 const DEFAULT_API_BASE: &str = "https://api.telegram.org";
 const DEFAULT_POLL_TIMEOUT_SECONDS: u64 = 25;
 const HTTP_TIMEOUT: Duration = Duration::from_secs(35);
@@ -542,8 +551,16 @@ where
             tau_proto::EventName::SESSION_AGENT_UNLOADED,
             tau_proto::EventName::SESSION_SHUTDOWN,
         ])
-        .register_tool(register_tool_spec())
-        .register_tool(send_tool_spec())
+        .register_tool_with_group_and_prompt_fragment(
+            register_tool_spec(),
+            Some(telegram_tool_group()),
+            None,
+        )
+        .register_tool_with_group_and_prompt_fragment(
+            send_tool_spec(),
+            Some(telegram_tool_group()),
+            None,
+        )
         .ready_message("telegram ready")
         .run(&mut writer)?;
 
@@ -630,6 +647,13 @@ where
     Ok(())
 }
 
+fn telegram_tool_group() -> tau_proto::ToolGroup {
+    tau_proto::ToolGroup {
+        name: tau_proto::ToolGroupName::new(TOOL_GROUP_NAME),
+        prompt_fragment: None,
+    }
+}
+
 fn register_tool_spec() -> ToolSpec {
     ToolSpec {
         name: tau_proto::ToolName::new(REGISTER_TOOL_NAME),
@@ -646,7 +670,7 @@ fn register_tool_spec() -> ToolSpec {
             "additionalProperties": false
         })),
         format: None,
-        tags: Vec::new(),
+        tags: vec![tau_proto::ToolTag::new(REGISTER_TOOL_TAG)],
         enabled_by_default: false,
         background_support: None,
     }
@@ -668,7 +692,7 @@ fn send_tool_spec() -> ToolSpec {
             "additionalProperties": false
         })),
         format: None,
-        tags: Vec::new(),
+        tags: vec![tau_proto::ToolTag::new(SEND_TOOL_TAG)],
         enabled_by_default: false,
         background_support: None,
     }

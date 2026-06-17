@@ -113,6 +113,25 @@ fn telegram_tools_are_role_opt_in() {
     assert!(!send_tool_spec().enabled_by_default);
 }
 
+/// Telegram bridge tools expose group and tag metadata so role policy can
+/// enable the bridge broadly or select registration/sending capabilities
+/// separately.
+#[test]
+fn telegram_tools_have_group_and_tags() {
+    assert_eq!(telegram_tool_group().name.as_str(), TOOL_GROUP_NAME);
+
+    let register = register_tool_spec();
+    assert!(
+        register
+            .tags
+            .iter()
+            .any(|tag| tag.as_str() == REGISTER_TOOL_TAG)
+    );
+
+    let send = send_tool_spec();
+    assert!(send.tags.iter().any(|tag| tag.as_str() == SEND_TOOL_TAG));
+}
+
 /// Enabled config must name a non-empty token secret and a non-empty allowlist;
 /// otherwise the extension cannot safely decide who may use the bot.
 #[test]

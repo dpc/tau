@@ -48,7 +48,8 @@ or linked chat.
 
 The `telegram_register` and `telegram_send` tools are opt-in for each Tau role.
 Enable them in the role configuration with `enable_tools` before asking that role
-to use the Telegram bridge.
+to use the Telegram bridge. Role policy can also target the `telegram` tool group
+or the `telegram:register` and `telegram:send` tool tags.
 
 ## Limitations
 
