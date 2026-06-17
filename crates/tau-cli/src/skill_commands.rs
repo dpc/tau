@@ -29,7 +29,10 @@ impl SkillCommandState {
     /// Apply one harness-stamped skill availability event.
     pub(crate) fn apply_skill_available(&self, skill: &ExtSkillAvailable) {
         let mut inner = locked(&self.inner);
-        if !skill.user_invocable {
+        // The harness normalizes this before publishing, but keep completion
+        // robust to stale replay data or older daemons: manual-only
+        // `disable_model_invocation` skills are effectively user-invocable.
+        if !skill.user_invocable && !skill.disable_model_invocation {
             inner.remove(skill.name.as_str());
             return;
         }

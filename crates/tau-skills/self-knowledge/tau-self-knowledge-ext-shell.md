@@ -47,7 +47,7 @@ Inferred read-only shell mode is advisory unless `config.dir_lock.enforce_ro_bin
 - matching `.agents.local/AGENTS.md` and `.agents.local/AGENTS.*.md` files
 - skills under `.agents/skills`, `.agents.local/skills`, `$HOME/.agents*/skills`, and `$HOME/.config/agents*/skills`
 
-`tau-ext-shell` parses skill `user-invocable`, `disable-model-invocation`, and `argument-hint` metadata and forwards it to the harness. The harness owns collision winner selection and policy: `disable-model-invocation` hides a skill from `<available_skills>` and the model `skill` tool, while `/skill <name> [args]` (or `/skill:<name> [args]`) explicitly injects user-invocable skill content into the next prompt with arguments appended.
+`tau-ext-shell` parses skill `user-invocable`, `disable-model-invocation`, and `argument-hint` metadata and forwards it to the harness. The harness owns collision winner selection and policy: `disable-model-invocation` hides a skill from `<available_skills>` and the model `skill` tool and implies user invocation, while `/skill <name> [args]` (or `/skill:<name> [args]`) explicitly injects user-invocable skill content into the next prompt with arguments appended.
 
 `.local` locations are intended for machine- or user-specific instructions and are usually gitignored.
 

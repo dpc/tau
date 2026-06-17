@@ -26,8 +26,8 @@ The frontmatter fields Tau reads are:
 - `name`: Optional. Defaults to the parent directory name for `SKILL.md`, or to the file stem for a root-level Markdown skill. Must be lowercase ASCII letters, digits, and hyphens only.
 - `description`: Required. Used in prompt advertisements, search results, and loaded skill results.
 - `advertise`: Optional. `true`, `True`, `TRUE`, and `1` force prompt advertisement. `false`, `False`, `FALSE`, and `0` force no prompt advertisement. Invalid values warn and use the default.
-- `user-invocable`: Optional, default `true`. If false, `/skill` rejects the skill and the terminal completion hides it. This does not block model-side invocation.
-- `disable-model-invocation`: Optional, default `false`. If true, Tau excludes the skill from `<available_skills>` and from the model-visible `skill` tool. Explicit user invocation still works when `user-invocable` is true.
+- `user-invocable`: Optional, default `true`. If false, `/skill` rejects the skill and the terminal completion hides it unless `disable-model-invocation: true` overrides it. This does not block model-side invocation.
+- `disable-model-invocation`: Optional, default `false`. If true, Tau excludes the skill from `<available_skills>` and from the model-visible `skill` tool, and treats the skill as user-invocable.
 - `argument-hint`: Optional short UI hint shown with `/skill` completion.
 
 Tau ignores `allowed-tools` and other provider-specific permission fields; skill frontmatter does not grant or restrict Tau tool permissions.

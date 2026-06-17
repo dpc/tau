@@ -456,6 +456,78 @@ fn user_skill_command_expands_prompt_block() {
     assert!(expanded.ends_with("</skill>\n\ndo this"));
 }
 
+/// Ensures `disable-model-invocation` is treated as manual-only rather than
+/// unreachable, even if an extension also sends `user-invocable: false`.
+#[test]
+fn disable_model_invocation_implies_user_invocable() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(tmp.path()).expect("harness");
+    let path = tmp.path().join("manual-only.md");
+    std::fs::write(
+        &path,
+        "---\nname: manual-only\ndescription: Manual only\n---\nManual only body.\n",
+    )
+    .expect("write skill");
+    h.record_discovered_skill(
+        "ext",
+        &tau_proto::ExtSkillAvailable {
+            name: "manual-only".into(),
+            description: "Manual only".to_owned(),
+            file_path: path,
+            add_to_prompt: true,
+            user_invocable: false,
+            disable_model_invocation: true,
+            argument_hint: None,
+        },
+    );
+
+    assert!(h.discovered_skills["manual-only"].user_invocable);
+    assert!(h.discovered_skills["manual-only"].disable_model_invocation);
+    assert!(
+        h.expand_user_skill_command("/skill manual-only")
+            .expect("expanded")
+            .contains("Manual only body.")
+    );
+}
+
+/// Ensures the harness normalizes manual-only skill policy before publishing
+/// availability events that UI clients use for `/skill` completion.
+#[test]
+fn published_skill_event_normalizes_disable_model_invocation() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(tmp.path()).expect("harness");
+    let path = tmp.path().join("manual-event.md");
+    std::fs::write(
+        &path,
+        "---\nname: manual-event\ndescription: Manual event\n---\nManual event body.\n",
+    )
+    .expect("write skill");
+
+    h.publish_extension_skill_available(
+        "ext",
+        tau_proto::ExtSkillAvailable {
+            name: "manual-event".into(),
+            description: "Manual event".to_owned(),
+            file_path: path,
+            add_to_prompt: false,
+            user_invocable: false,
+            disable_model_invocation: true,
+            argument_hint: Some("<task>".to_owned()),
+        },
+    );
+
+    let published = event_log_events(&h)
+        .into_iter()
+        .find_map(|event| match event {
+            Event::ExtSkillAvailable(skill) if skill.name.as_str() == "manual-event" => Some(skill),
+            _ => None,
+        })
+        .expect("published skill event");
+    assert!(published.user_invocable);
+    assert!(published.disable_model_invocation);
+    assert_eq!(published.argument_hint.as_deref(), Some("<task>"));
+}
+
 /// Ensures non-user-invocable skill commands are rejected before any prompt is
 /// submitted to the model path.
 #[test]

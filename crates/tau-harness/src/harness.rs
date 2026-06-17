@@ -799,6 +799,12 @@ fn built_in_discovered_skills() -> HashMap<tau_proto::SkillName, DiscoveredSkill
         .collect()
 }
 
+fn normalize_skill_invocation_policy(skill: &mut tau_proto::ExtSkillAvailable) {
+    if skill.disable_model_invocation {
+        skill.user_invocable = true;
+    }
+}
+
 fn built_in_skill_modified_time() -> Option<SystemTime> {
     crate::version::build_last_modified()
         .as_deref()
@@ -3773,8 +3779,9 @@ impl Harness {
     fn publish_extension_skill_available(
         &mut self,
         source_id: &str,
-        skill: tau_proto::ExtSkillAvailable,
+        mut skill: tau_proto::ExtSkillAvailable,
     ) {
+        normalize_skill_invocation_policy(&mut skill);
         self.record_discovered_skill(source_id, &skill);
         self.publish_event(Some(source_id), Event::ExtSkillAvailable(skill));
     }
@@ -6501,7 +6508,7 @@ impl Harness {
             description,
             source: DiscoveredSkillSource::File(std::path::PathBuf::from(&skill.file_path)),
             add_to_prompt: skill.add_to_prompt,
-            user_invocable: skill.user_invocable,
+            user_invocable: skill.user_invocable || skill.disable_model_invocation,
             disable_model_invocation: skill.disable_model_invocation,
             modified,
         };

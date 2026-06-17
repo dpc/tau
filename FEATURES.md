@@ -371,7 +371,9 @@ directories. Skills are loaded from `.agents/skills` and `.agents.local/skills`
 under the current working directory, plus `$HOME/.agents*/skills` and
 `$HOME/.config/agents*/skills`. The `.local` variants are intended for
 machine- or user-specific instructions and skills that should usually be added
-to `.gitignore` instead of checked in.
+to `.gitignore` instead of checked in. Skill frontmatter can make skills
+manual-only with `disable-model-invocation` and can add `/skill` completion
+argument hints with `argument-hint`.
 
 Prompt fragments are composable too: top-level `harness.yaml`
 `prompt_fragments` apply to every role, while `roles.<name>.prompt_fragments`

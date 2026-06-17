@@ -234,14 +234,15 @@ fn load_skill_user_invocation_metadata_defaults_and_explicit_values() {
     let path = Path::new("/skills/manual/SKILL.md");
     let (skill, diags) = load_skill_from_content(content, path);
     let skill = skill.expect("should load");
-    assert!(!skill.user_invocable);
+    assert!(skill.user_invocable);
     assert!(skill.user_invocable_explicit);
     assert!(skill.disable_model_invocation);
     assert_eq!(skill.argument_hint.as_deref(), Some("[topic]"));
     assert!(
         diags
             .iter()
-            .any(|d| d.kind == DiagnosticKind::Warning && d.message.contains("not reachable"))
+            .any(|d| d.kind == DiagnosticKind::Warning
+                && d.message.contains("implies user-invocable"))
     );
 
     let defaults = "---\nname: defaults\ndescription: Default skill\n---\n";

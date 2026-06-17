@@ -1604,6 +1604,7 @@ pub struct ExtSkillAvailable {
     #[serde(default = "default_true")]
     pub user_invocable: bool,
     /// Whether model-side skill discovery/loading should hide this skill.
+    /// Implies that the skill remains user-invocable.
     #[serde(default)]
     pub disable_model_invocation: bool,
     /// Optional UI hint for arguments accepted by this skill.

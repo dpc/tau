@@ -44,6 +44,7 @@ pub struct Skill {
     /// True when `user-invocable:` was explicitly present.
     pub user_invocable_explicit: bool,
     /// Whether model-side skill discovery/loading should hide this skill.
+    /// Implies that the skill remains user-invocable.
     pub disable_model_invocation: bool,
     /// Optional UI hint for arguments accepted by this skill.
     pub argument_hint: Option<String>,
@@ -75,6 +76,7 @@ pub struct BuiltInSkill {
     /// Whether users may explicitly invoke this skill with `/skill`.
     pub user_invocable: bool,
     /// Whether model-side skill discovery/loading should hide this skill.
+    /// Implies that the skill remains user-invocable.
     pub disable_model_invocation: bool,
     /// Optional UI hint for arguments accepted by this skill.
     pub argument_hint: Option<String>,
@@ -622,7 +624,7 @@ pub fn load_skill_from_content(
 
     let (add_to_prompt, add_to_prompt_explicit) =
         parse_bool_frontmatter(&fm, "advertise", false, file_path, &mut diagnostics);
-    let (user_invocable, user_invocable_explicit) =
+    let (parsed_user_invocable, user_invocable_explicit) =
         parse_bool_frontmatter(&fm, "user-invocable", true, file_path, &mut diagnostics);
     let (disable_model_invocation, _) = parse_bool_frontmatter(
         &fm,
@@ -631,12 +633,13 @@ pub fn load_skill_from_content(
         file_path,
         &mut diagnostics,
     );
+    let user_invocable = parsed_user_invocable || disable_model_invocation;
     let argument_hint = parse_argument_hint(&fm, file_path, &mut diagnostics);
-    if !user_invocable && disable_model_invocation {
+    if !parsed_user_invocable && disable_model_invocation {
         diagnostics.push(SkillDiagnostic {
             path: file_path.to_owned(),
             kind: DiagnosticKind::Warning,
-            message: "skill has both user-invocable: false and disable-model-invocation: true; it is not reachable through Tau skill invocation".to_owned(),
+            message: "skill has both user-invocable: false and disable-model-invocation: true; disable-model-invocation implies user-invocable".to_owned(),
         });
     }
 
