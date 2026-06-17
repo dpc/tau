@@ -168,7 +168,7 @@ impl Harness {
                 .and_then(|c| c.pending_prompts.pop_front())
                 .expect("runnable agent has a prompt");
             if let Err(error) = self.dispatch_prompt_for_agent(&agent_id, prompt) {
-                self.emit_info(&format!("failed to dispatch queued prompt: {error}"));
+                self.emit_harness_failure(&format!("failed to dispatch queued prompt: {error}"));
                 // Reset the agent so it doesn't wedge as
                 // AgentThinking with no in-flight prompt.
                 if let Some(conv) = self.agents.get_mut(&agent_id) {

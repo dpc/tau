@@ -1301,25 +1301,20 @@ fn is_action_id_token(token: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
-pub(crate) fn render_harness_info(
+pub(crate) fn render_harness_notice(
     theme: &tau_themes::Theme,
-    info: &tau_proto::HarnessInfo,
+    info: &tau_proto::HarnessNotice,
 ) -> tau_cli_term::StyledBlock {
     use tau_cli_term::resolve::themed_block;
     use tau_themes::names;
 
-    if info.level == tau_proto::HarnessInfoLevel::Normal
-        && let Some(path) = info
-            .message
-            .strip_prefix("session dir: ")
-            .and_then(|path| path.strip_suffix('/'))
-    {
-        return system_path_block(theme, "session dir: ", Path::new(path), "/");
-    }
-
     let style_name = match info.level {
-        tau_proto::HarnessInfoLevel::Normal => names::SYSTEM_INFO,
-        tau_proto::HarnessInfoLevel::Important => names::SYSTEM_INFO_IMPORTANT,
+        tau_proto::NoticeLevel::Critical | tau_proto::NoticeLevel::Warning => {
+            names::SYSTEM_INFO_IMPORTANT
+        }
+        tau_proto::NoticeLevel::Info
+        | tau_proto::NoticeLevel::Debug
+        | tau_proto::NoticeLevel::Trace => names::SYSTEM_INFO,
     };
     themed_block(theme, style_name, &info.message)
 }

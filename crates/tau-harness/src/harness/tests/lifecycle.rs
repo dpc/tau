@@ -280,11 +280,11 @@ fn configure_includes_only_resolved_extension_secrets() {
 }
 
 #[test]
-fn extension_config_error_is_important_and_replayed_to_late_ui() {
+fn extension_config_error_is_mandatory_warning_and_replayed_to_late_ui() {
     // Extension config validation often runs during daemon startup, before the
     // terminal UI has subscribed. This is regression coverage for the user
-    // contract: any extension `ConfigError` must become an Important
-    // `harness.info` visible to late UI clients, not just a debug-log line.
+    // contract: any extension `ConfigError` must become a mandatory warning
+    // `harness.notice` visible to late UI clients, not just a debug-log line.
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = quiet_provider_harness(&sp).expect("start");
@@ -304,8 +304,10 @@ fn extension_config_error_is_important_and_replayed_to_late_ui() {
         "harness",
         |event| matches!(
             event,
-            Event::HarnessInfo(info)
-                if info.level == tau_proto::HarnessInfoLevel::Important
+            Event::HarnessNotice(info)
+                if info.level == tau_proto::NoticeLevel::Warning
+                    && info.kind == tau_proto::notice_kind::EXTENSION_CONFIG_ERROR
+                    && info.always_show
                     && info.message.contains("extension config-bad-ext rejected its config")
                     && info.message.contains("unknown field `enforce_ro_mode`")
         )
@@ -324,11 +326,46 @@ fn extension_config_error_is_important_and_replayed_to_late_ui() {
     let frames = ui_sink.lock().expect("ui sink");
     assert!(frames.iter().any(|routed| matches!(
         peel_inner_event(&routed.frame),
-        Some(Event::HarnessInfo(info))
-            if info.level == tau_proto::HarnessInfoLevel::Important
+        Some(Event::HarnessNotice(info))
+            if info.level == tau_proto::NoticeLevel::Warning
+                && info.kind == tau_proto::notice_kind::EXTENSION_CONFIG_ERROR
+                && info.always_show
                 && info.message.contains("extension config-bad-ext rejected its config")
                 && info.message.contains("unknown field `enforce_ro_mode`")
     )));
+}
+
+#[test]
+fn extension_authored_notice_kind_is_stable_and_sanitized() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = quiet_provider_harness(&sp).expect("start");
+    let conn_id = "ext-conn-unstable";
+    let _extension_sink = connect_test_tool(&mut h, conn_id);
+
+    h.handle_extension_event(
+        conn_id,
+        TestProtocolItem::Event(Event::HarnessNotice(tau_proto::HarnessNotice {
+            kind: "spoofed.kind".to_owned(),
+            message: "extension authored".to_owned(),
+            level: tau_proto::NoticeLevel::Critical,
+            always_show: true,
+        })),
+    )
+    .expect("extension notice handled");
+
+    assert!(event_log_contains_source_event(
+        &h,
+        conn_id,
+        |event| matches!(
+            event,
+            Event::HarnessNotice(info)
+                if info.kind == tau_proto::notice_kind::EXTENSION_NOTICE
+                    && info.message == "extension authored"
+                    && info.level == tau_proto::NoticeLevel::Warning
+                    && !info.always_show
+        )
+    ));
 }
 
 #[test]
@@ -360,8 +397,8 @@ fn optional_extension_config_error_is_replayed_and_disables_extension() {
         "harness",
         |event| matches!(
             event,
-            Event::HarnessInfo(info)
-                if info.level == tau_proto::HarnessInfoLevel::Important
+            Event::HarnessNotice(info)
+                if info.level == tau_proto::NoticeLevel::Warning
                     && info.message.contains("extension optional-config-bad-ext rejected its config")
                     && info.message.contains("missing token")
         )
@@ -371,8 +408,10 @@ fn optional_extension_config_error_is_replayed_and_disables_extension() {
         "harness",
         |event| matches!(
             event,
-            Event::HarnessInfo(info)
-                if info.level == tau_proto::HarnessInfoLevel::Important
+            Event::HarnessNotice(info)
+                if info.level == tau_proto::NoticeLevel::Warning
+                    && info.kind == tau_proto::notice_kind::EXTENSION_OPTIONAL_SKIPPED
+                    && info.always_show
                     && info.message == "optional extension optional-config-bad-ext did not initialize"
         )
     ));
@@ -390,21 +429,23 @@ fn optional_extension_config_error_is_replayed_and_disables_extension() {
     let frames = ui_sink.lock().expect("ui sink");
     assert!(frames.iter().any(|routed| matches!(
         peel_inner_event(&routed.frame),
-        Some(Event::HarnessInfo(info))
-            if info.level == tau_proto::HarnessInfoLevel::Important
+        Some(Event::HarnessNotice(info))
+            if info.level == tau_proto::NoticeLevel::Warning
                 && info.message.contains("extension optional-config-bad-ext rejected its config")
                 && info.message.contains("missing token")
     )));
     assert!(frames.iter().any(|routed| matches!(
         peel_inner_event(&routed.frame),
-        Some(Event::HarnessInfo(info))
-            if info.level == tau_proto::HarnessInfoLevel::Important
+        Some(Event::HarnessNotice(info))
+            if info.level == tau_proto::NoticeLevel::Warning
+                && info.kind == tau_proto::notice_kind::EXTENSION_OPTIONAL_SKIPPED
+                && info.always_show
                 && info.message == "optional extension optional-config-bad-ext did not initialize"
     )));
 }
 
 #[test]
-fn optional_extension_spawn_failure_is_important_and_nonfatal() {
+fn optional_extension_spawn_failure_is_mandatory_warning_and_nonfatal() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = quiet_provider_harness(&sp).expect("start");
@@ -445,15 +486,17 @@ fn optional_extension_spawn_failure_is_important_and_nonfatal() {
         "harness",
         |event| matches!(
             event,
-            Event::HarnessInfo(info)
-                if info.level == tau_proto::HarnessInfoLevel::Important
+            Event::HarnessNotice(info)
+                if info.level == tau_proto::NoticeLevel::Warning
+                    && info.kind == tau_proto::notice_kind::EXTENSION_OPTIONAL_SKIPPED
+                    && info.always_show
                     && info.message == "optional extension optional-spawn-bad did not initialize"
         )
     ));
 }
 
 #[test]
-fn optional_pre_ready_disconnect_is_important_replayed_and_nonfatal() {
+fn optional_pre_ready_disconnect_is_mandatory_warning_replayed_and_nonfatal() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = quiet_provider_harness(&sp).expect("start");
@@ -476,8 +519,10 @@ fn optional_pre_ready_disconnect_is_important_replayed_and_nonfatal() {
         "harness",
         |event| matches!(
             event,
-            Event::HarnessInfo(info)
-                if info.level == tau_proto::HarnessInfoLevel::Important
+            Event::HarnessNotice(info)
+                if info.level == tau_proto::NoticeLevel::Warning
+                    && info.kind == tau_proto::notice_kind::EXTENSION_OPTIONAL_SKIPPED
+                    && info.always_show
                     && info.message == "optional extension optional-pre-ready-drop did not initialize"
         )
     ));
@@ -494,14 +539,16 @@ fn optional_pre_ready_disconnect_is_important_replayed_and_nonfatal() {
     let frames = ui_sink.lock().expect("ui sink");
     assert!(frames.iter().any(|routed| matches!(
         peel_inner_event(&routed.frame),
-        Some(Event::HarnessInfo(info))
-            if info.level == tau_proto::HarnessInfoLevel::Important
+        Some(Event::HarnessNotice(info))
+            if info.level == tau_proto::NoticeLevel::Warning
+                && info.kind == tau_proto::notice_kind::EXTENSION_OPTIONAL_SKIPPED
+                && info.always_show
                 && info.message == "optional extension optional-pre-ready-drop did not initialize"
     )));
 }
 
 #[test]
-fn optional_startup_timeout_is_important_replayed_and_nonfatal() {
+fn optional_startup_timeout_is_mandatory_warning_replayed_and_nonfatal() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = quiet_provider_harness(&sp).expect("start");
@@ -524,8 +571,10 @@ fn optional_startup_timeout_is_important_replayed_and_nonfatal() {
         "harness",
         |event| matches!(
             event,
-            Event::HarnessInfo(info)
-                if info.level == tau_proto::HarnessInfoLevel::Important
+            Event::HarnessNotice(info)
+                if info.level == tau_proto::NoticeLevel::Warning
+                    && info.kind == tau_proto::notice_kind::EXTENSION_OPTIONAL_SKIPPED
+                    && info.always_show
                     && info.message == "optional extension optional-timeout-ext did not initialize"
         )
     ));
@@ -542,8 +591,10 @@ fn optional_startup_timeout_is_important_replayed_and_nonfatal() {
     let frames = ui_sink.lock().expect("ui sink");
     assert!(frames.iter().any(|routed| matches!(
         peel_inner_event(&routed.frame),
-        Some(Event::HarnessInfo(info))
-            if info.level == tau_proto::HarnessInfoLevel::Important
+        Some(Event::HarnessNotice(info))
+            if info.level == tau_proto::NoticeLevel::Warning
+                && info.kind == tau_proto::notice_kind::EXTENSION_OPTIONAL_SKIPPED
+                && info.always_show
                 && info.message == "optional extension optional-timeout-ext did not initialize"
     )));
 }
@@ -566,8 +617,8 @@ fn required_startup_timeout_remains_startup_timeout() {
         "harness",
         |event| matches!(
             event,
-            Event::HarnessInfo(info)
-                if info.level == tau_proto::HarnessInfoLevel::Important
+            Event::HarnessNotice(info)
+                if info.level == tau_proto::NoticeLevel::Warning
                     && info.message.contains("startup timed out waiting for required extension")
                     && info.message.contains("required-timeout-ext")
         )
@@ -604,7 +655,7 @@ fn post_ready_optional_tool_disconnect_keeps_existing_respawn_policy_flag() {
 }
 
 #[test]
-fn startup_diagnostics_are_important_and_replayed() {
+fn startup_diagnostics_are_mandatory_warning_and_replayed() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = quiet_provider_harness(&sp).expect("start");
@@ -619,8 +670,10 @@ fn startup_diagnostics_are_important_and_replayed() {
         "harness",
         |event| matches!(
             event,
-            Event::HarnessInfo(info)
-                if info.level == tau_proto::HarnessInfoLevel::Important
+            Event::HarnessNotice(info)
+                if info.level == tau_proto::NoticeLevel::Warning
+                    && info.kind == tau_proto::notice_kind::EXTENSION_OPTIONAL_SKIPPED
+                    && info.always_show
                     && info.message == "optional extension optional-diagnostic did not initialize"
         )
     ));
@@ -637,10 +690,34 @@ fn startup_diagnostics_are_important_and_replayed() {
     let frames = ui_sink.lock().expect("ui sink");
     assert!(frames.iter().any(|routed| matches!(
         peel_inner_event(&routed.frame),
-        Some(Event::HarnessInfo(info))
-            if info.level == tau_proto::HarnessInfoLevel::Important
+        Some(Event::HarnessNotice(info))
+            if info.level == tau_proto::NoticeLevel::Warning
+                && info.kind == tau_proto::notice_kind::EXTENSION_OPTIONAL_SKIPPED
+                && info.always_show
                 && info.message == "optional extension optional-diagnostic did not initialize"
     )));
+}
+
+#[test]
+fn harness_failure_notice_is_mandatory_warning() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = quiet_provider_harness(&sp).expect("start");
+
+    h.emit_harness_failure("failed to dispatch queued prompt: boom");
+
+    assert!(event_log_contains_source_event(
+        &h,
+        "harness",
+        |event| matches!(
+            event,
+            Event::HarnessNotice(info)
+                if info.kind == tau_proto::notice_kind::HARNESS_FAILURE
+                    && info.level == tau_proto::NoticeLevel::Warning
+                    && info.always_show
+                    && info.message == "failed to dispatch queued prompt: boom"
+        )
+    ));
 }
 
 #[test]
@@ -1126,7 +1203,7 @@ fn skill_agent_context_and_fragment_are_staged_until_ready() {
     assert!(
         !event_log_events(&h).iter().any(|event| matches!(
             event,
-            Event::HarnessInfo(info)
+            Event::HarnessNotice(info)
                 if info.message.contains("extension.agent_context_publish rejected")
         )),
         "agent context publishes update prompt context but must not be persisted as agent transcript events"
@@ -2346,7 +2423,7 @@ fn provider_prompt_route_failure_clears_prompt_bookkeeping() {
     )));
     assert!(events.iter().any(|event| matches!(
         event,
-        Event::HarnessInfo(info)
+        Event::HarnessNotice(info)
             if info.message.contains("provider prompt route failed")
                 && info.message.contains(agent_prompt_id.as_str())
     )));
@@ -3270,7 +3347,7 @@ fn extension_tool_request_cannot_reuse_in_flight_agent_call_id() {
     assert!(event_log_events(&h).iter().any(|event| {
         matches!(
             event,
-            Event::HarnessInfo(info) if info.message.contains("already-known call_id")
+            Event::HarnessNotice(info) if info.message.contains("already-known call_id")
         )
     }));
     assert!(

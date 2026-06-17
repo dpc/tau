@@ -91,14 +91,26 @@ const SHOW_TOOLS_VALUES: &[SettingValue] = &[
     },
 ];
 
-const SHOW_STATUS_VALUES: &[SettingValue] = &[
+const NOTICE_LEVEL_VALUES: &[SettingValue] = &[
     SettingValue {
-        value: "all",
-        description: "show routine status messages",
+        value: "critical",
+        description: "show only critical harness failures",
     },
     SettingValue {
-        value: "minimal",
-        description: "hide routine status messages; keep important warnings",
+        value: "warning",
+        description: "show warnings and critical notices",
+    },
+    SettingValue {
+        value: "info",
+        description: "show useful notices, warnings, and critical failures",
+    },
+    SettingValue {
+        value: "debug",
+        description: "also show debugging notices",
+    },
+    SettingValue {
+        value: "trace",
+        description: "show developer-only trace notices",
     },
 ];
 
@@ -150,10 +162,10 @@ pub const SETTINGS: &[SettingDef] = &[
         get: |s| s.show_messages.as_str(),
     },
     SettingDef {
-        name: "show-status",
-        description: "Routine lifecycle/status message visibility",
-        values: SHOW_STATUS_VALUES,
-        get: |s| s.show_status.as_str(),
+        name: "notice-level",
+        description: "Harness/UI notice visibility threshold",
+        values: NOTICE_LEVEL_VALUES,
+        get: |s| s.notice_level.as_str(),
     },
     SettingDef {
         name: "show-prompt-scroll-indicator",

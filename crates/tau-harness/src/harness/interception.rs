@@ -140,11 +140,26 @@ const MUST_PASS_BY_DEFAULT: &[EventName] = &[
     EventName::TOOL_BACKGROUND_ERROR,
 ];
 
-fn important_harness_info_was_modified(original: &Event, replacement: &Event) -> bool {
+fn mandatory_harness_notice(event: &Event) -> bool {
     matches!(
-        original,
-        Event::HarnessInfo(info) if info.level == tau_proto::HarnessInfoLevel::Important
-    ) && original != replacement
+        event,
+        Event::HarnessNotice(info)
+            if info.always_show || info.level == tau_proto::NoticeLevel::Critical
+    )
+}
+
+fn mandatory_harness_notice_was_modified(original: &Event, replacement: &Event) -> bool {
+    mandatory_harness_notice(original) && original != replacement
+}
+
+fn sanitize_harness_notice_replacement(original: &Event, replacement: &mut Event) {
+    if let (Event::HarnessNotice(original), Event::HarnessNotice(replacement)) =
+        (original, replacement)
+    {
+        replacement.kind.clone_from(&original.kind);
+        replacement.level = original.level;
+        replacement.always_show = original.always_show;
+    }
 }
 
 fn immutable_protected_fact_was_modified(original: &Event, replacement: &Event) -> bool {
@@ -587,7 +602,7 @@ impl Harness {
         let next_event = match action {
             InterceptAction::Pass(None) => Some(original_event),
             InterceptAction::Pass(Some(boxed)) => {
-                let new_event = *boxed;
+                let mut new_event = *boxed;
                 if new_event.name() != event_name {
                     tracing::warn!(
                         target: "tau_harness::interception",
@@ -597,46 +612,49 @@ impl Harness {
                          falling back to the original",
                     );
                     Some(original_event)
-                } else if important_harness_info_was_modified(&original_event, &new_event) {
+                } else if mandatory_harness_notice_was_modified(&original_event, &new_event) {
                     tracing::warn!(
                         target: "tau_harness::interception",
                         event = %event_name,
-                        "interceptor tried to modify an Important harness.info; \
-                         publishing original instead",
-                    );
-                    Some(original_event)
-                } else if mutable_prompt_routing_identity_was_modified(&original_event, &new_event)
-                {
-                    tracing::warn!(
-                        target: "tau_harness::interception",
-                        event = %event_name,
-                        "interceptor tried to modify protected prompt routing identity; \
-                         publishing original instead",
-                    );
-                    Some(original_event)
-                } else if immutable_protected_fact_was_modified(&original_event, &new_event) {
-                    tracing::warn!(
-                        target: "tau_harness::interception",
-                        event = %event_name,
-                        "interceptor tried to modify an immutable protected fact; \
-                         publishing original instead",
-                    );
-                    Some(original_event)
-                } else if let Err(error) = self.validate_agent_metadata_event(&new_event) {
-                    tracing::warn!(
-                        target: "tau_harness::interception",
-                        event = %event_name,
-                        %error,
-                        "interceptor returned invalid agent metadata; \
+                        "interceptor tried to modify a mandatory harness.notice; \
                          publishing original instead",
                     );
                     Some(original_event)
                 } else {
-                    Some(new_event)
+                    sanitize_harness_notice_replacement(&original_event, &mut new_event);
+                    if mutable_prompt_routing_identity_was_modified(&original_event, &new_event) {
+                        tracing::warn!(
+                            target: "tau_harness::interception",
+                            event = %event_name,
+                            "interceptor tried to modify protected prompt routing identity; \
+                             publishing original instead",
+                        );
+                        Some(original_event)
+                    } else if immutable_protected_fact_was_modified(&original_event, &new_event) {
+                        tracing::warn!(
+                            target: "tau_harness::interception",
+                            event = %event_name,
+                            "interceptor tried to modify an immutable protected fact; \
+                             publishing original instead",
+                        );
+                        Some(original_event)
+                    } else if let Err(error) = self.validate_agent_metadata_event(&new_event) {
+                        tracing::warn!(
+                            target: "tau_harness::interception",
+                            event = %event_name,
+                            %error,
+                            "interceptor returned invalid agent metadata; \
+                             publishing original instead",
+                        );
+                        Some(original_event)
+                    } else {
+                        Some(new_event)
+                    }
                 }
             }
             InterceptAction::Drop => {
-                let must_pass_default = MUST_PASS_BY_DEFAULT.contains(&event_name);
+                let must_pass_default = MUST_PASS_BY_DEFAULT.contains(&event_name)
+                    || mandatory_harness_notice(&original_event);
                 if must_pass || must_pass_default {
                     tracing::warn!(
                         target: "tau_harness::interception",

@@ -35,7 +35,7 @@ If config parsing, script reading, compilation, or `init` fails, the extension s
 Scripts use JSON-shaped event maps such as:
 
 ```rhai
-#{ event: "harness.info", payload: #{ message: "hi", level: "normal" } }
+#{ event: "harness.notice", payload: #{ kind: "extension.notice", message: "hi", level: "info" } }
 ```
 
 Supported callbacks:
@@ -70,7 +70,7 @@ fn on_intercept(event, transient) {
 
 `init(config)` is optional. Missing `init` or unit/no-op return means no subscriptions, no intercepts, and the default ready message. `subscribe` uses selector maps with `kind: "exact"` or `kind: "prefix"`. Multiple `intercept` entries are allowed only when they share the same priority; their selectors are merged into one registration because the harness supports one interceptor registration per extension connection.
 
-`start(config)` is optional and runs once after `init` succeeds, subscriptions/intercepts are sent, `Ready` is sent, and host functions are registered. Use it for startup side effects such as `tau_info`; callback errors are reported as transient important `harness.info` diagnostics without disabling the extension.
+`start(config)` is optional and runs once after `init` succeeds, subscriptions/intercepts are sent, `Ready` is sent, and host functions are registered. Use it for startup side effects such as `tau_info`; callback errors are reported as transient warning `harness.notice` diagnostics without disabling the extension.
 
 `on_event(event, meta)` is optional and is called for delivered subscribed events. `meta.replay` is true for subscribe-time catch-up history, and `meta.recorded_at` is present when the harness supplies the event timestamp. Scripts with external side effects should skip replayed events.
 
@@ -80,7 +80,7 @@ fn on_intercept(event, transient) {
 - `#{ kind: "pass", event: event }` to pass a replacement event.
 - `"drop"` / `#{ kind: "drop" }` to drop the event.
 
-On script errors or invalid intercept returns, Tau reports a transient important `harness.info` diagnostic and defaults to passing the original event.
+On script errors or invalid intercept returns, Tau reports a transient warning `harness.notice` diagnostic and defaults to passing the original event.
 
 
 ## Host functions
@@ -93,7 +93,7 @@ Other host functions are available after `init` succeeds:
 - `shell_spawn(command, opts)` executes a trusted host shell command asynchronously and returns a `ShellJob`. `opts` supports `timeout`, `cwd`, `on_complete`, and `tag`. Completion callbacks receive `(result, job)`. A tool handler returning `ShellJob` defers the tool result until the shell finishes; callback return values become `tool.result`, callback throws become `tool.error`, and no callback returns the full shell result map.
 - `tau_emit(event)` emits a durable Tau event map.
 - `tau_emit_transient(event)` emits a transient Tau event map.
-- `tau_info(message)` and `tau_info(message, level)` emit transient `harness.info`; `level` is `normal` or `important`.
+- `tau_info(message)` and `tau_info(message, level)` emit transient `harness.notice`; `level` is `info`, `warning`, `debug`, or `trace` (`important` is accepted as a legacy spelling for `warning`).
 - `tau_log(level, message)` writes only to extension logs.
 
 

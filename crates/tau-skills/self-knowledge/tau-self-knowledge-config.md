@@ -49,8 +49,10 @@ to `require: true`, which preserves startup-fatal behavior for harness-owned
 startup failures such as an empty command, missing required declared secret, or
 spawn failure. Set `require: false` next to `enable` when the extension is useful
 but optional; Tau will skip it on startup/config/secret/pre-ready failures,
-continue without it, and emit an Important replayed `harness.info` explaining the
-skip.
+continue without it, and emit a mandatory warning `harness.notice` explaining
+the skip. Harness notices have stable `kind` strings and levels `critical`,
+`warning`, `info`, `debug`, and `trace`; CLI users can set the default threshold
+with `cli.yaml` `notice_level: warning` or runtime `/set notice-level warning`.
 
 Per-secret `optional: true` is narrower: it omits only that secret when absent.
 A missing non-optional secret skips the whole extension only when

@@ -50,7 +50,7 @@ Users can force a skill into the next model prompt with either form:
 /skill:<name> [arguments...]
 ```
 
-The harness validates the selected discovered skill, rejects unknown or non-user-invocable skills with a visible `harness.info`, reads the same bounded 64 KiB prefix used by the model-visible tool, strips frontmatter, and expands the submitted prompt to a Pi-style block:
+The harness validates the selected discovered skill, rejects unknown or non-user-invocable skills with a visible `harness.notice`, reads the same bounded 64 KiB prefix used by the model-visible tool, strips frontmatter, and expands the submitted prompt to a Pi-style block:
 
 ```text
 <skill name="..." location="...">

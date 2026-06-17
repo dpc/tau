@@ -557,7 +557,7 @@ pub fn send_daemon_message_with_trace(
                     Event::ShellCommandProgress(_) => {
                         progress_messages.push("shell: running shell command".to_owned())
                     }
-                    Event::HarnessInfo(info) => lifecycle_messages.push(info.message),
+                    Event::HarnessNotice(info) => lifecycle_messages.push(info.message),
                     event @ (Event::ExtensionStarting(_)
                     | Event::ExtensionReady(_)
                     | Event::ExtensionExited(_)

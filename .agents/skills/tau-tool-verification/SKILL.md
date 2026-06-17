@@ -303,7 +303,7 @@ Report concise but complete findings:
 
 ### Background tool `cancel`
 
-`cancel` requires `tool_call_id` and never backgrounds. It supports running `agent_start` calls and should support running `shell` calls. A successful cancel request returns `Tool cancellation requested`, emits a harness info event containing `tool call cancellation request`, and targets only the requested tool call. Cancellation is async and best effort: the success result only means Tau accepted the request, not that the child process or agent has already stopped. A canceled delegate should complete as a background error so `wait` can observe the cancellation instead of hanging. A canceled shell call should also complete through `wait`, include timing headers if it ran longer than about 5 seconds, and must not keep running to normal `status: 0` completion.
+`cancel` requires `tool_call_id` and never backgrounds. It supports running `agent_start` calls and should support running `shell` calls. A successful cancel request returns `Tool cancellation requested`, emits a harness notice event containing `tool call cancellation request`, and targets only the requested tool call. Cancellation is async and best effort: the success result only means Tau accepted the request, not that the child process or agent has already stopped. A canceled delegate should complete as a background error so `wait` can observe the cancellation instead of hanging. A canceled shell call should also complete through `wait`, include timing headers if it ran longer than about 5 seconds, and must not keep running to normal `status: 0` completion.
 
 Calling `cancel` for an unknown, completed, or unsupported tool call should return a tool error. Unknown ids should be distinguished from already-completed ids. Calling it twice for the same target should return a tool error like `Tool call already canceled`.
 
@@ -325,7 +325,7 @@ Record all of these observations:
 * The agent_start placeholder includes `tau_internal: true`, `self_agent_id`, `sub_agent_id`, and the background agent_start tool call ID.
 * `cancel` must be called with the agent_start `tool_call_id`, not the `sub_agent_id`.
 * A successful cancel returns exactly `Tool cancellation requested` and does not background.
-* The harness emits a `HarnessInfo` event containing `tool call cancellation request` if event logs are available.
+* The harness emits a `harness.notice` event containing `tool call cancellation request` if event logs are available.
 * The canceled delegate produces a background error that `wait` can collect.
 * `wait({"tool_call_id": id})` returns the canceled result once and only once.
 * `wait({})` can collect a canceled completion and includes `original_tool_call_id`.
@@ -442,7 +442,7 @@ If no stray completion appears before the inner `sleep 12` would have finished, 
 
 If you have direct access to harness event logs, verify:
 
-* Successful cancel emitted `HarnessInfo` with `tool call cancellation request`.
+* Successful cancel emitted `harness.notice` with `tool call cancellation request`.
 * The canceled delegate emitted `ToolBackgroundError` with `Tool call canceled`.
 * No `AgentPromptSteered` or queued pending prompt remains for canceled nested delegate completions.
 * Completed results are consumed once, and the consumed result is not available to later `wait` calls.

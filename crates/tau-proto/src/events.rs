@@ -70,24 +70,91 @@ impl fmt::Display for NodeId {
 }
 
 // ---------------------------------------------------------------------------
-// Harness informational messages
+// Harness notices
 // ---------------------------------------------------------------------------
 
-/// Severity of a harness informational message.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+/// Severity or verbosity of a harness notice.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum HarnessInfoLevel {
+pub enum NoticeLevel {
+    /// Harness/control-plane failure or other must-see failure notice.
+    Critical,
+    /// Something is wrong, but the session is not necessarily terminating.
+    Warning,
+    /// Useful normal information.
     #[default]
-    Normal,
-    Important,
+    Info,
+    /// Debugging information that is not normally needed.
+    Debug,
+    /// Developer-only noisy details that users should not normally see.
+    Trace,
 }
 
-/// An informational message from the harness displayed to the user.
+impl NoticeLevel {
+    /// Returns the canonical config/protocol string for this level.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Critical => "critical",
+            Self::Warning => "warning",
+            Self::Info => "info",
+            Self::Debug => "debug",
+            Self::Trace => "trace",
+        }
+    }
+
+    /// Parses a canonical notice level string.
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "critical" => Some(Self::Critical),
+            "warning" => Some(Self::Warning),
+            "info" => Some(Self::Info),
+            "debug" => Some(Self::Debug),
+            "trace" => Some(Self::Trace),
+            _ => None,
+        }
+    }
+
+    /// Returns true when a notice at `self` should be shown for `threshold`.
+    #[must_use]
+    pub fn visible_at(self, threshold: Self) -> bool {
+        self <= threshold
+    }
+}
+
+/// A user-facing notice from the harness.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct HarnessInfo {
+pub struct HarnessNotice {
+    /// Stable machine-readable notice kind used by UIs for special casing.
+    pub kind: String,
+    /// Human-readable notice text.
     pub message: String,
+    /// Severity or verbosity level.
     #[serde(default)]
-    pub level: HarnessInfoLevel,
+    pub level: NoticeLevel,
+    /// Whether UI filters must show this non-critical notice.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub always_show: bool,
+}
+
+impl HarnessNotice {
+    /// Creates a harness notice with filtering controlled only by its level.
+    #[must_use]
+    pub fn new(kind: impl Into<String>, message: impl Into<String>, level: NoticeLevel) -> Self {
+        Self {
+            kind: kind.into(),
+            message: message.into(),
+            level,
+            always_show: false,
+        }
+    }
+
+    /// Returns true when this notice should be shown for `threshold`.
+    #[must_use]
+    pub fn visible_at(&self, threshold: NoticeLevel) -> bool {
+        self.level == NoticeLevel::Critical || self.always_show || self.level.visible_at(threshold)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -2307,7 +2374,7 @@ pub struct UiSetAgentDisplayName {
 }
 
 /// The user typed `/tree`: render an agent's branching tree (one
-/// `harness.info` line per node) to the chat output.
+/// `harness.notice` line per node) to the chat output.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct UiTreeRequest {
     pub session_id: SessionId,
@@ -3112,9 +3179,9 @@ pub enum Event {
     #[serde(rename = "provider.tool_error")]
     ProviderToolError(ToolError),
 
-    // Harness info
-    #[serde(rename = "harness.info")]
-    HarnessInfo(HarnessInfo),
+    // Harness notices
+    #[serde(rename = "harness.notice")]
+    HarnessNotice(HarnessNotice),
     #[serde(rename = "harness.session_dir")]
     HarnessSessionDir(HarnessSessionDir),
     #[serde(rename = "harness.ui_dir")]
@@ -3279,7 +3346,7 @@ impl Event {
             Self::ProviderModelsUpdated(_) => EventName::PROVIDER_MODELS_UPDATED,
             Self::ProviderToolResult(_) => EventName::PROVIDER_TOOL_RESULT,
             Self::ProviderToolError(_) => EventName::PROVIDER_TOOL_ERROR,
-            Self::HarnessInfo(_) => EventName::HARNESS_INFO,
+            Self::HarnessNotice(_) => EventName::HARNESS_NOTICE,
             Self::HarnessSessionDir(_) => EventName::HARNESS_SESSION_DIR,
             Self::HarnessUiDir(_) => EventName::HARNESS_UI_DIR,
             Self::HarnessModelsAvailable(_) => EventName::HARNESS_MODELS_AVAILABLE,

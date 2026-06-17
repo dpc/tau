@@ -27,14 +27,17 @@ fn show_ui_io_values_are_registered() {
     assert_eq!(values, vec!["true", "false"]);
 }
 
-/// `/set show-status` is intentionally not a boolean: `minimal` hides only
-/// routine lifecycle/status chatter, while important warnings remain visible.
+/// `/set notice-level` is ordered by visibility threshold and uses meaningful
+/// severity names for completion and validation.
 #[test]
-fn show_status_values_are_registered() {
-    let setting = super::find("show-status").expect("show-status setting");
+fn notice_level_values_are_registered() {
+    let setting = super::find("notice-level").expect("notice-level setting");
     let values: Vec<_> = setting.values.iter().map(|value| value.value).collect();
 
-    assert_eq!(values, vec!["all", "minimal"]);
+    assert_eq!(
+        values,
+        vec!["critical", "warning", "info", "debug", "trace"]
+    );
 }
 
 /// `/set show-prompt-scroll-indicator` is a boolean prompt-input toggle.

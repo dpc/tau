@@ -175,8 +175,8 @@ fn interception_reply_can_modify_event() {
 }
 
 #[test]
-fn interception_cannot_modify_important_harness_info() {
-    // Important harness diagnostics include extension config parse failures.
+fn interception_cannot_modify_mandatory_harness_notice() {
+    // Mandatory harness diagnostics include extension config parse failures.
     // Interceptors may observe them, but must not be able to blank or downgrade
     // the message and recreate the same silent-fallback failure for live UIs.
     let tmp = TempDir::new().expect("tempdir");
@@ -185,7 +185,7 @@ fn interception_cannot_modify_important_harness_info() {
     h.handle_extension_event(
         "interceptor",
         TestProtocolItem::Message(TestMessage::Intercept(Intercept {
-            selectors: vec![EventSelector::Exact(tau_proto::EventName::HARNESS_INFO)],
+            selectors: vec![EventSelector::Exact(tau_proto::EventName::HARNESS_NOTICE)],
             priority: InterceptionPriority::new(0),
         })),
     )
@@ -196,10 +196,12 @@ fn interception_cannot_modify_important_harness_info() {
     h.handle_extension_event(
         "interceptor",
         TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
-            action: InterceptAction::Pass(Some(Box::new(Event::HarnessInfo(
-                tau_proto::HarnessInfo {
+            action: InterceptAction::Pass(Some(Box::new(Event::HarnessNotice(
+                tau_proto::HarnessNotice {
+                    kind: "test.info".to_owned(),
                     message: String::new(),
-                    level: tau_proto::HarnessInfoLevel::Normal,
+                    level: tau_proto::NoticeLevel::Info,
+                    always_show: false,
                 },
             )))),
         })),
@@ -212,9 +214,147 @@ fn interception_cannot_modify_important_harness_info() {
         .expect("important info in log");
     assert!(matches!(
         entry.event,
-        Event::HarnessInfo(info)
-            if info.level == tau_proto::HarnessInfoLevel::Important
+        Event::HarnessNotice(info)
+            if info.level == tau_proto::NoticeLevel::Warning
                 && info.message == "extension core-shell rejected its config"
+    ));
+}
+
+#[test]
+fn interception_cannot_modify_critical_harness_notice() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(tmp.path()).expect("harness");
+    let _interceptor = connect_test_tool(&mut h, "interceptor");
+    h.handle_extension_event(
+        "interceptor",
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(tau_proto::EventName::HARNESS_NOTICE)],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("intercept registration");
+    let after_registration_seq = h.event_log.next_seq();
+
+    h.emit_notice(
+        "test.critical",
+        tau_proto::NoticeLevel::Critical,
+        true,
+        "critical failure",
+    );
+    h.handle_extension_event(
+        "interceptor",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Pass(Some(Box::new(Event::HarnessNotice(
+                tau_proto::HarnessNotice {
+                    kind: "test.info".to_owned(),
+                    message: "downgraded".to_owned(),
+                    level: tau_proto::NoticeLevel::Info,
+                    always_show: false,
+                },
+            )))),
+        })),
+    )
+    .expect("mutating reply");
+
+    let entry = h
+        .event_log
+        .get_next_from(after_registration_seq)
+        .expect("critical notice in log");
+    assert!(matches!(
+        entry.event,
+        Event::HarnessNotice(info)
+            if info.level == tau_proto::NoticeLevel::Critical
+                && info.kind == "test.critical"
+                && info.always_show
+                && info.message == "critical failure"
+    ));
+}
+
+#[test]
+fn interception_cannot_drop_critical_harness_notice() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(tmp.path()).expect("harness");
+    let _interceptor = connect_test_tool(&mut h, "interceptor");
+    h.handle_extension_event(
+        "interceptor",
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(tau_proto::EventName::HARNESS_NOTICE)],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("intercept registration");
+    let after_registration_seq = h.event_log.next_seq();
+
+    h.emit_notice(
+        "test.critical",
+        tau_proto::NoticeLevel::Critical,
+        true,
+        "critical failure",
+    );
+    h.handle_extension_event(
+        "interceptor",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Drop,
+        })),
+    )
+    .expect("drop reply");
+
+    let entry = h
+        .event_log
+        .get_next_from(after_registration_seq)
+        .expect("critical notice in log");
+    assert!(matches!(
+        entry.event,
+        Event::HarnessNotice(info)
+            if info.level == tau_proto::NoticeLevel::Critical
+                && info.kind == "test.critical"
+                && info.always_show
+                && info.message == "critical failure"
+    ));
+}
+
+#[test]
+fn interception_cannot_escalate_non_mandatory_harness_notice() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(tmp.path()).expect("harness");
+    let _interceptor = connect_test_tool(&mut h, "interceptor");
+    h.handle_extension_event(
+        "interceptor",
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(tau_proto::EventName::HARNESS_NOTICE)],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("intercept registration");
+    let after_registration_seq = h.event_log.next_seq();
+
+    h.emit_info("ordinary notice");
+    h.handle_extension_event(
+        "interceptor",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Pass(Some(Box::new(Event::HarnessNotice(
+                tau_proto::HarnessNotice {
+                    kind: tau_proto::notice_kind::EXTENSION_CONFIG_ERROR.to_owned(),
+                    message: "edited message".to_owned(),
+                    level: tau_proto::NoticeLevel::Critical,
+                    always_show: true,
+                },
+            )))),
+        })),
+    )
+    .expect("mutating reply");
+
+    let entry = h
+        .event_log
+        .get_next_from(after_registration_seq)
+        .expect("notice in log");
+    assert!(matches!(
+        entry.event,
+        Event::HarnessNotice(info)
+            if info.level == tau_proto::NoticeLevel::Info
+                && info.kind == tau_proto::notice_kind::HARNESS_NOTICE
+                && !info.always_show
+                && info.message == "edited message"
     ));
 }
 
@@ -454,9 +594,11 @@ fn interception_defers_subsequent_publishes_until_reply() {
     h.publish_event(None, draft_event("held"));
     h.publish_event(
         None,
-        Event::HarnessInfo(tau_proto::HarnessInfo {
+        Event::HarnessNotice(tau_proto::HarnessNotice {
+            kind: "test.info".to_owned(),
             message: "second".to_owned(),
-            level: tau_proto::HarnessInfoLevel::Normal,
+            level: tau_proto::NoticeLevel::Info,
+            always_show: false,
         }),
     );
     // Neither has committed yet — interception is in flight on the
@@ -483,7 +625,7 @@ fn interception_defers_subsequent_publishes_until_reply() {
         .expect("second event committed");
     assert!(matches!(
         &second.event,
-        Event::HarnessInfo(info) if info.message == "second"
+        Event::HarnessNotice(info) if info.message == "second"
     ));
 }
 

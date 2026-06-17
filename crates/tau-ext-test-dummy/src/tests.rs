@@ -208,7 +208,7 @@ fn run_intercept(prompt: &str) -> (Vec<tau_proto::Emit>, Vec<InterceptReply>) {
     while let Some(frame) = reader.read_message().expect("read") {
         match frame {
             HarnessInputMessage::Emit(emit)
-                if matches!(emit.event.as_ref(), Event::HarnessInfo(_)) =>
+                if matches!(emit.event.as_ref(), Event::HarnessNotice(_)) =>
             {
                 notification_emits.push(emit);
             }
@@ -235,7 +235,7 @@ fn prompt_with_tao_is_corrected_with_notification() {
     assert_eq!(emits.len(), 1, "exactly one info emit on correction");
     assert!(matches!(
         emits[0].event.as_ref(),
-        Event::HarnessInfo(info) if info.message.contains("Tau") && info.message.contains("corrected")
+        Event::HarnessNotice(info) if info.message.contains("Tau") && info.message.contains("corrected")
     ));
 
     assert_eq!(replies.len(), 1);

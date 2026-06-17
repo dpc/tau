@@ -1,9 +1,11 @@
 use super::*;
 
 fn info(message: &str) -> Event {
-    Event::HarnessInfo(tau_proto::HarnessInfo {
+    Event::HarnessNotice(tau_proto::HarnessNotice {
+        kind: "test.info".to_owned(),
         message: message.to_owned(),
-        level: tau_proto::HarnessInfoLevel::Normal,
+        level: tau_proto::NoticeLevel::Info,
+        always_show: false,
     })
 }
 
@@ -42,8 +44,8 @@ fn get_next_from_skips_earlier_test_observer_entries() {
         .get_next_from(crate::event_log::EventLogSeq::new(1))
         .expect("entry should exist");
     assert_eq!(entry.seq.get(), 1);
-    let Event::HarnessInfo(info) = &entry.event else {
-        panic!("expected HarnessInfo");
+    let Event::HarnessNotice(info) = &entry.event else {
+        panic!("expected HarnessNotice");
     };
     assert_eq!(info.message, "b");
 }

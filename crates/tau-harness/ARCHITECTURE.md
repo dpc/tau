@@ -23,8 +23,10 @@ projections, terminal tool completion facts (`tool.result`, `tool.error`,
 closure facts such as `provider.response_finished`. Prompt text facts are
 must-pass, but only their routing keys are immutable: interceptors may rewrite
 text on the sanctioned prompt-text events without changing agent id, message
-class, or originator. Important `harness.info` diagnostics are also published
-with a call-site `must_pass` override.
+class, or originator. Mandatory `harness.notice` diagnostics (critical notices
+and `always_show` warnings such as extension config errors) are replayable,
+published with a call-site `must_pass` override, and protected from interceptor
+rewrite/drop.
 
 ## Session and agent stores
 
@@ -76,7 +78,7 @@ failure, and pre-Ready timeout. Other pre-Ready disconnect handling follows the
 existing compatibility behavior unless the disconnect is already provider/socket
 fatal. Optional extensions (`require: false`) are skipped or disabled for
 startup/config/secret/pre-Ready failures, but the failure must still be emitted as
-an Important replayable `harness.info` so initial and late UI subscribers see why
+a mandatory replayable `harness.notice` so initial and late UI subscribers see why
 the extension is absent. This policy is limited to startup/init availability; do
 not broaden it into new post-Ready respawn or runtime-failure semantics without a
 separate design change.
@@ -93,7 +95,7 @@ extension disk usage across many files.
 
 The harness owns canonical discovered-skill state. Extensions such as `tau-ext-shell` announce candidate skill files, but the harness validates names/descriptions, resolves collisions by selected winner, stores user/model invocation flags, and builds model-visible prompt/tool snapshots from the current winners. `disable-model-invocation` removes a winner from `<available_skills>` and from the internal `skill` tool snapshot; it is a prompt-surface policy, not a filesystem security boundary.
 
-User `/skill <name> [args]` and `/skill:<name> [args]` expansion is performed at harness prompt intake for both existing-agent prompts and new-agent initial prompts. Unknown, invalid, unreadable, or non-user-invocable commands emit `harness.info` and are not submitted as model prompts. Successful invocations read a bounded skill-file prefix, strip frontmatter, and store the expanded Pi-style `<skill>` block in the normal prompt transcript.
+User `/skill <name> [args]` and `/skill:<name> [args]` expansion is performed at harness prompt intake for both existing-agent prompts and new-agent initial prompts. Unknown, invalid, unreadable, or non-user-invocable commands emit `harness.notice` and are not submitted as model prompts. Successful invocations read a bounded skill-file prefix, strip frontmatter, and store the expanded Pi-style `<skill>` block in the normal prompt transcript.
 
 ## Lifecycle events
 

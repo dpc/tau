@@ -676,7 +676,7 @@ fn custom_event_rejects_reserved_event_names() {
     let value = serde_json::json!({
         "event": "extension.event",
         "payload": {
-            "name": "harness.info",
+            "name": "harness.notice",
             "payload": "spoofed"
         }
     });
@@ -720,7 +720,11 @@ fn custom_event_rejects_direct_empty_segments() {
     assert!(EventName::try_new(EventCategory::Other(String::new()), "progress").is_none());
     assert!(EventName::try_new(EventCategory::Other("demo".to_owned()), String::new()).is_none());
     assert!(
-        EventName::try_new(EventCategory::Other("harness.info".to_owned()), "progress").is_none()
+        EventName::try_new(
+            EventCategory::Other("harness.notice".to_owned()),
+            "progress"
+        )
+        .is_none()
     );
     assert!(
         EventName::try_new(EventCategory::Other("demo".to_owned()), "extra.progress").is_none()

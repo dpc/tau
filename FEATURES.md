@@ -123,7 +123,7 @@ for trusted local host automation and intentionally bypasses `tau-ext-shell` and
 its directory-update locks.
 
 The Rust extension owns protocol framing and script failures are reported as
-transient `harness.info` diagnostics or tool errors instead of crashing the
+transient `harness.notice` diagnostics or tool errors instead of crashing the
 process.
 
 ### Remote extensions over SSH
@@ -155,7 +155,7 @@ Configure handshake. Secret entries are required by default; set
 `extensions.<name>.require: false` when the whole extension is optional and Tau
 should continue startup without it if a required declared secret or other
 startup/pre-Ready setup fails; the skipped extension is still reported as an
-Important replayed `harness.info` notice.
+mandatory replayed `harness.notice` notice.
 For `std-pim`, migrate old `auth.password_env`, `auth.command`, and
 `auth.password_command` settings to `auth.password_secret` plus
 `extensions.std-pim.secrets`; the legacy `std-email` alias accepts the same
@@ -244,7 +244,7 @@ In the UI: `/role engineer effort medium`, `/role engineer verbosity low`,
 groups; Shift-Tab cycles within the selected role's group.
 Model knobs are slash-command-only today. Asking for an unsupported
 level (e.g. `effort xhigh` on a mini model, `verbosity high` on a provider
-that doesn't support it) degrades and surfaces a `HarnessInfo` notice rather
+that doesn't support it) degrades and surfaces a `harness.notice` diagnostic rather
 than silently dropping the field.
 
 The status bar renders the current session id and selected agent role,
@@ -564,10 +564,12 @@ it.
 `/set show-messages <none|self-summary|self-full|all-summary|all-full>`
 controls how agent-to-agent messages are shown in the transcript; messages sent
 from an agent to `user` always render fully as human-visible broadcasts.
-`/set show-status <all|minimal>` hides routine lifecycle/status chatter in
-`minimal` mode while preserving important warnings such as extension
-configuration errors. The first-arg menu shows the meaning of each allowed
-value. State is persisted to `<state_dir>/cli.json`.
+`/set notice-level <critical|warning|info|debug|trace>` controls which
+harness/UI notices are shown; `info` is the default, while `warning` hides
+routine lifecycle chatter but preserves warnings and critical failures. Critical
+or mandatory notices such as extension configuration errors remain visible. The
+first-arg menu shows the meaning of each allowed value. State is persisted to
+`<state_dir>/cli.json`.
 
 ### Prompt input history
 

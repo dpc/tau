@@ -933,7 +933,7 @@ pub(crate) fn run_chat(
             tau_cli_term::StyledBlock::new(build_banner(&theme)),
         );
     }
-    if cli_state.show_status == tau_config::settings::ShowStatus::All {
+    if tau_proto::NoticeLevel::Info.visible_at(cli_state.notice_level) {
         handle.print_output("ui-dir", ui_dir_block(&theme, ui_logging.dir()));
     }
 

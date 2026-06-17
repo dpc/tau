@@ -24,8 +24,8 @@ pub struct Config {
     /// Enabled extensions that should be spawned unless skipped later by
     /// secrets.
     pub extensions: BTreeMap<String, ExtensionConfig>,
-    /// Important diagnostics for optional extensions skipped during config
-    /// resolution.
+    /// Mandatory warning diagnostics for optional extensions skipped during
+    /// config resolution.
     pub extension_startup_diagnostics: Vec<ExtensionStartupDiagnostic>,
 }
 
@@ -35,7 +35,7 @@ pub struct Config {
 pub struct ExtensionStartupDiagnostic {
     /// Extension config key that the diagnostic is about.
     pub extension: String,
-    /// User-visible explanation safe to publish as Important `harness.info`.
+    /// User-visible explanation safe to publish as mandatory `harness.notice`.
     pub message: String,
 }
 
@@ -187,14 +187,15 @@ pub fn resolve_extensions_with_cli_overrides(
 pub struct ResolvedExtensions {
     /// Enabled extensions to spawn.
     pub extensions: Vec<ExtensionConfig>,
-    /// Important diagnostics for optional entries skipped during resolution.
+    /// Mandatory warning diagnostics for optional entries skipped during
+    /// resolution.
     pub diagnostics: Vec<ExtensionStartupDiagnostic>,
 }
 
 /// Resolve extensions like [`resolve_extensions_with_cli_overrides`], while
-/// also returning Important startup diagnostics for optional entries skipped
-/// during resolution. Harness startup must use this variant so diagnostics can
-/// be published and replayed instead of silently discarded.
+/// also returning mandatory warning startup diagnostics for optional entries
+/// skipped during resolution. Harness startup must use this variant so
+/// diagnostics can be published and replayed instead of silently discarded.
 pub fn resolve_extensions_with_cli_overrides_and_diagnostics(
     settings: &HarnessSettings,
     builtins: Vec<BuiltinExtension>,

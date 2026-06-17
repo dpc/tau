@@ -9694,8 +9694,8 @@ fn extension_prompt_submit_request_routes_to_loaded_agent() {
     h.shutdown().expect("shutdown");
 }
 
-/// Bad extension prompt targets must be rejected with user-visible harness info
-/// and must not create durable prompt facts for arbitrary agent ids.
+/// Bad extension prompt targets must be rejected with user-visible harness
+/// notice and must not create durable prompt facts for arbitrary agent ids.
 #[test]
 fn extension_prompt_submit_request_rejects_unknown_agent() {
     let td = TempDir::new().expect("tempdir");
@@ -9716,7 +9716,7 @@ fn extension_prompt_submit_request_rejects_unknown_agent() {
 
     assert!(event_log_contains_any_source(&h, |event| matches!(
         event,
-        Event::HarnessInfo(info) if info.message.contains("unknown or unloaded agent")
+        Event::HarnessNotice(info) if info.message.contains("unknown or unloaded agent")
     )));
     assert!(!event_log_contains_any_source(&h, |event| matches!(
         event,

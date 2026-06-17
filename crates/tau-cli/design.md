@@ -52,6 +52,12 @@ is not an extension. Internal harness startup and built-in extension defaults
 should therefore use `tau component harness` and `tau component <extension>`;
 `tau ext <name>` is not a supported compatibility alias.
 
+## Notice filtering
+
+Status: confirmed, 2026-06-17, dpc
+
+Harness/UI notices are filtered in the terminal UI, not at the harness emission site. The default threshold is `info`; `/set notice-level <level>` and persisted `cli.json` `notice_level` change what routine notices a UI renders. Critical notices and `always_show` warning diagnostics remain visible regardless of threshold. UI special-casing must use the stable `harness.notice.kind` field rather than parsing notice text.
+
 ## Theme defaults
 
 Status: confirmed, 2026-06-17, dpc

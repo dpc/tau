@@ -13,7 +13,7 @@ advertise: false
 
 - Registers `restart_test_dummy`, a tool that historically either exits the extension process or returns an error at random.
 - Can be configured with deterministic `restart_mode` for tests: `random`, `success`, `error`, or `exit`.
-- Intercepts `agent.prompt_submitted` and rewrites whole-word `tao` to `tau`, preserving letter case. When it changes text it emits a transient harness info message: `did you mean "Tau"? — corrected for you`.
+- Intercepts `agent.prompt_submitted` and rewrites whole-word `tao` to `tau`, preserving letter case. When it changes text it emits a transient harness notice message: `did you mean "Tau"? — corrected for you`.
 
 This extension is not intended as user-facing functionality. It should stay disabled in normal configs.
 

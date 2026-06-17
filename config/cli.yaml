@@ -4,7 +4,7 @@
 # bar_cursor: true
 # prompt_symbol: "◯"
 # submitted_prompt_symbol: "⬤"
-
+# notice_level: info  # critical|warning|info|debug|trace
 # Optional prompt completion rules keyed by word prefix.
 # completions:
 #   "@": complete_agents

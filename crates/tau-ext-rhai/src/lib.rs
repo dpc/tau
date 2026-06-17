@@ -16,9 +16,9 @@ use std::time::Duration;
 use rhai::{Array, Dynamic, Engine, EvalAltResult, FnPtr, ImmutableString, Map, Scope};
 use serde::Deserialize;
 use tau_proto::{
-    CborValue, ClientKind, ConfigError, Configure, Event, EventSelector, HarnessInfo,
-    HarnessInfoLevel, HarnessInputMessage, HarnessOutputMessage, Hello, Intercept, InterceptAction,
-    InterceptReply, InterceptionPriority, PROTOCOL_VERSION, PeerInputReader, PeerOutputWriter,
+    CborValue, ClientKind, ConfigError, Configure, Event, EventSelector, HarnessInputMessage,
+    HarnessNotice, HarnessOutputMessage, Hello, Intercept, InterceptAction, InterceptReply,
+    InterceptionPriority, NoticeLevel, PROTOCOL_VERSION, PeerInputReader, PeerOutputWriter,
     PromptOriginator, Ready, Subscribe, ToolError, ToolGroup, ToolGroupName, ToolName,
     ToolRegister, ToolResult, ToolResultKind, ToolSpec, ToolStarted, ToolType, UnixMicros,
 };
@@ -472,7 +472,7 @@ fn register_host_functions(
         "tau_info",
         move |message: ImmutableString| -> Result<(), Box<EvalAltResult>> {
             ensure_not_init(&info_state, "tau_info")?;
-            enqueue_info(&info_tx, message.as_str(), HarnessInfoLevel::Normal, true);
+            enqueue_info(&info_tx, message.as_str(), NoticeLevel::Info, true);
             Ok(())
         },
     );
@@ -710,7 +710,7 @@ fn enqueue_event(tx: &mpsc::Sender<HarnessInputMessage>, event: Dynamic, transie
             enqueue_info(
                 tx,
                 &format!("rhai invalid event: {message}"),
-                HarnessInfoLevel::Important,
+                NoticeLevel::Warning,
                 true,
             );
         }
@@ -720,22 +720,26 @@ fn enqueue_event(tx: &mpsc::Sender<HarnessInputMessage>, event: Dynamic, transie
 fn enqueue_info(
     tx: &mpsc::Sender<HarnessInputMessage>,
     message: &str,
-    level: HarnessInfoLevel,
+    level: NoticeLevel,
     transient: bool,
 ) {
     let _ = tx.send(HarnessInputMessage::emit_with_transient(
-        Event::HarnessInfo(HarnessInfo {
+        Event::HarnessNotice(HarnessNotice {
+            kind: tau_proto::notice_kind::EXTENSION_NOTICE.to_owned(),
             message: message.to_owned(),
             level,
+            always_show: false,
         }),
         transient,
     ));
 }
 
-fn parse_info_level(level: &str) -> HarnessInfoLevel {
+fn parse_info_level(level: &str) -> NoticeLevel {
     match level {
-        "important" => HarnessInfoLevel::Important,
-        _ => HarnessInfoLevel::Normal,
+        "critical" | "warning" | "important" => NoticeLevel::Warning,
+        "debug" => NoticeLevel::Debug,
+        "trace" => NoticeLevel::Trace,
+        _ => NoticeLevel::Info,
     }
 }
 
@@ -1116,7 +1120,7 @@ impl ScriptRuntime {
 
 fn report_callback_error(tx: &mpsc::Sender<HarnessInputMessage>, message: String) {
     tracing::warn!(target: LOG_TARGET, error = %message, "rhai callback failed");
-    enqueue_info(tx, &message, HarnessInfoLevel::Important, true);
+    enqueue_info(tx, &message, NoticeLevel::Warning, true);
 }
 
 fn meta_json(replay: bool, recorded_at: Option<UnixMicros>) -> serde_json::Value {

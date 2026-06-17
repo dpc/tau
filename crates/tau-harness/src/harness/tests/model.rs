@@ -1,22 +1,22 @@
 use tau_proto::{
-    Effort, HarnessInfoLevel, ModelId, ProviderModelInfo, ProviderModelsUpdated, ThinkingSummary,
+    Effort, ModelId, NoticeLevel, ProviderModelInfo, ProviderModelsUpdated, ThinkingSummary,
     Verbosity,
 };
 
 use super::*;
 use crate::model::LoadedRoles;
 
-/// Scan the harness event log for an `Important` `HarnessInfo`
+/// Scan the harness event log for a mandatory warning `HarnessNotice`
 /// containing `needle` and return its message. The startup paths emit
 /// these synchronously before the constructor returns, so by the time
 /// the test inspects the log every check_*_parses event is already
 /// committed — no need to pump the bus.
-fn find_important_info(h: &Harness, needle: &str) -> Option<String> {
+fn find_mandatory_warning_notice(h: &Harness, needle: &str) -> Option<String> {
     let mut seq = crate::event_log::EventLogSeq::new(0);
     while let Some(entry) = h.event_log.get_next_from(seq) {
         seq = entry.seq.next();
-        if let Event::HarnessInfo(info) = &entry.event
-            && info.level == HarnessInfoLevel::Important
+        if let Event::HarnessNotice(info) = &entry.event
+            && info.level == NoticeLevel::Warning
             && info.message.contains(needle)
         {
             return Some(info.message.clone());
@@ -29,7 +29,7 @@ fn find_info(h: &Harness, needle: &str) -> Option<String> {
     let mut seq = crate::event_log::EventLogSeq::new(0);
     while let Some(entry) = h.event_log.get_next_from(seq) {
         seq = entry.seq.next();
-        if let Event::HarnessInfo(info) = &entry.event
+        if let Event::HarnessNotice(info) = &entry.event
             && info.message.contains(needle)
         {
             return Some(info.message.clone());
@@ -868,11 +868,11 @@ fn role_without_verbosity_picks_low_when_supported() {
     );
 }
 
-/// A malformed `harness.yaml` must surface in the UI as an `Important`
-/// `HarnessInfo`. Without this, the only symptom of a borked file is that
+/// A malformed `harness.yaml` must surface in the UI as a mandatory warning
+/// `HarnessNotice`. Without this, the only symptom of a borked file is that
 /// user-configured extensions or roles vanish.
 #[test]
-fn borked_harness_yaml_emits_important_info() {
+fn borked_harness_yaml_emits_mandatory_warning_notice() {
     let td = TempDir::new().expect("tempdir");
     let config_dir = td.path().join("config");
     let state_dir = td.path().join("state");
@@ -890,8 +890,8 @@ fn borked_harness_yaml_emits_important_info() {
     .expect("write borked harness");
 
     let h = echo_harness_with_dirs("s1", state_dir, dirs).expect("harness");
-    let message = find_important_info(&h, "harness.yaml")
-        .expect("expected Important HarnessInfo about harness.yaml");
+    let message = find_mandatory_warning_notice(&h, "harness.yaml")
+        .expect("expected mandatory warning HarnessNotice about harness.yaml");
     assert!(
         message.contains("failed to parse"),
         "message should explain what happened, got: {message}"
@@ -948,7 +948,7 @@ fn harness_startup_errors_when_no_roles_are_enabled() {
 /// different role. The harness falls back to the first configured role so users
 /// still get a usable session.
 #[test]
-fn missing_default_role_emits_important_info_and_falls_back() {
+fn missing_default_role_emits_mandatory_warning_notice_and_falls_back() {
     let td = TempDir::new().expect("tempdir");
     let config_dir = td.path().join("config");
     let state_dir = td.path().join("state");
@@ -969,8 +969,8 @@ fn missing_default_role_emits_important_info_and_falls_back() {
 
     let h = echo_harness_with_dirs("s1", state_dir, dirs).expect("harness");
     assert_eq!(h.selected_role, "junior-engineer");
-    let message = find_important_info(&h, "default_role `ghost`")
-        .expect("expected Important HarnessInfo about missing default_role");
+    let message = find_mandatory_warning_notice(&h, "default_role `ghost`")
+        .expect("expected mandatory warning HarnessNotice about missing default_role");
     assert!(
         message.contains("selected `junior-engineer` instead"),
         "message should name the fallback role, got: {message}"

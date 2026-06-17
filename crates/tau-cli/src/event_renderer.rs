@@ -23,10 +23,10 @@ use crate::tool_render::{
     CompactionStatus, ToolCallDisplay, ToolSummaryDisplay, build_delegate_completion_display,
     build_osc1337_set_user_var, build_tool_summary_display, diff_payload_counts,
     extension_status_block, extract_diff, format_token_count, pending_tool_call_display,
-    render_compaction_block, render_delegate_display, render_diff_tool_block, render_harness_info,
-    render_multi_diff_tool_block, render_shell_block, render_tool_block, render_tool_use_state,
-    render_turn_stats_block, session_status_block, streaming_block, synthesize_fallback_display,
-    system_loaded_block, tool_duration_suffix, ui_dir_block,
+    render_compaction_block, render_delegate_display, render_diff_tool_block,
+    render_harness_notice, render_multi_diff_tool_block, render_shell_block, render_tool_block,
+    render_tool_use_state, render_turn_stats_block, session_status_block, streaming_block,
+    synthesize_fallback_display, system_loaded_block, tool_duration_suffix, ui_dir_block,
 };
 
 pub(crate) const UI_IO_MEDIUM_BYTES_PER_SEC: u64 = 10 * 1024;
@@ -213,8 +213,8 @@ pub(crate) struct EventRenderer {
     show_tools: tau_config::settings::ShowTools,
     /// Agent/user message visibility mode.
     show_messages: tau_config::settings::ShowMessages,
-    /// Routine lifecycle/status message visibility mode.
-    show_status: tau_config::settings::ShowStatus,
+    /// Harness/UI notice visibility threshold.
+    notice_level: tau_proto::NoticeLevel,
     /// Whether to show an indicator when prompt input rows are hidden.
     show_prompt_scroll_indicator: bool,
     /// Tool summary blocks keyed by their block id. Hidden when
@@ -1061,7 +1061,7 @@ impl EventRenderer {
             show_turn_stats: state.show_turn_stats,
             show_tools: state.show_tools,
             show_messages: state.show_messages,
-            show_status: state.show_status,
+            notice_level: state.notice_level,
             show_prompt_scroll_indicator: state.show_prompt_scroll_indicator,
             show_ui_io: state.show_ui_io,
             ui_io_stats: UiIoStats::default(),
@@ -1397,7 +1397,8 @@ impl EventRenderer {
             show_ui_io: self.show_ui_io,
             show_tools: self.show_tools,
             show_messages: self.show_messages,
-            show_status: self.show_status,
+            notice_level: self.notice_level,
+            show_status: tau_config::settings::ShowStatus::All,
             show_prompt_scroll_indicator: self.show_prompt_scroll_indicator,
         };
         if let Ok(mut mirror) = self.cli_state_mirror.lock() {
@@ -1504,9 +1505,9 @@ impl EventRenderer {
                     self.set_show_messages(show_messages);
                 }
             }
-            "show-status" => {
-                if let Some(show_status) = tau_config::settings::ShowStatus::parse(value) {
-                    self.set_show_status(show_status);
+            "notice-level" => {
+                if let Some(level) = tau_proto::NoticeLevel::parse(value) {
+                    self.set_notice_level(level);
                 }
             }
             "show-prompt-scroll-indicator" => self.set_show_prompt_scroll_indicator(on),
@@ -1839,11 +1840,11 @@ impl EventRenderer {
         self.save_cli_state();
     }
 
-    fn set_show_status(&mut self, show_status: tau_config::settings::ShowStatus) {
-        if self.show_status == show_status {
+    fn set_notice_level(&mut self, notice_level: tau_proto::NoticeLevel) {
+        if self.notice_level == notice_level {
             return;
         }
-        self.show_status = show_status;
+        self.notice_level = notice_level;
         self.save_cli_state();
     }
 
@@ -1857,8 +1858,10 @@ impl EventRenderer {
         self.save_cli_state();
     }
 
-    fn show_routine_status(&self) -> bool {
-        self.show_status == tau_config::settings::ShowStatus::All
+    fn notice_visible(&self, level: tau_proto::NoticeLevel, always_show: bool) -> bool {
+        level == tau_proto::NoticeLevel::Critical
+            || always_show
+            || level.visible_at(self.notice_level)
     }
 
     fn set_show_tools(&mut self, show_tools: tau_config::settings::ShowTools) {
@@ -1986,7 +1989,7 @@ impl EventRenderer {
     }
 
     fn render_session_preamble(&mut self) {
-        if !self.show_routine_status() {
+        if !self.notice_visible(tau_proto::NoticeLevel::Info, false) {
             return;
         }
         self.handle.print_output(
@@ -4664,7 +4667,7 @@ impl EventRenderer {
     }
 
     fn handle_extension_starting(&mut self, starting: &tau_proto::ExtensionStarting) {
-        if !self.show_routine_status() {
+        if !self.notice_visible(tau_proto::NoticeLevel::Info, false) {
             return;
         }
         let block = extension_status_block(&self.theme, &starting.extension_name, "starting");
@@ -4683,7 +4686,7 @@ impl EventRenderer {
         }
         self.ready_extensions
             .insert(ready.extension_name.to_string());
-        if !self.show_routine_status() {
+        if !self.notice_visible(tau_proto::NoticeLevel::Info, false) {
             return;
         }
         self.handle.print_output(
@@ -4697,7 +4700,7 @@ impl EventRenderer {
             self.handle.remove_block(bid);
         }
         self.ready_extensions.remove(exited.extension_name.as_str());
-        if !self.show_routine_status() {
+        if !self.notice_visible(tau_proto::NoticeLevel::Info, false) {
             return;
         }
         self.handle.print_output(
@@ -4714,7 +4717,7 @@ impl EventRenderer {
     }
 
     fn handle_extension_context_ready(&mut self, ready: &tau_proto::ExtensionContextReady) {
-        if !self.show_routine_status() {
+        if !self.notice_visible(tau_proto::NoticeLevel::Debug, false) {
             return;
         }
         self.handle.print_output(
@@ -4725,23 +4728,21 @@ impl EventRenderer {
 
     fn handle_harness_status_events(&mut self, event: &Event) -> bool {
         match event {
-            Event::HarnessInfo(info) => {
-                if self.show_routine_status()
-                    || info.level == tau_proto::HarnessInfoLevel::Important
-                {
+            Event::HarnessNotice(info) => {
+                if info.visible_at(self.notice_level) {
                     self.handle
-                        .print_output("harness-info", render_harness_info(&self.theme, info));
+                        .print_output("harness-notice", render_harness_notice(&self.theme, info));
                 }
                 true
             }
             Event::HarnessSessionDir(session_dir) => {
-                if self.show_routine_status() {
+                if self.notice_visible(tau_proto::NoticeLevel::Info, false) {
                     self.handle_harness_session_dir(session_dir);
                 }
                 true
             }
             Event::HarnessUiDir(ui_dir) => {
-                if self.show_routine_status() {
+                if self.notice_visible(tau_proto::NoticeLevel::Info, false) {
                     self.handle
                         .print_output("ui-dir", ui_dir_block(&self.theme, &ui_dir.path));
                 }

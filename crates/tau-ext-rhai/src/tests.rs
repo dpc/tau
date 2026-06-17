@@ -185,7 +185,7 @@ fn init_host_emit_failure_is_inert() {
     );
     assert!(frames.iter().all(|frame| !matches!(
         emitted_event(frame),
-        Some(Event::HarnessInfo(info)) if info.message.contains("should not leak")
+        Some(Event::HarnessNotice(info)) if info.message.contains("should not leak")
     )));
 }
 
@@ -268,7 +268,7 @@ fn start_runs_after_ready_with_host_functions() {
         .position(|frame| {
             matches!(
                 emitted_event(frame),
-                Some(Event::HarnessInfo(info)) if info.message == "started with honk"
+                Some(Event::HarnessNotice(info)) if info.message == "started with honk"
             )
         })
         .expect("start info");
@@ -304,7 +304,7 @@ fn start_error_reports_but_keeps_extension_ready() {
     );
     assert!(frames.iter().any(|frame| matches!(
         emitted_event(frame),
-        Some(Event::HarnessInfo(info)) if info.message.contains("rhai start failed")
+        Some(Event::HarnessNotice(info)) if info.message.contains("rhai start failed")
     )));
 }
 
@@ -352,11 +352,11 @@ fn delivered_event_invokes_script_with_replay_meta() {
 
     assert!(frames.iter().any(|frame| matches!(
         emitted_event(frame),
-        Some(Event::HarnessInfo(info)) if info.message.contains("saw false/11: hello")
+        Some(Event::HarnessNotice(info)) if info.message.contains("saw false/11: hello")
     )));
     assert!(frames.iter().any(|frame| matches!(
         emitted_event(frame),
-        Some(Event::HarnessInfo(info)) if info.message.contains("saw true/7: old")
+        Some(Event::HarnessNotice(info)) if info.message.contains("saw true/7: old")
     )));
 }
 
@@ -386,11 +386,11 @@ fn script_error_during_on_event_reports_and_keeps_running() {
 
     assert!(frames.iter().any(|frame| matches!(
         emitted_event(frame),
-        Some(Event::HarnessInfo(info)) if info.message.contains("on_event failed")
+        Some(Event::HarnessNotice(info)) if info.message.contains("on_event failed")
     )));
     assert!(frames.iter().any(|frame| matches!(
         emitted_event(frame),
-        Some(Event::HarnessInfo(info)) if info.message.contains("handled after")
+        Some(Event::HarnessNotice(info)) if info.message.contains("handled after")
     )));
 }
 
@@ -631,7 +631,7 @@ fn live_owned_tool_started_invokes_handler_and_replay_is_ignored() {
     );
     assert!(frames.iter().all(|frame| !matches!(
         emitted_event(frame),
-        Some(Event::HarnessInfo(info)) if info.message.contains("raw should not see")
+        Some(Event::HarnessNotice(info)) if info.message.contains("raw should not see")
     )));
 }
 

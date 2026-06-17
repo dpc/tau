@@ -78,7 +78,9 @@ pub struct CliSettings {
     pub show_tools: ShowTools,
     /// How inter-agent and user-agent messages are rendered in the transcript.
     pub show_messages: ShowMessages,
-    /// How routine startup lifecycle and status messages are rendered.
+    /// Default notice visibility threshold for harness/UI notices.
+    pub notice_level: tau_proto::NoticeLevel,
+    /// Deprecated compatibility setting for old routine status visibility.
     pub show_status: ShowStatus,
     /// Whether to show a compact indicator when the prompt input is locally
     /// scrolled.
@@ -116,6 +118,7 @@ impl CliSettings {
             show_ui_io: self.show_ui_io,
             show_tools: self.show_tools,
             show_messages: self.show_messages,
+            notice_level: self.notice_level,
             show_status: self.show_status,
             show_prompt_scroll_indicator: self.show_prompt_scroll_indicator,
         }
@@ -191,8 +194,10 @@ pub struct CliState {
     /// How messages between the user and agents, or between agents, are
     /// rendered in the transcript. Controlled by `/set show-messages <mode>`.
     pub show_messages: ShowMessages,
-    /// How routine startup lifecycle and status messages are rendered.
-    /// Controlled by `/set show-status <all|minimal>`.
+    /// Notice visibility threshold. Controlled by
+    /// `/set notice-level <critical|warning|info|debug|trace>`.
+    pub notice_level: tau_proto::NoticeLevel,
+    /// Deprecated compatibility setting for old routine status visibility.
     pub show_status: ShowStatus,
     /// Whether to show a compact indicator when the prompt input has hidden
     /// rows. Controlled by `/set show-prompt-scroll-indicator <true|false>`.
@@ -398,6 +403,7 @@ impl Default for CliState {
             show_ui_io: false,
             show_tools: ShowTools::Full,
             show_messages: ShowMessages::AllFull,
+            notice_level: tau_proto::NoticeLevel::Info,
             show_status: ShowStatus::All,
             show_prompt_scroll_indicator: true,
         }

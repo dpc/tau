@@ -1146,14 +1146,14 @@ pub struct Harness {
     /// model changes, etc.) surfaced to the UI as part of the next
     /// `InteractionOutcome`.
     pub(crate) lifecycle_messages: Vec<String>,
-    /// Important harness diagnostics that must be replayed to late UI clients.
+    /// Mandatory harness diagnostics that must be replayed to late UI clients.
     ///
     /// Extension config errors commonly happen during daemon startup, before
     /// the terminal UI has subscribed. Keep these messages as explicit
     /// current harness state instead of relying on the append-only event
     /// log: a config parse failure must never be visible only in stderr or
     /// historical debug logs.
-    pub(crate) replayable_harness_infos: Vec<tau_proto::HarnessInfo>,
+    pub(crate) replayable_harness_notices: Vec<tau_proto::HarnessNotice>,
     /// Extension process lifecycle and pre-`Ready` activation state.
     pub(crate) extensions: ExtensionRuntimeState,
     /// Maps agent_prompt_id → owning agent for in-flight
@@ -1597,7 +1597,7 @@ impl Harness {
             client_writers: HashMap::new(),
             startup_detach_requested: false,
             lifecycle_messages: Vec::new(),
-            replayable_harness_infos: Vec::new(),
+            replayable_harness_notices: Vec::new(),
             extensions: ExtensionRuntimeState::default(),
             prompt_agents: HashMap::new(),
             agents: HashMap::new(),
@@ -2045,7 +2045,7 @@ impl Harness {
                         error = %error,
                         "optional extension did not initialize during spawn"
                     );
-                    self.emit_info_important(&format!(
+                    self.emit_optional_extension_skipped(&format!(
                         "optional extension {} did not initialize",
                         ext_config.name
                     ));
@@ -2627,7 +2627,7 @@ impl Harness {
             }
             self.set_agent_turn_state(&cid, AgentTurnState::Idle);
         }
-        self.emit_info(&format!(
+        self.emit_harness_failure(&format!(
             "provider prompt route failed for `{agent_prompt_id}` via `{provider_connection_id}`: {reason}"
         ));
         self.try_advance_queue();
@@ -2704,7 +2704,7 @@ impl Harness {
                     %error,
                     "dropping event rejected by session store"
                 );
-                self.emit_info(&format!(
+                self.emit_harness_failure(&format!(
                     "event {} rejected by session store: {error}",
                     event.name()
                 ));
@@ -2807,7 +2807,7 @@ impl Harness {
             let _ = self.bus.publish_from(source, log_frame);
         }
         if let Err(error) = self.dispatch_internal_tool_event(&event) {
-            self.emit_info(&format!("internal tool event handler failed: {error}"));
+            self.emit_harness_failure(&format!("internal tool event handler failed: {error}"));
         }
         self.react_to_committed_event(&event);
     }
@@ -3828,7 +3828,7 @@ impl Harness {
             instance_id,
             schema.clone(),
         ) {
-            self.emit_info(&format!(
+            self.emit_harness_failure(&format!(
                 "extension {extension_name} published invalid action schema: {error}"
             ));
             return;
@@ -3957,12 +3957,17 @@ impl Harness {
                 // configuration schema. Do not downgrade, drop, or make this
                 // startup-only: invalid extension config must be visible in the
                 // UI even when it is reported before any UI client subscribes.
-                self.emit_info_important(&format!(
-                    "extension {name} rejected its config: {}\ncheck \
-                     `extensions.{name}.config` and `extensions.{name}.secrets` in harness.yaml; \
-                     invalid values are being ignored",
-                    err.message,
-                ));
+                self.emit_notice(
+                    tau_proto::notice_kind::EXTENSION_CONFIG_ERROR,
+                    tau_proto::NoticeLevel::Warning,
+                    true,
+                    &format!(
+                        "extension {name} rejected its config: {}\ncheck \
+                         `extensions.{name}.config` and `extensions.{name}.secrets` in harness.yaml; \
+                         invalid values are being ignored",
+                        err.message,
+                    ),
+                );
                 if optional {
                     tracing::warn!(
                         target: "tau_harness::startup",
@@ -4442,11 +4447,19 @@ impl Harness {
                 if !Self::is_extension_fallback_emit_allowed(&other) {
                     return Ok(());
                 }
-                let transient = transient_override.unwrap_or_else(|| other.defaults_to_transient());
+                let mut event = other;
+                if let Event::HarnessNotice(notice) = &mut event {
+                    notice.kind = tau_proto::notice_kind::EXTENSION_NOTICE.to_owned();
+                    notice.always_show = false;
+                    if notice.level == tau_proto::NoticeLevel::Critical {
+                        notice.level = tau_proto::NoticeLevel::Warning;
+                    }
+                }
+                let transient = transient_override.unwrap_or_else(|| event.defaults_to_transient());
                 if self.should_stage_extension_capabilities(source_id) {
-                    self.stage_extension_publish(source_id, other, transient);
+                    self.stage_extension_publish(source_id, event, transient);
                 } else {
-                    self.enqueue_publish(Some(source_id), other, transient, false, None);
+                    self.enqueue_publish(Some(source_id), event, transient, false, None);
                 }
             }
         }
@@ -4608,9 +4621,11 @@ impl Harness {
         if !self.available_roles.contains_key(&select.role) {
             self.publish_event(
                 None,
-                Event::HarnessInfo(tau_proto::HarnessInfo {
+                Event::HarnessNotice(tau_proto::HarnessNotice {
+                    kind: tau_proto::notice_kind::UI_COMMAND_ERROR.to_owned(),
                     message: format!("unknown role: {}", select.role),
-                    level: tau_proto::HarnessInfoLevel::Normal,
+                    level: tau_proto::NoticeLevel::Info,
+                    always_show: false,
                 }),
             );
             return Ok(true);
@@ -4622,9 +4637,11 @@ impl Harness {
         if self.selected_model.is_none() {
             self.publish_event(
                 None,
-                Event::HarnessInfo(tau_proto::HarnessInfo {
+                Event::HarnessNotice(tau_proto::HarnessNotice {
+                    kind: tau_proto::notice_kind::MODEL_SELECTION.to_owned(),
                     message: format!("role `{}` has no available model", select.role),
-                    level: tau_proto::HarnessInfoLevel::Normal,
+                    level: tau_proto::NoticeLevel::Info,
+                    always_show: false,
                 }),
             );
         }
@@ -5469,7 +5486,7 @@ impl Harness {
         if let Some(entry) = self.extensions.entries.get_mut(connection_id) {
             entry.respawn_allowed = false;
         }
-        self.emit_info_important(message);
+        self.emit_optional_extension_skipped(message);
         self.handle_disconnect(connection_id);
     }
 
@@ -6012,7 +6029,7 @@ impl Harness {
     }
 
     fn reject_extension_tool_request(&mut self, message: String) {
-        self.emit_info(&message);
+        self.emit_info_important(&message);
     }
 
     // -----------------------------------------------------------------------
@@ -6060,7 +6077,10 @@ impl Harness {
     fn is_extension_fallback_emit_allowed(event: &Event) -> bool {
         matches!(
             event,
-            Event::ExtensionEvent(_) | Event::Osc1337SetUserVar(_) | Event::TermBell(_)
+            Event::ExtensionEvent(_)
+                | Event::HarnessNotice(_)
+                | Event::Osc1337SetUserVar(_)
+                | Event::TermBell(_)
         )
     }
 
@@ -6187,7 +6207,7 @@ impl Harness {
     }
 
     /// Surface settings-file parse errors captured during the initial
-    /// load as `Important` `HarnessInfo`. The loaders already fell
+    /// load as mandatory warning `HarnessNotice`s. The loaders already fell
     /// back to defaults and wrote a short stderr line, but stderr is
     /// hidden once the TUI takes over the terminal — without this the
     /// user's only symptom is "my extensions vanished" / "my roles changed"
@@ -6282,36 +6302,76 @@ impl Harness {
     }
 
     pub(crate) fn emit_info(&mut self, message: &str) {
-        self.emit_info_with_level(message, tau_proto::HarnessInfoLevel::Normal);
+        self.emit_info_with_level(message, tau_proto::NoticeLevel::Info);
+    }
+
+    fn emit_harness_failure(&mut self, message: &str) {
+        self.emit_notice(
+            tau_proto::notice_kind::HARNESS_FAILURE,
+            tau_proto::NoticeLevel::Warning,
+            true,
+            message,
+        );
     }
 
     pub(crate) fn emit_info_important(&mut self, message: &str) {
-        self.emit_info_with_level(message, tau_proto::HarnessInfoLevel::Important);
+        self.emit_notice(
+            tau_proto::notice_kind::HARNESS_INTERNAL_WARNING,
+            tau_proto::NoticeLevel::Warning,
+            true,
+            message,
+        );
+    }
+
+    fn emit_optional_extension_skipped(&mut self, message: &str) {
+        self.emit_notice(
+            tau_proto::notice_kind::EXTENSION_OPTIONAL_SKIPPED,
+            tau_proto::NoticeLevel::Warning,
+            true,
+            message,
+        );
     }
 
     fn emit_extension_startup_diagnostics(&mut self, diagnostics: &[ExtensionStartupDiagnostic]) {
         for diagnostic in diagnostics {
-            self.emit_info_important(&diagnostic.message);
+            self.emit_optional_extension_skipped(&diagnostic.message);
         }
     }
 
-    fn emit_info_with_level(&mut self, message: &str, level: tau_proto::HarnessInfoLevel) {
-        let info = tau_proto::HarnessInfo {
+    fn emit_info_with_level(&mut self, message: &str, level: tau_proto::NoticeLevel) {
+        let (kind, always_show) = if matches!(
+            level,
+            tau_proto::NoticeLevel::Critical | tau_proto::NoticeLevel::Warning
+        ) {
+            (tau_proto::notice_kind::HARNESS_INTERNAL_WARNING, true)
+        } else {
+            (tau_proto::notice_kind::HARNESS_NOTICE, false)
+        };
+        self.emit_notice(kind, level, always_show, message);
+    }
+
+    fn emit_notice(
+        &mut self,
+        kind: &str,
+        level: tau_proto::NoticeLevel,
+        always_show: bool,
+        message: &str,
+    ) {
+        let always_show = always_show || level == tau_proto::NoticeLevel::Critical;
+        let notice = tau_proto::HarnessNotice {
+            kind: kind.to_owned(),
             message: message.to_owned(),
             level,
+            always_show,
         };
-        let important = level == tau_proto::HarnessInfoLevel::Important;
-        if important {
-            self.replayable_harness_infos.push(info.clone());
+        if always_show {
+            self.replayable_harness_notices.push(notice.clone());
         }
-        // Important diagnostics include config parse failures. Mark them
-        // must-pass so an interceptor cannot turn a user-visible configuration
-        // problem into another silent fallback.
         self.enqueue_publish(
             Some("harness"),
-            Event::HarnessInfo(info),
+            Event::HarnessNotice(notice),
             false,
-            important,
+            always_show,
             None,
         );
     }
@@ -6899,7 +6959,7 @@ impl Harness {
         if !self.pending_start_agent_requests.is_empty()
             && let Err(error) = self.drain_pending_start_agent_requests()
         {
-            self.emit_info(&format!("queued start-agent dispatch failed: {error}"));
+            self.emit_harness_failure(&format!("queued start-agent dispatch failed: {error}"));
         }
     }
 
@@ -7607,7 +7667,7 @@ impl Harness {
         }
     }
 
-    /// Renders the selected agent tree as one `harness.info` line per node.
+    /// Renders the selected agent tree as one `harness.notice` line per node.
     /// Bound-session-only: refuses if `session_id` doesn't match.
     fn handle_tree_request(&mut self, session_id: &SessionId, target_agent_id: Option<&str>) {
         if session_id != &self.current_session_id {
@@ -8185,7 +8245,7 @@ impl Harness {
         );
         if waiting_on.is_empty() {
             if let Err(error) = self.complete_session_init(session_id, reason) {
-                self.emit_info(&format!("failed to initialize session: {error}"));
+                self.emit_harness_failure(&format!("failed to initialize session: {error}"));
                 self.turn_state = TurnState::Idle;
             }
             return;
@@ -8260,7 +8320,7 @@ impl Harness {
         if let Some((session_id, reason)) = completed_session
             && let Err(error) = self.complete_session_init(session_id, reason)
         {
-            self.emit_info(&format!("failed to initialize session: {error}"));
+            self.emit_harness_failure(&format!("failed to initialize session: {error}"));
             self.turn_state = TurnState::Idle;
         }
     }
@@ -8414,7 +8474,7 @@ impl Harness {
                 Ok(Some(membership)) => membership.contains_agent(&agent_id_proto),
                 Ok(None) => false,
                 Err(error) => {
-                    self.emit_info(&format!(
+                    self.emit_harness_failure(&format!(
                         "failed to load session while unloading agent `{agent_id}`: {error}"
                     ));
                     false
@@ -8438,14 +8498,16 @@ impl Harness {
                 Ok(Some(membership)) => membership.loaded_agents().into_iter().cloned().collect(),
                 Ok(None) => return,
                 Err(error) => {
-                    self.emit_info(&format!("failed to load session during restore: {error}"));
+                    self.emit_harness_failure(&format!(
+                        "failed to load session during restore: {error}"
+                    ));
                     return;
                 }
             };
         for agent_id in loaded_agents {
             let agent_id_string = agent_id.to_string();
             if let Err(error) = self.agent_store.load_agent(agent_id.as_str()) {
-                self.emit_info(&format!(
+                self.emit_harness_failure(&format!(
                     "failed to load restored agent `{agent_id}`: {error}"
                 ));
                 continue;
@@ -8637,7 +8699,7 @@ impl Harness {
                 "{source} agent id template failed to generate a unique id after {attempts} attempts; falling back to default template"
             ),
         };
-        self.emit_info(&message);
+        self.emit_info_important(&message);
     }
 
     pub(crate) fn create_durable_user_agent(
@@ -8729,7 +8791,9 @@ impl Harness {
                 Ok(Some(tree)) => tree.materialized_prompt_count(),
                 Ok(None) => 0,
                 Err(error) => {
-                    self.emit_info(&format!("failed to load agent `{agent_id}`: {error}"));
+                    self.emit_harness_failure(&format!(
+                        "failed to load agent `{agent_id}`: {error}"
+                    ));
                     0
                 }
             };
@@ -8743,7 +8807,7 @@ impl Harness {
                 Ok(Some(membership)) => membership.contains_agent(&agent_id_proto),
                 Ok(None) => false,
                 Err(error) => {
-                    self.emit_info(&format!(
+                    self.emit_harness_failure(&format!(
                         "failed to load session while ensuring agent `{agent_id}`: {error}"
                     ));
                     false
@@ -9669,9 +9733,9 @@ impl Harness {
             } else {
                 // Should never happen — `source_connection` is set in
                 // `handle_start_agent_request` when the conversation is
-                // spawned. Surface it via `harness.info` rather than
+                // spawned. Surface it via `harness.notice` rather than
                 // silently dropping so a future regression is visible.
-                self.emit_info(&format!(
+                self.emit_harness_failure(&format!(
                     "start-agent-request result for `{}` (extension `{}`) had no source connection — \
                          dropping",
                     query_id, name
@@ -9994,7 +10058,7 @@ impl Harness {
 
     fn drain_pending_tool_invocations_or_report(&mut self) {
         if let Err(error) = self.drain_pending_tool_invocations() {
-            self.emit_info(&format!("queued tool dispatch failed: {error}"));
+            self.emit_harness_failure(&format!("queued tool dispatch failed: {error}"));
         }
     }
 

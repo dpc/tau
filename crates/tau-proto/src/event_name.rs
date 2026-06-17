@@ -272,7 +272,7 @@ impl EventName {
     pub const PROVIDER_CACHE_MISS_DIAGNOSTIC: Self =
         Self::from_static(EventCategory::Provider, "cache_miss_diagnostic");
 
-    pub const HARNESS_INFO: Self = Self::from_static(EventCategory::Harness, "info");
+    pub const HARNESS_NOTICE: Self = Self::from_static(EventCategory::Harness, "notice");
     pub const HARNESS_SESSION_DIR: Self = Self::from_static(EventCategory::Harness, "session_dir");
     pub const HARNESS_UI_DIR: Self = Self::from_static(EventCategory::Harness, "ui_dir");
     pub const HARNESS_MODELS_AVAILABLE: Self =

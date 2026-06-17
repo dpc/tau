@@ -1273,7 +1273,7 @@ fn extension_context_ready_routes_to_agent_ui_state() {
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
     );
-
+    renderer.apply_setting("notice-level", "debug");
     renderer.handle(&Event::ExtensionContextReady(
         tau_proto::ExtensionContextReady {
             session_id: "s1".into(),
@@ -2390,6 +2390,7 @@ fn show_messages_none_leaves_no_visible_message_output() {
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
     );
+    sync(&handle);
     let before = visible_lines(&vt, 80);
 
     renderer.apply_setting("show-messages", "none");
@@ -2581,44 +2582,69 @@ fn new_session_replays_startup_context_and_kept_extensions() {
     assert!(vt.screen_contains(80, "tau"));
     assert!(vt.screen_contains(80, "extension core-shell kept"));
 }
-/// `show-status=minimal` is for routine lifecycle chatter only. Important
-/// harness info carries configuration errors and must still reach the UI.
+/// `notice-level=warning` hides routine informational chatter while mandatory
+/// warnings such as configuration errors still reach the UI.
 #[test]
-fn minimal_status_hides_normal_harness_info_but_keeps_important() {
+fn warning_notice_level_hides_info_but_keeps_always_show_warning() {
     let (_term, handle, vt) = setup(80, 24);
     let mut renderer = EventRenderer::new(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
     );
-    renderer.apply_setting("show-status", "minimal");
+    renderer.apply_setting("notice-level", "warning");
 
-    renderer.handle(&Event::HarnessInfo(tau_proto::HarnessInfo {
+    renderer.handle(&Event::HarnessNotice(tau_proto::HarnessNotice {
+        kind: "test.info".into(),
         message: "routine lifecycle note".into(),
-        level: tau_proto::HarnessInfoLevel::Normal,
+        level: tau_proto::NoticeLevel::Info,
+        always_show: false,
     }));
     sync(&handle);
     assert!(!vt.screen_contains(80, "routine lifecycle note"));
 
-    renderer.handle(&Event::HarnessInfo(tau_proto::HarnessInfo {
+    renderer.handle(&Event::HarnessNotice(tau_proto::HarnessNotice {
+        kind: "test.warning".into(),
         message: "important config error".into(),
-        level: tau_proto::HarnessInfoLevel::Important,
+        level: tau_proto::NoticeLevel::Warning,
+        always_show: true,
     }));
     sync(&handle);
     assert!(vt.screen_contains(80, "important config error"));
 }
 
-/// Extension ready/kept messages are routine lifecycle status, so minimal mode
-/// should keep them out of both live startup and `/session new` preambles.
 #[test]
-fn minimal_status_hides_routine_extension_status() {
+fn critical_notice_level_keeps_always_show_harness_failure() {
     let (_term, handle, vt) = setup(80, 24);
     let mut renderer = EventRenderer::new(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
     );
-    renderer.apply_setting("show-status", "minimal");
+    renderer.apply_setting("notice-level", "critical");
+
+    renderer.handle(&Event::HarnessNotice(tau_proto::HarnessNotice {
+        kind: tau_proto::notice_kind::HARNESS_FAILURE.into(),
+        message: "failed to dispatch queued prompt: boom".into(),
+        level: tau_proto::NoticeLevel::Warning,
+        always_show: true,
+    }));
+    sync(&handle);
+    assert!(vt.screen_contains(80, "failed to dispatch queued prompt: boom"));
+}
+
+/// Extension ready/kept messages are informational lifecycle notices, so a
+/// warning threshold should keep them out of live startup and `/session new`
+/// preambles.
+#[test]
+fn warning_notice_level_hides_routine_extension_status() {
+    let (_term, handle, vt) = setup(80, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        cli_test_theme(),
+    );
+    renderer.apply_setting("notice-level", "warning");
 
     renderer.handle(&Event::ExtensionReady(ExtensionReady {
         instance_id: 1.into(),

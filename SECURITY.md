@@ -25,8 +25,12 @@ only extensions you trust to execute on your machine.
 policy for trusted local extensions. It lets Tau continue without that extension
 when startup/config/secret/pre-Ready setup fails; it is not a sandbox and does
 not broadly change post-Ready respawn/runtime semantics. Optional skips must
-still be surfaced as Important replayable harness diagnostics and must never hide
-extension config errors or leak secret values.
+still be surfaced as mandatory replayable `harness.notice` diagnostics and must
+never hide extension config errors or leak secret values. Notice filtering is a
+UI-side preference: critical and mandatory warning notices remain visible,
+replayable, and protected from interceptor rewrite/drop. Extension-authored
+notices are sanitized so extensions cannot spoof critical or always-visible
+harness diagnostics.
 
 Per-agent metadata (`agent.metadata_set` / `agent.metadata_unset`) is durable,
 extension-visible, and interceptable by privileged local interceptors. It is a

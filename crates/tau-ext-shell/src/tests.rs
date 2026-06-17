@@ -2149,7 +2149,7 @@ fn project_scoped_skills_are_advertised_by_default() {
 }
 
 #[test]
-fn skill_diagnostics_are_emitted_as_harness_info() {
+fn skill_diagnostics_are_emitted_as_harness_notice() {
     let temp = TempDir::new().expect("tempdir");
     let skills_dir = temp.path().join(".agents").join("skills");
     let skill_dir = skills_dir.join("bad-skill");
@@ -2167,13 +2167,13 @@ fn skill_diagnostics_are_emitted_as_harness_info() {
     push_skill_diagnostic_events(&mut events, result.diagnostics);
 
     let skipped = events.iter().find_map(|event| match event {
-        Event::HarnessInfo(info) if info.message.contains("skill skipped:") => Some(info),
+        Event::HarnessNotice(info) if info.message.contains("skill skipped:") => Some(info),
         _ => None,
     });
     let Some(info) = skipped else {
-        panic!("expected skipped skill harness info event, got {events:?}");
+        panic!("expected skipped skill harness notice event, got {events:?}");
     };
-    assert_eq!(info.level, tau_proto::HarnessInfoLevel::Important);
+    assert_eq!(info.level, tau_proto::NoticeLevel::Warning);
     assert!(info.message.contains("bad-skill/SKILL.md"));
     assert!(info.message.contains("name contains invalid characters"));
 }

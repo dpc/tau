@@ -14,8 +14,8 @@
 //! - [`Harness::replay_session_events`] announces the current loaded-agent
 //!   snapshot, then replays each loaded agent's durable transcript facts from
 //!   the global agent store.
-//! - [`Harness::replay_harness_info`] reconstructs current harness status from
-//!   live state snapshots, so a subscriber that just joined sees the same
+//! - [`Harness::replay_harness_notice`] reconstructs current harness status
+//!   from live state snapshots, so a subscriber that just joined sees the same
 //!   indicators as one that was here from the start without retaining old
 //!   runtime events.
 //!
@@ -59,7 +59,7 @@ impl Harness {
             .set_subscriptions(connection_id, selectors.clone())?;
         if self.session_initialized(&self.current_session_id) {
             self.replay_session_events(connection_id, &selectors);
-            self.replay_harness_info(connection_id, &selectors);
+            self.replay_harness_notice(connection_id, &selectors);
         }
         Ok(())
     }
@@ -185,9 +185,11 @@ impl Harness {
         let _ = self.bus.send_to(
             client_id,
             None,
-            HarnessOutputMessage::deliver(Event::HarnessInfo(tau_proto::HarnessInfo {
+            HarnessOutputMessage::deliver(Event::HarnessNotice(tau_proto::HarnessNotice {
+                kind: tau_proto::notice_kind::HARNESS_REPLAY_ERROR.to_owned(),
                 message: message.to_owned(),
-                level: tau_proto::HarnessInfoLevel::Important,
+                level: tau_proto::NoticeLevel::Warning,
+                always_show: true,
             })),
         );
     }
@@ -223,7 +225,7 @@ impl Harness {
 
     /// Replays current harness and extension state to a late-joining client.
     ///
-    /// Important `harness.info` diagnostics are replayed here too. In
+    /// mandatory `harness.notice` diagnostics are replayed here too. In
     /// particular, extension `ConfigError` messages can arrive during daemon
     /// startup before the terminal UI subscribes; replaying them is the
     /// contract that keeps extension config parse failures from becoming
@@ -232,7 +234,7 @@ impl Harness {
     /// Runtime-only historical events are intentionally not replayed here. The
     /// transcript catch-up path above comes from durable agent logs, while this
     /// method reconstructs current harness status snapshots.
-    pub(crate) fn replay_harness_info(&mut self, client_id: &str, selectors: &[EventSelector]) {
+    pub(crate) fn replay_harness_notice(&mut self, client_id: &str, selectors: &[EventSelector]) {
         let session_dir_event = Event::HarnessSessionDir(tau_proto::HarnessSessionDir {
             session_id: self.current_session_id.clone(),
             path: self.sessions_dir().join(self.current_session_id.as_str()),
@@ -274,8 +276,8 @@ impl Harness {
             }
         }
 
-        for info in &self.replayable_harness_infos {
-            let event = Event::HarnessInfo(info.clone());
+        for info in &self.replayable_harness_notices {
+            let event = Event::HarnessNotice(info.clone());
             if selector_matches_event(selectors, &event) {
                 let _ = self.bus.send_to(
                     client_id,

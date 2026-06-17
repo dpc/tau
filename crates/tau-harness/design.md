@@ -11,7 +11,7 @@ Harness lifecycle/startup changes should prefer focused unit or lifecycle tests
 that exercise the state machine directly, then rely on broader crate tests and
 `selfci` for regression coverage. Tests for startup, disconnect, and optional
 extension behavior should assert both the immediate state transition and the
-replay/delivery contract for Important diagnostics: initial publication is not
+replay/delivery contract for mandatory diagnostics: initial publication is not
 enough if late UI subscribers must understand what happened during startup.
 
 For optional-extension startup work, cover required/default compatibility and

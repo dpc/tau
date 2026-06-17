@@ -10,6 +10,7 @@ redraw_counter: false
 show_ui_io: false
 show_tools: full
 show_messages: all-full
+notice_level: info
 show_status: all
 show_prompt_scroll_indicator: true
 theme: tau-plain-dark

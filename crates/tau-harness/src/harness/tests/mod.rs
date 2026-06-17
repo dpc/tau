@@ -347,8 +347,9 @@ fn skill_winner_disconnect_restores_next_best_candidate() {
     h.shutdown().expect("shutdown");
 }
 
-/// Ensures cross-source skill collisions emit useful Important diagnostics for
-/// both replacement by newer mtimes and ignoring equal/unavailable timestamps.
+/// Ensures cross-source skill collisions emit useful mandatory warning
+/// diagnostics for both replacement by newer mtimes and ignoring
+/// equal/unavailable timestamps.
 #[test]
 fn skill_collision_diagnostics_describe_replaced_and_ignored_candidates() {
     let tmp = TempDir::new().expect("tempdir");
@@ -397,7 +398,7 @@ fn skill_collision_diagnostics_describe_replaced_and_ignored_candidates() {
     let infos = event_log_events(&h)
         .into_iter()
         .filter_map(|event| match event {
-            Event::HarnessInfo(info) => Some(info.message),
+            Event::HarnessNotice(info) => Some(info.message),
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -478,7 +479,7 @@ fn user_skill_command_rejects_non_user_invocable_skill() {
     let infos = event_log_events(&h)
         .into_iter()
         .filter_map(|event| match event {
-            Event::HarnessInfo(info) => Some(info.message),
+            Event::HarnessNotice(info) => Some(info.message),
             _ => None,
         })
         .collect::<Vec<_>>();

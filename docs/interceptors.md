@@ -107,7 +107,7 @@ durable session membership facts; `agent.started`; and harness-owned agent
 message projections. Treat
 `crates/tau-harness/src/harness/interception.rs` as the source of truth for that
 list. Individual harness call sites can also mark a publish as must-pass, as
-Important `harness.info` diagnostics do.
+mandatory warning/critical `harness.notice` diagnostics do.
 
 ### Pass unchanged
 
@@ -123,8 +123,8 @@ The interceptor can reply with `pass` and a replacement event.
 Later interceptors and final subscribers usually see the modified event. The
 replacement must have the same event type as the original; if it does not, the
 harness logs a warning and falls back to the original event. Some same-type
-replacements are also rejected to preserve immutable facts. For Important
-`harness.info` diagnostics, immutable prompt lifecycle facts,
+replacements are also rejected to preserve immutable facts. For mandatory
+warning/critical `harness.notice` diagnostics, immutable prompt lifecycle facts,
 `provider.response_finished`, terminal tool completion facts, session
 lifecycle/membership facts, `agent.started`, and harness-owned agent message
 projections, the harness publishes the original event instead. For mutable

@@ -5,9 +5,9 @@ use rand::Rng;
 #[cfg(test)]
 use rand::{SeedableRng, rngs::StdRng};
 use tau_proto::{
-    AgentPromptSubmitted, ConfigError, Emit, Event, EventSelector, HarnessInfo, HarnessInfoLevel,
-    HarnessInputMessage, HarnessOutputMessage, InterceptAction, InterceptReply,
-    InterceptionPriority, PeerInputReader, PeerOutputWriter, ToolError, ToolResult, ToolResultKind,
+    AgentPromptSubmitted, ConfigError, Emit, Event, EventSelector, HarnessInputMessage,
+    HarnessNotice, HarnessOutputMessage, InterceptAction, InterceptReply, InterceptionPriority,
+    NoticeLevel, PeerInputReader, PeerOutputWriter, ToolError, ToolResult, ToolResultKind,
     ToolSpec,
 };
 
@@ -160,9 +160,11 @@ where
                 };
                 if mutated.is_some() {
                     writer.write_message(&HarnessInputMessage::Emit(Emit {
-                        event: Box::new(Event::HarnessInfo(HarnessInfo {
+                        event: Box::new(Event::HarnessNotice(HarnessNotice {
+                            kind: tau_proto::notice_kind::EXTENSION_NOTICE.to_owned(),
                             message: "did you mean \"Tau\"? — corrected for you".to_owned(),
-                            level: HarnessInfoLevel::Normal,
+                            level: NoticeLevel::Info,
+                            always_show: false,
                         })),
                         transient: true,
                     }))?;

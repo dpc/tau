@@ -21,9 +21,17 @@ class of function that raises them.
 Emitted by the harness daemon itself, mostly for UI-facing status and
 for control of the emit/intercept pipeline.
 
-- **`harness.info`** — A free-form informational message from the
-  harness for the user, with a severity (`normal` / `important`). Used
-  for things like `/tree` rendering and ad-hoc notices.
+- **`harness.notice`** — A free-form notice from the harness for the user.
+  Notices include `kind` (stable machine-readable type), `message`, `level`
+  (`critical`, `warning`, `info`, `debug`, or `trace`), and optional
+  `always_show`. UIs filter notices locally by their configured notice-level;
+  critical and `always_show` notices remain visible. Current first-party kinds
+  include `extension.config_error`, `extension.optional_skipped`,
+  `extension.notice` for sanitized extension-authored notices,
+  `harness.failure`, `harness.internal_warning`, `harness.notice`,
+  `harness.replay_error`, `model.selection`, and `ui.command_error`. Extension
+  authored skill diagnostics are sanitized to `extension.notice`; add a
+  first-party kind here only when the harness owns and preserves it.
 - **`harness.session_dir`** — Announces the current session directory for UIs
   and extensions that need to present or inspect session-local paths.
 - **`harness.ui_dir`** — Announces the UI state directory for UI-facing helpers.
@@ -168,7 +176,7 @@ the agent requests calls, and the harness orchestrates dispatch.
   rejected before any tool provider receives it. Extension-authored
   `call_id`s must be non-empty and globally unique; empty ids or collisions
   with any known live, completed, or durable transcript tool call are refused
-  with `harness.info` only, not a call-id-keyed terminal event. Transcript
+  with `harness.notice` only, not a call-id-keyed terminal event. Transcript
   tool-call truth comes from the provider response's `ContextItem::ToolCall`,
   not this routing event.
 - **`tool.started`** *(harness)* — The harness accepted and routed a

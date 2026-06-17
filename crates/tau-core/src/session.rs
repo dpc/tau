@@ -553,7 +553,7 @@ impl AgentTree {
     /// Replay is purely positional: NodeIds are assigned by insertion
     /// order, so the same event slice always yields the same tree.
     /// Events that don't directly produce an agent entry (lifecycle
-    /// chatter, harness info, etc.) are ignored.
+    /// chatter, harness notice, etc.) are ignored.
     #[must_use]
     pub fn from_events(agent_id: AgentId, events: &[PersistedAgentEvent]) -> Self {
         let mut tree = Self {

@@ -1789,21 +1789,22 @@ fn push_skill_diagnostic_events(
 ) {
     for diagnostic in diagnostics {
         let (kind, level) = match diagnostic.kind {
-            tau_skills::DiagnosticKind::Warning => ("warning", tau_proto::HarnessInfoLevel::Normal),
-            tau_skills::DiagnosticKind::Collision => {
-                ("collision", tau_proto::HarnessInfoLevel::Important)
-            }
-            tau_skills::DiagnosticKind::Skipped => {
-                ("skipped", tau_proto::HarnessInfoLevel::Important)
-            }
+            tau_skills::DiagnosticKind::Warning => ("warning", tau_proto::NoticeLevel::Info),
+            tau_skills::DiagnosticKind::Collision => ("collision", tau_proto::NoticeLevel::Warning),
+            tau_skills::DiagnosticKind::Skipped => ("skipped", tau_proto::NoticeLevel::Warning),
         };
-        events.push(Event::HarnessInfo(tau_proto::HarnessInfo {
+        events.push(Event::HarnessNotice(tau_proto::HarnessNotice {
+            kind: format!("skill.{kind}"),
             message: format!(
                 "skill {kind}: {}\n{}",
                 diagnostic.path.display(),
                 diagnostic.message
             ),
             level,
+            always_show: matches!(
+                level,
+                tau_proto::NoticeLevel::Warning | tau_proto::NoticeLevel::Critical
+            ),
         }));
     }
 }

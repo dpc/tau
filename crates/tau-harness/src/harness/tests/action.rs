@@ -118,7 +118,7 @@ fn action_schema_replays_to_late_action_subscriber() {
     publish_action_schema(&mut h, "email-ext", "email.list");
     let late_ui = connect_test_client(&mut h, "late-ui", tau_proto::ClientKind::Ui);
 
-    h.replay_harness_info("late-ui", &[EventSelector::Prefix("action.".to_owned())]);
+    h.replay_harness_notice("late-ui", &[EventSelector::Prefix("action.".to_owned())]);
 
     let events = late_ui.lock().expect("late ui sink");
     assert!(events.iter().any(|routed| matches!(

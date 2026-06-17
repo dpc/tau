@@ -20,6 +20,7 @@ mod event_name;
 mod events;
 mod interception;
 mod messages;
+pub mod notice_kind;
 mod prompt_fragment;
 mod token_usage;
 

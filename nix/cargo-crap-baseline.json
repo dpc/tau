@@ -976,7 +976,7 @@
     },
     {
       "file": "/build/source/crates/tau-cli/src/tool_render.rs",
-      "function": "render_harness_info",
+      "function": "render_harness_notice",
       "line": 936,
       "cyclomatic": 5.0,
       "coverage": 0.0,
@@ -1651,7 +1651,7 @@
     },
     {
       "file": "/build/source/crates/tau-harness/src/harness/replay.rs",
-      "function": "Harness::replay_harness_info",
+      "function": "Harness::replay_harness_notice",
       "line": 54,
       "cyclomatic": 16.0,
       "coverage": 98.63945578231292,

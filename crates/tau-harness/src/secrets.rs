@@ -173,7 +173,8 @@ pub struct ResolvedExtensionSecrets {
     /// Optional extensions skipped because their secret declarations could not
     /// resolve safely.
     pub skipped_extensions: BTreeSet<String>,
-    /// Important diagnostics explaining optional secret-resolution skips.
+    /// Mandatory warning diagnostics explaining optional secret-resolution
+    /// skips.
     pub diagnostics: Vec<ExtensionStartupDiagnostic>,
 }
 
