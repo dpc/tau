@@ -35,6 +35,14 @@ Tau layers these defaults underneath user config and `*.d/*.yaml` drop-ins.
 {harness_config}
 ```
 
+`tool_policy.rules` is harness-owned declarative tool-surface policy. Rules are
+keyed so a user can disable built-ins such as `builtin.chatgpt-shell` with
+`enable: false`; matching rules run `disable_tool_tags` before
+`enable_tool_tags`. Rules sort by `priority` (default `0`, lower first) and then
+rule name. Tag patterns are exact or terminal-prefix forms like `shell:*`. Rule
+names may contain dots, so CLI overrides should use a whole-map value, for
+example `tool_policy={{{{rules: {{{{builtin.chatgpt-shell: {{{{enable: false}}}}}}}}}}}}`.
+
 ### CLI UI defaults
 
 ```yaml

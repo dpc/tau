@@ -18,3 +18,25 @@ For optional-extension startup work, cover required/default compatibility and
 each optional failure path being changed, such as config/secret/spawn failure,
 pre-Ready disconnect or timeout, and `ConfigError` handling. Avoid slow wall-clock
 timeout tests when a private helper can drive the same branch deterministically.
+
+## Harness-owned tool prompt-surface policy uses prompt snapshots
+
+Status: unconfirmed
+
+Extensions and providers publish neutral metadata (`ToolTag` and `ModelTag`) but
+must not decide which model receives which tool surface. The harness evaluates
+configured `tool_policy.rules` and role overrides when building the provider
+prompt's effective tool list. Built-in model-specific behavior, such as the
+ChatGPT shell surface, must be represented as ordinary policy data so user config
+can disable or replace it by keyed rule name.
+
+Provider tool-call authorization is against the tool snapshot advertised with the
+owning prompt. Mid-turn role/model switches or later staged tool registrations
+may affect future prompts, but they must not expand or shrink the set of tools
+accepted for an already-dispatched prompt.
+
+Testing is split by owner. `tau-config` tests cover file and CLI alias
+normalization, keyed rule layering, and tag-pattern parsing/rejection.
+`tau-harness` tests cover evaluator ordering, role broad-to-specific overrides,
+the built-in policy through the shared evaluator, and prompt-owned snapshot
+authorization.

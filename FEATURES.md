@@ -227,15 +227,20 @@ Roles can include a `description` shown after the model/knob summary in
 group-level fields apply as defaults to that group's roles; per-role
 `prompt_fragments` apply only to that role. Roles can set
 `compaction` to use provider-default automatic compaction, disable it, or set
-an explicit token threshold, and can also use `tools`, `enable_tool_groups`,
-`disable_tool_groups`, `enable_tools`, and `disable_tools` to customize internal
-tool availability. `tools` overrides the default set when present, tool-group
-overrides apply next, and individual tool overrides apply last.
-The harness also applies model-aware tool-surface policy from provider/tool tags:
-ChatGPT-tagged models see the `apply_patch`/`gpt_shell` shell alternatives,
-while generic models keep the `edit`/`shell` defaults. Explicit per-role
-`enable_tools`/`tools` entries pin fallback tools visible; `disable_tools` still
-wins.
+an explicit token threshold, and can also use `tools`, `disable_tool_tags`,
+`enable_tool_tags`, `disable_tool_groups`, `enable_tool_groups`,
+`disable_tools`, and `enable_tools` to customize internal tool availability.
+Tools start from extension defaults, matching `tool_policy.rules` apply by tag,
+then role overrides run broad-to-specific: disable tags, enable tags, disable
+groups, enable groups, disable tools, enable tools. `tools` remains an explicit
+role allow-list base when set.
+
+The harness owns model-aware tool-surface policy from provider/tool tags. The
+built-in `builtin.chatgpt-shell` rule matches `shell:chatgpt` models, disables
+`shell:*`, then re-enables `shell:edit:apply_patch`,
+`shell:exec:shell_command`, and `shell:cd`. Users can disable or replace that
+keyed rule in `tool_policy.rules`; policy rules sort by `priority` (default `0`,
+lower first) and then rule name. Tools and models only publish tags.
 
 `default_role` selects the startup role; if it is omitted Tau starts on the
 first role in `role_groups` order. `tau --role <role>` overrides the startup role

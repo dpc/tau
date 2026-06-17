@@ -247,7 +247,7 @@ where
             tool_type: tau_proto::ToolType::Custom,
             parameters: None,
             format: Some(tau_proto::ToolFormat::Text),
-            tags: tool_tags(&["shell:edit", "shell:edit:patch", "shell:mutates-files"]),
+            tags: tool_tags(&["shell:edit", "shell:edit:apply_patch", "shell:mutates-files"]),
             enabled_by_default: false,
             background_support: None,
         },
@@ -383,7 +383,7 @@ where
                 "additionalProperties": false
             })),
             format: None,
-            tags: tool_tags(&["shell:cwd"]),
+            tags: tool_tags(&["shell:cd"]),
             enabled_by_default: true,
             background_support: None,
         },
@@ -471,7 +471,7 @@ where
                 "additionalProperties": false
             })),
             format: None,
-            tags: tool_tags(&["shell:exec", "shell:exec:command-text"]),
+            tags: tool_tags(&["shell:exec", "shell:exec:shell_command"]),
             enabled_by_default: false,
             background_support: None,
         },

@@ -14,10 +14,12 @@ A role can set:
 - `prompt_fragments`: role-specific prompt fragments
 - `prompt_override`: system prompt template name
 - `tools`: explicit internal tools enabled for this role
-- `enable_tool_groups`: tool groups added to the selected/default set
-- `disable_tool_groups`: tool groups removed from the selected/default set
-- `enable_tools`: internal tools added after tool-group changes
-- `disable_tools`: internal tools removed after tool-group changes
+- `disable_tool_tags`: tool tag patterns removed after global policy
+- `enable_tool_tags`: tool tag patterns added after role tag disables
+- `disable_tool_groups`: tool groups removed after role tag changes
+- `enable_tool_groups`: tool groups added after role group disables
+- `disable_tools`: internal tools removed after role group changes
+- `enable_tools`: internal tools added last
 
 Top-level `prompt_fragments` in `harness.yaml` apply to every role. Use them for global style or policy instructions:
 
@@ -74,7 +76,9 @@ Roles live in `harness.yaml` under globally unique `role_groups`. Each group has
 }
 ```
 
-Missing fields use group defaults first, then provider-published fallback knobs for the role's resolved model. Tool filtering starts with `tools` when set, otherwise with each tool's default enablement; then `enable_tool_groups` and `disable_tool_groups` adjust whole groups; then `enable_tools` and `disable_tools` apply individual overrides. This order lets a role enable a group while disabling one tool in it, or disable a group while keeping one tool. When `compaction` is omitted, Tau asks supported providers to use their model-specific compaction default. Set `enable: false` on a role in a higher-precedence config layer to remove it from the effective role list and role-group cycling after all layers merge.
+Missing fields use group defaults first, then provider-published fallback knobs for the role's resolved model. Tools start from extension default enablement, then harness `tool_policy.rules` apply by provider/tool tags. Role overrides run afterward in broad-to-specific order: `disable_tool_tags`, `enable_tool_tags`, `disable_tool_groups`, `enable_tool_groups`, `disable_tools`, then `enable_tools`. `tools` remains an explicit role allow-list base when set. This order lets a role disable `shell:*` and keep `shell:cd`, or disable a group and keep one named tool. When `compaction` is omitted, Tau asks supported providers to use their model-specific compaction default. Set `enable: false` on a role in a higher-precedence config layer to remove it from the effective role list and role-group cycling after all layers merge.
+
+Global harness policy is configured under `tool_policy.rules` keyed by stable rule name. Rules default to `enable: true`, can be disabled with `enable: false`, match when all `when.model_tags` patterns match the selected model, then run `disable_tool_tags` before `enable_tool_tags`. Rules sort by `priority` (default `0`, lower runs first) and then by rule name for ties. Tag patterns are exact (`shell:cd`) or terminal prefix wildcards (`shell:*`, `shell:edit:*`). Built-in rule `builtin.chatgpt-shell` matches `shell:chatgpt`, disables `shell:*`, and re-enables `shell:edit:apply_patch`, `shell:exec:shell_command`, and `shell:cd`. Rule names may contain dots; for CLI overrides, prefer the whole-map form such as `--harness-config 'tool_policy={rules: {builtin.chatgpt-shell: {enable: false}}}'` rather than dotted paths through the rule name.
 
 Tau ships built-in `junior-engineer`, `senior-engineer`, `staff-engineer`, and `manager` roles, with `default_role: senior-engineer`. `junior-engineer` uses lower reasoning for straightforward engineering work, `senior-engineer` uses balanced individual-contributor defaults, and `staff-engineer` is the maximum-reasoning engineering variant. `manager` is an orchestration role with a built-in delegation prompt. For non-trivial work, the built-in `manager` prompt tells the model to use `agent_start` by default for research/scoping, implementation, and review/validation sub-agent steps, then synthesize the results; tiny or purely clerical work may still be handled directly.
 

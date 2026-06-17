@@ -648,7 +648,7 @@ impl<'de> serde::Deserialize<'de> for ModelTag {
 /// policy.
 ///
 /// Tags describe what a tool is, not which model should receive it; examples
-/// include `shell:edit:line`, `shell:edit:patch`, and `shell:exec`.
+/// include `shell:edit:line`, `shell:edit:apply_patch`, and `shell:exec`.
 #[derive(Clone, Debug, Eq, PartialEq, Hash, serde::Serialize)]
 #[serde(transparent)]
 pub struct ToolTag(String);

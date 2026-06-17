@@ -31,6 +31,13 @@ When adding or renaming a harness config field, update all alias handling paths
 needed for direct patch parsing) and add regression coverage for both file and
 CLI override forms.
 
+`tool_policy.rules` is a keyed layered map. Rule names may contain dots (for
+example `builtin.chatgpt-shell`), so dotted CLI overrides cannot naturally refer
+to such rule keys; use whole-map override values for those rules unless an
+escaping scheme is added. Rule aliases such as `enabled` must normalize inside
+each keyed rule before source layers merge, otherwise a higher-precedence alias
+can collide with a lower-precedence canonical key instead of overriding it.
+
 ## Harness role merging
 
 Role metadata is merged through domain-specific logic rather than generic YAML

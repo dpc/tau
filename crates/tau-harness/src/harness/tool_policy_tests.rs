@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::os::unix::net::UnixStream;
 
-use tau_config::settings::{AgentRole, TauDirs};
+use tau_config::settings::{AgentRole, TauDirs, ToolPolicy, ToolPolicyRule};
 use tau_proto::{
     BackgroundSupport, Effort, ModelId, ModelName, ModelTag, ProviderModelInfo, ProviderName,
     ThinkingSummary, ToolGroup, ToolGroupName, ToolName, ToolRegister, ToolSpec, ToolTag, ToolType,
@@ -9,7 +9,7 @@ use tau_proto::{
 };
 use tempfile::TempDir;
 
-use super::{Harness, tool_alternative_rank};
+use super::Harness;
 
 const ROLE: &str = "test";
 
@@ -78,10 +78,11 @@ fn policy_harness(model_tags: &[&str], role: AgentRole) -> PolicyHarness {
     };
     for spec in [
         tagged_tool("edit", true, &["shell:edit:line"]),
-        tagged_tool("apply_patch", false, &["shell:edit:patch"]),
+        tagged_tool("apply_patch", false, &["shell:edit:apply_patch"]),
         tagged_tool("shell", true, &["shell:exec:generic"]),
-        tagged_tool("gpt_shell", false, &["shell:exec:command-text"]),
+        tagged_tool("gpt_shell", false, &["shell:exec:shell_command"]),
         tagged_tool("read", true, &["shell:read"]),
+        tagged_tool("cd", true, &["shell:cd"]),
     ] {
         harness.registry.register_with_prompt_fragment(
             "tools",
@@ -99,7 +100,7 @@ fn policy_harness(model_tags: &[&str], role: AgentRole) -> PolicyHarness {
 }
 
 fn effective_tool_names(harness: &Harness) -> Vec<String> {
-    let relevant = ["edit", "apply_patch", "shell", "gpt_shell", "read"];
+    let relevant = ["edit", "apply_patch", "shell", "gpt_shell", "read", "cd"];
     let model = harness.selected_model.as_ref();
     harness
         .gather_effective_tool_specs_for_role_model(ROLE, model)
@@ -107,22 +108,6 @@ fn effective_tool_names(harness: &Harness) -> Vec<String> {
         .map(|spec| spec.name.into_string())
         .filter(|name| relevant.contains(&name.as_str()))
         .collect()
-}
-
-/// Ensures the built-in harness-owned policy ranks ChatGPT shell/edit
-/// alternatives ahead of generic ones without putting model knowledge in tool
-/// registrations.
-#[test]
-fn chatgpt_policy_prefers_patch_and_compatible_shell_alternatives() {
-    let edit = tagged_tool("edit", true, &["shell:edit:line"]);
-    let patch = tagged_tool("apply_patch", true, &["shell:edit:patch"]);
-    let shell = tagged_tool("shell", true, &["shell:exec:generic"]);
-    let gpt_shell = tagged_tool("gpt_shell", true, &["shell:exec:command-text"]);
-
-    assert!(tool_alternative_rank(&patch, true) > tool_alternative_rank(&edit, true));
-    assert!(tool_alternative_rank(&gpt_shell, true) > tool_alternative_rank(&shell, true));
-    assert!(tool_alternative_rank(&edit, false) > tool_alternative_rank(&patch, false));
-    assert!(tool_alternative_rank(&shell, false) > tool_alternative_rank(&gpt_shell, false));
 }
 
 /// Ensures untagged models keep generic edit/shell defaults and do not see the
@@ -138,8 +123,8 @@ fn generic_model_gets_generic_shell_alternatives() {
     assert!(!tools.contains(&"gpt_shell".to_owned()));
 }
 
-/// Ensures a `shell:chatgpt` model gets patch/command-text alternatives while
-/// ordinary read tools remain visible.
+/// Ensures a `shell:chatgpt` model gets only the declared shell exceptions
+/// from the otherwise disabled shell tag family.
 #[test]
 fn chatgpt_model_gets_promoted_shell_alternatives() {
     let policy = policy_harness(&["shell:chatgpt"], AgentRole::default());
@@ -147,15 +132,16 @@ fn chatgpt_model_gets_promoted_shell_alternatives() {
 
     assert!(tools.contains(&"apply_patch".to_owned()));
     assert!(tools.contains(&"gpt_shell".to_owned()));
-    assert!(tools.contains(&"read".to_owned()));
+    assert!(tools.contains(&"cd".to_owned()));
+    assert!(!tools.contains(&"read".to_owned()));
     assert!(!tools.contains(&"edit".to_owned()));
     assert!(!tools.contains(&"shell".to_owned()));
 }
 
-/// Ensures an explicit `tools` allow-list is treated as the base visible set
-/// and does not receive implicit model-tag alternative promotion.
+/// Ensures an explicit `tools` allow-list is treated as the role-visible set
+/// after global policy.
 #[test]
-fn explicit_tools_allowlist_prevents_implicit_promotion() {
+fn explicit_tools_allowlist_overrides_global_policy_base() {
     let role = AgentRole {
         tools: Some(vec![ToolName::new("read")]),
         ..AgentRole::default()
@@ -166,10 +152,9 @@ fn explicit_tools_allowlist_prevents_implicit_promotion() {
     assert_eq!(tools, vec!["read".to_owned()]);
 }
 
-/// Ensures `enable_tools` pins fallback tools or explicitly permitted exception
-/// alternatives even when the model policy would otherwise prune them.
+/// Ensures `enable_tools` can explicitly re-enable tools after tag policy.
 #[test]
-fn enable_tools_pins_fallback_and_exception_tools() {
+fn enable_tools_reenables_after_tag_policy() {
     let role = AgentRole {
         enable_tools: vec![ToolName::new("shell"), ToolName::new("apply_patch")],
         disable_tools: vec![ToolName::new("edit")],
@@ -183,28 +168,31 @@ fn enable_tools_pins_fallback_and_exception_tools() {
     assert!(!tools.contains(&"edit".to_owned()));
 }
 
-/// Ensures disabling a generic tool suppresses unpinned replacements in the
-/// same alternative set, while direct enablement of the replacement remains
-/// explicit.
+/// Ensures final per-tool enables can re-enable after per-tool disables because
+/// role operations run broad-to-specific and disable-before-enable.
 #[test]
-fn disable_tools_vetoes_unpinned_alternative_sets() {
+fn enable_tools_runs_after_disable_tools() {
     let role = AgentRole {
-        disable_tools: vec![ToolName::new("edit"), ToolName::new("shell")],
+        enable_tools: vec![ToolName::new("apply_patch")],
+        disable_tools: vec![
+            ToolName::new("edit"),
+            ToolName::new("shell"),
+            ToolName::new("apply_patch"),
+        ],
         ..AgentRole::default()
     };
     let policy = policy_harness(&["shell:chatgpt"], role);
     let tools = effective_tool_names(&policy.harness);
 
     assert!(!tools.contains(&"edit".to_owned()));
-    assert!(!tools.contains(&"apply_patch".to_owned()));
+    assert!(tools.contains(&"apply_patch".to_owned()));
     assert!(!tools.contains(&"shell".to_owned()));
-    assert!(!tools.contains(&"gpt_shell".to_owned()));
+    assert!(tools.contains(&"gpt_shell".to_owned()));
 }
 
-/// Ensures disabling the shell group suppresses unpinned alternative promotion,
-/// but an individual `enable_tools` entry can still re-enable one tool.
+/// Ensures group disables run before individual tool enables.
 #[test]
-fn disable_tool_groups_suppresses_unpinned_alternatives() {
+fn disable_tool_groups_runs_before_enable_tools() {
     let role = AgentRole {
         disable_tool_groups: vec![ToolGroupName::new("shell")],
         enable_tools: vec![ToolName::new("apply_patch")],
@@ -214,6 +202,67 @@ fn disable_tool_groups_suppresses_unpinned_alternatives() {
     let tools = effective_tool_names(&policy.harness);
 
     assert_eq!(tools, vec!["apply_patch".to_owned()]);
+}
+
+/// Ensures a keyed user override can disable the built-in ChatGPT shell policy
+/// without requiring tools or providers to publish model-specific tags.
+#[test]
+fn user_can_disable_builtin_chatgpt_shell_policy() {
+    let mut policy = policy_harness(&["shell:chatgpt"], AgentRole::default());
+    policy
+        .harness
+        .tool_policy
+        .rules
+        .entry("builtin.chatgpt-shell".to_owned())
+        .or_insert_with(ToolPolicyRule::default)
+        .enable = false;
+
+    let tools = effective_tool_names(&policy.harness);
+
+    assert!(tools.contains(&"edit".to_owned()));
+    assert!(tools.contains(&"shell".to_owned()));
+    assert!(tools.contains(&"read".to_owned()));
+    assert!(!tools.contains(&"apply_patch".to_owned()));
+    assert!(!tools.contains(&"gpt_shell".to_owned()));
+}
+
+/// Ensures a custom policy rule can disable a broad tag prefix and then
+/// re-enable a more specific tag prefix in the same evaluator path.
+#[test]
+fn custom_policy_rule_disables_and_enables_tool_tags() {
+    let mut policy = policy_harness(&[], AgentRole::default());
+    policy.harness.tool_policy = serde_json::from_str::<ToolPolicy>(
+        r#"{
+  "rules": {
+    "custom.shell-cwd-only": {
+      "disable_tool_tags": ["shell:*"],
+      "enable_tool_tags": ["shell:cd"]
+    }
+  }
+}"#,
+    )
+    .expect("policy parses");
+
+    let tools = effective_tool_names(&policy.harness);
+
+    assert_eq!(tools, vec!["cd".to_owned()]);
+}
+
+/// Ensures role-level tag operations run after global policy and before
+/// group/tool name operations, preserving broad-to-specific overrides.
+#[test]
+fn role_tool_tags_run_after_policy_before_groups_and_tools() {
+    let role = AgentRole {
+        disable_tool_tags: serde_json::from_str(r#"["shell:*"]"#).expect("tag pattern parses"),
+        enable_tool_tags: serde_json::from_str(r#"["shell:cd"]"#).expect("tag pattern parses"),
+        disable_tool_groups: vec![ToolGroupName::new("shell")],
+        enable_tools: vec![ToolName::new("cd")],
+        ..AgentRole::default()
+    };
+    let policy = policy_harness(&["shell:chatgpt"], role);
+    let tools = effective_tool_names(&policy.harness);
+
+    assert_eq!(tools, vec!["cd".to_owned()]);
 }
 
 /// Ensures prompt-owned tool lookup uses the advertised snapshot rather than

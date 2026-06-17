@@ -32,6 +32,123 @@ fn zero_session_retention_disables_cleanup() {
     assert_eq!(settings.session_retention(), None);
 }
 
+/// Ensures tag policy patterns support exact and terminal-prefix matching while
+/// rejecting middle globs that would make policy behavior ambiguous.
+#[test]
+fn tool_policy_tag_patterns_match_exact_and_prefix_only() {
+    let policy: ToolPolicy = serde_yaml_ng::from_str(
+        r#"
+rules:
+  test:
+    when:
+      model_tags: [shell:*]
+    disable_tool_tags: [shell:edit:*]
+    enable_tool_tags: [shell:cd]
+"#,
+    )
+    .expect("policy parses");
+    let rule = &policy.rules["test"];
+
+    assert!(rule.when.model_tags[0].matches(&tau_proto::ModelTag::new("shell:chatgpt")));
+    assert!(rule.disable_tool_tags[0].matches(&tau_proto::ToolTag::new("shell:edit:line")));
+    assert!(rule.enable_tool_tags[0].matches(&tau_proto::ToolTag::new("shell:cd")));
+    assert!(!rule.enable_tool_tags[0].matches(&tau_proto::ToolTag::new("shell:cd:child")));
+    assert!(
+        serde_yaml_ng::from_str::<ToolPolicy>(
+            r#"rules: {bad: {disable_tool_tags: [shell:*:edit]}}"#
+        )
+        .is_err()
+    );
+}
+
+/// Ensures the built-in harness config exposes the ChatGPT shell policy as a
+/// normal keyed rule that user configuration can disable by name.
+#[test]
+fn builtin_tool_policy_rule_is_keyed_and_enabled_by_default() {
+    let settings = HarnessSettings::built_in();
+    let rule = &settings.tool_policy.rules["builtin.chatgpt-shell"];
+
+    assert!(rule.enable);
+    assert_eq!(rule.disable_tool_tags.len(), 1);
+    assert_eq!(rule.enable_tool_tags.len(), 3);
+}
+
+/// Ensures the `toolPolicy` and nested `enabled` aliases are normalized before
+/// config layers merge with built-in canonical fields.
+#[test]
+fn user_config_can_disable_builtin_tool_policy_rule_with_enabled_alias() {
+    let td = TempDir::new().expect("tempdir");
+    let dir = td.path();
+    std::fs::write(
+        dir.join("harness.yaml"),
+        r#"
+toolPolicy:
+  rules:
+    builtin.chatgpt-shell:
+      enabled: false
+"#,
+    )
+    .expect("write harness config");
+
+    let settings = load_harness_settings_in(&dirs_with_config(dir)).expect("load");
+
+    assert!(!settings.tool_policy.rules["builtin.chatgpt-shell"].enable);
+}
+
+/// Ensures same-source `enabled`/`enable` conflicts in policy rules are
+/// rejected with path context instead of relying on serde duplicate-field
+/// errors.
+#[test]
+fn tool_policy_rule_rejects_enabled_enable_alias_conflict() {
+    let td = TempDir::new().expect("tempdir");
+    let dir = td.path();
+    std::fs::write(
+        dir.join("harness.yaml"),
+        r#"
+tool_policy:
+  rules:
+    builtin.chatgpt-shell:
+      enabled: false
+      enable: true
+"#,
+    )
+    .expect("write harness config");
+
+    let error = load_harness_settings_in(&dirs_with_config(dir)).expect_err("conflicting aliases");
+
+    assert!(
+        error.to_string().contains("enabled")
+            && error.to_string().contains("enable")
+            && error.to_string().contains("builtin.chatgpt-shell"),
+        "unexpected error: {error}"
+    );
+}
+
+/// Ensures higher-precedence user config can disable a built-in keyed policy
+/// rule without restating the rule's tag predicates or operations.
+#[test]
+fn user_config_can_disable_builtin_tool_policy_rule_by_name() {
+    let td = TempDir::new().expect("tempdir");
+    let dir = td.path();
+    std::fs::write(
+        dir.join("harness.yaml"),
+        r#"
+tool_policy:
+  rules:
+    builtin.chatgpt-shell:
+      enable: false
+"#,
+    )
+    .expect("write harness config");
+
+    let settings = load_harness_settings_in(&dirs_with_config(dir)).expect("load");
+    let rule = &settings.tool_policy.rules["builtin.chatgpt-shell"];
+
+    assert!(!rule.enable);
+    assert_eq!(rule.disable_tool_tags.len(), 1);
+    assert_eq!(rule.enable_tool_tags.len(), 3);
+}
+
 /// Ensures user CLI scalar settings override the built-in defaults.
 #[test]
 fn cli_settings_user_scalar_override_wins_over_built_in() {
@@ -338,6 +455,13 @@ fn harness_file_alias_table_normalizes_all_legacy_keys() {
         "defaultRole": "manager",
         "promptFragments": [],
         "customPrompts": [],
+        "toolPolicy": {
+            "rules": {
+                "builtin.chatgpt-shell": {
+                    "enabled": false,
+                }
+            }
+        },
         "agents": {
             "idTemplate": "agent-{{random_alphanumeric 4}}",
             "displayNameTemplate": "Agent {{n}}",
@@ -349,10 +473,12 @@ fn harness_file_alias_table_normalizes_all_legacy_keys() {
                 "serviceTier": "default",
                 "promptFragments": [],
                 "promptOverride": "built-in",
-                "enableToolGroups": [],
+                "disableToolTags": [],
+                "enableToolTags": [],
                 "disableToolGroups": [],
-                "enableTools": [],
+                "enableToolGroups": [],
                 "disableTools": [],
+                "enableTools": [],
                 "roles": {
                     "senior-engineer": {
                         "enabled": true,
@@ -360,10 +486,12 @@ fn harness_file_alias_table_normalizes_all_legacy_keys() {
                         "serviceTier": "default",
                         "promptFragments": [],
                         "promptOverride": "built-in",
-                        "enableToolGroups": [],
+                        "disableToolTags": [],
+                        "enableToolTags": [],
                         "disableToolGroups": [],
-                        "enableTools": [],
+                        "enableToolGroups": [],
                         "disableTools": [],
+                        "enableTools": [],
                     }
                 }
             }
@@ -375,6 +503,12 @@ fn harness_file_alias_table_normalizes_all_legacy_keys() {
     assert!(value.get("default_role").is_some());
     assert!(value.get("prompt_fragments").is_some());
     assert!(value.get("custom_prompts").is_some());
+    assert!(value.get("tool_policy").is_some());
+    assert!(
+        value
+            .pointer("/tool_policy/rules/builtin.chatgpt-shell/enable")
+            .is_some()
+    );
     assert!(value.pointer("/agents/id_template").is_some());
     assert!(value.pointer("/agents/display_name_template").is_some());
     let group = value.pointer("/role_groups/engineer").expect("group");
@@ -384,10 +518,12 @@ fn harness_file_alias_table_normalizes_all_legacy_keys() {
         "service_tier",
         "prompt_fragments",
         "prompt_override",
-        "enable_tool_groups",
+        "disable_tool_tags",
+        "enable_tool_tags",
         "disable_tool_groups",
-        "enable_tools",
+        "enable_tool_groups",
         "disable_tools",
+        "enable_tools",
     ] {
         assert!(group.get(key).is_some(), "missing group key {key}");
         assert!(
@@ -407,6 +543,7 @@ fn harness_cli_alias_table_normalizes_all_legacy_keys() {
         ("defaultRole", "default_role"),
         ("promptFragments", "prompt_fragments"),
         ("customPrompts", "custom_prompts"),
+        ("toolPolicy", "tool_policy"),
         ("agents.idTemplate", "agents.id_template"),
         ("agents.displayNameTemplate", "agents.display_name_template"),
         ("roleGroups.engineer.enabled", "role_groups.engineer.enable"),
@@ -425,6 +562,14 @@ fn harness_cli_alias_table_normalizes_all_legacy_keys() {
         (
             "roleGroups.engineer.promptOverride",
             "role_groups.engineer.prompt_override",
+        ),
+        (
+            "roleGroups.engineer.disableToolTags",
+            "role_groups.engineer.disable_tool_tags",
+        ),
+        (
+            "roleGroups.engineer.enableToolTags",
+            "role_groups.engineer.enable_tool_tags",
         ),
         (
             "roleGroups.engineer.enableToolGroups",
@@ -461,6 +606,14 @@ fn harness_cli_alias_table_normalizes_all_legacy_keys() {
         (
             "roleGroups.engineer.roles.senior-engineer.promptOverride",
             "role_groups.engineer.roles.senior-engineer.prompt_override",
+        ),
+        (
+            "roleGroups.engineer.roles.senior-engineer.disableToolTags",
+            "role_groups.engineer.roles.senior-engineer.disable_tool_tags",
+        ),
+        (
+            "roleGroups.engineer.roles.senior-engineer.enableToolTags",
+            "role_groups.engineer.roles.senior-engineer.enable_tool_tags",
         ),
         (
             "roleGroups.engineer.roles.senior-engineer.enableToolGroups",
@@ -960,6 +1113,24 @@ fn harness_config_cli_overrides_reject_map_value_alias_conflicts() {
     );
 }
 
+/// Ensures map-valued CLI overrides can address dotted tool-policy rule names
+/// and normalize `enabled` inside the supplied map.
+#[test]
+fn harness_config_cli_map_override_disables_tool_policy_with_enabled_alias() {
+    let td = TempDir::new().expect("tempdir");
+    let dir = td.path();
+    let overrides = [HarnessConfigCliOverride::from_str(
+        r#"tool_policy={rules: {builtin.chatgpt-shell: {enabled: false}}}"#,
+    )
+    .expect("override")];
+
+    let settings =
+        load_harness_settings_with_cli_overrides_in(&dirs_with_config(dir), &[], &overrides)
+            .expect("load");
+
+    assert!(!settings.tool_policy.rules["builtin.chatgpt-shell"].enable);
+}
+
 /// Ensures role tool allow/deny lists load into effective role settings.
 #[test]
 fn harness_settings_load_role_tool_lists() {
@@ -971,7 +1142,15 @@ fn harness_settings_load_role_tool_lists() {
             role_groups: {
                 engineer: {
                     roles: {
-                        engineer: { tools: ["read", "grep"], enable_tools: ["web_search"], disable_tools: ["grep"] },
+                        engineer: {
+                            tools: ["read", "grep"],
+                            disableToolTags: ["shell:*"],
+                            enableToolTags: ["shell:cd"],
+                            disableToolGroups: ["shell"],
+                            enableToolGroups: ["search"],
+                            disableTools: ["grep"],
+                            enableTools: ["web_search"],
+                        },
                     },
                 },
             },
@@ -986,6 +1165,18 @@ fn harness_settings_load_role_tool_lists() {
             tau_proto::ToolName::new("read"),
             tau_proto::ToolName::new("grep")
         ]
+    );
+    assert!(
+        s.roles["engineer"].disable_tool_tags[0].matches(&tau_proto::ToolTag::new("shell:read"))
+    );
+    assert!(s.roles["engineer"].enable_tool_tags[0].matches(&tau_proto::ToolTag::new("shell:cd")));
+    assert_eq!(
+        s.roles["engineer"].disable_tool_groups,
+        vec![tau_proto::ToolGroupName::new("shell")]
+    );
+    assert_eq!(
+        s.roles["engineer"].enable_tool_groups,
+        vec![tau_proto::ToolGroupName::new("search")]
     );
     assert_eq!(
         s.roles["engineer"].enable_tools,

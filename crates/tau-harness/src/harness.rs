@@ -531,30 +531,12 @@ pub(crate) struct PendingTool {
     pub(crate) tool_type: ToolType,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct ToolRoleState {
-    enabled: bool,
-    pinned: bool,
-    disabled: bool,
-    group_disabled: bool,
-}
-
-fn tool_alternative_rank(
-    spec: &tau_proto::ToolSpec,
-    chatgpt_shell: bool,
-) -> Option<(&'static str, i32)> {
-    let has_tag = |tag: &str| spec.tags.iter().any(|candidate| candidate.as_str() == tag);
-    if has_tag("shell:edit:patch") {
-        Some(("shell.edit", i32::from(chatgpt_shell) * 100))
-    } else if has_tag("shell:edit:line") {
-        Some(("shell.edit", i32::from(!chatgpt_shell) * 100))
-    } else if has_tag("shell:exec:command-text") {
-        Some(("shell.exec", i32::from(chatgpt_shell) * 100))
-    } else if has_tag("shell:exec:generic") {
-        Some(("shell.exec", i32::from(!chatgpt_shell) * 100))
-    } else {
-        None
-    }
+fn tags_match_any(
+    tags: &[tau_proto::ToolTag],
+    patterns: &[tau_config::settings::ToolTagPattern],
+) -> bool {
+    tags.iter()
+        .any(|tag| patterns.iter().any(|pattern| pattern.matches(tag)))
 }
 
 const DEFAULT_AGENT_ID_TEMPLATE: &str = "{{random_alphanumeric 6}}";
@@ -1267,6 +1249,8 @@ pub struct Harness {
     pub(crate) agent_display_name_template: Option<String>,
     /// Role overrides changed at runtime for this process.
     pub(crate) role_overrides: std::collections::HashMap<String, tau_config::settings::AgentRole>,
+    /// Harness-owned declarative tool tag policy applied before role overrides.
+    pub(crate) tool_policy: tau_config::settings::ToolPolicy,
     /// Currently selected role. The resolved model is derived from this role
     /// and provider model availability.
     pub(crate) selected_role: String,
@@ -1579,6 +1563,8 @@ struct HarnessBaseParts {
     custom_prompts: Vec<tau_proto::HarnessCustomPrompt>,
     /// Runtime role overrides loaded from settings.
     role_overrides: HashMap<String, tau_config::settings::AgentRole>,
+    /// Harness-owned declarative tool tag policy.
+    tool_policy: tau_config::settings::ToolPolicy,
     /// Initially selected role name.
     selected_role: String,
     /// Initially selected model, if any provider metadata can resolve one.
@@ -1657,6 +1643,7 @@ impl Harness {
             available_role_groups: parts.available_role_groups,
             custom_prompts: parts.custom_prompts,
             role_overrides: parts.role_overrides,
+            tool_policy: parts.tool_policy,
             agent_id_template: parts.agent_id_template,
             agent_display_name_template: parts.agent_display_name_template,
             selected_role: parts.selected_role,
@@ -1807,6 +1794,7 @@ impl Harness {
             available_role_groups,
             custom_prompts,
             role_overrides,
+            tool_policy: harness_settings.tool_policy.clone(),
             selected_role,
             selected_model,
             agent_id_template: harness_settings.agent_id_template.clone(),
@@ -1968,6 +1956,7 @@ impl Harness {
             available_role_groups,
             custom_prompts,
             role_overrides,
+            tool_policy: harness_settings.tool_policy.clone(),
             selected_role,
             selected_model,
             agent_id_template: harness_settings.agent_id_template.clone(),
@@ -9300,45 +9289,18 @@ impl Harness {
         role_name: &str,
         model: Option<&ModelId>,
     ) -> Vec<tau_proto::ToolSpec> {
-        let model_tags = model
-            .and_then(|model| self.provider_model_info.get(model))
-            .map(|info| info.tags.as_slice())
-            .unwrap_or(&[]);
-        let chatgpt_shell = model_tags.iter().any(|tag| tag.as_str() == "shell:chatgpt");
-        let role_has_tool_allowlist = self
-            .available_roles
-            .get(role_name)
-            .and_then(|role| role.tools.as_ref())
-            .is_some();
-        let providers: Vec<_> = self
-            .registry
+        self.registry
             .all_tool_providers()
             .into_iter()
-            .filter_map(|provider| {
-                let state =
-                    self.tool_role_state(&provider.tool, provider.tool_group.as_ref(), role_name);
-                let alternative = tool_alternative_rank(&provider.tool, chatgpt_shell).is_some();
-                let alternative_allowed = !role_has_tool_allowlist
-                    && !state.group_disabled
-                    && alternative
-                    && !self.role_disables_alternative_set(&provider.tool, role_name);
-                (!state.disabled && (state.enabled || alternative_allowed))
-                    .then_some((provider, state.pinned))
+            .filter(|provider| {
+                self.is_tool_enabled_for_role_model(
+                    &provider.tool,
+                    provider.tool_group.as_ref(),
+                    role_name,
+                    model,
+                )
             })
-            .collect();
-        providers
-            .iter()
-            .filter(|(provider, pinned)| {
-                *pinned
-                    || self.is_highest_rank_alternative(
-                        &provider.tool,
-                        providers
-                            .iter()
-                            .map(|(provider, pinned)| (&provider.tool, *pinned)),
-                        chatgpt_shell,
-                    )
-            })
-            .map(|(provider, _)| provider.tool.clone())
+            .map(|provider| provider.tool.clone())
             .collect()
     }
 
@@ -9417,51 +9379,62 @@ impl Harness {
             })
     }
 
-    fn role_disables_alternative_set(&self, spec: &tau_proto::ToolSpec, role_name: &str) -> bool {
-        let Some((set, _)) = tool_alternative_rank(spec, false) else {
-            return false;
-        };
-        let Some(role) = self.available_roles.get(role_name) else {
-            return false;
-        };
-        self.registry
-            .all_tool_providers()
-            .into_iter()
-            .any(|provider| {
-                role.disable_tools
-                    .iter()
-                    .any(|name| name == &provider.tool.name)
-                    && tool_alternative_rank(&provider.tool, false)
-                        .is_some_and(|(provider_set, _)| provider_set == set)
-            })
-    }
-
-    fn tool_role_state(
+    fn is_tool_enabled_for_role_model(
         &self,
         spec: &tau_proto::ToolSpec,
         group: Option<&tau_proto::ToolGroup>,
         role_name: &str,
-    ) -> ToolRoleState {
+        model: Option<&ModelId>,
+    ) -> bool {
+        let mut enabled = spec.enabled_by_default;
+        let model_tags = model
+            .and_then(|model| self.provider_model_info.get(model))
+            .map(|info| info.tags.as_slice())
+            .unwrap_or(&[]);
+        let mut rules: Vec<_> = self.tool_policy.rules.iter().collect();
+        rules.sort_by(|(left_name, left), (right_name, right)| {
+            left.priority
+                .cmp(&right.priority)
+                .then_with(|| left_name.cmp(right_name))
+        });
+        for (_, rule) in rules {
+            if !rule.enable
+                || !rule.when.model_tags.iter().all(|pattern| {
+                    model_tags
+                        .iter()
+                        .any(|model_tag| pattern.matches(model_tag))
+                })
+            {
+                continue;
+            }
+            if tags_match_any(&spec.tags, &rule.disable_tool_tags) {
+                enabled = false;
+            }
+            if tags_match_any(&spec.tags, &rule.enable_tool_tags) {
+                enabled = true;
+            }
+        }
+
         let Some(role) = self.available_roles.get(role_name) else {
-            return ToolRoleState {
-                enabled: spec.enabled_by_default,
-                pinned: false,
-                disabled: false,
-                group_disabled: false,
-            };
+            return enabled;
         };
-        let explicitly_allowed = role
-            .tools
-            .as_ref()
-            .is_some_and(|tools| tools.iter().any(|name| name == &spec.name));
-        let mut enabled = match role.tools.as_ref() {
-            Some(_) => explicitly_allowed,
-            None => spec.enabled_by_default,
-        };
-        let mut pinned = explicitly_allowed;
-        let mut disabled = false;
-        let mut group_disabled = false;
+        if let Some(tools) = &role.tools {
+            enabled = tools.iter().any(|name| name == &spec.name);
+        }
+        if tags_match_any(&spec.tags, &role.disable_tool_tags) {
+            enabled = false;
+        }
+        if tags_match_any(&spec.tags, &role.enable_tool_tags) {
+            enabled = true;
+        }
         if let Some(group) = group {
+            if role
+                .disable_tool_groups
+                .iter()
+                .any(|name| name == &group.name)
+            {
+                enabled = false;
+            }
             if role
                 .enable_tool_groups
                 .iter()
@@ -9469,49 +9442,14 @@ impl Harness {
             {
                 enabled = true;
             }
-            if role
-                .disable_tool_groups
-                .iter()
-                .any(|name| name == &group.name)
-            {
-                enabled = false;
-                pinned = false;
-                group_disabled = true;
-            }
-        }
-        if role.enable_tools.iter().any(|name| name == &spec.name) {
-            enabled = true;
-            pinned = true;
         }
         if role.disable_tools.iter().any(|name| name == &spec.name) {
             enabled = false;
-            pinned = false;
-            disabled = true;
         }
-        ToolRoleState {
-            enabled,
-            pinned,
-            disabled,
-            group_disabled,
+        if role.enable_tools.iter().any(|name| name == &spec.name) {
+            enabled = true;
         }
-    }
-
-    fn is_highest_rank_alternative<'a>(
-        &self,
-        spec: &tau_proto::ToolSpec,
-        candidates: impl Iterator<Item = (&'a tau_proto::ToolSpec, bool)>,
-        chatgpt_shell: bool,
-    ) -> bool {
-        let Some((set, rank)) = tool_alternative_rank(spec, chatgpt_shell) else {
-            return true;
-        };
-        candidates
-            .filter(|(_, pinned)| !*pinned)
-            .filter_map(|(candidate, _)| tool_alternative_rank(candidate, chatgpt_shell))
-            .filter(|(candidate_set, _)| *candidate_set == set)
-            .map(|(_, candidate_rank)| candidate_rank)
-            .max()
-            .is_none_or(|max_rank| rank >= max_rank)
+        enabled
     }
 
     fn resolve_enabled_tool_spec_for_role(
@@ -9593,7 +9531,7 @@ impl Harness {
         group: Option<&tau_proto::ToolGroup>,
         role_name: &str,
     ) -> bool {
-        self.tool_role_state(spec, group, role_name).enabled
+        self.is_tool_enabled_for_role_model(spec, group, role_name, self.selected_model.as_ref())
     }
 
     fn compaction_original_input_tokens_for_prompt(

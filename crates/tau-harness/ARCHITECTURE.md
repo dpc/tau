@@ -100,18 +100,22 @@ User `/skill <name> [args]` and `/skill:<name> [args]` expansion is performed at
 ## Tool prompt-surface policy
 
 Extensions and providers publish metadata only: tools declare neutral `ToolTag`s
-(such as `shell:edit:line`, `shell:edit:patch`, `shell:exec:generic`, and
-`shell:exec:command-text`) and providers publish model `ModelTag`s (such as
-`shell:chatgpt`). The harness owns all matching policy. For the built-in shell
-alternatives, `shell:chatgpt` models prefer patch editing and command-text shell
-execution, while untagged models prefer line editing and the generic shell
-surface.
+(such as `shell:edit:line`, `shell:edit:apply_patch`, `shell:exec:generic`,
+`shell:exec:shell_command`, and `shell:cd`) and providers publish model
+`ModelTag`s (such as `shell:chatgpt`). The harness owns all matching policy.
 
-Role precedence remains local and explicit: `tools` is an allow-list base, group
-enables/disables apply next, `enable_tools` can pin a fallback or re-enable after
-group policy, and `disable_tools` is the final veto. Built-in alternative
-promotion must not bypass an explicit disable of the same alternative set unless
-the replacement tool is explicitly allowed or pinned.
+Tool enablement starts from each extension's `enabled_by_default`, then matching
+harness `tool_policy.rules` run deterministically by `(priority, rule name)`,
+with each rule applying `disable_tool_tags` before `enable_tool_tags`. Built-in
+and user policy share the same evaluator; the built-in `builtin.chatgpt-shell`
+rule disables `shell:*` for ChatGPT-tagged models and re-enables apply-patch,
+shell-command, and cd tools.
+
+Role precedence is broad-to-specific and runs after global policy: optional
+`tools` allow-list base, `disable_tool_tags`, `enable_tool_tags`,
+`disable_tool_groups`, `enable_tool_groups`, `disable_tools`, then
+`enable_tools`. This deliberately lets a role disable a broad family and
+re-enable a narrower tag, group, or named tool.
 
 Prompt dispatch snapshots the effective `ToolSpec` list for the selected prompt
 model. Provider tool calls are validated against that prompt-owned snapshot, not

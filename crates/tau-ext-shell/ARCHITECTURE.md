@@ -33,8 +33,9 @@ and patch paths aligned without calling `chdir(2)` in the extension process.
 ## Tool tags
 
 `tau-ext-shell` tags tools with neutral capability metadata such as
-`shell:edit:line`, `shell:edit:patch`, `shell:exec:generic`, and
-`shell:exec:command-text`. The extension must not decide which model gets which
+`shell:edit:line`, `shell:edit:apply_patch`, `shell:exec:generic`,
+`shell:exec:shell_command`, and `shell:cd`. The extension must not decide which
+model gets which
 surface; the harness interprets these tags together with provider-published
 model tags and role configuration.
 

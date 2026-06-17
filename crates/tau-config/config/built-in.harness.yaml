@@ -3,6 +3,19 @@
 session_retention_days: 60
 default_role: senior-engineer
 extensions: {}
+tool_policy:
+  rules:
+    builtin.chatgpt-shell:
+      enable: true
+      when:
+        model_tags:
+          - shell:chatgpt
+      disable_tool_tags:
+        - shell:*
+      enable_tool_tags:
+        - shell:edit:apply_patch
+        - shell:exec:shell_command
+        - shell:cd
 agents:
   id_template: "{{random_alphanumeric 6}}"
   display_name_template: "{{#if task_name_present}}{{role}}: {{task_name}}{{else}}{{role}}{{/if}}"

@@ -15,7 +15,7 @@ use std::time::Duration;
 use indexmap::IndexMap;
 use serde::de::Error as _;
 use serde::{Deserialize, Serialize};
-use tau_proto::{ModelId, PromptContent, PromptPriority, ToolName};
+use tau_proto::{ModelId, ModelTag, PromptContent, PromptPriority, ToolName, ToolTag};
 
 // ---------------------------------------------------------------------------
 // Built-in configs
@@ -515,6 +515,10 @@ pub struct HarnessSettings {
     /// unambiguously from the slash command.
     pub custom_prompts: Vec<CustomPrompt>,
 
+    /// Harness-owned declarative policy applied to tool tags before role
+    /// overrides.
+    pub tool_policy: ToolPolicy,
+
     /// Handlebars template used to mint new durable agent identifiers.
     pub agent_id_template: String,
 
@@ -535,6 +539,8 @@ struct HarnessSettingsWire {
     prompt_fragments: Vec<RolePromptFragment>,
     #[serde(default, alias = "customPrompts")]
     custom_prompts: BTreeMap<String, String>,
+    #[serde(default)]
+    tool_policy: ToolPolicy,
     agents: AgentsSettings,
 }
 #[derive(Clone, Debug, Deserialize)]
@@ -563,6 +569,7 @@ impl<'de> Deserialize<'de> for HarnessSettings {
             role_groups: Vec::new(),
             prompt_fragments: wire.prompt_fragments,
             custom_prompts: custom_prompt_map_to_vec(wire.custom_prompts),
+            tool_policy: wire.tool_policy,
             agent_id_template: wire.agents.id_template,
             agent_display_name_template: wire.agents.display_name_template,
         };
@@ -572,6 +579,157 @@ impl<'de> Deserialize<'de> for HarnessSettings {
         validate_custom_prompts(&settings.custom_prompts).map_err(D::Error::custom)?;
         settings.remove_disabled_roles();
         Ok(settings)
+    }
+}
+
+/// Declarative harness-owned tool policy loaded from `tool_policy` config.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct ToolPolicy {
+    /// Rules keyed by stable names so higher-precedence config can override or
+    /// disable built-in behavior.
+    pub rules: IndexMap<String, ToolPolicyRule>,
+}
+
+/// One declarative tool policy rule evaluated against model/tool tags.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct ToolPolicyRule {
+    /// Whether this rule participates in evaluation. Defaults to true;
+    /// `enabled` is accepted as an alias for config ergonomics.
+    #[serde(alias = "enabled")]
+    pub enable: bool,
+    /// Priority used before rule name for deterministic evaluation order.
+    pub priority: i32,
+    /// Optional model-side match conditions. Missing or empty means always.
+    pub when: ToolPolicyWhen,
+    /// Tool tag patterns disabled first when the rule matches.
+    pub disable_tool_tags: Vec<ToolTagPattern>,
+    /// Tool tag patterns enabled after disables when the rule matches.
+    pub enable_tool_tags: Vec<ToolTagPattern>,
+}
+
+impl Default for ToolPolicyRule {
+    fn default() -> Self {
+        Self {
+            enable: true,
+            priority: 0,
+            when: ToolPolicyWhen::default(),
+            disable_tool_tags: Vec::new(),
+            enable_tool_tags: Vec::new(),
+        }
+    }
+}
+
+/// Model tag predicates controlling when a tool policy rule applies.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct ToolPolicyWhen {
+    /// Required model tag patterns; all listed patterns must match at least one
+    /// selected model tag.
+    pub model_tags: Vec<ModelTagPattern>,
+}
+
+/// Exact or terminal-prefix pattern over provider-published model tags.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(transparent)]
+pub struct ModelTagPattern(TagPattern);
+
+impl ModelTagPattern {
+    /// Returns true when this pattern matches one selected model tag.
+    pub fn matches(&self, tag: &ModelTag) -> bool {
+        self.0.matches(tag.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for ModelTagPattern {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let text = String::deserialize(deserializer)?;
+        TagPattern::parse(&text, |candidate| ModelTag::try_new(candidate).is_some())
+            .map(Self)
+            .map_err(D::Error::custom)
+    }
+}
+
+/// Exact or terminal-prefix pattern over extension-published tool tags.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(transparent)]
+pub struct ToolTagPattern(TagPattern);
+
+impl ToolTagPattern {
+    /// Returns true when this pattern matches one extension-published tool tag.
+    pub fn matches(&self, tag: &ToolTag) -> bool {
+        self.0.matches(tag.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for ToolTagPattern {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let text = String::deserialize(deserializer)?;
+        TagPattern::parse(&text, |candidate| ToolTag::try_new(candidate).is_some())
+            .map(Self)
+            .map_err(D::Error::custom)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct TagPattern {
+    text: String,
+    prefix_len: Option<usize>,
+}
+
+impl TagPattern {
+    fn parse(text: &str, valid_exact: impl Fn(&str) -> bool) -> Result<Self, String> {
+        if let Some(star) = text.find('*') {
+            if star != text.len() - 1 || text.matches('*').count() != 1 {
+                return Err(format!(
+                    "tag pattern `{text}` may only use `*` as a terminal prefix wildcard"
+                ));
+            }
+            let prefix = &text[..star];
+            if prefix.is_empty() || !prefix.ends_with(':') {
+                return Err(format!(
+                    "tag pattern `{text}` wildcard must follow a non-empty colon prefix"
+                ));
+            }
+            let sentinel = format!("{prefix}x");
+            if !valid_exact(&sentinel) {
+                return Err(format!("tag pattern `{text}` has an invalid tag prefix"));
+            }
+            Ok(Self {
+                text: text.to_owned(),
+                prefix_len: Some(prefix.len()),
+            })
+        } else if valid_exact(text) {
+            Ok(Self {
+                text: text.to_owned(),
+                prefix_len: None,
+            })
+        } else {
+            Err(format!("tag pattern `{text}` is not a valid tag"))
+        }
+    }
+
+    fn matches(&self, tag: &str) -> bool {
+        match self.prefix_len {
+            Some(prefix_len) => tag.starts_with(&self.text[..prefix_len]),
+            None => tag == self.text,
+        }
+    }
+}
+
+impl Serialize for TagPattern {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(&self.text)
     }
 }
 
@@ -664,14 +822,18 @@ struct RawRoleGroup {
     prompt_override: Option<Option<String>>,
     #[serde(deserialize_with = "present_option")]
     tools: Option<Option<Vec<ToolName>>>,
-    #[serde(alias = "enableToolGroups")]
-    enable_tool_groups: Option<Vec<tau_proto::ToolGroupName>>,
+    #[serde(alias = "disableToolTags")]
+    disable_tool_tags: Option<Vec<ToolTagPattern>>,
+    #[serde(alias = "enableToolTags")]
+    enable_tool_tags: Option<Vec<ToolTagPattern>>,
     #[serde(alias = "disableToolGroups")]
     disable_tool_groups: Option<Vec<tau_proto::ToolGroupName>>,
-    #[serde(alias = "enableTools")]
-    enable_tools: Option<Vec<ToolName>>,
+    #[serde(alias = "enableToolGroups")]
+    enable_tool_groups: Option<Vec<tau_proto::ToolGroupName>>,
     #[serde(alias = "disableTools")]
     disable_tools: Option<Vec<ToolName>>,
+    #[serde(alias = "enableTools")]
+    enable_tools: Option<Vec<ToolName>>,
     roles: IndexMap<String, AgentRolePatch>,
 }
 
@@ -716,14 +878,18 @@ struct AgentRolePatch {
     prompt_override: Option<Option<String>>,
     #[serde(deserialize_with = "present_option")]
     tools: Option<Option<Vec<ToolName>>>,
-    #[serde(alias = "enableToolGroups")]
-    enable_tool_groups: Option<Vec<tau_proto::ToolGroupName>>,
+    #[serde(alias = "disableToolTags")]
+    disable_tool_tags: Option<Vec<ToolTagPattern>>,
+    #[serde(alias = "enableToolTags")]
+    enable_tool_tags: Option<Vec<ToolTagPattern>>,
     #[serde(alias = "disableToolGroups")]
     disable_tool_groups: Option<Vec<tau_proto::ToolGroupName>>,
-    #[serde(alias = "enableTools")]
-    enable_tools: Option<Vec<ToolName>>,
+    #[serde(alias = "enableToolGroups")]
+    enable_tool_groups: Option<Vec<tau_proto::ToolGroupName>>,
     #[serde(alias = "disableTools")]
     disable_tools: Option<Vec<ToolName>>,
+    #[serde(alias = "enableTools")]
+    enable_tools: Option<Vec<ToolName>>,
 }
 
 impl RawRoleGroup {
@@ -740,10 +906,12 @@ impl RawRoleGroup {
             prompt_fragments: self.prompt_fragments.clone(),
             prompt_override: self.prompt_override.clone(),
             tools: self.tools.clone(),
-            enable_tool_groups: self.enable_tool_groups.clone(),
+            disable_tool_tags: self.disable_tool_tags.clone(),
+            enable_tool_tags: self.enable_tool_tags.clone(),
             disable_tool_groups: self.disable_tool_groups.clone(),
-            enable_tools: self.enable_tools.clone(),
+            enable_tool_groups: self.enable_tool_groups.clone(),
             disable_tools: self.disable_tools.clone(),
+            enable_tools: self.enable_tools.clone(),
         }
     }
 }
@@ -1087,8 +1255,30 @@ pub struct AgentRole {
     /// use their own default enablement.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tools: Option<Vec<ToolName>>,
-    /// Tool group names enabled in addition to the `tools` allow-list or the
-    /// default tool set. Group changes are applied before individual tool
+    /// Tool tag patterns disabled after global policy and before role-level tag
+    /// enables.
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        alias = "disableToolTags"
+    )]
+    pub disable_tool_tags: Vec<ToolTagPattern>,
+    /// Tool tag patterns enabled after role-level tag disables and global
+    /// policy.
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        alias = "enableToolTags"
+    )]
+    pub enable_tool_tags: Vec<ToolTagPattern>,
+    /// Tool group names disabled after tag changes and before group enables.
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        alias = "disableToolGroups"
+    )]
+    pub disable_tool_groups: Vec<tau_proto::ToolGroupName>,
+    /// Tool group names enabled after group disables and before individual tool
     /// changes.
     #[serde(
         default,
@@ -1096,21 +1286,12 @@ pub struct AgentRole {
         alias = "enableToolGroups"
     )]
     pub enable_tool_groups: Vec<tau_proto::ToolGroupName>,
-    /// Tool group names disabled before individual tool changes are applied.
-    #[serde(
-        default,
-        skip_serializing_if = "Vec::is_empty",
-        alias = "disableToolGroups"
-    )]
-    pub disable_tool_groups: Vec<tau_proto::ToolGroupName>,
-    /// Internal tool names enabled in addition to the `tools` allow-list or the
-    /// default tool set.
-    #[serde(default, skip_serializing_if = "Vec::is_empty", alias = "enableTools")]
-    pub enable_tools: Vec<ToolName>,
-    /// Internal tool names disabled for this role even if selected or enabled
-    /// by default.
+    /// Internal tool names disabled before final individual tool enables.
     #[serde(default, skip_serializing_if = "Vec::is_empty", alias = "disableTools")]
     pub disable_tools: Vec<ToolName>,
+    /// Internal tool names enabled last for this role.
+    #[serde(default, skip_serializing_if = "Vec::is_empty", alias = "enableTools")]
+    pub enable_tools: Vec<ToolName>,
 }
 
 /// Automatic provider-side compaction policy for a harness role.
@@ -1165,17 +1346,23 @@ impl AgentRole {
         if let Some(tools) = &patch.tools {
             self.tools = tools.clone();
         }
-        if let Some(enable_tool_groups) = &patch.enable_tool_groups {
-            self.enable_tool_groups = enable_tool_groups.clone();
+        if let Some(disable_tool_tags) = &patch.disable_tool_tags {
+            self.disable_tool_tags = disable_tool_tags.clone();
+        }
+        if let Some(enable_tool_tags) = &patch.enable_tool_tags {
+            self.enable_tool_tags = enable_tool_tags.clone();
         }
         if let Some(disable_tool_groups) = &patch.disable_tool_groups {
             self.disable_tool_groups = disable_tool_groups.clone();
         }
-        if let Some(enable_tools) = &patch.enable_tools {
-            self.enable_tools = enable_tools.clone();
+        if let Some(enable_tool_groups) = &patch.enable_tool_groups {
+            self.enable_tool_groups = enable_tool_groups.clone();
         }
         if let Some(disable_tools) = &patch.disable_tools {
             self.disable_tools = disable_tools.clone();
+        }
+        if let Some(enable_tools) = &patch.enable_tools {
+            self.enable_tools = enable_tools.clone();
         }
     }
 }
@@ -1496,7 +1683,8 @@ fn normalize_role_config_keys(
     normalize_alias_key(map, "serviceTier", "service_tier", source, path)?;
     normalize_alias_key(map, "promptFragments", "prompt_fragments", source, path)?;
     normalize_alias_key(map, "promptOverride", "prompt_override", source, path)?;
-    normalize_alias_key(map, "enableToolGroups", "enable_tool_groups", source, path)?;
+    normalize_alias_key(map, "disableToolTags", "disable_tool_tags", source, path)?;
+    normalize_alias_key(map, "enableToolTags", "enable_tool_tags", source, path)?;
     normalize_alias_key(
         map,
         "disableToolGroups",
@@ -1504,8 +1692,35 @@ fn normalize_role_config_keys(
         source,
         path,
     )?;
-    normalize_alias_key(map, "enableTools", "enable_tools", source, path)?;
+    normalize_alias_key(map, "enableToolGroups", "enable_tool_groups", source, path)?;
     normalize_alias_key(map, "disableTools", "disable_tools", source, path)?;
+    normalize_alias_key(map, "enableTools", "enable_tools", source, path)?;
+    Ok(())
+}
+
+fn normalize_tool_policy_config_keys(
+    value: &mut serde_json::Value,
+    source: &str,
+    path: &str,
+) -> Result<(), SettingsError> {
+    let serde_json::Value::Object(policy) = value else {
+        return Ok(());
+    };
+    let Some(serde_json::Value::Object(rules)) = policy.get_mut("rules") else {
+        return Ok(());
+    };
+    for (rule_name, rule) in rules {
+        let serde_json::Value::Object(rule_map) = rule else {
+            continue;
+        };
+        normalize_alias_key(
+            rule_map,
+            "enabled",
+            "enable",
+            source,
+            &format!("{path}.rules.{rule_name}"),
+        )?;
+    }
     Ok(())
 }
 
@@ -1520,6 +1735,10 @@ fn normalize_harness_config_value(
     normalize_alias_key(map, "roleGroups", "role_groups", source, "root")?;
     normalize_alias_key(map, "promptFragments", "prompt_fragments", source, "root")?;
     normalize_alias_key(map, "customPrompts", "custom_prompts", source, "root")?;
+    normalize_alias_key(map, "toolPolicy", "tool_policy", source, "root")?;
+    if let Some(tool_policy) = map.get_mut("tool_policy") {
+        normalize_tool_policy_config_keys(tool_policy, source, "tool_policy")?;
+    }
     if let Some(serde_json::Value::Object(agents)) = map.get_mut("agents") {
         normalize_alias_key(agents, "idTemplate", "id_template", source, "agents")?;
         normalize_alias_key(
@@ -1699,6 +1918,7 @@ fn canonical_top_level_key(key: &str) -> &str {
         "roleGroups" => "role_groups",
         "promptFragments" => "prompt_fragments",
         "customPrompts" => "custom_prompts",
+        "toolPolicy" => "tool_policy",
         _ => key,
     }
 }
@@ -1720,6 +1940,8 @@ fn canonical_role_key(key: &str) -> &str {
         "promptOverride" => "prompt_override",
         "enableToolGroups" => "enable_tool_groups",
         "disableToolGroups" => "disable_tool_groups",
+        "enableToolTags" => "enable_tool_tags",
+        "disableToolTags" => "disable_tool_tags",
         "enableTools" => "enable_tools",
         "disableTools" => "disable_tools",
         _ => key,

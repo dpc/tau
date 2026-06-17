@@ -1151,7 +1151,7 @@ fn tool_name_rejects_overlong_input() {
 #[test]
 fn model_and_tool_tags_validate_namespaced_lowercase_values() {
     assert!(ModelTag::try_new("shell:chatgpt").is_some());
-    assert!(ToolTag::try_new("shell:edit:patch").is_some());
+    assert!(ToolTag::try_new("shell:edit:apply_patch").is_some());
     assert!(ToolTag::try_new("tools:custom-text").is_some());
     assert!(ModelTag::try_new("Shell:ChatGPT").is_none());
     assert!(ToolTag::try_new("shell edit").is_none());
