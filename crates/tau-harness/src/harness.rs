@@ -6140,6 +6140,13 @@ impl Harness {
                 | Event::UiFocusChanged(_)
                 | Event::UiDetachRequest(_)
                 | Event::UiShellCommand(_)
+                // UI clients drive stateful extensions (e.g. the task factory's
+                // request/snapshot exchange) by emitting extension-owned custom
+                // events. `CustomEvent`'s deserialize path re-runs `try_new`, so
+                // the name is guaranteed to use an extension-owned category and
+                // cannot spoof a first-party `harness`/`agent`/`tool` fact; the
+                // event only reaches extensions that opted in by subscribing.
+                | Event::ExtensionEvent(_)
         )
     }
 

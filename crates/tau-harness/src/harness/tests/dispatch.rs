@@ -10183,3 +10183,51 @@ fn request_rendered_prompt(
         })
         .expect("rendered prompt result")
 }
+
+#[test]
+fn ui_emitted_custom_event_routes_to_subscribed_extension() {
+    // A UI client drives a stateful extension (the task factory's
+    // request/snapshot exchange) by emitting an extension-owned custom event.
+    // It must reach an extension that subscribed to that event name, the same
+    // way an extension-emitted custom event reaches the UI.
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = quiet_provider_harness(&sp).expect("start");
+
+    let ext = connect_test_client(&mut h, "factory-ext", tau_proto::ClientKind::Tool);
+    let command_name: tau_proto::EventName = "factory.sync".parse().expect("event name");
+    h.bus
+        .set_subscriptions(
+            "factory-ext",
+            vec![EventSelector::Prefix("factory.".to_owned())],
+        )
+        .expect("extension subscription");
+    let _ui = connect_test_client(&mut h, "ui", tau_proto::ClientKind::Ui);
+
+    h.handle_client_event_inner(
+        "ui",
+        Event::ExtensionEvent(
+            tau_proto::CustomEvent::try_new(command_name.clone(), None, CborValue::Null)
+                .expect("valid custom event"),
+        ),
+    )
+    .expect("ui custom event handled");
+
+    let frames = ext.lock().expect("extension sink");
+    assert!(frames.iter().any(|routed| matches!(
+        peel_inner_event(&routed.frame),
+        Some(Event::ExtensionEvent(custom)) if *custom.name() == command_name
+    )));
+}
+
+#[test]
+fn ui_cannot_emit_custom_event_with_reserved_first_party_category() {
+    // The reserved-category guard lives in `CustomEvent::try_new`, which the
+    // deserialize path re-runs — so a UI cannot construct a custom event named
+    // under `harness`/`agent`/`tool`/`extension` to spoof a first-party fact.
+    let reserved: tau_proto::EventName = "harness.notice".parse().expect("event name");
+    assert!(
+        tau_proto::CustomEvent::try_new(reserved, None, CborValue::Null).is_err(),
+        "reserved first-party category must be rejected at construction"
+    );
+}
