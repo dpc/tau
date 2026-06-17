@@ -238,7 +238,7 @@ role allow-list base when set.
 The harness owns model-aware tool-surface policy from provider/tool tags. The
 built-in `builtin.chatgpt-shell` rule matches `shell:chatgpt` models, disables
 `shell:*`, then re-enables `shell:edit:apply_patch`,
-`shell:exec:shell_command`, and `shell:cd`. Users can disable or replace that
+`shell:exec:shell_command`, `shell:cd`, and `shell:lock`. Users can disable or replace that
 keyed rule in `tool_policy.rules`; policy rules sort by `priority` (default `0`,
 lower first) and then rule name. Tools and models only publish tags.
 

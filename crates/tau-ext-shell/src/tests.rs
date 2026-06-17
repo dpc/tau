@@ -493,6 +493,10 @@ fn startup_registers_dir_lock_disabled_by_default() {
         };
         if register.tool.name == DIR_LOCK_TOOL_NAME {
             assert!(!register.tool.enabled_by_default);
+            assert!(
+                register.tool.tags.is_empty(),
+                "disabled dir_lock must not be re-enabled by shell tag policy"
+            );
             found_dir_lock = true;
         }
     }
@@ -650,6 +654,13 @@ fn dir_lock_config_re_registers_tool_enabled_when_config_true() {
         match reader.read_event().expect("read") {
             Some(Event::ToolRegister(register)) if register.tool.name == DIR_LOCK_TOOL_NAME => {
                 assert!(register.tool.enabled_by_default);
+                assert!(
+                    register
+                        .tool
+                        .tags
+                        .iter()
+                        .any(|tag| tag.as_str() == "shell:lock")
+                );
                 break;
             }
             Some(_) => continue,

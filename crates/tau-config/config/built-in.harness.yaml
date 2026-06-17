@@ -16,6 +16,7 @@ tool_policy:
         - shell:edit:apply_patch
         - shell:exec:shell_command
         - shell:cd
+        - shell:lock
 agents:
   id_template: "{{random_alphanumeric 6}}"
   display_name_template: "{{#if task_name_present}}{{role}}: {{task_name}}{{else}}{{role}}{{/if}}"

@@ -890,6 +890,11 @@ fn set_process_working_directory(working_directory: &Path) -> Result<(), String>
 }
 
 fn dir_lock_tool_spec(enabled_by_default: bool) -> ToolSpec {
+    let tags = if enabled_by_default {
+        tool_tags(&["shell:lock"])
+    } else {
+        Vec::new()
+    };
     ToolSpec {
         name: tau_proto::ToolName::new(DIR_LOCK_TOOL_NAME),
         model_visible_name: None,
@@ -919,7 +924,7 @@ fn dir_lock_tool_spec(enabled_by_default: bool) -> ToolSpec {
             "additionalProperties": false
         })),
         format: None,
-        tags: tool_tags(&["shell:lock"]),
+        tags,
         enabled_by_default,
         background_support: None,
     }

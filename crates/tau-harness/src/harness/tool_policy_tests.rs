@@ -83,6 +83,7 @@ fn policy_harness(model_tags: &[&str], role: AgentRole) -> PolicyHarness {
         tagged_tool("gpt_shell", false, &["shell:exec:shell_command"]),
         tagged_tool("read", true, &["shell:read"]),
         tagged_tool("cd", true, &["shell:cd"]),
+        tagged_tool("dir_lock", true, &["shell:lock"]),
     ] {
         harness.registry.register_with_prompt_fragment(
             "tools",
@@ -100,7 +101,15 @@ fn policy_harness(model_tags: &[&str], role: AgentRole) -> PolicyHarness {
 }
 
 fn effective_tool_names(harness: &Harness) -> Vec<String> {
-    let relevant = ["edit", "apply_patch", "shell", "gpt_shell", "read", "cd"];
+    let relevant = [
+        "edit",
+        "apply_patch",
+        "shell",
+        "gpt_shell",
+        "read",
+        "cd",
+        "dir_lock",
+    ];
     let model = harness.selected_model.as_ref();
     harness
         .gather_effective_tool_specs_for_role_model(ROLE, model)
@@ -119,6 +128,7 @@ fn generic_model_gets_generic_shell_alternatives() {
 
     assert!(tools.contains(&"edit".to_owned()));
     assert!(tools.contains(&"shell".to_owned()));
+    assert!(tools.contains(&"dir_lock".to_owned()));
     assert!(!tools.contains(&"apply_patch".to_owned()));
     assert!(!tools.contains(&"gpt_shell".to_owned()));
 }
@@ -133,6 +143,7 @@ fn chatgpt_model_gets_promoted_shell_alternatives() {
     assert!(tools.contains(&"apply_patch".to_owned()));
     assert!(tools.contains(&"gpt_shell".to_owned()));
     assert!(tools.contains(&"cd".to_owned()));
+    assert!(tools.contains(&"dir_lock".to_owned()));
     assert!(!tools.contains(&"read".to_owned()));
     assert!(!tools.contains(&"edit".to_owned()));
     assert!(!tools.contains(&"shell".to_owned()));
