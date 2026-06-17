@@ -76,6 +76,34 @@ fn path_conflicts_include_ancestors_and_children() {
 }
 
 #[test]
+fn shell_auto_lock_requires_current_manual_coverage() {
+    let manager = DirLockManager::default();
+    let owner = agent_id("agent-a");
+    assert!(matches!(
+        manager.acquire_auto_if_manual_covers(
+            "auto-without-manual".into(),
+            owner.clone(),
+            vec![path("/repo")],
+            || {},
+        ),
+        Err(LockAcquireError::NotCovered)
+    ));
+
+    manager
+        .acquire_manual("manual".into(), owner.clone(), path("/repo"), || {})
+        .expect("manual lock");
+    let guard = manager
+        .acquire_auto_if_manual_covers(
+            "auto-with-manual".into(),
+            owner,
+            vec![path("/repo/src")],
+            || {},
+        )
+        .expect("auto lock with manual coverage");
+    drop(guard);
+}
+
+#[test]
 fn fifo_front_waiter_blocks_later_independent_request() {
     let manager = DirLockManager::default();
     manager

@@ -145,7 +145,10 @@ fn push_failure(events: &mut Vec<Event>, invoke: tau_proto::ToolStarted, failure
 
 pub(crate) fn initial_display(invoke: &tau_proto::ToolStarted) -> Option<ToolUseState> {
     if invoke.tool_name == SHELL_TOOL_NAME || invoke.tool_name == GPT_SHELL_TOOL_NAME {
-        return Some(shell::initial_display(&invoke.arguments));
+        return Some(shell::initial_display(
+            &invoke.arguments,
+            shell::ShellCommandMode::READ_WRITE_HIDDEN,
+        ));
     }
 
     let mode = String::new();

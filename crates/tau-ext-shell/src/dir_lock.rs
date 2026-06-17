@@ -17,7 +17,6 @@ use tau_proto::{
 
 use crate::argument::{argument_text, optional_argument_text};
 use crate::display::{ToolFailure, ok_display};
-use crate::tools::shell::ShellAccessMode;
 use crate::tools::{APPLY_PATCH_TOOL_NAME, EDIT_TOOL_NAME, GPT_SHELL_TOOL_NAME, SHELL_TOOL_NAME};
 
 /// Agent-facing name of the directory locking tool.
@@ -176,6 +175,7 @@ pub(crate) enum LockAcquireError {
     Cancelled,
     Abandoned(AbandonedLock),
     SelfConflict { dir: PathBuf },
+    NotCovered,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -214,6 +214,28 @@ impl DirLockManager {
         self.acquire_auto_with_policy(call_id, owner, dirs, on_wait, LockWaitPolicy::default())
     }
 
+    /// Acquire an automatic update lock only while `owner` still holds a manual
+    /// lock covering every requested directory.
+    pub(crate) fn acquire_auto_if_manual_covers<F>(
+        &self,
+        call_id: ToolCallId,
+        owner: AgentId,
+        dirs: Vec<PathBuf>,
+        on_wait: F,
+    ) -> Result<AutoDirLockGuard, LockAcquireError>
+    where
+        F: FnOnce(),
+    {
+        self.acquire_auto_with_policy_and_manual_requirement(
+            call_id,
+            owner,
+            dirs,
+            on_wait,
+            LockWaitPolicy::default(),
+            true,
+        )
+    }
+
     fn acquire_auto_with_policy<F>(
         &self,
         call_id: ToolCallId,
@@ -225,9 +247,29 @@ impl DirLockManager {
     where
         F: FnOnce(),
     {
+        self.acquire_auto_with_policy_and_manual_requirement(
+            call_id, owner, dirs, on_wait, policy, false,
+        )
+    }
+
+    fn acquire_auto_with_policy_and_manual_requirement<F>(
+        &self,
+        call_id: ToolCallId,
+        owner: AgentId,
+        dirs: Vec<PathBuf>,
+        on_wait: F,
+        policy: LockWaitPolicy,
+        require_manual_cover: bool,
+    ) -> Result<AutoDirLockGuard, LockAcquireError>
+    where
+        F: FnOnce(),
+    {
         let dirs = normalize_lock_dirs(dirs);
         let mut on_wait = Some(on_wait);
         let mut state = self.inner.state.lock().expect("dir lock state poisoned");
+        if require_manual_cover && !state.manual_covers(&owner, &dirs) {
+            return Err(LockAcquireError::NotCovered);
+        }
         if !state.manual_covers(&owner, &dirs)
             && let Some(dir) = state.manual_lock_owned_overlapping(&owner, &dirs)
         {
@@ -254,6 +296,11 @@ impl DirLockManager {
             };
             if pos == 0 {
                 let queued = state.waiters.front().expect("position says front exists");
+                if require_manual_cover && !state.manual_covers(&queued.owner, &queued.dirs) {
+                    state.waiters.pop_front().expect("front exists");
+                    self.inner.changed.notify_all();
+                    return Err(LockAcquireError::NotCovered);
+                }
                 if !state.has_conflict(&queued.owner, &queued.dirs, queued.kind) {
                     let queued = state.waiters.pop_front().expect("front exists");
                     let id = state.add_auto(queued.owner, queued.dirs);
@@ -725,7 +772,12 @@ pub(crate) fn dispatch_dir_lock_tool(
                 invoke.call_id.clone(),
                 invoke.agent_id.clone(),
                 dir.clone(),
-                move || send_event(&wait_tx, waiting_progress_event(&wait_invoke, &[wait_dir])),
+                move || {
+                    send_event(
+                        &wait_tx,
+                        waiting_progress_event(&wait_invoke, &[wait_dir], None),
+                    )
+                },
             ) {
                 Ok(()) => send_event(
                     tx,
@@ -833,33 +885,37 @@ pub(crate) fn automatic_lock_dirs_for_tool_in_dir(
     tool_name: &str,
     arguments: &CborValue,
     cwd: &Path,
-) -> Result<Option<Vec<PathBuf>>, ToolFailure> {
+) -> Result<Vec<PathBuf>, ToolFailure> {
     match tool_name {
         EDIT_TOOL_NAME => {
             let path = argument_text(arguments, "path").map_err(ToolFailure::from)?;
-            Ok(Some(vec![canonical_write_lock_dir(Path::new(&path))?]))
+            Ok(vec![canonical_write_lock_dir(Path::new(&path))?])
         }
-        SHELL_TOOL_NAME | GPT_SHELL_TOOL_NAME => {
-            match crate::tools::shell::parse_access_mode(arguments).map_err(ToolFailure::from)? {
-                ShellAccessMode::ReadOnly => Ok(None),
-                ShellAccessMode::ReadWrite => Ok(Some(vec![canonical_shell_cwd(arguments)?])),
-            }
-        }
-        APPLY_PATCH_TOOL_NAME => Ok(Some(crate::tools::apply_patch::lock_directories_in_dir(
+        SHELL_TOOL_NAME | GPT_SHELL_TOOL_NAME => Ok(vec![canonical_shell_cwd(arguments)?]),
+        APPLY_PATCH_TOOL_NAME => Ok(crate::tools::apply_patch::lock_directories_in_dir(
             arguments, cwd,
-        )?)),
-        _ => Ok(None),
+        )?),
+        _ => Err(ToolFailure::new(format!(
+            "tool `{tool_name}` does not use automatic directory locks"
+        ))),
     }
 }
 
 /// Build a progress event that replaces the live tool block while waiting for
 /// a directory update lock.
-pub(crate) fn waiting_progress_event(invoke: &ToolStarted, dirs: &[PathBuf]) -> Event {
+pub(crate) fn waiting_progress_event(
+    invoke: &ToolStarted,
+    dirs: &[PathBuf],
+    shell_command_mode: Option<crate::tools::shell::ShellCommandMode>,
+) -> Event {
     let dirs_display = display_dirs(dirs);
-    let mut display = crate::tools::initial_display(invoke).unwrap_or_else(|| ToolUseState {
-        args: dirs_display.clone(),
-        ..Default::default()
-    });
+    let mut display = match shell_command_mode {
+        Some(mode) => crate::tools::shell::initial_display(&invoke.arguments, mode),
+        None => crate::tools::initial_display(invoke).unwrap_or_else(|| ToolUseState {
+            args: dirs_display.clone(),
+            ..Default::default()
+        }),
+    };
     display.args = dirs_display.clone();
     display.info_chips.push("dir lock".to_owned());
     display.status = ToolUseStatus::InProgress;

@@ -16,7 +16,7 @@ Model-visible tools:
 - `read` — reads UTF-8 and non-UTF-8 files with line numbers, line-ending markers, Unicode replacement for invalid bytes plus `invalid-utf8` flags, range/ranges support, line/byte truncation metadata, a 10 MiB input safety cap, and a rendered-range expansion cap that can reject large overlapping multi-range requests before rendering.
 - `edit` — applies context-checked line-oriented replacements. `newText` fully replaces the 1-based half-open `start_line`..`end_line_exclusive` range; `start_line` is included and `end_line_exclusive` is excluded. Empty insertion ranges use `start_line == end_line_exclusive`, such as `1..<1` for top-of-file insertion or `total_lines + 1 ..< total_lines + 1` for EOF append. Each edit has a `context_line` that matches the original line immediately before `start_line`; use an empty `context_line` when `start_line` is 1, and use the original last line for EOF appends to non-empty files. Non-empty `newText` with no trailing line ending is normalized into a full line; explicit line endings are preserved, so callers can create mixed endings. BOF context mismatches report `context_line_number: 0`. The agent-visible result is minimal status only; the UI receives a separate structured diff payload for changed UTF-8 files, including inline changed-token segments.
 - `apply_patch` — applies patch-style file edits and also sends structured UI-only diffs for changed UTF-8 files. It carries the neutral `shell:edit:apply_patch` tag; the harness built-in ChatGPT policy re-enables it after disabling the broader `shell:*` family.
-- `shell` — runs `sh -c`-style commands with `mode: "ro"` or `mode: "rw"`, optional `cwd`, timeout, stdout/stderr capture, Unicode replacement for invalid output bytes plus `invalid-utf8` flags, truncation, and tool cancellation support. It is the generic shell execution alternative.
+- `shell` — runs `sh -c`-style commands with optional `cwd`, timeout, stdout/stderr capture, Unicode replacement for invalid output bytes plus `invalid-utf8` flags, truncation, and tool cancellation support. It is the generic shell execution alternative. It no longer accepts an explicit `ro` / `rw` argument.
 - `cd` — changes the shell extension's remembered working directory for the current agent. The cwd is also stored as inheritable agent metadata using the extension instance key (for the built-in shell, `ext_core-shell_cwd`). It carries `shell:cd` and remains available under the built-in ChatGPT shell policy.
 - `gpt_shell` — shell-like execution surface advertised as model-visible `shell_command` for GPT-style tool compatibility. It carries the neutral `shell:exec:shell_command` tag; the harness built-in ChatGPT policy re-enables it after disabling the broader `shell:*` family.
 - `grep` — ripgrep-backed literal or regex search with context, glob filtering, truncation, escaped control characters in paths, invalid-UTF-8 path markers for byte paths, `limit` capped at 2000 matches, and `context` capped at 20 lines.
@@ -33,9 +33,9 @@ For Tau VCR runs, `ls`, `read`, `edit`, `apply_patch`, `shell`, and `gpt_shell` 
 
 ## Directory locks and mutation safety
 
-When `config.dir_lock.enable` is true, `dir_lock` is available and mutating calls automatically acquire matching directory locks: `edit`, `apply_patch`, and `shell`/`gpt_shell` with `mode: "rw"`. Read-only calls and shell calls with `mode: "ro"` do not wait on update locks. The extension publishes a `/shell-dir-force-unlock DIRECTORY` user action when a manual lock blocks work long enough to matter.
+`config.dir_lock.enable` defaults false. When it is true, `dir_lock` is available and mutating `edit` / `apply_patch` calls automatically acquire matching directory locks. `shell` / `gpt_shell` calls are inferred read-write only while the agent holds a manual lock covering the command cwd; otherwise they are inferred read-only and do not wait on update locks. When directory locking is disabled, all shell calls run read-write and the UI does not show an access-mode chip. The extension publishes a `/shell-dir-force-unlock DIRECTORY` user action when a manual lock blocks work long enough to matter.
 
-Read-only shell mode is advisory unless `config.enforce_ro_mode: true` is set. Enforced mode uses a read-only bind mount of the tool cwd when supported, but it is opt-in because tools such as `jj` and `nix-direnv` can break under that namespace setup.
+Inferred read-only shell mode is advisory unless `config.dir_lock.enforce_ro_bind: true` is set while directory locking is enabled. The read-only bind defaults true under `dir_lock` and uses a read-only bind mount of the tool cwd when supported.
 
 
 ## Agent context discovery
@@ -61,14 +61,13 @@ extensions: {
   "core-shell": {
     config: {
       working_directory: "/srv/project",
-      enforce_ro_mode: false,
       shell: {
         command: "bash",
         prefix: ["nix", "develop", "-c"],
         user_command_timeout_secs: 3600,
         extra_env: { PAGER: "cat" },
       },
-      dir_lock: { enable: true },
+      dir_lock: { enable: false, enforce_ro_bind: true },
     },
   },
 }

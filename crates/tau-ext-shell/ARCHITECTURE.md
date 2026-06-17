@@ -30,6 +30,18 @@ same cwd snapshot through lock waiting and execution, even if committed cwd
 metadata changes before the lock is granted. This keeps locks, shell execution,
 and patch paths aligned without calling `chdir(2)` in the extension process.
 
+Directory locking is opt-in. When disabled, `shell` / `gpt_shell` calls are
+ordinary read-write commands and no access-mode chip is published for UI display.
+When enabled, shell access mode is inferred from manual lock ownership: a command
+whose cwd is covered by the caller's manual lock is read-write and takes an
+automatic lock; otherwise it is read-only.
+
+The read-write inference and automatic lock acquisition happen under the
+`DirLockManager` state lock. A shell call queued as read-write must still have
+covering manual-lock ownership at the moment the automatic lock is granted;
+otherwise it falls back to read-only execution instead of running under stale
+coverage.
+
 ## Tool tags
 
 `tau-ext-shell` tags tools with neutral capability metadata such as

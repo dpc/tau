@@ -15,30 +15,31 @@ pub(crate) struct ExtConfig {
     pub(crate) working_directory: Option<PathBuf>,
     pub(crate) shell: ShellConfig,
     pub(crate) dir_lock: DirLockConfig,
-    /// Enforce read-only tool mode by bind-mounting the tool working directory
-    /// read-only inside the child namespace when supported by the tool.
-    ///
-    /// Disabled by default because some important tools break under this
-    /// namespace/bind-mount setup. Known examples: jj has issues
-    /// <https://github.com/jj-vcs/jj/issues/9579>, nix-direnv has issues
-    /// <https://github.com/nix-community/nix-direnv/issues/749>, and many other
-    /// tools may have similar problems. Keep this opt-in; read-only mode
-    /// remains advisory unless this is explicitly enabled.
-    pub(crate) enforce_ro_mode: bool,
 }
 
 #[derive(Clone, Debug, serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub(crate) struct DirLockConfig {
     /// Controls the agent-visible `dir_lock` tool and whether mutating
-    /// ext-shell tools participate in directory update locking. Enabled by
-    /// default; set to false to opt out.
+    /// ext-shell tools participate in directory update locking. Disabled by
+    /// default; set to true to opt in.
     pub(crate) enable: bool,
+    /// Enforce inferred read-only shell mode by bind-mounting the tool working
+    /// directory read-only inside the child namespace when supported by the
+    /// tool.
+    ///
+    /// This only applies when directory locking is enabled. Without directory
+    /// locking, shell tools run as read-write commands and no read-only bind is
+    /// attempted.
+    pub(crate) enforce_ro_bind: bool,
 }
 
 impl Default for DirLockConfig {
     fn default() -> Self {
-        Self { enable: true }
+        Self {
+            enable: false,
+            enforce_ro_bind: true,
+        }
     }
 }
 
@@ -101,7 +102,7 @@ impl ShellConfig {
         command: &str,
         cwd: Option<&str>,
         read_only_cwd: bool,
-        enforce_ro_mode: bool,
+        enforce_ro_bind: bool,
     ) -> std::io::Result<std::process::Child> {
         let mut child_cmd = self.command_for(command);
         child_cmd
@@ -111,7 +112,7 @@ impl ShellConfig {
             child_cmd.current_dir(cwd);
         }
         apply_command_isolation(&mut child_cmd);
-        let read_only_warning = if read_only_cwd && enforce_ro_mode {
+        let read_only_warning = if read_only_cwd && enforce_ro_bind {
             let mount_cwd = cwd.map_or_else(std::env::current_dir, |cwd| {
                 let cwd = std::path::Path::new(cwd);
                 if cwd.is_absolute() {

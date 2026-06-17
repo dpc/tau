@@ -479,7 +479,7 @@ fn shell_tool_cancel_request_stops_running_command_quickly() {
 }
 
 #[test]
-fn startup_registers_dir_lock_enabled_by_default() {
+fn startup_registers_dir_lock_disabled_by_default() {
     let (mut reader, mut writer) = spawn_extension();
 
     let mut found_dir_lock = false;
@@ -492,7 +492,7 @@ fn startup_registers_dir_lock_enabled_by_default() {
             continue;
         };
         if register.tool.name == DIR_LOCK_TOOL_NAME {
-            assert!(register.tool.enabled_by_default);
+            assert!(!register.tool.enabled_by_default);
             found_dir_lock = true;
         }
     }
@@ -553,6 +553,7 @@ fn shell_dir_force_unlock_releases_overlapping_manual_lock() {
     let edit_path = child_dir.join("file.txt");
     let (mut reader, mut writer) = spawn_extension();
     drain_startup(&mut reader);
+    send_dir_lock_config(&mut writer, true);
 
     writer
         .write_event(&tool_started(
@@ -640,15 +641,15 @@ fn shell_dir_force_unlock_releases_overlapping_manual_lock() {
 }
 
 #[test]
-fn dir_lock_config_re_registers_tool_disabled_when_config_false() {
+fn dir_lock_config_re_registers_tool_enabled_when_config_true() {
     let (mut reader, mut writer) = spawn_extension();
     drain_startup(&mut reader);
-    send_dir_lock_config(&mut writer, false);
+    send_dir_lock_config(&mut writer, true);
 
     loop {
         match reader.read_event().expect("read") {
             Some(Event::ToolRegister(register)) if register.tool.name == DIR_LOCK_TOOL_NAME => {
-                assert!(!register.tool.enabled_by_default);
+                assert!(register.tool.enabled_by_default);
                 break;
             }
             Some(_) => continue,
@@ -760,16 +761,6 @@ fn dir_lock_tool_can_be_disabled_by_config() {
     let (mut reader, mut writer) = spawn_extension();
     drain_startup(&mut reader);
     send_dir_lock_config(&mut writer, false);
-    loop {
-        match reader.read_event().expect("read") {
-            Some(Event::ToolRegister(register)) if register.tool.name == DIR_LOCK_TOOL_NAME => {
-                assert!(!register.tool.enabled_by_default);
-                break;
-            }
-            Some(_) => continue,
-            None => panic!("extension closed before dir_lock disable registration"),
-        }
-    }
 
     writer
         .write_event(&tool_started(
@@ -808,6 +799,7 @@ fn dir_lock_blocks_conflicting_edit_until_unlock() {
     let edit_path = lock_dir.join("file.txt");
     let (mut reader, mut writer) = spawn_extension();
     drain_startup(&mut reader);
+    send_dir_lock_config(&mut writer, true);
     writer
         .write_event(&tool_started(
             "lock-root",
@@ -908,6 +900,7 @@ fn locked_apply_patch_uses_cwd_frozen_at_lock_selection() {
     let agent_id = tau_proto::AgentId::parse("agent-patch-cwd-lock").expect("agent id");
     let (mut reader, mut writer) = spawn_extension();
     drain_startup(&mut reader);
+    send_dir_lock_config(&mut writer, true);
 
     writer
         .write_event(&Event::AgentMetadataSet(tau_proto::AgentMetadataSet {
@@ -1028,7 +1021,7 @@ fn locked_apply_patch_uses_cwd_frozen_at_lock_selection() {
 }
 
 #[test]
-fn locked_rw_shell_uses_cwd_frozen_at_lock_selection() {
+fn shell_without_manual_lock_does_not_wait_for_update_lock() {
     let tempdir = TempDir::new().expect("tempdir");
     let cwd_a = tempdir.path().join("a");
     let cwd_b = tempdir.path().join("b");
@@ -1037,6 +1030,7 @@ fn locked_rw_shell_uses_cwd_frozen_at_lock_selection() {
     let agent_id = tau_proto::AgentId::parse("agent-shell-cwd-lock").expect("agent id");
     let (mut reader, mut writer) = spawn_extension();
     drain_startup(&mut reader);
+    send_dir_lock_config(&mut writer, true);
 
     writer
         .write_event(&Event::AgentMetadataSet(tau_proto::AgentMetadataSet {
@@ -1073,43 +1067,22 @@ fn locked_rw_shell_uses_cwd_frozen_at_lock_selection() {
         .write_event(&tool_started(
             "blocked-shell",
             SHELL_TOOL_NAME,
-            cbor_text_map(vec![
-                ("command", "printf after > shell.txt"),
-                ("mode", "rw"),
-            ]),
+            cbor_text_map(vec![("command", "printf after > shell.txt")]),
             agent_id.as_str(),
         ))
         .expect("shell");
     writer.flush().expect("flush shell");
     loop {
         match reader.read_event().expect("read") {
-            Some(Event::ToolProgress(progress)) if progress.call_id.as_str() == "blocked-shell" => {
-                assert!(progress.message.as_deref().is_some_and(|message| {
-                    message.contains(cwd_a.to_str().expect("cwd a path is UTF-8"))
-                }));
+            Some(Event::ToolResult(result)) if result.call_id.as_str() == "blocked-shell" => {
+                let display = result.display.expect("display");
+                assert_eq!(display.mode, "ro");
                 break;
             }
-            Some(Event::ToolResult(result)) if result.call_id.as_str() == "blocked-shell" => {
-                panic!("shell completed before conflicting lock was released: {result:?}");
-            }
             Some(_) => continue,
-            None => panic!("extension closed before shell progress"),
+            None => panic!("extension closed before shell result"),
         }
     }
-
-    writer
-        .write_event(&Event::AgentMetadataSet(tau_proto::AgentMetadataSet {
-            agent_id: agent_id.clone(),
-            key: tau_proto::AgentMetadataKey::new("ext_core-shell_cwd"),
-            value: CborValue::Text(cwd_b.display().to_string()),
-            inheritable: true,
-        }))
-        .expect("move cwd while waiting");
-    writer.flush().expect("flush cwd b");
-    let _ = reader
-        .read_event()
-        .expect("read cwd b context")
-        .expect("context");
 
     writer
         .write_event(&tool_started(
@@ -1123,31 +1096,84 @@ fn locked_rw_shell_uses_cwd_frozen_at_lock_selection() {
         ))
         .expect("dir_lock unlock");
     writer.flush().expect("flush unlock");
-
-    let mut saw_unlock = false;
-    let mut saw_shell = false;
     let deadline = Instant::now() + Duration::from_secs(3);
-    while !(saw_unlock && saw_shell) {
-        assert!(
-            Instant::now() < deadline,
-            "timed out waiting for unlock/shell"
-        );
+    loop {
+        assert!(Instant::now() < deadline, "timed out waiting for unlock");
         match reader.read_event().expect("read") {
-            Some(Event::ToolResult(result)) if result.call_id.as_str() == "unlock-shell-a" => {
-                saw_unlock = true
+            Some(Event::ToolResult(result)) if result.call_id.as_str() == "unlock-shell-a" => break,
+            Some(_) => continue,
+            None => panic!("extension closed before unlock result"),
+        }
+    }
+    assert!(!cwd_b.join("shell.txt").exists());
+
+    writer
+        .write_frame(&disconnect_frame(None))
+        .expect("disconnect");
+    writer.flush().expect("flush");
+}
+
+#[test]
+fn shell_with_covering_manual_lock_displays_inferred_read_write_mode() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let lock_dir = tempdir.path().to_path_buf();
+    let (mut reader, mut writer) = spawn_extension();
+    drain_startup(&mut reader);
+    send_dir_lock_config(&mut writer, true);
+
+    writer
+        .write_event(&tool_started(
+            "lock-root",
+            DIR_LOCK_TOOL_NAME,
+            cbor_text_map(vec![
+                ("command", "update"),
+                ("directory", &lock_dir.display().to_string()),
+            ]),
+            "agent-a",
+        ))
+        .expect("dir_lock update");
+    writer.flush().expect("flush lock");
+    loop {
+        match reader.read_event().expect("read") {
+            Some(Event::ToolResult(result)) if result.call_id.as_str() == "lock-root" => break,
+            Some(_) => continue,
+            None => panic!("extension closed before lock result"),
+        }
+    }
+
+    writer
+        .write_event(&tool_started(
+            "rw-shell",
+            SHELL_TOOL_NAME,
+            cbor_text_map(vec![
+                ("command", "printf rw-ok"),
+                ("cwd", &lock_dir.display().to_string()),
+            ]),
+            "agent-a",
+        ))
+        .expect("rw shell");
+    writer.flush().expect("flush shell");
+
+    loop {
+        match reader.read_event().expect("read") {
+            Some(Event::ToolProgress(progress)) if progress.call_id.as_str() == "rw-shell" => {
+                assert_eq!(progress.display.expect("display").mode, "rw");
+                break;
             }
-            Some(Event::ToolResult(result)) if result.call_id.as_str() == "blocked-shell" => {
-                saw_shell = true
+            Some(_) => continue,
+            None => panic!("extension closed before shell progress"),
+        }
+    }
+    loop {
+        match reader.read_event().expect("read") {
+            Some(Event::ToolResult(result)) if result.call_id.as_str() == "rw-shell" => {
+                assert_eq!(result.display.expect("display").mode, "rw");
+                break;
             }
             Some(_) => continue,
             None => panic!("extension closed before shell result"),
         }
     }
-    assert_eq!(
-        fs::read_to_string(cwd_a.join("shell.txt")).expect("read a"),
-        "after"
-    );
-    assert!(!cwd_b.join("shell.txt").exists());
 
     writer
         .write_frame(&disconnect_frame(None))
@@ -1161,6 +1187,7 @@ fn dir_lock_releases_delegate_locks_on_start_agent_result() {
     let lock_dir = tempdir.path().to_path_buf();
     let (mut reader, mut writer) = spawn_extension();
     drain_startup(&mut reader);
+    send_dir_lock_config(&mut writer, true);
 
     writer
         .write_event(&Event::StartAgentAccepted(tau_proto::StartAgentAccepted {
@@ -1242,6 +1269,7 @@ fn dir_lock_unlock_can_target_another_owner() {
     let lock_dir = tempdir.path().to_path_buf();
     let (mut reader, mut writer) = spawn_extension();
     drain_startup(&mut reader);
+    send_dir_lock_config(&mut writer, true);
 
     writer
         .write_event(&tool_started(
@@ -1330,6 +1358,7 @@ fn dir_lock_unlock_rejects_wrong_type_owner_agent_id() {
     let lock_dir = tempdir.path().to_path_buf();
     let (mut reader, mut writer) = spawn_extension();
     drain_startup(&mut reader);
+    send_dir_lock_config(&mut writer, true);
 
     writer
         .write_event(&tool_started(
@@ -1375,6 +1404,7 @@ fn dir_lock_update_errors_when_same_agent_already_holds_overlapping_lock() {
     fs::create_dir(&child_dir).expect("child dir");
     let (mut reader, mut writer) = spawn_extension();
     drain_startup(&mut reader);
+    send_dir_lock_config(&mut writer, true);
 
     writer
         .write_event(&tool_started(
@@ -1495,14 +1525,18 @@ fn dir_lock_waiting_progress_preserves_shell_mode() {
     let Event::ToolStarted(invoke) = tool_started(
         "blocked-shell",
         SHELL_TOOL_NAME,
-        cbor_text_map(vec![("mode", "rw"), ("command", "printf hello")]),
+        cbor_text_map(vec![("command", "printf hello")]),
         "agent-b",
     ) else {
         panic!("expected tool started");
     };
-    let Event::ToolProgress(progress) =
-        crate::dir_lock::waiting_progress_event(&invoke, &[tempdir.path().to_path_buf()])
-    else {
+    let Event::ToolProgress(progress) = crate::dir_lock::waiting_progress_event(
+        &invoke,
+        &[tempdir.path().to_path_buf()],
+        Some(crate::tools::shell::ShellCommandMode::visible(
+            crate::tools::shell::ShellAccessMode::ReadWrite,
+        )),
+    ) else {
         panic!("expected tool progress");
     };
     let display = progress.display.expect("waiting display");
@@ -1515,13 +1549,15 @@ fn dir_lock_waiting_progress_preserves_shell_mode() {
 }
 
 #[test]
-fn shell_ro_bypasses_directory_update_lock() {
-    // Read-only shell commands should behave like read tools for advisory
-    // directory locking: they may run while another agent holds an update lock.
+fn inferred_read_only_shell_bypasses_directory_update_lock() {
+    // Shell commands without a covering manual lock behave like read tools for
+    // advisory directory locking: they may run while another agent holds an
+    // update lock.
     let tempdir = TempDir::new().expect("tempdir");
     let lock_dir = tempdir.path().to_path_buf();
     let (mut reader, mut writer) = spawn_extension();
     drain_startup(&mut reader);
+    send_dir_lock_config(&mut writer, true);
     writer
         .write_event(&tool_started(
             "lock-root",
@@ -1547,7 +1583,6 @@ fn shell_ro_bypasses_directory_update_lock() {
             "read-only-shell",
             SHELL_TOOL_NAME,
             cbor_text_map(vec![
-                ("mode", "ro"),
                 ("command", "printf ro-ok"),
                 ("cwd", &lock_dir.display().to_string()),
             ]),
@@ -1598,6 +1633,7 @@ fn same_agent_edit_reenters_manual_lock_while_shell_auto_lock_is_active() {
     let edit_path = lock_dir.join("while-shell-runs.txt");
     let (mut reader, mut writer) = spawn_extension();
     drain_startup(&mut reader);
+    send_dir_lock_config(&mut writer, true);
 
     writer
         .write_event(&tool_started(
@@ -1740,15 +1776,12 @@ fn startup_registers_shell_schemas_with_cwd_and_timeout_minimum() {
             assert!(!description.contains("tool errors"));
             let parameters = register.tool.parameters.as_ref().expect("parameters");
             let properties = &parameters["properties"];
-            assert_eq!(properties["mode"]["enum"], serde_json::json!(["ro", "rw"]));
+            assert!(properties["mode"].is_null());
             assert_eq!(properties["cwd"]["type"], serde_json::json!("string"));
             if register.tool.name == SHELL_TOOL_NAME {
                 assert_eq!(properties["timeout"]["minimum"], serde_json::json!(0));
             }
-            assert_eq!(
-                parameters["required"],
-                serde_json::json!(["mode", "command"])
-            );
+            assert_eq!(parameters["required"], serde_json::json!(["command"]));
             found_shell |= register.tool.name == SHELL_TOOL_NAME;
             found_gpt_shell |= register.tool.name == GPT_SHELL_TOOL_NAME;
         }
@@ -4454,13 +4487,17 @@ fn shell_tool_reports_progress_and_success() {
     writer.flush().expect("flush");
 
     let progress = reader.read_event().expect("read").expect("progress");
-    assert!(matches!(progress, Event::ToolProgress(_)));
+    let Event::ToolProgress(progress) = progress else {
+        panic!("expected tool progress");
+    };
+    assert_eq!(progress.display.expect("display").mode, "");
 
     let result = reader.read_event().expect("read").expect("result");
     let Event::ToolResult(result) = result else {
         panic!("expected tool result");
     };
     assert_eq!(result.tool_name, SHELL_TOOL_NAME);
+    assert_eq!(result.display.as_ref().expect("display").mode, "");
     assert_eq!(
         optional_argument_text(&result.result, "output"),
         Ok(Some("out(no_nl) hello".to_owned()))
@@ -4496,12 +4533,14 @@ fn gpt_shell_tool_reports_progress_and_success() {
         panic!("expected tool progress");
     };
     assert_eq!(progress.tool_name, GPT_SHELL_TOOL_NAME);
+    assert_eq!(progress.display.expect("display").mode, "");
 
     let result = reader.read_event().expect("read").expect("result");
     let Event::ToolResult(result) = result else {
         panic!("expected tool result");
     };
     assert_eq!(result.tool_name, GPT_SHELL_TOOL_NAME);
+    assert_eq!(result.display.as_ref().expect("display").mode, "");
     assert_eq!(
         optional_argument_text(&result.result, "output"),
         Ok(Some("out(no_nl) hello".to_owned()))
@@ -4674,17 +4713,20 @@ fn shell_extension_rejects_invalid_config() {
 }
 
 #[test]
-fn shell_enforce_ro_mode_defaults_false_and_can_be_enabled() {
-    // ro-mode namespace bind mounts are opt-in because jj, nix-direnv, and
-    // likely other tools currently have compatibility issues with them.
-    assert!(!ExtConfig::default().enforce_ro_mode);
+fn shell_enforce_ro_bind_defaults_true_under_dir_lock_config() {
+    // The directory-lock mechanism is opt-in, but enforced read-only bind mounts
+    // default on once that mechanism is enabled.
+    assert!(ExtConfig::default().dir_lock.enforce_ro_bind);
 
     let config = tau_extension::parse_config::<ExtConfig>(&CborValue::Map(vec![(
-        CborValue::Text("enforce_ro_mode".to_owned()),
-        CborValue::Bool(true),
+        CborValue::Text("dir_lock".to_owned()),
+        CborValue::Map(vec![(
+            CborValue::Text("enforce_ro_bind".to_owned()),
+            CborValue::Bool(false),
+        )]),
     )]))
-    .expect("parse enforce_ro_mode config");
-    assert!(config.enforce_ro_mode);
+    .expect("parse enforce_ro_bind config");
+    assert!(!config.dir_lock.enforce_ro_bind);
 }
 
 #[test]
@@ -4765,9 +4807,9 @@ fn shell_extension_reports_invalid_working_directory_config() {
 }
 
 #[test]
-fn shell_ro_mode_is_advisory_by_default() {
-    // With enforce_ro_mode at its default false value, `mode: ro` affects the UI
-    // label only. The child is not run under a read-only bind mount.
+fn shell_hidden_read_write_mode_is_unrestricted_by_default() {
+    // With directory locking disabled, shell calls run read-write and publish no
+    // access-mode chip.
     let td = TempDir::new().expect("tempdir");
     let args = CborValue::Map(vec![
         (
@@ -4775,22 +4817,23 @@ fn shell_ro_mode_is_advisory_by_default() {
             CborValue::Text("printf ok > probe".to_owned()),
         ),
         (
-            CborValue::Text("mode".to_owned()),
-            CborValue::Text("ro".to_owned()),
-        ),
-        (
             CborValue::Text("cwd".to_owned()),
             CborValue::Text(td.path().to_string_lossy().into_owned()),
         ),
     ]);
 
-    let CommandOutcome::Finished(output) =
-        run_command_live(&args, &crate::config::ShellConfig::default(), false, None).expect("run")
-    else {
+    let CommandOutcome::Finished(output) = run_command_live(
+        &args,
+        &crate::config::ShellConfig::default(),
+        crate::tools::shell::ShellCommandMode::READ_WRITE_HIDDEN,
+        false,
+        None,
+    )
+    .expect("run") else {
         panic!("expected finished shell outcome");
     };
     let output = *output;
-    assert_eq!(output.display.mode, "ro");
+    assert_eq!(output.display.mode, "");
     assert_eq!(
         fs::read_to_string(td.path().join("probe")).expect("probe"),
         "ok"
@@ -4810,13 +4853,18 @@ fn shell_tool_multiline_display_uses_short_args_and_text_payload() {
         ),
     ]);
 
-    let CommandOutcome::Finished(output) =
-        run_command_live(&args, &crate::config::ShellConfig::default(), false, None).expect("run")
-    else {
+    let CommandOutcome::Finished(output) = run_command_live(
+        &args,
+        &crate::config::ShellConfig::default(),
+        crate::tools::shell::ShellCommandMode::READ_WRITE_HIDDEN,
+        false,
+        None,
+    )
+    .expect("run") else {
         panic!("expected finished shell outcome");
     };
     let output = *output;
-    assert_eq!(output.display.mode, "rw");
+    assert_eq!(output.display.mode, "");
     assert_eq!(output.display.args, "printf hello");
     assert_eq!(
         output.display.payload,
@@ -4839,13 +4887,18 @@ fn shell_tool_long_display_args_are_middle_shortened() {
         ),
     ]);
 
-    let CommandOutcome::Finished(output) =
-        run_command_live(&args, &crate::config::ShellConfig::default(), false, None).expect("run")
-    else {
+    let CommandOutcome::Finished(output) = run_command_live(
+        &args,
+        &crate::config::ShellConfig::default(),
+        crate::tools::shell::ShellCommandMode::READ_WRITE_HIDDEN,
+        false,
+        None,
+    )
+    .expect("run") else {
         panic!("expected finished shell outcome");
     };
     let output = *output;
-    assert_eq!(output.display.mode, "rw");
+    assert_eq!(output.display.mode, "");
     assert_eq!(
         output.display.args,
         "printf 1234567890123┄12345678901234567890"
@@ -4854,23 +4907,24 @@ fn shell_tool_long_display_args_are_middle_shortened() {
 }
 
 #[test]
-fn shell_tool_use_state_mode_carries_access_mode() {
-    // The CLI renders tool mode separately from display args so themes can
-    // distinguish the agent-declared shell access mode from the command text.
-    let args = CborValue::Map(vec![
-        (
-            CborValue::Text("command".to_owned()),
-            CborValue::Text("printf hello".to_owned()),
-        ),
-        (
-            CborValue::Text("mode".to_owned()),
-            CborValue::Text("ro".to_owned()),
-        ),
-    ]);
+fn shell_tool_use_state_mode_can_show_inferred_access_mode() {
+    // When directory locking is enabled, the CLI can render ext-shell's inferred
+    // shell access mode separately from display args.
+    let args = CborValue::Map(vec![(
+        CborValue::Text("command".to_owned()),
+        CborValue::Text("printf hello".to_owned()),
+    )]);
 
-    let CommandOutcome::Finished(output) =
-        run_command_live(&args, &crate::config::ShellConfig::default(), false, None).expect("run")
-    else {
+    let CommandOutcome::Finished(output) = run_command_live(
+        &args,
+        &crate::config::ShellConfig::default(),
+        crate::tools::shell::ShellCommandMode::visible(
+            crate::tools::shell::ShellAccessMode::ReadOnly,
+        ),
+        false,
+        None,
+    )
+    .expect("run") else {
         panic!("expected finished shell outcome");
     };
     let output = *output;
@@ -4888,9 +4942,14 @@ fn shell_tool_marks_invalid_utf8_stdout_line_and_marks_output_invalid() {
         CborValue::Text("printf '\\377stdout'".to_owned()),
     )]);
 
-    let CommandOutcome::Finished(output) =
-        run_command_live(&args, &crate::config::ShellConfig::default(), false, None).expect("run")
-    else {
+    let CommandOutcome::Finished(output) = run_command_live(
+        &args,
+        &crate::config::ShellConfig::default(),
+        crate::tools::shell::ShellCommandMode::READ_WRITE_HIDDEN,
+        false,
+        None,
+    )
+    .expect("run") else {
         panic!("expected finished shell outcome");
     };
     let output = *output;
@@ -4911,9 +4970,14 @@ fn shell_tool_replaces_invalid_utf8_stderr_and_marks_output_invalid() {
         CborValue::Text("printf '\\376stderr' >&2".to_owned()),
     )]);
 
-    let CommandOutcome::Finished(output) =
-        run_command_live(&args, &crate::config::ShellConfig::default(), false, None).expect("run")
-    else {
+    let CommandOutcome::Finished(output) = run_command_live(
+        &args,
+        &crate::config::ShellConfig::default(),
+        crate::tools::shell::ShellCommandMode::READ_WRITE_HIDDEN,
+        false,
+        None,
+    )
+    .expect("run") else {
         panic!("expected finished shell outcome");
     };
     let output = *output;
@@ -4933,9 +4997,14 @@ fn shell_tool_replaces_invalid_utf8_both_streams_in_combined_output() {
         CborValue::Text("printf '\\377stdout'; printf '\\376stderr' >&2".to_owned()),
     )]);
 
-    let CommandOutcome::Finished(output) =
-        run_command_live(&args, &crate::config::ShellConfig::default(), false, None).expect("run")
-    else {
+    let CommandOutcome::Finished(output) = run_command_live(
+        &args,
+        &crate::config::ShellConfig::default(),
+        crate::tools::shell::ShellCommandMode::READ_WRITE_HIDDEN,
+        false,
+        None,
+    )
+    .expect("run") else {
         panic!("expected finished shell outcome");
     };
     let output = *output;
@@ -4955,9 +5024,14 @@ fn shell_tool_marks_crlf_and_cr_line_endings() {
         CborValue::Text("printf 'a\r\nb\rc\n'".to_owned()),
     )]);
 
-    let CommandOutcome::Finished(output) =
-        run_command_live(&args, &crate::config::ShellConfig::default(), false, None).expect("run")
-    else {
+    let CommandOutcome::Finished(output) = run_command_live(
+        &args,
+        &crate::config::ShellConfig::default(),
+        crate::tools::shell::ShellCommandMode::READ_WRITE_HIDDEN,
+        false,
+        None,
+    )
+    .expect("run") else {
         panic!("expected finished shell outcome");
     };
     let output = *output;
@@ -4976,9 +5050,14 @@ fn shell_tool_omits_truncation_marker_without_truncation() {
         CborValue::Text("printf 'ok\\n'".to_owned()),
     )]);
 
-    let CommandOutcome::Finished(output) =
-        run_command_live(&args, &crate::config::ShellConfig::default(), false, None).expect("run")
-    else {
+    let CommandOutcome::Finished(output) = run_command_live(
+        &args,
+        &crate::config::ShellConfig::default(),
+        crate::tools::shell::ShellCommandMode::READ_WRITE_HIDDEN,
+        false,
+        None,
+    )
+    .expect("run") else {
         panic!("expected finished shell outcome");
     };
     let output = *output;
@@ -5004,9 +5083,14 @@ fn shell_tool_reports_truncation_marker_and_original_totals() {
         CborValue::Text(command),
     )]);
 
-    let CommandOutcome::Finished(output) =
-        run_command_live(&args, &crate::config::ShellConfig::default(), false, None).expect("run")
-    else {
+    let CommandOutcome::Finished(output) = run_command_live(
+        &args,
+        &crate::config::ShellConfig::default(),
+        crate::tools::shell::ShellCommandMode::READ_WRITE_HIDDEN,
+        false,
+        None,
+    )
+    .expect("run") else {
         panic!("expected finished shell outcome");
     };
     let output = *output;
@@ -5035,9 +5119,14 @@ fn shell_tool_marks_invalid_utf8_and_truncation_together() {
         CborValue::Text(command),
     )]);
 
-    let CommandOutcome::Finished(output) =
-        run_command_live(&args, &crate::config::ShellConfig::default(), false, None).expect("run")
-    else {
+    let CommandOutcome::Finished(output) = run_command_live(
+        &args,
+        &crate::config::ShellConfig::default(),
+        crate::tools::shell::ShellCommandMode::READ_WRITE_HIDDEN,
+        false,
+        None,
+    )
+    .expect("run") else {
         panic!("expected finished shell outcome");
     };
     let output = *output;
@@ -5061,9 +5150,14 @@ fn shell_tool_runs_in_requested_cwd() {
         ),
     ]);
 
-    let CommandOutcome::Finished(output) =
-        run_command_live(&args, &crate::config::ShellConfig::default(), false, None).expect("run")
-    else {
+    let CommandOutcome::Finished(output) = run_command_live(
+        &args,
+        &crate::config::ShellConfig::default(),
+        crate::tools::shell::ShellCommandMode::READ_WRITE_HIDDEN,
+        false,
+        None,
+    )
+    .expect("run") else {
         panic!("expected finished shell outcome");
     };
     let output = *output;
@@ -5089,10 +5183,14 @@ fn shell_tool_timeout_preserves_partial_output() {
         ),
     ]);
 
-    let CommandOutcome::Finished(output) =
-        run_command_live(&args, &crate::config::ShellConfig::default(), false, None)
-            .expect("timeout result")
-    else {
+    let CommandOutcome::Finished(output) = run_command_live(
+        &args,
+        &crate::config::ShellConfig::default(),
+        crate::tools::shell::ShellCommandMode::READ_WRITE_HIDDEN,
+        false,
+        None,
+    )
+    .expect("timeout result") else {
         panic!("expected finished shell outcome");
     };
     let output = *output;
@@ -5126,9 +5224,14 @@ fn shell_tool_returns_after_foreground_exit_even_if_background_holds_pipe() {
     ]);
 
     let started = std::time::Instant::now();
-    let CommandOutcome::Finished(output) =
-        run_command_live(&args, &crate::config::ShellConfig::default(), false, None).expect("run")
-    else {
+    let CommandOutcome::Finished(output) = run_command_live(
+        &args,
+        &crate::config::ShellConfig::default(),
+        crate::tools::shell::ShellCommandMode::READ_WRITE_HIDDEN,
+        false,
+        None,
+    )
+    .expect("run") else {
         panic!("expected finished shell outcome");
     };
     let output = *output;
@@ -5222,10 +5325,14 @@ fn shell_tool_timeout_returns_without_waiting_for_escaped_pipe_holder() {
     ]);
 
     let started = std::time::Instant::now();
-    let CommandOutcome::Finished(result) =
-        run_command_live(&args, &crate::config::ShellConfig::default(), false, None)
-            .expect("timeout result")
-    else {
+    let CommandOutcome::Finished(result) = run_command_live(
+        &args,
+        &crate::config::ShellConfig::default(),
+        crate::tools::shell::ShellCommandMode::READ_WRITE_HIDDEN,
+        false,
+        None,
+    )
+    .expect("timeout result") else {
         panic!("expected finished shell outcome");
     };
     let result = *result;
@@ -5257,9 +5364,14 @@ fn shell_tool_bounded_huge_output_reports_original_totals() {
         CborValue::Text(command),
     )]);
 
-    let CommandOutcome::Finished(output) =
-        run_command_live(&args, &crate::config::ShellConfig::default(), false, None).expect("run")
-    else {
+    let CommandOutcome::Finished(output) = run_command_live(
+        &args,
+        &crate::config::ShellConfig::default(),
+        crate::tools::shell::ShellCommandMode::READ_WRITE_HIDDEN,
+        false,
+        None,
+    )
+    .expect("run") else {
         panic!("expected finished shell outcome");
     };
     let output = *output;
@@ -5285,10 +5397,14 @@ fn shell_tool_timeout_zero_is_immediate_timeout() {
         ),
     ]);
 
-    let CommandOutcome::Finished(output) =
-        run_command_live(&args, &crate::config::ShellConfig::default(), false, None)
-            .expect("timeout result")
-    else {
+    let CommandOutcome::Finished(output) = run_command_live(
+        &args,
+        &crate::config::ShellConfig::default(),
+        crate::tools::shell::ShellCommandMode::READ_WRITE_HIDDEN,
+        false,
+        None,
+    )
+    .expect("timeout result") else {
         panic!("expected finished shell outcome");
     };
     let output = *output;
@@ -5317,8 +5433,14 @@ fn shell_tool_rejects_negative_timeout() {
         ),
     ]);
 
-    let error = run_command_live(&args, &crate::config::ShellConfig::default(), false, None)
-        .expect_err("timeout");
+    let error = run_command_live(
+        &args,
+        &crate::config::ShellConfig::default(),
+        crate::tools::shell::ShellCommandMode::READ_WRITE_HIDDEN,
+        false,
+        None,
+    )
+    .expect_err("timeout");
     assert_eq!(error.message, "argument `timeout` must be non-negative");
 }
 #[cfg(target_os = "linux")]
@@ -5335,17 +5457,13 @@ fn read_only_mount_setattr_flags_are_recursive() {
 #[cfg(target_os = "linux")]
 #[test]
 fn shell_tool_enforced_read_only_mode_bind_mounts_cwd_read_only() {
-    // Regression coverage for opt-in enforced `mode: ro`: lock elision is not
-    // enough. When `enforce_ro_mode` is true, the child must get a read-only
-    // bind mount over its cwd so accidental writes fail before they can alter
-    // the working tree.
+    // Regression coverage for enforced inferred read-only shell mode: lock
+    // elision is not enough. When `enforce_ro_bind` is true, the child must get a
+    // read-only bind mount over its cwd so accidental writes fail before they
+    // can alter the working tree.
     let dir = TempDir::new().expect("temp dir");
     fs::write(dir.path().join("input.txt"), "ok").expect("write fixture");
     let args = CborValue::Map(vec![
-        (
-            CborValue::Text("mode".to_owned()),
-            CborValue::Text("ro".to_owned()),
-        ),
         (
             CborValue::Text("cwd".to_owned()),
             CborValue::Text(dir.path().display().to_string()),
@@ -5365,6 +5483,9 @@ fn shell_tool_enforced_read_only_mode_bind_mounts_cwd_read_only() {
         "enforced_ro_test",
         &args,
         &crate::config::ShellConfig::default(),
+        crate::tools::shell::ShellCommandMode::visible(
+            crate::tools::shell::ShellAccessMode::ReadOnly,
+        ),
         true,
         None,
         &mut world,
@@ -5392,9 +5513,9 @@ fn shell_tool_enforced_read_only_mode_bind_mounts_cwd_read_only() {
 }
 
 #[test]
-fn shell_tool_rejects_wrong_type_mode() {
-    // A present-but-non-string access mode should not silently fall back to
-    // the write-locking default, because that hides malformed tool calls.
+fn shell_tool_ignores_legacy_wrong_type_mode_argument() {
+    // `mode` is no longer part of the schema. If a stale caller sends it anyway,
+    // shell execution is controlled by ext-shell's inferred mode argument.
     let args = CborValue::Map(vec![
         (
             CborValue::Text("mode".to_owned()),
@@ -5406,9 +5527,17 @@ fn shell_tool_rejects_wrong_type_mode() {
         ),
     ]);
 
-    let error = run_command_live(&args, &crate::config::ShellConfig::default(), false, None)
-        .expect_err("mode");
-    assert_eq!(error.message, "argument `mode` must be `ro` or `rw`");
+    let CommandOutcome::Finished(output) = run_command_live(
+        &args,
+        &crate::config::ShellConfig::default(),
+        crate::tools::shell::ShellCommandMode::READ_WRITE_HIDDEN,
+        false,
+        None,
+    )
+    .expect("legacy mode ignored") else {
+        panic!("expected finished shell outcome");
+    };
+    assert_eq!(output.display.mode, "");
 }
 
 #[test]
@@ -5426,8 +5555,14 @@ fn shell_tool_rejects_wrong_type_timeout() {
         ),
     ]);
 
-    let error = run_command_live(&args, &crate::config::ShellConfig::default(), false, None)
-        .expect_err("timeout");
+    let error = run_command_live(
+        &args,
+        &crate::config::ShellConfig::default(),
+        crate::tools::shell::ShellCommandMode::READ_WRITE_HIDDEN,
+        false,
+        None,
+    )
+    .expect_err("timeout");
     assert_eq!(error.message, "argument `timeout` must be an integer");
 }
 
@@ -5444,8 +5579,14 @@ fn shell_tool_rejects_wrong_type_cwd() {
         ),
     ]);
 
-    let error = run_command_live(&args, &crate::config::ShellConfig::default(), false, None)
-        .expect_err("cwd");
+    let error = run_command_live(
+        &args,
+        &crate::config::ShellConfig::default(),
+        crate::tools::shell::ShellCommandMode::READ_WRITE_HIDDEN,
+        false,
+        None,
+    )
+    .expect_err("cwd");
     assert_eq!(error.message, "argument `cwd` must be a string");
 }
 
@@ -5465,10 +5606,14 @@ fn shell_tool_reports_signal_termination_details() {
         ),
     ]);
 
-    let CommandOutcome::Finished(output) =
-        run_command_live(&args, &crate::config::ShellConfig::default(), false, None)
-            .expect("signal result")
-    else {
+    let CommandOutcome::Finished(output) = run_command_live(
+        &args,
+        &crate::config::ShellConfig::default(),
+        crate::tools::shell::ShellCommandMode::READ_WRITE_HIDDEN,
+        false,
+        None,
+    )
+    .expect("signal result") else {
         panic!("expected finished shell outcome");
     };
     let output = *output;

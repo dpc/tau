@@ -18,12 +18,12 @@ pub(crate) const SLOW_COMMAND_EXEC_TIME_THRESHOLD_SECS: u64 = 5;
 const VCR_REPLAY_SPEEDUP: u64 = 100;
 const MAX_CAPTURED_LINE_BYTES: usize = MAX_OUTPUT_BYTES;
 const USER_OUTPUT_TRUNCATED_MARKER: &str = "[output truncated]";
-/// Agent-declared filesystem access intent for a shell command.
+/// Filesystem access mode ext-shell infers for a shell command.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ShellAccessMode {
-    /// Command promises to only read filesystem state.
+    /// Command is treated as read-only filesystem access.
     ReadOnly,
-    /// Command may modify filesystem state and must take update locks.
+    /// Command is treated as read-write filesystem access.
     ReadWrite,
 }
 
@@ -36,32 +36,51 @@ impl ShellAccessMode {
     }
 }
 
-/// Parse the shell command access mode.
-pub(crate) fn parse_access_mode(arguments: &CborValue) -> Result<ShellAccessMode, String> {
-    match arguments {
-        CborValue::Map(entries) => entries
-            .iter()
-            .find_map(|(key, value)| match key {
-                CborValue::Text(key) if key == "mode" => Some(match value {
-                    CborValue::Text(mode) if mode == "ro" => Ok(ShellAccessMode::ReadOnly),
-                    CborValue::Text(mode) if mode == "rw" => Ok(ShellAccessMode::ReadWrite),
-                    _ => Err("argument `mode` must be `ro` or `rw`".to_owned()),
-                }),
-                _ => None,
-            })
-            .unwrap_or(Ok(ShellAccessMode::ReadWrite)),
-        _ => Ok(ShellAccessMode::ReadWrite),
+/// Shell mode plus whether the UI should render the mode chip.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ShellCommandMode {
+    /// Read-write execution with no UI mode chip. Used when `dir_lock` is
+    /// disabled and shell commands behave like ordinary host commands.
+    HiddenReadWrite,
+    /// Inferred execution mode shown in UI state. Used when `dir_lock` is
+    /// enabled, so the mode communicates lock-derived shell semantics.
+    Visible(ShellAccessMode),
+}
+
+impl ShellCommandMode {
+    /// Read-write shell execution with no UI mode chip.
+    pub(crate) const READ_WRITE_HIDDEN: Self = Self::HiddenReadWrite;
+
+    /// Build a visible inferred mode for directory-lock-enabled shells.
+    pub(crate) fn visible(access: ShellAccessMode) -> Self {
+        Self::Visible(access)
+    }
+
+    fn access(self) -> ShellAccessMode {
+        match self {
+            Self::HiddenReadWrite => ShellAccessMode::ReadWrite,
+            Self::Visible(access) => access,
+        }
+    }
+
+    fn display_label(self) -> Option<&'static str> {
+        match self {
+            Self::HiddenReadWrite => None,
+            Self::Visible(access) => Some(access.display_label()),
+        }
     }
 }
 
 /// Build the provider-owned display descriptor published as the first progress
 /// event after `tool.started`.
-pub(crate) fn initial_display(arguments: &CborValue) -> ToolUseState {
-    let access_mode = parse_access_mode(arguments).unwrap_or(ShellAccessMode::ReadWrite);
+pub(crate) fn initial_display(
+    arguments: &CborValue,
+    command_mode: ShellCommandMode,
+) -> ToolUseState {
     let command = argument_text(arguments, "command").unwrap_or_default();
     ToolUseState {
         args: command_display_args(&command),
-        mode: access_mode.display_label().to_owned(),
+        mode: command_mode.display_label().unwrap_or_default().to_owned(),
         status: ToolUseStatus::InProgress,
         status_text: tau_proto::PROGRESS_INDICATOR_TEXT.to_owned(),
         payload: command_display_payload(&command),
@@ -86,7 +105,8 @@ pub(crate) fn run_command_cancellable(
     call_id: &str,
     arguments: &CborValue,
     shell_config: &ShellConfig,
-    enforce_ro_mode: bool,
+    command_mode: ShellCommandMode,
+    enforce_ro_bind: bool,
     cancel_rx: Option<mpsc::Receiver<()>>,
     world: &mut ShellWorld,
 ) -> Result<CommandOutcome, ToolFailure> {
@@ -95,7 +115,13 @@ pub(crate) fn run_command_cancellable(
     }
 
     let started = std::time::Instant::now();
-    let outcome = run_command_live(arguments, shell_config, enforce_ro_mode, cancel_rx)?;
+    let outcome = run_command_live(
+        arguments,
+        shell_config,
+        command_mode,
+        enforce_ro_bind,
+        cancel_rx,
+    )?;
     let elapsed_ms = elapsed_millis(started.elapsed());
     let recorded = match &outcome {
         CommandOutcome::Finished(output) => WorldShellOutcome::Finished {
@@ -112,13 +138,13 @@ pub(crate) fn run_command_cancellable(
 pub(crate) fn run_command_live(
     arguments: &CborValue,
     shell_config: &ShellConfig,
-    enforce_ro_mode: bool,
+    command_mode: ShellCommandMode,
+    enforce_ro_bind: bool,
     cancel_rx: Option<mpsc::Receiver<()>>,
 ) -> Result<CommandOutcome, ToolFailure> {
-    let access_mode = parse_access_mode(arguments).map_err(ToolFailure::from)?;
     let command = argument_text(arguments, "command").map_err(ToolFailure::from)?;
     let cwd = optional_argument_text(arguments, "cwd").map_err(ToolFailure::from)?;
-    let display_mode = access_mode.display_label();
+    let display_mode = command_mode.display_label().unwrap_or_default();
     let display_args = command_display_args(&command);
     let display_payload = command_display_payload(&command);
     let timeout_secs = parse_timeout_secs(arguments).map_err(|message| {
@@ -134,8 +160,8 @@ pub(crate) fn run_command_live(
         .spawn_isolated(
             &command,
             cwd.as_deref(),
-            access_mode == ShellAccessMode::ReadOnly,
-            enforce_ro_mode,
+            command_mode.access() == ShellAccessMode::ReadOnly,
+            enforce_ro_bind,
         )
         .map_err(|error| {
             ToolFailure::from(format!("failed to start shell command: {error}"))
@@ -1803,10 +1829,6 @@ mod tests {
                 CborValue::Text(command.to_owned()),
             ),
             (
-                CborValue::Text("mode".to_owned()),
-                CborValue::Text("ro".to_owned()),
-            ),
-            (
                 CborValue::Text("timeout".to_owned()),
                 CborValue::Integer(timeout.into()),
             ),
@@ -1866,6 +1888,7 @@ mod tests {
                 &call_id,
                 &args_for_thread,
                 &ShellConfig::default(),
+                ShellCommandMode::READ_WRITE_HIDDEN,
                 false,
                 Some(cancel_rx),
                 &mut world,
@@ -1904,6 +1927,7 @@ mod tests {
             "call_shell",
             &args,
             &ShellConfig::default(),
+            ShellCommandMode::READ_WRITE_HIDDEN,
             false,
             None,
             &mut world,
@@ -1930,6 +1954,7 @@ mod tests {
             "call_shell",
             &args,
             &ShellConfig::default(),
+            ShellCommandMode::READ_WRITE_HIDDEN,
             false,
             None,
             &mut world,
@@ -1982,6 +2007,7 @@ mod tests {
             "call_slow_finished_shell",
             &args,
             &ShellConfig::default(),
+            ShellCommandMode::READ_WRITE_HIDDEN,
             false,
             None,
             &mut world,
@@ -2021,6 +2047,7 @@ mod tests {
                 "call_cancelled_shell",
                 &args_for_thread,
                 &ShellConfig::default(),
+                ShellCommandMode::READ_WRITE_HIDDEN,
                 false,
                 Some(cancel_rx),
                 &mut world,
@@ -2066,6 +2093,7 @@ mod tests {
             "call_cancelled_shell",
             &args,
             &ShellConfig::default(),
+            ShellCommandMode::READ_WRITE_HIDDEN,
             false,
             Some(cancel_rx),
             &mut world,

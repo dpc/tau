@@ -7,7 +7,7 @@ This note documents the move of filesystem update coordination out of `agent_sta
 
 - `tau-ext-shell` owns directory update locking with an optional `dir_lock` tool.
 - The tool name is `dir_lock`; Tau tool names do not allow hyphens.
-- `dir_lock` is registered enabled by default. Setting ext-shell config `dir_lock.enable = false` disables the handler, re-registers the tool as disabled by default, and opts mutating ext-shell tools out of locking.
+- `dir_lock` is registered disabled by default. Setting ext-shell config `dir_lock.enable = true` enables the handler and opts mutating ext-shell tools into locking.
 - `agent_start` sub-agents are independent agents. A parent agent lock does not automatically cover a delegate.
 - The harness no longer enforces tool or start-agent update/exclusive scheduling, and the protocol no longer carries scheduling metadata for tool specs, delegate progress, or start-agent requests.
 
@@ -35,15 +35,26 @@ Manual locks are released when ext-shell observes `agent.start_result` for a tra
 
 ## Automatic locking for ext-shell tools
 
-When `dir_lock.enable` is true (the default), these mutating tools acquire automatic update locks before running:
+When `dir_lock.enable` is true, these mutating tools acquire automatic update
+locks before running:
 
 - `edit`: locks the target file parent. Existing final symlinks are followed to the real edited file. If parents are missing, it locks the deepest existing ancestor so line-oriented create/overwrite behavior remains intact.
 - `apply_patch`: parses the patch and locks all touched source and destination directories as one FIFO request.
-- `shell` and `gpt_shell` with `mode: "rw"`: lock the canonical `cwd`, or the agent's remembered cwd when `cwd` is omitted. `mode: "ro"` declares a read-only command and skips automatic update locking. Relative `apply_patch`, `dir_lock`, and filesystem-tool paths are resolved against the same remembered cwd before lock selection/execution. Once lock selection starts, the tool executes with that cwd snapshot even if later cwd metadata commits while it is waiting.
+- `shell` and `gpt_shell`: no longer accept an explicit access-mode argument. If the calling agent holds a manual lock covering the canonical `cwd` (or the agent's remembered cwd when `cwd` is omitted), the shell call is inferred read-write and takes an automatic lock. Otherwise it is inferred read-only and skips automatic update locking. Relative `apply_patch`, `dir_lock`, and filesystem-tool paths are resolved against the same remembered cwd before lock selection/execution. Once lock selection starts, the tool executes with that cwd snapshot even if later cwd metadata commits while it is waiting.
 
 Automatic locks are held only for the tool invocation duration. They serialize with manual locks and with other automatic mutating calls. When the calling agent already owns a covering manual lock, automatic calls under that lock reenter the same writer section and do not wait on same-owner automatic calls; other agents remain blocked until the manual lock is released and all active automatic calls finish. Lock waiters do not consume the ext-shell worker semaphore; the semaphore is acquired only after the lock is granted.
 
-`read`, `grep`, `find`, `ls`, and `shell`/`gpt_shell` calls with `mode: "ro"` remain free to run while update locks are held. User `!` shell commands are UI commands, not agent tool calls, and are intentionally excluded.
+`read`, `grep`, `find`, `ls`, and inferred read-only `shell` / `gpt_shell` calls remain free to run while update locks are held. With `dir_lock.enable = false`, all shell calls are ordinary read-write commands and no access-mode chip is published for the UI. User `!` shell commands are UI commands, not agent tool calls, and are intentionally excluded.
+
+The shell read-write inference and automatic lock acquisition are atomic: if a
+manual lock is force-unlocked or otherwise removed before the automatic lock is
+granted, the queued shell call falls back to inferred read-only rather than
+running as read-write under stale lock coverage.
+
+`dir_lock.enforce_ro_bind` defaults true and is defense-in-depth for inferred
+read-only shell calls. When enabled and supported by the platform, ext-shell
+attempts a read-only bind mount for the shell cwd; without that native isolation,
+read-only remains advisory.
 
 
 ## UI behavior
@@ -53,7 +64,7 @@ Blocked ext-shell tool calls emit `ToolProgress` with a live `ToolDisplay` updat
 
 ## Caveats
 
-- Shell locking is advisory. A `mode: "ro"` shell command is trusted to avoid mutations for now, and a `mode: "rw"` shell command can mutate paths outside its `cwd` using absolute paths or command-specific flags.
+- Shell locking is advisory. An inferred read-write shell command can mutate paths outside its `cwd` using absolute paths or command-specific flags. Inferred read-only is not a hard sandbox unless native read-only bind isolation is active and effective.
 - `edit` creates to missing parents are safe but less precise because the exact final parent does not exist yet.
 - Same-owner reentry can keep other agents waiting for as long as the owner keeps a manual lock. That is intentional manual-lock behavior, not starvation inside the FIFO queue.
 - Out-of-tree non-shell tools no longer get harness update/exclusive serialization. They need their own coordination if they mutate shared state.

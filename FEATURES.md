@@ -323,12 +323,6 @@ tool for testing. The shell command and any wrapper prefix are configurable:
     // launched remotely via SSH and the harness-level cwd only affects
     // the local ssh process.
     working_directory: "/srv/project",
-    // Enforce read-only mode with a read-only bind mount. Default false: jj
-    // (https://github.com/jj-vcs/jj/issues/9579), nix-direnv
-    // (https://github.com/nix-community/nix-direnv/issues/749), and possibly
-    // other tools have compatibility issues, so read-only mode is advisory
-    // unless this is explicitly enabled.
-    enforce_ro_mode: false,
     shell: {
       command: "bash",
       prefix: ["nix", "develop", "-c"],
@@ -344,8 +338,12 @@ tool for testing. The shell command and any wrapper prefix are configurable:
         PAGER: "cat",
       },
     },
-    // Advisory directory update locks are enabled by default; set false to opt out.
-    dir_lock: { enable: true },
+    // Advisory directory update locks are disabled by default; set true to opt in.
+    // When enabled, shell commands are inferred read-write only while the agent
+    // holds a matching manual lock. Otherwise they are inferred read-only.
+    // `enforce_ro_bind` defaults true and attempts a read-only bind mount for
+    // inferred read-only shell calls.
+    dir_lock: { enable: false, enforce_ro_bind: true },
   },
 },
 ```
@@ -355,11 +353,14 @@ received, so default relative paths for shell and filesystem tools resolve there
 It is startup-only: later partial config updates may omit it, but attempts to
 change it to a different directory are rejected.
 
-When `dir_lock.enable` is true (the default), the `dir_lock` tool can manually
-lock an existing directory for updates, and `edit`, `apply_patch`, plus
-`shell`/`gpt_shell` calls with `mode: "rw"`, acquire matching automatic locks
-before mutating. Reads and `shell`/`gpt_shell` calls with `mode: "ro"` remain
-unblocked; user `!` commands are outside this agent-tool lock path. The
+When `dir_lock.enable` is true, the `dir_lock` tool can manually lock an
+existing directory for updates, and `edit` / `apply_patch` acquire matching
+automatic locks before mutating. `shell` / `gpt_shell` no longer accept an
+explicit access-mode argument: while the agent holds a manual lock covering the
+shell cwd, the command is inferred read-write and takes an automatic lock;
+otherwise it is inferred read-only. With `dir_lock.enable: false`, all shell
+commands run as ordinary read-write commands and the UI does not show an access
+mode chip. User `!` commands are outside this agent-tool lock path. The
 extension also injects `/shell-dir-force-unlock DIRECTORY` so the user can clear
 manual locks that overlap a displayed waiting directory.
 

@@ -44,6 +44,7 @@ use crate::dir_lock::{DIR_LOCK_TOOL_NAME, DirLockManager};
 use crate::scheduler::{WorkMeta, WorkPriority, WorkScheduler};
 #[cfg(any(test, feature = "echo-agent"))]
 use crate::tools::ECHO_TOOL_NAME;
+use crate::tools::shell::{ShellAccessMode, ShellCommandMode};
 use crate::tools::{
     APPLY_PATCH_TOOL_NAME, CD_TOOL_NAME, EDIT_TOOL_NAME, FIND_TOOL_NAME, GPT_SHELL_TOOL_NAME,
     GREP_TOOL_NAME, LS_TOOL_NAME, READ_TOOL_NAME, SHELL_TOOL_NAME, execute_tool,
@@ -391,9 +392,11 @@ where
             name: tau_proto::ToolName::new(SHELL_TOOL_NAME),
             model_visible_name: None,
             description: Some(
-                "Execute a shell command via `sh -c`. Set `mode` to `rw` for commands \
-                 that may modify files, or `ro` for read-only commands. Non-zero exits and timeouts \
-                 are returned as structured command results with output details. Output is capped at 2000 lines / \
+                "Execute a shell command via `sh -c`. When directory locking is enabled, commands \
+                 are inferred read-write only while the agent holds a matching `dir_lock`; otherwise \
+                 they are read-only. When directory locking is disabled, shell commands run read-write. \
+                 Non-zero exits and timeouts are returned as structured command results with output details. \
+                 Output is capped at 2000 lines / \
                  50 KB; truncated output keeps the first 1000 and last 1000 lines \
                  separated by a literal `...` line. Output lines are prefixed with `out ` \
                  for stdout or `err ` for stderr; missing trailing newlines are marked, e.g. \
@@ -409,11 +412,6 @@ where
             parameters: Some(serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "mode": {
-                        "type": "string",
-                        "enum": ["ro", "rw"],
-                        "description": "Filesystem access intent: `ro` for read-only commands, `rw` for commands that may modify files"
-                    },
                     "command": {
                         "type": "string",
                         "description": "The shell command to execute"
@@ -428,7 +426,7 @@ where
                         "description": "Optional working directory for the command"
                     }
                 },
-                "required": ["mode", "command"],
+                "required": ["command"],
                 "additionalProperties": false
             })),
             format: None,
@@ -449,11 +447,6 @@ where
             parameters: Some(serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "mode": {
-                        "type": "string",
-                        "enum": ["ro", "rw"],
-                        "description": "Filesystem access intent: `ro` for read-only commands, `rw` for commands that may modify files"
-                    },
                     "command": {
                         "type": "string",
                         "description": "The shell command to execute"
@@ -467,7 +460,7 @@ where
                         "description": "Optional working directory for the command"
                     }
                 },
-                "required": ["mode", "command"],
+                "required": ["command"],
                 "additionalProperties": false
             })),
             format: None,
@@ -901,7 +894,7 @@ fn dir_lock_tool_spec(enabled_by_default: bool) -> ToolSpec {
         name: tau_proto::ToolName::new(DIR_LOCK_TOOL_NAME),
         model_visible_name: None,
         description: Some(
-            "Acquire or release an ext-shell directory update lock. Enabled by default; set ext-shell config `dir_lock.enable` to false to opt out. Commands are `update` and `unlock`, and `directory` must be an existing directory. `unlock` normally releases the caller's lock; pass `owner_agent_id` to release an abandoned lock held by another agent."
+            "Acquire or release an ext-shell directory update lock. Disabled by default; set ext-shell config `dir_lock.enable` to true to opt in. Commands are `update` and `unlock`, and `directory` must be an existing directory. `unlock` normally releases the caller's lock; pass `owner_agent_id` to release an abandoned lock held by another agent."
                 .to_owned(),
         ),
         tool_type: tau_proto::ToolType::Function,
@@ -1116,7 +1109,7 @@ fn schedule_tool_started(
                     &tx_for_job,
                     &running_shells,
                     &lock_manager,
-                    config.enforce_ro_mode,
+                    config.dir_lock.enforce_ro_bind,
                     cwd_state.clone(),
                 );
             } else {
@@ -1126,7 +1119,11 @@ fn schedule_tool_started(
                     &tx_for_job,
                     &running_shells,
                     None,
-                    config.enforce_ro_mode,
+                    config
+                        .dir_lock
+                        .enable
+                        .then_some(ShellCommandMode::visible(ShellAccessMode::ReadOnly)),
+                    config.dir_lock.enforce_ro_bind,
                     cwd_state.clone(),
                     None,
                 );
@@ -1242,7 +1239,7 @@ fn dispatch_locked_tool_invoke(
     tx: &mpsc::Sender<HarnessInputMessage>,
     running_shells: &Arc<Mutex<HashMap<tau_proto::ToolCallId, mpsc::Sender<()>>>>,
     lock_manager: &DirLockManager,
-    enforce_ro_mode: bool,
+    enforce_ro_bind: bool,
     cwd_state: CwdState,
 ) {
     let cwd = cwd_state.get_or_default(&invoke.agent_id);
@@ -1251,41 +1248,59 @@ fn dispatch_locked_tool_invoke(
         &invoke.arguments,
         &cwd,
     ) {
-        Ok(Some(dirs)) => crate::dir_lock::normalize_lock_dirs(dirs),
-        Ok(None) => {
+        Ok(dirs) => crate::dir_lock::normalize_lock_dirs(dirs),
+        Err(error) => {
+            send_tool_failure(invoke, error, tx);
+            return;
+        }
+    };
+    let shell_command_mode = is_shell_command_tool(invoke.tool_name.as_str())
+        .then_some(ShellCommandMode::visible(ShellAccessMode::ReadWrite));
+
+    let lock_wait_started = Instant::now();
+    let wait_invoke = invoke.clone();
+    let wait_dirs = dirs.clone();
+    let wait_shell_command_mode = shell_command_mode;
+    let wait_tx = tx.clone();
+    let on_wait = move || {
+        let _ = wait_tx.send(HarnessInputMessage::emit(
+            crate::dir_lock::waiting_progress_event(
+                &wait_invoke,
+                &wait_dirs,
+                wait_shell_command_mode,
+            ),
+        ));
+    };
+    let guard = match if shell_command_mode.is_some() {
+        lock_manager.acquire_auto_if_manual_covers(
+            invoke.call_id.clone(),
+            invoke.agent_id.clone(),
+            dirs,
+            on_wait,
+        )
+    } else {
+        lock_manager.acquire_auto(
+            invoke.call_id.clone(),
+            invoke.agent_id.clone(),
+            dirs,
+            on_wait,
+        )
+    } {
+        Ok(guard) => guard,
+        Err(crate::dir_lock::LockAcquireError::NotCovered) => {
             dispatch_tool_invoke(
                 invoke,
                 shell_config,
                 tx,
                 running_shells,
                 None,
-                enforce_ro_mode,
-                cwd_state.clone(),
-                Some(cwd.clone()),
+                Some(ShellCommandMode::visible(ShellAccessMode::ReadOnly)),
+                enforce_ro_bind,
+                cwd_state,
+                Some(cwd),
             );
             return;
         }
-        Err(error) => {
-            send_tool_failure(invoke, error, tx);
-            return;
-        }
-    };
-
-    let lock_wait_started = Instant::now();
-    let wait_invoke = invoke.clone();
-    let wait_dirs = dirs.clone();
-    let wait_tx = tx.clone();
-    let guard = match lock_manager.acquire_auto(
-        invoke.call_id.clone(),
-        invoke.agent_id.clone(),
-        dirs,
-        move || {
-            let _ = wait_tx.send(HarnessInputMessage::emit(
-                crate::dir_lock::waiting_progress_event(&wait_invoke, &wait_dirs),
-            ));
-        },
-    ) {
-        Ok(guard) => guard,
         Err(crate::dir_lock::LockAcquireError::Cancelled) => {
             let _ = tx.send(HarnessInputMessage::emit(Event::ToolCancelled(
                 ToolCancelled {
@@ -1321,7 +1336,8 @@ fn dispatch_locked_tool_invoke(
         tx,
         running_shells,
         lock_wait_duration_seconds,
-        enforce_ro_mode,
+        shell_command_mode,
+        enforce_ro_bind,
         cwd_state,
         Some(cwd),
     );
@@ -1445,7 +1461,8 @@ fn dispatch_tool_invoke(
     tx: &mpsc::Sender<HarnessInputMessage>,
     running_shells: &Arc<Mutex<HashMap<tau_proto::ToolCallId, mpsc::Sender<()>>>>,
     lock_wait_duration_seconds: Option<u64>,
-    enforce_ro_mode: bool,
+    shell_command_mode: Option<ShellCommandMode>,
+    enforce_ro_bind: bool,
     cwd_state: CwdState,
     frozen_cwd: Option<PathBuf>,
 ) {
@@ -1518,7 +1535,8 @@ fn dispatch_tool_invoke(
             tx,
             running_shells,
             lock_wait_duration_seconds,
-            enforce_ro_mode,
+            shell_command_mode.unwrap_or(ShellCommandMode::READ_WRITE_HIDDEN),
+            enforce_ro_bind,
             world,
         );
         return;
@@ -1549,7 +1567,8 @@ fn dispatch_cancellable_shell_tool(
     tx: &mpsc::Sender<HarnessInputMessage>,
     running_shells: &Arc<Mutex<HashMap<tau_proto::ToolCallId, mpsc::Sender<()>>>>,
     lock_wait_duration_seconds: Option<u64>,
-    enforce_ro_mode: bool,
+    shell_command_mode: ShellCommandMode,
+    enforce_ro_bind: bool,
     mut world: crate::tools::world::ShellWorld,
 ) {
     let (cancel_tx, cancel_rx) = mpsc::channel();
@@ -1569,14 +1588,18 @@ fn dispatch_cancellable_shell_tool(
             tool_name: invoke.tool_name.clone(),
             message: None,
             progress: None,
-            display: Some(crate::tools::shell::initial_display(&invoke.arguments)),
+            display: Some(crate::tools::shell::initial_display(
+                &invoke.arguments,
+                shell_command_mode,
+            )),
         },
     )));
     let result = crate::tools::shell::run_command_cancellable(
         invoke.call_id.as_str(),
         &invoke.arguments,
         &shell_config,
-        enforce_ro_mode,
+        shell_command_mode,
+        enforce_ro_bind,
         Some(cancel_rx),
         &mut world,
     );
@@ -1743,6 +1766,10 @@ fn is_dir_lock_update_tool(name: &str) -> bool {
         name,
         EDIT_TOOL_NAME | APPLY_PATCH_TOOL_NAME | SHELL_TOOL_NAME | GPT_SHELL_TOOL_NAME
     )
+}
+
+fn is_shell_command_tool(name: &str) -> bool {
+    matches!(name, SHELL_TOOL_NAME | GPT_SHELL_TOOL_NAME)
 }
 
 #[cfg(any(test, feature = "echo-agent"))]

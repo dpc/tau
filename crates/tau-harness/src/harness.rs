@@ -1478,16 +1478,10 @@ where
                         call_id: call_id.into(),
                         name: ToolName::new("shell"),
                         tool_type: tau_proto::ToolType::Function,
-                        arguments: CborValue::Map(vec![
-                            (
-                                CborValue::Text("mode".to_owned()),
-                                CborValue::Text("rw".to_owned()),
-                            ),
-                            (
-                                CborValue::Text("command".to_owned()),
-                                CborValue::Text(cmd.trim().to_owned()),
-                            ),
-                        ]),
+                        arguments: CborValue::Map(vec![(
+                            CborValue::Text("command".to_owned()),
+                            CborValue::Text(cmd.trim().to_owned()),
+                        )]),
                     }
                 } else {
                     ToolCallItem {
