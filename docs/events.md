@@ -12,6 +12,7 @@ traffic (handshake, subscribe/intercept, `emit`, `deliver`, etc.) and never
 appear on the bus or in durable semantic logs. Events are not top-level wire
 items; peers send them inside `emit` and receive them inside `deliver`. See
 [messages.md](messages.md) for the message-side reference.
+Tool registration payloads now include neutral `tags`, and provider model metadata includes model capability `tags`; these are protocol data used by the harness to decide the effective prompt tool surface.
 
 A few categories don't map to a single emitter — those are grouped by the
 class of function that raises them.

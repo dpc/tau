@@ -231,6 +231,11 @@ an explicit token threshold, and can also use `tools`, `enable_tool_groups`,
 `disable_tool_groups`, `enable_tools`, and `disable_tools` to customize internal
 tool availability. `tools` overrides the default set when present, tool-group
 overrides apply next, and individual tool overrides apply last.
+The harness also applies model-aware tool-surface policy from provider/tool tags:
+ChatGPT-tagged models see the `apply_patch`/`gpt_shell` shell alternatives,
+while generic models keep the `edit`/`shell` defaults. Explicit per-role
+`enable_tools`/`tools` entries pin fallback tools visible; `disable_tools` still
+wins.
 
 `default_role` selects the startup role; if it is omitted Tau starts on the
 first role in `role_groups` order. `tau --role <role>` overrides the startup role
@@ -303,7 +308,7 @@ config overrides after it has already been spawned.
 ### `core-shell` — shell and filesystem tools
 
 Registers the everyday tools the agent uses to inspect and edit a project:
-`shell`, `read`, `edit`, `apply_patch`, `grep`, `find`, `ls`, plus an `echo`
+`shell`, `gpt_shell`, `read`, `edit`, `apply_patch`, `grep`, `find`, `ls`, plus an `echo`
 tool for testing. The shell command and any wrapper prefix are configurable:
 
 ```json5

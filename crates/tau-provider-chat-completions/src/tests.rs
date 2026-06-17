@@ -9,11 +9,35 @@ fn provider() -> ChatCompletionsProvider {
             display_name: None,
             context_window: 128_000,
             compat: None,
+            tags: Vec::new(),
         }],
         max_output_tokens: DEFAULT_MAX_OUTPUT_TOKENS,
         extra_body: BTreeMap::new(),
+        tags: Vec::new(),
         compat: ChatCompletionsCompat::openai_defaults(),
     }
+}
+
+/// Ensures provider-wide and model-local model tags are both published once so
+/// harness policy can reason about OpenAI-compatible model capabilities.
+#[test]
+fn models_for_provider_unions_provider_and_model_tags() {
+    let mut provider = provider();
+    provider.tags = vec![ModelTag::new("tools:function-json")];
+    provider.models[0].tags = vec![
+        ModelTag::new("tools:function-json"),
+        ModelTag::new("shell:custom"),
+    ];
+
+    let models = models_for_provider(&ProviderName::new("openai"), &provider);
+
+    assert_eq!(
+        models[0].tags,
+        vec![
+            ModelTag::new("tools:function-json"),
+            ModelTag::new("shell:custom")
+        ]
+    );
 }
 
 fn resolved_provider(provider: &ChatCompletionsProvider) -> ResolvedProvider {

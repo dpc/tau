@@ -646,6 +646,7 @@ fn register_tool_spec() -> ToolSpec {
             "additionalProperties": false
         })),
         format: None,
+        tags: Vec::new(),
         enabled_by_default: true,
         background_support: None,
     }
@@ -667,6 +668,7 @@ fn send_tool_spec() -> ToolSpec {
             "additionalProperties": false
         })),
         format: None,
+        tags: Vec::new(),
         enabled_by_default: true,
         background_support: None,
     }

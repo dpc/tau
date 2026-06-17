@@ -12,8 +12,9 @@ use serde::{Deserialize, Serialize};
 use crate::{
     ActionInvocationId, AgentContextKey, AgentId, AgentMessageId, AgentMetadataKey, AgentPromptId,
     CborValue, ContextItem, DiffSummary, EventCategory, EventName, ExtensionInstanceId,
-    ExtensionName, ModelId, PromptContext, PromptFragment, ProviderResponseItem,
+    ExtensionName, ModelId, ModelTag, PromptContext, PromptFragment, ProviderResponseItem,
     ProviderTokenUsage, SessionId, SkillName, ToolCallId, ToolDefinition, ToolGroupName, ToolName,
+    ToolTag,
 };
 
 fn default_true() -> bool {
@@ -899,6 +900,9 @@ pub struct ToolSpec {
     /// unconstrained text for custom tools.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub format: Option<ToolFormat>,
+    /// Neutral capability tags used by harness-owned tool policy.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<ToolTag>,
     /// Whether this tool should be advertised to the agent when the role has
     /// no explicit `tools` allow-list and `disable_tools` does not remove it.
     #[serde(default = "tool_enabled_by_default", skip_serializing_if = "is_true")]
@@ -1920,6 +1924,9 @@ pub struct ProviderModelInfo {
     /// is absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
+    /// Provider-published model capability tags used by harness-owned policy.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<ModelTag>,
     /// Provider-published preference for becoming the implicit default model
     /// when the selected role does not name one. Higher values win; ties are
     /// broken by model id for deterministic behavior. Zero means neutral.

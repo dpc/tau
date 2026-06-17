@@ -18,7 +18,7 @@ use tau_proto::{
     CborValue, ConfigError, Event, ExtAgentContextPublish, ExtPromptFragmentPublish,
     ExtensionContextReady, HarnessInputMessage, HarnessOutputMessage, PeerInputReader,
     PeerOutputWriter, PromptContent, PromptFragment, PromptPriority, SessionAgentLoaded,
-    SessionStarted, ToolCancelled, ToolResult, ToolResultKind, ToolSpec,
+    SessionStarted, ToolCancelled, ToolResult, ToolResultKind, ToolSpec, ToolTag,
 };
 use tracing::{debug, trace};
 
@@ -48,6 +48,10 @@ use crate::tools::{
     APPLY_PATCH_TOOL_NAME, CD_TOOL_NAME, EDIT_TOOL_NAME, FIND_TOOL_NAME, GPT_SHELL_TOOL_NAME,
     GREP_TOOL_NAME, LS_TOOL_NAME, READ_TOOL_NAME, SHELL_TOOL_NAME, execute_tool,
 };
+
+fn tool_tags(tags: &[&str]) -> Vec<ToolTag> {
+    tags.iter().map(|tag| ToolTag::new(*tag)).collect()
+}
 
 const SHELL_DIR_FORCE_UNLOCK_ACTION_ID: &str = "shell.dir.force_unlock";
 
@@ -87,6 +91,7 @@ where
         tool_type: tau_proto::ToolType::Function,
         parameters: None,
         format: None,
+        tags: tool_tags(&["test:echo"]),
         enabled_by_default: false,
         background_support: None,
     });
@@ -161,6 +166,7 @@ where
                 "additionalProperties": false
             })),
             format: None,
+            tags: tool_tags(&["test:echo"]),
             enabled_by_default: true,
             background_support: None,
         },
@@ -227,6 +233,7 @@ where
                 "additionalProperties": false
             })),
             format: None,
+            tags: tool_tags(&["shell:edit", "shell:edit:line", "shell:mutates-files"]),
             enabled_by_default: true,
             background_support: None,
         },
@@ -240,6 +247,7 @@ where
             tool_type: tau_proto::ToolType::Custom,
             parameters: None,
             format: Some(tau_proto::ToolFormat::Text),
+            tags: tool_tags(&["shell:edit", "shell:edit:patch", "shell:mutates-files"]),
             enabled_by_default: false,
             background_support: None,
         },
@@ -291,6 +299,7 @@ where
                 "additionalProperties": false
             })),
             format: None,
+            tags: tool_tags(&["shell:read", "shell:search"]),
             enabled_by_default: true,
             background_support: None,
         },
@@ -325,6 +334,7 @@ where
                 "additionalProperties": false
             })),
             format: None,
+            tags: tool_tags(&["shell:read", "shell:search"]),
             enabled_by_default: true,
             background_support: None,
         },
@@ -357,6 +367,7 @@ where
                 "additionalProperties": false
             })),
             format: None,
+            tags: tool_tags(&["shell:read", "shell:list"]),
             enabled_by_default: true,
             background_support: None,
         },
@@ -372,6 +383,7 @@ where
                 "additionalProperties": false
             })),
             format: None,
+            tags: tool_tags(&["shell:cwd"]),
             enabled_by_default: true,
             background_support: None,
         },
@@ -420,6 +432,7 @@ where
                 "additionalProperties": false
             })),
             format: None,
+            tags: tool_tags(&["shell:exec", "shell:exec:generic"]),
             enabled_by_default: true,
             background_support: None,
         },
@@ -458,6 +471,7 @@ where
                 "additionalProperties": false
             })),
             format: None,
+            tags: tool_tags(&["shell:exec", "shell:exec:command-text"]),
             enabled_by_default: false,
             background_support: None,
         },
@@ -912,6 +926,7 @@ fn dir_lock_tool_spec(enabled_by_default: bool) -> ToolSpec {
             "additionalProperties": false
         })),
         format: None,
+        tags: tool_tags(&["shell:lock"]),
         enabled_by_default,
         background_support: None,
     }

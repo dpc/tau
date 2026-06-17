@@ -567,6 +567,149 @@ impl<'de> serde::Deserialize<'de> for ModelId {
 }
 
 // ---------------------------------------------------------------------------
+// ModelTag / ToolTag (validated newtypes)
+// ---------------------------------------------------------------------------
+
+fn is_valid_tag_identifier(s: &str, max_len: usize) -> bool {
+    !s.is_empty()
+        && s.len() <= max_len
+        && s.bytes().all(|b| {
+            b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'_' | b'-' | b'.' | b':')
+        })
+}
+
+/// Provider-published model capability tag used by harness-owned tool policy.
+///
+/// Tags are deterministic lowercase ASCII identifiers, optionally namespaced
+/// with `:` segments, such as `shell:chatgpt` or `tools:custom-text`.
+#[derive(Clone, Debug, Eq, PartialEq, Hash, serde::Serialize)]
+#[serde(transparent)]
+pub struct ModelTag(String);
+
+impl ModelTag {
+    /// Maximum allowed length for a model tag, in bytes.
+    pub const MAX_LEN: usize = 256;
+    /// Create a new `ModelTag`, panicking if the tag is invalid.
+    pub fn new(s: impl Into<String>) -> Self {
+        let s = s.into();
+        assert!(Self::is_valid(&s), "invalid model tag: {s:?}");
+        Self(s)
+    }
+    /// Try to create a `ModelTag`, returning `None` if invalid.
+    pub fn try_new(s: impl Into<String>) -> Option<Self> {
+        let s = s.into();
+        Self::is_valid(&s).then_some(Self(s))
+    }
+    /// Borrow the tag as a string slice.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+    /// Convert the tag into its owned string.
+    pub fn into_string(self) -> String {
+        self.0
+    }
+    fn is_valid(s: &str) -> bool {
+        is_valid_tag_identifier(s, Self::MAX_LEN)
+    }
+}
+impl std::ops::Deref for ModelTag {
+    type Target = str;
+    fn deref(&self) -> &str {
+        &self.0
+    }
+}
+impl std::fmt::Display for ModelTag {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+impl AsRef<str> for ModelTag {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+impl<'de> serde::Deserialize<'de> for ModelTag {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        if Self::is_valid(&s) {
+            Ok(Self(s))
+        } else {
+            Err(serde::de::Error::custom(format!(
+                "invalid model tag: {s:?}"
+            )))
+        }
+    }
+}
+
+/// Extension-published neutral tool capability tag used by harness-owned
+/// policy.
+///
+/// Tags describe what a tool is, not which model should receive it; examples
+/// include `shell:edit:line`, `shell:edit:patch`, and `shell:exec`.
+#[derive(Clone, Debug, Eq, PartialEq, Hash, serde::Serialize)]
+#[serde(transparent)]
+pub struct ToolTag(String);
+
+impl ToolTag {
+    /// Maximum allowed length for a tool tag, in bytes.
+    pub const MAX_LEN: usize = 256;
+    /// Create a new `ToolTag`, panicking if the tag is invalid.
+    pub fn new(s: impl Into<String>) -> Self {
+        let s = s.into();
+        assert!(Self::is_valid(&s), "invalid tool tag: {s:?}");
+        Self(s)
+    }
+    /// Try to create a `ToolTag`, returning `None` if invalid.
+    pub fn try_new(s: impl Into<String>) -> Option<Self> {
+        let s = s.into();
+        Self::is_valid(&s).then_some(Self(s))
+    }
+    /// Borrow the tag as a string slice.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+    /// Convert the tag into its owned string.
+    pub fn into_string(self) -> String {
+        self.0
+    }
+    fn is_valid(s: &str) -> bool {
+        is_valid_tag_identifier(s, Self::MAX_LEN)
+    }
+}
+impl std::ops::Deref for ToolTag {
+    type Target = str;
+    fn deref(&self) -> &str {
+        &self.0
+    }
+}
+impl std::fmt::Display for ToolTag {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+impl AsRef<str> for ToolTag {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+impl<'de> serde::Deserialize<'de> for ToolTag {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        if Self::is_valid(&s) {
+            Ok(Self(s))
+        } else {
+            Err(serde::de::Error::custom(format!("invalid tool tag: {s:?}")))
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // ToolName (validated newtype)
 // ---------------------------------------------------------------------------
 

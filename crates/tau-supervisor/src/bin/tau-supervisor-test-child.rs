@@ -97,6 +97,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                 tool_type: tau_proto::ToolType::Function,
                 parameters: None,
                 format: None,
+                tags: Vec::new(),
                 enabled_by_default: true,
                 background_support: None,
             },

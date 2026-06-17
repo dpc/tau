@@ -174,6 +174,7 @@ fn cmd_add_chat_completions() -> Result<(), Box<dyn Error>> {
         models,
         max_output_tokens: tau_provider_chat_completions::DEFAULT_MAX_OUTPUT_TOKENS,
         extra_body: BTreeMap::new(),
+        tags: Vec::new(),
         compat: chat_completions_add_compat(),
     };
     save_profile(&name, &BuiltinProviderProfile::ChatCompletions(profile))?;
@@ -302,6 +303,7 @@ fn parse_chat_model_list(input: &str) -> Result<Vec<ChatCompletionsModel>, Box<d
             display_name: None,
             context_window: 128_000,
             compat: None,
+            tags: Vec::new(),
         });
     }
     if models.is_empty() {

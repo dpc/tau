@@ -10,7 +10,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 use tau_proto::{
     AgentPromptId, ContentPart, ContextItem, ContextRole, Event, HarnessInputMessage,
-    InProgressOutputItem, ModelId, ModelName, OpaqueProviderItem, PeerOutputWriter,
+    InProgressOutputItem, ModelId, ModelName, ModelTag, OpaqueProviderItem, PeerOutputWriter,
     ProviderBackend, ProviderBackendKind, ProviderBackendTransport, ProviderModelInfo,
     ProviderName, ProviderResponseFinished, ProviderResponseItem, ProviderResponseUpdated,
     ProviderStopReason, ProviderTokenUsage, ReasoningTextItem, ReasoningTextKind, ThinkingSummary,
@@ -38,6 +38,9 @@ pub struct ChatCompletionsProvider {
     /// Model ids to publish under this provider namespace.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub models: Vec<ChatCompletionsModel>,
+    /// Provider-wide model capability tags applied to every published model.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<ModelTag>,
     /// Maximum output tokens requested from the upstream provider.
     ///
     /// Chat Completions servers often have small server-side defaults when the
@@ -76,6 +79,9 @@ pub struct ChatCompletionsModel {
     /// Optional model-specific compatibility overrides.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compat: Option<ChatCompletionsCompat>,
+    /// Model-specific capability tags added to the provider-wide tags.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<ModelTag>,
 }
 
 /// Compatibility switches for OpenAI-compatible Chat Completions APIs.
@@ -123,6 +129,7 @@ impl Default for ChatCompletionsProvider {
             models: Vec::new(),
             max_output_tokens: DEFAULT_MAX_OUTPUT_TOKENS,
             extra_body: BTreeMap::new(),
+            tags: Vec::new(),
             compat: ChatCompletionsCompat::default(),
         }
     }
@@ -253,6 +260,7 @@ pub fn models_for_provider(
         .map(|model| ProviderModelInfo {
             id: ModelId::new(provider_name.clone(), model.id.clone()),
             display_name: model.display_name.clone(),
+            tags: merged_model_tags(&provider.tags, &model.tags),
             default_affinity: 0,
             context_window: model.context_window,
             efforts: model_efforts(model.compat.unwrap_or(provider.compat)),
@@ -261,6 +269,16 @@ pub fn models_for_provider(
             supports_compaction: false,
         })
         .collect()
+}
+
+fn merged_model_tags(provider_tags: &[ModelTag], model_tags: &[ModelTag]) -> Vec<ModelTag> {
+    let mut tags = provider_tags.to_vec();
+    for tag in model_tags {
+        if !tags.iter().any(|existing| existing == tag) {
+            tags.push(tag.clone());
+        }
+    }
+    tags
 }
 
 fn model_efforts(compat: ChatCompletionsCompat) -> Vec<tau_proto::Effort> {

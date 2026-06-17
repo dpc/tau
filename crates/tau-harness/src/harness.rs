@@ -531,6 +531,32 @@ pub(crate) struct PendingTool {
     pub(crate) tool_type: ToolType,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ToolRoleState {
+    enabled: bool,
+    pinned: bool,
+    disabled: bool,
+    group_disabled: bool,
+}
+
+fn tool_alternative_rank(
+    spec: &tau_proto::ToolSpec,
+    chatgpt_shell: bool,
+) -> Option<(&'static str, i32)> {
+    let has_tag = |tag: &str| spec.tags.iter().any(|candidate| candidate.as_str() == tag);
+    if has_tag("shell:edit:patch") {
+        Some(("shell.edit", i32::from(chatgpt_shell) * 100))
+    } else if has_tag("shell:edit:line") {
+        Some(("shell.edit", i32::from(!chatgpt_shell) * 100))
+    } else if has_tag("shell:exec:command-text") {
+        Some(("shell.exec", i32::from(chatgpt_shell) * 100))
+    } else if has_tag("shell:exec:generic") {
+        Some(("shell.exec", i32::from(!chatgpt_shell) * 100))
+    } else {
+        None
+    }
+}
+
 const DEFAULT_AGENT_ID_TEMPLATE: &str = "{{random_alphanumeric 6}}";
 const AGENT_ID_TEMPLATE_COLLISION_ATTEMPTS: usize = 10;
 
@@ -1002,6 +1028,8 @@ mod delegate_display_tests;
 mod semantic_event_router_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tool_policy_tests;
 
 mod agent_context;
 mod current_session;
@@ -1253,6 +1281,13 @@ pub struct Harness {
     /// attribute the corresponding finished response even if the user
     /// switches models while it is in flight.
     pub(crate) prompt_models: std::collections::HashMap<AgentPromptId, ModelId>,
+    /// Effective tool specs advertised for each in-flight prompt. Tool-call
+    /// validation uses this snapshot so mid-turn role/model switches cannot
+    /// change which tools the provider was allowed to call.
+    pub(crate) prompt_tool_specs:
+        std::collections::HashMap<AgentPromptId, Vec<tau_proto::ToolSpec>>,
+    /// Prompt snapshot owner for each provider-emitted tool call id.
+    pub(crate) prompt_tool_call_prompts: std::collections::HashMap<ToolCallId, AgentPromptId>,
     /// Selected skill winners, keyed by name.
     pub(crate) discovered_skills: std::collections::HashMap<tau_proto::SkillName, DiscoveredSkill>,
     /// All discovered skill candidates, keyed by name, so removing the winner
@@ -1359,6 +1394,7 @@ where
             models: vec![ProviderModelInfo {
                 id: "echo/model".into(),
                 display_name: Some("Echo".to_owned()),
+                tags: Vec::new(),
                 default_affinity: 0,
                 context_window: 128_000,
                 efforts: vec![Effort::Off],
@@ -1627,6 +1663,8 @@ impl Harness {
             selected_model: parts.selected_model,
             current_session_state: CurrentSessionState::default(),
             prompt_models: HashMap::new(),
+            prompt_tool_specs: HashMap::new(),
+            prompt_tool_call_prompts: HashMap::new(),
             discovered_skills,
             discovered_skill_candidates,
             discovered_agents_files: Vec::new(),
@@ -2600,6 +2638,7 @@ impl Harness {
 
         self.prompt_agents.remove(agent_prompt_id.as_str());
         self.pending_provider_prompts.remove(&agent_prompt_id);
+        self.clear_prompt_tool_snapshot(&agent_prompt_id);
         if let Some(model) = self.prompt_models.remove(&agent_prompt_id) {
             self.current_session_state.token_usage.total.requests = self
                 .current_session_state
@@ -6055,6 +6094,12 @@ impl Harness {
         );
     }
 
+    fn clear_prompt_tool_snapshot(&mut self, agent_prompt_id: &AgentPromptId) {
+        self.prompt_tool_specs.remove(agent_prompt_id);
+        self.prompt_tool_call_prompts
+            .retain(|_, prompt_id| prompt_id != agent_prompt_id);
+    }
+
     /// Releases the conversation/name/provider mappings for a completed tool
     /// call. Must run *after* the result/error event has been published so
     /// terminal-event enrichment and transcript attribution can still read the
@@ -6064,6 +6109,14 @@ impl Harness {
         self.tool_agents.remove(call_id);
         self.pending_tools.remove(call_id);
         self.pending_tool_providers.remove(call_id);
+        if let Some(prompt_id) = self.prompt_tool_call_prompts.remove(call_id)
+            && !self
+                .prompt_tool_call_prompts
+                .values()
+                .any(|other_prompt_id| other_prompt_id == &prompt_id)
+        {
+            self.prompt_tool_specs.remove(&prompt_id);
+        }
     }
 
     fn validate_tool_event_source(&self, call_id: &ToolCallId, source_id: &str) -> bool {
@@ -7803,6 +7856,9 @@ impl Harness {
         self.pending_action_invocations.clear();
         self.prompt_agents.clear();
         self.pending_provider_prompts.clear();
+        self.prompt_models.clear();
+        self.prompt_tool_specs.clear();
+        self.prompt_tool_call_prompts.clear();
         self.suppressed_background_completion_prompts.clear();
         self.background_completion_targets.clear();
         self.canceled_prompts.clear();
@@ -8950,7 +9006,8 @@ impl Harness {
                 context: tau_proto::PromptContext::default(),
             });
         let context = prompt_context.context;
-        let tools = self.gather_tool_definitions_for_role(&role_name);
+        let tool_specs = self.gather_effective_tool_specs_for_role_model(&role_name, Some(&model));
+        let tools = self.tool_definitions_from_specs(&tool_specs);
         let durable_agent_id = agent_id_for_tree.as_deref().map(crate::parse_agent_id);
         let system_prompt =
             self.build_system_prompt_for_role_and_agent(&role_name, durable_agent_id.as_ref());
@@ -8980,6 +9037,8 @@ impl Harness {
         self.current_session_state.token_usage.start_request(&model);
         self.prompt_models
             .insert(agent_prompt_id.clone(), model.clone());
+        self.prompt_tool_specs
+            .insert(agent_prompt_id.clone(), tool_specs);
         let session_id = self
             .agents
             .get(cid)
@@ -9207,21 +9266,69 @@ impl Harness {
     }
 
     fn gather_tool_definitions_for_role(&self, role_name: &str) -> Vec<ToolDefinition> {
-        self.registry
+        let model = model_for_role(&self.provider_model_info, &self.available_roles, role_name);
+        let specs = self.gather_effective_tool_specs_for_role_model(role_name, model.as_ref());
+        self.tool_definitions_from_specs(&specs)
+    }
+
+    fn tool_definitions_from_specs(&self, specs: &[tau_proto::ToolSpec]) -> Vec<ToolDefinition> {
+        specs
+            .iter()
+            .map(|spec| ToolDefinition {
+                name: spec.name.clone(),
+                model_visible_name: spec.model_visible_name.clone(),
+                description: spec.description.clone(),
+                tool_type: spec.tool_type,
+                parameters: spec.parameters.clone(),
+                format: spec.format.clone(),
+            })
+            .collect()
+    }
+
+    fn gather_effective_tool_specs_for_role_model(
+        &self,
+        role_name: &str,
+        model: Option<&ModelId>,
+    ) -> Vec<tau_proto::ToolSpec> {
+        let model_tags = model
+            .and_then(|model| self.provider_model_info.get(model))
+            .map(|info| info.tags.as_slice())
+            .unwrap_or(&[]);
+        let chatgpt_shell = model_tags.iter().any(|tag| tag.as_str() == "shell:chatgpt");
+        let role_has_tool_allowlist = self
+            .available_roles
+            .get(role_name)
+            .and_then(|role| role.tools.as_ref())
+            .is_some();
+        let providers: Vec<_> = self
+            .registry
             .all_tool_providers()
             .into_iter()
-            .filter(|provider| self.is_tool_provider_enabled_for_role(provider, role_name))
-            .map(|provider| {
-                let spec = &provider.tool;
-                ToolDefinition {
-                    name: spec.name.clone(),
-                    model_visible_name: spec.model_visible_name.clone(),
-                    description: spec.description.clone(),
-                    tool_type: spec.tool_type,
-                    parameters: spec.parameters.clone(),
-                    format: spec.format.clone(),
-                }
+            .filter_map(|provider| {
+                let state =
+                    self.tool_role_state(&provider.tool, provider.tool_group.as_ref(), role_name);
+                let alternative = tool_alternative_rank(&provider.tool, chatgpt_shell).is_some();
+                let alternative_allowed = !role_has_tool_allowlist
+                    && !state.group_disabled
+                    && alternative
+                    && !self.role_disables_alternative_set(&provider.tool, role_name);
+                (!state.disabled && (state.enabled || alternative_allowed))
+                    .then_some((provider, state.pinned))
             })
+            .collect();
+        providers
+            .iter()
+            .filter(|(provider, pinned)| {
+                *pinned
+                    || self.is_highest_rank_alternative(
+                        &provider.tool,
+                        providers
+                            .iter()
+                            .map(|(provider, pinned)| (&provider.tool, *pinned)),
+                        chatgpt_shell,
+                    )
+            })
+            .map(|(provider, _)| provider.tool.clone())
             .collect()
     }
 
@@ -9243,6 +9350,7 @@ impl Harness {
         &self,
         cid: &AgentId,
         requested_name: &ToolName,
+        _agent_prompt_id: Option<&AgentPromptId>,
     ) -> bool {
         let role_name = self.role_name_for_agent_id(cid);
         if self
@@ -9260,6 +9368,103 @@ impl Harness {
         })
     }
 
+    fn role_disables_alternative_set(&self, spec: &tau_proto::ToolSpec, role_name: &str) -> bool {
+        let Some((set, _)) = tool_alternative_rank(spec, false) else {
+            return false;
+        };
+        let Some(role) = self.available_roles.get(role_name) else {
+            return false;
+        };
+        self.registry
+            .all_tool_providers()
+            .into_iter()
+            .any(|provider| {
+                role.disable_tools
+                    .iter()
+                    .any(|name| name == &provider.tool.name)
+                    && tool_alternative_rank(&provider.tool, false)
+                        .is_some_and(|(provider_set, _)| provider_set == set)
+            })
+    }
+
+    fn tool_role_state(
+        &self,
+        spec: &tau_proto::ToolSpec,
+        group: Option<&tau_proto::ToolGroup>,
+        role_name: &str,
+    ) -> ToolRoleState {
+        let Some(role) = self.available_roles.get(role_name) else {
+            return ToolRoleState {
+                enabled: spec.enabled_by_default,
+                pinned: false,
+                disabled: false,
+                group_disabled: false,
+            };
+        };
+        let explicitly_allowed = role
+            .tools
+            .as_ref()
+            .is_some_and(|tools| tools.iter().any(|name| name == &spec.name));
+        let mut enabled = match role.tools.as_ref() {
+            Some(_) => explicitly_allowed,
+            None => spec.enabled_by_default,
+        };
+        let mut pinned = explicitly_allowed;
+        let mut disabled = false;
+        let mut group_disabled = false;
+        if let Some(group) = group {
+            if role
+                .enable_tool_groups
+                .iter()
+                .any(|name| name == &group.name)
+            {
+                enabled = true;
+            }
+            if role
+                .disable_tool_groups
+                .iter()
+                .any(|name| name == &group.name)
+            {
+                enabled = false;
+                pinned = false;
+                group_disabled = true;
+            }
+        }
+        if role.enable_tools.iter().any(|name| name == &spec.name) {
+            enabled = true;
+            pinned = true;
+        }
+        if role.disable_tools.iter().any(|name| name == &spec.name) {
+            enabled = false;
+            pinned = false;
+            disabled = true;
+        }
+        ToolRoleState {
+            enabled,
+            pinned,
+            disabled,
+            group_disabled,
+        }
+    }
+
+    fn is_highest_rank_alternative<'a>(
+        &self,
+        spec: &tau_proto::ToolSpec,
+        candidates: impl Iterator<Item = (&'a tau_proto::ToolSpec, bool)>,
+        chatgpt_shell: bool,
+    ) -> bool {
+        let Some((set, rank)) = tool_alternative_rank(spec, chatgpt_shell) else {
+            return true;
+        };
+        candidates
+            .filter(|(_, pinned)| !*pinned)
+            .filter_map(|(candidate, _)| tool_alternative_rank(candidate, chatgpt_shell))
+            .filter(|(candidate_set, _)| *candidate_set == set)
+            .map(|(_, candidate_rank)| candidate_rank)
+            .max()
+            .is_none_or(|max_rank| rank >= max_rank)
+    }
+
     fn resolve_enabled_tool_spec_for_role(
         &self,
         requested_name: &ToolName,
@@ -9271,6 +9476,24 @@ impl Harness {
             if !self.is_tool_provider_enabled_for_role(provider, role_name) {
                 continue;
             }
+            if spec.name == *requested_name {
+                return Some(spec);
+            }
+            if self.tool_model_visible_name(spec) == requested_name && visible_match.is_none() {
+                visible_match = Some(spec);
+            }
+        }
+        visible_match
+    }
+
+    fn resolve_enabled_tool_spec_for_prompt(
+        &self,
+        requested_name: &ToolName,
+        agent_prompt_id: &AgentPromptId,
+    ) -> Option<&tau_proto::ToolSpec> {
+        let mut visible_match: Option<&tau_proto::ToolSpec> = None;
+        let specs = self.prompt_tool_specs.get(agent_prompt_id)?;
+        for spec in specs {
             if spec.name == *requested_name {
                 return Some(spec);
             }
@@ -9321,36 +9544,7 @@ impl Harness {
         group: Option<&tau_proto::ToolGroup>,
         role_name: &str,
     ) -> bool {
-        let Some(role) = self.available_roles.get(role_name) else {
-            return spec.enabled_by_default;
-        };
-        let mut enabled = match role.tools.as_ref() {
-            Some(tools) => tools.iter().any(|name| name == &spec.name),
-            None => spec.enabled_by_default,
-        };
-        if let Some(group) = group {
-            if role
-                .enable_tool_groups
-                .iter()
-                .any(|name| name == &group.name)
-            {
-                enabled = true;
-            }
-            if role
-                .disable_tool_groups
-                .iter()
-                .any(|name| name == &group.name)
-            {
-                enabled = false;
-            }
-        }
-        if role.enable_tools.iter().any(|name| name == &spec.name) {
-            enabled = true;
-        }
-        if role.disable_tools.iter().any(|name| name == &spec.name) {
-            enabled = false;
-        }
-        enabled
+        self.tool_role_state(spec, group, role_name).enabled
     }
 
     fn compaction_original_input_tokens_for_prompt(
@@ -9429,6 +9623,7 @@ impl Harness {
             self.pending_provider_prompts
                 .remove(&response.agent_prompt_id);
             self.prompt_models.remove(&response.agent_prompt_id);
+            self.clear_prompt_tool_snapshot(&response.agent_prompt_id);
             return Ok(());
         }
         let response_cid = self.agent_id_for_prompt(&response.agent_prompt_id);
@@ -9495,6 +9690,7 @@ impl Harness {
             self.pending_provider_prompts
                 .remove(&response.agent_prompt_id);
             self.prompt_models.remove(&response.agent_prompt_id);
+            self.clear_prompt_tool_snapshot(&response.agent_prompt_id);
             return Ok(());
         }
         // Save the model that ran this turn before the
@@ -9603,6 +9799,8 @@ impl Harness {
                         seen_tool_call_ids.insert(call.id.clone());
                         invalid_tool_call_errors.insert(call.id.clone(), message);
                     }
+                    self.prompt_tool_call_prompts
+                        .insert(call.id.clone(), response.agent_prompt_id.clone());
                     let background_support = self.resolve_tool_background_support(call.name.as_str());
                     (call, background_support)
                 })
@@ -9663,6 +9861,9 @@ impl Harness {
         } = response.originator
             && (!requested_tool_calls || is_non_tool_ext_query)
         {
+            if !requested_tool_calls {
+                self.clear_prompt_tool_snapshot(&response.agent_prompt_id);
+            }
             if requested_tool_calls {
                 let remaining_calls: Vec<ToolCallId> = normalized_calls
                     .iter()
@@ -9823,6 +10024,7 @@ impl Harness {
             }
             self.drain_pending_tool_invocations()?;
         } else {
+            self.clear_prompt_tool_snapshot(&response.agent_prompt_id);
             self.set_agent_turn_state(&cid, AgentTurnState::Idle);
             // No tool calls — this agent's turn is done. Drain
             // any queued prompts (on this or other agents) that
@@ -9937,6 +10139,7 @@ impl Harness {
             if self.tool_call_waits_for_staged_registration(
                 &next.conversation_id,
                 &next.invocation.name,
+                self.prompt_tool_call_prompts.get(&next.invocation.id),
             ) {
                 break;
             }
@@ -10538,8 +10741,13 @@ impl Harness {
         let tool_name = call.name.clone();
         let role_name = self.role_name_for_agent_id(cid).to_owned();
 
-        let Some(tool_spec) = self.resolve_enabled_tool_spec_for_role(&tool_name, &role_name)
-        else {
+        let prompt_tool_spec = self
+            .prompt_tool_call_prompts
+            .get(&call.id)
+            .map(|prompt_id| self.resolve_enabled_tool_spec_for_prompt(&tool_name, prompt_id));
+        let current_role_tool_spec =
+            || self.resolve_enabled_tool_spec_for_role(&tool_name, &role_name);
+        let Some(tool_spec) = prompt_tool_spec.unwrap_or_else(current_role_tool_spec) else {
             let message = if self.has_registered_tool_name(&tool_name) {
                 "tool is not enabled for the current role".to_owned()
             } else {
@@ -10588,7 +10796,12 @@ impl Harness {
         };
         let internal_tool_name = tool_spec.name.clone();
         let visible_tool_name = self.tool_model_visible_name(tool_spec).clone();
-        if let Err(error) = validate_tool_arguments(tool_spec, &call.arguments) {
+        if self
+            .registry
+            .resolve_provider(&internal_tool_name)
+            .is_some()
+            && let Err(error) = validate_tool_arguments(tool_spec, &call.arguments)
+        {
             self.reject_agent_tool_call_before_dispatch(
                 cid,
                 call,

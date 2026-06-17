@@ -366,6 +366,7 @@ fn supervised_child_exchanges_protocol_events_over_stdio() {
                 tool_type: tau_proto::ToolType::Function,
                 parameters: None,
                 format: None,
+                tags: Vec::new(),
                 enabled_by_default: true,
                 background_support: None,
             },

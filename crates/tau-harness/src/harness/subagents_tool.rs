@@ -604,6 +604,7 @@ fn test_tool_spec(
         tool_type: ToolType::Function,
         parameters: Some(serde_json::json!({"type":"object"})),
         format: None,
+        tags: Vec::new(),
         enabled_by_default: true,
         background_support,
     }

@@ -97,6 +97,28 @@ The harness owns canonical discovered-skill state. Extensions such as `tau-ext-s
 
 User `/skill <name> [args]` and `/skill:<name> [args]` expansion is performed at harness prompt intake for both existing-agent prompts and new-agent initial prompts. Unknown, invalid, unreadable, or non-user-invocable commands emit `harness.notice` and are not submitted as model prompts. Successful invocations read a bounded skill-file prefix, strip frontmatter, and store the expanded Pi-style `<skill>` block in the normal prompt transcript.
 
+## Tool prompt-surface policy
+
+Extensions and providers publish metadata only: tools declare neutral `ToolTag`s
+(such as `shell:edit:line`, `shell:edit:patch`, `shell:exec:generic`, and
+`shell:exec:command-text`) and providers publish model `ModelTag`s (such as
+`shell:chatgpt`). The harness owns all matching policy. For the built-in shell
+alternatives, `shell:chatgpt` models prefer patch editing and command-text shell
+execution, while untagged models prefer line editing and the generic shell
+surface.
+
+Role precedence remains local and explicit: `tools` is an allow-list base, group
+enables/disables apply next, `enable_tools` can pin a fallback or re-enable after
+group policy, and `disable_tools` is the final veto. Built-in alternative
+promotion must not bypass an explicit disable of the same alternative set unless
+the replacement tool is explicitly allowed or pinned.
+
+Prompt dispatch snapshots the effective `ToolSpec` list for the selected prompt
+model. Provider tool calls are validated against that prompt-owned snapshot, not
+against mutable current role/model state after the user switches roles or models
+mid-turn. Staged tool registration can never expand a prompt snapshot after it
+was sent.
+
 ## Lifecycle events
 
 Harness lifecycle events such as session start/shutdown and extension status are

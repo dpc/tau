@@ -20,6 +20,17 @@ fn publishes_chatgpt_model_metadata() {
         ],
     );
     assert!(models.iter().all(|model| model.supports_compaction));
+    assert!(
+        models
+            .iter()
+            .all(|model| model.tags.iter().any(|tag| tag.as_str() == "shell:chatgpt"))
+    );
+    assert!(models.iter().all(|model| {
+        model
+            .tags
+            .iter()
+            .any(|tag| tag.as_str() == "tools:custom-text")
+    }));
 }
 
 #[test]

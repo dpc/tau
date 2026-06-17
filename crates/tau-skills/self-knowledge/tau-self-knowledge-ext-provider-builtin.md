@@ -26,6 +26,7 @@ Supported profile kinds:
 - `openrouter` — OpenRouter profile with API key and either explicit models or models fetched from OpenRouter.
 
 The extension has no ordinary `extensions.provider-builtin.config` schema for provider credentials; credentials belong in provider auth/profile storage, not harness config.
+ChatGPT profiles publish model tags such as `shell:chatgpt` and `tools:custom-text` so the harness can choose compatible tool surfaces. Chat Completions profiles and individual models can also carry optional `tags`; published model metadata contains the provider/model tag union.
 
 
 ## Runtime behavior

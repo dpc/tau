@@ -42,6 +42,7 @@ fn provider_model(id: ModelId, context_window: u64) -> ProviderModelInfo {
     ProviderModelInfo {
         id,
         display_name: None,
+        tags: Vec::new(),
         default_affinity: 0,
         context_window,
         efforts: vec![Effort::High],
@@ -497,6 +498,7 @@ fn provider_model_metadata_drives_selection_state() {
             models: vec![ProviderModelInfo {
                 id: model_id.clone(),
                 display_name: None,
+                tags: Vec::new(),
                 default_affinity: 0,
                 context_window: 654_321,
                 efforts: vec![Effort::Off],
@@ -540,6 +542,7 @@ fn selected_role_params_are_clamped_by_provider_metadata() {
         ProviderModelInfo {
             id: openai.clone(),
             display_name: None,
+            tags: Vec::new(),
             default_affinity: 0,
             context_window: 128_000,
             efforts: vec![Effort::Off, Effort::High],
@@ -550,6 +553,7 @@ fn selected_role_params_are_clamped_by_provider_metadata() {
         ProviderModelInfo {
             id: local.clone(),
             display_name: None,
+            tags: Vec::new(),
             default_affinity: 0,
             context_window: 8_192,
             efforts: vec![Effort::Off],
@@ -647,6 +651,7 @@ fn role_without_effort_picks_middle_provider_effort() {
         ProviderModelInfo {
             id: openai.clone(),
             display_name: None,
+            tags: Vec::new(),
             default_affinity: 0,
             context_window: 128_000,
             efforts: vec![
@@ -663,6 +668,7 @@ fn role_without_effort_picks_middle_provider_effort() {
         ProviderModelInfo {
             id: local.clone(),
             display_name: None,
+            tags: Vec::new(),
             default_affinity: 0,
             context_window: 8_192,
             efforts: vec![Effort::Off],
@@ -813,6 +819,7 @@ fn role_missing_fields_use_model_defaults() {
     let provider_models = provider_models([ProviderModelInfo {
         id: selected.clone(),
         display_name: None,
+        tags: Vec::new(),
         default_affinity: 0,
         context_window: 8_192,
         efforts: vec![Effort::Off, Effort::Low, Effort::High],
@@ -835,6 +842,7 @@ fn role_without_verbosity_picks_low_when_supported() {
         ProviderModelInfo {
             id: openai.clone(),
             display_name: None,
+            tags: Vec::new(),
             default_affinity: 0,
             context_window: 128_000,
             efforts: vec![Effort::Off],
@@ -845,6 +853,7 @@ fn role_without_verbosity_picks_low_when_supported() {
         ProviderModelInfo {
             id: local.clone(),
             display_name: None,
+            tags: Vec::new(),
             default_affinity: 0,
             context_window: 8_192,
             efforts: vec![Effort::Off],
@@ -990,6 +999,7 @@ fn efforts_for_model_uses_provider_snapshot_levels() {
         ProviderModelInfo {
             id: custom.clone(),
             display_name: None,
+            tags: Vec::new(),
             default_affinity: 0,
             context_window: 128_000,
             efforts: vec![L::Medium, L::High, L::XHigh],
@@ -1000,6 +1010,7 @@ fn efforts_for_model_uses_provider_snapshot_levels() {
         ProviderModelInfo {
             id: local.clone(),
             display_name: None,
+            tags: Vec::new(),
             default_affinity: 0,
             context_window: 8_192,
             efforts: vec![L::Off],
@@ -1056,6 +1067,7 @@ fn verbosities_for_model_uses_provider_snapshot_levels() {
         ProviderModelInfo {
             id: gpt.clone(),
             display_name: None,
+            tags: Vec::new(),
             default_affinity: 0,
             context_window: 128_000,
             efforts: vec![Effort::Off],
@@ -1066,6 +1078,7 @@ fn verbosities_for_model_uses_provider_snapshot_levels() {
         ProviderModelInfo {
             id: locked.clone(),
             display_name: None,
+            tags: Vec::new(),
             default_affinity: 0,
             context_window: 128_000,
             efforts: vec![Effort::Off],
@@ -1104,6 +1117,7 @@ fn thinking_summaries_for_model_uses_provider_snapshot_levels() {
         ProviderModelInfo {
             id: gpt.clone(),
             display_name: None,
+            tags: Vec::new(),
             default_affinity: 0,
             context_window: 128_000,
             efforts: vec![Effort::Off],
@@ -1114,6 +1128,7 @@ fn thinking_summaries_for_model_uses_provider_snapshot_levels() {
         ProviderModelInfo {
             id: local.clone(),
             display_name: None,
+            tags: Vec::new(),
             default_affinity: 0,
             context_window: 8_192,
             efforts: vec![Effort::Off],
@@ -1153,6 +1168,7 @@ fn selected_params_use_runtime_role_fields() {
     let provider_models = provider_models([ProviderModelInfo {
         id: model.clone(),
         display_name: None,
+        tags: Vec::new(),
         default_affinity: 0,
         context_window: 128_000,
         efforts: vec![Effort::Off, Effort::Low, Effort::High],

@@ -30,6 +30,14 @@ same cwd snapshot through lock waiting and execution, even if committed cwd
 metadata changes before the lock is granted. This keeps locks, shell execution,
 and patch paths aligned without calling `chdir(2)` in the extension process.
 
+## Tool tags
+
+`tau-ext-shell` tags tools with neutral capability metadata such as
+`shell:edit:line`, `shell:edit:patch`, `shell:exec:generic`, and
+`shell:exec:command-text`. The extension must not decide which model gets which
+surface; the harness interprets these tags together with provider-published
+model tags and role configuration.
+
 ## Skill and instruction discovery
 
 `tau-ext-shell` discovers local AGENTS.md files and Markdown skills from the working-directory and user skill roots, parses skill frontmatter through `tau-skills`, canonicalizes file paths, and announces candidates to the harness. The extension is only the filesystem discoverer: the harness owns skill-name validation at the protocol boundary, collision winner selection, model/user invocation filtering, and `/skill` prompt expansion policy.

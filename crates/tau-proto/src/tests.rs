@@ -65,6 +65,7 @@ fn representative_events() -> Vec<Event> {
                 tool_type: ToolType::Function,
                 parameters: None,
                 format: None,
+                tags: Vec::new(),
                 enabled_by_default: true,
                 background_support: None,
             },
@@ -291,6 +292,7 @@ fn representative_events() -> Vec<Event> {
             models: vec![ProviderModelInfo {
                 id: "openai/gpt-4.1".parse().expect("model id"),
                 display_name: Some("GPT-4.1".to_owned()),
+                tags: Vec::new(),
                 default_affinity: 0,
                 context_window: 128_000,
                 efforts: vec![Effort::Off, Effort::Low, Effort::Medium, Effort::High],
@@ -1144,6 +1146,18 @@ fn tool_name_rejects_overlong_input() {
     assert!(ToolName::try_new(at_cap).is_some());
 }
 
+/// Ensures model/tool policy tags accept lowercase namespaced values and reject
+/// nondeterministic spellings such as uppercase or whitespace.
+#[test]
+fn model_and_tool_tags_validate_namespaced_lowercase_values() {
+    assert!(ModelTag::try_new("shell:chatgpt").is_some());
+    assert!(ToolTag::try_new("shell:edit:patch").is_some());
+    assert!(ToolTag::try_new("tools:custom-text").is_some());
+    assert!(ModelTag::try_new("Shell:ChatGPT").is_none());
+    assert!(ToolTag::try_new("shell edit").is_none());
+    assert!(ToolTag::try_new("a".repeat(ToolTag::MAX_LEN + 1)).is_none());
+}
+
 /// Ensures tool group names enforce the same valid identifier shape as tool
 /// names.
 #[test]
@@ -1424,6 +1438,7 @@ fn tool_spec_defaults_and_background_support() {
         tool_type: ToolType::Function,
         parameters: None,
         format: None,
+        tags: Vec::new(),
         enabled_by_default: false,
         background_support: None,
     };
@@ -1464,6 +1479,7 @@ fn echo_tool_spec() -> ToolSpec {
         tool_type: ToolType::Function,
         parameters: None,
         format: None,
+        tags: Vec::new(),
         enabled_by_default: true,
         background_support: None,
     }

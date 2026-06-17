@@ -46,6 +46,8 @@ key subject to harness validation.
 
 Read-only shell mode is a defense-in-depth feature. Native filesystem isolation is enforced only when supported and enabled by `enforce_ro_mode`; otherwise `mode: ro` can degrade to ordinary command execution and must not be treated as a hard sandbox. Directory update locks are advisory coordination between Tau agents and ext-shell tools, not an operating-system access-control boundary. They do not prevent commands from writing outside their locked working directory or other local processes from changing files. The shell extension remembers each agent's current cwd in durable metadata (`ext_<extension-instance>_cwd`); that value is visible to extensions and should be treated as non-secret path context.
 
+Tool and model tags are prompt-surface/routing metadata, not a sandbox. Extensions publish neutral tool tags, providers publish model tags, and the harness owns matching policy plus prompt-time tool snapshots. A provider tool call is authorized against the snapshot advertised to that prompt, not against later role/model changes. Role `disable_tools` and unpinned shell/edit alternative suppression are policy controls for the model-visible surface; they do not prevent trusted local extensions or host processes from accessing the filesystem outside Tau's tool route.
+
 ## Skills
 
 Skills are prompt instructions loaded from local/project Markdown files, not a sandbox or permission boundary. Project skills can be malicious prompt content. `disable-model-invocation` hides a skill from Tau's model-visible skill surfaces, but a model with filesystem tools could still read the underlying file if it learns the path. `allowed-tools` and similar frontmatter fields do not grant or restrict Tau tool permissions.

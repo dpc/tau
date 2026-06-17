@@ -4567,6 +4567,7 @@ fn email_envelope_tool_spec(name: &str) -> ToolSpec {
             "additionalProperties": false
         })),
         format: None,
+        tags: Vec::new(),
         enabled_by_default: false,
         background_support: None,
     }

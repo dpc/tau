@@ -9,3 +9,9 @@ First-party ChatGPT/Codex prompt-cache keys are stable per provider base URL and
 The legacy `share_user_cache_key` prompt flag is retained for persisted events and older providers, but this crate treats it as a no-op for cache-bucket selection. Any future cache-sharing behavior should be explicit agent metadata (for example, a reviewed `share_cache_from` design) rather than inferring cache identity from prompt provenance.
 
 WebSocket pool keys must follow the same identity as request `prompt_cache_key` values so upstream thread/session headers and request bodies target the same cache bucket.
+
+## Model metadata tags
+
+ChatGPT/Codex model publication includes provider-owned capability tags such as
+`shell:chatgpt` and `tools:custom-text`. These tags describe the model/backend
+surface; the harness owns all policy that maps them to tool alternatives.

@@ -8,8 +8,8 @@ use std::collections::HashSet;
 use std::sync::Mutex;
 
 use tau_proto::{
-    Effort, ModelId, ModelName, ProviderBackendTransport, ProviderModelInfo, ProviderName,
-    ThinkingSummary, Verbosity,
+    Effort, ModelId, ModelName, ModelTag, ProviderBackendTransport, ProviderModelInfo,
+    ProviderName, ThinkingSummary, Verbosity,
 };
 
 pub const LOG_TARGET: &str = "provider-chatgpt";
@@ -283,6 +283,10 @@ fn model_info(provider: &ProviderName, model: &str) -> ProviderModelInfo {
     ProviderModelInfo {
         id: ModelId::new(provider.clone(), ModelName::new(model)),
         display_name: None,
+        tags: vec![
+            ModelTag::new("shell:chatgpt"),
+            ModelTag::new("tools:custom-text"),
+        ],
         default_affinity: default_affinity_for_model(model),
         context_window: CONTEXT_WINDOW,
         efforts: efforts_for_model(model),

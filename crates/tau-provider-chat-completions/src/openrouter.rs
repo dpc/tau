@@ -28,6 +28,7 @@ impl OpenRouterProfile {
             base_url: "https://openrouter.ai/api/v1".to_owned(),
             api_key: self.api_key.clone(),
             models: self.models.clone(),
+            tags: Vec::new(),
             max_output_tokens: crate::DEFAULT_MAX_OUTPUT_TOKENS,
             extra_body: BTreeMap::new(),
             compat: ChatCompletionsCompat {
@@ -96,6 +97,7 @@ pub fn fetch_openrouter_models(
                         display_name: entry.name,
                         context_window: entry.context_length.unwrap_or(2_000_000),
                         compat: Some(compat),
+                        tags: Vec::new(),
                     });
                 }
             }

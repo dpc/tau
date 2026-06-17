@@ -46,6 +46,7 @@ fn tool_spec() -> ToolSpec {
         tool_type: ToolType::Function,
         parameters: None,
         format: None,
+        tags: Vec::new(),
         enabled_by_default: true,
         background_support: None,
     }

@@ -129,6 +129,7 @@ where
                     "additionalProperties": false,
                 })),
                 format: None,
+                tags: Vec::new(),
                 enabled_by_default: true,
                 background_support: None,
             },
