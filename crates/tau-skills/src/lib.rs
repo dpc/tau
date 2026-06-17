@@ -106,7 +106,8 @@ pub struct SkillDiagnostic {
 pub enum DiagnosticKind {
     /// Soft issue — the skill still loads.
     Warning,
-    /// Duplicate name across directories; the first one in wins.
+    /// Duplicate skill name; the loader selected a winner using modified-time
+    /// ordering with a stable tie-break.
     Collision,
     /// Fatal issue — the skill is not loaded.
     Skipped,

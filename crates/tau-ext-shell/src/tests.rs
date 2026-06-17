@@ -2178,6 +2178,63 @@ fn skill_diagnostics_are_emitted_as_harness_notice() {
     assert!(info.message.contains("name contains invalid characters"));
 }
 
+/// Ensures ext-shell keeps the expected notice severity for each skill-loader
+/// diagnostic kind: soft warnings are informational, expected collisions are
+/// trace-only, and skipped skills stay visible warnings.
+#[test]
+fn skill_diagnostics_map_expected_notice_levels() {
+    let mut events = Vec::new();
+    push_skill_diagnostic_events(
+        &mut events,
+        vec![
+            tau_skills::SkillDiagnostic {
+                path: PathBuf::from("warn/SKILL.md"),
+                kind: tau_skills::DiagnosticKind::Warning,
+                message: "soft warning".to_owned(),
+            },
+            tau_skills::SkillDiagnostic {
+                path: PathBuf::from("collision/SKILL.md"),
+                kind: tau_skills::DiagnosticKind::Collision,
+                message: "name collision".to_owned(),
+            },
+            tau_skills::SkillDiagnostic {
+                path: PathBuf::from("skipped/SKILL.md"),
+                kind: tau_skills::DiagnosticKind::Skipped,
+                message: "fatal skip".to_owned(),
+            },
+        ],
+    );
+
+    let notices = events
+        .iter()
+        .map(|event| match event {
+            Event::HarnessNotice(info) => info,
+            other => panic!("expected harness notice event, got {other:?}"),
+        })
+        .collect::<Vec<_>>();
+    let warning = notices
+        .iter()
+        .find(|info| info.message.contains("skill warning:"))
+        .expect("warning diagnostic");
+    assert_eq!(warning.level, tau_proto::NoticeLevel::Info);
+    assert!(!warning.always_show);
+
+    let collision = notices
+        .iter()
+        .find(|info| info.message.contains("skill collision:"))
+        .expect("collision diagnostic");
+    assert_eq!(collision.kind, tau_proto::notice_kind::SKILL_COLLISION);
+    assert_eq!(collision.level, tau_proto::NoticeLevel::Trace);
+    assert!(!collision.always_show);
+
+    let skipped = notices
+        .iter()
+        .find(|info| info.message.contains("skill skipped:"))
+        .expect("skipped diagnostic");
+    assert_eq!(skipped.level, tau_proto::NoticeLevel::Warning);
+    assert!(skipped.always_show);
+}
+
 #[test]
 fn session_agent_loaded_emits_ready_after_agent_context_publish() {
     let (mut reader, mut writer) = spawn_extension();

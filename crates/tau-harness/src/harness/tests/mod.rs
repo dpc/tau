@@ -347,9 +347,9 @@ fn skill_winner_disconnect_restores_next_best_candidate() {
     h.shutdown().expect("shutdown");
 }
 
-/// Ensures cross-source skill collisions emit useful mandatory warning
-/// diagnostics for both replacement by newer mtimes and ignoring
-/// equal/unavailable timestamps.
+/// Ensures cross-source skill collisions emit useful trace diagnostics for both
+/// replacement by newer mtimes and ignoring equal/unavailable timestamps
+/// without becoming mandatory visible notices.
 #[test]
 fn skill_collision_diagnostics_describe_replaced_and_ignored_candidates() {
     let tmp = TempDir::new().expect("tempdir");
@@ -398,19 +398,25 @@ fn skill_collision_diagnostics_describe_replaced_and_ignored_candidates() {
     let infos = event_log_events(&h)
         .into_iter()
         .filter_map(|event| match event {
-            Event::HarnessNotice(info) => Some(info.message),
+            Event::HarnessNotice(info) => Some(info),
             _ => None,
         })
         .collect::<Vec<_>>();
-    assert!(infos.iter().any(|message| {
-        message.contains("skill collision: collision-skill")
-            && message.contains("replaces")
-            && message.contains("newer modified time")
+    assert!(infos.iter().any(|info| {
+        info.kind == tau_proto::notice_kind::SKILL_COLLISION
+            && info.level == tau_proto::NoticeLevel::Trace
+            && !info.always_show
+            && info.message.contains("skill collision: collision-skill")
+            && info.message.contains("replaces")
+            && info.message.contains("newer modified time")
     }));
-    assert!(infos.iter().any(|message| {
-        message.contains("skill collision: collision-skill")
-            && message.contains("ignored")
-            && message.contains("same or unavailable modified time")
+    assert!(infos.iter().any(|info| {
+        info.kind == tau_proto::notice_kind::SKILL_COLLISION
+            && info.level == tau_proto::NoticeLevel::Trace
+            && !info.always_show
+            && info.message.contains("skill collision: collision-skill")
+            && info.message.contains("ignored")
+            && info.message.contains("same or unavailable modified time")
     }));
 
     h.shutdown().expect("shutdown");

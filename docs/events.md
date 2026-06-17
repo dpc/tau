@@ -30,8 +30,9 @@ for control of the emit/intercept pipeline.
   include `extension.config_error`, `extension.optional_skipped`,
   `extension.notice` for sanitized extension-authored notices,
   `harness.failure`, `harness.internal_warning`, `harness.notice`,
-  `harness.replay_error`, `model.selection`, and `ui.command_error`. Extension
-  authored skill diagnostics are sanitized to `extension.notice`; add a
+  `harness.replay_error`, `model.selection`, `skill.collision`, and
+  `ui.command_error`. Expected skill-name collisions are trace-level notices.
+  Extension-authored skill diagnostics are sanitized to `extension.notice`; add a
   first-party kind here only when the harness owns and preserves it.
 - **`harness.session_dir`** — Announces the current session directory for UIs
   and extensions that need to present or inspect session-local paths.

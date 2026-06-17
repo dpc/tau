@@ -1805,7 +1805,7 @@ fn push_skill_diagnostic_events(
     for diagnostic in diagnostics {
         let (kind, level) = match diagnostic.kind {
             tau_skills::DiagnosticKind::Warning => ("warning", tau_proto::NoticeLevel::Info),
-            tau_skills::DiagnosticKind::Collision => ("collision", tau_proto::NoticeLevel::Warning),
+            tau_skills::DiagnosticKind::Collision => ("collision", tau_proto::NoticeLevel::Trace),
             tau_skills::DiagnosticKind::Skipped => ("skipped", tau_proto::NoticeLevel::Warning),
         };
         events.push(Event::HarnessNotice(tau_proto::HarnessNotice {

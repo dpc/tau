@@ -6541,11 +6541,11 @@ impl Harness {
             && previous_winner.source_id != source_id
             && let Some(current_winner) = self.discovered_skills.get(&skill.name).cloned()
         {
-            self.emit_skill_collision_info(skill, source_id, &previous_winner, &current_winner);
+            self.emit_skill_collision_notice(skill, source_id, &previous_winner, &current_winner);
         }
     }
 
-    fn emit_skill_collision_info(
+    fn emit_skill_collision_notice(
         &mut self,
         skill: &tau_proto::ExtSkillAvailable,
         source_id: &str,
@@ -6553,13 +6553,18 @@ impl Harness {
         current_winner: &DiscoveredSkill,
     ) {
         if current_winner.source_id == source_id {
-            self.emit_info_important(&format!(
-                "skill collision: {} from {} replaces {} from {} (newer modified time)",
-                skill.name,
-                skill.file_path.display(),
-                previous_winner.source.label(),
-                previous_winner.source_id,
-            ));
+            self.emit_notice(
+                tau_proto::notice_kind::SKILL_COLLISION,
+                tau_proto::NoticeLevel::Trace,
+                false,
+                &format!(
+                    "skill collision: {} from {} replaces {} from {} (newer modified time)",
+                    skill.name,
+                    skill.file_path.display(),
+                    previous_winner.source.label(),
+                    previous_winner.source_id,
+                ),
+            );
             return;
         }
         let modified = skill_file_modified_time(&skill.file_path);
@@ -6568,13 +6573,18 @@ impl Harness {
         } else {
             "newer modified time"
         };
-        self.emit_info_important(&format!(
-            "skill collision: {} from {} ignored; keeping {} from {} ({reason})",
-            skill.name,
-            skill.file_path.display(),
-            current_winner.source.label(),
-            current_winner.source_id,
-        ));
+        self.emit_notice(
+            tau_proto::notice_kind::SKILL_COLLISION,
+            tau_proto::NoticeLevel::Trace,
+            false,
+            &format!(
+                "skill collision: {} from {} ignored; keeping {} from {} ({reason})",
+                skill.name,
+                skill.file_path.display(),
+                current_winner.source.label(),
+                current_winner.source_id,
+            ),
+        );
     }
 
     fn session_init_provider_ids(&self) -> std::collections::HashSet<tau_proto::ConnectionId> {
