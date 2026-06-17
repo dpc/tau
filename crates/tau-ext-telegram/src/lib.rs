@@ -647,7 +647,7 @@ fn register_tool_spec() -> ToolSpec {
         })),
         format: None,
         tags: Vec::new(),
-        enabled_by_default: true,
+        enabled_by_default: false,
         background_support: None,
     }
 }
@@ -669,7 +669,7 @@ fn send_tool_spec() -> ToolSpec {
         })),
         format: None,
         tags: Vec::new(),
-        enabled_by_default: true,
+        enabled_by_default: false,
         background_support: None,
     }
 }

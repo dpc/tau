@@ -46,6 +46,10 @@ Agents should reply to Telegram-originated prompts with `telegram_send`. The
 model cannot choose a destination chat; `telegram_send` uses only the configured
 or linked chat.
 
+The `telegram_register` and `telegram_send` tools are opt-in for each Tau role.
+Enable them in the role configuration with `enable_tools` before asking that role
+to use the Telegram bridge.
+
 ## Limitations
 
 The MVP is text-only. Attachments are acknowledged as unsupported. Registrations,

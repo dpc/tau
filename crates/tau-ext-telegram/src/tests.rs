@@ -105,6 +105,14 @@ fn extension() -> (
     (ext, rx, client)
 }
 
+/// Telegram bridge tools are disabled by default because each role must make an
+/// explicit policy choice before exposing the external chat bridge to a model.
+#[test]
+fn telegram_tools_are_role_opt_in() {
+    assert!(!register_tool_spec().enabled_by_default);
+    assert!(!send_tool_spec().enabled_by_default);
+}
+
 /// Enabled config must name a non-empty token secret and a non-empty allowlist;
 /// otherwise the extension cannot safely decide who may use the bot.
 #[test]
