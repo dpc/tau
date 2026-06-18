@@ -494,7 +494,8 @@ pub struct HarnessSettings {
 
     /// Role selected on startup when no explicit runtime selection has been
     /// made. If the configured role is missing, Tau warns and falls back to
-    /// the first role in `role_groups` order.
+    /// the first role from the first non-empty `role_groups` entry after roles
+    /// inside that group are sorted by role `order` and then role name.
     pub default_role: Option<String>,
 
     /// Harness-owned role defaults. Each role is a partial set of model
@@ -505,6 +506,8 @@ pub struct HarnessSettings {
     /// Ordered role groups used by the CLI for structured role navigation.
     /// Role names remain globally unique; groups provide shared defaults for
     /// their `roles` entries and affect presentation and keyboard cycling.
+    /// The group list preserves config order; role presentation inside a group
+    /// is sorted later by each role's `order` and then role name.
     pub role_groups: Vec<RoleGroup>,
 
     /// Top-level prompt fragments from harness config. Loaded settings also
@@ -791,7 +794,7 @@ fn validate_custom_prompts(prompts: &[CustomPrompt]) -> Result<(), String> {
 pub struct RoleGroup {
     /// Stable group name from `role_groups.<name>`.
     pub name: String,
-    /// Globally unique role names in this group, in configured order.
+    /// Globally unique role names in this group, in config declaration order.
     pub roles: Vec<String>,
 }
 
@@ -804,6 +807,8 @@ struct RawRoleGroup {
     // reading old config during migration.
     #[serde(alias = "enabled", deserialize_with = "present_option")]
     enable: Option<Option<bool>>,
+    #[serde(deserialize_with = "present_option")]
+    order: Option<Option<i64>>,
     #[serde(deserialize_with = "present_option")]
     description: Option<Option<String>>,
     #[serde(deserialize_with = "present_option")]
@@ -861,6 +866,8 @@ struct AgentRolePatch {
     #[serde(alias = "enabled", deserialize_with = "present_option")]
     enable: Option<Option<bool>>,
     #[serde(deserialize_with = "present_option")]
+    order: Option<Option<i64>>,
+    #[serde(deserialize_with = "present_option")]
     description: Option<Option<String>>,
     #[serde(deserialize_with = "present_option")]
     model: Option<Option<ModelId>>,
@@ -898,6 +905,7 @@ impl RawRoleGroup {
     fn defaults(&self) -> AgentRolePatch {
         AgentRolePatch {
             enable: self.enable,
+            order: self.order,
             description: self.description.clone(),
             model: self.model.clone(),
             effort: self.effort,
@@ -1221,6 +1229,10 @@ pub struct AgentRole {
     /// reading old config during migration.
     #[serde(alias = "enabled", skip_serializing_if = "Option::is_none")]
     pub enable: Option<bool>,
+    /// Optional role ordering key within a role group. Lower values come first;
+    /// roles with the same order, or without an order, are sorted by role name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub order: Option<i64>,
     /// Short free-form summary shown in role-selection completion menus.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
@@ -1313,6 +1325,9 @@ impl AgentRole {
     fn apply_patch(&mut self, patch: &AgentRolePatch) {
         if let Some(enable) = patch.enable {
             self.enable = enable;
+        }
+        if let Some(order) = patch.order {
+            self.order = order;
         }
         if let Some(description) = &patch.description {
             self.description = description.clone();

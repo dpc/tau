@@ -5,6 +5,7 @@ Agent roles are named aliases for the model and model-behavior settings Tau shou
 A role can set:
 
 - `description`: short free-form summary shown in `/role ...` completions
+- `order`: optional numeric order within the containing role group
 - `model`: qualified model id, in `provider/model` form
 - `effort`: `off`, `minimal`, `low`, `medium`, `high`, or `xhigh`
 - `verbosity`: `low`, `medium`, or `high`
@@ -37,7 +38,7 @@ prompt_fragments:
     text: Keep answers short and plain, using only simple words.
 ```
 
-Roles live in `harness.yaml` under globally unique `role_groups`. Each group has a `roles` map, plus optional role fields such as `prompt_fragments` that apply as defaults to every role in the group. `default_role` selects the startup role; if omitted, Tau starts on the first role in `role_groups` order.
+Roles live in `harness.yaml` under globally unique `role_groups`. Each group has a `roles` map, plus optional role fields such as `prompt_fragments` that apply as defaults to every role in the group. `default_role` selects the startup role; if omitted, Tau starts on the first role in `role_groups` order. Within a group, role cycling sorts by `order` first and role name second; roles without `order` sort after ordered roles by name.
 
 ```json5
 {
@@ -49,10 +50,12 @@ Roles live in `harness.yaml` under globally unique `role_groups`. Each group has
       ],
       roles: {
         "junior-engineer": {
+          order: 10,
           description: "Lower-reasoning engineer",
           effort: "low",
         },
         "senior-engineer": {
+          order: 20,
           description: "Balanced coding engineer",
           model: "chatgpt/gpt-5.3-codex",
           effort: "medium",
@@ -62,6 +65,7 @@ Roles live in `harness.yaml` under globally unique `role_groups`. Each group has
           disable_tools: ["email_trash"],
         },
         "staff-engineer": {
+          order: 30,
           description: "Maximum-reasoning engineer",
           effort: "xhigh",
         },
@@ -72,7 +76,8 @@ Roles live in `harness.yaml` under globally unique `role_groups`. Each group has
     },
     manager: {
       roles: {
-        manager: {
+        "micro-manager": {
+          order: 10,
           prompt_fragments: [
             { name: "manager.workflow", priority: 66, text: "Delegate non-trivial work." },
           ],
@@ -87,7 +92,7 @@ Missing fields use group defaults first, then provider-published fallback knobs 
 
 Global harness policy is configured under `tool_policy.rules` keyed by stable rule name. Rules default to `enable: true`, can be disabled with `enable: false`, match when all `when.model_tags` patterns match the selected model, then run `disable_tool_tags` before `enable_tool_tags`. Rules sort by `priority` (default `0`, lower runs first) and then by rule name for ties. Tag patterns are exact (`shell:cd`) or terminal prefix wildcards (`shell:*`, `shell:edit:*`). Built-in rule `builtin.chatgpt-shell` matches `shell:chatgpt`, disables `shell:*`, and re-enables `shell:edit:apply_patch`, `shell:exec:shell_command`, `shell:cd`, and `shell:lock`. Rule names may contain dots; for CLI overrides, prefer the whole-map form such as `--harness-config 'tool_policy={rules: {builtin.chatgpt-shell: {enable: false}}}'` rather than dotted paths through the rule name.
 
-Tau ships built-in `junior-engineer`, `senior-engineer`, `staff-engineer`, and `manager` roles, with `default_role: senior-engineer`. `junior-engineer` uses lower reasoning for straightforward engineering work, `senior-engineer` uses balanced individual-contributor defaults, and `staff-engineer` is the maximum-reasoning engineering variant. `manager` is an orchestration role with a built-in delegation prompt. For non-trivial work, the built-in `manager` prompt tells the model to use `agent_start` by default for research/scoping, implementation, and review/validation sub-agent steps, then synthesize the results; tiny or purely clerical work may still be handled directly.
+Tau ships built-in `junior-engineer`, `senior-engineer`, `staff-engineer`, and `micro-manager` roles, with `default_role: senior-engineer`. `junior-engineer` uses lower reasoning for straightforward engineering work, `senior-engineer` uses balanced individual-contributor defaults, and `staff-engineer` is the maximum-reasoning engineering variant. `micro-manager` is an orchestration role with a built-in delegation prompt. For non-trivial work, the built-in `micro-manager` prompt tells the model to use `agent_start` by default for research/scoping, implementation, and review/validation sub-agent steps, then synthesize the results; tiny or purely clerical work may still be handled directly.
 
 
 ## Selecting a role
@@ -109,7 +114,7 @@ Examples:
 
 ```text
 /role engineer model chatgpt/gpt-5.3-codex
-/role manager effort xhigh
+/role micro-manager effort xhigh
 /role engineer enable-tool-groups calendar,email
 /role engineer disable-tools email_trash
 /role temporary model anthropic/claude-sonnet-4-20250514

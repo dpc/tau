@@ -76,7 +76,8 @@ fn first_grouped_role(role_groups: &[tau_proto::HarnessRoleGroup]) -> Option<Str
 }
 
 /// Build the effective navigation groups for the available role set. Configured
-/// groups keep their configured order; roles not named by any group remain
+/// groups keep their configured group order; roles inside each group are sorted
+/// by role `order` and then role name. Roles not named by any group remain
 /// reachable as single-role groups after configured groups.
 pub(crate) fn role_groups_for_roles(
     roles: &HashMap<String, AgentRole>,
@@ -85,7 +86,7 @@ pub(crate) fn role_groups_for_roles(
     let mut grouped = HashSet::new();
     let mut out = Vec::new();
     for group in configured_groups {
-        let group_roles: Vec<_> = group
+        let mut group_roles: Vec<_> = group
             .roles
             .iter()
             .filter(|role| roles.contains_key(*role))
@@ -94,6 +95,7 @@ pub(crate) fn role_groups_for_roles(
             })
             .cloned()
             .collect();
+        sort_role_group_roles(roles, &mut group_roles);
         if !group_roles.is_empty() {
             out.push(tau_proto::HarnessRoleGroup {
                 name: group.name.clone(),
@@ -117,6 +119,32 @@ pub(crate) fn role_groups_for_roles(
             }),
     );
     out
+}
+
+#[derive(Eq, Ord, PartialEq, PartialOrd)]
+struct RoleGroupOrderKey<'a> {
+    unordered: bool,
+    order: i64,
+    name: &'a str,
+}
+
+/// Sort role names for display and keyboard navigation inside one role group.
+/// Explicit `order` values sort first, lower before higher, with role name as
+/// the stable tie-breaker. Roles without `order` sort afterward by role name.
+pub(crate) fn sort_role_group_roles(roles: &HashMap<String, AgentRole>, role_names: &mut [String]) {
+    role_names.sort_by(|a, b| role_group_order_key(roles, a).cmp(&role_group_order_key(roles, b)));
+}
+
+fn role_group_order_key<'a>(
+    roles: &'a HashMap<String, AgentRole>,
+    role_name: &'a str,
+) -> RoleGroupOrderKey<'a> {
+    let order = roles.get(role_name).and_then(|role| role.order);
+    RoleGroupOrderKey {
+        unordered: order.is_none(),
+        order: order.unwrap_or_default(),
+        name: role_name,
+    }
 }
 
 /// Return the role Tau should select if no configured default role is usable.

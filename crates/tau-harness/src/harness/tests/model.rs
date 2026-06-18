@@ -111,6 +111,85 @@ fn role_infos_include_configured_role_description() {
     assert_eq!(details.params.effort, Effort::High);
 }
 
+/// Ensures role group navigation honors explicit role `order` values before
+/// falling back to role names, so UI cycling can use logical sequences such as
+/// junior -> senior -> staff even when config or map iteration is different.
+#[test]
+fn role_groups_sort_roles_by_order_then_name() {
+    let roles = std::collections::HashMap::from([
+        (
+            "staff-engineer".to_owned(),
+            tau_config::settings::AgentRole {
+                order: Some(30),
+                ..Default::default()
+            },
+        ),
+        (
+            "junior-engineer".to_owned(),
+            tau_config::settings::AgentRole {
+                order: Some(10),
+                ..Default::default()
+            },
+        ),
+        (
+            "senior-engineer".to_owned(),
+            tau_config::settings::AgentRole {
+                order: Some(20),
+                ..Default::default()
+            },
+        ),
+        (
+            "alpha-peer".to_owned(),
+            tau_config::settings::AgentRole {
+                order: Some(20),
+                ..Default::default()
+            },
+        ),
+        (
+            "omega-explicit-max".to_owned(),
+            tau_config::settings::AgentRole {
+                order: Some(i64::MAX),
+                ..Default::default()
+            },
+        ),
+        (
+            "alpha-unordered".to_owned(),
+            tau_config::settings::AgentRole::default(),
+        ),
+        (
+            "advisor".to_owned(),
+            tau_config::settings::AgentRole::default(),
+        ),
+    ]);
+    let configured_groups = [tau_config::settings::RoleGroup {
+        name: "engineer".to_owned(),
+        roles: vec![
+            "alpha-unordered".to_owned(),
+            "omega-explicit-max".to_owned(),
+            "staff-engineer".to_owned(),
+            "senior-engineer".to_owned(),
+            "advisor".to_owned(),
+            "alpha-peer".to_owned(),
+            "junior-engineer".to_owned(),
+        ],
+    }];
+
+    let groups = crate::model::role_groups_for_roles(&roles, &configured_groups);
+
+    assert_eq!(
+        groups[0].roles,
+        vec![
+            "junior-engineer",
+            "alpha-peer",
+            "senior-engineer",
+            "staff-engineer",
+            "omega-explicit-max",
+            "advisor",
+            "alpha-unordered",
+        ]
+    );
+}
+
 /// Provider snapshots are runtime registry input, not just private extension
 /// chatter: the harness must retain metadata/routes and re-emit refreshed UI
 /// state for clients that are already connected.
@@ -935,7 +1014,7 @@ fn harness_startup_errors_when_no_roles_are_enabled() {
                 },
                 manager: {
                     roles: {
-                        manager: { enable: false },
+                        "micro-manager": { enable: false },
                     },
                 },
             },

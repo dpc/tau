@@ -18,13 +18,16 @@
 #     text: Keep answers short and plain, using only simple words.
 
 # Optional startup role. If omitted, Tau starts on the first role in
-# `role_groups` order. If the named role is missing, Tau warns and falls back to
-# that first role.
+# `role_groups` order after roles inside that group are sorted by `order` and
+# then role name. If the named role is missing, Tau warns and falls back to that
+# first role.
 # default_role: senior-engineer
 
 # Optional grouped role defaults. Role names are globally unique across all
-# groups. Tab cycles between groups; Shift-Tab cycles within the selected
-# role's group. Group-level fields are defaults for every role in `roles`.
+# groups. Tab cycles roles within the current group; Shift-Tab cycles to the
+# next role group. Group-level fields are defaults for every role in `roles`.
+# Per-role `order` sorts roles within a group before role name; unordered roles
+# sort after ordered roles by name.
 # `description` is shown in `/role ...` completions. `compaction` controls
 # provider-side automatic compaction: omit it or set `provider_default` for the
 # provider's model-specific default, `disabled` to turn it off, or `{ threshold:
@@ -40,14 +43,17 @@
 #         text: You are a careful coding agent.
 #     roles:
 #       junior-engineer:
+#         order: 10
 #         effort: low
 #       senior-engineer:
+#         order: 20
 #         description: Balanced coding engineer.
 #         model: chatgpt/gpt-5.5
 #         compaction: { threshold: 200000 }
 #         tools: [read, grep]
 #         disable_tools: [shell]
 #       staff-engineer:
+#         order: 30
 #         effort: xhigh
 #       old-role:
 #         enable: false  # hide a lower-layer or built-in role

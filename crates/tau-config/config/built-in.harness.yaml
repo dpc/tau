@@ -42,14 +42,17 @@ role_groups:
     roles:
       junior-engineer:
         enable: true
+        order: 10
         description: Lower-reasoning but fast individual contributor. Best for straightforward coding tasks.
         effort: low
       senior-engineer:
         enable: true
+        order: 20
         description: Capable individual contributor. Good default for most tasks.
         effort: medium
       staff-engineer:
         enable: true
+        order: 30
         description: Slow and expensive individual contributor using maximum reasoning. Best used only for hardest engineering problems.
         effort: high
 
@@ -57,6 +60,7 @@ role_groups:
     roles:
       micro-manager:
         enable: true
+        order: 10
         description: Role focused on splitting and delegation of tasks to other sub-agents via micro-management.
         effort: low
         prompt_fragments:

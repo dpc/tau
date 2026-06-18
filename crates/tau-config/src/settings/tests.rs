@@ -1672,13 +1672,13 @@ fn harness_settings_role_cli_overrides_later_disable_wins() {
     let s = load_harness_settings_with_role_overrides_in(
         &dirs_with_config(dir),
         &[
-            RoleCliOverride::Enable("manager".to_owned()),
-            RoleCliOverride::Disable("manager".to_owned()),
+            RoleCliOverride::Enable("micro-manager".to_owned()),
+            RoleCliOverride::Disable("micro-manager".to_owned()),
         ],
     )
     .expect("load");
 
-    assert!(!s.roles.contains_key("manager"));
+    assert!(!s.roles.contains_key("micro-manager"));
 }
 
 /// Ensures CLI overrides can disable every role and produce an empty effective
@@ -1887,7 +1887,7 @@ fn harness_global_prompt_fragments_apply_to_all_roles() {
             .count(),
         1
     );
-    for role_name in ["senior-engineer", "manager", "custom"] {
+    for role_name in ["senior-engineer", "micro-manager", "custom"] {
         let role = &s.roles[role_name];
         assert_eq!(
             role.prompt_fragments
@@ -1962,7 +1962,9 @@ fn harness_roles_merge_with_built_ins() {
     let manager = &s.roles["micro-manager"];
     assert_eq!(
         manager.description.as_deref(),
-        Some("Role focused on splitting and delegation of tasks to other sub-agents via micro-management.")
+        Some(
+            "Role focused on splitting and delegation of tasks to other sub-agents via micro-management."
+        )
     );
     assert!(
         manager
@@ -2251,6 +2253,39 @@ fn harness_role_groups_load_custom_roles() {
         manager.model.as_ref().map(ToString::to_string).as_deref(),
         Some("openai/gpt-5.5")
     );
+}
+
+/// Ensures role `order` values load as ordinary role fields so the harness can
+/// sort keyboard navigation within each role group independently from role
+/// name.
+#[test]
+fn harness_role_groups_load_role_order() {
+    let td = TempDir::new().expect("tempdir");
+    let dir = td.path();
+    std::fs::write(
+        dir.join("harness.yaml"),
+        r#"{
+            role_groups: {
+                engineer: {
+                    order: 40,
+                    roles: {
+                        "staff-engineer": { order: null },
+                        "senior-engineer": { order: 20 },
+                        "junior-engineer": {},
+                        "custom-engineer": {},
+                    },
+                },
+            },
+        }"#,
+    )
+    .expect("write");
+
+    let s = load_harness_settings_in(&dirs_with_config(dir)).expect("load");
+
+    assert_eq!(s.roles["junior-engineer"].order, Some(40));
+    assert_eq!(s.roles["senior-engineer"].order, Some(20));
+    assert_eq!(s.roles["staff-engineer"].order, None);
+    assert_eq!(s.roles["custom-engineer"].order, Some(40));
 }
 
 /// Ensures harness custom prompts parse from map syntax, sort by id, and are

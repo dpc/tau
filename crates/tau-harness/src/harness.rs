@@ -7415,7 +7415,7 @@ impl Harness {
         let mut grouped = HashSet::new();
         let mut groups = Vec::new();
         for group in &self.available_role_groups {
-            let roles: Vec<_> = group
+            let mut roles: Vec<_> = group
                 .roles
                 .iter()
                 .filter(|role| self.available_roles.contains_key(*role))
@@ -7424,6 +7424,7 @@ impl Harness {
                 })
                 .cloned()
                 .collect();
+            crate::model::sort_role_group_roles(&self.available_roles, &mut roles);
             if !roles.is_empty() {
                 groups.push(tau_proto::HarnessRoleGroup {
                     name: group.name.clone(),

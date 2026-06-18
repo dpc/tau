@@ -201,9 +201,11 @@ role_groups:
         text: Focus on implementation details.
     roles:
       junior-engineer:
+        order: 10
         description: Lower-reasoning engineer
         effort: low
       senior-engineer:
+        order: 20
         description: Balanced coding engineer
         model: chatgpt/gpt-5.5
         effort: medium
@@ -211,20 +213,23 @@ role_groups:
         enable_tool_groups: [calendar, email]
         disable_tools: [email_trash]
       staff-engineer:
+        order: 30
         description: Maximum-reasoning engineer
         effort: xhigh
       legacy-role:
         enable: false  # hide a lower-layer or built-in role without deleting it
   manager:
     roles:
-      manager:
+      micro-manager:
+        order: 10
         prompt_fragments:
           - name: manager.workflow
             priority: 66
             text: Delegate non-trivial work.
 ```
 
-Roles can include a `description` shown after the model/knob summary in
+Roles can include an `order` for role cycling within a group and a
+`description` shown after the model/knob summary in
 `/role ...` completions. Top-level `prompt_fragments` apply to every role;
 group-level fields apply as defaults to that group's roles; per-role
 `prompt_fragments` apply only to that role. Roles can set
@@ -245,15 +250,16 @@ keyed rule in `tool_policy.rules`; policy rules sort by `priority` (default `0`,
 lower first) and then rule name. Tools and models only publish tags.
 
 `default_role` selects the startup role; if it is omitted Tau starts on the
-first role in `role_groups` order. `tau --role <role>` overrides the startup role
+first role in `role_groups` order. Within a group, roles sort by `order` first
+and role name second. `tau --role <role>` overrides the startup role
 for one newly spawned session. `/model <provider>/<model>` switches the model
 for the currently selected agent; `/role <role> <setting> <value>` edits role
 settings for the current process only. See
 [`docs/agent-roles.md`](docs/agent-roles.md).
 
 In the UI: `/role engineer effort medium`, `/role engineer verbosity low`,
-`/role engineer thinking-summary concise`. Tab cycles between configured role
-groups; Shift-Tab cycles within the selected role's group.
+`/role engineer thinking-summary concise`. Tab cycles roles within the current
+group; Shift-Tab cycles to the next configured role group.
 Model knobs are slash-command-only today. Asking for an unsupported
 level (e.g. `effort xhigh` on a mini model, `verbosity high` on a provider
 that doesn't support it) degrades and surfaces a `harness.notice` diagnostic rather
