@@ -79,11 +79,37 @@ fn bool_args(value: bool) -> CborValue {
     )])
 }
 
+fn bool_args_with_extra(value: bool) -> CborValue {
+    CborValue::Map(vec![
+        (
+            CborValue::Text("enabled".to_owned()),
+            CborValue::Bool(value),
+        ),
+        (
+            CborValue::Text("destination".to_owned()),
+            CborValue::Text("mallory@example.org".to_owned()),
+        ),
+    ])
+}
+
 fn message_args(value: &str) -> CborValue {
     CborValue::Map(vec![(
         CborValue::Text("message".to_owned()),
         CborValue::Text(value.to_owned()),
     )])
+}
+
+fn message_args_with_destination(value: &str) -> CborValue {
+    CborValue::Map(vec![
+        (
+            CborValue::Text("message".to_owned()),
+            CborValue::Text(value.to_owned()),
+        ),
+        (
+            CborValue::Text("destination".to_owned()),
+            CborValue::Text("mallory@example.org".to_owned()),
+        ),
+    ])
 }
 
 fn cfg() -> RuntimeConfig {
@@ -186,6 +212,22 @@ fn config_rejects_unsafe_shapes() {
     .err()
     .expect("default recipient not allowed");
     assert!(err.contains("default_recipient"));
+
+    let err = ExtConfig {
+        jid: Some("tau@example.org".to_owned()),
+        password_secret: Some("xmpp_password".to_owned()),
+        allowed_jids: vec!["me@example.org".to_owned()],
+        default_recipient: Some("me@example.org".to_owned()),
+        routing: RoutingConfig {
+            mode: Some("direct_resource".to_owned()),
+        },
+        max_message_bytes: Some(MAX_MESSAGE_LIMIT + 1),
+        ..Default::default()
+    }
+    .validate(&secrets(), None)
+    .err()
+    .expect("oversized limit rejected");
+    assert!(err.contains("max_message_bytes"));
 }
 
 /// `xmpp_send` is gated on prior registration so an arbitrary agent cannot send
@@ -219,6 +261,27 @@ fn xmpp_register_true_registers_agent_and_starts_bridge() {
     assert!(state.conversations.contains_key(&agent_id("agent-1")));
 }
 
+/// `xmpp_register` rejects unexpected arguments so registration cannot grow a
+/// hidden model-chosen destination surface outside the declared schema.
+#[test]
+fn xmpp_register_rejects_unknown_arguments() {
+    let (ext, rx, _bridge) = extension();
+    ext.dispatch_tool(tool(
+        REGISTER_TOOL_NAME,
+        "agent-1",
+        bool_args_with_extra(true),
+    ));
+    let _progress = rx.recv().expect("progress");
+    let msg = rx.recv().expect("result");
+    let HarnessInputMessage::Emit(emit) = msg else {
+        panic!("emit")
+    };
+    let Event::ToolError(error) = *emit.event else {
+        panic!("tool error")
+    };
+    assert!(error.message.contains("destination"));
+}
+
 /// After registration, `xmpp_send` sends to the fixed conversation and prefixes
 /// the text with the stable agent id rather than accepting a destination JID.
 #[test]
@@ -232,6 +295,31 @@ fn xmpp_send_uses_registered_conversation_without_destination_arg() {
     let _result = rx.recv().expect("result");
     let sent = bridge.sent.lock().expect("lock");
     assert_eq!(sent[0], (agent_id("agent-1"), "[agent-1] hello".to_owned()));
+}
+
+/// `xmpp_send` rejects unexpected arguments such as a destination JID so future
+/// protocol or schema changes cannot accidentally make model-chosen recipients
+/// meaningful.
+#[test]
+fn xmpp_send_rejects_unknown_destination_argument() {
+    let (ext, rx, _bridge) = extension();
+    ext.dispatch_tool(tool(REGISTER_TOOL_NAME, "agent-1", bool_args(true)));
+    let _ = rx.recv();
+    let _ = rx.recv();
+    ext.dispatch_tool(tool(
+        SEND_TOOL_NAME,
+        "agent-1",
+        message_args_with_destination("hello"),
+    ));
+    let _progress = rx.recv().expect("progress");
+    let msg = rx.recv().expect("result");
+    let HarnessInputMessage::Emit(emit) = msg else {
+        panic!("emit")
+    };
+    let Event::ToolError(error) = *emit.event else {
+        panic!("tool error")
+    };
+    assert!(error.message.contains("destination"));
 }
 
 fn worker_with_muc_agent() -> (
@@ -267,6 +355,19 @@ fn muc_message(from: Jid, body: &str) -> Stanza {
     message.into()
 }
 
+fn delayed_muc_message(from: Jid, body: &str) -> Stanza {
+    let mut message =
+        Message::groupchat(Jid::new("tau-agent-1@conference.example.org").expect("jid"))
+            .with_body(Lang::new(), body.to_owned());
+    message.from = Some(from);
+    message.payloads.push(
+        "<delay xmlns='urn:xmpp:delay' from='conference.example.org' stamp='2026-06-18T00:00:00Z'/>"
+            .parse()
+            .expect("delay payload"),
+    );
+    message.into()
+}
+
 /// MUC groupchat messages without real-JID proof fail closed by default so room
 /// anonymity cannot silently bypass `allowed_jids`.
 #[test]
@@ -294,6 +395,23 @@ fn muc_message_without_real_jid_is_not_routed() {
     message.from = Some(Jid::new("tau-agent-1@conference.example.org/alice").expect("jid"));
     worker.handle_stanza(message.into());
     assert!(rx.try_recv().is_err());
+}
+
+/// MUC registration requires an online stream so callers get a clear diagnostic
+/// instead of an ambiguous stanza-send timeout while disconnected.
+#[tokio::test]
+async fn muc_registration_requires_online_stream() {
+    let (tx, _rx) = mpsc::channel();
+    let mut worker = WorkerState::new(cfg(), tx);
+    let mut client = Client::new(
+        Jid::new("tau@example.org/tau-resource").expect("jid"),
+        "unused".to_owned(),
+    );
+    let err = worker
+        .register_agent(agent_id("agent-1"), &mut client)
+        .await
+        .expect_err("offline muc registration rejected");
+    assert!(err.contains("not online"));
 }
 
 /// Allowed MUC text with a cached real JID routes exactly one prompt through
@@ -407,6 +525,77 @@ fn oversized_muc_message_is_not_routed() {
     );
     worker.handle_stanza(muc_message(occupant, "hello"));
     assert!(rx.try_recv().is_err());
+}
+
+/// Delayed MUC history is ignored so joining or reconnecting to a room cannot
+/// turn old backlog into fresh Tau prompts.
+#[test]
+fn delayed_muc_history_is_not_routed() {
+    let (mut worker, rx, _room, occupant) = worker_with_muc_agent();
+    worker.occupant_real_jids.insert(
+        occupant.clone(),
+        Jid::new("me@example.org/dino").expect("jid"),
+    );
+    worker.handle_stanza(delayed_muc_message(occupant, "old hello"));
+    assert!(rx.try_recv().is_err());
+}
+
+/// Coming online after a reconnect clears cached MUC occupant real JIDs so
+/// stale authorization evidence cannot survive a fresh stream.
+#[test]
+fn online_state_clears_muc_real_jid_cache() {
+    let (mut worker, _rx, _room, occupant) = worker_with_muc_agent();
+    worker
+        .occupant_real_jids
+        .insert(occupant, Jid::new("me@example.org/dino").expect("jid"));
+    worker.apply_online_state(Jid::new("tau@example.org/new").expect("jid"));
+    assert!(worker.occupant_real_jids.is_empty());
+}
+
+/// Direct-resource reconnect handling updates the stored full JID and returns a
+/// notification work item so the human recipient can learn the new address.
+#[test]
+fn online_state_updates_direct_resource_full_jid() {
+    let (tx, _rx) = mpsc::channel();
+    let mut cfg = cfg();
+    cfg.routing_mode = RoutingMode::DirectResource;
+    let mut worker = WorkerState::new(cfg, tx);
+    worker.conversations.insert(
+        agent_id("agent-1"),
+        Conversation::Direct {
+            full_jid: Jid::new("tau@example.org/old").expect("jid"),
+        },
+    );
+    let updates = worker.apply_online_state(Jid::new("tau@example.org/new").expect("jid"));
+    assert_eq!(
+        updates,
+        vec![(
+            agent_id("agent-1"),
+            Jid::new("tau@example.org/new").expect("jid")
+        )]
+    );
+    let Some(Conversation::Direct { full_jid }) = worker.conversations.get(&agent_id("agent-1"))
+    else {
+        panic!("direct conversation")
+    };
+    assert_eq!(full_jid, &Jid::new("tau@example.org/new").expect("jid"));
+}
+
+/// Reconnect handling computes the exact MUC room/nick pairs that need rejoin
+/// stanzas while ignoring direct-resource conversations.
+#[test]
+fn muc_rooms_to_rejoin_lists_only_muc_conversations() {
+    let (mut worker, _rx, room, _occupant) = worker_with_muc_agent();
+    worker.conversations.insert(
+        agent_id("agent-2"),
+        Conversation::Direct {
+            full_jid: Jid::new("tau@example.org/direct").expect("jid"),
+        },
+    );
+    assert_eq!(
+        worker.muc_rooms_to_rejoin(),
+        vec![(room, "tau-self".to_owned())]
+    );
 }
 
 /// Unavailable MUC presence invalidates the occupant real-JID cache so a later

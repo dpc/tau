@@ -21,6 +21,53 @@ server defaults or preconfiguration. Tau still fails closed on inbound MUC
 messages without real-JID proof unless `trust_muc_membership: true` is
 explicitly configured.
 
+Representative Prosody/NixOS sketch:
+
+```nix
+services.prosody = {
+  enable = true;
+  modules = {
+    disco = true;
+    roster = true;
+    saslauth = true;
+    tls = true;
+    ping = true;
+    smacks = true;
+    mam = true;      # useful for humans; Tau does not query history in the MVP
+    carbons = true;  # server support is fine; Tau does not enable carbons
+  };
+
+  virtualHosts."example.org" = {
+    enabled = true;
+    domain = "example.org";
+    extraConfig = ''
+      authentication = "internal_hashed"
+      c2s_require_encryption = true
+    '';
+  };
+
+  muc = [{
+    domain = "conference.example.org";
+    restrictRoomCreation = "local";
+    extraConfig = ''
+      modules_enabled = { "muc_mam"; }
+      muc_room_default_public = false
+      muc_room_default_persistent = true
+      muc_room_default_members_only = true
+      muc_room_default_moderated = false
+      muc_room_default_public_jids = true
+      muc_log_by_default = true
+      muc_log_expires_after = "4w"
+    '';
+  }];
+};
+```
+
+Ensure DNS/SRV records and certificates cover the account domain and MUC
+subdomain. If room creation is restricted, the Tau XMPP account must be allowed
+to create rooms. If your MUC service hides real JIDs, keep
+`trust_muc_membership: false` unless the room is genuinely members-only and the
+server-side membership list is the intended authorization boundary.
 
 ## Example configuration
 
@@ -43,6 +90,9 @@ extensions:
         # Set true only if the room server enforces membership and intentionally
         # hides real JIDs from Tau.
         trust_muc_membership: false
+        invite_default_recipient: true
+      # Default: 16384 bytes. Valid range: 1..=131072 (128 KiB).
+      max_message_bytes: 16384
 ```
 
 Agents must call `xmpp_register(enabled: true)` before they can receive XMPP
@@ -57,5 +107,11 @@ room occupants.
   while Tau enforces `allowed_jids` from current real-JID presence when
   available.
 - `direct_resource`: announces the current bound full JID to `default_recipient`
-  and accepts only direct messages addressed exactly to that full JID. This mode
-  supports only one registered agent per extension instance.
+  and accepts only direct messages addressed exactly to the current server-bound
+  full JID. This mode supports only one registered agent per extension instance;
+  if reconnect changes the resource, Tau sends the default recipient a new
+  address notice.
+
+Tau requests zero MUC history on join and drops delayed/history message stanzas
+if they are still delivered, so initial room backlog is not converted into
+prompts.

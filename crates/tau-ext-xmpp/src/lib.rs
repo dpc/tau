@@ -19,6 +19,7 @@ use tau_proto::{
     ToolSpec, ToolStarted, ToolUseState, ToolUseStatus,
 };
 use tokio_xmpp::Client;
+use xmpp_parsers::delay::Delay;
 use xmpp_parsers::jid::{BareJid, Jid};
 use xmpp_parsers::message::{Lang, Message, MessageType};
 use xmpp_parsers::muc::muc::History;
@@ -47,6 +48,7 @@ pub const SEND_TOOL_TAG: &str = "xmpp:send";
 const DEFAULT_RESOURCE_PREFIX: &str = "tau";
 const DEFAULT_ROOM_PREFIX: &str = "tau";
 const DEFAULT_MESSAGE_LIMIT: usize = 16 * 1024;
+const MAX_MESSAGE_LIMIT: usize = 128 * 1024;
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(60);
 const REGISTER_TIMEOUT: Duration = Duration::from_secs(45);
 const STANZA_TIMEOUT: Duration = Duration::from_secs(20);
@@ -279,6 +281,11 @@ impl ExtConfig {
         if max_message_bytes == 0 {
             return Err("xmpp `max_message_bytes` must be greater than zero".to_owned());
         }
+        if max_message_bytes > MAX_MESSAGE_LIMIT {
+            return Err(format!(
+                "xmpp `max_message_bytes` must be at most {MAX_MESSAGE_LIMIT}"
+            ));
+        }
         Ok(RuntimeConfig {
             account_jid: account.to_bare(),
             password: password.to_owned(),
@@ -371,6 +378,9 @@ impl Extension {
     }
 
     fn handle_register(&self, invoke: ToolStarted) -> Event {
+        if let Err(message) = cbor_reject_unknown_fields(&invoke.arguments, &["enabled"]) {
+            return tool_error(invoke, message);
+        }
         let enabled = match cbor_bool_field(&invoke.arguments, "enabled") {
             Ok(enabled) => enabled,
             Err(message) => return tool_error(invoke, message),
@@ -422,6 +432,9 @@ impl Extension {
     }
 
     fn handle_send(&self, invoke: ToolStarted) -> Event {
+        if let Err(message) = cbor_reject_unknown_fields(&invoke.arguments, &["message"]) {
+            return tool_error(invoke, message);
+        }
         let message = match cbor_string_field(&invoke.arguments, "message") {
             Ok(message) => message,
             Err(message) => return tool_error(invoke, message),
@@ -601,10 +614,7 @@ async fn xmpp_worker(
                 let Some(event) = event else { return; };
                 match event {
                     tokio_xmpp::Event::Online { bound_jid, .. } => {
-                        worker.bound_jid = Some(bound_jid.clone());
-                        worker.occupant_real_jids.clear();
-                        let _ = send_presence(&mut client, Presence::available().with_priority(-1)).await;
-                        worker.rejoin_all(&mut client).await;
+                        worker.handle_online(bound_jid, &mut client).await;
                     }
                     tokio_xmpp::Event::Disconnected(error) => {
                         tracing::warn!(target: LOG_TARGET, %error, "xmpp disconnected");
@@ -722,6 +732,12 @@ impl WorkerState {
         }
         let conversation = match self.cfg.routing_mode {
             RoutingMode::Muc => {
+                if self.bound_jid.is_none() {
+                    return Err(
+                        "xmpp connection is not online yet; retry after the account connects"
+                            .to_owned(),
+                    );
+                }
                 let service = self
                     .cfg
                     .muc
@@ -775,6 +791,56 @@ impl WorkerState {
         Ok(address)
     }
 
+    /// Refresh connection-dependent state after the XMPP stream comes online.
+    async fn handle_online(&mut self, bound_jid: Jid, client: &mut Client) {
+        let direct_updates = self.apply_online_state(bound_jid);
+        if let Err(error) = send_presence(client, Presence::available().with_priority(-1)).await {
+            tracing::warn!(target: LOG_TARGET, %error, "failed to send xmpp available presence");
+        }
+        self.notify_direct_reconnects(direct_updates, client).await;
+        self.rejoin_all(client).await;
+    }
+
+    /// Apply state changes for a newly online stream and return direct-resource
+    /// registrations whose externally visible address changed.
+    fn apply_online_state(&mut self, bound_jid: Jid) -> Vec<(AgentId, Jid)> {
+        self.bound_jid = Some(bound_jid.clone());
+        self.occupant_real_jids.clear();
+        self.update_direct_conversations(bound_jid)
+    }
+
+    /// Update direct-resource conversations after reconnect/resource changes.
+    fn update_direct_conversations(&mut self, bound_jid: Jid) -> Vec<(AgentId, Jid)> {
+        let mut updates = Vec::new();
+        for (agent_id, conversation) in &mut self.conversations {
+            let Conversation::Direct { full_jid } = conversation else {
+                continue;
+            };
+            if full_jid == &bound_jid {
+                continue;
+            }
+            *full_jid = bound_jid.clone();
+            updates.push((agent_id.clone(), bound_jid.clone()));
+        }
+        updates
+    }
+
+    /// Notify the configured human recipient about changed direct-resource
+    /// addresses after reconnect.
+    async fn notify_direct_reconnects(&self, updates: Vec<(AgentId, Jid)>, client: &mut Client) {
+        for (agent_id, bound_jid) in updates {
+            let notice = format!(
+                "Tau agent {} reconnected and is now available at {} (plaintext over TLS; no OMEMO/E2EE).",
+                agent_id.as_ref(),
+                bound_jid
+            );
+            if let Err(error) = send_chat(client, self.cfg.default_recipient.clone(), &notice).await
+            {
+                tracing::warn!(target: LOG_TARGET, %error, agent_id = %agent_id.as_ref(), "failed to send xmpp direct-resource reconnect notice");
+            }
+        }
+    }
+
     /// Send one message to a registered conversation.
     async fn send_message(
         &self,
@@ -798,11 +864,20 @@ impl WorkerState {
 
     /// Rejoin all known MUC rooms after an online/reconnect event.
     async fn rejoin_all(&self, client: &mut Client) {
-        for conversation in self.conversations.values() {
-            if let Conversation::Muc { room, nick } = conversation {
-                let _ = join_room(client, room, nick).await;
-            }
+        for (room, nick) in self.muc_rooms_to_rejoin() {
+            let _ = join_room(client, &room, &nick).await;
         }
+    }
+
+    /// Return MUC rooms that should be rejoined after reconnect.
+    fn muc_rooms_to_rejoin(&self) -> Vec<(BareJid, String)> {
+        self.conversations
+            .values()
+            .filter_map(|conversation| match conversation {
+                Conversation::Muc { room, nick } => Some((room.clone(), nick.clone())),
+                Conversation::Direct { .. } => None,
+            })
+            .collect()
     }
 
     /// Process an inbound stanza.
@@ -838,6 +913,11 @@ impl WorkerState {
 
     /// Process inbound message stanzas.
     fn handle_message(&mut self, message: Message) {
+        // XEP-0203 delayed delivery marks backlog/history. The MVP is live-only,
+        // so delayed messages must not become fresh Tau prompt submissions.
+        if has_delay_payload(&message) {
+            return;
+        }
         let Some(body) = message
             .get_best_body(Vec::new())
             .map(|(_, body)| body.trim().to_owned())
@@ -875,6 +955,7 @@ impl WorkerState {
         if let Some(real_jid) = real.as_ref()
             && !self.cfg.is_allowed(real_jid)
         {
+            tracing::warn!(target: LOG_TARGET, room = %room, sender = %real_jid, "dropping muc message from non-allowlisted real jid");
             return;
         }
         let source = real.map_or_else(|| from.to_string(), |jid| jid.to_string());
@@ -887,6 +968,7 @@ impl WorkerState {
             return;
         };
         if !self.cfg.is_allowed(&from) {
+            tracing::warn!(target: LOG_TARGET, sender = %from, "dropping direct xmpp message from non-allowlisted jid");
             return;
         }
         let Some(to) = message.to.as_ref() else {
@@ -896,6 +978,7 @@ impl WorkerState {
             return;
         };
         if to != bound {
+            tracing::warn!(target: LOG_TARGET, sender = %from, to = %to, bound = %bound, "dropping direct xmpp message not addressed to the current bound full jid");
             return;
         }
         let agents: Vec<_> = self
@@ -1190,6 +1273,21 @@ fn cbor_field<'a>(value: &'a CborValue, name: &str) -> Option<&'a CborValue> {
     })
 }
 
+fn cbor_reject_unknown_fields(value: &CborValue, allowed: &[&str]) -> Result<(), String> {
+    let CborValue::Map(entries) = value else {
+        return Err("tool arguments must be an object".to_owned());
+    };
+    for (key, _) in entries {
+        let CborValue::Text(key) = key else {
+            return Err("tool argument names must be strings".to_owned());
+        };
+        if !allowed.contains(&key.as_str()) {
+            return Err(format!("unknown `{key}` argument"));
+        }
+    }
+    Ok(())
+}
+
 fn tool_result(invoke: ToolStarted, text: &str) -> Event {
     Event::ToolResult(ToolResult {
         call_id: invoke.call_id,
@@ -1253,6 +1351,13 @@ fn generated_resource(cfg: &RuntimeConfig) -> String {
         std::process::id(),
         short_random_hex()
     )
+}
+
+fn has_delay_payload(message: &Message) -> bool {
+    message
+        .payloads
+        .iter()
+        .any(|payload| Delay::try_from(payload.clone()).is_ok())
 }
 
 #[cfg(test)]
