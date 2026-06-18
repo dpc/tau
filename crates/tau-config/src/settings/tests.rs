@@ -21,6 +21,125 @@ fn dirs_with_config_and_state(
     }
 }
 
+/// Ensures absent `testing.yaml` is distinguishable from an empty allowlist so
+/// `tau dev tmux start` can warn users that provider access was not configured.
+#[test]
+fn testing_settings_missing_file_returns_none() {
+    let td = tempfile::tempdir().expect("tempdir");
+
+    let loaded = load_testing_settings(&dirs_with_config(td.path())).expect("load testing");
+
+    assert_eq!(loaded, None);
+}
+
+/// Ensures testing config discovery fails closed for path inspection errors
+/// instead of treating them as an absent opt-in file.
+#[test]
+fn testing_settings_reports_discovery_errors() {
+    let td = tempfile::tempdir().expect("tempdir");
+    let config_file = td.path().join("not-a-directory");
+    std::fs::write(&config_file, "x").expect("write file");
+    let dirs = TauDirs {
+        config_dir: Some(config_file),
+        state_dir: None,
+    };
+
+    let error = load_testing_settings(&dirs).expect_err("discovery error reported");
+
+    assert!(error.to_string().contains("failed to inspect"));
+}
+
+/// Ensures a non-regular `testing.yaml` path fails closed before the config
+/// loader can block on or otherwise interpret it as YAML.
+#[test]
+fn testing_settings_rejects_non_regular_file() {
+    let td = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir(td.path().join("testing.yaml")).expect("mkdir testing path");
+
+    let error = load_testing_settings(&dirs_with_config(td.path()))
+        .expect_err("non-regular testing config rejected");
+
+    assert!(error.to_string().contains("not a regular file"));
+}
+
+/// Ensures a FIFO named `testing.yaml` fails closed using metadata before any
+/// read attempt that could block waiting for a writer.
+#[cfg(unix)]
+#[test]
+fn testing_settings_rejects_fifo_without_blocking() {
+    let td = tempfile::tempdir().expect("tempdir");
+    let path = td.path().join("testing.yaml");
+    let output = std::process::Command::new("mkfifo")
+        .arg(&path)
+        .output()
+        .expect("run mkfifo");
+    assert!(
+        output.status.success(),
+        "mkfifo failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let error = load_testing_settings(&dirs_with_config(td.path()))
+        .expect_err("fifo testing config rejected");
+
+    assert!(error.to_string().contains("not a regular file"));
+}
+
+/// Ensures `testing.yaml` parses exact provider profile names through the same
+/// provider-name validator used by model routing and provider auth filenames.
+#[test]
+fn testing_settings_parses_testing_provider_allowlist() {
+    let td = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        td.path().join("testing.yaml"),
+        "testing_providers:\n  - chatgpt\n  - openrouter.work\n",
+    )
+    .expect("write testing settings");
+
+    let loaded = load_testing_settings(&dirs_with_config(td.path()))
+        .expect("load testing")
+        .expect("present testing settings");
+
+    assert_eq!(
+        loaded.testing_providers,
+        vec![
+            tau_proto::ProviderName::new("chatgpt"),
+            tau_proto::ProviderName::new("openrouter.work")
+        ]
+    );
+}
+
+/// Prevents malformed or path-like provider names in `testing.yaml` from being
+/// accepted, because the allowlist is later translated into auth.d filenames.
+#[test]
+fn testing_settings_rejects_unsafe_provider_names() {
+    let td = tempfile::tempdir().expect("tempdir");
+    std::fs::write(
+        td.path().join("testing.yaml"),
+        "testing_providers:\n  - ../chatgpt\n",
+    )
+    .expect("write testing settings");
+
+    let error = load_testing_settings(&dirs_with_config(td.path()))
+        .expect_err("unsafe provider name rejected");
+
+    assert!(error.to_string().contains("provider name"));
+}
+
+/// Ensures typos in `testing.yaml` fail closed instead of silently producing an
+/// empty allowlist that could be mistaken for a configured provider setup.
+#[test]
+fn testing_settings_rejects_unknown_fields() {
+    let td = tempfile::tempdir().expect("tempdir");
+    std::fs::write(td.path().join("testing.yaml"), "providers: [chatgpt]\n")
+        .expect("write testing settings");
+
+    let error = load_testing_settings(&dirs_with_config(td.path()))
+        .expect_err("unknown testing key rejected");
+
+    assert!(error.to_string().contains("unknown field"));
+}
+
 /// Ensures `session_retention_days: 0` disables cleanup by returning `None`.
 #[test]
 fn zero_session_retention_disables_cleanup() {

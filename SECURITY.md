@@ -112,6 +112,20 @@ the recognized helper marker and scratch-root shape before connecting to a tmux
 socket, and cleanup must validate that ownership before killing a session or
 removing the scratch root.
 
+Provider credentials for `tau dev tmux start` are local-only by default. The
+helper must not copy provider profiles, tokens, API keys, provider config, or
+provider state from the user's real Tau directories unless the user explicitly
+opts in through `testing.yaml`. That allowlist names exact provider profile
+names only; the helper may copy only the corresponding
+`auth.d/<provider>.json` files into scratch state, must not copy lock files,
+general config, sessions, logs, unrelated provider profiles, whole directories,
+or "all providers", and must refuse symlink/path-traversal attempts around those
+files. Reused scratch destinations must be reconciled to the current allowlist
+and must not write through pre-existing symlinks, non-regular files, or
+externally linked entries. Missing or empty testing configuration must be
+surfaced as a warning and must continue with no provider credentials in the
+scratch environment.
+
 Raw terminal mode is a process-local ownership boundary. Before spawning editors
 or pickers, Tau must pause redraws, release raw-mode features, and always clear
 that paused state when setup or resume fails so the UI cannot remain permanently

@@ -17,7 +17,7 @@ fn tau_shell_command_uses_scratch_environment_and_core_shell_only() {
     let env = TmuxEnvironment::new(common(&scratch), Some(workdir)).expect("env builds");
 
     let command = env
-        .tau_shell_command(Path::new("/tmp/tau bin/target/debug/tau"))
+        .tau_shell_command(Path::new("/tmp/tau bin/target/debug/tau"), false)
         .expect("command builds");
 
     assert!(command.contains("HOME='/tmp/tau tmux scratch/home'"));
@@ -26,6 +26,7 @@ fn tau_shell_command_uses_scratch_environment_and_core_shell_only() {
     assert!(command.contains("XDG_RUNTIME_DIR='/tmp/tau tmux scratch/run'"));
     assert!(command.contains("--disable-extensions-all"));
     assert!(command.contains("--enable-extension core-shell"));
+    assert!(!command.contains("--enable-extension provider-builtin"));
     assert!(command.contains(
             "--harness-config='extensions.core-shell.config.working_directory=\"/tmp/tau tmux scratch/work #1: ok\"'"
         ));
@@ -42,7 +43,7 @@ fn tau_shell_command_quotes_shell_and_harness_config_values() {
     let env = TmuxEnvironment::new(common(&scratch), Some(workdir)).expect("env builds");
 
     let command = env
-        .tau_shell_command(Path::new("/tmp/tau'bin"))
+        .tau_shell_command(Path::new("/tmp/tau'bin"), false)
         .expect("command builds");
 
     assert!(command.contains("HOME='/tmp/tau'\\''tmux/home'"));
@@ -50,6 +51,22 @@ fn tau_shell_command_quotes_shell_and_harness_config_values() {
     assert!(command.contains(
             "--harness-config='extensions.core-shell.config.working_directory=\"/tmp/tau'\\''tmux/work #x: y\"'"
         ));
+}
+
+/// Ensures opted-in provider profiles also enable the built-in provider
+/// extension while keeping the tmux child limited to explicitly enabled
+/// extensions.
+#[test]
+fn tau_shell_command_enables_provider_extension_only_when_requested() {
+    let scratch = PathBuf::from("/tmp/tau tmux scratch");
+    let env = TmuxEnvironment::new(common(&scratch), None).expect("env builds");
+
+    let command = env
+        .tau_shell_command(Path::new("/tmp/tau"), true)
+        .expect("command builds");
+
+    assert!(command.contains("--disable-extensions-all"));
+    assert!(command.contains("--enable-extension core-shell --enable-extension provider-builtin"));
 }
 
 /// Protects cleanup from deleting arbitrary directories: even when a user

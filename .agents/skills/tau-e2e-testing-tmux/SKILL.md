@@ -29,6 +29,23 @@ checks, not an automated test framework.
    with its working directory pointed at scratch `work/`. Use `--workdir` only
    for an existing external directory that should not be created or chmodded by
    the helper.
+
+   Provider access is opt-in. If `~/.config/tau/testing.yaml` is absent, start
+   prints a warning and copies no real provider credentials/config/state. To let
+   the tmux Tau use selected real provider profiles, configure exact provider
+   profile names:
+   ```yaml
+   testing_providers:
+     - chatgpt
+   ```
+   Discover exact profile names in the real Tau environment with
+   `tau provider list`; use the displayed profile name, which must match the
+   stem of `~/.local/state/tau/auth.d/<provider>.json`.
+   The helper copies only `~/.local/state/tau/auth.d/<provider>.json` for those
+   names into scratch state and then enables `provider-builtin`; it never copies
+   all providers or general user config. For more detail, load the built-in
+   self-knowledge skills `tau-self-knowledge-e2e-testing` and
+   `tau-self-knowledge-ext-provider-builtin`.
 4. Inspect the UI:
    ```sh
    target/debug/tau dev tmux capture --scratch-root "$scratch_root"

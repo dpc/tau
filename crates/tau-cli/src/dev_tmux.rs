@@ -4,10 +4,15 @@
 //! scratch Tau environment. It is intentionally a manual development helper,
 //! not a general daemon launcher and not a sandbox boundary.
 
+mod provider_access;
+
 use std::fs::File;
 use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Output};
+
+use provider_access::prepare_provider_access;
+use tau_config::settings::TauDirs;
 
 use crate::CliError;
 use crate::cli::{
@@ -29,6 +34,7 @@ pub(crate) fn run(command: DevTmuxCommand) -> Result<(), CliError> {
 
 fn start(args: DevTmuxStartArgs) -> Result<(), CliError> {
     let env = TmuxEnvironment::new(args.common, args.workdir)?;
+    let provider_access = prepare_provider_access(&TauDirs::default(), &env.state)?;
     prepare_scratch_root(&env.target.scratch_root)?;
     ensure_private_directory(&env.home)?;
     ensure_private_directory(&env.config)?;
@@ -40,13 +46,15 @@ fn start(args: DevTmuxStartArgs) -> Result<(), CliError> {
         ensure_existing_directory(&env.workdir)?;
     }
     write_scratch_marker(&env.target.scratch_root)?;
+    provider_access.copy_allowed_profiles()?;
+    provider_access.print_summary();
 
     let tau_bin = match args.tau_bin {
         Some(path) if path.is_absolute() => path,
         Some(path) => std::env::current_dir()?.join(path),
         None => std::env::current_exe()?,
     };
-    let command = env.tau_shell_command(&tau_bin)?;
+    let command = env.tau_shell_command(&tau_bin, provider_access.provider_extension_enabled())?;
     let output = Command::new("tmux")
         .arg("-S")
         .arg(&env.target.socket)
@@ -210,20 +218,30 @@ impl TmuxEnvironment {
         })
     }
 
-    fn tau_shell_command(&self, tau_bin: &Path) -> Result<String, CliError> {
+    fn tau_shell_command(
+        &self,
+        tau_bin: &Path,
+        enable_provider_extension: bool,
+    ) -> Result<String, CliError> {
         let working_directory_override = serde_json::to_string(&self.workdir.display().to_string())
             .map_err(|error| CliError::Participant(error.to_string()))?;
+        let provider_extension_arg = if enable_provider_extension {
+            " --enable-extension provider-builtin"
+        } else {
+            ""
+        };
         Ok([
             format!("cd {}", shell_quote_path(&self.workdir)),
             format!(
                 "HOME={} XDG_CONFIG_HOME={} XDG_STATE_HOME={} XDG_RUNTIME_DIR={} {} \
-                 --disable-extensions-all --enable-extension core-shell \
+                 --disable-extensions-all --enable-extension core-shell{} \
                  --harness-config={}",
                 shell_quote_path(&self.home),
                 shell_quote_path(&self.config),
                 shell_quote_path(&self.state),
                 shell_quote_path(&self.runtime),
                 shell_quote_path(tau_bin),
+                provider_extension_arg,
                 shell_quote(&format!(
                     "extensions.core-shell.config.working_directory={working_directory_override}"
                 )),

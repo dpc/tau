@@ -18,6 +18,16 @@ overrides.
   directories, bad directory entries, and non-directory `*.d` paths are explicit
   config errors.
 
+`testing.yaml` is intentionally not part of the normal layered CLI/harness load
+order. It is an optional standalone testing-only file used by development
+helpers such as `tau dev tmux start` to decide whether provider profiles may be
+copied into scratch state. Absence is distinct from an empty
+`testing_providers: []` list so callers can warn differently, but both states
+mean no provider access. Unknown fields fail closed, and provider entries are
+validated as `ProviderName`s so path-like values never become filenames.
+Unreadable, unstatable, or non-regular `testing.yaml` paths are explicit config
+errors rather than missing files.
+
 ## Alias normalization
 
 Legacy camelCase keys are accepted for compatibility, but aliases are normalized

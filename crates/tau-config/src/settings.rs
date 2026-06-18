@@ -15,7 +15,9 @@ use std::time::Duration;
 use indexmap::IndexMap;
 use serde::de::Error as _;
 use serde::{Deserialize, Serialize};
-use tau_proto::{ModelId, ModelTag, PromptContent, PromptPriority, ToolName, ToolTag};
+use tau_proto::{
+    ModelId, ModelTag, PromptContent, PromptPriority, ProviderName, ToolName, ToolTag,
+};
 
 // ---------------------------------------------------------------------------
 // Built-in configs
@@ -1561,6 +1563,23 @@ impl Default for TauDirs {
     }
 }
 
+/// Testing-only settings loaded from `testing.yaml`.
+///
+/// This file is intentionally separate from normal `harness.yaml` settings
+/// because it controls whether local development helpers may copy provider
+/// credentials into scratch environments used by E2E tests.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct TestingSettings {
+    /// Provider profile names that `tau dev tmux start` may copy into its
+    /// scratch Tau state directory.
+    ///
+    /// Names are exact built-in provider namespaces and map to
+    /// `auth.d/<provider>.json` in Tau provider auth storage.
+    #[serde(default)]
+    pub testing_providers: Vec<ProviderName>,
+}
+
 /// Loads CLI settings from `cli.yaml` with `cli.d/*.yaml` overrides.
 pub fn load_cli_settings() -> Result<CliSettings, SettingsError> {
     load_cli_settings_in(&TauDirs::default())
@@ -1584,6 +1603,44 @@ pub fn load_cli_settings_in(dirs: &TauDirs) -> Result<CliSettings, SettingsError
     bindings.extend(settings.bind);
     settings.bind = bindings;
     Ok(settings)
+}
+
+/// Loads optional testing settings from `testing.yaml`.
+///
+/// Missing files return `Ok(None)` so callers can keep safe defaults while
+/// warning users that provider access has not been explicitly configured.
+///
+/// # Errors
+///
+/// Returns an error when `testing.yaml` exists but cannot be read, is not a
+/// regular file, or does not parse as valid testing settings.
+pub fn load_testing_settings(dirs: &TauDirs) -> Result<Option<TestingSettings>, SettingsError> {
+    let Some(dir) = dirs.config_dir.as_deref() else {
+        return Ok(None);
+    };
+    let path = dir.join("testing.yaml");
+    let Some(metadata) = std::fs::metadata(&path).map(Some).or_else(|err| {
+        if err.kind() == std::io::ErrorKind::NotFound {
+            Ok(None)
+        } else {
+            Err(SettingsError::Config(config::ConfigError::Message(
+                format!("failed to inspect {}: {err}", path.display()),
+            )))
+        }
+    })?
+    else {
+        return Ok(None);
+    };
+    if !metadata.is_file() {
+        return Err(SettingsError::Config(config::ConfigError::Message(
+            format!("{} exists but is not a regular file", path.display()),
+        )));
+    }
+    let settings = config::Config::builder()
+        .add_source(config::File::from(path).required(true))
+        .build()?
+        .try_deserialize::<TestingSettings>()?;
+    Ok(Some(settings))
 }
 
 /// Loads harness settings from `harness.yaml` with `harness.d/*.yaml`

@@ -655,6 +655,7 @@ fn built_in_tau_self_knowledge_skills_load_from_embedded_markdown() {
             "tau-self-knowledge-source-code",
             "tau-self-knowledge-community",
             "tau-self-knowledge-debugging",
+            "tau-self-knowledge-e2e-testing",
         ]
     );
 
@@ -702,6 +703,7 @@ fn built_in_tau_self_knowledge_skills_load_from_embedded_markdown() {
     assert!(skill.content.contains("tau-self-knowledge-source-code"));
     assert!(skill.content.contains("tau-self-knowledge-community"));
     assert!(skill.content.contains("tau-self-knowledge-debugging"));
+    assert!(skill.content.contains("tau-self-knowledge-e2e-testing"));
 
     let architecture = skills
         .iter()
@@ -829,6 +831,14 @@ fn built_in_tau_self_knowledge_skills_load_from_embedded_markdown() {
         .expect("built-in debugging skill");
     assert!(!debugging.add_to_prompt);
     assert!(debugging.content.contains("## Important paths"));
+
+    let e2e_testing = skills
+        .iter()
+        .find(|skill| skill.name == "tau-self-knowledge-e2e-testing")
+        .expect("built-in E2E testing skill");
+    assert!(!e2e_testing.add_to_prompt);
+    assert!(e2e_testing.content.contains("testing_providers"));
+    assert!(e2e_testing.content.contains("tau dev tmux"));
 }
 
 /// Ensures scoped skill directories still apply their configured default

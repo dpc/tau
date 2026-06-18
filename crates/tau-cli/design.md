@@ -84,9 +84,25 @@ must not load or validate the caller's normal harness configuration before
 spawning the scratch child Tau; startup overrides that would require normal
 harness config resolution are rejected at the outer helper boundary.
 
+Provider access in tmux E2E runs is an explicit testing-only exception to the
+scratch-state default. `tau dev tmux start` may read only `testing.yaml` from the
+real Tau config directory. Missing or empty testing config keeps the child
+local-only and must warn. Non-empty `testing_providers` names are exact provider
+profile allowlist entries; there is no "all providers" mode. The helper may copy
+only corresponding real `auth.d/<provider>.json` files into scratch state, must
+not copy provider lock files, general config, sessions, logs, or unrelated
+profiles, and must fail closed on path traversal, symlink, non-regular file, or
+unsafe destination conditions. `provider-builtin` is enabled in the child only
+when the current allowlist is non-empty.
+
 ## tau-cli testing strategy
 
 Status: unconfirmed
+
+`dev_tmux` provider-access tests should stay focused on the security boundary:
+config parsing, exact allowlist copying, stale scratch reconciliation, warning
+behavior, and refusal of symlink, non-regular, path-traversal, or unsafe
+source/destination entries.
 
 Pure transcript renderers should be tested at the rendered block/span boundary,
 not by snapshotting built-in theme implementation details. Rendering and theme
