@@ -9119,13 +9119,17 @@ impl Harness {
         let (prompt_fragments, tool_prompt_fragments) =
             self.gather_prompt_fragment_groups_for_role(role_name);
         let system_template = self.system_template_for_role(role_name);
+        let template_context = match agent_id {
+            Some(agent_id) => RolePromptTemplateContext::for_agent(role_name, agent_id),
+            None => RolePromptTemplateContext::for_role(role_name),
+        };
         build_system_prompt_with_tool_template_context(
             system_template,
             &self.discovered_skills,
             &prompt_fragments,
             &tool_prompt_fragments,
             self.agent_context.template_value(agent_id),
-            RolePromptTemplateContext { role_name },
+            template_context,
         )
     }
 

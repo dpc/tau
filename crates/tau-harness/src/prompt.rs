@@ -51,6 +51,27 @@ impl ToolPromptFragment {
 pub(crate) struct RolePromptTemplateContext<'a> {
     /// Name of the role whose prompt is being rendered.
     pub(crate) role_name: &'a str,
+    /// Durable agent id whose prompt is being rendered, when the render targets
+    /// a concrete agent instead of a role-only preview.
+    pub(crate) agent_id: Option<&'a tau_proto::AgentId>,
+}
+
+impl<'a> RolePromptTemplateContext<'a> {
+    /// Build template context for a role-only render.
+    pub(crate) fn for_role(role_name: &'a str) -> Self {
+        Self {
+            role_name,
+            agent_id: None,
+        }
+    }
+
+    /// Build template context for a concrete agent prompt render.
+    pub(crate) fn for_agent(role_name: &'a str, agent_id: &'a tau_proto::AgentId) -> Self {
+        Self {
+            role_name,
+            agent_id: Some(agent_id),
+        }
+    }
 }
 
 /// Builds the system prompt from Tau defaults plus role prompt and prompt
@@ -72,7 +93,7 @@ pub(crate) fn build_system_prompt(
         skills,
         prompt_fragments,
         serde_json::json!({}),
-        RolePromptTemplateContext { role_name: "" },
+        RolePromptTemplateContext::for_role(""),
     )
 }
 
@@ -167,6 +188,7 @@ fn prompt_template_data(
         "role": {
             "name": context.role_name,
         },
+        "agent_id": context.agent_id.map(ToString::to_string),
         "skills": prompt_template_skills(skills),
         "agent_context": agent_context,
     })

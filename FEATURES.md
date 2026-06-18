@@ -402,12 +402,13 @@ custom_prompts:
     Summarize the current session.
 ```
 
-Fragment templates
-also receive the durable agent working directory as `cwd` and
+Fragment templates also receive `agent_id` when rendering a concrete agent
+prompt, plus the durable agent working directory as `cwd` and
 `working_directory`, with `eq` and `starts_with` helpers for project-specific
-conditionals. `working_directory` contains `present`, `path`, `basename`, and
-`ancestors`; `ancestors` is ordered from the working directory up to the
-filesystem root.
+conditionals. Role-only prompt previews do not have an `agent_id`, so reusable
+templates should guard agent-specific text with `{{#if agent_id}}`.
+`working_directory` contains `present`, `path`, `basename`, and `ancestors`;
+`ancestors` is ordered from the working directory up to the filesystem root.
 
 ### `std-pim` — PIM (email and calendar) extension
 

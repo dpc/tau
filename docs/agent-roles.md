@@ -21,6 +21,12 @@ A role can set:
 - `disable_tools`: internal tools removed after role group changes
 - `enable_tools`: internal tools added last
 
+System prompt templates receive `agent_id` when Tau dispatches a prompt for a
+concrete agent. Tau's built-in templates render it at the end in an "Agent
+identity" section; custom templates selected with `prompt_override` can place or
+word `{{agent_id}}` however they want. Role-only prompt previews do not have an
+agent id.
+
 Top-level `prompt_fragments` in `harness.yaml` apply to every role. Use them for global style or policy instructions:
 
 ```yaml

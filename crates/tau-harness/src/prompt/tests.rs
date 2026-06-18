@@ -119,9 +119,7 @@ fn build_system_prompt_does_not_html_escape_cwd() {
                 { "extension_name": "tau-ext-shell", "value": "/tmp/a&b<quoted>" }
             ]
         }),
-        RolePromptTemplateContext {
-            role_name: "engineer",
-        },
+        RolePromptTemplateContext::for_role("engineer"),
     );
 
     assert!(prompt.contains("Current working directory: /tmp/a&b<quoted>"));
@@ -144,7 +142,7 @@ fn build_system_prompt_encourages_parallel_tool_calls() {
             ),
         )],
         serde_json::json!({}),
-        RolePromptTemplateContext { role_name: "" },
+        RolePromptTemplateContext::for_role(""),
     );
     assert!(prompt.contains("## Tool calling"));
     assert!(prompt.contains("shell tool docs"));
@@ -185,9 +183,7 @@ fn build_system_prompt_renders_role_prompt_handlebars_context() {
                 { "extension_name": "tau-ext-shell", "value": "/tmp/work" }
             ]
         }),
-        RolePromptTemplateContext {
-            role_name: "engineer",
-        },
+        RolePromptTemplateContext::for_role("engineer"),
     );
 
     assert!(prompt.contains("ROLE engineer is working in /tmp/work"));
@@ -214,9 +210,7 @@ fn build_system_prompt_exposes_shell_cwd_to_handlebars() {
                 { "extension_name": "tau-ext-shell", "value": "/tmp/work/project" }
             ]
         }),
-        RolePromptTemplateContext {
-            role_name: "engineer",
-        },
+        RolePromptTemplateContext::for_role("engineer"),
     );
 
     assert!(prompt.contains("WORK"));
@@ -254,9 +248,7 @@ fn build_system_prompt_exposes_sortable_skills_to_handlebars() {
         &skills,
         &fragments,
         serde_json::json!({}),
-        RolePromptTemplateContext {
-            role_name: "engineer",
-        },
+        RolePromptTemplateContext::for_role("engineer"),
     );
 
     let alpha = prompt.find("* alpha - first skill").expect("alpha skill");
@@ -296,9 +288,7 @@ fn build_system_prompt_sort_helper_sorts_scalar_items_without_default_key() {
         &skills,
         &[],
         serde_json::json!({}),
-        RolePromptTemplateContext {
-            role_name: "engineer",
-        },
+        RolePromptTemplateContext::for_role("engineer"),
     );
 
     // Missing variables keep this role template from rendering in strict
@@ -340,9 +330,7 @@ fn build_system_prompt_exposes_agent_context_to_handlebars() {
                 { "extension_name": "core-skills", "value": { "count": 2 } }
             ]
         }),
-        RolePromptTemplateContext {
-            role_name: "engineer",
-        },
+        RolePromptTemplateContext::for_role("engineer"),
     );
 
     assert!(prompt.contains("core-skills=2"));
@@ -368,9 +356,7 @@ fn prompt_fragment_renders_agent_context_variable() {
                 { "extension_name": "demo-ext", "value": { "answer": 42 } }
             ]
         }),
-        RolePromptTemplateContext {
-            role_name: "engineer",
-        },
+        RolePromptTemplateContext::for_role("engineer"),
     );
 
     assert!(prompt.contains("fragment=demo-ext:42"));
@@ -386,9 +372,7 @@ fn prompt_fragments_order_by_priority_name_and_expose_priority() {
         tau_proto::PromptFragment::new("b", tau_proto::PromptPriority::new(20), "B"),
     ];
     let data = system_prompt_template_data(
-        RolePromptTemplateContext {
-            role_name: "engineer",
-        },
+        RolePromptTemplateContext::for_role("engineer"),
         &std::collections::HashMap::new(),
         &fragments,
         &[],
@@ -414,6 +398,7 @@ fn big_system_prompt_template_is_builtin_and_renders_context() {
         tau_proto::SkillName::from("test-skill"),
         discovered_skill("test skill description", true),
     )]);
+    let agent_id = tau_proto::AgentId::parse("engineer-test").expect("agent id");
     let prompt = build_system_prompt_with_template_context(
         templates
             .get(BIG_SYSTEM_TEMPLATE_NAME)
@@ -429,14 +414,15 @@ fn big_system_prompt_template_is_builtin_and_renders_context() {
                 { "extension_name": "tau-ext-shell", "value": "/tmp/work" }
             ]
         }),
-        RolePromptTemplateContext {
-            role_name: "engineer",
-        },
+        RolePromptTemplateContext::for_agent("engineer", &agent_id),
     );
+    let identity_section = format!("## Agent identity\n\nYour agent id is `{agent_id}`.");
 
     assert!(prompt.contains("You are Tau, an autonomous coding agent."));
     assert!(prompt.contains("- test-skill: test skill description (file: <builtin>/SKILL.md)"));
     assert!(prompt.contains("FRAGMENT /tmp/work"));
+    assert!(prompt.trim_end().ends_with(&identity_section));
+    assert_eq!(prompt.matches(&identity_section).count(), 1);
 }
 
 /// Tool-scoped fragments render in a dedicated section near tool-use
@@ -460,9 +446,7 @@ fn tool_prompt_fragments_render_in_dedicated_section() {
             ),
         )],
         serde_json::json!({}),
-        RolePromptTemplateContext {
-            role_name: "engineer",
-        },
+        RolePromptTemplateContext::for_role("engineer"),
     );
 
     let tool_heading = prompt
@@ -496,7 +480,7 @@ fn rendered_empty_tool_prompt_fragment_skips_automatic_heading() {
             ),
         )],
         serde_json::json!({}),
-        RolePromptTemplateContext { role_name: "" },
+        RolePromptTemplateContext::for_role(""),
     );
 
     assert!(!prompt.contains("### `conditional_tool` instructions"));
@@ -565,9 +549,7 @@ fn build_system_prompt_composes_role_and_prompt_fragments_in_order() {
                 { "extension_name": "tau-ext-shell", "value": "/tmp/work" }
             ]
         }),
-        RolePromptTemplateContext {
-            role_name: "engineer",
-        },
+        RolePromptTemplateContext::for_role("engineer"),
     );
 
     let skills = prompt
@@ -622,9 +604,7 @@ fn build_system_prompt_normalizes_prompt_fragment_spacing() {
             ),
         ],
         serde_json::json!({}),
-        RolePromptTemplateContext {
-            role_name: "manager",
-        },
+        RolePromptTemplateContext::for_role("manager"),
     );
 
     assert!(prompt.contains("ROLE PROMPT"));

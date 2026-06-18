@@ -39,11 +39,13 @@ fn publish_pending_agent_context_ready(h: &mut Harness, agent_id: &str) {
     .expect("context ready");
 }
 
+/// Regression: startup has no implicit `main` agent. The first interactive
+/// prompt claims the default conversation by minting a durable role-prefixed
+/// hex agent id, publishes that id on `AgentPromptCreated` for UI routing, and
+/// includes the same id in the actual provider-bound default system prompt so
+/// the agent knows its own identity without relying only on event metadata.
 #[test]
 fn user_prompt_mints_first_agent_for_empty_startup() {
-    // Regression: startup has no implicit `main` agent. The first interactive
-    // prompt claims the default conversation by minting a durable role-prefixed
-    // hex agent id and publishes that id on `AgentPromptCreated` for UI routing.
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
@@ -79,6 +81,50 @@ fn user_prompt_mints_first_agent_for_empty_startup() {
         Event::AgentPromptCreated(created)
             if created.agent_id.as_str() == agent_id
     )));
+    let prompt = read_nth_prompt_created(&h, 0);
+    let identity_section = format!("## Agent identity\n\nYour agent id is `{agent_id}`.");
+    assert_eq!(prompt.agent_id.as_str(), agent_id);
+    assert!(prompt.system_prompt.trim_end().ends_with(&identity_section));
+    assert_eq!(prompt.system_prompt.matches(&identity_section).count(), 1);
+
+    h.shutdown().expect("shutdown");
+}
+
+/// Regression: `agent_id` is a first-class system prompt template variable, not
+/// a harness-level post-render prefix. A role `prompt_override` can therefore
+/// place the id in custom wording, and the built-in default identity section is
+/// not layered on top of custom templates.
+#[test]
+fn prompt_override_template_can_place_agent_id_without_default_duplication() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    h.selected_model = Some("test/model".into());
+    let selected_role = h.selected_role.clone();
+    h.system_prompt_templates.insert(
+        "custom-template".to_owned(),
+        "Custom identity placement: {{agent_id}}\n\nRole={{role.name}}".to_owned(),
+    );
+    h.available_roles
+        .entry(selected_role.clone())
+        .or_default()
+        .prompt_override = Some("custom-template".to_owned());
+
+    h.submit_user_prompt("s1".into(), "hello".to_owned())
+        .expect("submit first user prompt");
+
+    let agent_id = h
+        .agents
+        .get(&test_user_agent(&h))
+        .and_then(|conversation| conversation.agent_id.as_deref())
+        .expect("first prompt minted agent id");
+    let prompt = read_nth_prompt_created(&h, 0);
+    assert_eq!(
+        prompt.system_prompt,
+        format!("Custom identity placement: {agent_id}\n\nRole={selected_role}")
+    );
+    assert_eq!(prompt.system_prompt.matches(agent_id).count(), 1);
+    assert!(!prompt.system_prompt.contains("## Agent identity"));
 
     h.shutdown().expect("shutdown");
 }
