@@ -102,6 +102,16 @@ not follow symlinks in the metadata path, keep a byte limit for regular files in
 case of races, and list malformed, oversized, unreadable, or special entries by
 name with an empty description instead of blocking or failing the prompt.
 
+The hidden `tau dev tmux` helper is trusted local testing infrastructure, not a
+sandbox. It starts Tau under scratch HOME/XDG paths to avoid accidental config
+or state writes during manual E2E checks, but it still runs local processes with
+the user's permissions. Scratch cleanup must remain guarded by a helper marker
+and path validation so `--remove-scratch` cannot recursively delete arbitrary
+user directories. Target commands such as capture, send, and stop must validate
+the recognized helper marker and scratch-root shape before connecting to a tmux
+socket, and cleanup must validate that ownership before killing a session or
+removing the scratch root.
+
 Raw terminal mode is a process-local ownership boundary. Before spawning editors
 or pickers, Tau must pause redraws, release raw-mode features, and always clear
 that paused state when setup or resume fails so the UI cannot remain permanently

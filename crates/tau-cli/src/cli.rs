@@ -216,4 +216,103 @@ pub enum DevCommand {
 
     /// Print the effective tool definitions for a role.
     PrintTools,
+
+    /// Manage a manual Tau end-to-end session in a private tmux server.
+    Tmux {
+        /// Tmux helper action to run.
+        #[command(subcommand)]
+        command: DevTmuxCommand,
+    },
+}
+
+/// Hidden tmux helper subcommands for manual Tau end-to-end sessions.
+#[derive(Subcommand)]
+pub enum DevTmuxCommand {
+    /// Start Tau in an isolated scratch environment inside tmux.
+    Start(DevTmuxStartArgs),
+
+    /// Capture the current tmux pane contents.
+    Capture(DevTmuxTargetArgs),
+
+    /// Send text to the tmux pane, followed by Enter by default.
+    Send(DevTmuxSendArgs),
+
+    /// Stop the private tmux server.
+    Stop(DevTmuxStopArgs),
+}
+
+/// Shared tmux target arguments used by the manual E2E helper.
+#[derive(Args)]
+pub struct DevTmuxCommonArgs {
+    /// Scratch root containing the tmux socket and isolated Tau environment.
+    #[arg(long, default_value_os_t = default_dev_tmux_scratch_root())]
+    pub scratch_root: PathBuf,
+
+    /// Private tmux session name.
+    #[arg(long, default_value = "tau-e2e")]
+    pub session: String,
+}
+
+/// Arguments for starting a new isolated Tau tmux session.
+#[derive(Args)]
+pub struct DevTmuxStartArgs {
+    /// Shared tmux socket/session selection.
+    #[command(flatten)]
+    pub common: DevTmuxCommonArgs,
+
+    /// Tau binary to run inside tmux.
+    #[arg(long)]
+    pub tau_bin: Option<PathBuf>,
+
+    /// Working directory for Tau and core-shell.
+    #[arg(long)]
+    pub workdir: Option<PathBuf>,
+
+    /// Initial tmux pane width.
+    #[arg(long, default_value_t = 120)]
+    pub width: u16,
+
+    /// Initial tmux pane height.
+    #[arg(long, default_value_t = 40)]
+    pub height: u16,
+}
+
+/// Arguments that identify an existing Tau tmux session.
+#[derive(Args)]
+pub struct DevTmuxTargetArgs {
+    /// Shared tmux socket/session selection.
+    #[command(flatten)]
+    pub common: DevTmuxCommonArgs,
+}
+
+/// Arguments for sending literal input to an existing Tau tmux session.
+#[derive(Args)]
+pub struct DevTmuxSendArgs {
+    /// Existing tmux session to receive input.
+    #[command(flatten)]
+    pub target: DevTmuxTargetArgs,
+
+    /// Do not send Enter after the text.
+    #[arg(long)]
+    pub no_enter: bool,
+
+    /// Text to send literally to the Tau prompt.
+    #[arg(required = true, trailing_var_arg = true)]
+    pub text: Vec<String>,
+}
+
+/// Arguments for stopping an existing Tau tmux session.
+#[derive(Args)]
+pub struct DevTmuxStopArgs {
+    /// Existing tmux session to stop.
+    #[command(flatten)]
+    pub target: DevTmuxTargetArgs,
+
+    /// Remove the scratch root after stopping tmux.
+    #[arg(long)]
+    pub remove_scratch: bool,
+}
+
+fn default_dev_tmux_scratch_root() -> PathBuf {
+    std::env::temp_dir().join("tau-e2e-tmux")
 }

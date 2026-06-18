@@ -117,6 +117,75 @@ fn dev_print_tools_uses_shared_role_flag() {
     ));
 }
 
+/// Ensures the hidden tmux helper parses isolated scratch/workdir startup
+/// options, because future manual E2E sessions must not accidentally inherit
+/// the user's real Tau state.
+#[test]
+fn dev_tmux_start_parses_isolated_startup_options() {
+    let cli = super::cli::Cli::parse_from([
+        "tau",
+        "dev",
+        "tmux",
+        "start",
+        "--scratch-root",
+        "/tmp/tau-e2e-test",
+        "--session",
+        "manual",
+        "--tau-bin",
+        "target/debug/tau",
+        "--workdir",
+        "/tmp/tau-e2e-test/work",
+        "--width",
+        "100",
+        "--height",
+        "30",
+    ]);
+
+    assert!(matches!(
+        cli.command,
+        Some(super::cli::Command::Dev {
+            command: super::cli::DevCommand::Tmux {
+                command: super::cli::DevTmuxCommand::Start(args),
+            },
+        }) if args.common.scratch_root == std::path::Path::new("/tmp/tau-e2e-test")
+            && args.common.session == "manual"
+            && args.tau_bin == Some(std::path::PathBuf::from("target/debug/tau"))
+            && args.workdir == Some(std::path::PathBuf::from("/tmp/tau-e2e-test/work"))
+            && args.width == 100
+            && args.height == 30
+    ));
+}
+
+/// Ensures `send` keeps prompt text as a trailing argument vector and exposes a
+/// no-enter mode, protecting the manual workflow's ability to paste slash
+/// commands or partial prompts before submitting them.
+#[test]
+fn dev_tmux_send_parses_literal_text_and_enter_toggle() {
+    let cli = super::cli::Cli::parse_from([
+        "tau",
+        "dev",
+        "tmux",
+        "send",
+        "--scratch-root",
+        "/tmp/tau-e2e-test",
+        "--no-enter",
+        "--",
+        "/help",
+        "with spaces",
+    ]);
+
+    assert!(matches!(
+        cli.command,
+        Some(super::cli::Command::Dev {
+            command: super::cli::DevCommand::Tmux {
+                command: super::cli::DevTmuxCommand::Send(args),
+            },
+        }) if args.target.common.scratch_root == std::path::Path::new("/tmp/tau-e2e-test")
+            && args.no_enter
+            && args.text == vec!["/help".to_owned(), "with spaces".to_owned()]
+    ));
+}
+
 #[test]
 fn component_command_parses_harness() {
     let cli = super::cli::Cli::parse_from(["tau", "component", "harness"]);
@@ -423,6 +492,29 @@ fn extension_cli_overrides_preserve_argument_order() {
             tau_config::settings::ExtensionCliOverride::DisableAll,
             tau_config::settings::ExtensionCliOverride::Enable("std-websearch".to_owned()),
         ]
+    );
+}
+
+/// Proves the outer `tau dev tmux` dispatcher refuses startup overrides that
+/// would require normal harness configuration validation before the helper has
+/// switched into its scratch HOME/XDG environment.
+#[test]
+fn dev_tmux_rejects_startup_overrides_before_harness_validation() {
+    let role_error = super::reject_dev_tmux_startup_overrides(Some("manager"), &[], &[], &[])
+        .expect_err("--role refused");
+    assert!(role_error.to_string().contains("cannot use --role"));
+
+    let extension_error = super::reject_dev_tmux_startup_overrides(
+        None,
+        &[],
+        &[tau_config::settings::ExtensionCliOverride::DisableAll],
+        &[],
+    )
+    .expect_err("extension override refused");
+    assert!(
+        extension_error
+            .to_string()
+            .contains("cannot use extension enable/disable overrides")
     );
 }
 

@@ -71,6 +71,19 @@ terminal palettes. More opinionated built-ins, including the personalized
 `tau-dpc` theme and the light-background `tau-plain-light` theme, remain
 selectable but are not the default.
 
+## Manual tmux E2E helper
+
+Status: confirmed, 2026-06-18, dpc
+
+Manual terminal end-to-end checks should use the hidden `tau dev tmux` helper.
+That helper is the accepted tmux-only boundary for agent-controlled manual Tau UI
+testing: it starts a real Tau binary in a private tmux server, defaults to
+scratch HOME/XDG state, and keeps the workflow manual rather than turning tmux
+into a second automated test framework. The outer `tau dev tmux` dispatch path
+must not load or validate the caller's normal harness configuration before
+spawning the scratch child Tau; startup overrides that would require normal
+harness config resolution are rejected at the outer helper boundary.
+
 ## tau-cli testing strategy
 
 Status: unconfirmed

@@ -7,6 +7,7 @@ mod action_commands;
 mod agent_activity;
 mod chat;
 mod daemon;
+mod dev_tmux;
 mod event_renderer;
 mod markdown_render;
 mod print_prompt;
@@ -337,6 +338,30 @@ fn reject_harness_config_overrides(
     )))
 }
 
+fn reject_dev_tmux_startup_overrides(
+    startup_role: Option<&str>,
+    role_cli_overrides: &[tau_config::settings::RoleCliOverride],
+    extension_cli_overrides: &[tau_config::settings::ExtensionCliOverride],
+    harness_config_overrides: &[tau_config::settings::HarnessConfigCliOverride],
+) -> Result<(), CliError> {
+    if startup_role.is_some() {
+        return Err(CliError::Participant(
+            "`tau dev tmux` cannot use --role because the outer helper must not load normal user harness config before spawning the scratch Tau".to_owned(),
+        ));
+    }
+    if !role_cli_overrides.is_empty() {
+        return Err(CliError::Participant(
+            "`tau dev tmux` cannot use role enable/disable overrides because the outer helper must not load normal user harness config before spawning the scratch Tau".to_owned(),
+        ));
+    }
+    if !extension_cli_overrides.is_empty() {
+        return Err(CliError::Participant(
+            "`tau dev tmux` cannot use extension enable/disable overrides because the outer helper must not load normal user harness config before spawning the scratch Tau".to_owned(),
+        ));
+    }
+    reject_harness_config_overrides(harness_config_overrides, "dev tmux")
+}
+
 fn reject_legacy_config_path(config: Option<&std::path::Path>) -> Result<(), CliError> {
     if let Some(path) = config {
         return Err(CliError::Participant(format!(
@@ -524,6 +549,16 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
                 reject_harness_config_overrides(&harness_config_overrides, "dev send")?;
             }
             cli::Command::Dev {
+                command: cli::DevCommand::Tmux { .. },
+            } => {
+                reject_dev_tmux_startup_overrides(
+                    harness.role.as_deref(),
+                    &role_cli_overrides,
+                    &extension_cli_overrides,
+                    &harness_config_overrides,
+                )?;
+            }
+            cli::Command::Dev {
                 command: cli::DevCommand::DumpInitialPrompt { .. },
             } => {
                 reject_harness_config_overrides(
@@ -534,6 +569,13 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
             cli::Command::Component { .. } => {
                 reject_harness_config_overrides(&harness_config_overrides, "component")?;
             }
+        }
+
+        if let cli::Command::Dev {
+            command: cli::DevCommand::Tmux { command },
+        } = command
+        {
+            return dev_tmux::run(command);
         }
 
         tau_harness::validate_cli_overrides(
@@ -684,6 +726,10 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
                         &extension_cli_overrides,
                         &harness_config_overrides,
                     )
+                }
+                cli::DevCommand::Tmux { command } => {
+                    let _ = command;
+                    unreachable!("dev tmux dispatch returns before harness config validation")
                 }
             },
 
