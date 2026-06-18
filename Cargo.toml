@@ -18,6 +18,7 @@ members = [
   "crates/tau-ext-telegram",
   "crates/tau-ext-test-dummy",
   "crates/tau-ext-websearch",
+  "crates/tau-ext-xmpp",
   "crates/tau-extension",
   "crates/tau-harness",
   "crates/tau-harness-tools",
@@ -75,6 +76,7 @@ tau-ext-std-notifications = { path = "crates/tau-ext-std-notifications" }
 tau-ext-telegram = { path = "crates/tau-ext-telegram" }
 tau-ext-test-dummy = { path = "crates/tau-ext-test-dummy" }
 tau-ext-websearch = { path = "crates/tau-ext-websearch" }
+tau-ext-xmpp = { path = "crates/tau-ext-xmpp" }
 tau-extension = { path = "crates/tau-extension" }
 tau-harness = { path = "crates/tau-harness" }
 tau-harness-tools = { path = "crates/tau-harness-tools" }
@@ -203,6 +205,12 @@ tokio-tungstenite = { version = "0.29", default-features = false, features = [
   "handshake",
   "rustls-tls-native-roots",
 ] }
+tokio-xmpp = { version = "6", default-features = false, features = [
+  "direct-tls",
+  "ring",
+  "rustls-native-certs",
+  "starttls",
+] }
 toml = { version = "0.9", default-features = false, features = [
   "display",
   "parse",
@@ -232,6 +240,7 @@ uuid = { version = "1", default-features = false, features = ["std", "v8"] }
 vt100 = { version = "0.16", default-features = false }
 webpki-roots = { version = "1", default-features = false }
 which = { version = "8", default-features = false, features = ["real-sys"] }
+xmpp-parsers = { version = "0.23", default-features = false }
 
 [profile.ci]
 debug = "line-tables-only"

@@ -14,6 +14,7 @@
 - `crates/tau-ext-rhai` — disabled-by-default trusted local Rhai scripting extension for event hooks, tool registration, and direct shell automation
 - `crates/tau-ext-test-dummy` — test-only dummy extension
 - `crates/tau-ext-websearch` — built-in generic web search extension (Exa default plus opt-in Parallel.ai tools)
+- `crates/tau-ext-xmpp` — disabled-by-default XMPP text bridge extension
 - `crates/tau-extension` — extension-side protocol/runtime helpers
 - `crates/tau-harness` — harness daemon: extensions, bus, sessions, socket server, harness-owned delegate/wait tools
 - `crates/tau-provider` — provider credential/config library (storage and OAuth helpers)

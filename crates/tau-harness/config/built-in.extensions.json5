@@ -46,6 +46,13 @@
         config: {},
     },
     {
+        name: "std-xmpp",
+        suffix: ["component", "ext-xmpp"],
+        role: "tool",
+        enable: false,
+        config: {},
+    },
+    {
         name: "std-websearch",
         suffix: ["component", "ext-websearch"],
         role: "tool",

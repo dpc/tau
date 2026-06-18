@@ -66,6 +66,24 @@ channels visible to everyone in that chat. Runtime registrations, selected
 agents, learned chat id, and update offsets are in-memory only. Avoid logs that
 include bot tokens, Bot API URLs, or unexpected private Telegram content.
 
+## XMPP extension
+
+`std-xmpp` / `tau-ext-xmpp` is disabled by default because it bridges
+untrusted external XMPP text into Tau prompts. When enabled, it requires an
+explicit password secret, a non-empty `allowed_jids` allowlist, and a
+`default_recipient` that matches that allowlist. The model cannot choose
+arbitrary destination JIDs: outgoing messages use only the registered agent
+conversation. Outbound MUC messages are visible to room occupants. The MVP is
+plaintext XMPP over TLS only and does not implement OMEMO/E2EE, so XMPP
+servers/operators can read message content. Tau does not currently configure
+MUC privacy or member affiliations itself; private/hidden/members-only policy
+must come from server defaults or preconfiguration. MUC mode must verify real
+sender JIDs from room presence by default; if a server hides real JIDs, the
+extension fails closed unless the user explicitly configures trust in
+server-side room membership. Runtime registrations and room mappings are
+in-memory only. Avoid logs that include XMPP passwords or private message
+content.
+
 ## Rhai scripting extension
 
 `std-rhai` / `tau-ext-rhai` scripts are trusted local code. A Rhai script can
