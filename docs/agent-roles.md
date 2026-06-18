@@ -29,7 +29,9 @@ word `{{agent_id}}` however they want. `tau dev print-prompt` and
 `tau dev print-system-prompt` use the stable fake `dev-preview-agent` id so
 role previews show the full template.
 
-Top-level `prompt_fragments` in `harness.yaml` apply to every role. Use them for global style or policy instructions:
+Top-level `prompt_fragments` in `harness.yaml` apply to every role in every
+role group. Use them for global style, policy, or run-wide instructions that
+should not be duplicated under each group or role:
 
 ```yaml
 prompt_fragments:
@@ -37,6 +39,10 @@ prompt_fragments:
     priority: 65
     text: Keep answers short and plain, using only simple words.
 ```
+
+The same global fragment path is available to one-shot harness config overrides,
+for example `--harness-config 'promptFragments=[{ name: "run.policy", priority:
+65, text: "Follow the run policy." }]'`.
 
 Roles live in `harness.yaml` under globally unique `role_groups`. Each group has a `roles` map, plus optional role fields such as `prompt_fragments` that apply as defaults to every role in the group. `default_role` selects the startup role; if omitted, Tau starts on the first role in `role_groups` order. Within a group, role cycling sorts by `order` first and role name second; roles without `order` sort after ordered roles by name.
 

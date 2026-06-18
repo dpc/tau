@@ -29,7 +29,7 @@ role_groups:
           If your task involved code changes to a larger project, consider them work in progress until they pass review.
 ```
 
-Top-level `prompt_fragments` apply to every role. Role-level `prompt_fragments` apply only to that role or role group. Group-level fragments without `roles:` are mainly useful for overriding an existing built-in group; new groups should define roles. Fragments are sorted by ascending `priority`; priorities below `100` render before later generated system-prompt sections such as skills.
+Top-level `prompt_fragments` apply to every role in every role group, including fragments supplied by one-shot harness config overrides. Role-level `prompt_fragments` apply only to that role or role group. Group-level fragments without `roles:` are mainly useful for overriding an existing built-in group; new groups should define roles. Fragments are sorted by ascending `priority`; priorities below `100` render before later generated system-prompt sections such as skills.
 
 Roles can also choose a full system prompt template with `prompt_override`; custom templates live under `~/.config/tau/prompts/<name>.hbs`.
 

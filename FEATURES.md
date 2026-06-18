@@ -230,7 +230,8 @@ role_groups:
 
 Roles can include an `order` for role cycling within a group and a
 `description` shown after the model/knob summary in
-`/role ...` completions. Top-level `prompt_fragments` apply to every role;
+`/role ...` completions. Top-level `prompt_fragments` apply to every role in
+every role group, including when supplied by one-shot harness config overrides;
 group-level fields apply as defaults to that group's roles; per-role
 `prompt_fragments` apply only to that role. Roles can set
 `compaction` to use provider-default automatic compaction, disable it, or set
@@ -389,9 +390,10 @@ checked in. Skill frontmatter can make skills manual-only with
 argument hints with `argument-hint`.
 
 Prompt fragments are composable too: top-level `harness.yaml`
-`prompt_fragments` apply to every role, while `roles.<name>.prompt_fragments`
-apply only to that role. Fragments are ordered by priority with extension- and
-tool-provided fragments, so global style instructions, role guidance, and
+`prompt_fragments` apply to every role in every role group, while
+`roles.<name>.prompt_fragments` apply only to that role. Fragments are ordered
+by priority with extension- and tool-provided fragments, so global style
+instructions, role guidance, and
 tool-specific instructions share one prompt assembly path.
 
 Custom prompt templates are separate from system-prompt fragments. Define

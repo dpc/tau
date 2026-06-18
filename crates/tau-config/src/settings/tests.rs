@@ -1900,6 +1900,59 @@ fn harness_global_prompt_fragments_apply_to_all_roles() {
     }
 }
 
+/// Ensures command-line global prompt fragments are folded into every role.
+#[test]
+fn harness_config_cli_global_prompt_fragments_apply_to_all_roles() {
+    // One-shot harness config overrides are a convenient way to inject shared
+    // run-specific instructions. They must take the same domain-specific merge
+    // path as file-based top-level prompt fragments so every effective role sees
+    // the fragment exactly once.
+    let td = TempDir::new().expect("tempdir");
+    let dir = td.path();
+    std::fs::write(
+        dir.join("harness.yaml"),
+        r#"{
+            role_groups: {
+                custom: {
+                    roles: {
+                        custom: { model: "openai/custom" },
+                    },
+                },
+            },
+        }"#,
+    )
+    .expect("write harness");
+
+    let s = load_harness_settings_with_cli_overrides_in(
+        &dirs_with_config(dir),
+        &[],
+        &[HarnessConfigCliOverride::from_str(
+            "promptFragments=[{ name: \"global.cli\", priority: 64, text: \"Follow the run policy.\" }]",
+        )
+        .expect("parse override")],
+    )
+    .expect("load");
+
+    assert_eq!(
+        s.prompt_fragments
+            .iter()
+            .filter(|fragment| fragment.name == "global.cli")
+            .count(),
+        1
+    );
+    assert!(s.roles.contains_key("custom"));
+    for (role_name, role) in &s.roles {
+        assert_eq!(
+            role.prompt_fragments
+                .iter()
+                .filter(|fragment| fragment.name == "global.cli")
+                .count(),
+            1,
+            "CLI global fragment should apply once to {role_name}"
+        );
+    }
+}
+
 /// Ensures user role definitions merge with the built-in role catalog rather
 /// than replacing it wholesale.
 #[test]
