@@ -10,6 +10,8 @@ use std::fs::File;
 use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Output};
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use provider_access::prepare_provider_access;
 use tau_config::settings::TauDirs;
@@ -33,43 +35,81 @@ pub(crate) fn run(command: DevTmuxCommand) -> Result<(), CliError> {
 }
 
 fn start(args: DevTmuxStartArgs) -> Result<(), CliError> {
+    let generated_scratch_root = args.common.scratch_root.is_none();
     let env = TmuxEnvironment::new(args.common, args.workdir)?;
+    print_generated_scratch_root(&env, generated_scratch_root);
     let provider_access = prepare_provider_access(&TauDirs::default(), &env.tau_state_dir())?;
+    prepare_start_environment(&env)?;
+    provider_access.copy_allowed_profiles()?;
+    provider_access.print_summary();
+
+    let tau_bin = resolve_tau_bin(args.tau_bin)?;
+    let command = env.tau_shell_command(&tau_bin, provider_access.provider_extension_enabled())?;
+    start_tmux_session(&env.target, args.width, args.height, command)?;
+    print_start_summary(&env);
+
+    Ok(())
+}
+
+fn prepare_start_environment(env: &TmuxEnvironment) -> Result<(), CliError> {
     prepare_scratch_root(&env.target.scratch_root)?;
     ensure_private_directory(&env.home)?;
     ensure_private_directory(&env.config)?;
     ensure_private_directory(&env.state)?;
     ensure_private_directory(&env.runtime)?;
-    if env.workdir_is_scratch {
-        ensure_private_directory(&env.workdir)?;
-    } else {
-        ensure_existing_directory(&env.workdir)?;
-    }
-    write_scratch_marker(&env.target.scratch_root)?;
-    provider_access.copy_allowed_profiles()?;
-    provider_access.print_summary();
+    prepare_workdir(env)?;
+    write_scratch_marker(&env.target.scratch_root)
+}
 
-    let tau_bin = match args.tau_bin {
-        Some(path) if path.is_absolute() => path,
-        Some(path) => std::env::current_dir()?.join(path),
-        None => std::env::current_exe()?,
-    };
-    let command = env.tau_shell_command(&tau_bin, provider_access.provider_extension_enabled())?;
+fn prepare_workdir(env: &TmuxEnvironment) -> Result<(), CliError> {
+    if env.workdir_is_scratch {
+        ensure_private_directory(&env.workdir)
+    } else {
+        ensure_existing_directory(&env.workdir)
+    }
+}
+
+fn print_generated_scratch_root(env: &TmuxEnvironment, generated_scratch_root: bool) {
+    if generated_scratch_root {
+        eprintln!(
+            "tau dev tmux: generated scratch root {}",
+            env.target.scratch_root.display()
+        );
+    }
+}
+
+fn resolve_tau_bin(tau_bin: Option<PathBuf>) -> Result<PathBuf, CliError> {
+    match tau_bin {
+        Some(path) if path.is_absolute() => Ok(path),
+        Some(path) => Ok(std::env::current_dir()?.join(path)),
+        None => Ok(std::env::current_exe()?),
+    }
+}
+
+fn start_tmux_session(
+    target: &TmuxTarget,
+    width: u16,
+    height: u16,
+    command: String,
+) -> Result<(), CliError> {
     let output = Command::new("tmux")
         .arg("-S")
-        .arg(&env.target.socket)
+        .arg(&target.socket)
         .arg("new-session")
         .arg("-d")
         .arg("-s")
-        .arg(&env.target.session)
+        .arg(&target.session)
         .arg("-x")
-        .arg(args.width.to_string())
+        .arg(width.to_string())
         .arg("-y")
-        .arg(args.height.to_string())
+        .arg(height.to_string())
         .arg(command)
         .output()?;
     ensure_output_success(output, "tmux new-session")?;
+    Ok(())
+}
 
+fn print_start_summary(env: &TmuxEnvironment) {
     println!("started Tau tmux session `{}`", env.target.session);
     println!("socket: {}", env.target.socket.display());
     println!("scratch root: {}", env.target.scratch_root.display());
@@ -90,11 +130,10 @@ fn start(args: DevTmuxStartArgs) -> Result<(), CliError> {
         shell_quote_path(&env.target.scratch_root),
         shell_quote(&env.target.session)
     );
-    Ok(())
 }
 
 fn capture(args: DevTmuxTargetArgs) -> Result<(), CliError> {
-    let target = TmuxTarget::new(args.common)?;
+    let target = TmuxTarget::for_target_command(args.common)?;
     target.validate_helper_owned()?;
     let output = Command::new("tmux")
         .arg("-S")
@@ -112,7 +151,7 @@ fn capture(args: DevTmuxTargetArgs) -> Result<(), CliError> {
 }
 
 fn send(args: DevTmuxSendArgs) -> Result<(), CliError> {
-    let target = TmuxTarget::new(args.target.common)?;
+    let target = TmuxTarget::for_target_command(args.target.common)?;
     target.validate_helper_owned()?;
     let text = args.text.join(" ");
     let output = Command::new("tmux")
@@ -140,7 +179,7 @@ fn send(args: DevTmuxSendArgs) -> Result<(), CliError> {
 }
 
 fn stop(args: DevTmuxStopArgs) -> Result<(), CliError> {
-    let target = TmuxTarget::new(args.target.common)?;
+    let target = TmuxTarget::for_target_command(args.target.common)?;
     target.validate_helper_owned()?;
     let output = Command::new("tmux")
         .args(stop_tmux_args(&target))
@@ -165,12 +204,30 @@ struct TmuxTarget {
 }
 
 impl TmuxTarget {
-    fn new(common: DevTmuxCommonArgs) -> Result<Self, CliError> {
-        let scratch_root = absolute_path(common.scratch_root)?;
+    /// Resolves a target command's tmux root, using the deterministic fallback
+    /// for callers that intentionally target the historical default session.
+    fn for_target_command(common: DevTmuxCommonArgs) -> Result<Self, CliError> {
+        let scratch_root = common
+            .scratch_root
+            .unwrap_or_else(static_dev_tmux_target_scratch_root);
+        Self::from_scratch_root(scratch_root, common.session)
+    }
+
+    /// Resolves a start command's tmux root, generating a fresh temporary root
+    /// when the user did not request a reusable location.
+    fn for_start(common: DevTmuxCommonArgs) -> Result<Self, CliError> {
+        let scratch_root = common
+            .scratch_root
+            .unwrap_or_else(unique_dev_tmux_scratch_root);
+        Self::from_scratch_root(scratch_root, common.session)
+    }
+
+    fn from_scratch_root(scratch_root: PathBuf, session: String) -> Result<Self, CliError> {
+        let scratch_root = absolute_path(scratch_root)?;
         let socket = scratch_root.join("tmux.sock");
         Ok(Self {
             scratch_root,
-            session: common.session,
+            session,
             socket,
         })
     }
@@ -201,7 +258,7 @@ struct TmuxEnvironment {
 
 impl TmuxEnvironment {
     fn new(common: DevTmuxCommonArgs, workdir: Option<PathBuf>) -> Result<Self, CliError> {
-        let target = TmuxTarget::new(common)?;
+        let target = TmuxTarget::for_start(common)?;
         let scratch_root = target.scratch_root.clone();
         let (workdir, workdir_is_scratch) = match workdir {
             Some(path) => (absolute_path(path)?, false),
@@ -253,6 +310,24 @@ impl TmuxEnvironment {
     fn tau_state_dir(&self) -> PathBuf {
         self.state.join("tau")
     }
+}
+
+fn unique_dev_tmux_scratch_root() -> PathBuf {
+    static COUNTER: AtomicU32 = AtomicU32::new(0);
+
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    let counter = COUNTER.fetch_add(1, Ordering::Relaxed);
+    std::env::temp_dir().join(format!(
+        "tau-tmux-{}-{nanos:x}-{counter:x}",
+        std::process::id()
+    ))
+}
+
+fn static_dev_tmux_target_scratch_root() -> PathBuf {
+    std::env::temp_dir().join("tau-e2e-tmux")
 }
 
 fn prepare_scratch_root(path: &Path) -> Result<(), CliError> {

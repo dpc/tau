@@ -2,7 +2,14 @@ use super::*;
 
 fn common(scratch_root: &Path) -> DevTmuxCommonArgs {
     DevTmuxCommonArgs {
-        scratch_root: scratch_root.to_path_buf(),
+        scratch_root: Some(scratch_root.to_path_buf()),
+        session: "tau-e2e".to_owned(),
+    }
+}
+
+fn common_without_scratch_root() -> DevTmuxCommonArgs {
+    DevTmuxCommonArgs {
+        scratch_root: None,
         session: "tau-e2e".to_owned(),
     }
 }
@@ -42,6 +49,39 @@ fn tau_state_dir_matches_child_tau_state_under_scratch_xdg_state() {
     let env = TmuxEnvironment::new(common(&scratch), None).expect("env builds");
 
     assert_eq!(env.tau_state_dir(), scratch.join("state").join("tau"));
+}
+
+/// Ensures `start` can be launched without a user-provided scratch root, while
+/// still choosing an absolute temporary path that does not reuse the static
+/// target-command fallback.
+#[test]
+fn start_environment_generates_unique_scratch_root_when_omitted() {
+    let env = TmuxEnvironment::new(common_without_scratch_root(), None).expect("env builds");
+    let second_env =
+        TmuxEnvironment::new(common_without_scratch_root(), None).expect("second env builds");
+
+    assert!(env.target.scratch_root.is_absolute());
+    assert_ne!(env.target.scratch_root, second_env.target.scratch_root);
+    assert_ne!(
+        env.target.scratch_root,
+        static_dev_tmux_target_scratch_root()
+    );
+    assert!(
+        env.target
+            .scratch_root
+            .file_name()
+            .is_some_and(|name| name.to_string_lossy().starts_with("tau-tmux-"))
+    );
+}
+
+/// Ensures target commands retain a deterministic fallback root for users that
+/// intentionally started the historical default helper session.
+#[test]
+fn target_commands_keep_static_scratch_root_fallback() {
+    let target =
+        TmuxTarget::for_target_command(common_without_scratch_root()).expect("target builds");
+
+    assert_eq!(target.scratch_root, static_dev_tmux_target_scratch_root());
 }
 
 /// Ensures paths with shell and YAML-sensitive characters are shell-quoted
@@ -114,7 +154,7 @@ fn stop_remove_scratch_refuses_unmarked_root_before_tmux() {
 fn target_validation_requires_exact_marker_content() {
     let temp = tempfile::tempdir().expect("tempdir");
     std::fs::write(temp.path().join(SCRATCH_MARKER_FILE), "lookalike\n").expect("write marker");
-    let target = TmuxTarget::new(common(temp.path())).expect("target");
+    let target = TmuxTarget::for_target_command(common(temp.path())).expect("target");
 
     let error = target
         .validate_helper_owned()
@@ -141,7 +181,7 @@ fn target_validation_rejects_symlink_socket() {
     .expect("write marker");
     std::os::unix::fs::symlink("/tmp/other-tmux.sock", temp.path().join("tmux.sock"))
         .expect("symlink");
-    let target = TmuxTarget::new(common(temp.path())).expect("target");
+    let target = TmuxTarget::for_target_command(common(temp.path())).expect("target");
 
     let error = target
         .validate_helper_owned()
@@ -208,7 +248,7 @@ fn existing_scratch_root_rejects_fifo_marker_without_blocking() {
         String::from_utf8_lossy(&output.stderr)
     );
 
-    let target = TmuxTarget::new(common(temp.path())).expect("target");
+    let target = TmuxTarget::for_target_command(common(temp.path())).expect("target");
     let error = target
         .validate_helper_owned()
         .expect_err("fifo marker refused");
@@ -363,7 +403,8 @@ fn unsafe_root_shape_rejects_canonical_home_symlink() {
 /// every tmux session on the private server socket.
 #[test]
 fn stop_tmux_args_kill_only_requested_session() {
-    let target = TmuxTarget::new(common(Path::new("/tmp/tau-stop-target"))).expect("target");
+    let target =
+        TmuxTarget::for_target_command(common(Path::new("/tmp/tau-stop-target"))).expect("target");
 
     let args: Vec<String> = stop_tmux_args(&target)
         .into_iter()

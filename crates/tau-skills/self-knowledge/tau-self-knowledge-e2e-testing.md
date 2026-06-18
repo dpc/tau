@@ -23,6 +23,13 @@ It starts Tau in a private tmux server, disables all extensions by default, and
 enables `core-shell` with its working directory pointed at scratch `work/` (or
 an explicit `--workdir`).
 
+When no scratch path is supplied, `start` generates a unique temporary root and
+prints it in the startup output. Use `--scratch-root` or its shorter `--root`
+alias when a specific reusable scratch location is needed. The printed capture,
+send, and stop commands include the selected scratch root. If target commands are
+run without a root, they use the deterministic historical fallback root instead
+of discovering the generated one.
+
 ## Provider access opt-in
 
 Provider credentials are not copied by default. When `~/.config/tau/testing.yaml`

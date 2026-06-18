@@ -147,12 +147,39 @@ fn dev_tmux_start_parses_isolated_startup_options() {
             command: super::cli::DevCommand::Tmux {
                 command: super::cli::DevTmuxCommand::Start(args),
             },
-        }) if args.common.scratch_root == std::path::Path::new("/tmp/tau-e2e-test")
+        }) if args.common.scratch_root == Some(std::path::PathBuf::from("/tmp/tau-e2e-test"))
             && args.common.session == "manual"
             && args.tau_bin == Some(std::path::PathBuf::from("target/debug/tau"))
             && args.workdir == Some(std::path::PathBuf::from("/tmp/tau-e2e-test/work"))
             && args.width == 100
             && args.height == 30
+    ));
+}
+
+/// Ensures `start` can omit its scratch root so the helper can generate a fresh
+/// temporary root, and accepts the shorter `--root` spelling when a caller
+/// needs to select the root explicitly.
+#[test]
+fn dev_tmux_start_accepts_generated_root_and_root_alias() {
+    let generated = super::cli::Cli::parse_from(["tau", "dev", "tmux", "start"]);
+    assert!(matches!(
+        generated.command,
+        Some(super::cli::Command::Dev {
+            command: super::cli::DevCommand::Tmux {
+                command: super::cli::DevTmuxCommand::Start(args),
+            },
+        }) if args.common.scratch_root.is_none()
+    ));
+
+    let explicit =
+        super::cli::Cli::parse_from(["tau", "dev", "tmux", "start", "--root", "/tmp/tau-e2e-test"]);
+    assert!(matches!(
+        explicit.command,
+        Some(super::cli::Command::Dev {
+            command: super::cli::DevCommand::Tmux {
+                command: super::cli::DevTmuxCommand::Start(args),
+            },
+        }) if args.common.scratch_root == Some(std::path::PathBuf::from("/tmp/tau-e2e-test"))
     ));
 }
 
@@ -180,7 +207,7 @@ fn dev_tmux_send_parses_literal_text_and_enter_toggle() {
             command: super::cli::DevCommand::Tmux {
                 command: super::cli::DevTmuxCommand::Send(args),
             },
-        }) if args.target.common.scratch_root == std::path::Path::new("/tmp/tau-e2e-test")
+        }) if args.target.common.scratch_root == Some(std::path::PathBuf::from("/tmp/tau-e2e-test"))
             && args.no_enter
             && args.text == vec!["/help".to_owned(), "with spaces".to_owned()]
     ));

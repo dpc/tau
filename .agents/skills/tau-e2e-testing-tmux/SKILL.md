@@ -13,16 +13,14 @@ checks, not an automated test framework.
    ```sh
    cargo build -p tau
    ```
-2. Allocate a unique scratch directory so parallel manual workflows do not
-   conflict:
-   ```sh
-   scratch_root="$(mktemp --directory /tmp/tau-e2e-XXXXXX)"
-   ```
-3. Start an isolated tmux session:
+2. Start an isolated tmux session. When `--scratch-root` / `--root` is omitted,
+   the helper generates a unique temporary scratch root and prints it in the
+   startup output. Copy the printed `scratch root:` value into `scratch_root`
+   for later commands:
    ```sh
    target/debug/tau dev tmux start \
-     --scratch-root "$scratch_root" \
      --tau-bin target/debug/tau
+   scratch_root='<printed scratch root>'
    ```
    By default this sets scratch `HOME`, `XDG_CONFIG_HOME`, `XDG_STATE_HOME`,
    `XDG_RUNTIME_DIR`, disables all extensions, and enables only `core-shell`
@@ -46,19 +44,20 @@ checks, not an automated test framework.
    all providers or general user config. For more detail, load the built-in
    self-knowledge skills `tau-self-knowledge-e2e-testing` and
    `tau-self-knowledge-ext-provider-builtin`.
-4. Inspect the UI:
+3. Inspect the UI using the printed scratch root:
    ```sh
    target/debug/tau dev tmux capture --scratch-root "$scratch_root"
    ```
-5. Send input:
+4. Send input:
    ```sh
    target/debug/tau dev tmux send --scratch-root "$scratch_root" -- /help
    ```
    Add `--no-enter` to paste without submitting.
-6. Stop and clean up:
+5. Stop and clean up:
    ```sh
    target/debug/tau dev tmux stop --scratch-root "$scratch_root" --remove-scratch
    ```
 
-Use `--session`, `--width`, and `--height` when you need a non-default session
-name or fixed pane size.
+Use `--scratch-root` or its shorter `--root` alias when you need a specific
+scratch location. Use `--session`, `--width`, and `--height` when you need a
+non-default session name or fixed pane size.

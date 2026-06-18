@@ -251,8 +251,10 @@ pub enum DevTmuxCommand {
 #[derive(Args)]
 pub struct DevTmuxCommonArgs {
     /// Scratch root containing the tmux socket and isolated Tau environment.
-    #[arg(long, default_value_os_t = default_dev_tmux_scratch_root())]
-    pub scratch_root: PathBuf,
+    /// When omitted, `start` generates a fresh temporary root; target commands
+    /// use the historical static fallback root.
+    #[arg(long = "scratch-root", visible_alias = "root")]
+    pub scratch_root: Option<PathBuf>,
 
     /// Private tmux session name.
     #[arg(long, default_value = "tau-e2e")]
@@ -317,8 +319,4 @@ pub struct DevTmuxStopArgs {
     /// Remove the scratch root after stopping tmux.
     #[arg(long)]
     pub remove_scratch: bool,
-}
-
-fn default_dev_tmux_scratch_root() -> PathBuf {
-    std::env::temp_dir().join("tau-e2e-tmux")
 }

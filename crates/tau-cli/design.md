@@ -84,6 +84,13 @@ must not load or validate the caller's normal harness configuration before
 spawning the scratch child Tau; startup overrides that would require normal
 harness config resolution are rejected at the outer helper boundary.
 
+`tau dev tmux start` owns scratch-root generation: when no root is supplied, it
+chooses a fresh temporary root and prints it before fallible scratch/provider
+setup so failed starts remain easy to clean up. Target commands (`capture`,
+`send`, and `stop`) keep the deterministic historical fallback root when no root
+is supplied, but normal generated-root workflows should use the printed commands
+from `start`.
+
 Provider access in tmux E2E runs is an explicit testing-only exception to the
 scratch-state default. `tau dev tmux start` may read only `testing.yaml` from the
 real Tau config directory. Missing or empty testing config keeps the child
