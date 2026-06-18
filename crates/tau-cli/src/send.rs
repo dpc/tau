@@ -88,6 +88,7 @@ fn event_for_line(session_id: &str, text: &str) -> Option<Event> {
         session_id,
         DEFAULT_AGENT_ROLE,
         text,
+        None,
     ))
 }
 

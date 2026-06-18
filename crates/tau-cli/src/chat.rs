@@ -1509,6 +1509,45 @@ struct TerminalInputSession<'a> {
     session_id: &'a mut String,
     ctx: TerminalInputLoopCtx,
     output: LocalTerminalOutput,
+    pending_new_agent_model: PendingNewAgentModel,
+}
+
+/// One-shot model override staged while the UI is in new-agent mode.
+#[derive(Default)]
+struct PendingNewAgentModel {
+    model: Option<tau_proto::ModelId>,
+}
+
+impl PendingNewAgentModel {
+    fn apply_selection(
+        &mut self,
+        session_id: &str,
+        selected_agent_id: Option<tau_proto::AgentId>,
+        model: tau_proto::ModelId,
+    ) -> Option<Event> {
+        if let Some(target_agent_id) = selected_agent_id {
+            Some(crate::ui_events::agent_model_select(
+                session_id,
+                Some(target_agent_id),
+                model,
+            ))
+        } else {
+            self.stage(model);
+            None
+        }
+    }
+
+    fn stage(&mut self, model: tau_proto::ModelId) {
+        self.model = Some(model);
+    }
+
+    fn take(&mut self) -> Option<tau_proto::ModelId> {
+        self.model.take()
+    }
+
+    fn clear(&mut self) {
+        self.model = None;
+    }
 }
 
 impl<'a> TerminalInputSession<'a> {
@@ -2092,7 +2131,7 @@ impl<'a> TerminalInputSession<'a> {
         self.ctx.routing.agent_is_active(agent_id)
     }
 
-    fn handle_role_selection_command(&self, text: &str) -> bool {
+    fn handle_role_selection_command(&mut self, text: &str) -> bool {
         if text == "/role" || text.starts_with("/role ") {
             let output = &self.output;
             handle_role_command(text, self.writer, &|message| output.system_info(message));
@@ -2103,14 +2142,16 @@ impl<'a> TerminalInputSession<'a> {
             if !model.is_empty() {
                 match model.parse::<tau_proto::ModelId>() {
                     Ok(model) => {
-                        let _ = send_event(
-                            self.writer,
-                            &crate::ui_events::agent_model_select(
-                                self.session_id,
-                                self.ctx.routing.selected_side_agent_id(),
-                                model,
-                            ),
-                        );
+                        if let Some(event) = self.pending_new_agent_model.apply_selection(
+                            self.session_id,
+                            self.ctx.routing.selected_side_agent_id(),
+                            model.clone(),
+                        ) {
+                            let _ = send_event(self.writer, &event);
+                        } else {
+                            self.output
+                                .system_info(&format!("next agent model set to {model}"));
+                        }
                     }
                     Err(error) => self.output.system_info(&error.to_string()),
                 }
@@ -2190,7 +2231,7 @@ impl<'a> TerminalInputSession<'a> {
         )
     }
 
-    fn submit_prompt(&self, text: &str) -> Option<InputLoopExit> {
+    fn submit_prompt(&mut self, text: &str) -> Option<InputLoopExit> {
         self.invalidate_pending_draft();
 
         let selected_agent = self.ctx.routing.selected_agent_id();
@@ -2222,7 +2263,8 @@ impl<'a> TerminalInputSession<'a> {
                 .ok()
                 .and_then(|role| role.clone())
                 .unwrap_or_else(|| DEFAULT_AGENT_ROLE.to_owned());
-            create_user_agent_prompt(self.session_id, role, text)
+            let model_override = self.pending_new_agent_model.take();
+            create_user_agent_prompt(self.session_id, role, text, model_override)
         };
         if send_event(self.writer, &event).is_err() {
             return Some(InputLoopExit::Quit);
@@ -2315,6 +2357,7 @@ impl<'a> TerminalInputSession<'a> {
     }
 
     fn switch_to_agent(&mut self, agent_id: String) {
+        self.pending_new_agent_model.clear();
         self.ctx.routing.set_selected_agent(Some(agent_id.clone()));
         self.dismiss_completion_menu();
         let _ = self
@@ -2463,6 +2506,7 @@ fn terminal_input_loop(
         session_id,
         ctx,
         output,
+        pending_new_agent_model: PendingNewAgentModel::default(),
     }
     .run()
 }

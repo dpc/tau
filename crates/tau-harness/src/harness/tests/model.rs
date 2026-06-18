@@ -421,6 +421,106 @@ fn ui_agent_model_select_sets_model_override_for_target_agent() {
     );
 }
 
+/// Creating an agent may include the model override staged by the interactive
+/// `/new` + `/model` flow; the harness must apply it before the first prompt is
+/// routed so the initial provider request uses the requested model.
+#[test]
+fn ui_create_agent_applies_initial_model_override() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path()).expect("harness");
+    clear_startup_echo_models(&mut h);
+    connect_provider_source(&mut h, "provider-ext");
+    let role = h.selected_role.clone();
+    let default_model: ModelId = "test/default".parse().expect("model id");
+    let selected_model: ModelId = "test/selected".parse().expect("model id");
+    h.handle_extension_event(
+        "provider-ext",
+        TestProtocolItem::Event(Event::ProviderModelsUpdated(ProviderModelsUpdated {
+            models: vec![
+                provider_model(default_model.clone(), 128_000),
+                provider_model(selected_model.clone(), 128_000),
+            ],
+        })),
+    )
+    .expect("handle provider snapshot");
+
+    h.handle_ui_create_agent(tau_proto::UiCreateAgent {
+        parent_agent: None,
+        session_id: "s1".into(),
+        role,
+        model_override: Some(selected_model.clone()),
+        metadata: Vec::new(),
+        initial_prompt: Some("hello".to_owned()),
+        message_class: tau_proto::PromptMessageClass::User,
+        originator: tau_proto::PromptOriginator::User,
+        ctx_id: None,
+    })
+    .expect("create agent");
+
+    let cid = test_user_agent(&h);
+    let conv = &h.agents[&cid];
+    assert_eq!(conv.model_override.as_ref(), Some(&selected_model));
+    assert_eq!(h.model_for_agent_role(conv), Some(selected_model));
+    let created = read_nth_prompt_created(&h, 0);
+    assert_eq!(created.model, "test/selected".parse().expect("model id"));
+}
+
+/// A model staged by `/new` + `/model` must survive the supported cold-provider
+/// path where the first prompt queues before any provider has published models.
+#[test]
+fn ui_create_agent_preserves_model_override_until_cold_provider_models_arrive() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path()).expect("harness");
+    clear_startup_echo_models(&mut h);
+    connect_provider_source(&mut h, "provider-ext");
+    h.provider_model_routes.clear();
+    h.provider_model_info.clear();
+    h.available_models.clear();
+    h.selected_model = None;
+    let role = h.selected_role.clone();
+    let selected_model: ModelId = "test/cold-selected".parse().expect("model id");
+
+    h.handle_ui_create_agent(tau_proto::UiCreateAgent {
+        parent_agent: None,
+        session_id: "s1".into(),
+        role,
+        model_override: Some(selected_model.clone()),
+        metadata: Vec::new(),
+        initial_prompt: Some("hello cold".to_owned()),
+        message_class: tau_proto::PromptMessageClass::User,
+        originator: tau_proto::PromptOriginator::User,
+        ctx_id: None,
+    })
+    .expect("create queued agent");
+
+    let cid = test_user_agent(&h);
+    assert_eq!(
+        h.agents[&cid].model_override.as_ref(),
+        Some(&selected_model)
+    );
+    assert!(
+        event_log_events(&h)
+            .iter()
+            .any(|event| matches!(event, Event::AgentPromptQueued(_)))
+    );
+    assert!(
+        !event_log_events(&h)
+            .iter()
+            .any(|event| matches!(event, Event::AgentPromptCreated(_)))
+    );
+
+    h.handle_extension_event(
+        "provider-ext",
+        TestProtocolItem::Event(Event::ProviderModelsUpdated(ProviderModelsUpdated {
+            models: vec![provider_model(selected_model.clone(), 128_000)],
+        })),
+    )
+    .expect("handle provider snapshot");
+
+    let created = read_nth_prompt_created(&h, 0);
+    assert_eq!(created.model, selected_model);
+}
+
 /// If a model override disappears from provider routing, the harness must not
 /// emit future prompts to that unrouteable model. It should fall back to normal
 /// role-based resolution instead.

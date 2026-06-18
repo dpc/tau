@@ -346,10 +346,11 @@ intent.
   `include_in_context` flag.
 - **`ui.switch_session`** — User wants to switch to a different session
   in the same daemon, with `new`/`resume` reason.
-- **`ui.create_agent`** — User typed `/agent new`: keep the current session
-  but rotate the harness default conversation so the next untargeted prompt
-  starts a fresh agent. The invoking UI clears its own current-agent
-  selection locally; this request is not replayed to synchronize other UIs.
+- **`ui.create_agent`** — UI requests creation of a durable user-owned agent,
+  optionally with the first prompt to append after context loads. The request
+  carries the role, initial metadata, optional parent agent, optional prompt
+  correlation id, and optional `model_override`; when present, `model_override`
+  is installed on the new agent before its first prompt is queued or routed.
 - **`ui.tree_request`** — User typed `/tree`: render the selected or targeted
   agent branching tree to chat.
 - **`ui.navigate_tree`** — User typed `/tree <id>`: move the selected or targeted

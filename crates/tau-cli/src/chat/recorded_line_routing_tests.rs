@@ -93,3 +93,53 @@ fn skillx_remains_unknown_slash_action() {
         ["notice:unknown CLI action `/skillx`"]
     );
 }
+
+/// Covers the new-agent half of `/model`: with no selected agent, the command
+/// must not emit an agent-update event and must instead stage a one-shot
+/// override for the next `UiCreateAgent`.
+#[test]
+fn model_selection_without_selected_agent_stages_one_shot_create_override() {
+    let mut pending = PendingNewAgentModel::default();
+    let model: tau_proto::ModelId = "test/staged".parse().expect("model id");
+
+    let event = pending.apply_selection("s1", None, model.clone());
+
+    assert_eq!(event, None);
+    assert_eq!(pending.take(), Some(model));
+    assert_eq!(pending.take(), None);
+}
+
+/// Covers the existing-agent half of `/model`: a selected agent still receives
+/// a targeted `UiAgentModelSelect`, and no stale new-agent override is staged.
+#[test]
+fn model_selection_with_selected_agent_emits_targeted_update() {
+    let mut pending = PendingNewAgentModel::default();
+    let model: tau_proto::ModelId = "test/selected".parse().expect("model id");
+    let agent_id = tau_proto::AgentId::parse("agent-1234567890abcdef").expect("agent id");
+
+    let event = pending
+        .apply_selection("s1", Some(agent_id.clone()), model.clone())
+        .expect("selected agent event");
+
+    match event {
+        Event::UiAgentModelSelect(select) => {
+            assert_eq!(select.session_id, "s1");
+            assert_eq!(select.target_agent_id, Some(agent_id));
+            assert_eq!(select.model, model);
+        }
+        other => panic!("expected model-select event, got {other:?}"),
+    }
+    assert_eq!(pending.take(), None);
+}
+
+/// Switching to an existing agent should discard a staged new-agent override so
+/// an old `/new` + `/model` choice cannot unexpectedly affect a later prompt.
+#[test]
+fn pending_new_agent_model_clear_discards_staged_override() {
+    let mut pending = PendingNewAgentModel::default();
+    pending.stage("test/stale".parse().expect("model id"));
+
+    pending.clear();
+
+    assert_eq!(pending.take(), None);
+}

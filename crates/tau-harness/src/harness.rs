@@ -5009,6 +5009,7 @@ impl Harness {
         );
         if let Some(conv) = self.agents.get_mut(&cid) {
             conv.next_ctx_id = req.ctx_id.clone();
+            conv.model_override = req.model_override;
         }
         if let Some(initial_prompt) = initial_prompt {
             if !req.message_class.is_internal() {

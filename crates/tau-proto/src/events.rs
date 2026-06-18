@@ -2334,6 +2334,10 @@ pub struct UiCreateAgent {
     pub session_id: SessionId,
     /// Role to bind to the new durable agent.
     pub role: String,
+    /// Model override to apply to the new agent before its first prompt is
+    /// dispatched.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_override: Option<ModelId>,
     /// Initial metadata facts to publish for the new agent.
     ///
     /// The harness fills in the newly-created agent id when publishing these

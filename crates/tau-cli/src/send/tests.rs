@@ -14,6 +14,7 @@ fn prompt_text(text: &str) -> String {
         Event::UiCreateAgent(req) => {
             assert_eq!(req.session_id, SESSION_ID);
             assert_eq!(req.role, DEFAULT_AGENT_ROLE);
+            assert_eq!(req.model_override, None);
             assert_eq!(req.originator, PromptOriginator::User);
             assert_eq!(req.ctx_id, None);
             req.initial_prompt.expect("initial prompt")

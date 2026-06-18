@@ -148,6 +148,7 @@ fn queued_first_user_prompt_publishes_replayable_agent_target() {
         parent_agent: None,
         session_id: "s1".into(),
         role: h.selected_role.clone(),
+        model_override: None,
         metadata: Vec::new(),
         initial_prompt: Some("hello while cold".to_owned()),
         message_class: tau_proto::PromptMessageClass::User,
@@ -232,6 +233,7 @@ fn ui_create_agent_embeds_shell_cwd_metadata_in_agent_started() {
         parent_agent: None,
         session_id: "s1".into(),
         role: h.selected_role.clone(),
+        model_override: None,
         metadata: vec![tau_proto::AgentInitialMetadata {
             key: tau_proto::AgentMetadataKey::new("ext_core-shell_cwd"),
             value: CborValue::Text(cwd.display().to_string()),

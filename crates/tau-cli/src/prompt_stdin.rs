@@ -105,7 +105,7 @@ fn submit_prompt(
 ) -> io::Result<()> {
     crate::ui_client::send_message(
         writer,
-        &HarnessInputMessage::emit(create_user_agent_prompt(session_id, role, prompt)),
+        &HarnessInputMessage::emit(create_user_agent_prompt(session_id, role, prompt, None)),
     )
 }
 fn read_one_shot_result(

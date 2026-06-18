@@ -70,6 +70,11 @@ prompt commands, currently `/skill <name> ...` and `/skill:<name> ...`, are
 completed and echoed by the CLI but must still be submitted as prompts so the
 harness can resolve skills and inject their content.
 
+`/model <provider>/<model>` has two CLI-owned paths: with a selected agent it
+emits a targeted `ui.agent_model_select`; after `/new`, with no selected agent,
+it stages a one-shot `ui.create_agent.model_override` for the next prompt-created
+agent instead of sending an untargeted agent update.
+
 Only after those owners decline a line may the CLI treat an unrecognized leading
 slash token as an unknown-action notice. That fallback is intentionally limited
 to leading slash roots; ordinary prompt text that contains slashes later in the

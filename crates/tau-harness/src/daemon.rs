@@ -518,6 +518,7 @@ pub fn send_daemon_message_with_trace(
             parent_agent: None,
             session_id: session_id.into(),
             role: "senior-engineer".to_owned(),
+            model_override: None,
             metadata: vec![tau_proto::AgentInitialMetadata {
                 key: tau_proto::AgentMetadataKey::new("ext_core-shell_cwd"),
                 value: tau_proto::CborValue::Text(
