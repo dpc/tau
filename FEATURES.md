@@ -564,6 +564,11 @@ Type `/` for menu autocompletion. The built-in set:
 | `/set <name> <val>` | Set a UI setting (Tab cycles names + values)         |
 | `/skill <name> [args]` | Invoke a user-invocable skill; `/skill:<name>` is also accepted |
 
+Unknown leading slash roots are treated as local CLI notices instead of being
+submitted as prompt text. This catches mistyped commands like `/modle` early,
+while ordinary prompts that contain slashes later in the line are still sent to
+the selected agent normally.
+
 A session is an agent-membership container backed by a durable membership log.
 Starting a new session resets harness/UI session state; prompts create/load
 agents whose transcripts are stored under `<state_dir>/agents/<agent_id>/`. The

@@ -1,6 +1,9 @@
 //! Interactive chat as a socket client of the harness daemon: input
 //! loop, draft debouncer, and the threading glue that joins them.
 
+#[cfg(test)]
+mod recorded_line_routing_tests;
+
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::io::{self, BufReader, BufWriter, Read, Write};
 use std::net::Shutdown;
@@ -1488,6 +1491,13 @@ enum CommandOutcome {
     Exit(InputLoopExit),
 }
 
+trait RecordedLineHandlers {
+    fn handle_known_command(&mut self, text: &str) -> Result<CommandOutcome, CliError>;
+    fn handle_dynamic_action(&mut self, text: &str) -> CommandOutcome;
+    fn submit_prompt(&mut self, text: &str) -> Option<InputLoopExit>;
+    fn system_info(&mut self, message: &str);
+}
+
 /// Mutable state for one terminal input loop invocation.
 ///
 /// Keeping the borrows and owned context together lets each command-family
@@ -1600,15 +1610,7 @@ impl<'a> TerminalInputSession<'a> {
     }
 
     fn handle_recorded_line(&mut self, text: &str) -> Result<Option<InputLoopExit>, CliError> {
-        match self.handle_known_command(text)? {
-            CommandOutcome::NotHandled => match self.handle_dynamic_action(text) {
-                CommandOutcome::NotHandled => Ok(self.submit_prompt(text)),
-                CommandOutcome::Continue => Ok(None),
-                CommandOutcome::Exit(exit) => Ok(Some(exit)),
-            },
-            CommandOutcome::Continue => Ok(None),
-            CommandOutcome::Exit(exit) => Ok(Some(exit)),
-        }
+        handle_recorded_line_with_handlers(text, self)
     }
 
     fn handle_known_command(&mut self, text: &str) -> Result<CommandOutcome, CliError> {
@@ -2386,6 +2388,24 @@ impl<'a> TerminalInputSession<'a> {
     }
 }
 
+impl RecordedLineHandlers for TerminalInputSession<'_> {
+    fn handle_known_command(&mut self, text: &str) -> Result<CommandOutcome, CliError> {
+        TerminalInputSession::handle_known_command(self, text)
+    }
+
+    fn handle_dynamic_action(&mut self, text: &str) -> CommandOutcome {
+        TerminalInputSession::handle_dynamic_action(self, text)
+    }
+
+    fn submit_prompt(&mut self, text: &str) -> Option<InputLoopExit> {
+        TerminalInputSession::submit_prompt(self, text)
+    }
+
+    fn system_info(&mut self, message: &str) {
+        self.output.system_info(message);
+    }
+}
+
 pub(crate) fn role_cycling_enabled(current_agent_state: &Arc<Mutex<Option<String>>>) -> bool {
     current_agent_state
         .lock()
@@ -2756,6 +2776,43 @@ fn custom_prompt_ids(prompts: &[tau_proto::HarnessCustomPrompt]) -> String {
         .map(|prompt| prompt.id.as_str())
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+pub(crate) fn leading_slash_action(text: &str) -> Option<&str> {
+    let command = text.split_whitespace().next()?;
+    command.starts_with('/').then_some(command)
+}
+
+fn is_harness_prompt_slash_action(action: &str) -> bool {
+    action == "/skill" || action.starts_with("/skill:")
+}
+
+fn handle_recorded_line_with_handlers(
+    text: &str,
+    handlers: &mut impl RecordedLineHandlers,
+) -> Result<Option<InputLoopExit>, CliError> {
+    match handlers.handle_known_command(text)? {
+        CommandOutcome::NotHandled => match handlers.handle_dynamic_action(text) {
+            CommandOutcome::NotHandled => {
+                // This is only a candidate leading slash-token detector. It must
+                // run after CLI-owned commands, dynamic extension actions, and
+                // harness-owned prompt commands such as `/skill` are excluded so
+                // each owner keeps its routing contract.
+                if let Some(action) = leading_slash_action(text)
+                    && !is_harness_prompt_slash_action(action)
+                {
+                    handlers.system_info(&format!("unknown CLI action `{action}`"));
+                    Ok(None)
+                } else {
+                    Ok(handlers.submit_prompt(text))
+                }
+            }
+            CommandOutcome::Continue => Ok(None),
+            CommandOutcome::Exit(exit) => Ok(Some(exit)),
+        },
+        CommandOutcome::Continue => Ok(None),
+        CommandOutcome::Exit(exit) => Ok(Some(exit)),
+    }
 }
 
 pub(crate) fn is_local_slash_command(text: &str) -> bool {

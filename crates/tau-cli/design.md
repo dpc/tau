@@ -58,6 +58,23 @@ Status: confirmed, 2026-06-17, dpc
 
 Harness/UI notices are filtered in the terminal UI, not at the harness emission site. The default threshold is `info`; `/set notice-level <level>` and persisted `cli.json` `notice_level` change what routine notices a UI renders. Critical notices and `always_show` warning diagnostics remain visible regardless of threshold. UI special-casing must use the stable `harness.notice.kind` field rather than parsing notice text.
 
+## Slash command ownership
+
+Status: unconfirmed
+
+The terminal input loop has multiple slash-command owners. CLI-owned commands
+such as `/quit`, `/session`, `/agent`, `/role`, `/model`, `/set`, and `/theme`
+are handled locally. Dynamic extension actions are parsed against the current
+published action schema and dispatched as `ActionInvoke` events. Harness-owned
+prompt commands, currently `/skill <name> ...` and `/skill:<name> ...`, are
+completed and echoed by the CLI but must still be submitted as prompts so the
+harness can resolve skills and inject their content.
+
+Only after those owners decline a line may the CLI treat an unrecognized leading
+slash token as an unknown-action notice. That fallback is intentionally limited
+to leading slash roots; ordinary prompt text that contains slashes later in the
+line remains normal prompt text.
+
 ## Theme defaults
 
 Status: confirmed, 2026-06-17, dpc
@@ -119,3 +136,10 @@ transforms such as table padding, and check that the resolved spans carry the
 intended semantic styling. Built-in theme tests should only validate that the
 embedded files parse and satisfy intentional theme-level invariants, so built-in
 theme tweaks do not force unrelated renderer expectation churn.
+
+Input-loop command routing tests should cover the emitted local notices and
+harness events/prompts produced by routing decisions, not only tokenizer helper
+functions. This is especially important for slash-command ownership boundaries
+where CLI-owned commands, dynamic extension actions, harness-owned prompt
+commands, and the unknown leading-slash fallback intentionally share similar
+surface syntax.

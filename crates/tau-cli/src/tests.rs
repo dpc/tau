@@ -18,8 +18,8 @@ use tau_proto::{
 
 use super::chat::{
     DraftSlot, SUSPENDED_AGENT_PROMPT, agent_is_active_in_sets, custom_prompt_replacement,
-    invalidate_pending_draft, is_local_slash_command, next_active_agent, role_cycling_enabled,
-    should_send_draft_snapshot,
+    invalidate_pending_draft, is_local_slash_command, leading_slash_action, next_active_agent,
+    role_cycling_enabled, should_send_draft_snapshot,
 };
 use super::event_renderer::EventRenderer;
 
@@ -610,6 +610,22 @@ fn renderer_tracks_custom_prompts_from_harness_event() {
 #[test]
 fn prompt_command_is_local_slash_command() {
     assert!(is_local_slash_command("/prompt review"));
+}
+
+/// Protects interactive prompt submission from treating a likely mistyped
+/// leading slash command as a normal user message while leaving non-leading
+/// slashes available in ordinary prompt text.
+#[test]
+fn leading_slash_actions_are_identified_before_prompt_submission() {
+    assert_eq!(leading_slash_action("/typo"), Some("/typo"));
+    assert_eq!(leading_slash_action("  /typo arg"), Some("/typo"));
+    assert_eq!(
+        leading_slash_action("/skill:jujutsu args"),
+        Some("/skill:jujutsu")
+    );
+    assert_eq!(leading_slash_action("hello /typo"), None);
+    assert_eq!(leading_slash_action("please inspect /tmp/file"), None);
+    assert_eq!(leading_slash_action("./relative/path"), None);
 }
 
 #[test]
