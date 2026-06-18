@@ -61,6 +61,8 @@ Tau may send internal behavior information to you prefixed with `[tau-internal]`
 These instructions apply only because the corresponding tools are available to your current role.
 
 {{#each tool_prompt_fragments}}
+### `{{tool_name}}` instructions
+
 {{trim content}}{{#unless @last}}
 
 {{/unless}}

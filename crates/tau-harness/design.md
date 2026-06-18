@@ -1,7 +1,8 @@
 # Design decisions
 
-This file records local design decisions for `tau-harness` that are too specific
-for the architecture overview but important for future changes and reviews.
+This file records major design decisions currently embodied by this directory's
+code, and how authoritative each decision is. It is not an architecture overview,
+ADR log, todo list, roadmap, implementation guide, or changelog.
 
 ## Harness lifecycle tests cover state and replay contracts
 
@@ -43,13 +44,14 @@ authorization.
 
 ## System prompts are assembled only through templates
 
-Status: confirmed
+Status: confirmed, 2026-06-17, dpc
 
 System prompts must be assembled through the prompt templating system. Any new
 dynamic system-prompt value must be an explicit template variable/input, not text
-prepended, appended, or replaced after rendering.
+formatted, prepended, appended, replaced, or otherwise edited around rendered
+prompt content.
 
-Post-render manipulation of system-prompt text is forbidden. Exceptions are only
-for clearly documented transport concerns that are not system-prompt content. This
-keeps custom templates in control of placement and wording for dynamic values such
-as `agent_id`.
+Ad-hoc string surgery for prompt variables such as `agent_id` is forbidden both
+before and after template rendering. Exceptions are only for clearly documented
+transport concerns that are not system-prompt content. This keeps custom
+templates in control of placement and wording for dynamic values.

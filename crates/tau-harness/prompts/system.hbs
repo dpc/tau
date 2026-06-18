@@ -32,6 +32,8 @@ You can call multiple tools in a single response and they will execute in parall
 
 {{#if tool_prompt_fragments}}
 {{#each tool_prompt_fragments}}
+### `{{tool_name}}` instructions
+
 {{trim content}}{{#unless @last}}
 
 {{/unless}}

@@ -294,7 +294,8 @@ fn rendered_tool_prompt_fragment_template_parts(
             Some(serde_json::json!({
                 "name": fragment.name,
                 "priority": fragment.priority.get(),
-                "content": format!("### `{}` instructions\n\n{rendered}", item.tool_name),
+                "tool_name": item.tool_name,
+                "content": rendered,
                 "early": fragment.priority.get() < 100,
             }))
         })
