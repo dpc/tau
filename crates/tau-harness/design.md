@@ -40,3 +40,16 @@ normalization, keyed rule layering, and tag-pattern parsing/rejection.
 `tau-harness` tests cover evaluator ordering, role broad-to-specific overrides,
 the built-in policy through the shared evaluator, and prompt-owned snapshot
 authorization.
+
+## System prompts are assembled only through templates
+
+Status: confirmed
+
+System prompts must be assembled through the prompt templating system. Any new
+dynamic system-prompt value must be an explicit template variable/input, not text
+prepended, appended, or replaced after rendering.
+
+Post-render manipulation of system-prompt text is forbidden. Exceptions are only
+for clearly documented transport concerns that are not system-prompt content. This
+keeps custom templates in control of placement and wording for dynamic values such
+as `agent_id`.
