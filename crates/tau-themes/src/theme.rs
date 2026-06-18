@@ -1,8 +1,8 @@
 //! Theme definition and resolution.
 //!
-//! A [`Theme`] maps [`StyleName`]s to [`ThemeStyle`]s. Resolution
-//! takes a [`ThemedText`] and produces [`ResolvedSpan`]s with
-//! concrete style attributes.
+//! A [`Theme`] carries optional human-facing metadata and maps [`StyleName`]s
+//! to [`ThemeStyle`]s. Resolution takes a [`ThemedText`] and produces
+//! [`ResolvedSpan`]s with concrete style attributes.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -36,13 +36,16 @@ impl ThemeStyle {
     }
 }
 
-/// A theme: a mapping from style names to visual attributes.
+/// A theme: optional user-facing metadata plus a mapping from style names to
+/// visual attributes.
 ///
 /// Styles not present in the map resolve to [`ThemeStyle::default()`]
 /// (no formatting).
 #[derive(Clone, Debug, Default, serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Theme {
+    /// Human-facing summary shown when listing or completing available themes.
+    description: Option<String>,
     #[serde(default)]
     styles: HashMap<StyleName, ThemeStyle>,
 }
@@ -104,6 +107,12 @@ impl Theme {
     /// Parses a theme from a JSON5 string.
     pub fn parse(s: &str) -> Result<Self, json5::Error> {
         json5::from_str(s)
+    }
+
+    /// Returns the human-facing theme description, if the theme file provides
+    /// one.
+    pub fn description(&self) -> Option<&str> {
+        self.description.as_deref()
     }
 
     /// Looks up the style for a name, falling back to the default.

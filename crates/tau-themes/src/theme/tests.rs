@@ -35,6 +35,26 @@ fn named_style_resolves() {
     assert!(resolved[0].style.strikethrough);
 }
 
+/// Ensures theme files may carry user-facing metadata without changing style
+/// resolution, and that old files which omit the metadata remain valid.
+#[test]
+fn description_metadata_is_optional_and_parsed() {
+    let described = Theme::parse(
+        r#"{
+                description: "Readable theme description",
+                styles: {
+                    prompt: { fg: "green" },
+                }
+            }"#,
+    )
+    .expect("valid described theme");
+    let old_format = Theme::parse(r#"{ styles: { prompt: { fg: "green" } } }"#)
+        .expect("valid undescribed theme");
+
+    assert_eq!(described.description(), Some("Readable theme description"));
+    assert_eq!(old_format.description(), None);
+}
+
 #[test]
 fn default_idx_resolves_to_default_style() {
     let theme: Theme = Theme::parse(

@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
+use std::io::Read as _;
 use std::path::{Component, Path, PathBuf};
 use std::{fmt, io};
 
@@ -7,6 +8,7 @@ use tau_config::settings::{CliTheme, TauDirs};
 use tau_themes::{SpanTree, ThemedText};
 
 const THEME_ENV: &str = "TAU_THEME";
+const THEME_CHOICE_METADATA_LIMIT: u64 = 64 * 1024;
 
 pub(crate) fn active_prompt_marker(
     theme: &tau_themes::Theme,
@@ -144,25 +146,37 @@ fn select_named_theme(dirs: &TauDirs, name: &str) -> Result<tau_themes::Theme, T
     tau_themes::Theme::load(&path).map_err(|source| ThemeError::Load { path, source })
 }
 
-/// One theme shown to `/theme` argument completion and usage output.
+/// One theme shown to `/theme` argument completion and listing output.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ThemeChoice {
     /// Theme selector typed after `/theme`.
     pub(crate) name: String,
-    /// Human-facing description for completion menus.
+    /// Human-facing description for completion menus and no-argument listings.
     pub(crate) description: String,
+}
+
+impl ThemeChoice {
+    /// Formats this theme choice for no-argument `/theme` output.
+    pub(crate) fn into_listing_text(self) -> String {
+        if self.description.is_empty() {
+            self.name
+        } else {
+            format!("{} — {}", self.name, self.description)
+        }
+    }
 }
 
 /// Lists built-in and user-defined theme files available to this UI.
 pub(crate) fn available_theme_choices(dirs: &TauDirs) -> Vec<ThemeChoice> {
     let mut choices = BTreeMap::new();
     for name in tau_themes::theme::BUILTIN_THEME_NAMES {
-        choices.insert((*name).to_owned(), format!("built-in {name} theme"));
+        let theme =
+            tau_themes::Theme::builtin_named(name).expect("built-in theme registry name resolves");
+        let description = theme.description().unwrap_or_default().to_owned();
+        choices.insert((*name).to_owned(), description);
     }
-    for name in external_theme_names(dirs) {
-        choices
-            .entry(name)
-            .or_insert_with(|| "user theme from config themes directory".to_owned());
+    for choice in external_theme_choices(dirs) {
+        choices.entry(choice.name).or_insert(choice.description);
     }
     choices
         .into_iter()
@@ -170,7 +184,7 @@ pub(crate) fn available_theme_choices(dirs: &TauDirs) -> Vec<ThemeChoice> {
         .collect()
 }
 
-fn external_theme_names(dirs: &TauDirs) -> Vec<String> {
+fn external_theme_choices(dirs: &TauDirs) -> Vec<ThemeChoice> {
     let Some(config_dir) = &dirs.config_dir else {
         return Vec::new();
     };
@@ -188,7 +202,7 @@ fn external_theme_names(dirs: &TauDirs) -> Vec<String> {
         .copied()
         .map(str::to_ascii_lowercase)
         .collect();
-    let mut names = Vec::new();
+    let mut choices = Vec::new();
     for entry in entries {
         let Ok(entry) = entry else {
             continue;
@@ -204,11 +218,36 @@ fn external_theme_names(dirs: &TauDirs) -> Vec<String> {
         if builtin_names.contains(&normalized_stem) || validate_external_theme_name(stem).is_err() {
             continue;
         }
-        names.push(stem.to_owned());
+        let description = match entry.file_type() {
+            Ok(file_type) if file_type.is_file() => read_theme_choice_description(&path),
+            _ => String::new(),
+        };
+        choices.push(ThemeChoice {
+            name: stem.to_owned(),
+            description,
+        });
     }
-    names.sort();
-    names.dedup();
-    names
+    choices.sort_by(|left, right| left.name.cmp(&right.name));
+    choices.dedup_by(|left, right| left.name == right.name);
+    choices
+}
+
+fn read_theme_choice_description(path: &Path) -> String {
+    let Ok(file) = std::fs::File::open(path) else {
+        return String::new();
+    };
+    let mut limited = file.take(THEME_CHOICE_METADATA_LIMIT + 1);
+    let mut contents = String::new();
+    if limited.read_to_string(&mut contents).is_err() {
+        return String::new();
+    }
+    if contents.len() as u64 > THEME_CHOICE_METADATA_LIMIT {
+        return String::new();
+    }
+    tau_themes::Theme::parse(&contents)
+        .ok()
+        .and_then(|theme| theme.description().map(str::to_owned))
+        .unwrap_or_default()
 }
 
 fn env_theme_override() -> Option<CliTheme> {

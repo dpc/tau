@@ -95,6 +95,13 @@ unignored files. These operations should stay bounded and best-effort: failures
 or quota/size limits should disable the completion source or surface a local
 notice, not wedge the prompt.
 
+Theme completion and no-argument `/theme` listings may inspect custom theme
+files only for optional display metadata. These reads must remain best-effort
+and bounded: avoid opening non-regular or special theme directory entries, do
+not follow symlinks in the metadata path, keep a byte limit for regular files in
+case of races, and list malformed, oversized, unreadable, or special entries by
+name with an empty description instead of blocking or failing the prompt.
+
 Raw terminal mode is a process-local ownership boundary. Before spawning editors
 or pickers, Tau must pause redraws, release raw-mode features, and always clear
 that paused state when setup or resume fails so the UI cannot remain permanently

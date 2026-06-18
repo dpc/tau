@@ -3,6 +3,7 @@
 // Tuned for light terminal backgrounds. Style names mirror the other built-ins
 // so the CLI can switch themes without changing semantic rendering code.
 {
+  description: "Light built-in theme for terminals with light backgrounds.",
   styles: {
     // -- User input --
     "user.prompt":          { bold: true },

@@ -1873,7 +1873,7 @@ impl<'a> TerminalInputSession<'a> {
         if name.is_empty() {
             let names = crate::theme::available_theme_choices(&self.ctx.dirs)
                 .into_iter()
-                .map(|choice| choice.name)
+                .map(crate::theme::ThemeChoice::into_listing_text)
                 .collect::<Vec<_>>()
                 .join(", ");
             self.output

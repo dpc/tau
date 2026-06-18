@@ -3,6 +3,7 @@
 // Style names use dot-separated hierarchy:
 //   category.element[.variant]
 {
+  description: "dpc's personal theme/design to work with. Generated from rad:z66La5YXmV5jbW77ByXvoeTs1c5n.",
   styles: {
     // -- User input --
     "user.prompt":          { bold: true },

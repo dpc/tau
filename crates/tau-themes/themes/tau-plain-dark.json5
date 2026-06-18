@@ -5,6 +5,7 @@
 // green, and red foregrounds, which are considered generally safe terminal
 // colors. Other `tau-dpc` colors are dropped or mapped to one of those colors.
 {
+  description: "Conservative dark built-in theme using broadly safe terminal colors.",
   styles: {
     // -- User input --
     "user.prompt":          { bold: true },

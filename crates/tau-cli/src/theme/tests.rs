@@ -105,14 +105,19 @@ fn selected_external_theme_from_config_themes_dir() {
     assert!(prompt.spans()[0].style.bold);
 }
 
-/// Ensures `/theme` completion can show built-in selectors and valid user theme
-/// files without exposing path-like or duplicate external names.
+/// Ensures `/theme` completion/listing can show descriptions for built-in
+/// selectors and valid user theme files without exposing path-like or duplicate
+/// external names.
 #[test]
 fn available_theme_choices_include_builtins_and_user_themes() {
     let temp = tempfile::TempDir::new().expect("tempdir");
     let themes = temp.path().join("themes");
     std::fs::create_dir(&themes).expect("themes dir");
-    std::fs::write(themes.join("custom.json5"), "{ styles: {} }").expect("write custom theme");
+    std::fs::write(
+        themes.join("custom.json5"),
+        r#"{ description: "Custom theme from disk", styles: {} }"#,
+    )
+    .expect("write custom theme");
     std::fs::write(themes.join("tau-dpc.json5"), "{ styles: {} }").expect("write shadowed theme");
     std::fs::write(themes.join("TAU-DPC.json5"), "{ styles: {} }").expect("write shadowed theme");
     std::fs::write(themes.join("not-a-theme.txt"), "ignored").expect("write ignored file");
@@ -121,10 +126,8 @@ fn available_theme_choices_include_builtins_and_user_themes() {
         state_dir: None,
     };
 
-    let names: Vec<String> = available_theme_choices(&dirs)
-        .into_iter()
-        .map(|choice| choice.name)
-        .collect();
+    let choices = available_theme_choices(&dirs);
+    let names: Vec<String> = choices.iter().map(|choice| choice.name.clone()).collect();
 
     for name in tau_themes::theme::BUILTIN_THEME_NAMES
         .iter()
@@ -145,6 +148,122 @@ fn available_theme_choices_include_builtins_and_user_themes() {
         assert!(!names.iter().any(|choice| choice == removed_alias));
     }
     assert!(!names.iter().any(|choice| choice == "not-a-theme"));
+    assert!(
+        choices
+            .iter()
+            .any(|choice| choice.name == "custom"
+                && choice.description == "Custom theme from disk")
+    );
+    assert!(choices.iter().any(|choice| {
+        choice.name == "tau-dpc"
+            && choice
+                .description
+                .contains("rad:z66La5YXmV5jbW77ByXvoeTs1c5n")
+    }));
+}
+
+/// Ensures no-argument `/theme` listings include descriptions when available,
+/// while preserving compact name-only output for themes without metadata.
+#[test]
+fn theme_listing_formats_descriptions_when_present() {
+    assert_eq!(
+        ThemeChoice {
+            name: "custom".to_owned(),
+            description: "Custom theme".to_owned(),
+        }
+        .into_listing_text(),
+        "custom — Custom theme"
+    );
+    assert_eq!(
+        ThemeChoice {
+            name: "old".to_owned(),
+            description: String::new(),
+        }
+        .into_listing_text(),
+        "old"
+    );
+}
+
+/// Ensures completion/listing metadata extraction remains bounded: oversized
+/// external theme files still appear by name but do not block on full parsing
+/// or allocation just to discover an optional description.
+#[test]
+fn available_theme_choices_omit_description_for_oversized_theme_files() {
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let themes = temp.path().join("themes");
+    std::fs::create_dir(&themes).expect("themes dir");
+    let mut contents = String::from(r#"{ description: "Too large", styles: {}"#);
+    contents.extend(std::iter::repeat_n(' ', 70 * 1024));
+    contents.push('}');
+    std::fs::write(themes.join("huge.json5"), contents).expect("write oversized theme");
+    let dirs = tau_config::settings::TauDirs {
+        config_dir: Some(temp.path().to_owned()),
+        state_dir: None,
+    };
+
+    let huge = available_theme_choices(&dirs)
+        .into_iter()
+        .find(|choice| choice.name == "huge")
+        .expect("oversized theme is still listed");
+
+    assert_eq!(huge.description, "");
+}
+
+/// Ensures completion/listing metadata extraction does not open non-regular
+/// theme entries. They remain visible by name, but with empty descriptions so
+/// special files cannot wedge prompt completion or no-argument `/theme` output.
+#[test]
+fn available_theme_choices_omit_description_for_non_regular_entries() {
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let themes = temp.path().join("themes");
+    std::fs::create_dir(&themes).expect("themes dir");
+    std::fs::create_dir(themes.join("directory.json5")).expect("write directory theme entry");
+    #[cfg(unix)]
+    let special_name = {
+        let socket = themes.join("socket.json5");
+        let _listener = std::os::unix::net::UnixListener::bind(&socket).expect("bind socket theme");
+        "socket"
+    };
+    #[cfg(not(unix))]
+    let special_name = "directory";
+    let dirs = tau_config::settings::TauDirs {
+        config_dir: Some(temp.path().to_owned()),
+        state_dir: None,
+    };
+
+    let choices = available_theme_choices(&dirs);
+
+    let directory = choices
+        .iter()
+        .find(|choice| choice.name == "directory")
+        .expect("directory theme entry is still listed");
+    assert_eq!(directory.description, "");
+    let special = choices
+        .iter()
+        .find(|choice| choice.name == special_name)
+        .expect("special theme entry is still listed");
+    assert_eq!(special.description, "");
+}
+
+/// Ensures malformed external theme files remain available by name for
+/// completion/listing even though their optional descriptions cannot be parsed.
+#[test]
+fn available_theme_choices_omit_description_for_invalid_theme_files() {
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let themes = temp.path().join("themes");
+    std::fs::create_dir(&themes).expect("themes dir");
+    std::fs::write(themes.join("invalid.json5"), "{ description: ").expect("write invalid theme");
+    let dirs = tau_config::settings::TauDirs {
+        config_dir: Some(temp.path().to_owned()),
+        state_dir: None,
+    };
+
+    let invalid = available_theme_choices(&dirs)
+        .into_iter()
+        .find(|choice| choice.name == "invalid")
+        .expect("invalid theme is still listed");
+
+    assert_eq!(invalid.description, "");
 }
 
 /// Ensures invalid external names fail visibly instead of escaping the themes
