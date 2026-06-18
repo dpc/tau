@@ -205,6 +205,9 @@ pub enum DevCommand {
     },
 
     /// Print the effective provider-visible prompt context for a role.
+    ///
+    /// Uses a stable fake agent id so role previews render agent-scoped
+    /// template sections such as Agent identity.
     PrintPrompt {
         /// Include harness-injected AGENTS.md context.
         #[arg(long = "enable-agents-md", default_value_t = true, action = clap::ArgAction::Set)]
@@ -212,6 +215,9 @@ pub enum DevCommand {
     },
 
     /// Print only the rendered system prompt for a role.
+    ///
+    /// Uses a stable fake agent id so role previews render agent-scoped
+    /// template sections such as Agent identity.
     PrintSystemPrompt,
 
     /// Print the effective tool definitions for a role.

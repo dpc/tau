@@ -90,6 +90,8 @@ use crate::prompt::{
 use crate::secrets::{load_secret_sources, resolve_extension_secrets};
 use crate::settings::{Config, ExtensionStartupDiagnostic, load_harness_settings_or_warn};
 use crate::tool_turn::{ForegroundAction, PendingToolInvocation, ToolTurnMachine};
+
+const RENDERED_PROMPT_PREVIEW_AGENT_ID: &str = "dev-preview-agent";
 use crate::turn::{PromptSubmission, TurnState};
 
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(2);
@@ -3421,7 +3423,10 @@ impl Harness {
         let (prompt, error) = if !self.available_roles.contains_key(&request.role) {
             (None, Some(format!("unknown role: {}", request.role)))
         } else {
-            (Some(self.build_system_prompt_for_role(&request.role)), None)
+            (
+                Some(self.build_system_prompt_for_role_preview(&request.role)),
+                None,
+            )
         };
         let _ = self.bus.send_to(
             connection_id,
@@ -3444,7 +3449,7 @@ impl Harness {
         let (prompt, error) = if !self.available_roles.contains_key(&request.role) {
             (None, Some(format!("unknown role: {}", request.role)))
         } else {
-            let system_prompt = self.build_system_prompt_for_role(&request.role);
+            let system_prompt = self.build_system_prompt_for_role_preview(&request.role);
             let agents_context =
                 if request.enable_agents_md && !self.discovered_agents_files.is_empty() {
                     Some(render_agents_context_message(
@@ -9107,8 +9112,14 @@ impl Harness {
         )
     }
 
+    #[cfg(test)]
     fn build_system_prompt_for_role(&self, role_name: &str) -> String {
         self.build_system_prompt_for_role_and_agent(role_name, None)
+    }
+
+    fn build_system_prompt_for_role_preview(&self, role_name: &str) -> String {
+        let preview_agent_id = crate::parse_agent_id(RENDERED_PROMPT_PREVIEW_AGENT_ID);
+        self.build_system_prompt_for_role_and_agent(role_name, Some(&preview_agent_id))
     }
 
     fn build_system_prompt_for_role_and_agent(

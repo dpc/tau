@@ -152,10 +152,8 @@ fn daemon_mode_renders_system_prompt_for_requested_role() {
     let prompt =
         get_daemon_rendered_system_prompt(&sock, "senior-engineer").expect("render prompt");
     assert!(prompt.contains("## Your mission"));
-    assert!(
-        !prompt.contains("Current working directory:"),
-        "cwd is agent-scoped and rendered-system-prompt requests do not target an agent"
-    );
+    assert!(prompt.contains("## Agent identity"));
+    assert!(prompt.contains("Your agent id is `dev-preview-agent`."));
 
     server.join().expect("join").expect("daemon clean exit");
 }

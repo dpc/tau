@@ -10103,6 +10103,7 @@ fn rendered_prompt_without_agents_md_uses_system_wrapper_only() {
     assert_eq!(result.error, None);
     assert!(prompt.contains("<message role=\"system\">"));
     assert!(prompt.contains("DEBUG ROLE PROMPT"));
+    assert!(prompt.contains("Your agent id is `dev-preview-agent`."));
     assert!(!prompt.contains("source=\"AGENTS.md\""));
     assert!(!prompt.contains("AGENTS_FILE"));
 }
