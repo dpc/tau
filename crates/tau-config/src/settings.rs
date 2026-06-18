@@ -73,6 +73,9 @@ pub struct CliSettings {
     /// Whether to render the full-redraw debug counter in the model
     /// status bar by default.
     pub redraw_counter: bool,
+    /// Maximum number of rendered history lines to replay to the terminal on a
+    /// full redraw by default.
+    pub redraw_history_size: usize,
     /// Whether to render UI↔harness socket throughput in the model
     /// status bar by default.
     pub show_ui_io: bool,
@@ -117,6 +120,7 @@ impl CliSettings {
             show_thinking: self.show_thinking,
             show_turn_stats: self.show_turn_stats,
             redraw_counter: self.redraw_counter,
+            redraw_history_size: self.redraw_history_size,
             show_ui_io: self.show_ui_io,
             show_tools: self.show_tools,
             show_messages: self.show_messages,
@@ -187,6 +191,9 @@ pub struct CliState {
     /// Whether to render the full-redraw debug counter in the model
     /// status bar. Controlled by `/set redraw-counter <true|false>`.
     pub redraw_counter: bool,
+    /// Maximum number of rendered history lines replayed to the terminal on a
+    /// full redraw. Controlled by `/set redraw-history-size <lines>`.
+    pub redraw_history_size: usize,
     /// Whether to render UI↔harness socket throughput in the model
     /// status bar. Controlled by `/set show-ui-io <true|false>`.
     pub show_ui_io: bool,
@@ -204,6 +211,60 @@ pub struct CliState {
     /// Whether to show a compact indicator when the prompt input has hidden
     /// rows. Controlled by `/set show-prompt-scroll-indicator <true|false>`.
     pub show_prompt_scroll_indicator: bool,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+struct CliStatePatch {
+    show_diff: Option<bool>,
+    show_thinking: Option<bool>,
+    show_turn_stats: Option<bool>,
+    redraw_counter: Option<bool>,
+    redraw_history_size: Option<usize>,
+    show_ui_io: Option<bool>,
+    show_tools: Option<ShowTools>,
+    show_messages: Option<ShowMessages>,
+    notice_level: Option<tau_proto::NoticeLevel>,
+    show_status: Option<ShowStatus>,
+    show_prompt_scroll_indicator: Option<bool>,
+}
+
+impl CliStatePatch {
+    fn apply_to(self, mut state: CliState) -> CliState {
+        if let Some(value) = self.show_diff {
+            state.show_diff = value;
+        }
+        if let Some(value) = self.show_thinking {
+            state.show_thinking = value;
+        }
+        if let Some(value) = self.show_turn_stats {
+            state.show_turn_stats = value;
+        }
+        if let Some(value) = self.redraw_counter {
+            state.redraw_counter = value;
+        }
+        if let Some(value) = self.redraw_history_size {
+            state.redraw_history_size = value;
+        }
+        if let Some(value) = self.show_ui_io {
+            state.show_ui_io = value;
+        }
+        if let Some(value) = self.show_tools {
+            state.show_tools = value;
+        }
+        if let Some(value) = self.show_messages {
+            state.show_messages = value;
+        }
+        if let Some(value) = self.notice_level {
+            state.notice_level = value;
+        }
+        if let Some(value) = self.show_status {
+            state.show_status = value;
+        }
+        if let Some(value) = self.show_prompt_scroll_indicator {
+            state.show_prompt_scroll_indicator = value;
+        }
+        state
+    }
 }
 /// CLI color theme selection.
 ///
@@ -402,6 +463,7 @@ impl Default for CliState {
             show_thinking: true,
             show_turn_stats: false,
             redraw_counter: false,
+            redraw_history_size: 2000,
             show_ui_io: false,
             show_tools: ShowTools::Full,
             show_messages: ShowMessages::AllFull,
@@ -431,7 +493,10 @@ impl CliState {
         let Ok(text) = std::fs::read_to_string(&path) else {
             return default;
         };
-        serde_json::from_str(&text).unwrap_or(default)
+        match serde_json::from_str::<CliStatePatch>(&text) {
+            Ok(patch) => patch.apply_to(default),
+            Err(_) => default,
+        }
     }
 
     /// Persist current state. Best-effort: a slash command never fails

@@ -823,6 +823,31 @@ fn renderer_starts_without_selected_or_default_agent() {
     );
 }
 
+/// Increasing `/set redraw-history-size` should restore more scrollback
+/// immediately by forcing a full redraw, while decreasing it should only affect
+/// the next otherwise-needed full redraw.
+#[test]
+fn redraw_history_size_only_redraws_immediately_when_increased() {
+    let (_term, handle, _vt) = setup(80, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        cli_test_theme(),
+    );
+    sync(&handle);
+    let initial_full_renders = handle.full_render_count();
+
+    renderer.apply_setting("redraw-history-size", "100");
+    sync(&handle);
+    assert_eq!(handle.redraw_history_size(), 100);
+    assert_eq!(handle.full_render_count(), initial_full_renders);
+
+    renderer.apply_setting("redraw-history-size", "101");
+    sync(&handle);
+    assert_eq!(handle.redraw_history_size(), 101);
+    assert_eq!(handle.full_render_count(), initial_full_renders + 1);
+}
+
 #[test]
 fn first_agent_prompt_created_selects_new_agent_and_new_session_clears_it() {
     // Regression: the first prompt created for the default conversation carries

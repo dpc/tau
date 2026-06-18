@@ -10,7 +10,7 @@
 //! - **Scrolling render** — on overflow, diffs full content and renders in
 //!   order; `\r\n` at the bottom pushes content into scrollback
 //! - **Full render** — on resize/invalidation, clears screen + scrollback and
-//!   replays logical content without rubber
+//!   replays the capped log/history suffix plus fixed tail without rubber
 
 use std::collections::HashMap;
 use std::io::{self, BufWriter, Write};
@@ -227,6 +227,11 @@ struct SharedState {
     /// A redraw request arrived while notifications were suppressed. The
     /// outermost suppression guard flushes this request when it drops.
     redraw_dirty_while_suppressed: bool,
+    /// Maximum number of rendered persistent-history/log rows to replay during
+    /// a full redraw. Older rows are omitted after clearing scrollback so slow
+    /// terminals do not receive an unbounded transcript.
+    redraw_history_size: usize,
+    /// Number of full renders performed by the redraw thread since creation.
     full_render_count: u64,
 }
 
@@ -268,6 +273,7 @@ impl SharedState {
             pending_raw: Vec::new(),
             redraw_suppression: 0,
             redraw_dirty_while_suppressed: false,
+            redraw_history_size: usize::MAX,
             full_render_count: 0,
         }
     }
@@ -922,9 +928,9 @@ impl TermHandle {
 
     /// Forces the next redraw to take the full-render path: clear
     /// the visible screen + scrollback (`\x1b[2J\x1b[H\x1b[3J`)
-    /// and re-emit logical content from scratch. Overflow naturally
-    /// rebuilds terminal scrollback, but full-redraw plans intentionally
-    /// omit rubber.
+    /// and re-emit the configured suffix of rendered history/log rows plus the
+    /// fixed tail. Overflow naturally rebuilds recent terminal scrollback, but
+    /// full-redraw plans intentionally omit rubber.
     ///
     /// Use this when a mutation affects rows that may already be in
     /// terminal scrollback — e.g. toggling visibility of a block from
@@ -953,6 +959,19 @@ impl TermHandle {
     /// terminal creation. Temporary debugging aid for scrollback bugs.
     pub fn full_render_count(&self) -> u64 {
         self.lock().full_render_count
+    }
+
+    /// Maximum number of rendered history/log rows replayed during a full
+    /// redraw. `usize::MAX` preserves the historical unbounded behavior.
+    pub fn redraw_history_size(&self) -> usize {
+        self.lock().redraw_history_size
+    }
+
+    /// Updates the maximum number of rendered history/log rows replayed during
+    /// full redraw. This method only stores the value; callers decide whether
+    /// to invalidate the screen immediately.
+    pub fn set_redraw_history_size(&self, redraw_history_size: usize) {
+        self.lock().redraw_history_size = redraw_history_size;
     }
 
     /// Triggers a redraw and blocks until the redraw thread has
@@ -2668,12 +2687,14 @@ struct ViewPlan {
 }
 
 impl ViewPlan {
-    fn visible_start(&self, height: usize) -> usize {
-        self.render_lines.len().saturating_sub(height)
+    fn visible_start(&self, _height: usize) -> usize {
+        self.viewport_start.min(self.render_lines.len())
     }
 
     fn visible_lines(&self, height: usize) -> &[Vec<Cell>] {
-        &self.render_lines[self.visible_start(height)..]
+        let start = self.visible_start(height);
+        let end = (start + height).min(self.render_lines.len());
+        &self.render_lines[start..end]
     }
 
     fn cursor_in_visible(&self, height: usize) -> usize {
@@ -2865,9 +2886,9 @@ impl TerminalModel {
             .extend_from_slice(&tail.sources[..tail.active_height]);
     }
 
-    fn reset_to_plan(&mut self, layout: LayoutAll, plan: &ViewPlan) {
-        self.viewport_start = plan.viewport_start;
-        self.rubber_height = plan.rubber_height;
+    fn reset_to_plan(&mut self, layout: LayoutAll, viewport_start: usize, rubber_height: usize) {
+        self.viewport_start = viewport_start;
+        self.rubber_height = rubber_height;
         self.history_generation = layout.history_generation;
         self.history_width = layout.history_width;
         self.known_lines = layout.all_lines[..layout.log_end].to_vec();
@@ -3226,6 +3247,7 @@ fn redraw_loop(
         // with state changes we haven't read yet.
         let sync_gen = st.sync_requested;
         let pending_raw = std::mem::take(&mut st.pending_raw);
+        let redraw_history_size = st.redraw_history_size;
 
         history_cache.refresh(&st);
         let tail = layout_tail(&st, history_cache.lines.len());
@@ -3297,12 +3319,24 @@ fn redraw_loop(
                             previous_source: None,
                         },
                     );
-                    if let Err(e) =
-                        full_render(&mut writer, &mut screen, &layout, &plan, width, height)
-                    {
+                    if let Err(e) = full_render(
+                        &mut writer,
+                        &mut screen,
+                        &layout,
+                        &plan,
+                        width,
+                        height,
+                        redraw_history_size,
+                    ) {
                         tracing::error!(target: "tau_cli_term_raw::redraw", error = %e, "full render error");
                     }
-                    terminal_model.reset_to_plan(layout, &plan);
+                    let viewport_start = full_render_effective_viewport_start(
+                        &layout,
+                        &plan,
+                        height,
+                        redraw_history_size,
+                    );
+                    terminal_model.reset_to_plan(layout, viewport_start, plan.rubber_height);
                 } else {
                     screen.set_width(width);
 
@@ -3310,6 +3344,7 @@ fn redraw_loop(
                     let incremental_plan = terminal_model.plan_view(&layout, height);
                     let incremental_visible_start = incremental_plan.viewport_start;
                     let plan;
+                    let used_full_render;
 
                     if incremental_visible_start < terminal_model.viewport_start {
                         // The desired viewport moved upward to keep the input cursor
@@ -3331,11 +3366,18 @@ fn redraw_loop(
                                 previous_source: None,
                             },
                         );
-                        if let Err(e) =
-                            full_render(&mut writer, &mut screen, &layout, &plan, width, height)
-                        {
+                        if let Err(e) = full_render(
+                            &mut writer,
+                            &mut screen,
+                            &layout,
+                            &plan,
+                            width,
+                            height,
+                            redraw_history_size,
+                        ) {
                             tracing::error!(target: "tau_cli_term_raw::redraw", error = %e, "full render error");
                         }
+                        used_full_render = true;
                     } else if hidden_prefix_changed {
                         // The terminal scrollback may contain rows whose logical
                         // content changed. Clear it instead of trying to patch it
@@ -3359,13 +3401,21 @@ fn redraw_loop(
                                 previous_source,
                             },
                         );
-                        if let Err(e) =
-                            full_render(&mut writer, &mut screen, &layout, &plan, width, height)
-                        {
+                        if let Err(e) = full_render(
+                            &mut writer,
+                            &mut screen,
+                            &layout,
+                            &plan,
+                            width,
+                            height,
+                            redraw_history_size,
+                        ) {
                             tracing::error!(target: "tau_cli_term_raw::redraw", error = %e, "full render error");
                         }
+                        used_full_render = true;
                     } else if terminal_model.viewport_start < incremental_visible_start {
                         plan = incremental_plan;
+                        used_full_render = false;
                         // Content pushed log rows off the top. Use the scrolling
                         // renderer (Pi-style). Rubber is part of the virtual tail, so
                         // it shrinks before any extra log row enters scrollback.
@@ -3380,6 +3430,7 @@ fn redraw_loop(
                         }
                     } else {
                         plan = incremental_plan;
+                        used_full_render = false;
                         // No new scrollback rows — normal differential update. This
                         // includes visible shrinkage: rubber grows instead of moving
                         // the viewport upward.
@@ -3393,7 +3444,17 @@ fn redraw_loop(
                             tracing::error!(target: "tau_cli_term_raw::redraw", error = %e, "update error");
                         }
                     }
-                    terminal_model.reset_to_plan(layout, &plan);
+                    let viewport_start = if used_full_render {
+                        full_render_effective_viewport_start(
+                            &layout,
+                            &plan,
+                            height,
+                            redraw_history_size,
+                        )
+                    } else {
+                        plan.viewport_start
+                    };
+                    terminal_model.reset_to_plan(layout, viewport_start, plan.rubber_height);
                 }
             }
         }
@@ -3516,12 +3577,37 @@ fn hidden_lines_changed(
     (0..prev_visible_start).any(|idx| prev_all_lines.get(idx) != all_lines.get(idx))
 }
 
-/// Full re-render: clear screen + scrollback, output all logical lines, and
-/// position cursor. Used on resize and after invalidation. Callers should pass
-/// a no-rubber plan so a full repaint drops rubber instead of preserving
-/// temporary blank space. Overflow rebuilds terminal scrollback naturally.
-/// After rendering, Screen tracks the visible viewport for subsequent
-/// differential updates.
+fn full_render_replay_start(
+    layout: &LayoutAll,
+    plan: &ViewPlan,
+    redraw_history_size: usize,
+) -> usize {
+    let total = plan.render_lines.len();
+    let log_end = layout.log_end.min(total);
+    log_end.saturating_sub(redraw_history_size)
+}
+
+fn full_render_effective_viewport_start(
+    layout: &LayoutAll,
+    plan: &ViewPlan,
+    height: usize,
+    redraw_history_size: usize,
+) -> usize {
+    let replay_start = full_render_replay_start(layout, plan, redraw_history_size);
+    let replay_len = plan.render_lines.len().saturating_sub(replay_start);
+    if height < replay_len {
+        plan.render_lines.len().saturating_sub(height)
+    } else {
+        replay_start
+    }
+}
+
+/// Full re-render: clear screen + scrollback, output the configured suffix of
+/// rendered history/log rows plus the fixed tail, and position the cursor. Used
+/// on resize and after invalidation. Callers should pass a no-rubber plan so a
+/// full repaint drops rubber instead of preserving temporary blank space.
+/// Overflow rebuilds recent terminal scrollback naturally. After rendering,
+/// Screen tracks the visible viewport for subsequent differential updates.
 fn full_render(
     stdout: &mut impl Write,
     screen: &mut Screen,
@@ -3529,23 +3615,26 @@ fn full_render(
     plan: &ViewPlan,
     width: usize,
     height: usize,
+    redraw_history_size: usize,
 ) -> io::Result<()> {
     screen.set_width(width);
 
     let all_lines = &plan.render_lines;
-    let total = all_lines.len();
+    let replay_start = full_render_replay_start(layout, plan, redraw_history_size);
+    let replay_lines = &all_lines[replay_start..];
+    let replay_total = replay_lines.len();
 
     stdout.queue(terminal::BeginSynchronizedUpdate)?;
-    // Clear screen, home cursor, and clear scrollback. The scrollback is
-    // rebuilt by replaying no-rubber logical content below. Disable autowrap
-    // while replaying so exact-width rows don't create phantom blank rows
-    // before the explicit CRLF between logical rows.
+    // Clear screen, home cursor, and clear scrollback. The scrollback is rebuilt
+    // by replaying the capped no-rubber suffix below. Disable autowrap while
+    // replaying so exact-width rows don't create phantom blank rows before the
+    // explicit CRLF between logical rows.
     stdout.queue(Print("\x1b[2J\x1b[H\x1b[3J\x1b[?7l"))?;
 
-    // Output all logical lines starting at the top. Overflow scrolls into
-    // scrollback naturally. Short content stays at the top, so the prompt sits
-    // directly under content instead of being bottom-pinned by rubber.
-    for (i, line) in all_lines.iter().enumerate() {
+    // Output the capped logical suffix starting at the top. Overflow scrolls
+    // into scrollback naturally. Short content stays at the top, so the prompt
+    // sits directly under content instead of being bottom-pinned by rubber.
+    for (i, line) in replay_lines.iter().enumerate() {
         if i > 0 {
             stdout.queue(Print("\r\n"))?;
         }
@@ -3557,13 +3646,15 @@ fn full_render(
     // After outputting, the cursor is at the last content line. When content
     // overflowed, that line is at the terminal bottom; otherwise it is at its
     // natural row below the transcript.
-    let current_screen_row = if height <= total {
+    let current_screen_row = if height <= replay_total {
         height - 1
     } else {
-        total.saturating_sub(1)
+        replay_total.saturating_sub(1)
     };
 
-    let cursor_screen_row = plan.cursor_in_visible(height);
+    let effective_viewport_start =
+        full_render_effective_viewport_start(layout, plan, height, redraw_history_size);
+    let cursor_screen_row = plan.cursor_row.saturating_sub(effective_viewport_start);
 
     let up = current_screen_row.saturating_sub(cursor_screen_row);
     if up > 0 {
@@ -3574,8 +3665,9 @@ fn full_render(
 
     // Track what's visible on the terminal so the next
     // screen.update() can diff correctly.
-    let visible_lines = plan.visible_lines(height).to_vec();
-    let cursor_in_visible = plan.cursor_in_visible(height);
+    let visible_end = (effective_viewport_start + height).min(plan.render_lines.len());
+    let visible_lines = plan.render_lines[effective_viewport_start..visible_end].to_vec();
+    let cursor_in_visible = plan.cursor_row.saturating_sub(effective_viewport_start);
     screen.reset_to(visible_lines, cursor_in_visible, layout.cursor_col);
 
     Ok(())

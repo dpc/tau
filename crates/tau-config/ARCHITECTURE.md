@@ -28,6 +28,14 @@ validated as `ProviderName`s so path-like values never become filenames.
 Unreadable, unstatable, or non-regular `testing.yaml` paths are explicit config
 errors rather than missing files.
 
+## CLI runtime-state overlay
+
+`CliSettings` comes from layered `cli.yaml` config and provides the default UI
+state for a process. Persisted `<state_dir>/cli.json` is a partial runtime patch
+written by `/set`; when it is loaded, present fields override the `CliSettings`
+derived defaults and missing fields keep those defaults. This preserves new or
+user-configured defaults for existing state files from older Tau versions.
+
 ## Alias normalization
 
 Legacy camelCase keys are accepted for compatibility, but aliases are normalized

@@ -49,3 +49,17 @@ fn show_prompt_scroll_indicator_values_are_registered() {
 
     assert_eq!(values, vec!["true", "false"]);
 }
+
+/// `/set redraw-history-size` accepts arbitrary non-negative integers while
+/// still offering common sizes in completion.
+#[test]
+fn redraw_history_size_accepts_integer_values() {
+    let setting = super::find("redraw-history-size").expect("redraw-history-size setting");
+    let values: Vec<_> = setting.values.iter().map(|value| value.value).collect();
+
+    assert!(values.contains(&"2000"));
+    assert!((setting.validate)("0"));
+    assert!((setting.validate)("12345"));
+    assert!(!(setting.validate)("all"));
+    assert!(!(setting.validate)("-1"));
+}

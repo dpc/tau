@@ -7,7 +7,8 @@
 //!
 //! Most settings are booleans rendered as `true`/`false`; the shape is
 //! value-list based so settings can also take three or more named values
-//! without further plumbing.
+//! without further plumbing. Numeric settings can provide suggested values
+//! while accepting any value that passes their validator.
 
 use tau_config::settings::CliState;
 
@@ -22,7 +23,9 @@ pub struct SettingValue {
 pub struct SettingDef {
     pub name: &'static str,
     pub description: &'static str,
+    pub value_hint: &'static str,
     pub values: &'static [SettingValue],
+    pub validate: fn(&str) -> bool,
     /// Read the setting's current value from `CliState`, returning the
     /// matching `values[i].value` string. Used by the completion menu
     /// to show the live value alongside each setting name. Writes go
@@ -31,7 +34,7 @@ pub struct SettingDef {
     /// (re-render diff blocks vs. status bar vs. turn-stats blocks)
     /// so a `fn(&mut CliState, &str)` here wouldn't actually buy us
     /// anything.
-    pub get: fn(&CliState) -> &'static str,
+    pub get: fn(&CliState) -> String,
 }
 
 const BOOL_VALUES: &[SettingValue] = &[
@@ -118,60 +121,121 @@ fn bool_str(b: bool) -> &'static str {
     if b { "true" } else { "false" }
 }
 
+fn validate_bool(value: &str) -> bool {
+    matches!(value, "true" | "false")
+}
+
+fn validate_list(value: &str, values: &[SettingValue]) -> bool {
+    values.iter().any(|v| v.value == value)
+}
+
+fn validate_redraw_history_size(value: &str) -> bool {
+    value.parse::<usize>().is_ok()
+}
+
+const REDRAW_HISTORY_SIZE_VALUES: &[SettingValue] = &[
+    SettingValue {
+        value: "0",
+        description: "replay no off-screen history on full redraw",
+    },
+    SettingValue {
+        value: "100",
+        description: "small mobile/slow-SSH history replay",
+    },
+    SettingValue {
+        value: "500",
+        description: "moderate history replay",
+    },
+    SettingValue {
+        value: "2000",
+        description: "default history replay",
+    },
+    SettingValue {
+        value: "10000",
+        description: "large history replay",
+    },
+];
+
 pub const SETTINGS: &[SettingDef] = &[
     SettingDef {
         name: "show-diff",
         description: "Expanded vs compact display of file edit diffs",
+        value_hint: "true|false",
         values: BOOL_VALUES,
-        get: |s| bool_str(s.show_diff),
+        validate: validate_bool,
+        get: |s| bool_str(s.show_diff).to_owned(),
     },
     SettingDef {
         name: "show-thinking",
         description: "Visibility of the agent's reasoning summary blocks",
+        value_hint: "true|false",
         values: BOOL_VALUES,
-        get: |s| bool_str(s.show_thinking),
+        validate: validate_bool,
+        get: |s| bool_str(s.show_thinking).to_owned(),
     },
     SettingDef {
         name: "show-turn-stats",
         description: "Turn stats below agent responses",
+        value_hint: "true|false",
         values: BOOL_VALUES,
-        get: |s| bool_str(s.show_turn_stats),
+        validate: validate_bool,
+        get: |s| bool_str(s.show_turn_stats).to_owned(),
     },
     SettingDef {
         name: "redraw-counter",
         description: "Temporary full-redraw counter in the status bar",
+        value_hint: "true|false",
         values: BOOL_VALUES,
-        get: |s| bool_str(s.redraw_counter),
+        validate: validate_bool,
+        get: |s| bool_str(s.redraw_counter).to_owned(),
+    },
+    SettingDef {
+        name: "redraw-history-size",
+        description: "History lines replayed on full redraw",
+        value_hint: "non-negative integer",
+        values: REDRAW_HISTORY_SIZE_VALUES,
+        validate: validate_redraw_history_size,
+        get: |s| s.redraw_history_size.to_string(),
     },
     SettingDef {
         name: "show-ui-io",
         description: "UI↔harness socket throughput in the status bar",
+        value_hint: "true|false",
         values: BOOL_VALUES,
-        get: |s| bool_str(s.show_ui_io),
+        validate: validate_bool,
+        get: |s| bool_str(s.show_ui_io).to_owned(),
     },
     SettingDef {
         name: "show-tools",
         description: "Tool block visibility",
+        value_hint: "off|summarize-turn|summarize-prompt|compact|full",
         values: SHOW_TOOLS_VALUES,
-        get: |s| s.show_tools.as_str(),
+        validate: |value| validate_list(value, SHOW_TOOLS_VALUES),
+        get: |s| s.show_tools.as_str().to_owned(),
     },
     SettingDef {
         name: "show-messages",
         description: "Agent message visibility",
+        value_hint: "none|self-summary|self-full|all-summary|all-full",
         values: SHOW_MESSAGES_VALUES,
-        get: |s| s.show_messages.as_str(),
+        validate: |value| validate_list(value, SHOW_MESSAGES_VALUES),
+        get: |s| s.show_messages.as_str().to_owned(),
     },
     SettingDef {
         name: "notice-level",
         description: "Harness/UI notice visibility threshold",
+        value_hint: "critical|warning|info|debug|trace",
         values: NOTICE_LEVEL_VALUES,
-        get: |s| s.notice_level.as_str(),
+        validate: |value| validate_list(value, NOTICE_LEVEL_VALUES),
+        get: |s| s.notice_level.as_str().to_owned(),
     },
     SettingDef {
         name: "show-prompt-scroll-indicator",
         description: "Hidden-row indicator for capped prompt input",
+        value_hint: "true|false",
         values: BOOL_VALUES,
-        get: |s| bool_str(s.show_prompt_scroll_indicator),
+        validate: validate_bool,
+        get: |s| bool_str(s.show_prompt_scroll_indicator).to_owned(),
     },
 ];
 

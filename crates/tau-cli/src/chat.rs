@@ -929,6 +929,7 @@ pub(crate) fn run_chat(
     }
     handle.set_right_prompt(right_prompt);
     handle.set_prompt_scroll_indicator(cli_state.show_prompt_scroll_indicator);
+    handle.set_redraw_history_size(cli_state.redraw_history_size);
     // Show logo if enabled.
     if settings.show_logo {
         handle.print_output(
@@ -2720,7 +2721,10 @@ fn build_set_arg_completer(
             let mut substr_matches = Vec::new();
             for def in settings_registry::SETTINGS {
                 let lower = def.name.to_lowercase();
-                let current = snapshot.as_ref().map(|s| (def.get)(s)).unwrap_or("?");
+                let current = snapshot
+                    .as_ref()
+                    .map(|s| (def.get)(s))
+                    .unwrap_or_else(|| "?".to_owned());
                 let description = format!("[{current}] {}", def.description);
                 let item = CompletionItem::new(def.name, description);
                 if needle.is_empty() || lower.starts_with(&needle) {
@@ -2920,12 +2924,14 @@ fn handle_set_command(
         print_local(&format!("/set: unknown setting `{name}`"));
         return;
     };
-    if !def.values.iter().any(|v| v.value == value) {
+    if !(def.validate)(value) {
         let allowed: Vec<&str> = def.values.iter().map(|v| v.value).collect();
-        print_local(&format!(
-            "/set {name}: invalid value `{value}` (allowed: {})",
-            allowed.join(", "),
-        ));
+        let hint = if allowed.is_empty() {
+            def.value_hint.to_owned()
+        } else {
+            format!("{}; suggested: {}", def.value_hint, allowed.join(", "))
+        };
+        print_local(&format!("/set {name}: invalid value `{value}` ({hint})"));
         return;
     }
     let _ = renderer_tx.send(RendererCmd::Set {

@@ -582,9 +582,11 @@ hidden-agent preferences to other UIs.
 Available `/set` names include `show-diff` (expanded vs. compact diffs),
 `show-thinking` (agent reasoning summaries), `show-turn-stats` (per-turn
 token usage below responses), `redraw-counter` (debug redraw counter),
+`redraw-history-size` (history lines replayed on full redraw),
 `show-ui-io` (UI↔harness socket throughput), and
 `show-prompt-scroll-indicator` (hidden-row indicator for capped prompt input).
-These take `true` / `false`.
+The boolean settings take `true` / `false`; `redraw-history-size` takes a
+non-negative line count and defaults from `cli.yaml`.
 
 Prompt input is capped to `floor(33% of terminal height)` with a minimum of
 one editable row. Long drafts scroll inside this prompt-local viewport instead
@@ -605,6 +607,12 @@ routine lifecycle chatter but preserves warnings and critical failures. Critical
 or mandatory notices such as extension configuration errors remain visible. The
 first-arg menu shows the meaning of each allowed value. State is persisted to
 `<state_dir>/cli.json`.
+
+On full redraws such as terminal resize, agent switches, or retroactive UI
+toggles, the terminal UI clears Tau-owned scrollback and replays only the most
+recent rendered history lines up to `redraw_history_size`. Lowering
+`/set redraw-history-size <lines>` takes effect on the next full redraw; raising
+it forces an immediate full redraw so more history is restored right away.
 
 ### Prompt input history
 

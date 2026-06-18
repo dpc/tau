@@ -443,6 +443,7 @@ fn cli_state_round_trip_through_save_and_load() {
         show_thinking: false,
         show_turn_stats: true,
         redraw_counter: true,
+        redraw_history_size: 123,
         show_ui_io: true,
         show_tools: crate::settings::ShowTools::SummarizeTurn,
         show_messages: crate::settings::ShowMessages::AllSummary,
@@ -857,7 +858,7 @@ fn cli_state_defaults_to_cli_config_when_state_file_is_missing() {
     std::fs::create_dir_all(&state_dir).expect("mkdir state");
     std::fs::write(
         config_dir.join("cli.yaml"),
-        r#"{ show_diff: true, show_thinking: false, show_turn_stats: true, redraw_counter: true, show_ui_io: true, show_tools: "compact", show_messages: "self-full", notice_level: "warning", show_status: "minimal", show_prompt_scroll_indicator: false }"#,
+        r#"{ show_diff: true, show_thinking: false, show_turn_stats: true, redraw_counter: true, redraw_history_size: 321, show_ui_io: true, show_tools: "compact", show_messages: "self-full", notice_level: "warning", show_status: "minimal", show_prompt_scroll_indicator: false }"#,
     )
     .expect("write");
 
@@ -872,6 +873,7 @@ fn cli_state_defaults_to_cli_config_when_state_file_is_missing() {
             show_thinking: false,
             show_turn_stats: true,
             redraw_counter: true,
+            redraw_history_size: 321,
             show_ui_io: true,
             show_tools: ShowTools::Compact,
             show_messages: ShowMessages::SelfFull,
@@ -880,6 +882,31 @@ fn cli_state_defaults_to_cli_config_when_state_file_is_missing() {
             show_prompt_scroll_indicator: false,
         }
     );
+}
+
+/// Existing `cli.json` files from older Tau versions may not mention newer
+/// settings. Missing persisted fields must keep the caller-supplied CLI config
+/// defaults instead of falling back to `CliState::default()`.
+#[test]
+fn partial_cli_state_overlays_cli_config_defaults() {
+    let td = TempDir::new().expect("tempdir");
+    let state_dir = td.path().join("state");
+    std::fs::create_dir_all(&state_dir).expect("mkdir state");
+    std::fs::write(state_dir.join("cli.json"), r#"{"show_diff":false}"#).expect("write state");
+    let dirs = TauDirs {
+        config_dir: None,
+        state_dir: Some(state_dir),
+    };
+    let default = CliState {
+        show_diff: true,
+        redraw_history_size: 321,
+        ..CliState::default()
+    };
+
+    let state = CliState::load_with_default(&dirs, default);
+
+    assert!(!state.show_diff);
+    assert_eq!(state.redraw_history_size, 321);
 }
 
 /// Ensures persisted state values override CLI config defaults where state is

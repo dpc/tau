@@ -163,6 +163,12 @@ results. Markdown table padding is also display-only: it may add spacing around
 cell contents for readability, but must preserve the cell text, avoid code
 contexts, and keep bounded output amplification.
 
+The CLI `redraw_history_size` setting bounds only how many already-rendered
+history rows the terminal UI replays to stdout when rebuilding Tau-owned
+scrollback after a full redraw. It does not truncate in-memory UI state,
+protocol events, durable session logs, provider/model context, or any other
+non-terminal history.
+
 ## Reporting guidance
 
 When reporting a vulnerability, include:

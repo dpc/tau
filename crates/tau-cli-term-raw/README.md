@@ -56,11 +56,12 @@ managing scrollback internally.
 ### Path 3 — Full render (resize)
 
 On terminal resize or invalidation, `full_render()` clears the screen **and
-scrollback** (`\x1b[2J\x1b[H\x1b[3J`), then outputs all no-rubber logical
-lines from the top. Lines that overflow the viewport scroll into native
-scrollback naturally, rebuilding history with the current width. Temporary
-rubber is dropped, so if the transcript fits, the prompt sits directly under
-content instead of being bottom-pinned by blank rows.
+scrollback** (`\x1b[2J\x1b[H\x1b[3J`), then outputs the configured suffix of
+no-rubber scrollable log/history lines plus the fixed tail. Lines that overflow
+the viewport scroll into native scrollback naturally, rebuilding recent history
+with the current width while deliberately omitting older history. Temporary
+rubber is dropped, so if the replayed transcript fits, the prompt sits directly
+under content instead of being bottom-pinned by blank rows.
 
 Scrollback is cleared on resize because the old scrollback contains lines
 wrapped at the old terminal width. Replaying logical content produces correctly
@@ -108,7 +109,8 @@ the diff renderer can update them in place.
 
 `invalidate_screen()` sets a flag that forces the next redraw through
 `full_render` — clear screen + clear scrollback (`\x1b[2J\x1b[H\x1b[3J`),
-then re-emit no-rubber `all_lines`. Use it for:
+then re-emit the configured suffix of no-rubber scrollable history plus the
+fixed tail. Use it for:
 
 - **`set_block` on a block that may have scrolled out of the viewport.**
   Anything in `history`, including the most recent finalized block once
@@ -138,10 +140,10 @@ edits within a long live block, those updates would also need
 
 - **Resize clears pre-tau scrollback history.** Any terminal output from
   *before* tau started (shell commands, etc.) is lost on the first resize.
-  Tau's own logical history is rebuilt by the full re-render, but the pre-tau
-  scrollback cannot
-  be recovered. This is an inherent trade-off of rendering to the normal
-  terminal buffer without an alternate screen.
+  Tau's configured replay window is rebuilt by the full re-render, but older
+  clipped Tau rows remain only in Tau's logical history, and the pre-tau
+  scrollback cannot be recovered. This is an inherent trade-off of rendering to
+  the normal terminal buffer without an alternate screen.
 
 - **Content never displayed on screen cannot enter scrollback.** Path 2
   handles the common case where previously-visible lines scroll off. However,

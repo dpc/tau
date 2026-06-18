@@ -203,6 +203,8 @@ pub(crate) struct EventRenderer {
     show_turn_stats: bool,
     /// Whether to show a temporary full-redraw counter in the status bar.
     redraw_counter: bool,
+    /// Maximum number of rendered history lines replayed on full redraw.
+    redraw_history_size: usize,
     /// Whether to show UI↔harness socket throughput in the status bar.
     show_ui_io: bool,
     /// Latest rolling UI↔harness socket throughput maxima.
@@ -1025,6 +1027,7 @@ impl EventRenderer {
         submitted_prompt_symbol: String,
     ) -> Self {
         let cli_state_mirror = std::sync::Arc::new(std::sync::Mutex::new(state.clone()));
+        handle.set_redraw_history_size(state.redraw_history_size);
         Self {
             handle,
             completion_data,
@@ -1088,6 +1091,7 @@ impl EventRenderer {
             main_agent_turn_active: false,
             main_tools_visible: false,
             redraw_counter: state.redraw_counter,
+            redraw_history_size: state.redraw_history_size,
             last_full_render_count: 0,
             last_full_render_at: None,
             cumulative_agent_latency: Duration::ZERO,
@@ -1394,6 +1398,7 @@ impl EventRenderer {
             show_thinking: self.show_thinking,
             show_turn_stats: self.show_turn_stats,
             redraw_counter: self.redraw_counter,
+            redraw_history_size: self.redraw_history_size,
             show_ui_io: self.show_ui_io,
             show_tools: self.show_tools,
             show_messages: self.show_messages,
@@ -1494,6 +1499,11 @@ impl EventRenderer {
             "show-thinking" => self.set_show_thinking(on),
             "show-turn-stats" => self.set_show_turn_stats(on),
             "redraw-counter" => self.set_redraw_counter(on),
+            "redraw-history-size" => {
+                if let Ok(redraw_history_size) = value.parse::<usize>() {
+                    self.set_redraw_history_size(redraw_history_size);
+                }
+            }
             "show-ui-io" => self.set_show_ui_io(on),
             "show-tools" => {
                 if let Some(show_tools) = tau_config::settings::ShowTools::parse(value) {
@@ -1592,6 +1602,19 @@ impl EventRenderer {
         }
         self.redraw_counter = on;
         self.render_model_status();
+        self.save_cli_state();
+    }
+
+    fn set_redraw_history_size(&mut self, redraw_history_size: usize) {
+        if self.redraw_history_size == redraw_history_size {
+            return;
+        }
+        let previous = self.redraw_history_size;
+        self.redraw_history_size = redraw_history_size;
+        self.handle.set_redraw_history_size(redraw_history_size);
+        if previous < redraw_history_size {
+            self.handle.invalidate_screen();
+        }
         self.save_cli_state();
     }
 

@@ -49,6 +49,7 @@ fn run_full_render(
         &plan,
         cols as usize,
         rows as usize,
+        usize::MAX,
     )
     .expect("full_render should succeed");
 
@@ -189,6 +190,41 @@ fn full_render_overflow_cursor_and_screen_state() {
     );
 }
 
+/// Full redraw history limiting should clear scrollback and replay only the
+/// most recent rendered history rows plus the fixed prompt area, so slow remote
+/// terminals do not receive the entire old transcript again.
+#[test]
+fn full_render_limits_replayed_history_rows() {
+    let all_lines = plain_lines(&[
+        "hist 0", "hist 1", "hist 2", "hist 3", "hist 4", "hist 5", "> prompt",
+    ]);
+    let layout = LayoutAll {
+        line_sources: (0..all_lines.len())
+            .map(|wrapped_row| LineSource::Input { wrapped_row })
+            .collect(),
+        all_lines,
+        log_end: 6,
+        history_generation: 0,
+        history_width: 30,
+        cursor_row: 6,
+        cursor_col: 8,
+    };
+    let plan = TerminalModel::default().plan_view(&layout, 10);
+    let mut buf = Vec::new();
+    let mut screen = Screen::new(30);
+
+    full_render(&mut buf, &mut screen, &layout, &plan, 30, 10, 2).expect("render");
+
+    let text = String::from_utf8_lossy(&buf);
+    assert!(!text.contains("hist 0"));
+    assert!(!text.contains("hist 3"));
+    assert!(text.contains("hist 4"));
+    assert!(text.contains("hist 5"));
+    assert!(text.contains("> prompt"));
+    assert_eq!(screen.actual_line_count(), 3);
+    assert_eq!(screen.cursor_row(), 2);
+}
+
 // --- full_render: content shorter than terminal ---
 
 /// Cursor shape settings should use steady crossterm styles so Tau does not
@@ -303,7 +339,7 @@ fn full_render_caps_visible_state_when_fixed_area_exceeds_height() {
     };
     let plan = TerminalModel::bottom_aligned_plan(&layout, 3);
 
-    full_render(&mut buf, &mut screen, &layout, &plan, 30, 3).expect("render");
+    full_render(&mut buf, &mut screen, &layout, &plan, 30, 3, usize::MAX).expect("render");
     term.process(&buf);
 
     assert_eq!(visible_rows(&term), vec!["below 0", "below 1", "below 2"]);
@@ -331,7 +367,7 @@ fn full_render_cursor_uses_physical_viewport_start() {
     };
     let plan = TerminalModel::bottom_aligned_plan(&layout, 3);
 
-    full_render(&mut buf, &mut screen, &layout, &plan, 30, 3).expect("render");
+    full_render(&mut buf, &mut screen, &layout, &plan, 30, 3, usize::MAX).expect("render");
     term.process(&buf);
 
     assert_eq!(visible_rows(&term), vec!["live 0", "> prompt", "below"]);
@@ -368,7 +404,7 @@ fn full_render_resize_to_larger_bottom_aligns_without_rubber() {
     };
 
     let plan = TerminalModel::bottom_aligned_plan(&layout, 10);
-    model.reset_to_plan(layout, &plan);
+    model.reset_to_plan(layout, plan.viewport_start, plan.rubber_height);
 
     assert_eq!(plan.rubber_height, 0);
     assert_eq!(plan.viewport_start, 1);
@@ -1722,6 +1758,41 @@ fn assert_full_redraw_after(
     );
 }
 
+/// After a capped full redraw, the renderer's internal viewport must remain
+/// clipped so later ordinary differential redraws do not reintroduce history
+/// rows that were intentionally omitted from terminal scrollback.
+#[test]
+fn clipped_full_redraw_keeps_later_diff_redraws_clipped() {
+    let buf = SharedBuffer::new();
+    let mut parser = vt100::Parser::new(5, 40, 20);
+
+    let (_term, handle, _input_tx) =
+        Term::new_virtual(40, 5, "> ", Box::new(buf.clone()), CursorShape::Bar);
+    handle.set_redraw_history_size(1);
+    for idx in 0..4 {
+        handle.print_output(format!("hist-{idx}"), plain_block(format!("hist {idx}")));
+    }
+    flush_redraws(&handle, &buf, &mut parser);
+
+    assert_full_redraw_after(&handle, &buf, &mut parser, || {
+        handle.invalidate_screen();
+    });
+    assert!(!screen_contains(&parser, 40, "hist 0"));
+    assert!(!screen_contains(&parser, 40, "hist 2"));
+    assert!(screen_contains(&parser, 40, "hist 3"));
+
+    let full_renders = handle.full_render_count();
+    handle.set_right_prompt(StyledText::from("status"));
+    handle.redraw();
+    flush_redraws(&handle, &buf, &mut parser);
+
+    assert_eq!(handle.full_render_count(), full_renders);
+    assert!(!screen_contains(&parser, 40, "hist 0"));
+    assert!(!screen_contains(&parser, 40, "hist 2"));
+    assert!(screen_contains(&parser, 40, "hist 3"));
+    assert!(screen_contains(&parser, 40, "status"));
+}
+
 /// Pasting multiline text should normalize layout and cursor state so the
 /// rendered terminal matches the buffer.
 #[test]
@@ -2578,7 +2649,16 @@ fn full_redraw_queues_without_flushing_mid_frame() {
     let plan = TerminalModel::full_redraw_plan(&layout, 10);
 
     let mut buffered = std::io::BufWriter::new(writer.clone());
-    full_render(&mut buffered, &mut screen, &layout, &plan, 40, 10).expect("full render");
+    full_render(
+        &mut buffered,
+        &mut screen,
+        &layout,
+        &plan,
+        40,
+        10,
+        usize::MAX,
+    )
+    .expect("full render");
     assert_eq!(
         writer.write_count(),
         0,
