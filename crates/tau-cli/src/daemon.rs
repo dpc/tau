@@ -27,17 +27,17 @@ pub(crate) enum DaemonHandle {
     /// `child` is `Some` until [`leak`] pulls it out.
     Owned {
         child: Option<std::process::Child>,
-        daemon_dir: PathBuf,
+        harness_path: PathBuf,
         initial_ui: Option<InitialUiStdio>,
     },
     Attached {
-        daemon_dir: PathBuf,
+        harness_path: PathBuf,
     },
 }
 
 impl DaemonHandle {
     pub(crate) fn socket_path(&self) -> PathBuf {
-        runtime_dir::socket_path(self.daemon_dir())
+        runtime_dir::socket_path(self.harness_path())
     }
 
     pub(crate) fn take_initial_ui_stdio(&mut self) -> Option<InitialUiStdio> {
@@ -47,9 +47,9 @@ impl DaemonHandle {
         }
     }
 
-    fn daemon_dir(&self) -> &Path {
+    fn harness_path(&self) -> &Path {
         match self {
-            Self::Owned { daemon_dir, .. } | Self::Attached { daemon_dir } => daemon_dir,
+            Self::Owned { harness_path, .. } | Self::Attached { harness_path } => harness_path,
         }
     }
 
@@ -225,10 +225,10 @@ pub(crate) fn resolve_daemon(
     let project_root = std::env::current_dir()?;
     if attach {
         tracing::debug!(target: "tau_cli::startup", project_root = %project_root.display(), "looking for existing harness daemon");
-        let daemon_dir =
+        let harness_path =
             runtime_dir::find_harness_for_dir(&project_root).ok_or(CliError::NoRunningDaemon)?;
-        tracing::debug!(target: "tau_cli::startup", daemon_dir = %daemon_dir.display(), "attached harness daemon resolved");
-        return Ok(DaemonHandle::Attached { daemon_dir });
+        tracing::debug!(target: "tau_cli::startup", harness_path = %harness_path.display(), "attached harness daemon resolved");
+        return Ok(DaemonHandle::Attached { harness_path });
     }
     start_daemon(
         session_id,
@@ -269,7 +269,7 @@ fn start_daemon(
     let mut child = spawn_result?;
 
     tracing::debug!(target: "tau_cli::startup", pid = child.id(), "harness daemon spawned");
-    let daemon_dir = runtime_dir::root_runtime_dir().join(child.id().to_string());
+    let harness_path = runtime_dir::harnesses_dir().join(child.id().to_string());
     let stdin = child
         .stdin
         .take()
@@ -280,7 +280,7 @@ fn start_daemon(
         .ok_or_else(|| CliError::Participant("missing harness stdout pipe".to_owned()))?;
     Ok(DaemonHandle::Owned {
         child: Some(child),
-        daemon_dir,
+        harness_path,
         initial_ui: Some(InitialUiStdio { stdin, stdout }),
     })
 }

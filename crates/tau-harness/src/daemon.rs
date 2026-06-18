@@ -815,13 +815,13 @@ fn run_harness_daemon_with_internal_tools_and_initial_client(
 ) -> Result<(), HarnessError> {
     let startup_started_at = Instant::now();
     tracing::debug!(target: "tau_harness::startup", project_root = %project_root.display(), eager_session_id, "starting harness daemon");
-    let daemon_dir = notify_startup_error(
-        runtime_dir::prepare_daemon_dir(project_root),
+    let harness_paths = notify_startup_error(
+        runtime_dir::prepare_harness_paths(project_root, eager_session_id),
         &mut initial_client_error_stream,
     )?;
-    tracing::debug!(target: "tau_harness::startup", daemon_dir = %daemon_dir.path().display(), elapsed_ms = startup_started_at.elapsed().as_millis(), "prepared daemon dir");
+    tracing::debug!(target: "tau_harness::startup", harness_path = %harness_paths.path().display(), elapsed_ms = startup_started_at.elapsed().as_millis(), "prepared harness paths");
     let listener = notify_startup_error(
-        bind_listener(&daemon_dir.socket_path()),
+        bind_listener(&harness_paths.socket_path()),
         &mut initial_client_error_stream,
     )?;
 
@@ -845,19 +845,7 @@ fn run_harness_daemon_with_internal_tools_and_initial_client(
 
     tracing::debug!(target: "tau_harness::startup", elapsed_ms = startup_started_at.elapsed().as_millis(), "writing daemon ready markers");
     notify_startup_error_after_accept(
-        daemon_dir.write_marker(),
-        &mut initial_client_error_stream,
-        &mut harness,
-        initial_client_id.as_ref(),
-    )?;
-    notify_startup_error_after_accept(
-        daemon_dir.write_pid(),
-        &mut initial_client_error_stream,
-        &mut harness,
-        initial_client_id.as_ref(),
-    )?;
-    notify_startup_error_after_accept(
-        daemon_dir.write_session_id(eager_session_id),
+        harness_paths.write_metadata(),
         &mut initial_client_error_stream,
         &mut harness,
         initial_client_id.as_ref(),
@@ -876,7 +864,7 @@ fn run_harness_daemon_with_internal_tools_and_initial_client(
     let _ = harness.shutdown();
     drop(forwarder);
     drop(listener_handle);
-    daemon_dir.cleanup();
+    harness_paths.cleanup();
     result
 }
 

@@ -603,10 +603,10 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
                 let (session_id, session_status) = if attach {
                     reject_harness_config_overrides(&harness_config_overrides, "--attach")?;
                     let cwd = std::env::current_dir()?;
-                    let daemon_dir =
+                    let harness_path =
                         runtime_dir::find_harness_for_dir(&cwd).ok_or(CliError::NoRunningDaemon)?;
-                    let daemon_session_id =
-                        runtime_dir::read_session_id(&daemon_dir).ok_or_else(|| {
+                    let daemon_session_id = runtime_dir::read_session_id(&harness_path)
+                        .ok_or_else(|| {
                             CliError::Participant(
                                 "running daemon did not publish its session id".to_owned(),
                             )

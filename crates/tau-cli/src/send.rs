@@ -14,11 +14,11 @@ pub(crate) fn run_send(session_id: &str, line: &str) -> Result<(), CliError> {
         return Ok(());
     }
 
-    let daemon_dir = find_daemon_for_session(session_id).ok_or_else(|| {
+    let harness_path = find_daemon_for_session(session_id).ok_or_else(|| {
         CliError::Participant(format!("no running daemon for session `{session_id}`"))
     })?;
     let mut writer = crate::ui_client::connect_ui_writer(
-        &tau_harness::runtime_dir::socket_path(&daemon_dir),
+        &tau_harness::runtime_dir::socket_path(&harness_path),
         "tau-dev-send",
     )?;
 
@@ -97,16 +97,20 @@ fn role_event_for_command(rest: &str) -> Option<Event> {
 }
 
 fn find_daemon_for_session(session_id: &str) -> Option<PathBuf> {
-    let runtime_dir = tau_harness::runtime_dir::root_runtime_dir();
+    let runtime_dir = tau_harness::runtime_dir::harnesses_dir();
     for entry in std::fs::read_dir(runtime_dir).ok()?.flatten() {
-        let daemon_dir = entry.path();
-        if tau_harness::runtime_dir::read_session_id(&daemon_dir).as_deref() != Some(session_id) {
+        let socket = entry.path();
+        if socket.extension().and_then(|ext| ext.to_str()) != Some("sock") {
             continue;
         }
-        if UnixStream::connect(tau_harness::runtime_dir::socket_path(&daemon_dir)).is_ok() {
-            return Some(daemon_dir);
+        let harness_path = socket.with_extension("");
+        if tau_harness::runtime_dir::read_session_id(&harness_path).as_deref() != Some(session_id) {
+            continue;
         }
-        let _ = std::fs::remove_dir_all(daemon_dir);
+        if UnixStream::connect(&socket).is_ok() {
+            return Some(harness_path);
+        }
+        tau_harness::runtime_dir::remove_harness_files(&harness_path);
     }
     None
 }
