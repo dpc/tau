@@ -60,23 +60,35 @@ fn final_render_applies_markdown_styles() {
     );
     let spans = block.content.spans();
 
-    let heading = spans.iter().find(|span| span.text == "# Title").unwrap();
+    let heading = spans
+        .iter()
+        .find(|span| span.text == "# Title")
+        .expect("expected styled markdown span");
     assert!(heading.style.underline);
 
-    let marker = spans.iter().find(|span| span.text == "-").unwrap();
+    let marker = spans
+        .iter()
+        .find(|span| span.text == "-")
+        .expect("expected styled markdown span");
     assert_eq!(marker.style.fg, Some(tau_cli_term::Color::Green));
 
-    let strong = spans.iter().find(|span| span.text == "*bold*").unwrap();
+    let strong = spans
+        .iter()
+        .find(|span| span.text == "*bold*")
+        .expect("expected styled markdown span");
     assert!(strong.style.bold);
 
-    let emphasis = spans.iter().find(|span| span.text == "_italics_").unwrap();
+    let emphasis = spans
+        .iter()
+        .find(|span| span.text == "_italics_")
+        .expect("expected styled markdown span");
     assert!(!emphasis.style.bold);
     assert!(emphasis.style.italic);
 
     let strikethrough = spans
         .iter()
         .find(|span| span.text == "~~deleted~~")
-        .unwrap();
+        .expect("expected styled markdown span");
     assert!(strikethrough.style.strikethrough);
 }
 
@@ -91,18 +103,24 @@ fn final_render_styles_italic_and_bold_italic_emphasis() {
 
     assert_eq!(rendered_text(&block), source);
 
-    let bold = spans.iter().find(|span| span.text == "**bold**").unwrap();
+    let bold = spans
+        .iter()
+        .find(|span| span.text == "**bold**")
+        .expect("expected styled markdown span");
     assert!(bold.style.bold);
     assert!(!bold.style.italic);
 
-    let italic = spans.iter().find(|span| span.text == "_italic_").unwrap();
+    let italic = spans
+        .iter()
+        .find(|span| span.text == "_italic_")
+        .expect("expected styled markdown span");
     assert!(!italic.style.bold);
     assert!(italic.style.italic);
 
     let bold_italic = spans
         .iter()
         .find(|span| span.text == "***bold italic***")
-        .unwrap();
+        .expect("expected styled markdown span");
     assert!(bold_italic.style.bold);
     assert!(bold_italic.style.italic);
 }
@@ -396,7 +414,7 @@ fn live_stream_formats_only_sealed_paragraphs() {
         .spans()
         .iter()
         .find(|span| span.text == "*bold*")
-        .unwrap();
+        .expect("expected styled markdown span");
     assert!(!bold.style.bold);
 
     let block = markdown_streaming_block(&theme, names::SHELL_OUTPUT, "*bold*\n\nnext", &mut cache);
@@ -405,14 +423,14 @@ fn live_stream_formats_only_sealed_paragraphs() {
         .spans()
         .iter()
         .find(|span| span.text == "*bold*")
-        .unwrap();
+        .expect("expected styled markdown span");
     assert!(bold.style.bold);
     let next = block
         .content
         .spans()
         .iter()
         .find(|span| span.text == "next")
-        .unwrap();
+        .expect("expected styled markdown span");
     assert!(!next.style.bold);
 }
 
@@ -431,7 +449,7 @@ fn live_stream_cache_resets_on_replacement() {
         .spans()
         .iter()
         .find(|span| span.text == "_new_")
-        .unwrap();
+        .expect("expected styled markdown span");
     assert!(!emphasis.style.bold);
     assert!(emphasis.style.italic);
 }
@@ -444,10 +462,16 @@ fn prompt_marker_uses_submitted_marker_style() {
     let block = markdown_prompt_block(&theme, names::USER_PROMPT, "> ".to_owned(), "- item");
     let spans = block.content.spans();
 
-    let prompt_marker = spans.iter().find(|span| span.text == "> ").unwrap();
+    let prompt_marker = spans
+        .iter()
+        .find(|span| span.text == "> ")
+        .expect("expected styled markdown span");
     assert_eq!(prompt_marker.style.fg, Some(tau_cli_term::Color::Red));
 
-    let list_marker = spans.iter().find(|span| span.text == "-").unwrap();
+    let list_marker = spans
+        .iter()
+        .find(|span| span.text == "-")
+        .expect("expected styled markdown span");
     assert_eq!(list_marker.style.fg, Some(tau_cli_term::Color::Green));
 }
 

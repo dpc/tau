@@ -128,7 +128,7 @@ fn optional_extension_missing_required_secret_is_skipped_with_diagnostic() {
     let resolved = resolve_extension_secrets(&config, td.path(), &SecretSources::default())
         .expect("optional missing secret should not fail startup");
 
-    assert!(resolved.secrets.get("std-email").is_none());
+    assert!(!resolved.secrets.contains_key("std-email"));
     assert!(resolved.skipped_extensions.contains("std-email"));
     assert_eq!(resolved.diagnostics.len(), 1);
     assert_eq!(resolved.diagnostics[0].extension, "std-email");
@@ -151,7 +151,7 @@ fn optional_extension_invalid_secret_name_is_skipped_with_diagnostic() {
     let resolved = resolve_extension_secrets(&config, td.path(), &SecretSources::default())
         .expect("optional invalid secret name should skip extension");
 
-    assert!(resolved.secrets.get("std-email").is_none());
+    assert!(!resolved.secrets.contains_key("std-email"));
     assert!(resolved.skipped_extensions.contains("std-email"));
     assert_eq!(
         resolved.diagnostics[0].message,

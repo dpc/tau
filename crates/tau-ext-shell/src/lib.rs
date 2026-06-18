@@ -1536,16 +1536,16 @@ fn dispatch_tool_invoke(
     };
 
     if invoke.tool_name == SHELL_TOOL_NAME || invoke.tool_name == GPT_SHELL_TOOL_NAME {
-        dispatch_cancellable_shell_tool(
+        dispatch_cancellable_shell_tool(CancellableShellDispatch {
             invoke,
             shell_config,
             tx,
             running_shells,
             lock_wait_duration_seconds,
-            shell_command_mode.unwrap_or(ShellCommandMode::READ_WRITE_HIDDEN),
+            shell_command_mode: shell_command_mode.unwrap_or(ShellCommandMode::READ_WRITE_HIDDEN),
             enforce_ro_bind,
             world,
-        );
+        });
         return;
     }
 
@@ -1568,16 +1568,39 @@ fn dispatch_tool_invoke(
     }
 }
 
-fn dispatch_cancellable_shell_tool(
+/// Parameters needed to run a cancellable shell-like tool invocation.
+struct CancellableShellDispatch<'a> {
+    /// Tool invocation emitted by the harness.
     invoke: tau_proto::ToolStarted,
+    /// Effective shell execution configuration for this invocation.
     shell_config: ShellConfig,
-    tx: &mpsc::Sender<HarnessInputMessage>,
-    running_shells: &Arc<Mutex<HashMap<tau_proto::ToolCallId, mpsc::Sender<()>>>>,
+    /// Channel used to send progress and terminal events back to the harness.
+    tx: &'a mpsc::Sender<HarnessInputMessage>,
+    /// Shared registry used by cancel requests to signal running shell
+    /// processes.
+    running_shells: &'a Arc<Mutex<HashMap<tau_proto::ToolCallId, mpsc::Sender<()>>>>,
+    /// Seconds spent waiting on a directory lock before this invocation ran.
     lock_wait_duration_seconds: Option<u64>,
+    /// Display and access mode chosen for the shell command.
     shell_command_mode: ShellCommandMode,
+    /// Whether read-only commands should run under the native read-only bind
+    /// guard.
     enforce_ro_bind: bool,
-    mut world: crate::tools::world::ShellWorld,
-) {
+    /// Tool execution world carrying the cwd and recorded side effects.
+    world: crate::tools::world::ShellWorld,
+}
+
+fn dispatch_cancellable_shell_tool(params: CancellableShellDispatch<'_>) {
+    let CancellableShellDispatch {
+        invoke,
+        shell_config,
+        tx,
+        running_shells,
+        lock_wait_duration_seconds,
+        shell_command_mode,
+        enforce_ro_bind,
+        mut world,
+    } = params;
     let (cancel_tx, cancel_rx) = mpsc::channel();
     debug!(
         call_id = %invoke.call_id,

@@ -109,7 +109,7 @@ harness `tool_policy.rules` run deterministically by `(priority, rule name)`,
 with each rule applying `disable_tool_tags` before `enable_tool_tags`. Built-in
 and user policy share the same evaluator; the built-in `builtin.chatgpt-shell`
 rule disables `shell:*` for ChatGPT-tagged models and re-enables apply-patch,
-shell-command, and cd tools.
+shell-command, cd, and directory-lock tools.
 
 Role precedence is broad-to-specific and runs after global policy: optional
 `tools` allow-list base, `disable_tool_tags`, `enable_tool_tags`,

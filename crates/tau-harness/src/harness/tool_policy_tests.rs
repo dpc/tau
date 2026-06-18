@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::os::unix::net::UnixStream;
 
-use tau_config::settings::{AgentRole, TauDirs, ToolPolicy, ToolPolicyRule};
+use tau_config::settings::{AgentRole, TauDirs, ToolPolicy};
 use tau_proto::{
     BackgroundSupport, Effort, ModelId, ModelName, ModelTag, ProviderModelInfo, ProviderName,
     ThinkingSummary, ToolGroup, ToolGroupName, ToolName, ToolRegister, ToolSpec, ToolTag, ToolType,
@@ -225,7 +225,7 @@ fn user_can_disable_builtin_chatgpt_shell_policy() {
         .tool_policy
         .rules
         .entry("builtin.chatgpt-shell".to_owned())
-        .or_insert_with(ToolPolicyRule::default)
+        .or_default()
         .enable = false;
 
     let tools = effective_tool_names(&policy.harness);
