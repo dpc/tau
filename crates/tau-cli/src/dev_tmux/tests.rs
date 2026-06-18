@@ -32,6 +32,18 @@ fn tau_shell_command_uses_scratch_environment_and_core_shell_only() {
         ));
 }
 
+/// Ensures provider profiles are copied into the same Tau state directory that
+/// the child process derives from its scratch `XDG_STATE_HOME`, preventing
+/// provider-builtin from starting with an empty model list despite copied
+/// testing credentials.
+#[test]
+fn tau_state_dir_matches_child_tau_state_under_scratch_xdg_state() {
+    let scratch = PathBuf::from("/tmp/tau tmux scratch");
+    let env = TmuxEnvironment::new(common(&scratch), None).expect("env builds");
+
+    assert_eq!(env.tau_state_dir(), scratch.join("state").join("tau"));
+}
+
 /// Ensures paths with shell and YAML-sensitive characters are shell-quoted
 /// and JSON-quoted before being passed through `--harness-config`, so
 /// manual tests can use realistic scratch directories without parser

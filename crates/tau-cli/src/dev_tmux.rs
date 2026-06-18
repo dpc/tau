@@ -34,7 +34,7 @@ pub(crate) fn run(command: DevTmuxCommand) -> Result<(), CliError> {
 
 fn start(args: DevTmuxStartArgs) -> Result<(), CliError> {
     let env = TmuxEnvironment::new(args.common, args.workdir)?;
-    let provider_access = prepare_provider_access(&TauDirs::default(), &env.state)?;
+    let provider_access = prepare_provider_access(&TauDirs::default(), &env.tau_state_dir())?;
     prepare_scratch_root(&env.target.scratch_root)?;
     ensure_private_directory(&env.home)?;
     ensure_private_directory(&env.config)?;
@@ -248,6 +248,10 @@ impl TmuxEnvironment {
             ),
         ]
         .join(" && "))
+    }
+
+    fn tau_state_dir(&self) -> PathBuf {
+        self.state.join("tau")
     }
 }
 
