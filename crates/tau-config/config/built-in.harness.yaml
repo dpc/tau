@@ -55,9 +55,9 @@ role_groups:
 
   manager:
     roles:
-      manager:
+      micro-manager:
         enable: true
-        description: Role focused on splitting and delegation of tasks to other sub-agents.
+        description: Role focused on splitting and delegation of tasks to other sub-agents via micro-management.
         effort: low
         prompt_fragments:
           - name: manager.instructions

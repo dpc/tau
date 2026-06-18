@@ -1762,7 +1762,7 @@ fn harness_drop_in_layers_merge_through_domain_overrides() {
             role_groups: {
                 manager: {
                     roles: {
-                        manager: { prompt_fragments: [{ name: "manager.local", priority: 170, text: "Local manager instruction." }] },
+                        "micro-manager": { prompt_fragments: [{ name: "manager.local", priority: 170, text: "Local manager instruction." }] },
                     },
                 },
             },
@@ -1783,7 +1783,7 @@ fn harness_drop_in_layers_merge_through_domain_overrides() {
             role_groups: {
                 manager: {
                     roles: {
-                        manager: { prompt_fragments: [{ name: "manager.drop-in", priority: 180, text: "Drop-in manager instruction." }] },
+                        "micro-manager": { prompt_fragments: [{ name: "manager.drop-in", priority: 180, text: "Drop-in manager instruction." }] },
                     },
                 },
             },
@@ -1811,7 +1811,7 @@ fn harness_drop_in_layers_merge_through_domain_overrides() {
             .iter()
             .any(|fragment| fragment.text.as_str() == "Drop-in global instruction.")
     );
-    let manager = &s.roles["manager"];
+    let manager = &s.roles["micro-manager"];
     assert!(
         manager
             .prompt_fragments
@@ -1920,7 +1920,7 @@ fn harness_roles_merge_with_built_ins() {
                 },
                 manager: {
                     roles: {
-                        manager: { model: "openai/gpt-5.5" },
+                        "micro-manager": { model: "openai/gpt-5.5" },
                     },
                 },
             },
@@ -1930,7 +1930,7 @@ fn harness_roles_merge_with_built_ins() {
 
     let s = load_harness_settings_in(&dirs_with_config(dir)).expect("load");
     assert!(s.roles.contains_key("engineer"));
-    assert!(s.roles.contains_key("manager"));
+    assert!(s.roles.contains_key("micro-manager"));
     assert!(!s.roles.contains_key("assistant"));
     assert!(!s.roles.contains_key("smart"));
     assert!(!s.roles.contains_key("deep"));
@@ -1959,10 +1959,10 @@ fn harness_roles_merge_with_built_ins() {
         Some(vec![tau_proto::ToolName::new("read")])
     );
 
-    let manager = &s.roles["manager"];
+    let manager = &s.roles["micro-manager"];
     assert_eq!(
         manager.description.as_deref(),
-        Some("Role focused on splitting and delegation of tasks to other sub-agents.")
+        Some("Role focused on splitting and delegation of tasks to other sub-agents via micro-management.")
     );
     assert!(
         manager
@@ -1986,7 +1986,7 @@ fn harness_manager_partial_override_keeps_built_in_prompt_fragments() {
             role_groups: {
                 manager: {
                     roles: {
-                        manager: { model: "openai/gpt-5.5" },
+                        "micro-manager": { model: "openai/gpt-5.5" },
                     },
                 },
             },
@@ -1995,7 +1995,7 @@ fn harness_manager_partial_override_keeps_built_in_prompt_fragments() {
     .expect("write");
 
     let s = load_harness_settings_in(&dirs_with_config(dir)).expect("load");
-    let manager = &s.roles["manager"];
+    let manager = &s.roles["micro-manager"];
     assert!(manager.prompt_fragments.iter().any(|fragment| {
         fragment
             .text
@@ -2023,7 +2023,7 @@ fn harness_manager_prompt_fragments_extend_built_in_prompt_fragments() {
             role_groups: {
                 manager: {
                     roles: {
-                        manager: { prompt_fragments: [{ name: "manager.custom", priority: 100, text: "Custom manager prompt." }] },
+                        "micro-manager": { prompt_fragments: [{ name: "manager.custom", priority: 100, text: "Custom manager prompt." }] },
                     },
                 },
             },
@@ -2032,7 +2032,7 @@ fn harness_manager_prompt_fragments_extend_built_in_prompt_fragments() {
     .expect("write");
 
     let s = load_harness_settings_in(&dirs_with_config(dir)).expect("load");
-    let manager = &s.roles["manager"];
+    let manager = &s.roles["micro-manager"];
     assert!(manager.prompt_fragments.iter().any(|fragment| {
         fragment
             .text
@@ -2171,7 +2171,7 @@ fn harness_built_in_roles_load_from_json_with_manager_prompt() {
                     "staff-engineer".to_owned(),
                 ],
             ),
-            ("manager".to_owned(), vec!["manager".to_owned()]),
+            ("manager".to_owned(), vec!["micro-manager".to_owned()]),
         ]
     );
     let junior_engineer = &s.roles["junior-engineer"];
@@ -2195,7 +2195,7 @@ fn harness_built_in_roles_load_from_json_with_manager_prompt() {
             .iter()
             .any(|fragment| fragment.text.contains("Trust the `<instructions>`"))
     );
-    let manager = &s.roles["manager"];
+    let manager = &s.roles["micro-manager"];
     let prompt = manager
         .prompt_fragments
         .first()
@@ -2226,7 +2226,7 @@ fn harness_role_groups_load_custom_roles() {
                 },
                 manager: {
                     roles: {
-                        manager: { model: "openai/gpt-5.5" },
+                        "micro-manager": { model: "openai/gpt-5.5" },
                     },
                 },
             },
@@ -2240,7 +2240,7 @@ fn harness_role_groups_load_custom_roles() {
         s.roles["custom"].tools.as_ref().expect("tools"),
         &vec![tau_proto::ToolName::new("read")]
     );
-    let manager = &s.roles["manager"];
+    let manager = &s.roles["micro-manager"];
     assert!(
         manager
             .prompt_fragments
@@ -2359,7 +2359,7 @@ fn missing_user_files_load_the_built_in_baseline() {
     let harness = load_harness_settings_in(&dirs_with_config(td.path())).expect("harness");
     assert!(harness.roles.contains_key("junior-engineer"));
     assert!(harness.roles.contains_key("senior-engineer"));
-    assert!(harness.roles.contains_key("manager"));
+    assert!(harness.roles.contains_key("micro-manager"));
     assert_eq!(harness.default_role.as_deref(), Some("senior-engineer"));
     assert!(!harness.roles.contains_key("assistant"));
     assert!(harness.roles.contains_key("staff-engineer"));
@@ -2410,7 +2410,7 @@ fn harness_role_enable_false_filters_built_in_roles_after_merging() {
             .iter()
             .map(|group| (group.name.as_str(), group.roles.as_slice()))
             .collect::<Vec<_>>(),
-        vec![("manager", &["manager".to_owned()][..]),]
+        vec![("manager", &["micro-manager".to_owned()][..]),]
     );
 }
 
