@@ -62,6 +62,11 @@ corresponding must-pass `session.agent_loaded` publish commits. That keeps
 idempotency stable while an interceptor parks publication and prevents duplicate
 membership/start facts from being queued for the same live agent.
 
+Provider tool calls are evaluated against the tool snapshot owned by the prompt
+that produced them. Model-visible rejection diagnostics for those calls must use
+that same snapshot for availability wording and near-name suggestions; current
+role/model policy is only the authority when no prompt-owned snapshot exists.
+
 Extensions that need to turn external user input into a normal agent prompt use
 `extension.prompt_submit_request`. The harness accepts this request only on the
 extension path, validates the target loaded agent, and then submits a normal

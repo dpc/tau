@@ -5,8 +5,8 @@ use crate::agent::PendingPrompt;
 use crate::extension::{ExtensionConnectCommand, ExtensionEntry, ExtensionState, spawn_in_process};
 use crate::harness::{
     PendingTool, PromptFragmentSource, extension_disconnected_tool_call_error_message,
-    tool_available_again_notice_prompt, tool_unavailable_notice_prompt,
-    unavailable_tool_error_message, validate_protocol_version,
+    prompt_snapshot_tool_error_message, tool_available_again_notice_prompt,
+    tool_unavailable_notice_prompt, unavailable_tool_error_message, validate_protocol_version,
 };
 
 fn context_text(item: &ContextItem) -> Option<&str> {
@@ -1852,7 +1852,7 @@ fn old_prompt_call_gets_tau_internal_unavailable_error() {
     })
     .expect("unavailable old tool call should be closed");
 
-    let expected = unavailable_tool_error_message(&ToolName::new("shell"));
+    let expected_prefix = unavailable_tool_error_message(&ToolName::new("shell"));
     assert!(default_agent_tree(&h).nodes().iter().any(|node| {
         matches!(
             &node.entry,
@@ -1861,7 +1861,7 @@ fn old_prompt_call_gets_tau_internal_unavailable_error() {
                     item.call_id.as_str() == "c1"
                         && matches!(
                             &item.status,
-                            ToolResultStatus::Error { message } if message == &expected
+                            ToolResultStatus::Error { message } if message.starts_with(&expected_prefix)
                         )
                 })
         )
@@ -2063,7 +2063,7 @@ fn unavailable_tool_is_reported_without_crashing() {
     })
     .expect("unavailable tool should be rejected cleanly");
 
-    let expected = unavailable_tool_error_message(&ToolName::new("shell"));
+    let expected_prefix = unavailable_tool_error_message(&ToolName::new("shell"));
     assert!(default_agent_tree(&h).nodes().iter().any(|node| {
         matches!(
             &node.entry,
@@ -2072,7 +2072,7 @@ fn unavailable_tool_is_reported_without_crashing() {
                     item.call_id.as_str() == "c1"
                         && matches!(
                             &item.status,
-                            ToolResultStatus::Error { message } if message == &expected
+                            ToolResultStatus::Error { message } if message.starts_with(&expected_prefix)
                         )
                 })
         )
@@ -2272,7 +2272,7 @@ fn disconnected_tool_is_removed_cleanly() {
     })
     .expect("removed tool should be rejected cleanly");
 
-    let expected = unavailable_tool_error_message(&ToolName::new("shell"));
+    let expected_prefix = unavailable_tool_error_message(&ToolName::new("shell"));
     assert!(default_agent_tree(&h).nodes().iter().any(|node| {
         matches!(
             &node.entry,
@@ -2281,7 +2281,7 @@ fn disconnected_tool_is_removed_cleanly() {
                     item.call_id.as_str() == "c1"
                         && matches!(
                             &item.status,
-                            ToolResultStatus::Error { message } if message == &expected
+                            ToolResultStatus::Error { message } if message.starts_with(&expected_prefix)
                         )
                 })
         )
@@ -2471,6 +2471,7 @@ fn role_disabled_tool_is_reported_without_dispatch() {
     })
     .expect("disabled tool call should be handled");
 
+    let expected = prompt_snapshot_tool_error_message(&ToolName::new("shell"));
     assert!(default_agent_tree(&h).nodes().iter().any(|node| {
         matches!(
             &node.entry,
@@ -2480,7 +2481,7 @@ fn role_disabled_tool_is_reported_without_dispatch() {
                         && matches!(
                             &item.status,
                             ToolResultStatus::Error { message }
-                                if message == "tool is not enabled for the current role"
+                                if message == &expected
                         )
                 })
         )

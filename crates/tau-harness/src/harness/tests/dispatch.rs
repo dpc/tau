@@ -984,9 +984,223 @@ fn invalid_tool_arguments_are_rejected_before_logical_dispatch() {
 
     let provider_error = provider_error.expect("provider tool error");
     assert!(provider_error.contains("invalid arguments for tool `strict_tool`"));
-    assert!(provider_error.contains("unexpected argument `extra`"));
+    assert!(provider_error.contains("unexpected argument(s): `extra`"));
+    assert!(provider_error.contains("allowed fields: `allowed`"));
     assert_eq!(logical_events, vec!["tool.error"]);
     assert!(tool_invoke_call_ids(&tool_events).is_empty());
+
+    h.shutdown().expect("shutdown");
+}
+
+/// Ensures unavailable-tool diagnostics distinguish a misspelled/unknown tool
+/// from a registered tool disabled by policy, and give a near-name suggestion
+/// only for the unknown-tool case where the model can retry mechanically.
+#[test]
+fn unavailable_tool_errors_are_actionable_for_unknown_and_disabled_tools() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    h.selected_model = Some("test/model".into());
+    h.selected_role = "restricted".to_owned();
+    h.available_roles.insert(
+        "restricted".to_owned(),
+        tau_config::settings::AgentRole {
+            disable_tools: vec![ToolName::new("disabled_tool")],
+            ..Default::default()
+        },
+    );
+
+    h.registry
+        .register("conn-readable", shared_test_tool_spec("readable"));
+    h.registry
+        .register("conn-disabled", shared_test_tool_spec("disabled_tool"));
+
+    let cid = ensure_test_user_agent(&mut h);
+    let spid: AgentPromptId = "sp-unavailable-tool-errors".into();
+    seed_agent_thinking(&mut h, &cid, spid.as_str());
+    h.prompt_agents.insert(spid.clone(), cid.clone());
+
+    h.handle_provider_response_finished(ProviderResponseFinished {
+        agent_prompt_id: spid,
+        agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
+        output_items: vec![
+            ContextItem::ToolCall(ToolCallItem {
+                call_id: "unknown-tool".into(),
+                name: ToolName::new("readble"),
+                tool_type: tau_proto::ToolType::Function,
+                arguments: CborValue::Map(Vec::new()),
+            }),
+            ContextItem::ToolCall(ToolCallItem {
+                call_id: "disabled-tool".into(),
+                name: ToolName::new("disabled_tool"),
+                tool_type: tau_proto::ToolType::Function,
+                arguments: CborValue::Map(Vec::new()),
+            }),
+        ],
+        stop_reason: tau_proto::ProviderStopReason::ToolCalls,
+        error: None,
+        usage: None,
+        originator: tau_proto::PromptOriginator::User,
+        compaction_original_input_tokens: None,
+        compaction_compacted_input_tokens: None,
+        backend: None,
+        provider_response_id: None,
+        ws_pool_delta: None,
+    })
+    .expect("provider response handled");
+
+    let mut unknown_error = None;
+    let mut disabled_error = None;
+    let mut seq = crate::event_log::EventLogSeq::new(0);
+    while let Some(entry) = h.event_log.get_next_from(seq) {
+        seq = entry.seq.next();
+        match &entry.event {
+            Event::ProviderToolError(error) if error.call_id.as_str() == "unknown-tool" => {
+                unknown_error = Some(error.message.clone());
+            }
+            Event::ProviderToolError(error) if error.call_id.as_str() == "disabled-tool" => {
+                disabled_error = Some(error.message.clone());
+            }
+            _ => {}
+        }
+    }
+
+    let unknown_error = unknown_error.expect("unknown tool provider error");
+    assert!(unknown_error.contains("Tool `readble` is not available."));
+    assert!(unknown_error.contains("Did you mean `readable`?"));
+    let disabled_error = disabled_error.expect("disabled tool provider error");
+    assert!(
+        disabled_error
+            .contains("Tool `disabled_tool` was not in the tool set advertised for this prompt."),
+        "unexpected disabled error: {disabled_error}"
+    );
+
+    h.shutdown().expect("shutdown");
+}
+
+/// Ensures a registered tool that is disabled by the current live role/model is
+/// reported as disabled, not as unknown, when the call is not tied to a prompt
+/// snapshot.
+#[test]
+fn current_role_disabled_tool_error_names_role_model_authority() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    h.selected_model = Some("test/model".into());
+    h.selected_role = "restricted".to_owned();
+    h.available_roles.insert(
+        "restricted".to_owned(),
+        tau_config::settings::AgentRole {
+            disable_tools: vec![ToolName::new("disabled_tool")],
+            ..Default::default()
+        },
+    );
+    h.registry
+        .register("conn-disabled", shared_test_tool_spec("disabled_tool"));
+    let cid = ensure_test_user_agent(&mut h);
+
+    h.execute_agent_tool_call(
+        &cid,
+        &AgentToolCall {
+            id: "disabled-current-role".into(),
+            name: ToolName::new("disabled_tool"),
+            tool_type: tau_proto::ToolType::Function,
+            arguments: CborValue::Map(Vec::new()),
+        },
+    )
+    .expect("disabled direct call handled");
+
+    assert!(event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::ProviderToolError(error)
+            if error.call_id.as_str() == "disabled-current-role"
+                && error.message.contains(
+                    "Tool `disabled_tool` exists, but is disabled for the current role/model."
+                )
+    )));
+
+    h.shutdown().expect("shutdown");
+}
+
+/// Ensures unknown-tool suggestions for a provider response use the prompt's
+/// advertised tool snapshot rather than the current role surface, which can
+/// change while the model is thinking.
+#[test]
+fn unknown_tool_suggestion_uses_prompt_tool_snapshot() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    h.selected_model = Some("test/model".into());
+
+    h.registry
+        .register("conn-current", shared_test_tool_spec("current_tool"));
+
+    let cid = ensure_test_user_agent(&mut h);
+    let spid: AgentPromptId = "sp-snapshot-tool-suggestion".into();
+    seed_agent_thinking(&mut h, &cid, spid.as_str());
+    h.prompt_agents.insert(spid.clone(), cid.clone());
+    h.prompt_tool_specs
+        .insert(spid.clone(), vec![shared_test_tool_spec("snapshot_tool")]);
+    h.prompt_tool_call_prompts
+        .insert("snapshot-typo".into(), spid.clone());
+    h.prompt_tool_call_prompts
+        .insert("registered-not-snapshot".into(), spid.clone());
+
+    h.handle_provider_response_finished(ProviderResponseFinished {
+        agent_prompt_id: spid,
+        agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
+        output_items: vec![
+            ContextItem::ToolCall(ToolCallItem {
+                call_id: "snapshot-typo".into(),
+                name: ToolName::new("snapshot_too"),
+                tool_type: tau_proto::ToolType::Function,
+                arguments: CborValue::Map(Vec::new()),
+            }),
+            ContextItem::ToolCall(ToolCallItem {
+                call_id: "registered-not-snapshot".into(),
+                name: ToolName::new("current_tool"),
+                tool_type: tau_proto::ToolType::Function,
+                arguments: CborValue::Map(Vec::new()),
+            }),
+        ],
+        stop_reason: tau_proto::ProviderStopReason::ToolCalls,
+        error: None,
+        usage: None,
+        originator: tau_proto::PromptOriginator::User,
+        compaction_original_input_tokens: None,
+        compaction_compacted_input_tokens: None,
+        backend: None,
+        provider_response_id: None,
+        ws_pool_delta: None,
+    })
+    .expect("provider response handled");
+
+    let mut provider_error = None;
+    let mut registered_error = None;
+    let mut seq = crate::event_log::EventLogSeq::new(0);
+    while let Some(entry) = h.event_log.get_next_from(seq) {
+        seq = entry.seq.next();
+        if let Event::ProviderToolError(error) = &entry.event
+            && error.call_id.as_str() == "snapshot-typo"
+        {
+            provider_error = Some(error.message.clone());
+        }
+        if let Event::ProviderToolError(error) = &entry.event
+            && error.call_id.as_str() == "registered-not-snapshot"
+        {
+            registered_error = Some(error.message.clone());
+        }
+    }
+
+    let provider_error = provider_error.expect("provider tool error");
+    assert!(provider_error.contains("Did you mean `snapshot_tool`?"));
+    assert!(!provider_error.contains("current_tool"));
+    let registered_error = registered_error.expect("registered tool outside snapshot error");
+    assert!(
+        registered_error
+            .contains("Tool `current_tool` was not in the tool set advertised for this prompt.")
+    );
+    assert!(!registered_error.contains("current role/model"));
 
     h.shutdown().expect("shutdown");
 }

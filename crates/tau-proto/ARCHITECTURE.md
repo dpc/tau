@@ -14,6 +14,12 @@ Tool result events carry raw CBOR for non-provider consumers, but provider promp
 
 `ToolResponse::render()` must keep headers as safe single lines, preserve ASCII LF body separators for line-oriented records, escape other model-visible control and separator characters, and keep binary/fallback rendering bounded. This is not terminal/UI escaping; terminal renderers still need their own sanitization for display state and layout.
 
+Bounded model-visible diagnostic text helpers that are shared by harness, core,
+and extensions may also live in `tau-proto` when they have no dependency on
+harness state or extension implementation details. These helpers are part of the
+same prompt-surface safety boundary as rendered tool responses: keep work
+bounded, outputs deterministic, and tests close to the exported helper.
+
 ## Event names and routing
 
 `Event` serde `rename` values, `EventName` constants, and `Event::name()` are one contract. When adding or renaming an event, update all three together and update `docs/events.md` when the selected guide should mention the event.

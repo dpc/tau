@@ -28,7 +28,7 @@ use tau_proto::{
     ProviderResponseFinished, ProviderStopReason, ProviderTokenUsage, SecretValue, SessionId,
     ToolBackgroundError, ToolBackgroundResult, ToolCallId, ToolCallItem, ToolCancelled,
     ToolDefinition, ToolError, ToolName, ToolRegister, ToolRejected, ToolRequest, ToolResult,
-    ToolResultKind, ToolType, UiCancelPrompt,
+    ToolResultKind, ToolType, UiCancelPrompt, nearest_name_suggestion,
 };
 
 use crate::agent::{Agent, AgentTurnState, PendingCancel, PendingPrompt};
@@ -378,6 +378,31 @@ fn extension_disconnected_background_tool_call_error_message(call_id: &ToolCallI
 pub(crate) fn unavailable_tool_error_message(tool_name: &ToolName) -> String {
     format!(
         "{}: true\n\nTool `{tool_name}` is not available.",
+        tau_proto::TAU_INTERNAL_HEADER_NAME
+    )
+}
+
+fn unavailable_tool_error_message_with_suggestion(
+    tool_name: &ToolName,
+    suggestion: Option<String>,
+) -> String {
+    let mut message = unavailable_tool_error_message(tool_name);
+    if let Some(suggestion) = suggestion {
+        message.push_str(&format!(" Did you mean `{suggestion}`?"));
+    }
+    message
+}
+
+pub(crate) fn disabled_tool_error_message(tool_name: &ToolName) -> String {
+    format!(
+        "{}: true\n\nTool `{tool_name}` exists, but is disabled for the current role/model.",
+        tau_proto::TAU_INTERNAL_HEADER_NAME
+    )
+}
+
+pub(crate) fn prompt_snapshot_tool_error_message(tool_name: &ToolName) -> String {
+    format!(
+        "{}: true\n\nTool `{tool_name}` was not in the tool set advertised for this prompt.",
         tau_proto::TAU_INTERNAL_HEADER_NAME
     )
 }
@@ -9343,6 +9368,37 @@ impl Harness {
         false
     }
 
+    fn nearest_enabled_tool_name_for_role(
+        &self,
+        requested_name: &ToolName,
+        role_name: &str,
+    ) -> Option<String> {
+        let names = self
+            .registry
+            .all_tool_providers()
+            .into_iter()
+            .filter(|provider| self.is_tool_provider_enabled_for_role(provider, role_name))
+            .map(|provider| self.tool_model_visible_name(&provider.tool).as_str());
+        nearest_name_suggestion(requested_name.as_str(), names)
+    }
+
+    fn nearest_enabled_tool_name_for_prompt(
+        &self,
+        requested_name: &ToolName,
+        agent_prompt_id: &AgentPromptId,
+    ) -> Option<String> {
+        // Unavailable-tool diagnostics for model calls must be based on the
+        // exact prompt-owned tool snapshot when one exists. The role's live tool
+        // surface may have changed since the provider saw the prompt; suggesting
+        // a current-role-only tool would steer the model toward a tool it could
+        // not have selected in that turn.
+        let specs = self.prompt_tool_specs.get(agent_prompt_id)?;
+        let names = specs
+            .iter()
+            .map(|spec| self.tool_model_visible_name(spec).as_str());
+        nearest_name_suggestion(requested_name.as_str(), names)
+    }
+
     fn tool_call_waits_for_staged_registration(
         &self,
         cid: &AgentId,
@@ -10753,17 +10809,25 @@ impl Harness {
         let tool_name = call.name.clone();
         let role_name = self.role_name_for_agent_id(cid).to_owned();
 
-        let prompt_tool_spec = self
-            .prompt_tool_call_prompts
-            .get(&call.id)
+        let prompt_id = self.prompt_tool_call_prompts.get(&call.id).cloned();
+        let prompt_tool_spec = prompt_id
+            .as_ref()
             .map(|prompt_id| self.resolve_enabled_tool_spec_for_prompt(&tool_name, prompt_id));
         let current_role_tool_spec =
             || self.resolve_enabled_tool_spec_for_role(&tool_name, &role_name);
         let Some(tool_spec) = prompt_tool_spec.unwrap_or_else(current_role_tool_spec) else {
-            let message = if self.has_registered_tool_name(&tool_name) {
-                "tool is not enabled for the current role".to_owned()
+            let message = if prompt_id.is_some() && self.has_registered_tool_name(&tool_name) {
+                prompt_snapshot_tool_error_message(&tool_name)
+            } else if self.has_registered_tool_name(&tool_name) {
+                disabled_tool_error_message(&tool_name)
             } else {
-                unavailable_tool_error_message(&tool_name)
+                let suggestion = prompt_id
+                    .as_ref()
+                    .and_then(|prompt_id| {
+                        self.nearest_enabled_tool_name_for_prompt(&tool_name, prompt_id)
+                    })
+                    .or_else(|| self.nearest_enabled_tool_name_for_role(&tool_name, &role_name));
+                unavailable_tool_error_message_with_suggestion(&tool_name, suggestion)
             };
             let call_id: ToolCallId = call.id.clone();
             let owner_agent_id = self.tool_owner_agent_id(cid);

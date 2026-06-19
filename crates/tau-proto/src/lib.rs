@@ -22,6 +22,7 @@ mod interception;
 mod messages;
 pub mod notice_kind;
 mod prompt_fragment;
+mod suggestion;
 mod token_usage;
 
 use std::io::{BufReader, Cursor, Read, Write};
@@ -37,6 +38,7 @@ pub use messages::*;
 pub use prompt_fragment::*;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
+pub use suggestion::*;
 pub use tau_actions::*;
 pub use token_usage::*;
 

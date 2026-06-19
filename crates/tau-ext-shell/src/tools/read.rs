@@ -1,8 +1,8 @@
 //! `read` tool: read a file (optionally a line slice).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use tau_proto::CborValue;
+use tau_proto::{CborValue, nearest_name_suggestion};
 
 use crate::argument::{argument_text, optional_argument_int_strict};
 use crate::display::{ToolFailure, ToolOutput, ok_display, text_stats};
@@ -12,6 +12,7 @@ use crate::truncate::{MAX_OUTPUT_BYTES, truncate_line_oriented};
 const MAX_READ_RANGES_PER_CALL: usize = 100;
 const MAX_READ_FILE_BYTES: usize = MAX_SAFE_FILE_READ_BYTES;
 const MAX_READ_RANGE_RENDERED_BYTES: usize = MAX_OUTPUT_BYTES * 40;
+const MAX_PATH_SUGGESTION_SIBLINGS: usize = 64;
 
 pub(crate) fn read_file(
     arguments: &CborValue,
@@ -25,7 +26,15 @@ pub(crate) fn read_file(
 
     let bytes = world
         .read_file_limited(&path_buf, MAX_READ_FILE_BYTES)
-        .map_err(|error| ToolFailure::from(error.to_string()).with_args(display_args.clone()))?;
+        .map_err(|error| {
+            let mut message = error.to_string();
+            if error.kind() == std::io::ErrorKind::NotFound
+                && let Some(suggestion) = near_sibling_path_suggestion(&path_buf, world)
+            {
+                message.push_str(&format!("; did you mean `{suggestion}`?"));
+            }
+            ToolFailure::from(message).with_args(display_args.clone())
+        })?;
     let file_bytes = bytes.len();
     validate_range_render_budget(&bytes, &request.ranges, &display_args)?;
     let sliced = slice_line_ranges(&bytes, &request.ranges);
@@ -65,6 +74,24 @@ pub(crate) fn read_file(
         result: CborValue::Map(entries),
         display,
     })
+}
+
+fn near_sibling_path_suggestion(path: &Path, world: &mut ShellWorld) -> Option<String> {
+    let requested_name = path.file_name()?.to_str()?;
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())?;
+    let entries = world
+        .read_dir_limited(parent, MAX_PATH_SUGGESTION_SIBLINGS + 1)
+        .ok()?;
+    if MAX_PATH_SUGGESTION_SIBLINGS < entries.len() {
+        return None;
+    }
+    let names = entries
+        .iter()
+        .filter_map(|entry| std::str::from_utf8(entry.name.as_slice()).ok());
+    let suggestion = nearest_name_suggestion(requested_name, names)?;
+    Some(parent.join(suggestion).display().to_string())
 }
 
 /// One 1-based line range requested from a file.
@@ -583,6 +610,51 @@ mod tests {
         assert!(
             err.message.contains("file is too large to read safely"),
             "unexpected error: {}",
+            err.message
+        );
+    }
+
+    /// Ensures missing-path diagnostics give a nearby sibling only when the
+    /// sibling scan stays within the hard bound, preventing expensive or
+    /// nondeterministic directory-wide suggestions.
+    #[test]
+    fn read_missing_path_suggestion_is_bounded() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(temp.path().join("target_file.rs"), "content").expect("write target");
+        let mut world = ShellWorld::real();
+
+        let err = read_file(
+            &map(vec![(
+                "path",
+                CborValue::Text(temp.path().join("target_fiel.rs").display().to_string()),
+            )]),
+            &mut world,
+        )
+        .expect_err("misspelled path should fail");
+
+        assert!(
+            err.message.contains("did you mean") && err.message.contains("target_file.rs"),
+            "unexpected error: {}",
+            err.message
+        );
+
+        for idx in 0..=MAX_PATH_SUGGESTION_SIBLINGS {
+            std::fs::write(temp.path().join(format!("sibling-{idx}.txt")), "x")
+                .expect("write sibling");
+        }
+        let mut world = ShellWorld::real();
+        let err = read_file(
+            &map(vec![(
+                "path",
+                CborValue::Text(temp.path().join("target_fiel.rs").display().to_string()),
+            )]),
+            &mut world,
+        )
+        .expect_err("misspelled path should still fail");
+
+        assert!(
+            !err.message.contains("did you mean"),
+            "suggestion should be suppressed past sibling bound: {}",
             err.message
         );
     }

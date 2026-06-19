@@ -7,10 +7,15 @@ use std::fmt;
 
 use tau_proto::{
     CborValue, ConnectionId, PromptFragment, ToolGroup, ToolName, ToolRegister, ToolRequest,
-    ToolSpec, ToolStarted, ToolType,
+    ToolSpec, ToolStarted, ToolType, nearest_name_suggestion,
 };
 
 use crate::connection::RouteError;
+
+const MAX_DIAGNOSTIC_ITEMS: usize = 16;
+const MAX_DIAGNOSTIC_ITEM_CHARS: usize = 40;
+const MAX_DIAGNOSTIC_MESSAGE_CHARS: usize = 1024;
+const MAX_DIAGNOSTIC_PATH_CHARS: usize = 200;
 
 /// Kind of provider registered for a tool name.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -69,9 +74,10 @@ pub struct ToolArgumentValidationError {
 
 impl ToolArgumentValidationError {
     fn new(path: impl Into<String>, message: impl Into<String>) -> Self {
+        let message = message.into();
         Self {
-            path: path.into(),
-            message: message.into(),
+            path: bounded_text(&path.into(), MAX_DIAGNOSTIC_PATH_CHARS),
+            message: bounded_text(&message, MAX_DIAGNOSTIC_MESSAGE_CHARS),
         }
     }
 }
@@ -168,7 +174,7 @@ fn validate_json_schema(
     if let Some(type_schema) = schema.get("type")
         && !schema_type_matches(type_schema, value)
     {
-        return Err(type_error(path, type_schema));
+        return Err(type_error(path, type_schema, value));
     }
 
     if let Some(enum_values) = schema.get("enum").and_then(serde_json::Value::as_array)
@@ -176,10 +182,7 @@ fn validate_json_schema(
             .iter()
             .any(|allowed| tau_proto::json_to_cbor(allowed) == *value)
     {
-        return Err(ToolArgumentValidationError::new(
-            path,
-            "must be one of the schema enum values",
-        ));
+        return Err(enum_error(path, enum_values, value));
     }
 
     match value {
@@ -215,21 +218,62 @@ fn schema_type_name_matches(kind: &str, value: &CborValue) -> bool {
     }
 }
 
-fn type_error(path: &str, type_schema: &serde_json::Value) -> ToolArgumentValidationError {
+fn type_error(
+    path: &str,
+    type_schema: &serde_json::Value,
+    value: &CborValue,
+) -> ToolArgumentValidationError {
     let expected = match type_schema {
         serde_json::Value::String(kind) => kind.clone(),
         serde_json::Value::Array(kinds) => kinds
             .iter()
             .filter_map(serde_json::Value::as_str)
+            .take(MAX_DIAGNOSTIC_ITEMS)
             .collect::<Vec<_>>()
             .join(" or "),
         _ => "expected schema type".to_owned(),
     };
     if path == "$" && expected == "object" {
-        ToolArgumentValidationError::new(path, "arguments must be an object")
+        ToolArgumentValidationError::new(
+            path,
+            format!(
+                "arguments must be an object; expected object, got {}",
+                cbor_type_name(value)
+            ),
+        )
     } else {
-        ToolArgumentValidationError::new(path, format!("must be {expected}"))
+        ToolArgumentValidationError::new(
+            path,
+            format!("expected {expected}, got {}", cbor_type_name(value)),
+        )
     }
+}
+
+fn enum_error(
+    path: &str,
+    enum_values: &[serde_json::Value],
+    value: &CborValue,
+) -> ToolArgumentValidationError {
+    let allowed = enum_values
+        .iter()
+        .take(MAX_DIAGNOSTIC_ITEMS)
+        .map(short_json_value)
+        .collect::<Vec<_>>();
+    let allowed = bounded_list(allowed, enum_values.len());
+    let mut message = format!(
+        "invalid enum value {}; allowed values: {}",
+        short_cbor_value(value),
+        allowed
+    );
+    if let CborValue::Text(text) = value
+        && let Some(suggestion) = nearest_name_suggestion(
+            text,
+            enum_values.iter().filter_map(serde_json::Value::as_str),
+        )
+    {
+        message.push_str(&format!("; did you mean `{suggestion}`?"));
+    }
+    ToolArgumentValidationError::new(path, message)
 }
 
 fn validate_object_schema(
@@ -242,13 +286,46 @@ fn validate_object_schema(
         .and_then(serde_json::Value::as_object);
 
     if let Some(required) = schema.get("required").and_then(serde_json::Value::as_array) {
-        for required_name in required.iter().filter_map(serde_json::Value::as_str) {
-            if !entries
-                .iter()
-                .any(|(key, _)| cbor_key_matches(key, required_name))
-            {
-                return Err(missing_required_error(path, required_name));
-            }
+        let missing = required
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .filter(|required_name| {
+                !entries
+                    .iter()
+                    .any(|(key, _)| cbor_key_matches(key, required_name))
+            })
+            .take(MAX_DIAGNOSTIC_ITEMS + 1)
+            .collect::<Vec<_>>();
+        if !missing.is_empty() {
+            return Err(missing_required_error(path, &missing));
+        }
+    }
+
+    if matches!(
+        schema.get("additionalProperties"),
+        Some(serde_json::Value::Bool(false))
+    ) {
+        let unknown = entries
+            .iter()
+            .filter_map(|(key, _)| match key {
+                CborValue::Text(field_name)
+                    if properties.is_none_or(|properties| !properties.contains_key(field_name)) =>
+                {
+                    Some(field_name.as_str())
+                }
+                _ => None,
+            })
+            .take(MAX_DIAGNOSTIC_ITEMS + 1)
+            .collect::<Vec<_>>();
+        if !unknown.is_empty() {
+            let mut allowed = properties
+                .into_iter()
+                .flat_map(serde_json::Map::keys)
+                .map(String::as_str)
+                .take(MAX_DIAGNOSTIC_ITEMS + 1)
+                .collect::<Vec<_>>();
+            allowed.sort_unstable();
+            return Err(unexpected_properties_error(path, &unknown, &allowed));
         }
     }
 
@@ -264,9 +341,7 @@ fn validate_object_schema(
             continue;
         }
         match schema.get("additionalProperties") {
-            Some(serde_json::Value::Bool(false)) => {
-                return Err(unexpected_property_error(path, field_name));
-            }
+            Some(serde_json::Value::Bool(false)) => {}
             Some(additional_schema @ serde_json::Value::Object(_)) => {
                 validate_json_schema(
                     additional_schema,
@@ -287,6 +362,7 @@ fn cbor_key_matches(key: &CborValue, expected: &str) -> bool {
 }
 
 fn child_path(parent: &str, field: &str) -> String {
+    let field = bounded_text(field, MAX_DIAGNOSTIC_ITEM_CHARS);
     if parent == "$" {
         format!("$.{field}")
     } else {
@@ -298,20 +374,59 @@ fn item_path(parent: &str, index: usize) -> String {
     format!("{parent}[{index}]")
 }
 
-fn missing_required_error(path: &str, name: &str) -> ToolArgumentValidationError {
-    if path == "$" {
-        ToolArgumentValidationError::new(path, format!("missing required argument `{name}`"))
-    } else {
-        ToolArgumentValidationError::new(path, format!("missing required property `{name}`"))
-    }
+fn missing_required_error(path: &str, names: &[&str]) -> ToolArgumentValidationError {
+    let total = names.len();
+    let quoted = bounded_list(
+        names
+            .iter()
+            .take(MAX_DIAGNOSTIC_ITEMS)
+            .map(|name| format!("`{}`", bounded_text(name, MAX_DIAGNOSTIC_ITEM_CHARS)))
+            .collect::<Vec<_>>(),
+        total,
+    );
+    let noun = if path == "$" { "argument" } else { "property" };
+    ToolArgumentValidationError::new(path, format!("missing required {noun}(s): {quoted}"))
 }
 
-fn unexpected_property_error(path: &str, name: &str) -> ToolArgumentValidationError {
-    if path == "$" {
-        ToolArgumentValidationError::new(path, format!("unexpected argument `{name}`"))
+fn unexpected_properties_error(
+    path: &str,
+    names: &[&str],
+    allowed: &[&str],
+) -> ToolArgumentValidationError {
+    let quoted = bounded_list(
+        names
+            .iter()
+            .take(MAX_DIAGNOSTIC_ITEMS)
+            .map(|name| format!("`{}`", bounded_text(name, MAX_DIAGNOSTIC_ITEM_CHARS)))
+            .collect::<Vec<_>>(),
+        names.len(),
+    );
+    let allowed = if allowed.is_empty() {
+        "none".to_owned()
     } else {
-        ToolArgumentValidationError::new(path, format!("unexpected property `{name}`"))
+        bounded_list(
+            allowed
+                .iter()
+                .take(MAX_DIAGNOSTIC_ITEMS)
+                .map(|name| format!("`{}`", bounded_text(name, MAX_DIAGNOSTIC_ITEM_CHARS)))
+                .collect::<Vec<_>>(),
+            allowed.len(),
+        )
+    };
+    let noun = if path == "$" { "argument" } else { "property" };
+    ToolArgumentValidationError::new(
+        path,
+        format!("unexpected {noun}(s): {quoted}; allowed fields: {allowed}"),
+    )
+}
+
+fn bounded_list(items: Vec<String>, total_items: usize) -> String {
+    let shown = items.len().min(MAX_DIAGNOSTIC_ITEMS);
+    let mut rendered = items.into_iter().take(shown).collect::<Vec<_>>();
+    if shown < total_items {
+        rendered.push("… and more".to_owned());
     }
+    rendered.join(", ")
 }
 
 fn validate_array_schema(
@@ -416,6 +531,55 @@ fn cbor_number_as_f64(value: &CborValue) -> Option<f64> {
         CborValue::Float(value) => Some(*value),
         _ => None,
     }
+}
+
+fn cbor_type_name(value: &CborValue) -> &'static str {
+    match value {
+        CborValue::Null => "null",
+        CborValue::Bool(_) => "boolean",
+        CborValue::Integer(_) => "integer",
+        CborValue::Float(_) => "number",
+        CborValue::Bytes(_) => "bytes",
+        CborValue::Text(_) => "string",
+        CborValue::Array(_) => "array",
+        CborValue::Map(_) => "object",
+        CborValue::Tag(_, _) => "tagged value",
+        _ => "value",
+    }
+}
+
+fn short_json_value(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::String(text) => {
+            format!("`{}`", bounded_text(text, MAX_DIAGNOSTIC_ITEM_CHARS))
+        }
+        _ => bounded_text(&value.to_string(), MAX_DIAGNOSTIC_ITEM_CHARS),
+    }
+}
+
+fn short_cbor_value(value: &CborValue) -> String {
+    match value {
+        CborValue::Text(text) => {
+            format!("`{}`", bounded_text(text, MAX_DIAGNOSTIC_ITEM_CHARS))
+        }
+        CborValue::Integer(value) => {
+            let value: i128 = (*value).into();
+            value.to_string()
+        }
+        CborValue::Float(value) => value.to_string(),
+        CborValue::Bool(value) => value.to_string(),
+        CborValue::Null => "null".to_owned(),
+        _ => cbor_type_name(value).to_owned(),
+    }
+}
+
+fn bounded_text(text: &str, max_chars: usize) -> String {
+    let mut chars = text.chars();
+    let mut out = chars.by_ref().take(max_chars).collect::<String>();
+    if chars.next().is_some() {
+        out.push('…');
+    }
+    out
 }
 
 /// Live tool registration state keyed by connection and tool name.
@@ -653,3 +817,6 @@ impl ToolRegistry {
         }
     }
 }
+
+#[cfg(test)]
+mod tests;

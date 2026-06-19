@@ -1840,3 +1840,48 @@ fn tool_response_renders_bytes_as_bounded_placeholder() {
 
     assert_eq!(response.render(), "<1024 bytes>");
 }
+
+/// Ensures a clear close name is suggested, while poor and tied matches are
+/// suppressed so callers do not present misleading recovery hints.
+#[test]
+fn nearest_name_suggestion_is_conservative_and_tie_safe() {
+    assert_eq!(
+        nearest_name_suggestion("rea", ["read", "edit"].into_iter()),
+        Some("read".to_owned())
+    );
+    assert_eq!(
+        nearest_name_suggestion("xyz", ["read", "edit"].into_iter()),
+        None
+    );
+    assert_eq!(
+        nearest_name_suggestion("cat", ["bat", "cut"].into_iter()),
+        None
+    );
+}
+
+/// Ensures suggestion work is bounded by observed candidate count, not only by
+/// accepted short candidates after filtering.
+#[test]
+fn nearest_name_suggestion_suppresses_oversized_candidate_sets() {
+    let candidates = (0..=MAX_SUGGESTION_CANDIDATES)
+        .map(|idx| format!("{}-{idx}", "x".repeat(MAX_SUGGESTION_NAME_CHARS + 10)))
+        .collect::<Vec<_>>();
+    let suggestion = nearest_name_suggestion("read", candidates.iter().map(String::as_str));
+
+    assert_eq!(suggestion, None);
+}
+
+/// Ensures overlong requested names and candidates are handled without scanning
+/// or scoring unbounded strings.
+#[test]
+fn nearest_name_suggestion_suppresses_overlong_names() {
+    let overlong = "r".repeat(MAX_SUGGESTION_NAME_CHARS + 1);
+    assert_eq!(
+        nearest_name_suggestion(&overlong, ["read"].into_iter()),
+        None
+    );
+    assert_eq!(
+        nearest_name_suggestion("reed", ["read", overlong.as_str()].into_iter()),
+        Some("read".to_owned())
+    );
+}

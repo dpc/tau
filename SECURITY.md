@@ -48,6 +48,11 @@ Read-only shell mode is a defense-in-depth feature of the opt-in directory-lock 
 
 Tool and model tags are prompt-surface/routing metadata, not a sandbox. Extensions publish neutral tool tags, providers publish model tags, and the harness owns matching policy plus prompt-time tool snapshots. A provider tool call is authorized against the snapshot advertised to that prompt, not against later role/model changes. Role `disable_tools` and unpinned shell/edit alternative suppression are policy controls for the model-visible surface; they do not prevent trusted local extensions or host processes from accessing the filesystem outside Tau's tool route.
 
+Model-visible diagnostics are part of the prompt surface. Keep tool rejection,
+schema validation, and path suggestion text deterministic and bounded so
+extension-provided schemas, filesystem names, or model arguments cannot amplify
+unbounded work or prompt content.
+
 ## Skills
 
 Skills are prompt instructions loaded from local/project Markdown files, not a sandbox or permission boundary. Project skills can be malicious prompt content. `disable-model-invocation` hides a skill from Tau's model-visible skill surfaces, but a model with filesystem tools could still read the underlying file if it learns the path. `allowed-tools` and similar frontmatter fields do not grant or restrict Tau tool permissions.
