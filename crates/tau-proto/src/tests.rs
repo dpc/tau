@@ -968,9 +968,10 @@ fn execution_events_use_provider_wire_family() {
         (
             Event::ProviderResponseUpdated(ProviderResponseUpdated {
                 agent_prompt_id: "sp-1".into(),
-                items: Vec::new(),
-                compaction_original_input_tokens: None,
-                compaction_compacted_input_tokens: None,
+                agent_id: agent_id("engineer_abcd1234"),
+                deltas: Vec::new(),
+                compaction: None,
+                status: None,
                 originator: PromptOriginator::User,
             }),
             "provider.response_updated",
@@ -1001,14 +1002,15 @@ fn execution_events_use_provider_wire_family() {
     }
 }
 
-/// Ensures provider response updates require snapshot output items rather than
-/// accepting empty deltas.
+/// Ensures provider response updates require the new delta-routing fields
+/// rather than accepting legacy text/thinking snapshots.
 #[test]
-fn provider_response_updated_requires_item_snapshots() {
-    // The provider streaming payload is item-based only. Legacy text/thinking
-    // snapshots must fail instead of silently decoding as empty item updates.
+fn provider_response_updated_requires_delta_routing_fields() {
+    // The provider streaming payload is delta-based. Legacy text/thinking
+    // snapshots must fail instead of silently decoding as empty delta updates.
     let value = serde_json::json!({
         "agent_prompt_id": "sp-1",
+        "agent_id": "engineer_abcd1234",
         "text": "legacy assistant text",
         "thinking": "legacy reasoning text"
     });
@@ -1016,7 +1018,7 @@ fn provider_response_updated_requires_item_snapshots() {
     let error = serde_json::from_value::<ProviderResponseUpdated>(value)
         .expect_err("legacy streaming payload should not decode");
     assert!(
-        error.to_string().contains("items"),
+        error.to_string().contains("text"),
         "unexpected error: {error}"
     );
 }
@@ -1229,9 +1231,10 @@ fn event_defaults_to_transient_marks_progress_kinds() {
     let transient = [
         Event::ProviderResponseUpdated(ProviderResponseUpdated {
             agent_prompt_id: "sp-1".into(),
-            items: Vec::new(),
-            compaction_original_input_tokens: None,
-            compaction_compacted_input_tokens: None,
+            agent_id: agent_id("engineer_abcd1234"),
+            deltas: Vec::new(),
+            compaction: None,
+            status: None,
             originator: PromptOriginator::User,
         }),
         Event::ToolProgress(ToolProgress {

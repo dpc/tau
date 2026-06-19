@@ -1407,109 +1407,49 @@ fn apply_event_text_delta_accumulates_and_notifies() {
 }
 
 #[test]
-fn response_items_preserve_reasoning_summary_output_index() {
-    // Live item snapshots must preserve provider order. Reasoning summaries are
-    // displayable, but they still belong at the output index reported by the
-    // provider rather than being forced before every other in-progress item.
+fn stream_delta_emitter_emits_only_new_assistant_and_reasoning_text() {
+    // Streaming response updates are append deltas; this prevents large
+    // responses from being copied and sent again on every provider chunk while
+    // keeping the final output item accumulator complete.
     let mut state = crate::common::StreamState::new();
-    let mut on_update = |_: &crate::common::StreamState| {};
+    let mut emitter = crate::common::StreamDeltaEmitter::default();
 
-    apply_event(
-        &mut state,
-        &serde_json::json!({
-            "type": "response.output_text.delta",
-            "output_index": 0,
-            "delta": "answer first",
-        }),
-        &mut on_update,
-    )
-    .expect("message delta");
-    apply_event(
-        &mut state,
-        &serde_json::json!({
-            "type": "response.reasoning_summary_text.delta",
-            "output_index": 1,
-            "delta": "then thinking",
-        }),
-        &mut on_update,
-    )
-    .expect("reasoning delta");
-
-    let items = state.response_items();
-    assert_eq!(items.len(), 2);
-    assert!(matches!(
-        &items[0],
-        tau_proto::ProviderResponseItem::InProgress(
-            tau_proto::InProgressOutputItem::Message { text, .. }
-        ) if text == "answer first"
-    ));
-    assert!(matches!(
-        &items[1],
-        tau_proto::ProviderResponseItem::InProgress(
-            tau_proto::InProgressOutputItem::ReasoningText { text, .. }
-        ) if text == "then thinking"
-    ));
-
-    let output_items = state.into_output_items();
-    assert!(matches!(
-        output_items[0],
-        tau_proto::ContextItem::Message(_)
-    ));
-    assert!(matches!(
-        &output_items[1],
-        tau_proto::ContextItem::ReasoningText(reasoning) if reasoning.text == "then thinking"
-    ));
-}
-
-#[test]
-fn response_items_allow_completed_items_after_in_progress_items() {
-    // A mixed ordered list can represent the provider finishing a later output
-    // item while an earlier item is still streaming. This would be impossible
-    // to render correctly with separate completed/in-progress vectors.
-    let mut state = crate::common::StreamState::new();
-    let mut on_update = |_: &crate::common::StreamState| {};
-
-    apply_event(
-        &mut state,
-        &serde_json::json!({
-            "type": "response.output_text.delta",
-            "output_index": 0,
-            "delta": "still streaming",
-        }),
-        &mut on_update,
-    )
-    .expect("message delta");
-    apply_event(
-        &mut state,
-        &serde_json::json!({
-            "type": "response.output_item.done",
-            "output_index": 1,
-            "item": {
-                "type": "function_call",
-                "call_id": "call_read",
-                "name": "read",
-                "arguments": "{\"path\":\"Cargo.toml\"}",
+    state.append_message_delta_at(0, "hel");
+    state.append_reasoning_summary_delta_at(1, "plan");
+    assert_eq!(
+        emitter.deltas(&state),
+        vec![
+            tau_proto::ProviderResponseTextDelta::Message {
+                output_index: 0,
+                text: "hel".to_owned(),
+                phase: None,
             },
-        }),
-        &mut on_update,
-    )
-    .expect("tool done");
+            tau_proto::ProviderResponseTextDelta::ReasoningText {
+                output_index: 1,
+                kind: tau_proto::ReasoningTextKind::Summary,
+                text: "plan".to_owned(),
+            },
+        ]
+    );
 
-    let items = state.response_items();
-    assert_eq!(items.len(), 2);
-    assert!(matches!(
-        &items[0],
-        tau_proto::ProviderResponseItem::InProgress(
-            tau_proto::InProgressOutputItem::Message { text, .. }
-        ) if text == "still streaming"
-    ));
-    let tau_proto::ProviderResponseItem::Completed(tau_proto::ContextItem::ToolCall(call)) =
-        &items[1]
-    else {
-        panic!("expected completed tool call after in-progress message: {items:?}");
-    };
-    assert_eq!(call.call_id.as_str(), "call_read");
-    assert_eq!(call.name.as_str(), "read");
+    state.append_message_delta_at(0, "lo");
+    state.append_reasoning_summary_delta_at(1, " next");
+    assert_eq!(
+        emitter.deltas(&state),
+        vec![
+            tau_proto::ProviderResponseTextDelta::Message {
+                output_index: 0,
+                text: "lo".to_owned(),
+                phase: None,
+            },
+            tau_proto::ProviderResponseTextDelta::ReasoningText {
+                output_index: 1,
+                kind: tau_proto::ReasoningTextKind::Summary,
+                text: " next".to_owned(),
+            },
+        ]
+    );
+    assert!(emitter.deltas(&state).is_empty());
 }
 
 #[test]

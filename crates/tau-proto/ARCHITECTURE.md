@@ -45,3 +45,7 @@ Prefer additive optional fields with serde defaults for backward compatibility. 
 ## Agent metadata protocol
 
 `agent.metadata_set` and `agent.metadata_unset` are durable, extension-visible agent facts. Metadata keys are strings; values are arbitrary CBOR values capped by `MAX_AGENT_METADATA_VALUE_BYTES`; and `metadata_set.inheritable` controls child-agent copies. Do not classify these events as transient defaults: extensions may subscribe to them for live state, and replay uses the latest folded snapshot before `session.agent_loaded`.
+
+## Provider response streaming updates
+
+`provider.response_updated` is transient append-delta protocol surface for visible assistant/reasoning progress. Providers must send newly appended text in `deltas`, not full accumulated message snapshots; retry/status diagnostics belong in the separate `status` field because they are provider-authored, not assistant-authored. `provider.response_finished.output_items` remains the complete durable response and replay source.

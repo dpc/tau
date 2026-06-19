@@ -600,10 +600,6 @@ pub fn apply_event(
                         changed = true;
                     }
                 }
-                if event_type == "response.output_item.done" {
-                    state.mark_output_item_done(output_index);
-                    changed = true;
-                }
                 if changed {
                     on_update(state);
                 }

@@ -1,13 +1,13 @@
 //! Types shared by the ChatGPT/Codex Responses transports.
 
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use tau_proto::{
-    CborValue, ContentPart, ContextItem, ContextRole, InProgressCompactionStatus,
-    InProgressOutputItem, MessageItem, OpaqueProviderItem, PromptContext, PromptOriginator,
-    ProviderResponseItem, ProviderTokenUsage, ReasoningTextItem, ReasoningTextKind, SessionId,
-    ToolCallItem, ToolDefinition,
+    CborValue, ContentPart, ContextItem, ContextRole, MessageItem, OpaqueProviderItem,
+    PromptContext, PromptOriginator, ProviderResponseCompactionStatus,
+    ProviderResponseCompactionUpdate, ProviderResponseTextDelta, ProviderTokenUsage,
+    ReasoningTextItem, ReasoningTextKind, SessionId, ToolCallItem, ToolDefinition,
 };
 use uuid::Uuid;
 
@@ -220,10 +220,79 @@ pub struct StreamState {
     pub stale_chain_fallback: bool,
     /// Synthesized item slot for plain assistant text content.
     chat_message_item_index: Option<usize>,
-    /// Output item indices the upstream stream has marked done. Live updates
-    /// expose only the completed prefix from this set; final output is still
-    /// committed exclusively by `ProviderResponseFinished`.
-    completed_output_indices: BTreeSet<usize>,
+}
+
+/// Tracks text already emitted to transient response update streams.
+#[derive(Debug, Default)]
+pub struct StreamDeltaEmitter {
+    /// Last assistant message text emitted per provider output index.
+    emitted_messages: BTreeMap<usize, String>,
+    /// Last reasoning text emitted per provider output index.
+    emitted_reasoning: BTreeMap<usize, String>,
+}
+
+impl StreamDeltaEmitter {
+    /// Returns newly appended assistant/reasoning deltas since the last call.
+    pub fn deltas(&mut self, state: &StreamState) -> Vec<ProviderResponseTextDelta> {
+        let mut deltas = Vec::new();
+        for (index, item) in state.output_items.iter().enumerate() {
+            if let OutputItemAccumulator::Message(message) = item {
+                self.push_message_delta(index, message, &mut deltas);
+            }
+        }
+        if let Some(thinking) = state
+            .thinking
+            .as_deref()
+            .filter(|thinking| !thinking.is_empty())
+        {
+            let index = state.thinking_output_index.unwrap_or(0);
+            let previous = self.emitted_reasoning.entry(index).or_default();
+            if let Some(delta) = append_suffix(previous, thinking) {
+                deltas.push(ProviderResponseTextDelta::ReasoningText {
+                    output_index: index as u32,
+                    kind: ReasoningTextKind::Summary,
+                    text: delta,
+                });
+            }
+        }
+        deltas
+    }
+
+    fn push_message_delta(
+        &mut self,
+        index: usize,
+        message: &MessageAccumulator,
+        deltas: &mut Vec<ProviderResponseTextDelta>,
+    ) {
+        if message.text.is_empty() {
+            return;
+        }
+        let previous = self.emitted_messages.entry(index).or_default();
+        if let Some(delta) = append_suffix(previous, &message.text) {
+            deltas.push(ProviderResponseTextDelta::Message {
+                output_index: index as u32,
+                text: delta,
+                phase: message.phase,
+            });
+        }
+    }
+}
+
+fn append_suffix(previous: &mut String, current: &str) -> Option<String> {
+    if current == previous {
+        return None;
+    }
+    if let Some(suffix) = current.strip_prefix(previous.as_str()) {
+        previous.push_str(suffix);
+        if suffix.is_empty() {
+            None
+        } else {
+            Some(suffix.to_owned())
+        }
+    } else {
+        tracing::trace!("stream text stopped being append-only; waiting for final response");
+        None
+    }
 }
 
 /// Accumulates one tool call across streaming chunks.
@@ -265,15 +334,6 @@ impl ToolCallAccumulator {
             arguments,
         }))
     }
-
-    fn in_progress_item(&self) -> InProgressOutputItem {
-        InProgressOutputItem::ToolCall {
-            call_id: (!self.id.is_empty()).then(|| self.id.clone().into()),
-            name: (!self.name.is_empty()).then(|| self.name.clone()),
-            tool_type: self.tool_type,
-            arguments: self.arguments_json.clone(),
-        }
-    }
 }
 
 impl OutputItemAccumulator {
@@ -288,24 +348,6 @@ impl OutputItemAccumulator {
                 Some(ContextItem::Compaction(item.clone()))
             }
             OutputItemAccumulator::Compaction(None) => None,
-        }
-    }
-
-    fn in_progress_item(&self) -> Option<InProgressOutputItem> {
-        match self {
-            OutputItemAccumulator::Empty => None,
-            OutputItemAccumulator::Message(message) => {
-                (!message.text.is_empty()).then(|| InProgressOutputItem::Message {
-                    text: message.text.clone(),
-                    phase: message.phase,
-                })
-            }
-            OutputItemAccumulator::ToolCall(call) => Some(call.in_progress_item()),
-            OutputItemAccumulator::Reasoning(_) => None,
-            OutputItemAccumulator::Compaction(Some(_)) => None,
-            OutputItemAccumulator::Compaction(None) => Some(InProgressOutputItem::Compaction {
-                status: InProgressCompactionStatus::Started,
-            }),
         }
     }
 }
@@ -330,7 +372,6 @@ impl StreamState {
             provider_terminal_event: None,
             stale_chain_fallback: false,
             chat_message_item_index: None,
-            completed_output_indices: BTreeSet::new(),
         }
     }
 
@@ -454,10 +495,6 @@ impl StreamState {
         }
     }
 
-    pub fn mark_output_item_done(&mut self, output_index: usize) {
-        self.completed_output_indices.insert(output_index);
-    }
-
     fn refresh_text(&mut self) {
         self.text.clear();
         for item in &self.output_items {
@@ -467,71 +504,22 @@ impl StreamState {
         }
     }
 
-    /// Returns the ordered live response snapshot for a transient update.
-    ///
-    /// Completed entries are stable for the rest of the stream but remain
-    /// non-durable until `ProviderResponseFinished` commits final output.
-    pub fn response_items(&self) -> Vec<ProviderResponseItem> {
-        let mut items = Vec::new();
-        let thinking_index = self.thinking_output_index.unwrap_or(0);
-        let thinking_len = self
-            .thinking
-            .as_deref()
-            .filter(|thinking| !thinking.is_empty())
-            .map(|_| thinking_index + 1)
-            .unwrap_or(0);
-        let len = self.output_items.len().max(thinking_len);
-        for index in 0..len {
-            self.push_reasoning_response_item(index, &mut items);
-            if let Some(item) = self.output_items.get(index) {
-                self.push_output_response_item(index, item, &mut items);
-            }
-        }
-        items
-    }
-
-    fn push_reasoning_response_item(&self, index: usize, items: &mut Vec<ProviderResponseItem>) {
-        let Some(thinking) = self
-            .thinking
-            .as_deref()
-            .filter(|thinking| !thinking.is_empty())
-        else {
-            return;
-        };
-        if self.thinking_output_index.unwrap_or(0) != index {
-            return;
-        }
-        let kind = ReasoningTextKind::Summary;
-        if self.completed_output_indices.contains(&index) {
-            items.push(ProviderResponseItem::Completed(ContextItem::ReasoningText(
-                ReasoningTextItem {
-                    kind,
-                    text: thinking.to_owned(),
-                },
-            )));
-        } else {
-            items.push(ProviderResponseItem::InProgress(
-                InProgressOutputItem::ReasoningText {
-                    kind,
-                    text: thinking.to_owned(),
-                },
-            ));
-        }
-    }
-
-    fn push_output_response_item(
-        &self,
-        index: usize,
-        item: &OutputItemAccumulator,
-        items: &mut Vec<ProviderResponseItem>,
-    ) {
-        if self.completed_output_indices.contains(&index) {
-            if let Some(item) = item.context_item() {
-                items.push(ProviderResponseItem::Completed(item));
-            }
-        } else if let Some(item) = item.in_progress_item() {
-            items.push(ProviderResponseItem::InProgress(item));
-        }
+    /// Returns the current compact compaction status, when a compaction item is
+    /// present in the live provider output.
+    pub fn compaction_update(&self) -> Option<ProviderResponseCompactionUpdate> {
+        self.output_items.iter().find_map(|item| match item {
+            OutputItemAccumulator::Compaction(Some(_)) => Some(ProviderResponseCompactionUpdate {
+                status: ProviderResponseCompactionStatus::Completed,
+                original_input_tokens: None,
+                compacted_input_tokens: None,
+            }),
+            OutputItemAccumulator::Compaction(None) => Some(ProviderResponseCompactionUpdate {
+                status: ProviderResponseCompactionStatus::Started,
+                original_input_tokens: None,
+                compacted_input_tokens: None,
+            }),
+            _ => None,
+        })
     }
 
     /// Returns the final assistant output items in provider item order.
@@ -646,7 +634,7 @@ pub fn verbosity_wire(level: tau_proto::Verbosity) -> &'static str {
 pub fn prompt_cache_key_for(base_url: &str, agent_id: &tau_proto::AgentId) -> String {
     let mut hasher = blake3::Hasher::new();
     hasher.update(base_url.as_bytes());
-    hasher.update(b" agent:");
+    hasher.update(b"agent:");
     hasher.update(agent_id.as_str().as_bytes());
 
     let mut bytes = [0; 16];

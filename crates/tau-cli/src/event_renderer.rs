@@ -2,14 +2,14 @@
 //! the terminal UI. Stateful: tracks per-prompt and per-tool-call UI
 //! state so streaming updates land in the right block.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use tau_proto::{
-    CborValue, ContentPart, ContextItem, ContextRole, Event, InProgressOutputItem, MessageItem,
-    ProviderResponseItem, ToolCallItem, UnixMicros,
+    CborValue, ContentPart, ContextItem, ContextRole, Event, MessageItem,
+    ProviderResponseCompactionStatus, ProviderResponseTextDelta, ToolCallItem, UnixMicros,
 };
 
 use crate::action_commands::ActionCommandState;
@@ -721,8 +721,8 @@ struct TurnStatsBlockEntry {
 /// `AgentPromptTerminated`.
 #[derive(Default)]
 struct PromptState {
-    /// Live agent-response block. `None` until `AgentPromptCreated`
-    /// allocates it (some prompts arrive without a creation event).
+    /// Live agent-response block. `None` until `AgentPromptCreated` or a
+    /// late/mid-stream provider update allocates it.
     response_block_id: Option<tau_cli_term::BlockId>,
     /// Live thinking block. Lazy-created the first time the agent emits
     /// non-empty `thinking`, so backends that don't return reasoning
@@ -732,6 +732,14 @@ struct PromptState {
     /// can render it into history even when the finish event doesn't
     /// carry displayable reasoning text.
     thinking_text: Option<String>,
+    /// Accumulated live assistant text by provider output index.
+    response_text_by_index: BTreeMap<u32, String>,
+    /// Accumulated live reasoning text by provider output index.
+    thinking_text_by_index: BTreeMap<u32, String>,
+    /// Whether this live response started after missed earlier deltas.
+    missing_response_prefix: bool,
+    /// Whether this live thinking block started after missed earlier deltas.
+    missing_thinking_prefix: bool,
     /// Append-aware Markdown-lite cache for the live assistant response block.
     response_markdown_cache: MarkdownStreamCache,
     /// Append-aware Markdown-lite cache for the live thinking block.
@@ -872,65 +880,20 @@ fn format_ui_io_scaled_rate(bytes_per_sec: u64, divisor: u64, suffix: &str) -> S
 fn update_compaction_status(
     update: &tau_proto::ProviderResponseUpdated,
 ) -> Option<(CompactionStatus, String)> {
-    if update.items.iter().any(|item| {
-        matches!(
-            item,
-            ProviderResponseItem::Completed(ContextItem::Compaction(_))
-        )
-    }) {
-        return Some((
+    let compaction = update.compaction.as_ref()?;
+    match compaction.status {
+        ProviderResponseCompactionStatus::Started => Some((
+            CompactionStatus::Progress,
+            EventRenderer::compaction_progress_status(compaction.original_input_tokens),
+        )),
+        ProviderResponseCompactionStatus::Completed => Some((
             CompactionStatus::Success,
             EventRenderer::compaction_success_status(
-                update.compaction_original_input_tokens,
-                update.compaction_compacted_input_tokens,
+                compaction.original_input_tokens,
+                compaction.compacted_input_tokens,
             ),
-        ));
-    }
-    update.items.iter().find_map(|item| match item {
-        ProviderResponseItem::InProgress(InProgressOutputItem::Compaction { .. }) => Some((
-            CompactionStatus::Progress,
-            EventRenderer::compaction_progress_status(update.compaction_original_input_tokens),
         )),
-        _ => None,
-    })
-}
-
-fn assistant_text_from_update(update: &tau_proto::ProviderResponseUpdated) -> Option<String> {
-    let mut text = String::new();
-    for item in &update.items {
-        match item {
-            ProviderResponseItem::Completed(item) => {
-                if let Some(part) = assistant_text_from_context_item(item) {
-                    text.push_str(&part);
-                }
-            }
-            ProviderResponseItem::InProgress(InProgressOutputItem::Message {
-                text: part, ..
-            }) => {
-                text.push_str(part);
-            }
-            ProviderResponseItem::InProgress(_) => {}
-        }
     }
-    (!text.is_empty()).then_some(text)
-}
-
-fn reasoning_text_from_update(update: &tau_proto::ProviderResponseUpdated) -> Option<String> {
-    let mut text = String::new();
-    for item in &update.items {
-        match item {
-            ProviderResponseItem::Completed(ContextItem::ReasoningText(reasoning)) => {
-                text.push_str(&reasoning.text);
-            }
-            ProviderResponseItem::Completed(_) => {}
-            ProviderResponseItem::InProgress(InProgressOutputItem::ReasoningText {
-                text: part,
-                ..
-            }) => text.push_str(part),
-            ProviderResponseItem::InProgress(_) => {}
-        }
-    }
-    (!text.is_empty()).then_some(text)
 }
 
 fn reasoning_text_from_output_items(output_items: &[ContextItem]) -> Option<String> {
@@ -2954,7 +2917,7 @@ impl EventRenderer {
                 .prompt_agents
                 .get(update.agent_prompt_id.as_str())
                 .cloned()
-                .or_else(|| self.agent_id_for_originator(&update.originator)),
+                .or_else(|| Some(update.agent_id.to_string())),
             Event::ProviderResponseFinished(finished) => Some(finished.agent_id.to_string()),
             _ => self.current_agent_id.clone(),
         }
@@ -3403,12 +3366,117 @@ impl EventRenderer {
 
     fn handle_provider_response_updated(&mut self, update: &tau_proto::ProviderResponseUpdated) {
         let spid = update.agent_prompt_id.as_str();
-        let text = assistant_text_from_update(update).unwrap_or_default();
-        let thinking = reasoning_text_from_update(update);
+        self.prompt_agents
+            .entry(spid.to_owned())
+            .or_insert_with(|| update.agent_id.to_string());
+        self.ensure_live_response_block_for_update(update);
+        if let Some(status) = &update.status {
+            if status.clear_response {
+                self.clear_live_response_accumulators(spid);
+            }
+            self.update_editor_current_response(update, "");
+            self.update_live_compaction_block(spid, update_compaction_status(update));
+            if update.deltas.is_empty() {
+                self.update_live_response_block(spid, &status.text);
+                return;
+            }
+        }
+        let (text, thinking) = self.accumulate_response_update(update);
         self.update_editor_current_response(update, &text);
         self.update_live_thinking_block(spid, thinking.as_deref());
         self.update_live_compaction_block(spid, update_compaction_status(update));
         self.update_live_response_block(spid, &text);
+    }
+
+    fn clear_live_response_accumulators(&mut self, spid: &str) {
+        if let Some(state) = self.prompts.get_mut(spid) {
+            state.response_text_by_index.clear();
+            state.thinking_text_by_index.clear();
+            state.thinking_text = None;
+            state.missing_response_prefix = false;
+            state.missing_thinking_prefix = false;
+            state.response_markdown_cache = MarkdownStreamCache::default();
+            state.thinking_markdown_cache = MarkdownStreamCache::default();
+            if let Some(block_id) = state.thinking_block_id.take() {
+                self.handle.remove_block(block_id);
+            }
+        }
+    }
+
+    fn ensure_live_response_block_for_update(
+        &mut self,
+        update: &tau_proto::ProviderResponseUpdated,
+    ) {
+        use tau_themes::names;
+
+        let spid = update.agent_prompt_id.as_str();
+        let state = self.prompts.entry(spid.to_owned()).or_default();
+        if state.response_block_id.is_some() {
+            return;
+        }
+        state.missing_response_prefix = true;
+        state.missing_thinking_prefix = true;
+        let block = streaming_block(&self.theme, names::AGENT_PENDING, "");
+        let id = self.handle.new_block(
+            format!("agent-response-live:{}", update.agent_prompt_id),
+            block,
+        );
+        self.handle.push_above_active(id);
+        self.handle.redraw();
+        self.prompts
+            .entry(spid.to_owned())
+            .or_default()
+            .response_block_id = Some(id);
+    }
+
+    fn accumulate_response_update(
+        &mut self,
+        update: &tau_proto::ProviderResponseUpdated,
+    ) -> (String, Option<String>) {
+        let state = self
+            .prompts
+            .entry(update.agent_prompt_id.to_string())
+            .or_default();
+        for delta in &update.deltas {
+            match delta {
+                ProviderResponseTextDelta::Message {
+                    output_index, text, ..
+                } => {
+                    state
+                        .response_text_by_index
+                        .entry(*output_index)
+                        .or_default()
+                        .push_str(text);
+                }
+                ProviderResponseTextDelta::ReasoningText {
+                    output_index, text, ..
+                } => {
+                    state
+                        .thinking_text_by_index
+                        .entry(*output_index)
+                        .or_default()
+                        .push_str(text);
+                }
+            }
+        }
+        let mut text = state
+            .response_text_by_index
+            .values()
+            .cloned()
+            .collect::<String>();
+        if state.missing_response_prefix && !text.is_empty() {
+            text.insert(0, '…');
+        }
+        let mut thinking = state
+            .thinking_text_by_index
+            .values()
+            .cloned()
+            .collect::<String>();
+        if state.missing_thinking_prefix && !thinking.is_empty() {
+            thinking.insert(0, '…');
+        }
+        state.thinking_text = (!thinking.is_empty()).then_some(thinking.clone());
+        (text, (!thinking.is_empty()).then_some(thinking))
     }
 
     fn update_editor_current_response(

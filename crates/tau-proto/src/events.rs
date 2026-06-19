@@ -12,9 +12,9 @@ use serde::{Deserialize, Serialize};
 use crate::{
     ActionInvocationId, AgentContextKey, AgentId, AgentMessageId, AgentMetadataKey, AgentPromptId,
     CborValue, ContextItem, DiffSummary, EventCategory, EventName, ExtensionInstanceId,
-    ExtensionName, ModelId, ModelTag, PromptContext, PromptFragment, ProviderResponseItem,
-    ProviderTokenUsage, SessionId, SkillName, ToolCallId, ToolDefinition, ToolGroupName, ToolName,
-    ToolTag,
+    ExtensionName, MessagePhase, ModelId, ModelTag, PromptContext, PromptFragment,
+    ProviderTokenUsage, ReasoningTextKind, SessionId, SkillName, ToolCallId, ToolDefinition,
+    ToolGroupName, ToolName, ToolTag,
 };
 
 fn default_true() -> bool {
@@ -2918,34 +2918,94 @@ pub struct ProviderPromptSubmitted {
     pub originator: PromptOriginator,
 }
 
-/// The provider has new accumulated response output for a prompt.
+/// The provider has newly appended displayable response output for a prompt.
 ///
-/// Each update is a replace-style ordered item snapshot, not a delta. Consumers
-/// should render `items` in order; completed entries are still transient until
-/// [`ProviderResponseFinished`] commits final `output_items`.
+/// Each update is a transient append-delta event. Providers send only newly
+/// appended assistant/reasoning text in `deltas`; the complete durable response
+/// remains [`ProviderResponseFinished::output_items`]. Some updates are
+/// status- or compaction-only and therefore have empty `deltas`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ProviderResponseUpdated {
-    /// Prompt id whose accumulated response changed.
+    /// Prompt id whose response changed.
     pub agent_prompt_id: AgentPromptId,
-    /// Ordered live provider output items. Completed entries are stable within
-    /// the live snapshot but are not durable transcript facts until the
-    /// matching [`ProviderResponseFinished`] commits final `output_items`.
-    pub items: Vec<ProviderResponseItem>,
-    /// Input-token count of the conversation before provider-side compaction,
-    /// if this update is reporting a compaction lifecycle item and the harness
-    /// knows the previous context size.
+    /// Agent transcript this in-flight response belongs to.
+    pub agent_id: AgentId,
+    /// Newly appended displayable assistant/reasoning text chunks.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deltas: Vec<ProviderResponseTextDelta>,
+    /// Small provider-side compaction lifecycle/status snapshot.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub compaction_original_input_tokens: Option<u64>,
-    /// Prompt/input-token count of the compacted provider item in this live
-    /// update, if the provider has already completed the compaction item and
-    /// the harness can estimate its replay size.
+    pub compaction: Option<ProviderResponseCompactionUpdate>,
+    /// Provider-authored transient status text, such as retry diagnostics.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub compaction_compacted_input_tokens: Option<u64>,
+    pub status: Option<ProviderResponseStatusUpdate>,
     /// Echo of [`AgentPromptCreated::originator`]. UIs filter on
     /// `originator.is_user()` so the streaming text from a side
     /// conversation doesn't paint into the user's chat window.
     #[serde(default)]
     pub originator: PromptOriginator,
+}
+
+/// Newly appended displayable text in a provider response update.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ProviderResponseTextDelta {
+    /// Assistant-authored message text appended to one provider output item.
+    Message {
+        /// Provider output index when available. Backends without native
+        /// indices use their local live-output item order.
+        output_index: u32,
+        /// Newly appended assistant text.
+        text: String,
+        /// Optional assistant-message phase metadata.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        phase: Option<MessagePhase>,
+    },
+    /// Displayable reasoning text appended to one provider output item.
+    ReasoningText {
+        /// Provider output index when available.
+        output_index: u32,
+        /// Whether this is summary or full reasoning text.
+        kind: ReasoningTextKind,
+        /// Newly appended reasoning text.
+        text: String,
+    },
+}
+
+/// Provider-side compaction lifecycle/status carried by a transient update.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ProviderResponseCompactionUpdate {
+    /// Current compaction status.
+    pub status: ProviderResponseCompactionStatus,
+    /// Input-token count before compaction, filled by the harness when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original_input_tokens: Option<u64>,
+    /// Prompt/input-token count of the compacted provider item, when available.
+    /// Live updates may omit this and rely on the final response metadata.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compacted_input_tokens: Option<u64>,
+}
+
+/// Status of provider-side compaction in a transient response update.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderResponseCompactionStatus {
+    /// The provider has started compaction.
+    Started,
+    /// The provider finished compaction successfully.
+    Completed,
+}
+
+/// Provider-authored transient status text for an in-flight response.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ProviderResponseStatusUpdate {
+    /// Human-readable status text to display while the provider continues work.
+    pub text: String,
+    /// Whether prior live assistant/reasoning deltas for this prompt should be
+    /// hidden because the provider is retrying or otherwise replacing work.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub clear_response: bool,
 }
 
 /// The provider finished processing a prompt.

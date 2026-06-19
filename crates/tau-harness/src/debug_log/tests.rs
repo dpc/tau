@@ -1,7 +1,6 @@
 use tau_proto::{
-    AgentPromptId, HarnessInputMessage, InProgressOutputItem, ModelId, PromptOriginator,
-    ProviderResponseFinished, ProviderResponseItem, ProviderResponseUpdated, ProviderTokenUsage,
-    ReasoningTextKind,
+    AgentPromptId, HarnessInputMessage, ModelId, PromptOriginator, ProviderResponseFinished,
+    ProviderResponseTextDelta, ProviderResponseUpdated, ProviderTokenUsage, ReasoningTextKind,
 };
 
 use super::*;
@@ -65,18 +64,21 @@ fn published_line_compacts_long_strings() {
     let mut log = DebugEventLog::open(td.path()).expect("open");
     let event = Event::ProviderResponseUpdated(ProviderResponseUpdated {
         agent_prompt_id: AgentPromptId::from("sp-0"),
-        items: vec![
-            ProviderResponseItem::InProgress(InProgressOutputItem::Message {
+        agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
+        deltas: vec![
+            ProviderResponseTextDelta::Message {
+                output_index: 0,
                 text: "x".repeat(101),
                 phase: None,
-            }),
-            ProviderResponseItem::InProgress(InProgressOutputItem::ReasoningText {
+            },
+            ProviderResponseTextDelta::ReasoningText {
+                output_index: 1,
                 kind: ReasoningTextKind::Summary,
                 text: format!("{}{}{}", "α".repeat(30), "middle", "ω".repeat(30)),
-            }),
+            },
         ],
-        compaction_original_input_tokens: None,
-        compaction_compacted_input_tokens: None,
+        compaction: None,
+        status: None,
         originator: PromptOriginator::User,
     });
 
@@ -86,11 +88,11 @@ fn published_line_compacts_long_strings() {
     assert_eq!(lines.len(), 1);
     let payload = &lines[0]["event"]["payload"];
     assert_eq!(
-        payload["items"][0]["item"]["text"],
+        payload["deltas"][0]["text"],
         "xxxxxxxxxxxxxxxxxxxx┄total 101┄xxxxxxxxxxxxxxxxxxxx"
     );
     assert_eq!(
-        payload["items"][1]["item"]["text"],
+        payload["deltas"][1]["text"],
         "αααααααααα┄total 126┄ωωωωωωωωωω"
     );
 }
@@ -106,14 +108,14 @@ fn transient_from_connection_events_are_not_logged_twice() {
     let mut log = DebugEventLog::open(td.path()).expect("open");
     let event = Event::ProviderResponseUpdated(ProviderResponseUpdated {
         agent_prompt_id: AgentPromptId::from("sp-0"),
-        items: vec![ProviderResponseItem::InProgress(
-            InProgressOutputItem::Message {
-                text: "partial".to_owned(),
-                phase: None,
-            },
-        )],
-        compaction_original_input_tokens: None,
-        compaction_compacted_input_tokens: None,
+        agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
+        deltas: vec![ProviderResponseTextDelta::Message {
+            output_index: 0,
+            text: "partial".to_owned(),
+            phase: None,
+        }],
+        compaction: None,
+        status: None,
         originator: PromptOriginator::User,
     });
 

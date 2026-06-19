@@ -4539,6 +4539,9 @@ impl Harness {
                         tau_proto::EventName::PROVIDER_RESPONSE_UPDATED,
                     )
                 {
+                    if let Some(agent_id) = self.agent_id_for_prompt(&updated.agent_prompt_id) {
+                        updated.agent_id = agent_id;
+                    }
                     self.enrich_provider_response_updated_compaction(&mut updated);
                     self.publish_event(Some(source_id), Event::ProviderResponseUpdated(updated));
                 }
@@ -9702,32 +9705,14 @@ impl Harness {
         &self,
         updated: &mut tau_proto::ProviderResponseUpdated,
     ) {
-        let has_compaction = updated.items.iter().any(|item| {
-            matches!(
-                item,
-                tau_proto::ProviderResponseItem::InProgress(
-                    tau_proto::InProgressOutputItem::Compaction { .. }
-                ) | tau_proto::ProviderResponseItem::Completed(ContextItem::Compaction(_))
-            )
-        });
-        if !has_compaction {
+        if updated.compaction.is_none() {
             return;
         }
-        updated.compaction_original_input_tokens = self
-            .compaction_original_input_tokens_for_prompt(&updated.agent_prompt_id)
-            .or(updated.compaction_original_input_tokens);
-        let completed_items: Vec<_> = updated
-            .items
-            .iter()
-            .filter_map(|item| match item {
-                tau_proto::ProviderResponseItem::Completed(item) => Some(item.clone()),
-                _ => None,
-            })
-            .collect();
-        if let Some(replay_window) = latest_compaction_replay_window(&completed_items) {
-            updated.compaction_compacted_input_tokens =
-                estimate_compacted_input_tokens(replay_window)
-                    .or(updated.compaction_compacted_input_tokens);
+        let original_input_tokens =
+            self.compaction_original_input_tokens_for_prompt(&updated.agent_prompt_id);
+        if let Some(compaction) = updated.compaction.as_mut() {
+            compaction.original_input_tokens =
+                original_input_tokens.or(compaction.original_input_tokens);
         }
     }
 

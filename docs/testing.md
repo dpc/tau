@@ -34,3 +34,8 @@ general config, sessions, logs, or unrelated state.
 This workflow complements automated tests; it is not a replacement for focused
 regression coverage. Reusable steps live in
 `.agents/skills/tau-e2e-testing-tmux/SKILL.md`.
+
+
+## Provider response streaming tests
+
+Tests for `provider.response_updated` should use append-delta semantics: multi-update assistant/reasoning cases send only the newly appended suffix in each update. Do not feed full accumulated snapshots through delta helpers unless the test is explicitly checking legacy/invalid payload handling. Final-response tests should continue to assert complete `provider.response_finished.output_items`.

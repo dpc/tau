@@ -155,3 +155,9 @@ functions. This is especially important for slash-command ownership boundaries
 where CLI-owned commands, dynamic extension actions, harness-owned prompt
 commands, and the unknown leading-slash fallback intentionally share similar
 surface syntax.
+
+## Provider response delta accumulation
+
+Status: confirmed, 2026-06-19, dpc
+
+Terminal streaming accumulates `provider.response_updated.deltas` per prompt and provider output index. If a UI sees a delta for an unknown in-flight prompt, it may create a live block with an ellipsis prefix to indicate missed earlier transient deltas; the final `provider.response_finished` replaces live content with complete durable output. Provider status updates are rendered as transient status text and do not enter assistant response accumulation.

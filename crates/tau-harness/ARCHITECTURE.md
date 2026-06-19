@@ -154,3 +154,7 @@ facts are protected because extensions and context providers use them to set up
 or tear down per-session state. Extension lifecycle/status events are runtime
 observability facts and may be intercepted like other non-protected events unless
 call-site policy says otherwise.
+
+## Provider response update routing
+
+The harness treats `provider.response_updated` as non-durable live progress. It validates that the publishing connection owns the in-flight provider prompt, overwrites the update `agent_id` from harness prompt ownership, enriches best-effort compaction metadata, and does not include these transient deltas in durable replay.

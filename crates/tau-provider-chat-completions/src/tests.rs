@@ -1,5 +1,14 @@
 use super::*;
 
+fn decode_frames(bytes: &[u8]) -> Vec<HarnessInputMessage> {
+    let mut reader = tau_proto::HarnessInputReader::new(std::io::BufReader::new(bytes));
+    let mut frames = Vec::new();
+    while let Some(frame) = reader.read_message().expect("decode frame") {
+        frames.push(frame);
+    }
+    frames
+}
+
 fn provider() -> ChatCompletionsProvider {
     ChatCompletionsProvider {
         base_url: "https://api.openai.com/v1".to_owned(),
@@ -48,6 +57,102 @@ fn resolved_provider(provider: &ChatCompletionsProvider) -> ResolvedProvider {
         extra_body: provider.extra_body.clone(),
         compat: provider.compat,
     }
+}
+
+/// Ensures Chat Completions streaming progress emits append deltas rather than
+/// full accumulated assistant/reasoning snapshots.
+#[test]
+fn stream_delta_emitter_emits_append_deltas() {
+    let mut state = StreamState::new();
+    let mut emitter = StreamDeltaEmitter::default();
+
+    state.append_assistant_text_delta("hel");
+    state.append_reasoning_delta("think");
+    assert_eq!(
+        emitter.deltas(&state),
+        vec![
+            tau_proto::ProviderResponseTextDelta::Message {
+                output_index: 0,
+                text: "hel".to_owned(),
+                phase: None,
+            },
+            tau_proto::ProviderResponseTextDelta::ReasoningText {
+                output_index: 1,
+                kind: tau_proto::ReasoningTextKind::Full,
+                text: "think".to_owned(),
+            },
+        ]
+    );
+
+    state.append_assistant_text_delta("lo");
+    assert_eq!(
+        emitter.deltas(&state),
+        vec![tau_proto::ProviderResponseTextDelta::Message {
+            output_index: 2,
+            text: "lo".to_owned(),
+            phase: None,
+        }]
+    );
+}
+
+/// Ensures rare provider corrections do not produce corrupt suffix deltas; the
+/// final complete response is responsible for correcting the UI.
+#[test]
+fn stream_delta_emitter_drops_non_prefix_corrections() {
+    let mut state = StreamState::new();
+    let mut emitter = StreamDeltaEmitter::default();
+
+    state.append_assistant_text_delta("abcd");
+    assert_eq!(
+        emitter.deltas(&state),
+        vec![tau_proto::ProviderResponseTextDelta::Message {
+            output_index: 0,
+            text: "abcd".to_owned(),
+            phase: None,
+        }]
+    );
+
+    let OutputItemAccumulator::Message(text) = &mut state.output_items[0] else {
+        panic!("expected message output item");
+    };
+    *text = "wxyz12".to_owned();
+
+    assert!(
+        emitter.deltas(&state).is_empty(),
+        "non-prefix rewrite must not emit a misleading suffix"
+    );
+}
+
+/// Empty-response retry diagnostics are provider status text, not assistant
+/// deltas, so they must not pollute live assistant accumulation.
+#[test]
+fn empty_response_retry_emits_status_not_message_delta() {
+    let mut bytes = Vec::new();
+    {
+        let mut writer = PeerOutputWriter::new(&mut bytes);
+        emit_empty_response_retry_update(
+            &AgentPromptId::from("sp-retry"),
+            &prompt(),
+            1,
+            &mut writer,
+        );
+    }
+
+    let frames = decode_frames(&bytes);
+    let Some(HarnessInputMessage::Emit(emit)) = frames.first() else {
+        panic!("expected emitted retry update frame: {frames:?}");
+    };
+    let Event::ProviderResponseUpdated(update) = emit.event.as_ref() else {
+        panic!("expected provider response update: {:?}", emit.event);
+    };
+    assert!(update.deltas.is_empty());
+    assert!(matches!(
+        update.status.as_ref(),
+        Some(tau_proto::ProviderResponseStatusUpdate {
+            text,
+            clear_response: true,
+        }) if text.contains("provider returned an empty response")
+    ));
 }
 
 fn prompt() -> tau_proto::AgentPromptCreated {

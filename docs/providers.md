@@ -80,9 +80,16 @@ Provider execution should use provider-named events, not `agent.*` events:
 These should keep the semantics of the current agent execution events as much as possible:
 
 - submitted = the provider accepted the prompt and started work
-- updated = replace-style ordered live item snapshot: `items` mixes completed
-  non-durable context items with in-progress items for streaming UI
+- updated = transient append deltas for newly generated displayable assistant
+  text and reasoning text, plus small compaction/status metadata when relevant
 - finished = final response, tool calls, usage, stop reason, backend metadata
+
+Providers must not repeat the full accumulated assistant/reasoning text in
+intermediate updates. `provider.response_finished.output_items` remains the
+complete durable response and is where ordered final provider items, including
+tool calls and opaque provider items, are committed. Provider-authored retry or
+diagnostic text must be sent as update `status`, not as assistant message
+deltas.
 
 Provider final responses may contain tool calls, but providers do not execute Tau tools.
 The harness routes tools and sends follow-up prompts back to the selected provider when needed.

@@ -16,11 +16,11 @@ use backon::BackoffBuilder;
 use dialoguer::Input;
 use serde::{Deserialize, Serialize};
 use tau_proto::{
-    ClientKind, ContextItem, Event, EventName, HarnessInputMessage, HarnessOutputMessage,
-    InProgressOutputItem, ModelId, ModelName, PeerInputReader, PeerOutputWriter, ProviderBackend,
-    ProviderBackendKind, ProviderBackendTransport, ProviderCacheMissDiagnostic, ProviderModelInfo,
+    ClientKind, ContextItem, Event, EventName, HarnessInputMessage, HarnessOutputMessage, ModelId,
+    ModelName, PeerInputReader, PeerOutputWriter, ProviderBackend, ProviderBackendKind,
+    ProviderBackendTransport, ProviderCacheMissDiagnostic, ProviderModelInfo,
     ProviderModelsUpdated, ProviderName, ProviderPromptSubmitted, ProviderResponseFinished,
-    ProviderResponseItem, ProviderResponseUpdated, ProviderStopReason,
+    ProviderResponseStatusUpdate, ProviderResponseUpdated, ProviderStopReason,
 };
 use tau_provider::storage::{AuthFile, ProviderStore};
 use tau_provider_chat_completions::openrouter::{OpenRouterProfile, fetch_openrouter_models};
@@ -1200,6 +1200,7 @@ fn llm_retry_schedule(max_attempts: usize) -> backon::FibonacciBackoff {
 
 fn with_llm_retry<F, R, W: Write, T>(
     agent_prompt_id: &str,
+    agent_id: &tau_proto::AgentId,
     originator: &tau_proto::PromptOriginator,
     writer: &mut PeerOutputWriter<W>,
     retry_ctx: &mut R,
@@ -1232,12 +1233,12 @@ where
         );
         emit_retry_banner(
             agent_prompt_id,
+            agent_id,
             originator,
             writer,
             &error,
             delay,
             attempt,
-            max_attempts,
         );
         if matches!(
             retry_ctx.sleep_or_abort(delay, agent_prompt_id),
@@ -1255,13 +1256,14 @@ where
 
 fn emit_retry_banner<W: Write>(
     agent_prompt_id: &str,
+    agent_id: &tau_proto::AgentId,
     originator: &tau_proto::PromptOriginator,
     writer: &mut PeerOutputWriter<W>,
     error: &common::LlmError,
     delay: Duration,
     attempt: usize,
-    max_attempts: usize,
 ) {
+    let max_attempts = max_retries_for(originator);
     let banner = format!(
         "provider error — retrying in {}s (attempt {}/{})\n\n> {}",
         delay.as_secs(),
@@ -1272,14 +1274,13 @@ fn emit_retry_banner<W: Write>(
     let _ = writer.write_message(&HarnessInputMessage::emit(Event::ProviderResponseUpdated(
         ProviderResponseUpdated {
             agent_prompt_id: agent_prompt_id.into(),
-            items: vec![ProviderResponseItem::InProgress(
-                InProgressOutputItem::Message {
-                    text: banner,
-                    phase: None,
-                },
-            )],
-            compaction_original_input_tokens: None,
-            compaction_compacted_input_tokens: None,
+            agent_id: agent_id.clone(),
+            deltas: Vec::new(),
+            compaction: None,
+            status: Some(ProviderResponseStatusUpdate {
+                text: banner,
+                clear_response: true,
+            }),
             originator: originator.clone(),
         },
     )));
@@ -1406,17 +1407,25 @@ where
     let mut ws_pool_delta = None;
     let result = with_llm_retry(
         agent_prompt_id,
+        &prompt.agent_id,
         &originator,
         writer,
         retry_ctx,
         |writer, retry_ctx| {
+            let mut delta_emitter = common::StreamDeltaEmitter::default();
             let mut on_update = |state: &common::StreamState| {
+                let deltas = delta_emitter.deltas(state);
+                let compaction = state.compaction_update();
+                if deltas.is_empty() && compaction.is_none() {
+                    return;
+                }
                 let _ = writer.write_message(&HarnessInputMessage::emit(
                     Event::ProviderResponseUpdated(ProviderResponseUpdated {
                         agent_prompt_id: agent_prompt_id.into(),
-                        items: state.response_items(),
-                        compaction_original_input_tokens: None,
-                        compaction_compacted_input_tokens: None,
+                        agent_id: prompt.agent_id.clone(),
+                        deltas,
+                        compaction,
+                        status: None,
                         originator: originator.clone(),
                     }),
                 ));

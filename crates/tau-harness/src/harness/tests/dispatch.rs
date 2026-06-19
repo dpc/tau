@@ -3833,9 +3833,10 @@ fn provider_execution_events_must_come_from_prompt_owner() {
         "provider-other",
         TestProtocolItem::Event(Event::ProviderResponseUpdated(ProviderResponseUpdated {
             agent_prompt_id: spid.clone(),
-            items: Vec::new(),
-            compaction_original_input_tokens: None,
-            compaction_compacted_input_tokens: None,
+            agent_id: durable_agent_id_for_conversation(&h, &test_user_agent(&h)),
+            deltas: Vec::new(),
+            compaction: None,
+            status: None,
             originator: tau_proto::PromptOriginator::User,
         })),
     )
@@ -3844,9 +3845,10 @@ fn provider_execution_events_must_come_from_prompt_owner() {
         "tool-impersonator",
         TestProtocolItem::Event(Event::ProviderResponseUpdated(ProviderResponseUpdated {
             agent_prompt_id: spid.clone(),
-            items: Vec::new(),
-            compaction_original_input_tokens: None,
-            compaction_compacted_input_tokens: None,
+            agent_id: durable_agent_id_for_conversation(&h, &test_user_agent(&h)),
+            deltas: Vec::new(),
+            compaction: None,
+            status: None,
             originator: tau_proto::PromptOriginator::User,
         })),
     )
@@ -3887,9 +3889,10 @@ fn provider_execution_events_must_come_from_prompt_owner() {
         "provider-owner",
         TestProtocolItem::Event(Event::ProviderResponseUpdated(ProviderResponseUpdated {
             agent_prompt_id: spid.clone(),
-            items: Vec::new(),
-            compaction_original_input_tokens: None,
-            compaction_compacted_input_tokens: None,
+            agent_id: durable_agent_id_for_conversation(&h, &test_user_agent(&h)),
+            deltas: Vec::new(),
+            compaction: None,
+            status: None,
             originator: tau_proto::PromptOriginator::User,
         })),
     )

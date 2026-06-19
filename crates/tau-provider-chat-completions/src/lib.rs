@@ -9,12 +9,13 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use tau_proto::{
-    AgentPromptId, ContentPart, ContextItem, ContextRole, Event, HarnessInputMessage,
-    InProgressOutputItem, ModelId, ModelName, ModelTag, OpaqueProviderItem, PeerOutputWriter,
-    ProviderBackend, ProviderBackendKind, ProviderBackendTransport, ProviderModelInfo,
-    ProviderName, ProviderResponseFinished, ProviderResponseItem, ProviderResponseUpdated,
-    ProviderStopReason, ProviderTokenUsage, ReasoningTextItem, ReasoningTextKind, ThinkingSummary,
-    ToolCallItem, ToolChoice, ToolDefinition, ToolResponseHeader, ToolResultStatus, ToolType,
+    AgentPromptId, ContentPart, ContextItem, ContextRole, Event, HarnessInputMessage, ModelId,
+    ModelName, ModelTag, OpaqueProviderItem, PeerOutputWriter, ProviderBackend,
+    ProviderBackendKind, ProviderBackendTransport, ProviderModelInfo, ProviderName,
+    ProviderResponseFinished, ProviderResponseStatusUpdate, ProviderResponseTextDelta,
+    ProviderResponseUpdated, ProviderStopReason, ProviderTokenUsage, ReasoningTextItem,
+    ReasoningTextKind, ThinkingSummary, ToolCallItem, ToolChoice, ToolDefinition,
+    ToolResponseHeader, ToolResultStatus, ToolType,
 };
 
 const DEFAULT_CONTEXT_WINDOW: u64 = 128_000;
@@ -162,13 +163,19 @@ fn run_prompt<W: Write>(
     let mut empty_response_retries = 0_usize;
     loop {
         let result = {
+            let mut delta_emitter = StreamDeltaEmitter::default();
             let mut on_update = |state: &StreamState| {
+                let deltas = delta_emitter.deltas(state);
+                if deltas.is_empty() {
+                    return;
+                }
                 let _ = writer.write_message(&HarnessInputMessage::emit(
                     Event::ProviderResponseUpdated(ProviderResponseUpdated {
                         agent_prompt_id: agent_prompt_id.clone(),
-                        items: state.response_items(),
-                        compaction_original_input_tokens: None,
-                        compaction_compacted_input_tokens: None,
+                        agent_id: prompt.agent_id.clone(),
+                        deltas,
+                        compaction: None,
+                        status: None,
                         originator: prompt.originator.clone(),
                     }),
                 ));
@@ -204,11 +211,13 @@ fn emit_empty_response_retry_update<W: Write>(
     let _ = writer.write_message(&HarnessInputMessage::emit(Event::ProviderResponseUpdated(
         ProviderResponseUpdated {
             agent_prompt_id: agent_prompt_id.clone(),
-            items: vec![ProviderResponseItem::InProgress(
-                InProgressOutputItem::Message { text, phase: None },
-            )],
-            compaction_original_input_tokens: None,
-            compaction_compacted_input_tokens: None,
+            agent_id: prompt.agent_id.clone(),
+            deltas: Vec::new(),
+            compaction: None,
+            status: Some(ProviderResponseStatusUpdate {
+                text,
+                clear_response: true,
+            }),
             originator: prompt.originator.clone(),
         },
     )));
@@ -330,6 +339,69 @@ struct StreamState {
     stop_reason: ProviderStopReason,
 }
 
+/// Tracks displayable text already emitted on transient response updates.
+#[derive(Default)]
+struct StreamDeltaEmitter {
+    /// Assistant message text already emitted per output item.
+    emitted_messages: HashMap<usize, String>,
+    /// Reasoning text already emitted per output item.
+    emitted_reasoning: HashMap<usize, String>,
+}
+
+impl StreamDeltaEmitter {
+    /// Returns only newly appended assistant/reasoning text since the last
+    /// call.
+    fn deltas(&mut self, state: &StreamState) -> Vec<ProviderResponseTextDelta> {
+        let mut deltas = Vec::new();
+        for (output_index, item) in state.output_items.iter().enumerate() {
+            match item {
+                OutputItemAccumulator::Message(text) => {
+                    if let Some(delta) =
+                        append_suffix(self.emitted_messages.entry(output_index).or_default(), text)
+                    {
+                        deltas.push(ProviderResponseTextDelta::Message {
+                            output_index: output_index as u32,
+                            text: delta,
+                            phase: None,
+                        });
+                    }
+                }
+                OutputItemAccumulator::Reasoning(text) => {
+                    if let Some(delta) = append_suffix(
+                        self.emitted_reasoning.entry(output_index).or_default(),
+                        text,
+                    ) {
+                        deltas.push(ProviderResponseTextDelta::ReasoningText {
+                            output_index: output_index as u32,
+                            kind: ReasoningTextKind::Full,
+                            text: delta,
+                        });
+                    }
+                }
+                OutputItemAccumulator::ToolCall(_) => {}
+            }
+        }
+        deltas
+    }
+}
+
+fn append_suffix(previous: &mut String, current: &str) -> Option<String> {
+    if current == previous {
+        return None;
+    }
+    if let Some(suffix) = current.strip_prefix(previous.as_str()) {
+        previous.push_str(suffix);
+        if suffix.is_empty() {
+            None
+        } else {
+            Some(suffix.to_owned())
+        }
+    } else {
+        tracing::trace!("stream text stopped being append-only; waiting for final response");
+        None
+    }
+}
+
 impl StreamState {
     fn new() -> Self {
         Self {
@@ -350,14 +422,6 @@ impl StreamState {
         self.output_items
             .iter()
             .filter_map(OutputItemAccumulator::context_item)
-            .collect()
-    }
-
-    fn response_items(&self) -> Vec<ProviderResponseItem> {
-        self.output_items
-            .iter()
-            .filter_map(OutputItemAccumulator::in_progress_item)
-            .map(ProviderResponseItem::InProgress)
             .collect()
     }
 
@@ -448,22 +512,6 @@ impl OutputItemAccumulator {
             Self::ToolCall(call) => call.context_item(),
         }
     }
-
-    fn in_progress_item(&self) -> Option<InProgressOutputItem> {
-        match self {
-            Self::Message(text) => (!text.is_empty()).then(|| InProgressOutputItem::Message {
-                text: text.clone(),
-                phase: None,
-            }),
-            Self::Reasoning(reasoning) => {
-                (!reasoning.is_empty()).then(|| InProgressOutputItem::ReasoningText {
-                    kind: ReasoningTextKind::Full,
-                    text: reasoning.clone(),
-                })
-            }
-            Self::ToolCall(call) => Some(call.in_progress_item()),
-        }
-    }
 }
 
 #[derive(Default)]
@@ -486,14 +534,6 @@ impl ToolCallAccumulator {
                 .map(|value| json_to_cbor(&value))
                 .unwrap_or(tau_proto::CborValue::Null),
         }))
-    }
-    fn in_progress_item(&self) -> InProgressOutputItem {
-        InProgressOutputItem::ToolCall {
-            call_id: (!self.id.is_empty()).then(|| self.id.clone().into()),
-            name: (!self.name.is_empty()).then(|| self.name.clone()),
-            tool_type: ToolType::Function,
-            arguments: self.arguments.clone(),
-        }
     }
 }
 

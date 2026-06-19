@@ -719,9 +719,10 @@ fn late_joining_ui_client_replays_final_but_not_stale_queued_session_events() {
         None,
         Event::ProviderResponseUpdated(ProviderResponseUpdated {
             agent_prompt_id: spid.clone(),
-            items: Vec::new(),
-            compaction_original_input_tokens: None,
-            compaction_compacted_input_tokens: None,
+            agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
+            deltas: Vec::new(),
+            compaction: None,
+            status: None,
             originator: Default::default(),
         }),
     );

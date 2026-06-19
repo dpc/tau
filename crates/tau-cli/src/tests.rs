@@ -1119,32 +1119,34 @@ fn initial_tool_progress(call_id: &str, tool_name: &str, args: &str, mode: &str)
         }),
     })
 }
-fn provider_response_update(
+fn provider_response_delta_update(
     agent_prompt_id: impl Into<tau_proto::AgentPromptId>,
     text: impl Into<String>,
     thinking: Option<String>,
     originator: tau_proto::PromptOriginator,
 ) -> ProviderResponseUpdated {
     let text = text.into();
-    let mut items = Vec::new();
+    let mut deltas = Vec::new();
     if let Some(thinking) = thinking.filter(|thinking| !thinking.is_empty()) {
-        items.push(tau_proto::ProviderResponseItem::InProgress(
-            tau_proto::InProgressOutputItem::ReasoningText {
-                kind: tau_proto::ReasoningTextKind::Summary,
-                text: thinking,
-            },
-        ));
+        deltas.push(tau_proto::ProviderResponseTextDelta::ReasoningText {
+            output_index: 0,
+            kind: tau_proto::ReasoningTextKind::Summary,
+            text: thinking,
+        });
     }
     if !text.is_empty() {
-        items.push(tau_proto::ProviderResponseItem::InProgress(
-            tau_proto::InProgressOutputItem::Message { text, phase: None },
-        ));
+        deltas.push(tau_proto::ProviderResponseTextDelta::Message {
+            output_index: 0,
+            text,
+            phase: None,
+        });
     }
     ProviderResponseUpdated {
         agent_prompt_id: agent_prompt_id.into(),
-        items,
-        compaction_original_input_tokens: None,
-        compaction_compacted_input_tokens: None,
+        agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
+        deltas,
+        compaction: None,
+        status: None,
         originator,
     }
 }
@@ -1175,6 +1177,100 @@ fn finished_response(
         provider_response_id: None,
         ws_pool_delta: None,
     }
+}
+
+/// Streaming response updates append text deltas rather than replacing a full
+/// accumulated snapshot, so two chunks should render as one growing response.
+#[test]
+fn response_delta_updates_append_live_text() {
+    let (_term, handle, vt) = setup(80, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        cli_test_theme(),
+    );
+
+    renderer.handle(&Event::AgentPromptCreated(agent_prompt_created(
+        "sp-0", "s1",
+    )));
+    renderer.handle(&Event::ProviderResponseUpdated(
+        provider_response_delta_update("sp-0", "Hel", None, tau_proto::PromptOriginator::User),
+    ));
+    renderer.handle(&Event::ProviderResponseUpdated(
+        provider_response_delta_update("sp-0", "lo", None, tau_proto::PromptOriginator::User),
+    ));
+    sync(&handle);
+
+    assert!(vt.screen_contains(80, "Hello"));
+    assert!(!vt.screen_contains(80, "HelHel"));
+}
+
+/// A UI that missed the prompt-created event can still route later deltas by
+/// agent id and marks the live text with an ellipsis until the final response.
+#[test]
+fn late_response_delta_update_uses_ellipsis_prefix() {
+    let (_term, handle, vt) = setup(80, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        cli_test_theme(),
+    );
+
+    renderer.handle(&Event::ProviderResponseUpdated(
+        provider_response_delta_update("sp-late", "world", None, tau_proto::PromptOriginator::User),
+    ));
+    sync(&handle);
+    assert!(vt.screen_contains(80, "…world"));
+
+    renderer.handle(&Event::ProviderResponseFinished(finished_response(
+        "sp-late",
+        vec![assistant_message_item("hello world")],
+    )));
+    sync(&handle);
+    assert!(vt.screen_contains(80, "hello world"));
+    assert!(!vt.screen_contains(80, "…world"));
+}
+
+/// A provider retry/status reset hides reasoning from the failed attempt so
+/// stale thinking does not remain visible while the replacement attempt runs.
+#[test]
+fn status_clear_response_removes_live_thinking_block() {
+    let (_term, handle, vt) = setup(80, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        cli_test_theme(),
+    );
+
+    renderer.handle(&Event::AgentPromptCreated(agent_prompt_created(
+        "sp-0", "s1",
+    )));
+    renderer.handle(&Event::ProviderResponseUpdated(
+        provider_response_delta_update(
+            "sp-0",
+            "",
+            Some("failed attempt thinking".to_owned()),
+            tau_proto::PromptOriginator::User,
+        ),
+    ));
+    sync(&handle);
+    assert!(vt.screen_contains(80, "failed attempt thinking"));
+
+    renderer.handle(&Event::ProviderResponseUpdated(ProviderResponseUpdated {
+        agent_prompt_id: "sp-0".into(),
+        agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
+        deltas: Vec::new(),
+        compaction: None,
+        status: Some(tau_proto::ProviderResponseStatusUpdate {
+            text: "retrying".to_owned(),
+            clear_response: true,
+        }),
+        originator: tau_proto::PromptOriginator::User,
+    }));
+    sync(&handle);
+
+    assert!(vt.screen_contains(80, "retrying"));
+    assert!(!vt.screen_contains(80, "failed attempt thinking"));
 }
 
 fn finished_response_with_usage(
@@ -3432,15 +3528,17 @@ fn delegate_side_conversation_keeps_parent_tool_status_visible() {
         },
         ..agent_prompt_created("side-sp", "s1")
     }));
-    renderer.handle(&Event::ProviderResponseUpdated(provider_response_update(
-        "side-sp",
-        "working",
-        None,
-        tau_proto::PromptOriginator::Extension {
-            name: "core-subagents".into(),
-            query_id: "q1".to_owned(),
-        },
-    )));
+    renderer.handle(&Event::ProviderResponseUpdated(
+        provider_response_delta_update(
+            "side-sp",
+            "working",
+            None,
+            tau_proto::PromptOriginator::Extension {
+                name: "core-subagents".into(),
+                query_id: "q1".to_owned(),
+            },
+        ),
+    ));
     sync(&handle);
 
     let status_row = vt
@@ -3663,12 +3761,14 @@ fn single_prompt_response_cycle() {
     assert!(vt.screen_contains(80, "…"));
 
     // Agent streams response.
-    renderer.handle(&Event::ProviderResponseUpdated(provider_response_update(
-        "sp-0",
-        "Hi there!",
-        None,
-        tau_proto::PromptOriginator::User,
-    )));
+    renderer.handle(&Event::ProviderResponseUpdated(
+        provider_response_delta_update(
+            "sp-0",
+            "Hi there!",
+            None,
+            tau_proto::PromptOriginator::User,
+        ),
+    ));
     sync(&handle);
     assert!(vt.screen_contains(80, "Hi there!"));
 
@@ -3713,12 +3813,14 @@ fn thinking_renders_as_separate_block_above_response() {
 
     // Thinking arrives before the response text. Both should be
     // visible simultaneously, with thinking above response.
-    renderer.handle(&Event::ProviderResponseUpdated(provider_response_update(
-        "sp-0",
-        String::new(),
-        Some("planning the answer".into()),
-        tau_proto::PromptOriginator::User,
-    )));
+    renderer.handle(&Event::ProviderResponseUpdated(
+        provider_response_delta_update(
+            "sp-0",
+            String::new(),
+            Some("planning the answer".into()),
+            tau_proto::PromptOriginator::User,
+        ),
+    ));
     sync(&handle);
     assert!(
         vt.screen_contains(80, "planning the answer"),
@@ -3726,12 +3828,14 @@ fn thinking_renders_as_separate_block_above_response() {
         vt.screen_text(80)
     );
 
-    renderer.handle(&Event::ProviderResponseUpdated(provider_response_update(
-        "sp-0",
-        "actual answer",
-        Some("planning the answer".into()),
-        tau_proto::PromptOriginator::User,
-    )));
+    renderer.handle(&Event::ProviderResponseUpdated(
+        provider_response_delta_update(
+            "sp-0",
+            "actual answer",
+            None,
+            tau_proto::PromptOriginator::User,
+        ),
+    ));
     sync(&handle);
     assert!(vt.screen_contains(80, "actual answer"));
     assert!(vt.screen_contains(80, "planning the answer"));
@@ -3798,12 +3902,14 @@ fn set_show_thinking_round_trip_restores_history() {
         },
         ..agent_prompt_created("sp-0", "s1")
     }));
-    renderer.handle(&Event::ProviderResponseUpdated(provider_response_update(
-        "sp-0",
-        "the_response",
-        Some("the_thinking_text".into()),
-        tau_proto::PromptOriginator::User,
-    )));
+    renderer.handle(&Event::ProviderResponseUpdated(
+        provider_response_delta_update(
+            "sp-0",
+            "the_response",
+            Some("the_thinking_text".into()),
+            tau_proto::PromptOriginator::User,
+        ),
+    ));
     renderer.handle(&Event::ProviderResponseFinished(finished_response(
         "sp-0",
         vec![assistant_message_item("the_response")],
@@ -3916,12 +4022,9 @@ fn no_thinking_block_when_summary_absent() {
     renderer.handle(&Event::AgentPromptCreated(agent_prompt_created(
         "sp-0", "s1",
     )));
-    renderer.handle(&Event::ProviderResponseUpdated(provider_response_update(
-        "sp-0",
-        "hello",
-        None,
-        tau_proto::PromptOriginator::User,
-    )));
+    renderer.handle(&Event::ProviderResponseUpdated(
+        provider_response_delta_update("sp-0", "hello", None, tau_proto::PromptOriginator::User),
+    ));
     renderer.handle(&Event::ProviderResponseFinished(finished_response(
         "sp-0",
         vec![assistant_message_item("hello")],
@@ -4002,12 +4105,14 @@ fn queued_prompt_renders_after_first_completes() {
         vt.screen_text(80)
     );
 
-    renderer.handle(&Event::ProviderResponseUpdated(provider_response_update(
-        "sp-1",
-        "response two",
-        None,
-        tau_proto::PromptOriginator::User,
-    )));
+    renderer.handle(&Event::ProviderResponseUpdated(
+        provider_response_delta_update(
+            "sp-1",
+            "response two",
+            None,
+            tau_proto::PromptOriginator::User,
+        ),
+    ));
     sync(&handle);
     assert!(
         vt.screen_contains(80, "response two"),
@@ -4249,12 +4354,14 @@ fn three_queued_prompts_render_sequentially() {
                 ..agent_prompt_created("sp-ignore", "s1")
             }));
         }
-        renderer.handle(&Event::ProviderResponseUpdated(provider_response_update(
-            spid.clone(),
-            format!("partial-{i}"),
-            None,
-            tau_proto::PromptOriginator::User,
-        )));
+        renderer.handle(&Event::ProviderResponseUpdated(
+            provider_response_delta_update(
+                spid.clone(),
+                format!("partial-{i}"),
+                None,
+                tau_proto::PromptOriginator::User,
+            ),
+        ));
         renderer.handle(&Event::ProviderResponseFinished(finished_response(
             spid.as_ref(),
             vec![assistant_message_item(format!("response-{i}"))],
@@ -4295,12 +4402,9 @@ fn streaming_indicator_appends_during_updates() {
     sync(&handle);
     assert!(vt.screen_contains(80, "…"));
 
-    renderer.handle(&Event::ProviderResponseUpdated(provider_response_update(
-        "sp-0",
-        "Hello",
-        None,
-        tau_proto::PromptOriginator::User,
-    )));
+    renderer.handle(&Event::ProviderResponseUpdated(
+        provider_response_delta_update("sp-0", "Hello", None, tau_proto::PromptOriginator::User),
+    ));
     sync(&handle);
     assert!(vt.screen_contains(80, "Hello …"));
 
@@ -4400,13 +4504,14 @@ fn render_provider_compaction_update_as_compact_progress() {
 
     renderer.handle(&Event::ProviderResponseUpdated(ProviderResponseUpdated {
         agent_prompt_id: "sp-compact".into(),
-        items: vec![tau_proto::ProviderResponseItem::InProgress(
-            tau_proto::InProgressOutputItem::Compaction {
-                status: tau_proto::InProgressCompactionStatus::Started,
-            },
-        )],
-        compaction_original_input_tokens: Some(226_200),
-        compaction_compacted_input_tokens: None,
+        agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
+        deltas: Vec::new(),
+        compaction: Some(tau_proto::ProviderResponseCompactionUpdate {
+            status: tau_proto::ProviderResponseCompactionStatus::Started,
+            original_input_tokens: Some(226_200),
+            compacted_input_tokens: None,
+        }),
+        status: None,
         originator: tau_proto::PromptOriginator::User,
     }));
     sync(&handle);
@@ -5532,12 +5637,9 @@ fn streaming_block_does_not_duplicate_on_finish() {
     renderer.handle(&Event::AgentPromptCreated(agent_prompt_created(
         "sp-0", "s1",
     )));
-    renderer.handle(&Event::ProviderResponseUpdated(provider_response_update(
-        "sp-0",
-        "hello!",
-        None,
-        tau_proto::PromptOriginator::User,
-    )));
+    renderer.handle(&Event::ProviderResponseUpdated(
+        provider_response_delta_update("sp-0", "hello!", None, tau_proto::PromptOriginator::User),
+    ));
     renderer.handle(&Event::ProviderResponseFinished(finished_response(
         "sp-0",
         vec![assistant_message_item("hello!")],
@@ -6565,12 +6667,9 @@ fn three_prompts_during_streaming_all_render_correctly() {
     )));
 
     // Agent starts streaming response 1.
-    renderer.handle(&Event::ProviderResponseUpdated(provider_response_update(
-        "sp-0",
-        "Hello",
-        None,
-        tau_proto::PromptOriginator::User,
-    )));
+    renderer.handle(&Event::ProviderResponseUpdated(
+        provider_response_delta_update("sp-0", "Hello", None, tau_proto::PromptOriginator::User),
+    ));
     sync(&handle);
     assert!(
         vt.screen_contains(80, "Hello"),
@@ -6607,12 +6706,14 @@ fn three_prompts_during_streaming_all_render_correctly() {
     }));
 
     // More streaming updates (multi-line, like a real LLM).
-    renderer.handle(&Event::ProviderResponseUpdated(provider_response_update(
-        "sp-0",
-        "Hello!\n\nHow can I help you today?",
-        None,
-        tau_proto::PromptOriginator::User,
-    )));
+    renderer.handle(&Event::ProviderResponseUpdated(
+        provider_response_delta_update(
+            "sp-0",
+            "!\n\nHow can I help you today?",
+            None,
+            tau_proto::PromptOriginator::User,
+        ),
+    ));
     sync(&handle);
 
     // Response 1 finishes.
@@ -6633,12 +6734,14 @@ fn three_prompts_during_streaming_all_render_correctly() {
     renderer.handle(&Event::AgentPromptCreated(agent_prompt_created(
         "sp-1", "s1",
     )));
-    renderer.handle(&Event::ProviderResponseUpdated(provider_response_update(
-        "sp-1",
-        "Hello again!\n\nHow can I help you?",
-        None,
-        tau_proto::PromptOriginator::User,
-    )));
+    renderer.handle(&Event::ProviderResponseUpdated(
+        provider_response_delta_update(
+            "sp-1",
+            "Hello again!\n\nHow can I help you?",
+            None,
+            tau_proto::PromptOriginator::User,
+        ),
+    ));
     renderer.handle(&Event::ProviderResponseFinished(finished_response(
         "sp-1",
         vec![assistant_message_item(
@@ -6656,12 +6759,14 @@ fn three_prompts_during_streaming_all_render_correctly() {
     renderer.handle(&Event::AgentPromptCreated(agent_prompt_created(
         "sp-2", "s1",
     )));
-    renderer.handle(&Event::ProviderResponseUpdated(provider_response_update(
-        "sp-2",
-        "Hi there!\n\nWhat can I help you with?",
-        None,
-        tau_proto::PromptOriginator::User,
-    )));
+    renderer.handle(&Event::ProviderResponseUpdated(
+        provider_response_delta_update(
+            "sp-2",
+            "Hi there!\n\nWhat can I help you with?",
+            None,
+            tau_proto::PromptOriginator::User,
+        ),
+    ));
     renderer.handle(&Event::ProviderResponseFinished(finished_response(
         "sp-2",
         vec![assistant_message_item(
@@ -6729,12 +6834,9 @@ fn emoji_in_response_renders_correctly() {
 
     // Response with emoji followed by text on next line.
     let response = "Hello! 👋\n\nHow can I help you today?";
-    renderer.handle(&Event::ProviderResponseUpdated(provider_response_update(
-        "sp-0",
-        response,
-        None,
-        tau_proto::PromptOriginator::User,
-    )));
+    renderer.handle(&Event::ProviderResponseUpdated(
+        provider_response_delta_update("sp-0", response, None, tau_proto::PromptOriginator::User),
+    ));
     renderer.handle(&Event::ProviderResponseFinished(finished_response(
         "sp-0",
         vec![assistant_message_item(response)],
@@ -6828,12 +6930,9 @@ fn overflowing_stream_replaced_cleanly_on_finish() {
     )));
 
     let partial = "stream 0\nstream 1\nstream 2\nstream 3\nPARTIAL ONLY";
-    renderer.handle(&Event::ProviderResponseUpdated(provider_response_update(
-        "sp-0",
-        partial,
-        None,
-        tau_proto::PromptOriginator::User,
-    )));
+    renderer.handle(&Event::ProviderResponseUpdated(
+        provider_response_delta_update("sp-0", partial, None, tau_proto::PromptOriginator::User),
+    ));
     sync(&handle);
     assert!(
         vt.screen_contains(40, "PARTIAL ONLY"),

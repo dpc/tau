@@ -6,7 +6,8 @@ use std::io::{self, Read, Write};
 use tau_harness::SessionLaunchStatus;
 use tau_proto::{
     AgentPromptTerminated, ContentPart, ContextItem, ContextRole, Event, EventName, EventSelector,
-    HarnessInputMessage, HarnessOutputMessage, ProviderResponseFinished, ProviderResponseUpdated,
+    HarnessInputMessage, HarnessOutputMessage, ProviderResponseFinished, ProviderResponseTextDelta,
+    ProviderResponseUpdated,
 };
 
 use crate::CliError;
@@ -178,14 +179,27 @@ impl OneShotOutput {
             return;
         }
         let prompt_id = update.agent_prompt_id.to_string();
+        if update
+            .status
+            .as_ref()
+            .is_some_and(|status| status.clear_response)
+        {
+            self.thinking_by_prompt.remove(&prompt_id);
+            self.response_by_prompt.remove(&prompt_id);
+        }
         let thinking = reasoning_text_from_update(update);
         if let Some(thinking) = thinking.filter(|thinking| !thinking.is_empty()) {
             self.thinking_by_prompt
-                .insert(prompt_id.clone(), thinking.clone());
+                .entry(prompt_id.clone())
+                .or_default()
+                .push_str(&thinking);
         }
         let text = assistant_text_from_update(update).unwrap_or_default();
         if !text.is_empty() {
-            self.response_by_prompt.insert(prompt_id, text);
+            self.response_by_prompt
+                .entry(prompt_id)
+                .or_default()
+                .push_str(&text);
         }
     }
 
@@ -238,37 +252,26 @@ fn write_text_block(stdout: &mut impl Write, wrote_block: &mut bool, text: &str)
 }
 
 fn assistant_text_from_update(update: &ProviderResponseUpdated) -> Option<String> {
-    let mut text = String::new();
-    for item in &update.items {
-        match item {
-            tau_proto::ProviderResponseItem::Completed(item) => {
-                if let Some(part) = assistant_text_from_context_item(item) {
-                    text.push_str(&part);
-                }
-            }
-            tau_proto::ProviderResponseItem::InProgress(
-                tau_proto::InProgressOutputItem::Message { text: part, .. },
-            ) => text.push_str(part),
-            tau_proto::ProviderResponseItem::InProgress(_) => {}
-        }
-    }
+    let text = update
+        .deltas
+        .iter()
+        .filter_map(|delta| match delta {
+            ProviderResponseTextDelta::Message { text, .. } => Some(text.as_str()),
+            ProviderResponseTextDelta::ReasoningText { .. } => None,
+        })
+        .collect::<String>();
     (!text.is_empty()).then_some(text)
 }
 
 fn reasoning_text_from_update(update: &ProviderResponseUpdated) -> Option<String> {
-    let mut text = String::new();
-    for item in &update.items {
-        match item {
-            tau_proto::ProviderResponseItem::Completed(ContextItem::ReasoningText(reasoning)) => {
-                text.push_str(&reasoning.text);
-            }
-            tau_proto::ProviderResponseItem::Completed(_) => {}
-            tau_proto::ProviderResponseItem::InProgress(
-                tau_proto::InProgressOutputItem::ReasoningText { text: part, .. },
-            ) => text.push_str(part),
-            tau_proto::ProviderResponseItem::InProgress(_) => {}
-        }
-    }
+    let text = update
+        .deltas
+        .iter()
+        .filter_map(|delta| match delta {
+            ProviderResponseTextDelta::ReasoningText { text, .. } => Some(text.as_str()),
+            ProviderResponseTextDelta::Message { .. } => None,
+        })
+        .collect::<String>();
     (!text.is_empty()).then_some(text)
 }
 

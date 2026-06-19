@@ -136,6 +136,11 @@ extend the tail. If we ever wanted retractable streaming or out-of-order
 edits within a long live block, those updates would also need
 `invalidate_screen()`.
 
+The provider protocol mirrors this assumption for visible assistant/reasoning
+progress: intermediate `provider.response_updated` events carry only appended
+text deltas, while `provider.response_finished` carries the complete final
+response.
+
 ## Known limitations
 
 - **Resize clears pre-tau scrollback history.** Any terminal output from

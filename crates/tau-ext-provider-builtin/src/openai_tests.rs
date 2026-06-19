@@ -54,6 +54,36 @@ fn input_event(message: &HarnessInputMessage) -> Option<&Event> {
     }
 }
 
+#[test]
+fn retry_banner_emits_status_not_message_delta() {
+    let mut bytes = Vec::new();
+    {
+        let mut writer = tau_proto::PeerOutputWriter::new(&mut bytes);
+        emit_retry_banner(
+            "sp-retry",
+            &tau_proto::AgentId::parse("main").expect("agent id"),
+            &tau_proto::PromptOriginator::User,
+            &mut writer,
+            &common::LlmError::HttpStatus(500, "temporary".to_owned()),
+            Duration::from_secs(1),
+            1,
+        );
+    }
+
+    let frames = decode_frames(&bytes);
+    let Some(Event::ProviderResponseUpdated(update)) = frames.first().and_then(input_event) else {
+        panic!("expected provider response update frame: {frames:?}");
+    };
+    assert!(update.deltas.is_empty());
+    assert!(matches!(
+        update.status.as_ref(),
+        Some(tau_proto::ProviderResponseStatusUpdate {
+            text,
+            clear_response: true,
+        }) if text.contains("provider error")
+    ));
+}
+
 fn model_id(provider: &str, model: &str) -> ModelId {
     ModelId::new(ProviderName::new(provider), ModelName::new(model))
 }

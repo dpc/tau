@@ -38,3 +38,6 @@ ChatGPT/Codex turns use the Responses backend. Conversation chains reuse `previo
 The ChatGPT/Codex surface also uses a persistent WebSocket connection pool keyed by account and agent so upstream connection-local caches stay warm across turns, including interleaved sub-agent delegations. Prompt-cache keys are stable per target agent and do not split based on whether a turn came from the user, an extension, a manager relay, or an agent-to-agent message. Refreshed OAuth tokens invalidate stale sockets on next use.
 
 Prompt execution concurrency defaults to 4 and can be overridden with `TAU_BUILTIN_PROVIDER_PROMPT_CONCURRENCY`. Main-agent transient provider errors retry with a Fibonacci-like backoff up to roughly nine minutes; extension-originated side turns use a smaller retry cap.
+
+
+Provider response streaming note: built-in providers publish transient `provider.response_updated` append deltas for visible assistant/reasoning text. Retry diagnostics are provider status updates, and complete durable assistant output is committed through `provider.response_finished`.

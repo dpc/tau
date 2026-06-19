@@ -211,3 +211,8 @@ When reporting a vulnerability, include:
 
 Avoid sharing API keys, OAuth tokens, email contents, or other private data in
 reports.
+
+
+## Provider streaming trust boundary
+
+Provider response progress updates are transient and untrusted. The harness validates the provider prompt owner and derives the published `agent_id` from harness state so a provider cannot route streaming deltas to another agent by forging ids. Provider-authored retry/status diagnostics must stay separate from assistant text deltas to avoid confusing diagnostics with model-authored transcript content; durable truth remains the final response event.
