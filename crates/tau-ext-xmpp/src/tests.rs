@@ -1,4 +1,5 @@
-use std::sync::Mutex;
+use std::sync::{Condvar, Mutex};
+use std::time::Duration;
 
 use tau_proto::{HarnessInputMessage, ToolStarted};
 
@@ -7,6 +8,11 @@ use super::*;
 #[derive(Default)]
 struct FakeBridge {
     started: Mutex<usize>,
+    ready: Mutex<bool>,
+    ready_changed: Condvar,
+    readiness_error: Mutex<Option<String>>,
+    wait_timeouts: Mutex<Vec<Duration>>,
+    wait_recorded: Condvar,
     registered: Mutex<HashMap<AgentId, String>>,
     sent: Mutex<Vec<(AgentId, String)>>,
 }
@@ -14,6 +20,28 @@ struct FakeBridge {
 impl FakeBridge {
     fn new() -> Arc<Self> {
         Arc::new(Self::default())
+    }
+
+    fn set_ready(&self, ready: bool) {
+        *self.ready.lock().expect("lock") = ready;
+        self.ready_changed.notify_all();
+    }
+
+    fn set_readiness_error(&self, message: &str) {
+        *self.readiness_error.lock().expect("lock") = Some(message.to_owned());
+    }
+
+    fn wait_for_wait_calls(&self, count: usize) -> Vec<Duration> {
+        let calls = self.wait_timeouts.lock().expect("lock");
+        let (calls, result) = self
+            .wait_recorded
+            .wait_timeout_while(calls, Duration::from_secs(1), |calls| calls.len() < count)
+            .expect("lock");
+        assert!(
+            !result.timed_out(),
+            "timed out waiting for {count} readiness wait call(s)"
+        );
+        calls.clone()
     }
 }
 
@@ -53,6 +81,28 @@ impl XmppBridge for FakeBridge {
     fn unregister_agent(&self, agent_id: &AgentId) -> Result<(), String> {
         self.registered.lock().expect("lock").remove(agent_id);
         Ok(())
+    }
+
+    fn wait_until_ready(&self, timeout: Duration) -> Result<(), String> {
+        self.wait_timeouts.lock().expect("lock").push(timeout);
+        self.wait_recorded.notify_all();
+        if let Some(message) = self.readiness_error.lock().expect("lock").clone() {
+            return Err(message);
+        }
+        let ready = self.ready.lock().expect("lock");
+        let (ready, result) = self
+            .ready_changed
+            .wait_timeout_while(ready, timeout, |ready| !*ready)
+            .expect("lock");
+        if *ready {
+            Ok(())
+        } else {
+            debug_assert!(result.timed_out());
+            Err(format!(
+                "xmpp connection did not become online within {}s; retry after the account connects",
+                timeout.as_secs()
+            ))
+        }
     }
 
     fn send_message(&self, agent_id: &AgentId, text: &str) -> Result<(), String> {
@@ -153,6 +203,7 @@ fn extension() -> (
 ) {
     let (tx, rx) = mpsc::channel();
     let bridge = FakeBridge::new();
+    bridge.set_ready(true);
     let ext = Extension::new(bridge.clone(), tx);
     ext.apply_config(cfg());
     ext.state.lock().expect("lock").current_session_id = Some("session-1".into());
@@ -287,6 +338,69 @@ fn xmpp_register_true_registers_agent_and_starts_bridge() {
     assert!(state.conversations.contains_key(&agent_id("agent-1")));
 }
 
+/// `xmpp_register` waits for bridge readiness before creating the server-backed
+/// conversation, preventing early startup races from surfacing as immediate
+/// "not online yet" tool failures.
+#[test]
+fn xmpp_register_waits_for_online_readiness() {
+    let (tx, rx) = mpsc::channel();
+    let bridge = FakeBridge::new();
+    let ext = Extension::new(bridge.clone(), tx);
+    ext.apply_config(cfg());
+    ext.state.lock().expect("lock").current_session_id = Some("session-1".into());
+
+    std::thread::scope(|scope| {
+        let handle = scope.spawn(|| {
+            ext.dispatch_tool(tool(REGISTER_TOOL_NAME, "agent-1", bool_args(true)));
+        });
+        let _progress = rx.recv().expect("progress");
+        assert_eq!(bridge.wait_for_wait_calls(1), vec![Duration::from_secs(30)]);
+        assert!(bridge.registered.lock().expect("lock").is_empty());
+        bridge.set_ready(true);
+        handle.join().expect("register thread");
+    });
+
+    let _result = rx.recv().expect("result");
+    assert!(
+        bridge
+            .registered
+            .lock()
+            .expect("lock")
+            .contains_key(&agent_id("agent-1"))
+    );
+}
+
+/// Register readiness timeout errors are surfaced directly and do not leave a
+/// partially registered conversation in extension or bridge state.
+#[test]
+fn xmpp_register_readiness_timeout_is_clear_and_does_not_register() {
+    let (tx, rx) = mpsc::channel();
+    let bridge = FakeBridge::new();
+    bridge.set_readiness_error(
+        "xmpp connection did not become online within 30s; retry after the account connects",
+    );
+    let ext = Extension::new(bridge.clone(), tx);
+    ext.apply_config(cfg());
+    ext.state.lock().expect("lock").current_session_id = Some("session-1".into());
+
+    ext.dispatch_tool(tool(REGISTER_TOOL_NAME, "agent-1", bool_args(true)));
+    let _progress = rx.recv().expect("progress");
+    let msg = rx.recv().expect("result");
+    let HarnessInputMessage::Emit(emit) = msg else {
+        panic!("emit")
+    };
+    let Event::ToolError(error) = *emit.event else {
+        panic!("tool error")
+    };
+    assert!(error.message.contains("within 30s"));
+    assert!(error.message.contains("retry"));
+    assert_eq!(bridge.wait_for_wait_calls(1), vec![Duration::from_secs(30)]);
+    assert!(bridge.registered.lock().expect("lock").is_empty());
+    let state = ext.state.lock().expect("lock");
+    assert!(!state.registered_agents.contains(&agent_id("agent-1")));
+    assert!(!state.conversations.contains_key(&agent_id("agent-1")));
+}
+
 /// MUC room identity needs the current Tau session id; registration should fail
 /// before starting XMPP if the extension has not observed `session.started`.
 #[test]
@@ -363,6 +477,63 @@ fn xmpp_send_uses_registered_conversation_without_destination_arg() {
     let _result = rx.recv().expect("result");
     let sent = bridge.sent.lock().expect("lock");
     assert_eq!(sent[0], (agent_id("agent-1"), "[agent-1] hello".to_owned()));
+}
+
+/// `xmpp_send` waits for the already-started bridge to become ready again
+/// before handing the message to the worker, which covers reconnects after a
+/// successful registration without requiring agents to implement manual retry
+/// loops.
+#[test]
+fn xmpp_send_waits_for_online_readiness_after_registration() {
+    let (ext, rx, bridge) = extension();
+    ext.dispatch_tool(tool(REGISTER_TOOL_NAME, "agent-1", bool_args(true)));
+    let _ = rx.recv();
+    let _ = rx.recv();
+
+    bridge.set_ready(false);
+    std::thread::scope(|scope| {
+        let handle = scope.spawn(|| {
+            ext.dispatch_tool(tool(SEND_TOOL_NAME, "agent-1", message_args("hello")));
+        });
+        let _progress = rx.recv().expect("progress");
+        assert_eq!(
+            bridge.wait_for_wait_calls(2),
+            vec![Duration::from_secs(30), Duration::from_secs(30)]
+        );
+        assert!(bridge.sent.lock().expect("lock").is_empty());
+        bridge.set_ready(true);
+        handle.join().expect("send thread");
+    });
+
+    let _result = rx.recv().expect("result");
+    let sent = bridge.sent.lock().expect("lock");
+    assert_eq!(sent[0], (agent_id("agent-1"), "[agent-1] hello".to_owned()));
+}
+
+/// Readiness waits are deliberately bounded to the 30-second user-facing retry
+/// window, avoiding hidden unbounded tool calls when the XMPP account never
+/// connects.
+#[test]
+fn online_readiness_wait_is_bounded_to_thirty_seconds() {
+    assert_eq!(ONLINE_WAIT_TIMEOUT, Duration::from_secs(30));
+}
+
+/// A disconnect must clear the cached online marker so later register/send
+/// commands do not silently reuse stale readiness from an earlier stream.
+#[test]
+fn disconnected_state_requires_fresh_online_readiness() {
+    let (tx, _rx) = mpsc::channel();
+    let mut worker = WorkerState::new(cfg(), tx);
+    worker.bound_jid = Some(Jid::new("tau@example.org/tau-resource").expect("jid"));
+    worker.occupant_real_jids.insert(
+        Jid::new("room@conference.example.org/alice").expect("jid"),
+        Jid::new("me@example.org/dino").expect("jid"),
+    );
+
+    worker.handle_disconnected();
+
+    assert!(worker.bound_jid.is_none());
+    assert!(worker.occupant_real_jids.is_empty());
 }
 
 /// `xmpp_send` rejects unexpected arguments such as a destination JID so future

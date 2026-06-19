@@ -52,7 +52,8 @@ const DEFAULT_MESSAGE_LIMIT: usize = 16 * 1024;
 const MAX_MESSAGE_LIMIT: usize = 128 * 1024;
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(60);
 const REGISTER_TIMEOUT: Duration = Duration::from_secs(45);
-const ONLINE_WAIT_TIMEOUT: Duration = Duration::from_secs(5);
+const ONLINE_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
+const READY_RESPONSE_SLACK: Duration = Duration::from_secs(1);
 const STANZA_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// Run the XMPP extension over stdio.
@@ -90,6 +91,9 @@ trait XmppBridge: Send + Sync + 'static {
 
     /// Remove one registered agent conversation from the bridge.
     fn unregister_agent(&self, agent_id: &AgentId) -> Result<(), String>;
+
+    /// Wait for the underlying XMPP stream to be online and authenticated.
+    fn wait_until_ready(&self, timeout: Duration) -> Result<(), String>;
 
     /// Send text to the registered agent's conversation.
     fn send_message(&self, agent_id: &AgentId, text: &str) -> Result<(), String>;
@@ -424,6 +428,9 @@ impl Extension {
                 }
                 cfg
             };
+            if let Err(message) = self.bridge.wait_until_ready(ONLINE_WAIT_TIMEOUT) {
+                return tool_error(invoke, message);
+            }
             let session_id = {
                 let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
                 let Some(session_id) = state.current_session_id.clone() else {
@@ -477,6 +484,21 @@ impl Extension {
             return tool_error(invoke, "`message` must not be empty".to_owned());
         }
         {
+            let (has_config, bridge_started) = {
+                let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+                (state.config.is_some(), state.bridge_started)
+            };
+            if !has_config {
+                return tool_error(invoke, "xmpp extension is not configured".to_owned());
+            }
+            // Tool-side readiness gives callers a clear bounded wait/error before
+            // normal validation; worker-side readiness below still protects
+            // against reconnect races or callers that bypass this preflight.
+            if bridge_started
+                && let Err(message) = self.bridge.wait_until_ready(ONLINE_WAIT_TIMEOUT)
+            {
+                return tool_error(invoke, message);
+            }
             let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
             let Some(cfg) = state.config.as_ref() else {
                 return tool_error(invoke, "xmpp extension is not configured".to_owned());
@@ -536,6 +558,12 @@ enum XmppCommand {
         /// Response channel.
         response: mpsc::Sender<Result<(), String>>,
     },
+    WaitReady {
+        /// Maximum time to wait for an authenticated online stream.
+        timeout: Duration,
+        /// Response channel.
+        response: mpsc::Sender<Result<(), String>>,
+    },
 }
 
 impl XmppBridge for LiveXmppBridge {
@@ -584,6 +612,19 @@ impl XmppBridge for LiveXmppBridge {
             agent_id: agent_id.clone(),
         })
         .map_err(|_| "xmpp worker is not running".to_owned())
+    }
+
+    fn wait_until_ready(&self, timeout: Duration) -> Result<(), String> {
+        let tx = self.command_sender()?;
+        let (response_tx, response_rx) = mpsc::channel();
+        tx.send(XmppCommand::WaitReady {
+            timeout,
+            response: response_tx,
+        })
+        .map_err(|_| "xmpp worker is not running".to_owned())?;
+        response_rx
+            .recv_timeout(timeout + READY_RESPONSE_SLACK)
+            .map_err(|_| "timed out waiting for xmpp readiness".to_owned())?
     }
 
     fn send_message(&self, agent_id: &AgentId, text: &str) -> Result<(), String> {
@@ -664,6 +705,7 @@ async fn xmpp_worker(
                     }
                     tokio_xmpp::Event::Disconnected(error) => {
                         tracing::warn!(target: LOG_TARGET, %error, "xmpp disconnected");
+                        worker.handle_disconnected();
                     }
                     tokio_xmpp::Event::Stanza(stanza) => worker.handle_stanza(stanza),
                 }
@@ -754,6 +796,10 @@ impl WorkerState {
                 response,
             } => {
                 let result = self.send_message(&agent_id, &text, client).await;
+                let _ = response.send(result);
+            }
+            XmppCommand::WaitReady { timeout, response } => {
+                let result = self.ensure_online_with_timeout(client, timeout).await;
                 let _ = response.send(result);
             }
         }
@@ -875,9 +921,21 @@ impl WorkerState {
         .map(|jid| jid.to_bare())
     }
 
-    /// Wait briefly for the XMPP stream to become online and process any
-    /// intervening stanzas needed to keep routing state fresh.
+    /// Wait up to the standard readiness timeout for the XMPP stream to
+    /// become online and process any intervening stanzas needed to keep routing
+    /// state fresh.
     async fn ensure_online(&mut self, client: &mut Client) -> Result<(), String> {
+        self.ensure_online_with_timeout(client, ONLINE_WAIT_TIMEOUT)
+            .await
+    }
+
+    /// Wait for the XMPP stream to become online within a caller-selected
+    /// bound.
+    async fn ensure_online_with_timeout(
+        &mut self,
+        client: &mut Client,
+        timeout: Duration,
+    ) -> Result<(), String> {
         if self.bound_jid.is_some() {
             return Ok(());
         }
@@ -898,11 +956,22 @@ impl WorkerState {
                 }
             }
         };
-        tokio::time::timeout(ONLINE_WAIT_TIMEOUT, wait)
+        tokio::time::timeout(timeout, wait)
             .await
             .map_err(|_| {
-                "xmpp connection is not online yet; retry after the account connects".to_owned()
+                format!(
+                    "xmpp connection did not become online within {}s; retry after the account connects",
+                    timeout.as_secs()
+                )
             })?
+    }
+
+    /// Mark the stream offline after a disconnect event so the next command
+    /// waits for a fresh authenticated `Online` event before using the
+    /// connection.
+    fn handle_disconnected(&mut self) {
+        self.bound_jid = None;
+        self.occupant_real_jids.clear();
     }
 
     /// Unregister one agent and leave its MUC room when applicable.
@@ -995,11 +1064,12 @@ impl WorkerState {
 
     /// Send one message to a registered conversation.
     async fn send_message(
-        &self,
+        &mut self,
         agent_id: &AgentId,
         text: &str,
         client: &mut Client,
     ) -> Result<(), String> {
+        self.ensure_online(client).await?;
         let conversation = self
             .conversations
             .get(agent_id)

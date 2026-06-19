@@ -100,7 +100,9 @@ extensions:
 Agents must call `xmpp_register(enabled: true)` before they can receive XMPP
 prompts or use `xmpp_send`. Roles must opt into the tools because both tools are
 registered with `enabled_by_default: false`. Outbound MUC messages are visible to
-room occupants.
+room occupants. Registration and sends wait up to 30 seconds for the XMPP stream
+to become online/authenticated before returning a readiness error; `xmpp_send`
+still requires an existing registered conversation after that wait.
 
 ## Routing modes
 

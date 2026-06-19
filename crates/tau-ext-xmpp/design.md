@@ -44,6 +44,12 @@ Status: unconfirmed
 
 Direct-resource routing is a fallback. It supports one registered direct agent per extension instance because one bound full JID cannot distinguish multiple agents for inbound direct messages. The second-registration error explicitly points users to `routing.mode: muc` for multiple agents or separate conversations. On reconnect, a changed bound resource is announced to the default recipient.
 
+## Bounded readiness waits
+
+Status: unconfirmed
+
+`xmpp_register(enabled: true)` starts the bridge and waits up to 30 seconds for the worker to observe an authenticated XMPP `Online` event before creating the conversation. `xmpp_send` waits up to 30 seconds only when the bridge has already been started; it does not turn send-before-register into an implicit registration/start operation, and a missing conversation after readiness still returns the explicit `xmpp_register(enabled: true)` requirement. Readiness is owned by the worker, which processes intervening stanzas while waiting and clears connection-scoped online/occupant caches on disconnect so later commands require a fresh `Online` event.
+
 ## MUC deployment preconditions
 
 Status: unconfirmed
@@ -62,7 +68,7 @@ The MVP sends ordinary XMPP text protected by TLS certificate validation. It doe
 
 Status: unconfirmed
 
-Unit tests with fake or state-only XMPP surfaces cover config validation, opt-in tool metadata, send-before-register rejection, registration state, multiple MUC agents in one Tau session, stable session/agent room identity, long-agent-id and case-folding non-collapse, MUC mediated invite payloads, MUC leave presence construction, MUC real-JID allowlist routing, hidden-real-JID fail-closed behavior, explicit membership-trust behavior, own-message suppression, stale occupant cache invalidation, delayed/history drops, message-size drops, unknown tool-argument rejection, direct full-JID exact-to routing, and reconnect state updates. Live Prosody testing is still future work.
+Unit tests with fake or state-only XMPP surfaces cover config validation, opt-in tool metadata, send-before-register rejection, registration state, bounded register/send readiness waits and timeout propagation, disconnect readiness/cache invalidation, multiple MUC agents in one Tau session, stable session/agent room identity, long-agent-id and case-folding non-collapse, MUC mediated invite payloads, MUC leave presence construction, MUC real-JID allowlist routing, hidden-real-JID fail-closed behavior, explicit membership-trust behavior, own-message suppression, stale occupant cache invalidation, delayed/history drops, message-size drops, unknown tool-argument rejection, direct full-JID exact-to routing, and reconnect state updates. Live Prosody testing is still future work.
 
 ## Registration timeout rollback
 
