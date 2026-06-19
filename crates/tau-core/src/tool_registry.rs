@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::error::Error;
 use std::fmt;
 
+use serde::de::{self, DeserializeSeed, MapAccess, SeqAccess, Visitor};
 use tau_proto::{
     CborValue, ConnectionId, PromptFragment, ToolExample, ToolExampleSelector, ToolGroup, ToolName,
     ToolRegister, ToolRequest, ToolSpec, ToolStarted, ToolType, nearest_name_suggestion,
@@ -23,6 +24,7 @@ const MAX_TOOL_EXAMPLE_SELECTOR_PATH: usize = 8;
 const MAX_TOOL_EXAMPLE_ARGUMENT_CHARS: usize = 600;
 const MAX_TOOL_EXAMPLE_ARGUMENT_NODES: usize = 128;
 const MAX_TOOL_EXAMPLE_HINT_CHARS: usize = 1200;
+const MAX_REPAIR_TRACE_STEPS: usize = 16;
 
 /// Kind of provider registered for a tool name.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -107,6 +109,100 @@ pub struct ToolArgumentValidationError {
     message: String,
 }
 
+/// Result of conservative schema-guided argument repair.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ToolArgumentRepair {
+    /// Repaired arguments to revalidate before dispatch.
+    pub arguments: CborValue,
+    /// Bounded typed trace of repairs applied. This is intended for logs and UI
+    /// diagnostics, not as a stable machine protocol.
+    steps: Vec<ToolArgumentRepairStep>,
+    /// Number of additional repair steps omitted from [`Self::steps`].
+    omitted_steps: usize,
+}
+
+/// One bounded schema-guided argument repair step.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ToolArgumentRepairStep {
+    /// Bounded JSON-ish argument path repaired by this step.
+    pub path: String,
+    /// Semantic repair operation applied at [`Self::path`].
+    pub kind: ToolArgumentRepairKind,
+}
+
+/// Narrow repair operations Tau may apply after schema validation failure.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ToolArgumentRepairKind {
+    JsonObjectStringToObject,
+    JsonArrayStringToArray,
+    RemovedOptionalNull,
+    ScalarToOneElementArray,
+    IntegerStringToInteger,
+    BooleanStringToBoolean,
+}
+
+impl ToolArgumentRepair {
+    /// Renders a compact bounded human-readable summary for logs/UI.
+    #[must_use]
+    pub fn render_summary(&self) -> String {
+        let mut parts = self
+            .steps
+            .iter()
+            .map(ToolArgumentRepairStep::render)
+            .collect::<Vec<_>>();
+        if self.omitted_steps > 0 {
+            parts.push(format!("… and {} more", self.omitted_steps));
+        }
+        bounded_text(&parts.join("; "), MAX_DIAGNOSTIC_MESSAGE_CHARS)
+    }
+}
+
+impl ToolArgumentRepairStep {
+    fn new(path: &str, kind: ToolArgumentRepairKind) -> Self {
+        Self {
+            path: bounded_text(path, MAX_DIAGNOSTIC_PATH_CHARS),
+            kind,
+        }
+    }
+
+    fn render(&self) -> String {
+        format!("{}: {}", self.path, self.kind.description())
+    }
+}
+
+impl ToolArgumentRepairKind {
+    fn description(self) -> &'static str {
+        match self {
+            Self::JsonObjectStringToObject => "parsed JSON object string",
+            Self::JsonArrayStringToArray => "parsed JSON array string",
+            Self::RemovedOptionalNull => "removed null optional field",
+            Self::ScalarToOneElementArray => "wrapped scalar in one-element array",
+            Self::IntegerStringToInteger => "parsed integer string",
+            Self::BooleanStringToBoolean => "parsed boolean string",
+        }
+    }
+}
+
+#[derive(Default)]
+struct RepairTrace {
+    steps: Vec<ToolArgumentRepairStep>,
+    omitted_steps: usize,
+}
+
+impl RepairTrace {
+    fn push(&mut self, path: &str, kind: ToolArgumentRepairKind) {
+        if self.steps.len() < MAX_REPAIR_TRACE_STEPS {
+            self.steps.push(ToolArgumentRepairStep::new(path, kind));
+        } else {
+            self.omitted_steps = self.omitted_steps.saturating_add(1);
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.steps.is_empty() && self.omitted_steps == 0
+    }
+}
+
 impl ToolArgumentValidationError {
     fn new(path: impl Into<String>, message: impl Into<String>) -> Self {
         let message = message.into();
@@ -184,6 +280,36 @@ pub fn validate_tool_arguments(
         return Ok(());
     };
     validate_json_schema(schema, arguments, "$")
+}
+
+/// Attempts narrow schema-guided repairs for invalid model-produced arguments.
+///
+/// This helper does not decide whether repair is allowed for a call. Callers
+/// must run normal validation first, invoke repair only after validation
+/// failure, and revalidate the returned arguments before dispatch.
+///
+/// The only repair classes are JSON object strings when the schema demands an
+/// object, JSON array strings when the schema demands an array, invalid `null`
+/// values on optional known fields, scalar values when the schema demands an
+/// array, integer-looking strings when the schema demands an integer, and exact
+/// lowercase boolean strings when the schema demands a boolean. Ambiguous
+/// schemas and values are left unrepaired.
+pub fn repair_tool_arguments(tool: &ToolSpec, arguments: &CborValue) -> Option<ToolArgumentRepair> {
+    if !matches!(tool.tool_type, ToolType::Function) {
+        return None;
+    }
+    let schema = tool.parameters.as_ref()?;
+    let mut trace = RepairTrace::default();
+    let repaired = repair_json_schema(schema, arguments, "$", &mut trace)?;
+    if trace.is_empty() || repaired == *arguments {
+        None
+    } else {
+        Some(ToolArgumentRepair {
+            arguments: repaired,
+            steps: trace.steps,
+            omitted_steps: trace.omitted_steps,
+        })
+    }
 }
 
 /// Validates provider-owned examples attached to a tool registration.
@@ -467,6 +593,295 @@ fn cbor_to_json_value(value: &CborValue) -> serde_json::Value {
         ),
         CborValue::Tag(_, value) => cbor_to_json_value(value),
         _ => serde_json::Value::Null,
+    }
+}
+
+fn repair_json_schema(
+    schema: &serde_json::Value,
+    value: &CborValue,
+    path: &str,
+    trace: &mut RepairTrace,
+) -> Option<CborValue> {
+    let schema = schema.as_object()?;
+
+    if schema_demands_type(schema.get("type"), "object")
+        && let CborValue::Text(text) = value
+        && let Some(parsed) = parse_json_text_as(text, JsonTextKind::Object)
+    {
+        trace.push(path, ToolArgumentRepairKind::JsonObjectStringToObject);
+        return Some(parsed);
+    }
+
+    if schema_demands_type(schema.get("type"), "array") {
+        if let CborValue::Text(text) = value
+            && let Some(parsed) = parse_json_text_as(text, JsonTextKind::Array)
+        {
+            trace.push(path, ToolArgumentRepairKind::JsonArrayStringToArray);
+            return Some(parsed);
+        }
+        if let CborValue::Text(text) = value
+            && text.trim_start().starts_with('[')
+        {
+            return None;
+        }
+        if is_scalar_cbor(value) {
+            let item_schema = schema.get("items");
+            let item = item_schema
+                .and_then(|item_schema| {
+                    repair_json_schema(item_schema, value, &format!("{path}[0]"), trace)
+                })
+                .unwrap_or_else(|| value.clone());
+            trace.push(path, ToolArgumentRepairKind::ScalarToOneElementArray);
+            return Some(CborValue::Array(vec![item]));
+        }
+    }
+
+    if schema_demands_type(schema.get("type"), "integer")
+        && let CborValue::Text(text) = value
+        && let Some(integer) = parse_integer_text(text)
+    {
+        trace.push(path, ToolArgumentRepairKind::IntegerStringToInteger);
+        return Some(CborValue::Integer(integer.into()));
+    }
+
+    if schema_demands_type(schema.get("type"), "boolean")
+        && let CborValue::Text(text) = value
+        && let Some(boolean) = parse_boolean_text(text)
+    {
+        trace.push(path, ToolArgumentRepairKind::BooleanStringToBoolean);
+        return Some(CborValue::Bool(boolean));
+    }
+
+    match value {
+        CborValue::Map(entries) => repair_object_schema(schema, entries, path, trace),
+        CborValue::Array(values) => repair_array_items(schema, values, path, trace),
+        _ => None,
+    }
+}
+
+fn repair_object_schema(
+    schema: &serde_json::Map<String, serde_json::Value>,
+    entries: &[(CborValue, CborValue)],
+    path: &str,
+    trace: &mut RepairTrace,
+) -> Option<CborValue> {
+    let properties = schema
+        .get("properties")
+        .and_then(serde_json::Value::as_object)?;
+    let required = schema
+        .get("required")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(serde_json::Value::as_str)
+        .collect::<std::collections::HashSet<_>>();
+
+    let mut changed = false;
+    let mut repaired_entries = Vec::with_capacity(entries.len());
+    for (key, value) in entries {
+        let Some(field_name) = cbor_text_key(key) else {
+            repaired_entries.push((key.clone(), value.clone()));
+            continue;
+        };
+        let Some(field_schema) = properties.get(field_name) else {
+            repaired_entries.push((key.clone(), value.clone()));
+            continue;
+        };
+        let field_path = child_path(path, field_name);
+        if matches!(value, CborValue::Null)
+            && !required.contains(field_name)
+            && validate_json_schema(field_schema, value, &field_path).is_err()
+        {
+            trace.push(&field_path, ToolArgumentRepairKind::RemovedOptionalNull);
+            changed = true;
+            continue;
+        }
+        if let Some(repaired_value) = repair_json_schema(field_schema, value, &field_path, trace) {
+            repaired_entries.push((key.clone(), repaired_value));
+            changed = true;
+        } else {
+            repaired_entries.push((key.clone(), value.clone()));
+        }
+    }
+
+    changed.then_some(CborValue::Map(repaired_entries))
+}
+
+fn repair_array_items(
+    schema: &serde_json::Map<String, serde_json::Value>,
+    values: &[CborValue],
+    path: &str,
+    trace: &mut RepairTrace,
+) -> Option<CborValue> {
+    let item_schema = schema.get("items")?;
+    let mut changed = false;
+    let mut repaired_values = Vec::with_capacity(values.len());
+    for (idx, value) in values.iter().enumerate() {
+        let item_path = format!("{path}[{idx}]");
+        if let Some(repaired_value) = repair_json_schema(item_schema, value, &item_path, trace) {
+            repaired_values.push(repaired_value);
+            changed = true;
+        } else {
+            repaired_values.push(value.clone());
+        }
+    }
+    changed.then_some(CborValue::Array(repaired_values))
+}
+
+fn schema_demands_type(type_schema: Option<&serde_json::Value>, expected: &str) -> bool {
+    matches!(type_schema, Some(serde_json::Value::String(kind)) if kind == expected)
+}
+
+enum JsonTextKind {
+    Object,
+    Array,
+}
+
+fn parse_json_text_as(text: &str, kind: JsonTextKind) -> Option<CborValue> {
+    let parsed = parse_json_text_rejecting_duplicate_keys(text).ok()?;
+    match (&kind, &parsed) {
+        (JsonTextKind::Object, serde_json::Value::Object(_))
+        | (JsonTextKind::Array, serde_json::Value::Array(_)) => {
+            Some(tau_proto::json_to_cbor(&parsed))
+        }
+        _ => None,
+    }
+}
+
+fn parse_json_text_rejecting_duplicate_keys(
+    text: &str,
+) -> Result<serde_json::Value, serde_json::Error> {
+    let mut deserializer = serde_json::Deserializer::from_str(text);
+    let value = ValueNoDuplicateKeys.deserialize(&mut deserializer)?;
+    deserializer.end()?;
+    Ok(value)
+}
+
+struct ValueNoDuplicateKeys;
+
+impl<'de> DeserializeSeed<'de> for ValueNoDuplicateKeys {
+    type Value = serde_json::Value;
+
+    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        deserializer.deserialize_any(ValueNoDuplicateKeysVisitor)
+    }
+}
+
+struct ValueNoDuplicateKeysVisitor;
+
+impl<'de> Visitor<'de> for ValueNoDuplicateKeysVisitor {
+    type Value = serde_json::Value;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("any JSON value without duplicate object keys")
+    }
+
+    fn visit_bool<E>(self, value: bool) -> Result<Self::Value, E> {
+        Ok(serde_json::Value::Bool(value))
+    }
+
+    fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E> {
+        Ok(serde_json::Value::Number(value.into()))
+    }
+
+    fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E> {
+        Ok(serde_json::Value::Number(value.into()))
+    }
+
+    fn visit_f64<E>(self, value: f64) -> Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        serde_json::Number::from_f64(value)
+            .map(serde_json::Value::Number)
+            .ok_or_else(|| E::custom("invalid JSON number"))
+    }
+
+    fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+    where
+        E: de::Error,
+    {
+        Ok(serde_json::Value::String(value.to_owned()))
+    }
+
+    fn visit_string<E>(self, value: String) -> Result<Self::Value, E> {
+        Ok(serde_json::Value::String(value))
+    }
+
+    fn visit_none<E>(self) -> Result<Self::Value, E> {
+        Ok(serde_json::Value::Null)
+    }
+
+    fn visit_unit<E>(self) -> Result<Self::Value, E> {
+        Ok(serde_json::Value::Null)
+    }
+
+    fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+    where
+        A: SeqAccess<'de>,
+    {
+        let mut values = Vec::new();
+        while let Some(value) = seq.next_element_seed(ValueNoDuplicateKeys)? {
+            values.push(value);
+        }
+        Ok(serde_json::Value::Array(values))
+    }
+
+    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        let mut seen = std::collections::HashSet::new();
+        let mut values = serde_json::Map::new();
+        while let Some(key) = map.next_key::<String>()? {
+            if !seen.insert(key.clone()) {
+                return Err(de::Error::custom(format!("duplicate key `{key}`")));
+            }
+            let value = map.next_value_seed(ValueNoDuplicateKeys)?;
+            values.insert(key, value);
+        }
+        Ok(serde_json::Value::Object(values))
+    }
+}
+
+fn parse_integer_text(text: &str) -> Option<i64> {
+    if text.is_empty() {
+        return None;
+    }
+    let digits = text.strip_prefix('-').unwrap_or(text);
+    if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    text.parse().ok()
+}
+
+fn parse_boolean_text(text: &str) -> Option<bool> {
+    match text {
+        "true" => Some(true),
+        "false" => Some(false),
+        _ => None,
+    }
+}
+
+fn is_scalar_cbor(value: &CborValue) -> bool {
+    matches!(
+        value,
+        CborValue::Null
+            | CborValue::Bool(_)
+            | CborValue::Integer(_)
+            | CborValue::Float(_)
+            | CborValue::Text(_)
+            | CborValue::Bytes(_)
+    )
+}
+
+fn cbor_text_key(key: &CborValue) -> Option<&str> {
+    match key {
+        CborValue::Text(key) => Some(key.as_str()),
+        _ => None,
     }
 }
 

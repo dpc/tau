@@ -51,6 +51,12 @@ rendered provider tool definitions for good calls, and failure-triggered injecti
 is one-shot per agent branch while invalid registrations produce mandatory
 diagnostics.
 
+Schema-guided argument repair runs only in the pre-dispatch validation failure
+branch. The harness executes a repaired call only after the repaired arguments
+pass the same schema validator, emits a non-mandatory notice/log trace for the
+local repair, and otherwise preserves the rejection/error/example behavior used
+for unrepaired failures.
+
 Testing is split by owner. `tau-config` tests cover file and CLI alias
 normalization, keyed rule layering, and tag-pattern parsing/rejection.
 `tau-harness` tests cover evaluator ordering, role broad-to-specific overrides,

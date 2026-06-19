@@ -15,7 +15,8 @@ use rand::rngs::StdRng;
 use tau_core::{
     ActionRegistry, AgentStore, Connection, ConnectionMetadata, ConnectionOrigin,
     DefaultSubscriptionPolicy, EventBus, NodeId, PolicyStore, RouteError, SessionStore,
-    ToolRegistry, ToolRouteError, ToolRouteTarget, tool_example_hint, validate_tool_arguments,
+    ToolRegistry, ToolRouteError, ToolRouteTarget, repair_tool_arguments, tool_example_hint,
+    validate_tool_arguments,
 };
 use tau_proto::{
     ActionError, ActionInvocationId, ActionInvoke, ActionResult, ActionSchemaPublished, AgentId,
@@ -10898,21 +10899,45 @@ impl Harness {
         };
         let internal_tool_name = tool_spec.name.clone();
         let visible_tool_name = self.tool_model_visible_name(tool_spec).clone();
+        let mut arguments = call.arguments.clone();
         if self
             .registry
             .resolve_provider(&internal_tool_name)
             .is_some()
-            && let Err(error) = validate_tool_arguments(tool_spec, &call.arguments)
+            && let Err(error) = validate_tool_arguments(tool_spec, &arguments)
         {
-            let mut message = format!("invalid arguments for tool `{tool_name}`: {error}");
-            if let Some(hint) = tool_example_hint(tool_spec, &call.arguments) {
-                let key = (cid.clone(), visible_tool_name.clone(), hint.clone());
-                if self.shown_tool_failure_examples.insert(key) {
-                    message.push_str(&hint);
+            if let Some(repair) = repair_tool_arguments(tool_spec, &arguments)
+                && validate_tool_arguments(tool_spec, &repair.arguments).is_ok()
+            {
+                let repair_summary = repair.render_summary();
+                tracing::info!(
+                    target: "tau_harness",
+                    agent_id = %cid,
+                    tool_name = %visible_tool_name,
+                    repairs = %repair_summary,
+                    "repaired tool arguments after schema validation failure"
+                );
+                self.emit_notice(
+                    tau_proto::notice_kind::HARNESS_NOTICE,
+                    tau_proto::NoticeLevel::Info,
+                    false,
+                    &format!(
+                        "Repaired arguments for tool `{visible_tool_name}` after schema validation failure: {}.",
+                        repair_summary
+                    ),
+                );
+                arguments = repair.arguments;
+            } else {
+                let mut message = format!("invalid arguments for tool `{tool_name}`: {error}");
+                if let Some(hint) = tool_example_hint(tool_spec, &arguments) {
+                    let key = (cid.clone(), visible_tool_name.clone(), hint.clone());
+                    if self.shown_tool_failure_examples.insert(key) {
+                        message.push_str(&hint);
+                    }
                 }
+                self.reject_agent_tool_call_before_dispatch(cid, call, visible_tool_name, message);
+                return Ok(());
             }
-            self.reject_agent_tool_call_before_dispatch(cid, call, visible_tool_name, message);
-            return Ok(());
         }
 
         let call_id: ToolCallId = call.id.clone();
@@ -10937,7 +10962,7 @@ impl Harness {
             call_id: call_id.clone(),
             tool_name: visible_tool_name.clone(),
             tool_type: call.tool_type,
-            arguments: call.arguments.clone(),
+            arguments: arguments.clone(),
             agent_id: owner_agent_id.clone(),
             originator: owner_originator.clone(),
         };
@@ -10946,7 +10971,7 @@ impl Harness {
             call_id: call_id.clone(),
             tool_name: internal_tool_name.clone(),
             tool_type: call.tool_type,
-            arguments: call.arguments.clone(),
+            arguments,
             agent_id: owner_agent_id.clone(),
             originator: owner_originator.clone(),
         };

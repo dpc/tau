@@ -59,6 +59,11 @@ harness must validate them at registration, reject invalid examples visibly, omi
 them from normal provider tool definitions, and surface at most bounded example
 text after a failed call.
 
+Schema-guided argument repair is a local pre-dispatch convenience, not a trust
+boundary. Keep repairs narrow, run them only after validation failure, revalidate
+before dispatch, keep repair traces bounded and metadata-only, and preserve
+deterministic rejection diagnostics when repair does not apply.
+
 ## Skills
 
 Skills are prompt instructions loaded from local/project Markdown files, not a sandbox or permission boundary. Project skills can be malicious prompt content. `disable-model-invocation` hides a skill from Tau's model-visible skill surfaces, but a model with filesystem tools could still read the underlying file if it learns the path. `allowed-tools` and similar frontmatter fields do not grant or restrict Tau tool permissions.

@@ -181,6 +181,296 @@ fn validation_error_reports_unknown_and_allowed_fields() {
 }
 
 #[test]
+fn repair_parses_json_object_string_when_schema_demands_object() {
+    let tool = strict_tool(serde_json::json!({"type": "object"}));
+    let repair = repair_tool_arguments(
+        &tool,
+        &CborValue::Text("{\"path\":\"src/lib.rs\"}".to_owned()),
+    )
+    .expect("repair");
+
+    assert_eq!(
+        repair.arguments,
+        CborValue::Map(vec![(
+            CborValue::Text("path".to_owned()),
+            CborValue::Text("src/lib.rs".to_owned())
+        )])
+    );
+    assert_eq!(
+        repair.steps[0].kind,
+        ToolArgumentRepairKind::JsonObjectStringToObject
+    );
+    validate_tool_arguments(&tool, &repair.arguments).expect("repaired args validate");
+}
+
+#[test]
+fn repair_parses_json_array_string_when_schema_demands_array() {
+    let tool = strict_tool(serde_json::json!({"type": "array"}));
+    let repair =
+        repair_tool_arguments(&tool, &CborValue::Text("[1,2]".to_owned())).expect("repair");
+
+    assert_eq!(
+        repair.arguments,
+        CborValue::Array(vec![
+            CborValue::Integer(1.into()),
+            CborValue::Integer(2.into())
+        ])
+    );
+    validate_tool_arguments(&tool, &repair.arguments).expect("repaired args validate");
+}
+
+#[test]
+fn repair_removes_null_optional_fields() {
+    let tool = strict_tool(serde_json::json!({
+        "type": "object",
+        "properties": {
+            "required": { "type": "string" },
+            "optional": { "type": "string" }
+        },
+        "required": ["required"],
+        "additionalProperties": false
+    }));
+    let repair = repair_tool_arguments(
+        &tool,
+        &CborValue::Map(vec![
+            (
+                CborValue::Text("required".to_owned()),
+                CborValue::Text("value".to_owned()),
+            ),
+            (CborValue::Text("optional".to_owned()), CborValue::Null),
+        ]),
+    )
+    .expect("repair");
+
+    assert_eq!(
+        repair.arguments,
+        CborValue::Map(vec![(
+            CborValue::Text("required".to_owned()),
+            CborValue::Text("value".to_owned()),
+        )])
+    );
+    validate_tool_arguments(&tool, &repair.arguments).expect("repaired args validate");
+}
+
+#[test]
+fn repair_wraps_scalar_when_schema_demands_array() {
+    let tool = strict_tool(serde_json::json!({
+        "type": "object",
+        "properties": { "items": { "type": "array", "items": { "type": "integer" } } },
+        "required": ["items"],
+        "additionalProperties": false
+    }));
+    let repair = repair_tool_arguments(
+        &tool,
+        &CborValue::Map(vec![(
+            CborValue::Text("items".to_owned()),
+            CborValue::Integer(7.into()),
+        )]),
+    )
+    .expect("repair");
+
+    assert_eq!(
+        repair.arguments,
+        CborValue::Map(vec![(
+            CborValue::Text("items".to_owned()),
+            CborValue::Array(vec![CborValue::Integer(7.into())]),
+        )])
+    );
+    validate_tool_arguments(&tool, &repair.arguments).expect("repaired args validate");
+}
+
+#[test]
+fn repair_parses_integer_and_boolean_strings_when_schema_demands_them() {
+    let tool = strict_tool(serde_json::json!({
+        "type": "object",
+        "properties": {
+            "count": { "type": "integer" },
+            "enabled": { "type": "boolean" }
+        },
+        "required": ["count", "enabled"],
+        "additionalProperties": false
+    }));
+    let repair = repair_tool_arguments(
+        &tool,
+        &CborValue::Map(vec![
+            (
+                CborValue::Text("count".to_owned()),
+                CborValue::Text("-42".to_owned()),
+            ),
+            (
+                CborValue::Text("enabled".to_owned()),
+                CborValue::Text("false".to_owned()),
+            ),
+        ]),
+    )
+    .expect("repair");
+
+    assert_eq!(
+        repair.arguments,
+        CborValue::Map(vec![
+            (
+                CborValue::Text("count".to_owned()),
+                CborValue::Integer((-42).into()),
+            ),
+            (
+                CborValue::Text("enabled".to_owned()),
+                CborValue::Bool(false),
+            ),
+        ])
+    );
+    validate_tool_arguments(&tool, &repair.arguments).expect("repaired args validate");
+}
+
+#[test]
+fn repair_does_not_rewrite_valid_or_ambiguous_arguments() {
+    let tool = strict_tool(serde_json::json!({
+        "type": "object",
+        "properties": {
+            "name": { "type": "string" },
+            "count": { "type": "integer" },
+            "required": { "type": "string" }
+        },
+        "required": ["name", "count", "required"],
+        "additionalProperties": false
+    }));
+    let valid = CborValue::Map(vec![
+        (
+            CborValue::Text("name".to_owned()),
+            CborValue::Text("7".to_owned()),
+        ),
+        (
+            CborValue::Text("count".to_owned()),
+            CborValue::Integer(7.into()),
+        ),
+        (
+            CborValue::Text("required".to_owned()),
+            CborValue::Text("present".to_owned()),
+        ),
+    ]);
+    validate_tool_arguments(&tool, &valid).expect("valid");
+    assert_eq!(repair_tool_arguments(&tool, &valid), None);
+
+    let ambiguous = CborValue::Map(vec![
+        (
+            CborValue::Text("name".to_owned()),
+            CborValue::Text("7".to_owned()),
+        ),
+        (
+            CborValue::Text("count".to_owned()),
+            CborValue::Text("4.2".to_owned()),
+        ),
+        (CborValue::Text("required".to_owned()), CborValue::Null),
+    ]);
+    assert_eq!(repair_tool_arguments(&tool, &ambiguous), None);
+
+    let union_integer = strict_tool(serde_json::json!({"type": ["integer", "boolean"]}));
+    assert_eq!(
+        repair_tool_arguments(&union_integer, &CborValue::Text("7".to_owned())),
+        None
+    );
+    let boolean_tool = strict_tool(serde_json::json!({"type": "boolean"}));
+    assert_eq!(
+        repair_tool_arguments(&boolean_tool, &CborValue::Text("TRUE".to_owned())),
+        None
+    );
+}
+
+#[test]
+fn repair_does_not_remove_valid_optional_null() {
+    let tool = strict_tool(serde_json::json!({
+        "type": "object",
+        "properties": {
+            "maybe": { "type": ["string", "null"] },
+            "count": { "type": "integer" }
+        },
+        "required": ["count"],
+        "additionalProperties": false
+    }));
+    let arguments = CborValue::Map(vec![
+        (CborValue::Text("maybe".to_owned()), CborValue::Null),
+        (
+            CborValue::Text("count".to_owned()),
+            CborValue::Text("7".to_owned()),
+        ),
+    ]);
+    let repair = repair_tool_arguments(&tool, &arguments).expect("count repair");
+
+    assert_eq!(
+        repair.arguments,
+        CborValue::Map(vec![
+            (CborValue::Text("maybe".to_owned()), CborValue::Null),
+            (
+                CborValue::Text("count".to_owned()),
+                CborValue::Integer(7.into()),
+            ),
+        ])
+    );
+}
+
+#[test]
+fn repair_rejects_duplicate_keys_in_json_object_strings() {
+    let tool = strict_tool(serde_json::json!({"type": "object"}));
+
+    assert_eq!(
+        repair_tool_arguments(
+            &tool,
+            &CborValue::Text("{\"path\":\"safe\",\"path\":\"danger\"}".to_owned()),
+        ),
+        None
+    );
+}
+
+#[test]
+fn repair_rejects_nested_duplicate_keys_in_json_array_strings() {
+    let tool = strict_tool(serde_json::json!({"type": "array"}));
+
+    assert_eq!(
+        repair_tool_arguments(
+            &tool,
+            &CborValue::Text("[{\"path\":\"safe\",\"path\":\"danger\"}]".to_owned()),
+        ),
+        None
+    );
+}
+
+#[test]
+fn repair_trace_is_bounded() {
+    let properties = (0..(MAX_REPAIR_TRACE_STEPS + 4))
+        .map(|idx| {
+            (
+                format!("field{idx}"),
+                serde_json::json!({"type": "integer"}),
+            )
+        })
+        .collect::<serde_json::Map<_, _>>();
+    let required = (0..(MAX_REPAIR_TRACE_STEPS + 4))
+        .map(|idx| serde_json::Value::String(format!("field{idx}")))
+        .collect::<Vec<_>>();
+    let arguments = CborValue::Map(
+        (0..(MAX_REPAIR_TRACE_STEPS + 4))
+            .map(|idx| {
+                (
+                    CborValue::Text(format!("field{idx}")),
+                    CborValue::Text(idx.to_string()),
+                )
+            })
+            .collect(),
+    );
+    let tool = strict_tool(serde_json::json!({
+        "type": "object",
+        "properties": properties,
+        "required": required,
+        "additionalProperties": false
+    }));
+    let repair = repair_tool_arguments(&tool, &arguments).expect("repair");
+
+    assert_eq!(repair.steps.len(), MAX_REPAIR_TRACE_STEPS);
+    assert_eq!(repair.omitted_steps, 4);
+    assert!(repair.render_summary().contains("… and 4 more"));
+    assert!(repair.render_summary().len() <= MAX_DIAGNOSTIC_MESSAGE_CHARS);
+}
+
+#[test]
 fn invalid_tool_example_rejects_registration() {
     let mut tool = strict_tool(serde_json::json!({
         "type": "object",

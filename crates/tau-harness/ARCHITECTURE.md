@@ -131,6 +131,12 @@ against mutable current role/model state after the user switches roles or models
 mid-turn. Staged tool registration can never expand a prompt snapshot after it
 was sent.
 
+Narrow schema-guided argument repair also uses the prompt-owned `ToolSpec`.
+Repair runs only after pre-dispatch validation failure, applies a small fixed set
+of mechanical conversions, revalidates before dispatch, and falls back to the
+normal rejection diagnostics when repair is unsupported or still invalid. Repair
+traces are bounded metadata for logs/UI, not prompt-surface examples.
+
 ## Lifecycle events
 
 Harness lifecycle events such as session start/shutdown and extension status are

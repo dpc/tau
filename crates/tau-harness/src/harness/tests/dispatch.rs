@@ -1040,6 +1040,181 @@ fn invalid_tool_arguments_are_rejected_before_logical_dispatch() {
 }
 
 #[test]
+fn invalid_tool_arguments_are_repaired_and_revalidated_before_dispatch() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    h.selected_model = Some("test/model".into());
+
+    let _tool_events = connect_test_tool(&mut h, "conn-repair-tool");
+    let mut spec = shared_test_tool_spec("repair_tool");
+    spec.parameters = Some(serde_json::json!({
+        "type": "object",
+        "properties": {
+            "count": { "type": "integer" },
+            "flags": { "type": "array", "items": { "type": "boolean" } },
+            "optional": { "type": "string" }
+        },
+        "required": ["count", "flags"],
+        "additionalProperties": false
+    }));
+    h.registry.register("conn-repair-tool", spec);
+
+    let cid = ensure_test_user_agent(&mut h);
+    let spid: AgentPromptId = "sp-repair-tool-args".into();
+    seed_agent_thinking(&mut h, &cid, spid.as_str());
+    h.prompt_agents.insert(spid.clone(), cid.clone());
+
+    h.handle_provider_response_finished(ProviderResponseFinished {
+        agent_prompt_id: spid,
+        agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
+        output_items: vec![ContextItem::ToolCall(ToolCallItem {
+            call_id: "repair-args".into(),
+            name: ToolName::new("repair_tool"),
+            tool_type: tau_proto::ToolType::Function,
+            arguments: CborValue::Map(vec![
+                (
+                    CborValue::Text("count".to_owned()),
+                    CborValue::Text("42".to_owned()),
+                ),
+                (CborValue::Text("flags".to_owned()), CborValue::Bool(true)),
+                (CborValue::Text("optional".to_owned()), CborValue::Null),
+            ]),
+        })],
+        stop_reason: tau_proto::ProviderStopReason::ToolCalls,
+        error: None,
+        usage: None,
+        originator: tau_proto::PromptOriginator::User,
+        compaction_original_input_tokens: None,
+        compaction_compacted_input_tokens: None,
+        backend: None,
+        provider_response_id: None,
+        ws_pool_delta: None,
+    })
+    .expect("provider response handled");
+
+    let mut published_request = None;
+    let mut provider_error = None;
+    let mut notice = None;
+    let mut seq = crate::event_log::EventLogSeq::new(0);
+    while let Some(entry) = h.event_log.get_next_from(seq) {
+        seq = entry.seq.next();
+        match &entry.event {
+            Event::ToolRequest(request) if request.call_id.as_str() == "repair-args" => {
+                published_request = Some(request.clone());
+            }
+            Event::ProviderToolError(error) if error.call_id.as_str() == "repair-args" => {
+                provider_error = Some(error.message.clone());
+            }
+            Event::HarnessNotice(harness_notice)
+                if harness_notice
+                    .message
+                    .contains("Repaired arguments for tool `repair_tool`") =>
+            {
+                notice = Some(harness_notice.clone());
+            }
+            _ => {}
+        }
+    }
+
+    let published_request = published_request.expect("repaired tool request");
+    assert_eq!(
+        published_request.arguments,
+        CborValue::Map(vec![
+            (
+                CborValue::Text("count".to_owned()),
+                CborValue::Integer(42.into()),
+            ),
+            (
+                CborValue::Text("flags".to_owned()),
+                CborValue::Array(vec![CborValue::Bool(true)]),
+            ),
+        ])
+    );
+    assert!(provider_error.is_none());
+    assert!(notice.is_some());
+
+    h.shutdown().expect("shutdown");
+}
+
+#[test]
+fn repaired_tool_arguments_are_rejected_when_revalidation_fails() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    h.selected_model = Some("test/model".into());
+
+    let _tool_events = connect_test_tool(&mut h, "conn-repair-revalidate-tool");
+    let mut spec = shared_test_tool_spec("repair_revalidate_tool");
+    spec.parameters = Some(serde_json::json!({
+        "type": "object",
+        "properties": {
+            "count": { "type": "integer", "minimum": 1 }
+        },
+        "required": ["count"],
+        "additionalProperties": false
+    }));
+    h.registry.register("conn-repair-revalidate-tool", spec);
+
+    let cid = ensure_test_user_agent(&mut h);
+    let spid: AgentPromptId = "sp-repair-revalidate-tool-args".into();
+    seed_agent_thinking(&mut h, &cid, spid.as_str());
+    h.prompt_agents.insert(spid.clone(), cid);
+
+    h.handle_provider_response_finished(ProviderResponseFinished {
+        agent_prompt_id: spid,
+        agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
+        output_items: vec![ContextItem::ToolCall(ToolCallItem {
+            call_id: "repair-revalidate-args".into(),
+            name: ToolName::new("repair_revalidate_tool"),
+            tool_type: tau_proto::ToolType::Function,
+            arguments: CborValue::Map(vec![(
+                CborValue::Text("count".to_owned()),
+                CborValue::Text("0".to_owned()),
+            )]),
+        })],
+        stop_reason: tau_proto::ProviderStopReason::ToolCalls,
+        error: None,
+        usage: None,
+        originator: tau_proto::PromptOriginator::User,
+        compaction_original_input_tokens: None,
+        compaction_compacted_input_tokens: None,
+        backend: None,
+        provider_response_id: None,
+        ws_pool_delta: None,
+    })
+    .expect("provider response handled");
+
+    let mut provider_error = None;
+    let mut logical_events = Vec::new();
+    let mut seq = crate::event_log::EventLogSeq::new(0);
+    while let Some(entry) = h.event_log.get_next_from(seq) {
+        seq = entry.seq.next();
+        match &entry.event {
+            Event::ProviderToolError(error)
+                if error.call_id.as_str() == "repair-revalidate-args" =>
+            {
+                provider_error = Some(error.message.clone());
+            }
+            Event::ToolRequest(request) if request.call_id.as_str() == "repair-revalidate-args" => {
+                logical_events.push("tool.request");
+            }
+            Event::ToolError(error) if error.call_id.as_str() == "repair-revalidate-args" => {
+                logical_events.push("tool.error");
+            }
+            _ => {}
+        }
+    }
+
+    let provider_error = provider_error.expect("provider error");
+    assert!(provider_error.contains("invalid arguments for tool `repair_revalidate_tool`"));
+    assert!(provider_error.contains("$.count: expected integer, got string"));
+    assert_eq!(logical_events, vec!["tool.error"]);
+
+    h.shutdown().expect("shutdown");
+}
+
+#[test]
 fn rendered_tool_definitions_do_not_include_examples() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
