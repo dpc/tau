@@ -64,6 +64,11 @@ boundary. Keep repairs narrow, run them only after validation failure, revalidat
 before dispatch, keep repair traces bounded and metadata-only, and preserve
 deterministic rejection diagnostics when repair does not apply.
 
+Loop-guard prompts are harness-authored internal steering. Keep loop signatures
+compact and runtime-only, inject at most one breaker for a detected cycle, and
+surface a harness notice instead of creating unbounded self-dialogue when the
+cycle continues.
+
 ## Skills
 
 Skills are prompt instructions loaded from local/project Markdown files, not a sandbox or permission boundary. Project skills can be malicious prompt content. `disable-model-invocation` hides a skill from Tau's model-visible skill surfaces, but a model with filesystem tools could still read the underlying file if it learns the path. `allowed-tools` and similar frontmatter fields do not grant or restrict Tau tool permissions.

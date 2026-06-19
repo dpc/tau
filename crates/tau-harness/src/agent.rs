@@ -11,8 +11,11 @@
 //! `prompt_agents: HashMap<AgentPromptId, AgentId>` and
 //! `tool_agents: HashMap<ToolCallId, AgentId>`.
 
+mod loop_guard;
+
 use std::collections::VecDeque;
 
+pub(crate) use loop_guard::{LoopCycleState, LoopGuardState, LoopGuardTrigger, LoopTurnSignature};
 use tau_core::NodeId;
 use tau_proto::{
     AgentId, AgentPromptId, ConnectionId, ModelId, PromptMessageClass, PromptOriginator, SessionId,
@@ -154,6 +157,8 @@ pub(crate) struct Agent {
     /// [`Agent::head`] whenever the cursor moves
     /// non-linearly. See `crate::dedup` for the full rationale.
     pub(crate) result_dedup: ResultDedupMap,
+    /// Runtime-only conservative loop guard state for this agent branch.
+    pub(crate) loop_guard: LoopGuardState,
 }
 
 /// Where a queued prompt came from.
@@ -163,6 +168,8 @@ pub(crate) enum PendingPromptSource {
     General,
     /// A prompt created from an `agent.message_received` delivery.
     AgentMessageReceived,
+    /// Internal loop-guard pivot prompt.
+    LoopGuard,
 }
 
 /// A queued prompt plus its user/internal classification.
@@ -228,6 +235,16 @@ impl PendingPrompt {
         }
     }
 
+    /// Create an internal loop-guard pivot prompt.
+    pub(crate) fn loop_guard(text: String) -> Self {
+        Self {
+            text,
+            message_class: PromptMessageClass::Internal,
+            source: PendingPromptSource::LoopGuard,
+            ctx_id: None,
+        }
+    }
+
     /// Attach a caller correlation id to this exact queued prompt.
     pub(crate) fn with_ctx_id(mut self, ctx_id: Option<String>) -> Self {
         self.ctx_id = ctx_id;
@@ -244,6 +261,12 @@ impl PendingPrompt {
     #[must_use]
     pub(crate) fn is_agent_message_received(&self) -> bool {
         self.source == PendingPromptSource::AgentMessageReceived
+    }
+
+    /// Whether this queued prompt is a loop-guard pivot.
+    #[must_use]
+    pub(crate) fn is_loop_guard(&self) -> bool {
+        self.source == PendingPromptSource::LoopGuard
     }
 }
 
@@ -283,6 +306,7 @@ impl Agent {
             context_cached_tokens: None,
             context_percent_used: None,
             result_dedup: ResultDedupMap::new(),
+            loop_guard: LoopGuardState::default(),
         }
     }
 }

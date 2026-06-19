@@ -1,6 +1,6 @@
 use super::*;
 use crate::AgentId;
-use crate::agent::{Agent, PendingPrompt};
+use crate::agent::{Agent, AgentTurnState, PendingPrompt};
 use crate::harness::{
     AgentState, PendingTool, background_completion_prompt,
     extension_disconnected_background_tool_call_error_message,
@@ -1313,6 +1313,639 @@ fn shown_tool_failure_examples_are_session_and_agent_scoped() {
     .expect("switch session");
 
     assert!(h.shown_tool_failure_examples.is_empty());
+}
+
+fn loop_guard_tool_error(call_id: &str, tool_name: &str, message: &str) -> tau_proto::ToolError {
+    tau_proto::ToolError {
+        call_id: call_id.into(),
+        tool_name: ToolName::new(tool_name),
+        tool_type: tau_proto::ToolType::Function,
+        message: message.to_owned(),
+        details: None,
+        originator: tau_proto::PromptOriginator::User,
+        display: None,
+    }
+}
+
+#[test]
+fn loop_guard_detects_repeated_assistant_text_once_then_blocks() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    let cid = ensure_test_user_agent(&mut h);
+    let text =
+        "I will keep trying the same plan without taking any tool action or making progress.";
+
+    h.record_assistant_loop_signature(&cid, Some(text));
+    h.record_assistant_loop_signature(&cid, Some(text));
+    h.record_assistant_loop_signature(&cid, Some(text));
+
+    let conv = h.agents.get(&cid).expect("agent");
+    assert_eq!(conv.pending_prompts.len(), 1);
+    assert!(conv.pending_prompts[0].text.contains("Loop guard:"));
+    assert!(!conv.loop_guard.stop_automatic_continuation());
+
+    h.mark_loop_guard_breakers_dispatched(&cid);
+    h.record_assistant_loop_signature(&cid, Some(text));
+
+    let conv = h.agents.get(&cid).expect("agent");
+    assert_eq!(conv.pending_prompts.len(), 1);
+    assert!(conv.loop_guard.stop_automatic_continuation());
+    assert!(event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::HarnessNotice(notice)
+            if notice.message.contains("Loop guard stopped automatic continuation")
+    )));
+}
+
+#[test]
+fn loop_guard_repeated_assistant_text_flows_through_provider_responses() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    h.selected_model = Some("test/model".into());
+    let cid = ensure_test_user_agent(&mut h);
+    let text =
+        "I will keep trying the same plan without taking any tool action or making progress.";
+
+    for idx in 0..3 {
+        let spid: AgentPromptId = format!("sp-loop-text-{idx}").into();
+        seed_agent_thinking(&mut h, &cid, spid.as_str());
+        h.prompt_agents.insert(spid.clone(), cid.clone());
+        h.handle_provider_response_finished(provider_text_response(
+            &spid,
+            tau_proto::AgentId::parse("main").expect("agent id"),
+            text,
+        ))
+        .expect("response handled");
+    }
+
+    assert!(event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::AgentPromptSteered(steered)
+            if steered.message_class == tau_proto::PromptMessageClass::Internal
+                && steered.text.contains("Loop guard:")
+    )));
+    assert!(
+        h.agents
+            .get(&cid)
+            .expect("agent")
+            .pending_prompts
+            .is_empty()
+    );
+
+    let spid = h
+        .agents
+        .get(&cid)
+        .and_then(|conv| conv.in_flight_prompt.clone())
+        .expect("loop breaker prompt dispatched");
+    h.handle_provider_response_finished(provider_text_response(
+        &spid,
+        tau_proto::AgentId::parse("main").expect("agent id"),
+        text,
+    ))
+    .expect("response handled");
+
+    assert!(
+        h.agents
+            .get(&cid)
+            .expect("agent")
+            .loop_guard
+            .stop_automatic_continuation()
+    );
+    assert!(event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::HarnessNotice(notice)
+            if notice.message.contains("Loop guard stopped automatic continuation")
+    )));
+}
+
+#[test]
+fn loop_guard_detects_repeated_same_failing_tool_call() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    let cid = ensure_test_user_agent(&mut h);
+
+    for idx in 0..3 {
+        h.record_tool_failure_loop_signature(
+            &cid,
+            &loop_guard_tool_error(&format!("call-{idx}"), "read", "missing file"),
+        );
+    }
+
+    let conv = h.agents.get(&cid).expect("agent");
+    assert_eq!(conv.pending_prompts.len(), 1);
+    assert!(
+        conv.pending_prompts[0]
+            .text
+            .contains("repeated identical failing tool call")
+    );
+}
+
+#[test]
+fn loop_guard_repeated_tool_failure_signature_includes_arguments() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    let cid = ensure_test_user_agent(&mut h);
+
+    for (idx, path) in ["a.txt", "b.txt"].into_iter().enumerate() {
+        let call = crate::harness::AgentToolCall {
+            id: format!("call-{idx}").into(),
+            name: ToolName::new("read"),
+            tool_type: tau_proto::ToolType::Function,
+            arguments: CborValue::Map(vec![(
+                CborValue::Text("path".to_owned()),
+                CborValue::Text(path.to_owned()),
+            )]),
+        };
+        h.remember_tool_call_loop_signature(&cid, &call);
+        h.record_tool_failure_loop_signature(
+            &cid,
+            &loop_guard_tool_error(call.id.as_str(), "read", "generic failure"),
+        );
+    }
+
+    assert!(
+        h.agents
+            .get(&cid)
+            .expect("agent")
+            .pending_prompts
+            .is_empty()
+    );
+}
+
+#[test]
+fn loop_guard_production_tool_failure_signature_includes_arguments() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    let cid = ensure_test_user_agent(&mut h);
+
+    for idx in 0..3 {
+        h.execute_agent_tool_call(
+            &cid,
+            &crate::harness::AgentToolCall {
+                id: format!("distinct-{idx}").into(),
+                name: ToolName::new("missing_tool"),
+                tool_type: tau_proto::ToolType::Function,
+                arguments: CborValue::Map(vec![(
+                    CborValue::Text("path".to_owned()),
+                    CborValue::Text(format!("file-{idx}.txt")),
+                )]),
+            },
+        )
+        .expect("tool call handled");
+    }
+    assert!(
+        h.agents
+            .get(&cid)
+            .expect("agent")
+            .pending_prompts
+            .is_empty()
+    );
+    assert!(!event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::AgentPromptSubmitted(submitted)
+            if submitted.text.contains("Loop guard:")
+    )));
+
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    let cid = ensure_test_user_agent(&mut h);
+    for idx in 0..3 {
+        h.execute_agent_tool_call(
+            &cid,
+            &crate::harness::AgentToolCall {
+                id: format!("same-{idx}").into(),
+                name: ToolName::new("missing_tool"),
+                tool_type: tau_proto::ToolType::Function,
+                arguments: CborValue::Map(vec![(
+                    CborValue::Text("path".to_owned()),
+                    CborValue::Text("same.txt".to_owned()),
+                )]),
+            },
+        )
+        .expect("tool call handled");
+    }
+    assert!(event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::AgentPromptSubmitted(submitted)
+            if submitted.text.contains("repeated identical failing tool call")
+    )));
+}
+
+#[test]
+fn loop_guard_progress_reset_preserves_in_flight_argument_signatures() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    let cid = ensure_test_user_agent(&mut h);
+
+    for (idx, path) in ["a.txt", "b.txt", "c.txt"].into_iter().enumerate() {
+        h.remember_tool_call_loop_signature(
+            &cid,
+            &crate::harness::AgentToolCall {
+                id: format!("call-{idx}").into(),
+                name: ToolName::new("read"),
+                tool_type: tau_proto::ToolType::Function,
+                arguments: CborValue::Map(vec![(
+                    CborValue::Text("path".to_owned()),
+                    CborValue::Text(path.to_owned()),
+                )]),
+            },
+        );
+    }
+
+    h.reset_loop_guard_for_progress(&cid);
+
+    for idx in 0..3 {
+        h.record_tool_failure_loop_signature(
+            &cid,
+            &loop_guard_tool_error(&format!("call-{idx}"), "read", "generic failure"),
+        );
+    }
+
+    assert!(
+        h.agents
+            .get(&cid)
+            .expect("agent")
+            .pending_prompts
+            .is_empty()
+    );
+}
+
+#[test]
+fn loop_guard_detects_consecutive_different_tool_failures() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    let cid = ensure_test_user_agent(&mut h);
+
+    for idx in 0..4 {
+        h.record_tool_failure_loop_signature(
+            &cid,
+            &loop_guard_tool_error(&format!("call-{idx}"), "tool", &format!("failure {idx}")),
+        );
+    }
+
+    let conv = h.agents.get(&cid).expect("agent");
+    assert_eq!(conv.pending_prompts.len(), 1);
+    assert!(
+        conv.pending_prompts[0]
+            .text
+            .contains("several consecutive tool failures")
+    );
+}
+
+#[test]
+fn loop_guard_same_batch_failures_do_not_block_before_breaker_dispatch() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    let cid = ensure_test_user_agent(&mut h);
+
+    for idx in 0..4 {
+        h.record_tool_failure_loop_signature(
+            &cid,
+            &loop_guard_tool_error(&format!("call-{idx}"), "tool", &format!("failure {idx}")),
+        );
+    }
+
+    let conv = h.agents.get(&cid).expect("agent");
+    assert_eq!(conv.pending_prompts.len(), 1);
+    assert!(!conv.loop_guard.stop_automatic_continuation());
+}
+
+#[test]
+fn loop_guard_detects_abab_suffix() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    let cid = ensure_test_user_agent(&mut h);
+
+    h.record_assistant_loop_signature(
+        &cid,
+        Some("First repeated long assistant state with no concrete action."),
+    );
+    h.record_tool_failure_loop_signature(
+        &cid,
+        &loop_guard_tool_error("call-a", "read", "first distinct failure"),
+    );
+    h.record_assistant_loop_signature(
+        &cid,
+        Some("First repeated long assistant state with no concrete action."),
+    );
+    h.record_tool_failure_loop_signature(
+        &cid,
+        &loop_guard_tool_error("call-b", "read", "first distinct failure"),
+    );
+
+    let conv = h.agents.get(&cid).expect("agent");
+    assert_eq!(conv.pending_prompts.len(), 1);
+    assert!(conv.pending_prompts[0].text.contains("A/B/A/B"));
+}
+
+#[test]
+fn loop_guard_resets_on_user_progress() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    let cid = ensure_test_user_agent(&mut h);
+    let text =
+        "I will keep trying the same plan without taking any tool action or making progress.";
+
+    h.record_assistant_loop_signature(&cid, Some(text));
+    h.record_assistant_loop_signature(&cid, Some(text));
+    h.reset_loop_guard_for_progress(&cid);
+    h.record_assistant_loop_signature(&cid, Some(text));
+
+    let conv = h.agents.get(&cid).expect("agent");
+    assert!(conv.pending_prompts.is_empty());
+}
+
+#[test]
+fn loop_guard_resets_when_user_prompt_is_published() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    let cid = ensure_test_user_agent(&mut h);
+    let text =
+        "I will keep trying the same plan without taking any tool action or making progress.";
+    h.record_assistant_loop_signature(&cid, Some(text));
+    h.record_assistant_loop_signature(&cid, Some(text));
+
+    h.publish_pending_prompt_for_agent(&cid, PendingPrompt::user("new direction".to_owned()))
+        .expect("publish user prompt");
+
+    let conv = h.agents.get(&cid).expect("agent");
+    assert!(
+        !conv
+            .pending_prompts
+            .iter()
+            .any(PendingPrompt::is_loop_guard)
+    );
+}
+
+#[test]
+fn loop_guard_reset_removes_pending_breaker_prompt() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    let cid = ensure_test_user_agent(&mut h);
+    let text =
+        "I will keep trying the same plan without taking any tool action or making progress.";
+    h.record_assistant_loop_signature(&cid, Some(text));
+    h.record_assistant_loop_signature(&cid, Some(text));
+    h.record_assistant_loop_signature(&cid, Some(text));
+    assert!(
+        h.agents
+            .get(&cid)
+            .expect("agent")
+            .pending_prompts
+            .iter()
+            .any(PendingPrompt::is_loop_guard)
+    );
+
+    h.publish_pending_prompt_for_agent(&cid, PendingPrompt::user("new input".to_owned()))
+        .expect("publish user prompt");
+
+    let conv = h.agents.get(&cid).expect("agent");
+    assert!(
+        !conv
+            .pending_prompts
+            .iter()
+            .any(PendingPrompt::is_loop_guard)
+    );
+}
+
+#[test]
+fn loop_guard_resets_when_user_prompt_is_queued() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    let cid = ensure_test_user_agent(&mut h);
+    let agent_id = h
+        .ensure_agent_id_for_agent(&cid)
+        .expect("agent id")
+        .to_owned();
+    h.agents.get_mut(&cid).expect("agent").turn_state = AgentTurnState::AgentThinking {
+        agent_prompt_id: "sp-loop-queued-reset".into(),
+    };
+    h.record_assistant_loop_signature(
+        &cid,
+        Some("I will keep trying the same plan without taking any tool action or making progress."),
+    );
+
+    let submission = h
+        .submit_prompt_to_agent(
+            h.current_session_id.clone(),
+            &agent_id,
+            PendingPrompt::user("queued user input".to_owned()),
+        )
+        .expect("submit prompt");
+
+    assert_eq!(submission, PromptSubmission::Queued);
+    let conv = h.agents.get(&cid).expect("agent");
+    assert_eq!(conv.pending_prompts.len(), 1);
+}
+
+#[test]
+fn loop_guard_queued_user_prompt_removes_pending_breaker() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    let cid = ensure_test_user_agent(&mut h);
+    let agent_id = h
+        .ensure_agent_id_for_agent(&cid)
+        .expect("agent id")
+        .to_owned();
+    let text =
+        "I will keep trying the same plan without taking any tool action or making progress.";
+    h.record_assistant_loop_signature(&cid, Some(text));
+    h.record_assistant_loop_signature(&cid, Some(text));
+    h.record_assistant_loop_signature(&cid, Some(text));
+    h.agents.get_mut(&cid).expect("agent").turn_state = AgentTurnState::AgentThinking {
+        agent_prompt_id: "sp-loop-queued-breaker-reset".into(),
+    };
+
+    let submission = h
+        .submit_prompt_to_agent(
+            h.current_session_id.clone(),
+            &agent_id,
+            PendingPrompt::user("queued user input".to_owned()),
+        )
+        .expect("submit prompt");
+
+    assert_eq!(submission, PromptSubmission::Queued);
+    let conv = h.agents.get(&cid).expect("agent");
+    assert!(
+        !conv
+            .pending_prompts
+            .iter()
+            .any(PendingPrompt::is_loop_guard)
+    );
+}
+
+#[test]
+fn loop_guard_folding_user_prompt_drops_stale_pivot_from_batch() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    let cid = ensure_test_user_agent(&mut h);
+    {
+        let conv = h.agents.get_mut(&cid).expect("agent");
+        conv.pending_prompts
+            .push_back(PendingPrompt::user("queued user input".to_owned()));
+    }
+    let text =
+        "I will keep trying the same plan without taking any tool action or making progress.";
+    h.record_assistant_loop_signature(&cid, Some(text));
+    h.record_assistant_loop_signature(&cid, Some(text));
+    h.record_assistant_loop_signature(&cid, Some(text));
+
+    h.fold_pending_prompts_as_steered(&cid);
+
+    assert!(!event_log_contains_any_source(&h, |event| {
+        matches!(
+            event,
+            Event::AgentPromptSteered(steered) if steered.text.contains("Loop guard:")
+        )
+    }));
+    assert!(event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::AgentPromptSteered(steered) if steered.text == "queued user input"
+    )));
+}
+
+#[test]
+fn loop_guard_block_preserves_agent_message_internal_prompt() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    let cid = ensure_test_user_agent(&mut h);
+    {
+        let conv = h.agents.get_mut(&cid).expect("agent");
+        conv.loop_guard.mark_cycle_blocked("cycle");
+        conv.pending_prompts
+            .push_back(PendingPrompt::agent_message_received(
+                "external message".to_owned(),
+            ));
+    }
+    seed_tools_running(&mut h, &cid, vec!["done-call".into()]);
+
+    h.maybe_complete_agent_turn_for(&cid, "done-call");
+
+    assert!(event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::AgentPromptSteered(steered) if steered.text == "external message"
+    )));
+}
+
+#[test]
+fn loop_guard_resets_on_successful_terminal_tool_result() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    let cid = ensure_test_user_agent(&mut h);
+    h.record_tool_failure_loop_signature(
+        &cid,
+        &loop_guard_tool_error("failed-call", "read", "missing file"),
+    );
+
+    h.publish_terminal_tool_result(
+        Some(&cid),
+        None,
+        tau_proto::ToolResult {
+            call_id: "ok-call".into(),
+            tool_name: ToolName::new("read"),
+            tool_type: tau_proto::ToolType::Function,
+            result: CborValue::Text("ok".to_owned()),
+            kind: tau_proto::ToolResultKind::Final,
+            display: None,
+            originator: tau_proto::PromptOriginator::User,
+        },
+    );
+
+    let conv = h.agents.get(&cid).expect("agent");
+    assert_eq!(conv.loop_guard.consecutive_tool_failures(), 0);
+    assert!(conv.pending_prompts.is_empty());
+}
+
+#[test]
+fn loop_guard_resets_on_successful_background_tool_result() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    let cid = ensure_test_user_agent(&mut h);
+    h.record_tool_failure_loop_signature(
+        &cid,
+        &loop_guard_tool_error("failed-call", "read", "missing file"),
+    );
+    h.tool_agents.insert("bg-call".into(), cid.clone());
+    h.pending_tools.insert(
+        "bg-call".into(),
+        PendingTool {
+            name: ToolName::new("read"),
+            internal_name: ToolName::new("read"),
+            tool_type: tau_proto::ToolType::Function,
+        },
+    );
+
+    h.handle_background_tool_result(
+        "conn-bg",
+        tau_proto::ToolResult {
+            call_id: "bg-call".into(),
+            tool_name: ToolName::new("read"),
+            tool_type: tau_proto::ToolType::Function,
+            result: CborValue::Text("ok".to_owned()),
+            kind: tau_proto::ToolResultKind::Final,
+            display: None,
+            originator: tau_proto::PromptOriginator::User,
+        },
+    );
+
+    let conv = h.agents.get(&cid).expect("agent");
+    assert_eq!(conv.loop_guard.consecutive_tool_failures(), 0);
+    assert!(conv.pending_prompts.is_empty());
+}
+
+#[test]
+fn loop_guard_resets_on_agent_head_move() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    let cid = ensure_test_user_agent(&mut h);
+    let agent_id = h
+        .ensure_agent_id_for_agent(&cid)
+        .expect("agent id")
+        .to_owned();
+    h.publish_pending_prompt_for_agent(&cid, PendingPrompt::user("seed".to_owned()))
+        .expect("publish seed");
+    let node_id = h.agents.get(&cid).expect("agent").head.expect("agent head");
+    let text =
+        "I will keep trying the same plan without taking any tool action or making progress.";
+    h.record_assistant_loop_signature(&cid, Some(text));
+    h.record_assistant_loop_signature(&cid, Some(text));
+    h.record_assistant_loop_signature(&cid, Some(text));
+
+    h.publish_for_agent(
+        &cid,
+        Event::AgentHeadMoved(tau_proto::AgentHeadMoved {
+            agent_id: crate::parse_agent_id(&agent_id),
+            node_id,
+        }),
+    );
+
+    let conv = h.agents.get(&cid).expect("agent");
+    assert!(
+        !conv
+            .pending_prompts
+            .iter()
+            .any(PendingPrompt::is_loop_guard)
+    );
 }
 
 /// Ensures unavailable-tool diagnostics distinguish a misspelled/unknown tool

@@ -32,7 +32,10 @@ use tau_proto::{
     ToolResultKind, ToolType, UiCancelPrompt, nearest_name_suggestion,
 };
 
-use crate::agent::{Agent, AgentTurnState, PendingCancel, PendingPrompt};
+use crate::agent::{
+    Agent, AgentTurnState, LoopCycleState, LoopGuardTrigger, LoopTurnSignature, PendingCancel,
+    PendingPrompt,
+};
 use crate::daemon::InteractionOutcome;
 use crate::debug_log::DebugEventLog;
 use crate::dedup::{
@@ -372,6 +375,37 @@ fn extension_disconnected_background_tool_call_error_message(call_id: &ToolCallI
         "{}: true\n\nBackground tool call `{call_id}` was interrupted because extension disconnected. Side effects may have occurred.",
         tau_proto::TAU_INTERNAL_HEADER_NAME
     )
+}
+
+const LOOP_GUARD_RECENT_LIMIT: usize = 8;
+const LOOP_GUARD_CYCLE_LIMIT: usize = 8;
+const LOOP_GUARD_ASSISTANT_REPEAT_THRESHOLD: usize = 3;
+const LOOP_GUARD_TOOL_FAILURE_REPEAT_THRESHOLD: usize = 3;
+const LOOP_GUARD_CONSECUTIVE_FAILURE_THRESHOLD: u8 = 4;
+const LOOP_GUARD_ASSISTANT_MIN_CHARS: usize = 40;
+const LOOP_GUARD_TEXT_SIGNATURE_CHARS: usize = 240;
+const LOOP_GUARD_TOOL_ERROR_CHARS: usize = 160;
+const LOOP_GUARD_TOOL_ARGUMENT_CHARS: usize = 200;
+
+fn loop_guard_pivot_prompt(reason: &str) -> String {
+    format!(
+        "{} Loop guard: possible repeated cycle detected ({reason}). Briefly identify the repeated assumption or action, then choose a different concrete action, ask for clarification, or provide a final answer if no further progress is possible.",
+        crate::INTERNAL_MARKER
+    )
+}
+
+fn normalize_loop_text(text: &str) -> Option<String> {
+    let normalized = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    (LOOP_GUARD_ASSISTANT_MIN_CHARS <= normalized.chars().count())
+        .then(|| bounded_loop_text(&normalized, LOOP_GUARD_TEXT_SIGNATURE_CHARS))
+}
+
+fn bounded_loop_text(text: &str, max_chars: usize) -> String {
+    let mut out = text.chars().take(max_chars).collect::<String>();
+    if text.chars().nth(max_chars).is_some() {
+        out.push('…');
+    }
+    out
 }
 
 /// Model-visible internal tool error for calls whose provider is no longer
@@ -2482,6 +2516,7 @@ impl Harness {
     ) {
         match cid {
             Some(cid) => {
+                self.reset_loop_guard_for_progress(cid);
                 self.publish_for_agent_from(cid, source, Event::ToolResult(result.clone()));
                 self.publish_for_agent_from(cid, source, Event::ProviderToolResult(result.clone()));
             }
@@ -2501,6 +2536,7 @@ impl Harness {
     ) {
         match cid {
             Some(cid) => {
+                self.record_tool_failure_loop_signature(cid, &error);
                 self.publish_for_agent_from(cid, source, Event::ToolError(error.clone()));
                 self.publish_for_agent_from(cid, source, Event::ProviderToolError(error.clone()));
             }
@@ -2782,6 +2818,8 @@ impl Harness {
             match (&event, folded_node_id) {
                 (Event::AgentHeadMoved(moved), _) => {
                     c.head = Some(moved.node_id);
+                    c.loop_guard.invalidate_branch();
+                    c.pending_prompts.retain(|prompt| !prompt.is_loop_guard());
                 }
                 (_, Some(node_id)) => {
                     // Only advance the agent's own branch cursor when
@@ -7626,6 +7664,7 @@ impl Harness {
             || !self.turn_state.is_idle()
             || !self.extensions_all_ready()
         {
+            self.reset_loop_guard_for_progress(&cid);
             if let Some(conv) = self.agents.get_mut(&cid) {
                 conv.pending_prompts.push_back(PendingPrompt::user(text));
             }
@@ -7633,6 +7672,7 @@ impl Harness {
             return Ok(PromptSubmission::Queued);
         }
         if self.dispatch_blocked_for(&cid) {
+            self.reset_loop_guard_for_progress(&cid);
             if let Some(conv) = self.agents.get_mut(&cid) {
                 conv.pending_prompts.push_back(PendingPrompt::user(text));
             }
@@ -7671,6 +7711,9 @@ impl Harness {
             || !self.turn_state.is_idle()
             || !self.extensions_all_ready()
         {
+            if !prompt.is_internal() {
+                self.reset_loop_guard_for_progress(&cid);
+            }
             if let Some(conv) = self.agents.get_mut(&cid) {
                 conv.pending_prompts.push_back(prompt.clone());
             }
@@ -7686,6 +7729,9 @@ impl Harness {
             return Ok(PromptSubmission::Queued);
         }
         if self.dispatch_blocked_for(&cid) {
+            if !prompt.is_internal() {
+                self.reset_loop_guard_for_progress(&cid);
+            }
             if let Some(conv) = self.agents.get_mut(&cid) {
                 conv.pending_prompts.push_back(prompt.clone());
             }
@@ -10120,7 +10166,17 @@ impl Harness {
             self.drain_pending_tool_invocations()?;
         } else {
             self.clear_prompt_tool_snapshot(&response.agent_prompt_id);
+            self.record_assistant_loop_signature(&cid, assistant_text.as_deref());
             self.set_agent_turn_state(&cid, AgentTurnState::Idle);
+            if self.agents.get(&cid).is_some_and(|conv| {
+                conv.pending_prompts
+                    .iter()
+                    .any(PendingPrompt::is_loop_guard)
+            }) {
+                self.fold_pending_prompts_as_steered(&cid);
+                self.dispatch_prompt_after_publish_idle(&cid);
+                return Ok(());
+            }
             // No tool calls — this agent's turn is done. Drain
             // any queued prompts (on this or other agents) that
             // are now eligible to dispatch.
@@ -10386,6 +10442,7 @@ impl Harness {
         self.record_wait_background_result(background);
         self.background_completion_targets
             .insert(call_id.clone(), cid.clone());
+        self.reset_loop_guard_for_progress(&cid);
         self.queue_background_completion_prompt(&cid, &call_id);
         // Keep the completion prompt queued before draining. If an unblocked
         // queued call closes the tool round, `maybe_complete_agent_turn` can
@@ -10695,6 +10752,18 @@ impl Harness {
             false
         };
         if should_send {
+            if self
+                .agents
+                .get(cid)
+                .is_some_and(|conv| conv.loop_guard.stop_automatic_continuation())
+                && let Some(conv) = self.agents.get_mut(cid)
+            {
+                conv.pending_prompts
+                    .retain(|prompt| !prompt.is_loop_guard());
+                if conv.pending_prompts.is_empty() {
+                    return;
+                }
+            }
             self.fold_pending_prompts_as_steered(cid);
             // If folding the steered prompts parked any of them in
             // interception (e.g. an extension intercepting
@@ -10753,10 +10822,15 @@ impl Harness {
             .map(|c| c.pending_prompts.drain(..).collect())
             .unwrap_or_default();
         if let Some(user_prompt_pos) = pending.iter().position(|prompt| !prompt.is_internal()) {
+            self.reset_loop_guard_for_progress(cid);
+            pending.retain(|prompt| !prompt.is_loop_guard());
             let restore_prompts = self.take_pending_restore_prompts_for_user_prompt(cid);
             if !restore_prompts.is_empty() {
                 pending.splice(user_prompt_pos..user_prompt_pos, restore_prompts);
             }
+        }
+        if pending.iter().any(PendingPrompt::is_loop_guard) {
+            self.mark_loop_guard_breakers_dispatched(cid);
         }
         self.publish_prompts_as_steered(cid, pending);
     }
@@ -10828,6 +10902,163 @@ impl Harness {
             .unwrap_or_default()
     }
 
+    fn reset_loop_guard_for_progress(&mut self, cid: &AgentId) {
+        if let Some(conv) = self.agents.get_mut(cid) {
+            conv.loop_guard.reset_for_progress();
+            conv.pending_prompts
+                .retain(|prompt| !prompt.is_loop_guard());
+        }
+    }
+
+    fn record_loop_signature(
+        &mut self,
+        cid: &AgentId,
+        signature: LoopTurnSignature,
+    ) -> Option<LoopGuardTrigger> {
+        let conv = self.agents.get_mut(cid)?;
+        let guard = &mut conv.loop_guard;
+        guard.push_recent(signature.clone(), LOOP_GUARD_RECENT_LIMIT);
+
+        let trigger = match &signature {
+            LoopTurnSignature::AssistantText(text) => {
+                let repeated =
+                    guard.recent_repeats(&signature, LOOP_GUARD_ASSISTANT_REPEAT_THRESHOLD);
+                repeated.then(|| {
+                    (
+                        format!("assistant:{text}"),
+                        "repeated assistant response with no tool action".to_owned(),
+                    )
+                })
+            }
+            LoopTurnSignature::ToolFailure(failure) => {
+                let repeated =
+                    guard.repeated_tool_failure(failure, LOOP_GUARD_TOOL_FAILURE_REPEAT_THRESHOLD);
+                if repeated {
+                    Some((
+                        format!("tool-failure:{failure}"),
+                        "repeated identical failing tool call".to_owned(),
+                    ))
+                } else if guard.consecutive_tool_failures()
+                    >= LOOP_GUARD_CONSECUTIVE_FAILURE_THRESHOLD
+                {
+                    Some((
+                        "tool-failure-streak".to_owned(),
+                        "several consecutive tool failures without a successful result".to_owned(),
+                    ))
+                } else {
+                    None
+                }
+            }
+        }
+        .or_else(|| {
+            guard.abab_suffix().map(|(a, b)| {
+                (
+                    format!("abab:{a:?}:{b:?}"),
+                    "repeated A/B/A/B turn pattern".to_owned(),
+                )
+            })
+        })?;
+
+        let (cycle_key, reason) = trigger;
+        Some(LoopGuardTrigger { cycle_key, reason })
+    }
+
+    fn handle_loop_guard_trigger(&mut self, cid: &AgentId, cycle_key: String, reason: String) {
+        let Some(conv) = self.agents.get_mut(cid) else {
+            return;
+        };
+        if let Some(state) = conv.loop_guard.cycle_state(&cycle_key) {
+            match state {
+                LoopCycleState::BreakerPending => return,
+                LoopCycleState::BreakerDispatched => {
+                    conv.loop_guard.mark_cycle_blocked(&cycle_key);
+                    self.emit_notice(
+                        tau_proto::notice_kind::HARNESS_INTERNAL_WARNING,
+                        tau_proto::NoticeLevel::Warning,
+                        true,
+                        &format!(
+                            "Loop guard stopped automatic continuation for agent `{cid}` after repeated cycle: {reason}."
+                        ),
+                    );
+                }
+                LoopCycleState::Blocked => {}
+            }
+            return;
+        }
+
+        conv.loop_guard
+            .remember_cycle_pending(cycle_key, LOOP_GUARD_CYCLE_LIMIT);
+        conv.pending_prompts
+            .push_back(PendingPrompt::loop_guard(loop_guard_pivot_prompt(&reason)));
+    }
+
+    fn mark_loop_guard_breakers_dispatched(&mut self, cid: &AgentId) {
+        let Some(conv) = self.agents.get_mut(cid) else {
+            return;
+        };
+        conv.loop_guard.mark_pending_breakers_dispatched();
+    }
+
+    fn remember_tool_call_loop_signature(&mut self, cid: &AgentId, call: &AgentToolCall) {
+        let Some(conv) = self.agents.get_mut(cid) else {
+            return;
+        };
+        let signature = format!(
+            "{}:{}",
+            call.name,
+            bounded_loop_text(
+                &format!("{:?}", call.arguments),
+                LOOP_GUARD_TOOL_ARGUMENT_CHARS
+            )
+        );
+        conv.loop_guard.push_tool_call_signature(
+            call.id.clone(),
+            signature,
+            LOOP_GUARD_RECENT_LIMIT,
+        );
+    }
+
+    fn take_tool_call_loop_signature(
+        &mut self,
+        cid: &AgentId,
+        call_id: &ToolCallId,
+    ) -> Option<String> {
+        self.agents
+            .get_mut(cid)?
+            .loop_guard
+            .take_tool_call_signature(call_id)
+    }
+
+    fn record_assistant_loop_signature(&mut self, cid: &AgentId, text: Option<&str>) {
+        let Some(signature_text) = text.and_then(normalize_loop_text) else {
+            return;
+        };
+        if let Some(trigger) =
+            self.record_loop_signature(cid, LoopTurnSignature::AssistantText(signature_text))
+        {
+            self.handle_loop_guard_trigger(cid, trigger.cycle_key, trigger.reason);
+        }
+    }
+
+    fn record_tool_failure_loop_signature(&mut self, cid: &AgentId, error: &ToolError) {
+        let call_signature = self
+            .take_tool_call_loop_signature(cid, &error.call_id)
+            .unwrap_or_else(|| format!("{}:<arguments unavailable>", error.tool_name));
+        let failure = format!(
+            "{call_signature}:{}",
+            bounded_loop_text(&error.message, LOOP_GUARD_TOOL_ERROR_CHARS)
+        );
+        if let Some(conv) = self.agents.get_mut(cid) {
+            conv.loop_guard
+                .push_tool_failure(failure.clone(), LOOP_GUARD_RECENT_LIMIT);
+        }
+        if let Some(trigger) =
+            self.record_loop_signature(cid, LoopTurnSignature::ToolFailure(failure))
+        {
+            self.handle_loop_guard_trigger(cid, trigger.cycle_key, trigger.reason);
+        }
+    }
+
     fn execute_agent_tool_call(
         &mut self,
         cid: &AgentId,
@@ -10835,6 +11066,7 @@ impl Harness {
     ) -> Result<(), HarnessError> {
         let tool_name = call.name.clone();
         let role_name = self.role_name_for_agent_id(cid).to_owned();
+        self.remember_tool_call_loop_signature(cid, call);
 
         let prompt_id = self.prompt_tool_call_prompts.get(&call.id).cloned();
         let prompt_tool_spec = prompt_id

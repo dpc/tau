@@ -58,6 +58,9 @@ impl Harness {
         prompt: impl Into<PendingPrompt>,
     ) -> Result<(), HarnessError> {
         let prompt = prompt.into();
+        if !prompt.is_internal() {
+            self.reset_loop_guard_for_progress(agent_id);
+        }
         let target_agent_id: tau_proto::AgentId =
             crate::parse_agent_id(self.ensure_agent_id_for_agent(agent_id).ok_or_else(|| {
                 HarnessError::Participant(format!(
@@ -107,6 +110,7 @@ impl Harness {
     ) -> Result<(), HarnessError> {
         let prompt = prompt.into();
         if !prompt.is_internal() {
+            self.reset_loop_guard_for_progress(agent_id);
             let restore_prompts = self.take_pending_restore_prompts_for_user_prompt(agent_id);
             if !restore_prompts.is_empty() {
                 for restore_prompt in restore_prompts {
