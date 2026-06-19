@@ -13,13 +13,14 @@ Tau rooms so each registered Tau agent appears as a separate conversation.
 ## Prosody-oriented setup notes
 
 For the recommended MUC mode, configure the MUC component so newly created Tau
-rooms are private/hidden, persistent if desired, members-only for your allowed
-human JIDs, and expose real JIDs to room occupants (`public_jids` in Prosody
-terms). This MVP joins/creates rooms but does not submit room configuration
-forms or member affiliation IQs, so privacy and membership policy must come from
-server defaults or preconfiguration. Tau still fails closed on inbound MUC
-messages without real-JID proof unless `trust_muc_membership: true` is
-explicitly configured.
+rooms are private/hidden, persistent if desired, and expose real JIDs to room
+occupants (`public_jids` in Prosody terms). Tau waits for its MUC self-presence
+and, when the server reports a newly-created room, submits the XEP-0045
+instant-room owner form to unlock the room before reporting `xmpp_register`
+success. Tau does not yet grant member affiliations; if the server default is
+members-only, invited users still need preconfigured/server-side membership.
+Tau fails closed on inbound MUC messages without real-JID proof unless
+`trust_muc_membership: true` is explicitly configured.
 
 Representative Prosody/NixOS sketch:
 
@@ -53,7 +54,7 @@ services.prosody = {
       modules_enabled = { "muc_mam"; }
       muc_room_default_public = false
       muc_room_default_persistent = true
-      muc_room_default_members_only = true
+      muc_room_default_members_only = false
       muc_room_default_moderated = false
       muc_room_default_public_jids = true
       muc_log_by_default = true
@@ -113,8 +114,12 @@ still requires an existing registered conversation after that wait.
   normalization cannot merge distinct Tau agents. Tau sends a formal XEP-0045
   mediated invite to `default_recipient` plus a direct fallback notice with the
   room JID, and enforces `allowed_jids` from current real-JID presence when
-  available. Invite and fallback notice delivery are best-effort after the room
-  is joined; Tau still tracks and leaves the room on registration rollback,
+  available. Registration waits for the exact post-join `room/nick`
+  self-presence or presence error. A self-presence with status 201 triggers an
+  instant-room owner config submit; presence/config errors or timeouts are
+  returned from `xmpp_register` instead of silently claiming a usable room.
+  Invite and fallback notice delivery are best-effort after the room is joined
+  and unlocked; Tau still tracks and leaves the room on registration rollback,
   unregister, or shutdown.
 - `direct_resource`: announces the current bound full JID to `default_recipient`
   and accepts only direct messages addressed exactly to the current server-bound

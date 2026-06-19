@@ -36,7 +36,7 @@ Recommended routing is one MUC room per Tau session id and agent id. The room na
 
 Status: unconfirmed
 
-MUC registration sends a formal XEP-0045 mediated invite to `default_recipient`, followed by a direct fallback notice containing the room JID for clients that do not surface mediated invites. After a MUC join succeeds, invite and fallback notice delivery are best-effort: the joined room is tracked immediately so timeout, dropped registration response, unregister, and session shutdown can send unavailable presence before removing routing state where the worker is still connected.
+MUC registration sends a join presence, stores the room/nick as a pending non-routable join, waits for the exact `room/nick` self-presence or presence error, and submits an XEP-0045 instant-room owner config if the self-presence reports status 201 for a newly-created room. Only after join confirmation and any required room unlock succeeds does registration promote the join to a routable conversation and send a formal XEP-0045 mediated invite to `default_recipient`, followed by a direct fallback notice containing the room JID for clients that do not surface mediated invites. Invite and fallback notice delivery are best-effort after the room is usable; rollback, unregister, and session shutdown send unavailable presence for tracked pending or active rooms where the worker is still connected.
 
 ## Direct-resource fallback scope
 
@@ -54,7 +54,7 @@ Status: unconfirmed
 
 Status: unconfirmed
 
-The MVP joins/creates MUC rooms and requests no history. It does not submit XEP-0045 room configuration forms or member affiliation IQs. Private, hidden, members-only, persistent, and real-JID-visible room policy must be provided by the Prosody/server defaults or preconfiguration.
+The MVP joins/creates MUC rooms, requests no history, waits for self-presence, and submits instant-room config to unlock newly-created rooms. It does not fetch full configuration forms or submit member affiliation IQs. Private, hidden, members-only, persistent, and real-JID-visible room policy must be provided by the Prosody/server defaults or preconfiguration.
 
 Tau-side authorization still fails closed unless an inbound MUC occupant has a current real-JID presence mapping that matches `allowed_jids`. Operators may set `trust_muc_membership: true` only when they intentionally accept server-side MUC membership as the security boundary for hidden-real-JID rooms.
 
@@ -68,7 +68,7 @@ The MVP sends ordinary XMPP text protected by TLS certificate validation. It doe
 
 Status: unconfirmed
 
-Unit tests with fake or state-only XMPP surfaces cover config validation, opt-in tool metadata, send-before-register rejection, registration state, bounded register/send readiness waits and timeout propagation, disconnect readiness/cache invalidation, multiple MUC agents in one Tau session, stable session/agent room identity, long-agent-id and case-folding non-collapse, MUC mediated invite payloads, MUC leave presence construction, MUC real-JID allowlist routing, hidden-real-JID fail-closed behavior, explicit membership-trust behavior, own-message suppression, stale occupant cache invalidation, delayed/history drops, message-size drops, unknown tool-argument rejection, direct full-JID exact-to routing, and reconnect state updates. Live Prosody testing is still future work.
+Unit tests with fake or state-only XMPP surfaces cover config validation, opt-in tool metadata, send-before-register rejection, registration state, bounded register/send readiness waits and timeout propagation, disconnect readiness/cache invalidation, multiple MUC agents in one Tau session, stable session/agent room identity, long-agent-id and case-folding non-collapse, MUC self-presence status 201 detection, MUC join error surfacing, exact room/nick join correlation, MUC mediated invite payloads, MUC leave presence construction, MUC real-JID allowlist routing, hidden-real-JID fail-closed behavior, explicit membership-trust behavior, own-message suppression, stale occupant cache invalidation, delayed/history drops, message-size drops, unknown tool-argument rejection, direct full-JID exact-to routing, and reconnect state updates. Live Prosody testing is still future work.
 
 ## Registration timeout rollback
 

@@ -14,8 +14,10 @@
 - Messages from JIDs outside `allowed_jids` are ignored before routing.
 - MUC mode requires real-JID visibility by default. If real JIDs are hidden, the
   extension fails closed unless `trust_muc_membership: true` is explicitly set.
-  Tau does not currently configure MUC privacy or member affiliations itself;
-  deployments must enforce that at the server or room-default layer.
+  Tau submits instant-room configuration only to unlock newly-created rooms; it
+  does not currently relax privacy settings or grant member affiliations.
+  Deployments must enforce privacy and any members-only policy at the server or
+  room-default layer.
 - MUC room names are routing keys derived from the full Tau session id and full
   validated agent id through lowercase hex encodings. Distinct agent ids must
   not collapse after XMPP JID normalization, because that would risk cross-agent

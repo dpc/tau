@@ -607,6 +607,132 @@ fn delayed_muc_message(from: Jid, body: &str) -> Stanza {
     message.into()
 }
 
+/// MUC join confirmation must notice status 201 so registration can unlock a
+/// newly-created room with an instant-room owner configuration before reporting
+/// success to the agent.
+#[test]
+fn muc_self_presence_status_201_requires_instant_room_setup() {
+    let occupant = Jid::new("tau-agent-1@conference.example.org/tau-self").expect("jid");
+    let mut presence = Presence::available();
+    presence.from = Some(occupant);
+    presence.payloads.push(
+        MucUser::new()
+            .with_statuses(vec![MucStatus::SelfPresence, MucStatus::RoomHasBeenCreated])
+            .into(),
+    );
+
+    let join = MucJoin::from_self_presence(&presence).expect("self-presence");
+
+    assert!(join.created);
+    assert!(join.statuses.contains(&MucStatus::RoomHasBeenCreated));
+}
+
+/// MUC registration must fail loudly on a matching join presence error instead
+/// of storing a room and claiming success for a locked or policy-rejected room.
+#[test]
+fn muc_join_presence_error_is_reported() {
+    let occupant = Jid::new("tau-agent-1@conference.example.org/tau-self").expect("jid");
+    let mut presence = Presence::error();
+    presence.from = Some(occupant);
+    presence.payloads.push(
+        StanzaError::new(
+            xmpp_parsers::stanza_error::ErrorType::Cancel,
+            xmpp_parsers::stanza_error::DefinedCondition::ItemNotFound,
+            "",
+            "room locked",
+        )
+        .into(),
+    );
+
+    let err = MucJoin::from_self_presence(&presence).expect_err("join error");
+
+    assert!(err.contains("MUC join rejected"));
+    assert!(err.contains("ItemNotFound"));
+}
+
+/// A matching unavailable presence is not a successful MUC join confirmation:
+/// treating it as success would let registration continue after the server has
+/// removed Tau's room occupant.
+#[test]
+fn muc_unavailable_self_presence_is_not_join_success() {
+    let occupant = Jid::new("tau-agent-1@conference.example.org/tau-self").expect("jid");
+    let mut presence = Presence::unavailable();
+    presence.from = Some(occupant);
+
+    let err = MucJoin::from_self_presence(&presence).expect_err("unavailable rejected");
+
+    assert!(err.contains("did not succeed"));
+    assert!(err.contains("Unavailable"));
+}
+
+/// The instant-room setup IQ uses the XEP-0045 owner namespace with an empty
+/// XEP-0004 submit form, which unlocks a new room using server defaults without
+/// pretending to configure privacy or affiliations.
+#[test]
+fn instant_room_config_query_uses_owner_submit_form() {
+    let query = instant_room_config_query();
+    let form = query.children().next().expect("form child");
+
+    assert_eq!(query.name(), "query");
+    assert_eq!(query.ns(), MUC_OWNER_NS);
+    assert_eq!(form.name(), "x");
+    assert_eq!(form.ns(), xmpp_parsers::ns::DATA_FORMS);
+    assert_eq!(form.attr("type"), Some("submit"));
+}
+
+/// Pending MUC joins are separate from routable room maps so a room that fails
+/// setup can be cleaned up without accepting prompts from it.
+#[test]
+fn pending_muc_join_is_not_routable_and_can_be_removed() {
+    let (tx, _rx) = mpsc::channel();
+    let mut worker = WorkerState::new(cfg(), tx);
+    let room = Jid::new("tau-agent-1@conference.example.org")
+        .expect("jid")
+        .to_bare();
+    worker.pending_muc_joins.insert(
+        agent_id("agent-1"),
+        MucOccupant::new(room.clone(), "tau-self".to_owned()),
+    );
+
+    assert!(!worker.room_to_agent.contains_key(&room));
+    assert!(!worker.conversations.contains_key(&agent_id("agent-1")));
+    assert!(
+        worker
+            .pending_muc_joins
+            .remove(&agent_id("agent-1"))
+            .is_some()
+    );
+}
+
+/// Join confirmation correlation is exact to the room/nick occupant JID so
+/// unrelated room presence cannot satisfy a pending registration.
+#[test]
+fn muc_join_presence_correlation_requires_exact_room_and_nick() {
+    let room = Jid::new("tau-agent-1@conference.example.org")
+        .expect("jid")
+        .to_bare();
+    let occupant = muc_occupant_jid(&room, "tau-self").expect("occupant jid");
+    let mut matching = Presence::available();
+    matching.from = Some(occupant);
+    let mut other_nick = Presence::available();
+    other_nick.from = Some(Jid::new("tau-agent-1@conference.example.org/alice").expect("jid"));
+    let mut other_room = Presence::available();
+    other_room.from = Some(Jid::new("other@conference.example.org/tau-self").expect("jid"));
+
+    assert!(muc_presence_from(
+        &matching,
+        matching.from.as_ref().expect("from")
+    ));
+    assert!(!muc_presence_from(
+        &other_nick,
+        matching.from.as_ref().expect("from")
+    ));
+    assert!(!muc_presence_from(
+        &other_room,
+        matching.from.as_ref().expect("from")
+    ));
+}
+
 /// MUC groupchat messages without real-JID proof fail closed by default so room
 /// anonymity cannot silently bypass `allowed_jids`.
 #[test]

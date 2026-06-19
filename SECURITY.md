@@ -76,8 +76,9 @@ arbitrary destination JIDs: outgoing messages use only the registered agent
 conversation, and MUC invites/notices go only to the configured allowlisted
 default recipient. Outbound MUC messages are visible to room occupants. The MVP is
 plaintext XMPP over TLS only and does not implement OMEMO/E2EE, so XMPP
-servers/operators can read message content. Tau does not currently configure
-MUC privacy or member affiliations itself; private/hidden/members-only policy
+servers/operators can read message content. Tau submits only the XEP-0045
+instant-room owner form needed to unlock newly-created MUC rooms; it does not
+configure MUC privacy or member affiliations itself. Private/hidden/members-only policy
 must come from server defaults or preconfiguration. MUC mode must verify real
 sender JIDs from room presence by default; if a server hides real JIDs, the
 extension fails closed unless the user explicitly configures trust in

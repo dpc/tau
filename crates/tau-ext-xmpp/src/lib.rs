@@ -18,15 +18,18 @@ use tau_proto::{
     HarnessInputMessage, HarnessOutputMessage, PeerInputReader, PeerOutputWriter, SessionId,
     ToolError, ToolProgress, ToolResult, ToolSpec, ToolStarted, ToolUseState, ToolUseStatus,
 };
-use tokio_xmpp::Client;
+use tokio_xmpp::{Client, IqRequest, IqResponse};
 use xmpp_parsers::delay::Delay;
+use xmpp_parsers::iq::Iq;
 use xmpp_parsers::jid::{BareJid, Jid};
 use xmpp_parsers::message::{Lang, Message, MessageType};
 use xmpp_parsers::muc::muc::History;
-use xmpp_parsers::muc::user::Invite;
+use xmpp_parsers::muc::user::{Invite, Status as MucStatus};
 use xmpp_parsers::muc::{Muc, MucUser};
+use xmpp_parsers::ns;
 use xmpp_parsers::presence::{Presence, Type as PresenceType};
 use xmpp_parsers::stanza::Stanza;
+use xmpp_parsers::stanza_error::StanzaError;
 
 /// Tracing target used by this extension.
 pub const LOG_TARGET: &str = "xmpp";
@@ -55,6 +58,7 @@ const REGISTER_TIMEOUT: Duration = Duration::from_secs(45);
 const ONLINE_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
 const READY_RESPONSE_SLACK: Duration = Duration::from_secs(1);
 const STANZA_TIMEOUT: Duration = Duration::from_secs(20);
+const MUC_OWNER_NS: &str = "http://jabber.org/protocol/muc#owner";
 
 /// Run the XMPP extension over stdio.
 pub fn run_stdio() -> Result<(), Box<dyn Error>> {
@@ -745,6 +749,8 @@ struct WorkerState {
     bound_jid: Option<Jid>,
     /// Registered conversations.
     conversations: HashMap<AgentId, Conversation>,
+    /// MUC joins that have been sent but are not yet routable conversations.
+    pending_muc_joins: HashMap<AgentId, MucOccupant>,
     /// MUC room to agent mapping.
     room_to_agent: HashMap<BareJid, AgentId>,
     /// MUC occupant real JID cache.
@@ -759,6 +765,7 @@ impl WorkerState {
             tx,
             bound_jid: None,
             conversations: HashMap::new(),
+            pending_muc_joins: HashMap::new(),
             room_to_agent: HashMap::new(),
             occupant_real_jids: HashMap::new(),
         }
@@ -835,12 +842,20 @@ impl WorkerState {
                 self.ensure_online(client).await?;
                 let room = self.muc_room_for(&session_id, &agent_id)?;
                 let nick = format!("{}-{}", self.cfg.resource_prefix, short_random_hex());
-                join_room(client, &room, &nick).await?;
+                let occupant = MucOccupant::new(room.clone(), nick);
+                join_room(client, &occupant.room, &occupant.nick).await?;
+                self.pending_muc_joins
+                    .insert(agent_id.clone(), occupant.clone());
+                if let Err(error) = self.setup_joined_muc_room(client, &occupant).await {
+                    self.leave_pending_muc_join(&agent_id, client).await;
+                    return Err(error);
+                }
                 self.room_to_agent.insert(room.clone(), agent_id.clone());
                 let conversation = Conversation::Muc {
-                    room: room.clone(),
-                    nick,
+                    room: occupant.room.clone(),
+                    nick: occupant.nick.clone(),
                 };
+                self.pending_muc_joins.remove(&agent_id);
                 self.conversations
                     .insert(agent_id.clone(), conversation.clone());
                 if self.cfg.muc.invite_default_recipient {
@@ -976,6 +991,7 @@ impl WorkerState {
 
     /// Unregister one agent and leave its MUC room when applicable.
     async fn unregister_agent(&mut self, agent_id: &AgentId, client: &mut Client) {
+        self.leave_pending_muc_join(agent_id, client).await;
         if let Some(conversation) = self.remove_conversation(agent_id) {
             self.leave_conversation(&conversation, client).await;
         }
@@ -984,6 +1000,7 @@ impl WorkerState {
     /// Remove one registered conversation and its room mapping.
     fn remove_conversation(&mut self, agent_id: &AgentId) -> Option<Conversation> {
         let conversation = self.conversations.remove(agent_id);
+        self.pending_muc_joins.remove(agent_id);
         self.room_to_agent.retain(|_, mapped| mapped != agent_id);
         conversation
     }
@@ -997,6 +1014,14 @@ impl WorkerState {
             .collect::<Vec<_>>();
         for conversation in conversations {
             self.leave_conversation(&conversation, client).await;
+        }
+        let pending = self
+            .pending_muc_joins
+            .drain()
+            .map(|(_, occupant)| occupant)
+            .collect::<Vec<_>>();
+        for occupant in pending {
+            self.leave_muc_occupant(&occupant, client).await;
         }
         self.room_to_agent.clear();
         self.occupant_real_jids.clear();
@@ -1012,14 +1037,33 @@ impl WorkerState {
         }
     }
 
+    /// Leave a pending MUC join and remove its non-routable registration state.
+    async fn leave_pending_muc_join(&mut self, agent_id: &AgentId, client: &mut Client) {
+        if let Some(occupant) = self.pending_muc_joins.remove(agent_id) {
+            self.leave_muc_occupant(&occupant, client).await;
+        }
+    }
+
+    /// Send unavailable presence for one MUC room/nick pair.
+    async fn leave_muc_occupant(&self, occupant: &MucOccupant, client: &mut Client) {
+        if let Err(error) = leave_room(client, &occupant.room, &occupant.nick).await {
+            tracing::warn!(target: LOG_TARGET, %error, room = %occupant.room, "failed to leave pending xmpp muc room");
+        }
+    }
+
     /// Refresh connection-dependent state after the XMPP stream comes online.
     async fn handle_online(&mut self, bound_jid: Jid, client: &mut Client) {
+        self.refresh_online_state(bound_jid, client).await;
+        self.rejoin_all(client).await;
+    }
+
+    /// Refresh online state without recursively rejoining rooms.
+    async fn refresh_online_state(&mut self, bound_jid: Jid, client: &mut Client) {
         let direct_updates = self.apply_online_state(bound_jid);
         if let Err(error) = send_presence(client, Presence::available().with_priority(-1)).await {
             tracing::warn!(target: LOG_TARGET, %error, "failed to send xmpp available presence");
         }
         self.notify_direct_reconnects(direct_updates, client).await;
-        self.rejoin_all(client).await;
     }
 
     /// Apply state changes for a newly online stream and return direct-resource
@@ -1084,10 +1128,86 @@ impl WorkerState {
         }
     }
 
+    /// Complete post-join setup for a MUC occupant before it becomes routable.
+    async fn setup_joined_muc_room(
+        &mut self,
+        client: &mut Client,
+        occupant: &MucOccupant,
+    ) -> Result<(), String> {
+        let join = self
+            .wait_for_muc_self_presence(client, &occupant.room, &occupant.nick)
+            .await?;
+        tracing::info!(
+            target: LOG_TARGET,
+            room = %occupant.room,
+            nick = %occupant.nick,
+            created = join.created,
+            statuses = ?join.statuses,
+            "joined xmpp muc room"
+        );
+        if join.created {
+            tracing::info!(target: LOG_TARGET, room = %occupant.room, "new xmpp muc room created; submitting instant-room owner config");
+            submit_instant_room_config(client, &occupant.room).await?;
+            tracing::info!(target: LOG_TARGET, room = %occupant.room, "submitted xmpp muc instant-room owner config");
+        }
+        Ok(())
+    }
+
+    /// Wait for the post-join self-presence or matching presence error for a
+    /// specific room occupant JID.
+    async fn wait_for_muc_self_presence(
+        &mut self,
+        client: &mut Client,
+        room: &BareJid,
+        nick: &str,
+    ) -> Result<MucJoin, String> {
+        let occupant = muc_occupant_jid(room, nick)?;
+        let wait = async {
+            loop {
+                let Some(event) = client.next().await else {
+                    return Err(format!(
+                        "xmpp connection ended while waiting for MUC self-presence from {occupant}"
+                    ));
+                };
+                match event {
+                    tokio_xmpp::Event::Online { bound_jid, .. } => {
+                        self.refresh_online_state(bound_jid, client).await;
+                    }
+                    tokio_xmpp::Event::Disconnected(error) => {
+                        self.handle_disconnected();
+                        tracing::warn!(target: LOG_TARGET, %error, room = %room, nick = %nick, "xmpp disconnected while waiting for muc join confirmation");
+                    }
+                    tokio_xmpp::Event::Stanza(Stanza::Presence(presence))
+                        if muc_presence_from(&presence, &occupant) =>
+                    {
+                        let join = MucJoin::from_self_presence(&presence)?;
+                        self.handle_presence(presence);
+                        return Ok(join);
+                    }
+                    tokio_xmpp::Event::Stanza(stanza) => self.handle_stanza(stanza),
+                }
+            }
+        };
+        tokio::time::timeout(STANZA_TIMEOUT, wait)
+            .await
+            .map_err(|_| {
+                format!(
+                    "timed out waiting for xmpp MUC self-presence from {occupant}; room may still be locked or unusable"
+                )
+            })?
+    }
+
     /// Rejoin all known MUC rooms after an online/reconnect event.
-    async fn rejoin_all(&self, client: &mut Client) {
+    async fn rejoin_all(&mut self, client: &mut Client) {
         for (room, nick) in self.muc_rooms_to_rejoin() {
-            let _ = join_room(client, &room, &nick).await;
+            let occupant = MucOccupant::new(room, nick);
+            if let Err(error) = join_room(client, &occupant.room, &occupant.nick).await {
+                tracing::warn!(target: LOG_TARGET, %error, room = %occupant.room, "failed to rejoin xmpp muc room");
+                continue;
+            }
+            if let Err(error) = self.setup_joined_muc_room(client, &occupant).await {
+                tracing::warn!(target: LOG_TARGET, %error, room = %occupant.room, "failed to confirm/setup rejoined xmpp muc room");
+            }
         }
     }
 
@@ -1107,7 +1227,18 @@ impl WorkerState {
         match stanza {
             Stanza::Message(message) => self.handle_message(message),
             Stanza::Presence(presence) => self.handle_presence(presence),
-            Stanza::Iq(_) => {}
+            Stanza::Iq(iq) => self.handle_iq(iq),
+        }
+    }
+
+    /// Process inbound IQ stanzas not already claimed by an explicit IQ
+    /// response token.
+    fn handle_iq(&self, iq: Iq) {
+        if let Iq::Error {
+            from, id, error, ..
+        } = iq
+        {
+            tracing::warn!(target: LOG_TARGET, from = ?from, id = %id, error = ?error, "received xmpp iq error");
         }
     }
 
@@ -1121,6 +1252,13 @@ impl WorkerState {
             PresenceType::Unavailable | PresenceType::Error
         ) {
             self.occupant_real_jids.remove(&from);
+            if presence.type_ == PresenceType::Error {
+                let error = presence
+                    .payloads
+                    .iter()
+                    .find_map(|payload| StanzaError::try_from(payload.clone()).ok());
+                tracing::warn!(target: LOG_TARGET, from = %from, error = ?error, "received xmpp presence error");
+            }
             return;
         }
         for payload in presence.payloads {
@@ -1135,6 +1273,14 @@ impl WorkerState {
 
     /// Process inbound message stanzas.
     fn handle_message(&mut self, message: Message) {
+        if message.type_ == MessageType::Error {
+            let error = message
+                .payloads
+                .iter()
+                .find_map(|payload| StanzaError::try_from(payload.clone()).ok());
+            tracing::warn!(target: LOG_TARGET, from = ?message.from, error = ?error, "received xmpp message error");
+            return;
+        }
         // XEP-0203 delayed delivery marks backlog/history. The MVP is live-only,
         // so delayed messages must not become fresh Tau prompt submissions.
         if has_delay_payload(&message) {
@@ -1153,7 +1299,8 @@ impl WorkerState {
         match message.type_ {
             MessageType::Groupchat => self.handle_groupchat(message, body),
             MessageType::Chat | MessageType::Normal => self.handle_direct(message, body),
-            MessageType::Error | MessageType::Headline => {}
+            MessageType::Error => unreachable!("message errors returned before body handling"),
+            MessageType::Headline => {}
         }
     }
 
@@ -1263,6 +1410,21 @@ enum Conversation {
     },
 }
 
+#[derive(Clone)]
+struct MucOccupant {
+    /// Room bare JID for a pending or active occupant.
+    room: BareJid,
+    /// Tau occupant nick in the room.
+    nick: String,
+}
+
+impl MucOccupant {
+    /// Create a room/nick pair used for MUC join, setup, and cleanup.
+    fn new(room: BareJid, nick: String) -> Self {
+        Self { room, nick }
+    }
+}
+
 impl Conversation {
     /// Return the user-visible conversation address.
     fn address(&self) -> String {
@@ -1273,9 +1435,61 @@ impl Conversation {
     }
 }
 
+#[derive(Debug)]
+struct MucJoin {
+    /// Whether the server reported XEP-0045 status 201 for a newly-created
+    /// room.
+    created: bool,
+    /// MUC status codes included in the self-presence.
+    statuses: Vec<MucStatus>,
+}
+
+impl MucJoin {
+    /// Inspect the exact MUC self-presence returned after join and classify
+    /// success, new-room status, or server rejection.
+    fn from_self_presence(presence: &Presence) -> Result<Self, String> {
+        if presence.type_ == PresenceType::Error {
+            let error = presence
+                .payloads
+                .iter()
+                .find_map(|payload| StanzaError::try_from(payload.clone()).ok());
+            tracing::warn!(
+                target: LOG_TARGET,
+                from = ?presence.from,
+                error = ?error,
+                "xmpp muc join presence error"
+            );
+            let detail = error.map_or_else(
+                || "no stanza error payload".to_owned(),
+                |error| format!("{:?} {:?}", error.type_, error.defined_condition),
+            );
+            return Err(format!("xmpp MUC join rejected by server: {detail}"));
+        }
+        if presence.type_ != PresenceType::None {
+            tracing::warn!(
+                target: LOG_TARGET,
+                from = ?presence.from,
+                presence_type = ?presence.type_,
+                "xmpp muc join returned non-available self-presence"
+            );
+            return Err(format!(
+                "xmpp MUC join did not succeed; server returned {:?} self-presence",
+                presence.type_
+            ));
+        }
+        let statuses = presence
+            .payloads
+            .iter()
+            .find_map(|payload| MucUser::try_from(payload.clone()).ok())
+            .map(|muc_user| muc_user.status)
+            .unwrap_or_default();
+        let created = statuses.contains(&MucStatus::RoomHasBeenCreated);
+        Ok(Self { created, statuses })
+    }
+}
+
 async fn join_room(client: &mut Client, room: &BareJid, nick: &str) -> Result<(), String> {
-    let to = Jid::new(&format!("{room}/{nick}"))
-        .map_err(|e| format!("invalid muc occupant jid: {e}"))?;
+    let to = muc_occupant_jid(room, nick)?;
     let presence = Presence::available()
         .with_to(to)
         .with_payload(Muc::new().with_history(History::new().with_maxstanzas(0)));
@@ -1292,9 +1506,57 @@ async fn leave_room(client: &mut Client, room: &BareJid, nick: &str) -> Result<(
 }
 
 fn leave_presence(room: &BareJid, nick: &str) -> Result<Presence, String> {
-    let to = Jid::new(&format!("{room}/{nick}"))
-        .map_err(|e| format!("invalid muc occupant jid: {e}"))?;
+    let to = muc_occupant_jid(room, nick)?;
     Ok(Presence::unavailable().with_to(to))
+}
+
+fn muc_occupant_jid(room: &BareJid, nick: &str) -> Result<Jid, String> {
+    Jid::new(&format!("{room}/{nick}")).map_err(|e| format!("invalid muc occupant jid: {e}"))
+}
+
+fn muc_presence_from(presence: &Presence, occupant: &Jid) -> bool {
+    presence.from.as_ref() == Some(occupant)
+}
+
+async fn submit_instant_room_config(client: &mut Client, room: &BareJid) -> Result<(), String> {
+    // XEP-0045 instant-room setup: an empty owner data-form submit unlocks a
+    // newly-created room using server defaults. This is intentionally not a
+    // full privacy or member-affiliation configuration flow.
+    let query = instant_room_config_query();
+    let token = client
+        .send_iq(Some(Jid::from(room.clone())), IqRequest::Set(query))
+        .await;
+    match tokio::time::timeout(STANZA_TIMEOUT, token).await {
+        Ok(Ok(IqResponse::Result(_))) => Ok(()),
+        Ok(Ok(IqResponse::Error(error))) => {
+            tracing::warn!(target: LOG_TARGET, room = %room, error = ?error, "xmpp muc instant-room owner config rejected");
+            Err(format!(
+                "xmpp MUC instant-room owner config rejected by server: {:?} {:?}",
+                error.type_, error.defined_condition
+            ))
+        }
+        Ok(Err(error)) => {
+            tracing::warn!(target: LOG_TARGET, room = %room, %error, "failed to send xmpp muc instant-room owner config iq");
+            Err(format!(
+                "failed to send xmpp MUC instant-room owner config iq: {error}"
+            ))
+        }
+        Err(_) => Err(format!(
+            "timed out waiting for xmpp MUC instant-room owner config result from {room}"
+        )),
+    }
+}
+
+fn instant_room_config_query() -> xmpp_parsers::minidom::Element {
+    let form = xmpp_parsers::minidom::Element::builder("x", ns::DATA_FORMS)
+        .attr(
+            xmpp_parsers::minidom::rxml::xml_ncname!("type").into(),
+            "submit",
+        )
+        .build();
+    xmpp_parsers::minidom::Element::builder("query", MUC_OWNER_NS)
+        .append(form)
+        .build()
 }
 
 async fn send_presence(client: &mut Client, presence: Presence) -> Result<(), String> {
