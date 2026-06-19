@@ -256,6 +256,16 @@ fn xmpp_tools_have_group_and_tags() {
     );
 }
 
+/// Provider-owned repair examples must stay schema-valid as bridge tool
+/// argument shapes evolve.
+#[test]
+fn xmpp_tool_examples_are_schema_valid() {
+    for spec in [register_tool_spec(), send_tool_spec()] {
+        tau_core::validate_tool_examples(&spec)
+            .unwrap_or_else(|error| panic!("invalid examples for {}: {error}", spec.name));
+    }
+}
+
 /// Config validation fails closed when credentials, allowlist, default
 /// recipient, or MUC service information is absent or unsafe.
 #[test]

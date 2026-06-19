@@ -26,3 +26,6 @@ tokio.workspace = true
 tokio-xmpp.workspace = true
 tracing.workspace = true
 xmpp-parsers.workspace = true
+
+[dev-dependencies]
+tau-core.workspace = true

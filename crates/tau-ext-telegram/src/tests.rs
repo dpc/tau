@@ -132,6 +132,16 @@ fn telegram_tools_have_group_and_tags() {
     assert!(send.tags.iter().any(|tag| tag.as_str() == SEND_TOOL_TAG));
 }
 
+/// Provider-owned repair examples must stay schema-valid as bridge tool
+/// argument shapes evolve.
+#[test]
+fn telegram_tool_examples_are_schema_valid() {
+    for spec in [register_tool_spec(), send_tool_spec()] {
+        tau_core::validate_tool_examples(&spec)
+            .unwrap_or_else(|error| panic!("invalid examples for {}: {error}", spec.name));
+    }
+}
+
 /// Enabled config must name a non-empty token secret and a non-empty allowlist;
 /// otherwise the extension cannot safely decide who may use the bot.
 #[test]

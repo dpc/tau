@@ -39,4 +39,5 @@ tau-vcr.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+tau-core.workspace = true
 tempfile.workspace = true

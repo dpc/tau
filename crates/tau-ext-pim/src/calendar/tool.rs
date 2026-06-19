@@ -1,5 +1,7 @@
 use serde::Deserialize;
-use tau_proto::{CborValue, PromptFragment, PromptPriority, ToolSpec};
+use tau_proto::{
+    CborValue, PromptFragment, PromptPriority, ToolExample, ToolExampleSelector, ToolSpec,
+};
 
 use super::{TOOL_NAME, TOOL_PREFIX};
 
@@ -162,6 +164,7 @@ fn calendar_command_tool_spec(tool_name: &str, command: &str) -> ToolSpec {
     let mut spec = calendar_envelope_tool_spec(&format!("{TOOL_PREFIX}{tool_name}"));
     spec.description = Some(calendar_tool_description(tool_name, command).to_owned());
     spec.parameters = Some(calendar_command_parameters(command));
+    spec.examples = calendar_command_examples(command);
     spec
 }
 
@@ -193,8 +196,144 @@ fn calendar_envelope_tool_spec(name: &str) -> ToolSpec {
         tags: Vec::new(),
         enabled_by_default: false,
         background_support: None,
-        examples: Vec::new(),
+        examples: calendar_envelope_examples(),
     }
+}
+
+fn example_field(name: &str, value: CborValue) -> (CborValue, CborValue) {
+    (CborValue::Text(name.to_owned()), value)
+}
+
+fn example_text(value: &str) -> CborValue {
+    CborValue::Text(value.to_owned())
+}
+
+fn example_int(value: i64) -> CborValue {
+    CborValue::Integer(value.into())
+}
+
+fn calendar_example(id: &str, title: &str, arguments: CborValue) -> ToolExample {
+    ToolExample {
+        id: id.to_owned(),
+        title: Some(title.to_owned()),
+        arguments,
+        note: None,
+        subcommand: None,
+    }
+}
+
+fn calendar_command_examples(command: &str) -> Vec<ToolExample> {
+    let example = match command {
+        "list_calendars" => calendar_example(
+            "list-calendars",
+            "List calendars",
+            CborValue::Map(Vec::new()),
+        ),
+        "list_events" => calendar_example(
+            "list-events",
+            "Search events",
+            CborValue::Map(vec![
+                example_field("start", example_text("today")),
+                example_field("end", example_text("next week")),
+                example_field("limit", example_int(10)),
+            ]),
+        ),
+        "read_event" => calendar_example(
+            "read-event",
+            "Get an event",
+            CborValue::Map(vec![example_field("event_id", example_text("evt_123"))]),
+        ),
+        "free_busy" => calendar_example(
+            "free-busy",
+            "Check free/busy",
+            CborValue::Map(vec![
+                example_field("start", example_text("2026-06-19T09:00:00")),
+                example_field("end", example_text("2026-06-19T17:00:00")),
+            ]),
+        ),
+        "create_event" => calendar_example(
+            "create-event",
+            "Create an event",
+            CborValue::Map(vec![
+                example_field("title", example_text("Planning")),
+                example_field("start", example_text("tomorrow 10:00")),
+                example_field("end", example_text("tomorrow 10:30")),
+            ]),
+        ),
+        "update_event" => calendar_example(
+            "update-event",
+            "Update an event field",
+            CborValue::Map(vec![
+                example_field("event_id", example_text("evt_123")),
+                example_field("field", example_text("title")),
+                example_field("new_value", example_text("Updated title")),
+            ]),
+        ),
+        "delete_event" => calendar_example(
+            "delete-event",
+            "Delete an event",
+            CborValue::Map(vec![example_field("event_id", example_text("evt_123"))]),
+        ),
+        "respond_invite" => calendar_example(
+            "respond-invite",
+            "Respond to invite",
+            CborValue::Map(vec![
+                example_field("event_id", example_text("evt_123")),
+                example_field("response", example_text("accepted")),
+            ]),
+        ),
+        _ => return Vec::new(),
+    };
+    vec![example]
+}
+
+fn calendar_envelope_examples() -> Vec<ToolExample> {
+    CALENDAR_TOOL_COMMANDS
+        .iter()
+        .flat_map(|(_, command)| {
+            calendar_command_examples(command)
+                .into_iter()
+                .map(|mut example| {
+                    let args = calendar_envelope_args(command, example.arguments);
+                    example.arguments = CborValue::Map(vec![
+                        example_field("command", example_text(command)),
+                        example_field("args", args),
+                    ]);
+                    example.subcommand = Some(ToolExampleSelector {
+                        path: vec!["command".to_owned()],
+                        value: example_text(command),
+                    });
+                    example
+                })
+        })
+        .collect()
+}
+
+fn calendar_envelope_args(command: &str, args: CborValue) -> CborValue {
+    if command != "update_event" {
+        return args;
+    }
+    let CborValue::Map(entries) = args else {
+        return args;
+    };
+    let mut field_value = None;
+    let mut new_value = None;
+    let mut out = Vec::new();
+    for (key, value) in entries {
+        match (&key, &value) {
+            (CborValue::Text(key), CborValue::Text(value)) if key == "field" => {
+                field_value = Some(value.clone());
+            }
+            (CborValue::Text(key), CborValue::Text(value)) if key == "new_value" => {
+                new_value = Some(value.clone());
+            }
+            _ => out.push((key, value)),
+        }
+    }
+    if let (Some(field), Some(new_value)) = (field_value, new_value) {
+        out.push((CborValue::Text(field), CborValue::Text(new_value)));
+    }
+    CborValue::Map(out)
 }
 
 fn calendar_command_parameters(command: &str) -> serde_json::Value {

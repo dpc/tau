@@ -78,3 +78,49 @@ fn calendar_schema_hides_timezone_and_has_command_conditionals() {
     );
     assert!(update_schema.pointer("/anyOf").is_none());
 }
+
+#[test]
+fn calendar_tool_examples_validate_and_legacy_examples_parse() {
+    // Examples are provider-owned repair hints. Validate them against the
+    // registered schemas and ensure legacy envelope examples use runtime args,
+    // not only split-tool adapter args.
+    for spec in calendar_tool_specs()
+        .into_iter()
+        .chain([calendar_tool_spec()])
+    {
+        tau_core::validate_tool_examples(&spec)
+            .unwrap_or_else(|error| panic!("invalid examples for {}: {error}", spec.name));
+    }
+
+    for example in calendar_tool_spec().examples {
+        let invocation: ToolInvocation = example.arguments.deserialized().unwrap_or_else(|error| {
+            panic!("legacy example `{}` did not parse: {error}", example.id)
+        });
+        let args = invocation
+            .args
+            .unwrap_or_else(|| CborValue::Map(Vec::new()));
+        match invocation.command {
+            CalendarCommand::ListCalendars => {
+                let _: ListCalendarsArgs = args.deserialized().expect("list args");
+            }
+            CalendarCommand::ListEvents | CalendarCommand::FreeBusy => {
+                let _: CalendarRangeArgs = args.deserialized().expect("range args");
+            }
+            CalendarCommand::ReadEvent => {
+                let _: ReadEventArgs = args.deserialized().expect("read args");
+            }
+            CalendarCommand::CreateEvent => {
+                let _: CreateEventArgs = args.deserialized().expect("create args");
+            }
+            CalendarCommand::UpdateEvent => {
+                let _: UpdateEventArgs = args.deserialized().expect("update args");
+            }
+            CalendarCommand::DeleteEvent => {
+                let _: DeleteEventArgs = args.deserialized().expect("delete args");
+            }
+            CalendarCommand::RespondInvite => {
+                let _: RespondInviteArgs = args.deserialized().expect("respond args");
+            }
+        }
+    }
+}

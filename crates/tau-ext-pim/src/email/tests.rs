@@ -3733,3 +3733,20 @@ fn parser_accepts_and_rejects_command_shapes() {
         .is_err()
     );
 }
+
+#[test]
+fn email_tool_examples_validate_and_legacy_examples_parse() {
+    // Examples are provider-owned repair hints. Validate them against the
+    // registered schemas and ensure legacy envelope examples use runtime args,
+    // not only split-tool adapter args.
+    for spec in email_tool_specs().into_iter().chain([email_tool_spec()]) {
+        tau_core::validate_tool_examples(&spec)
+            .unwrap_or_else(|error| panic!("invalid examples for {}: {error}", spec.name));
+    }
+
+    for example in email_tool_spec().examples {
+        parse_command(&example.arguments).unwrap_or_else(|error| {
+            panic!("legacy example `{}` did not parse: {error:?}", example.id)
+        });
+    }
+}

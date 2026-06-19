@@ -48,8 +48,8 @@ use tau_proto::{
     ACTION_SCHEMA_VERSION, ActionArg, ActionArgKind, ActionChoice, ActionCommand, ActionError,
     ActionInvoke, ActionOutput, ActionResult, ActionSchema, CborValue, ConfigError, Event,
     HarnessInputMessage, HarnessOutputMessage, PeerInputReader, PeerOutputWriter, PromptFragment,
-    PromptPriority, ToolError, ToolProgress, ToolResult, ToolSpec, ToolStarted, ToolUseState,
-    ToolUseStats, ToolUseStatus,
+    PromptPriority, ToolError, ToolExample, ToolExampleSelector, ToolProgress, ToolResult,
+    ToolSpec, ToolStarted, ToolUseState, ToolUseStats, ToolUseStatus,
 };
 
 /// `tracing` target for events emitted from this extension.
@@ -4544,6 +4544,7 @@ fn email_command_tool_spec(command: &str) -> ToolSpec {
     let mut spec = email_envelope_tool_spec(&format!("{TOOL_PREFIX}{command}"));
     spec.description = Some(email_tool_description(command).to_owned());
     spec.parameters = Some(email_command_parameters(command));
+    spec.examples = email_command_examples(command);
     spec
 }
 
@@ -4570,8 +4571,116 @@ fn email_envelope_tool_spec(name: &str) -> ToolSpec {
         tags: Vec::new(),
         enabled_by_default: false,
         background_support: None,
-        examples: Vec::new(),
+        examples: email_envelope_examples(),
     }
+}
+
+fn example_field(name: &str, value: CborValue) -> (CborValue, CborValue) {
+    (CborValue::Text(name.to_owned()), value)
+}
+
+fn cbor_text(value: &str) -> CborValue {
+    CborValue::Text(value.to_owned())
+}
+
+fn cbor_int(value: i64) -> CborValue {
+    CborValue::Integer(value.into())
+}
+
+fn email_example(id: &str, title: &str, arguments: CborValue) -> ToolExample {
+    ToolExample {
+        id: id.to_owned(),
+        title: Some(title.to_owned()),
+        arguments,
+        note: None,
+        subcommand: None,
+    }
+}
+
+fn email_command_examples(command: &str) -> Vec<ToolExample> {
+    let example = match command {
+        "list_folders" => email_example("list-folders", "List folders", CborValue::Map(Vec::new())),
+        "list_recent" => email_example(
+            "list-recent",
+            "List recent mail",
+            CborValue::Map(vec![example_field("limit", cbor_int(10))]),
+        ),
+        "read" => email_example(
+            "read-message",
+            "Read a message",
+            CborValue::Map(vec![example_field("email_id", cbor_text("msg_123"))]),
+        ),
+        "request_access" => email_example(
+            "request-access",
+            "Request full access",
+            CborValue::Map(vec![example_field("email_id", cbor_text("msg_123"))]),
+        ),
+        "mark_read" => email_example(
+            "mark-read",
+            "Mark read",
+            CborValue::Map(vec![example_field("email_id", cbor_text("msg_123"))]),
+        ),
+        "mark_unread" => email_example(
+            "mark-unread",
+            "Mark unread",
+            CborValue::Map(vec![example_field("email_id", cbor_text("msg_123"))]),
+        ),
+        "star" => email_example(
+            "star-message",
+            "Star a message",
+            CborValue::Map(vec![example_field("email_id", cbor_text("msg_123"))]),
+        ),
+        "unstar" => email_example(
+            "unstar-message",
+            "Unstar a message",
+            CborValue::Map(vec![example_field("email_id", cbor_text("msg_123"))]),
+        ),
+        "trash" => email_example(
+            "trash-message",
+            "Move to trash",
+            CborValue::Map(vec![example_field("email_id", cbor_text("msg_123"))]),
+        ),
+        "send" => email_example(
+            "send-mail",
+            "Send mail",
+            CborValue::Map(vec![
+                example_field("to", CborValue::Array(vec![cbor_text("alice@example.com")])),
+                example_field("subject", cbor_text("Quick update")),
+                example_field(
+                    "body_text",
+                    cbor_text("Hello Alice,\n\nHere is the update."),
+                ),
+            ]),
+        ),
+        _ => return Vec::new(),
+    };
+    vec![example]
+}
+
+fn email_envelope_examples() -> Vec<ToolExample> {
+    EMAIL_COMMANDS
+        .iter()
+        .flat_map(|command| {
+            email_command_examples(command)
+                .into_iter()
+                .map(|mut example| {
+                    let args = email_envelope_args(command, example.arguments);
+                    example.arguments = CborValue::Map(vec![
+                        example_field("command", cbor_text(command)),
+                        example_field("args", args),
+                    ]);
+                    example.subcommand = Some(ToolExampleSelector {
+                        path: vec!["command".to_owned()],
+                        value: cbor_text(command),
+                    });
+                    example
+                })
+        })
+        .collect()
+}
+
+fn email_envelope_args(command: &str, args: CborValue) -> CborValue {
+    split_tool_args_to_command_args(command, args)
 }
 
 fn email_command_parameters(command: &str) -> serde_json::Value {
@@ -4600,6 +4709,7 @@ fn email_common_arg_properties() -> serde_json::Value {
             "days": {"type": "integer", "minimum": 1, "maximum": 365, "description": "For email_list_recent, include messages with IMAP internal date in the last N calendar days. Optional; defaults to 7 and is capped at 365."},
             "cursor": {"type": "string", "description": "Pagination cursor returned by email_list_recent."},
             "email_id": {"type": "string", "description": "Message id from email list results."},
+            "uid": {"type": "string", "description": "Legacy message uid for the envelope email tool."},
             "to": {"type": "array", "items": {"type": "string"}, "description": "Recipients. Required for email_send."},
             "cc": {"type": "array", "items": {"type": "string"}, "description": "Cc recipients for email_send."},
             "bcc": {"type": "array", "items": {"type": "string"}, "description": "Bcc recipients for email_send."},

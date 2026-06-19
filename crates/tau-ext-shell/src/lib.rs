@@ -18,7 +18,8 @@ use tau_proto::{
     CborValue, ConfigError, Event, ExtAgentContextPublish, ExtPromptFragmentPublish,
     ExtensionContextReady, HarnessInputMessage, HarnessOutputMessage, PeerInputReader,
     PeerOutputWriter, PromptContent, PromptFragment, PromptPriority, SessionAgentLoaded,
-    SessionStarted, ToolCancelled, ToolExample, ToolResult, ToolResultKind, ToolSpec, ToolTag,
+    SessionStarted, ToolCancelled, ToolExample, ToolExampleSelector, ToolResult, ToolResultKind,
+    ToolSpec, ToolTag,
 };
 use tracing::{debug, trace};
 
@@ -52,6 +53,18 @@ use crate::tools::{
 
 fn tool_tags(tags: &[&str]) -> Vec<ToolTag> {
     tags.iter().map(|tag| ToolTag::new(*tag)).collect()
+}
+
+fn example_field(name: &str, value: CborValue) -> (CborValue, CborValue) {
+    (CborValue::Text(name.to_owned()), value)
+}
+
+fn example_text(value: &str) -> CborValue {
+    CborValue::Text(value.to_owned())
+}
+
+fn example_int(value: i64) -> CborValue {
+    CborValue::Integer(value.into())
 }
 
 const SHELL_DIR_FORCE_UNLOCK_ACTION_ID: &str = "shell.dir.force_unlock";
@@ -176,10 +189,7 @@ where
             examples: vec![ToolExample {
                 id: "read-file".to_owned(),
                 title: Some("Read a file".to_owned()),
-                arguments: CborValue::Map(vec![(
-                    CborValue::Text("path".to_owned()),
-                    CborValue::Text("src/main.rs".to_owned()),
-                )]),
+                arguments: CborValue::Map(vec![example_field("path", example_text("src/main.rs"))]),
                 note: Some("Use only the path field for a full-file read.".to_owned()),
                 subcommand: None,
             }],
@@ -254,29 +264,14 @@ where
                 id: "replace-lines".to_owned(),
                 title: Some("Replace one line".to_owned()),
                 arguments: CborValue::Map(vec![
-                    (
-                        CborValue::Text("path".to_owned()),
-                        CborValue::Text("src/main.rs".to_owned()),
-                    ),
+                    example_field("path", example_text("src/main.rs")),
                     (
                         CborValue::Text("edits".to_owned()),
                         CborValue::Array(vec![CborValue::Map(vec![
-                            (
-                                CborValue::Text("start_line".to_owned()),
-                                CborValue::Integer(10.into()),
-                            ),
-                            (
-                                CborValue::Text("end_line_exclusive".to_owned()),
-                                CborValue::Integer(11.into()),
-                            ),
-                            (
-                                CborValue::Text("newText".to_owned()),
-                                CborValue::Text("replacement line".to_owned()),
-                            ),
-                            (
-                                CborValue::Text("context_line".to_owned()),
-                                CborValue::Text("line before replacement".to_owned()),
-                            ),
+                            example_field("start_line", example_int(10)),
+                            example_field("end_line_exclusive", example_int(11)),
+                            example_field("newText", example_text("replacement line")),
+                            example_field("context_line", example_text("line before replacement")),
                         ])]),
                     ),
                 ]),
@@ -350,7 +345,17 @@ where
             tags: tool_tags(&["shell:read", "shell:search"]),
             enabled_by_default: true,
             background_support: None,
-            examples: Vec::new(),
+            examples: vec![ToolExample {
+                id: "search-literal".to_owned(),
+                title: Some("Search literal text".to_owned()),
+                arguments: CborValue::Map(vec![
+                    example_field("pattern", example_text("TODO")),
+                    example_field("path", example_text("src")),
+                    example_field("glob", example_text("**/*.rs")),
+                ]),
+                note: Some("Set regex=true only when pattern is a regular expression.".to_owned()),
+                subcommand: None,
+            }],
         },
         ToolSpec {
             name: tau_proto::ToolName::new(FIND_TOOL_NAME),
@@ -386,7 +391,16 @@ where
             tags: tool_tags(&["shell:read", "shell:search"]),
             enabled_by_default: true,
             background_support: None,
-            examples: Vec::new(),
+            examples: vec![ToolExample {
+                id: "find-rust-files".to_owned(),
+                title: Some("Find files by glob".to_owned()),
+                arguments: CborValue::Map(vec![
+                    example_field("pattern", example_text("**/*.rs")),
+                    example_field("path", example_text("crates")),
+                ]),
+                note: None,
+                subcommand: None,
+            }],
         },
         ToolSpec {
             name: tau_proto::ToolName::new(LS_TOOL_NAME),
@@ -420,7 +434,13 @@ where
             tags: tool_tags(&["shell:read", "shell:list"]),
             enabled_by_default: true,
             background_support: None,
-            examples: Vec::new(),
+            examples: vec![ToolExample {
+                id: "list-directory".to_owned(),
+                title: Some("List a directory".to_owned()),
+                arguments: CborValue::Map(vec![example_field("path", example_text("src"))]),
+                note: None,
+                subcommand: None,
+            }],
         },
         ToolSpec {
             name: tau_proto::ToolName::new(CD_TOOL_NAME),
@@ -437,7 +457,13 @@ where
             tags: tool_tags(&["shell:cd"]),
             enabled_by_default: true,
             background_support: None,
-            examples: Vec::new(),
+            examples: vec![ToolExample {
+                id: "change-directory".to_owned(),
+                title: Some("Change directory".to_owned()),
+                arguments: CborValue::Map(vec![example_field("path", example_text("crates/tau"))]),
+                note: None,
+                subcommand: None,
+            }],
         },
         ToolSpec {
             name: tau_proto::ToolName::new(SHELL_TOOL_NAME),
@@ -484,7 +510,16 @@ where
             tags: tool_tags(&["shell:exec", "shell:exec:generic"]),
             enabled_by_default: true,
             background_support: None,
-            examples: Vec::new(),
+            examples: vec![ToolExample {
+                id: "run-command".to_owned(),
+                title: Some("Run a command".to_owned()),
+                arguments: CborValue::Map(vec![
+                    example_field("command", example_text("cargo test -p tau-core")),
+                    example_field("timeout", example_int(120)),
+                ]),
+                note: Some("For file edits, prefer apply_patch when available.".to_owned()),
+                subcommand: None,
+            }],
         },
         ToolSpec {
             name: tau_proto::ToolName::new(GPT_SHELL_TOOL_NAME),
@@ -519,7 +554,16 @@ where
             tags: tool_tags(&["shell:exec", "shell:exec:shell_command"]),
             enabled_by_default: false,
             background_support: None,
-            examples: Vec::new(),
+            examples: vec![ToolExample {
+                id: "run-command".to_owned(),
+                title: Some("Run a command".to_owned()),
+                arguments: CborValue::Map(vec![
+                    example_field("command", example_text("cargo test -p tau-core")),
+                    example_field("timeout", example_int(120)),
+                ]),
+                note: Some("For file edits, prefer apply_patch when available.".to_owned()),
+                subcommand: None,
+            }],
         },
     ]);
 
@@ -980,7 +1024,34 @@ fn dir_lock_tool_spec(enabled_by_default: bool) -> ToolSpec {
         tags,
         enabled_by_default,
         background_support: None,
-        examples: Vec::new(),
+        examples: vec![
+            ToolExample {
+                id: "update-lock".to_owned(),
+                title: Some("Acquire update lock".to_owned()),
+                arguments: CborValue::Map(vec![
+                    example_field("command", example_text("update")),
+                    example_field("directory", example_text(".")),
+                ]),
+                note: Some("Acquire before making file changes when directory locking is enabled.".to_owned()),
+                subcommand: Some(ToolExampleSelector {
+                    path: vec!["command".to_owned()],
+                    value: example_text("update"),
+                }),
+            },
+            ToolExample {
+                id: "unlock".to_owned(),
+                title: Some("Release update lock".to_owned()),
+                arguments: CborValue::Map(vec![
+                    example_field("command", example_text("unlock")),
+                    example_field("directory", example_text(".")),
+                ]),
+                note: None,
+                subcommand: Some(ToolExampleSelector {
+                    path: vec!["command".to_owned()],
+                    value: example_text("unlock"),
+                }),
+            },
+        ],
     }
 }
 

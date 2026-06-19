@@ -16,7 +16,8 @@ use rand::RngCore;
 use tau_proto::{
     AgentId, CborValue, ConfigError, Configure, Event, EventDelivery, ExtPromptSubmitRequest,
     HarnessInputMessage, HarnessOutputMessage, PeerInputReader, PeerOutputWriter, SessionId,
-    ToolError, ToolProgress, ToolResult, ToolSpec, ToolStarted, ToolUseState, ToolUseStatus,
+    ToolError, ToolExample, ToolProgress, ToolResult, ToolSpec, ToolStarted, ToolUseState,
+    ToolUseStatus,
 };
 use tokio_xmpp::{Client, IqRequest, IqResponse};
 use xmpp_parsers::delay::Delay;
@@ -1795,6 +1796,14 @@ fn xmpp_tool_group() -> tau_proto::ToolGroup {
     }
 }
 
+fn example_field(name: &str, value: CborValue) -> (CborValue, CborValue) {
+    (CborValue::Text(name.to_owned()), value)
+}
+
+fn example_text(value: &str) -> CborValue {
+    CborValue::Text(value.to_owned())
+}
+
 fn register_tool_spec() -> ToolSpec {
     ToolSpec {
         name: tau_proto::ToolName::new(REGISTER_TOOL_NAME),
@@ -1811,7 +1820,13 @@ fn register_tool_spec() -> ToolSpec {
         tags: vec![tau_proto::ToolTag::new(REGISTER_TOOL_TAG)],
         enabled_by_default: false,
         background_support: None,
-        examples: Vec::new(),
+        examples: vec![ToolExample {
+            id: "enable-registration".to_owned(),
+            title: Some("Register for XMPP".to_owned()),
+            arguments: CborValue::Map(vec![example_field("enabled", CborValue::Bool(true))]),
+            note: Some("Use enabled=false to stop receiving XMPP prompts.".to_owned()),
+            subcommand: None,
+        }],
     }
 }
 
@@ -1831,7 +1846,16 @@ fn send_tool_spec() -> ToolSpec {
         tags: vec![tau_proto::ToolTag::new(SEND_TOOL_TAG)],
         enabled_by_default: false,
         background_support: None,
-        examples: Vec::new(),
+        examples: vec![ToolExample {
+            id: "send-reply".to_owned(),
+            title: Some("Send an XMPP reply".to_owned()),
+            arguments: CborValue::Map(vec![example_field(
+                "message",
+                example_text("Thanks, I’ll look into it."),
+            )]),
+            note: Some("There is no destination argument; the registered conversation is used.".to_owned()),
+            subcommand: None,
+        }],
     }
 }
 

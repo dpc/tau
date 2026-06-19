@@ -428,6 +428,49 @@ fn startup_registers_echo_disabled_by_default_and_gpt_shell_visible_name() {
 }
 
 #[test]
+fn startup_registers_schema_valid_tool_examples() {
+    // Provider-owned examples are shown after failed calls, so every startup
+    // registration must keep them aligned with that tool's current schema.
+    let (mut reader, mut writer) = spawn_extension();
+
+    let mut checked = Vec::new();
+    for _ in 0..11 {
+        let event = reader
+            .read_event()
+            .expect("read")
+            .expect("startup event should arrive");
+        let Event::ToolRegister(register) = event else {
+            continue;
+        };
+        tau_core::validate_tool_examples(&register.tool)
+            .unwrap_or_else(|error| panic!("invalid examples for {}: {error}", register.tool.name));
+        checked.push(register.tool.name.to_string());
+    }
+    for tool_name in [
+        READ_TOOL_NAME,
+        EDIT_TOOL_NAME,
+        APPLY_PATCH_TOOL_NAME,
+        DIR_LOCK_TOOL_NAME,
+        GREP_TOOL_NAME,
+        FIND_TOOL_NAME,
+        LS_TOOL_NAME,
+        CD_TOOL_NAME,
+        SHELL_TOOL_NAME,
+        GPT_SHELL_TOOL_NAME,
+    ] {
+        assert!(
+            checked.iter().any(|name| name == tool_name),
+            "expected to validate examples for {tool_name}"
+        );
+    }
+
+    writer
+        .write_frame(&disconnect_frame(None))
+        .expect("disconnect");
+    writer.flush().expect("flush");
+}
+
+#[test]
 fn shell_tool_cancel_request_stops_running_command_quickly() {
     let (mut reader, mut writer) = spawn_extension();
     drain_startup(&mut reader);
