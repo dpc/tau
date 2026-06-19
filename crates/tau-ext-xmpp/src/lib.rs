@@ -1811,6 +1811,7 @@ fn register_tool_spec() -> ToolSpec {
         tags: vec![tau_proto::ToolTag::new(REGISTER_TOOL_TAG)],
         enabled_by_default: false,
         background_support: None,
+        examples: Vec::new(),
     }
 }
 
@@ -1830,6 +1831,7 @@ fn send_tool_spec() -> ToolSpec {
         tags: vec![tau_proto::ToolTag::new(SEND_TOOL_TAG)],
         enabled_by_default: false,
         background_support: None,
+        examples: Vec::new(),
     }
 }
 

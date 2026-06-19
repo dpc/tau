@@ -6,8 +6,8 @@ use std::error::Error;
 use std::fmt;
 
 use tau_proto::{
-    CborValue, ConnectionId, PromptFragment, ToolGroup, ToolName, ToolRegister, ToolRequest,
-    ToolSpec, ToolStarted, ToolType, nearest_name_suggestion,
+    CborValue, ConnectionId, PromptFragment, ToolExample, ToolExampleSelector, ToolGroup, ToolName,
+    ToolRegister, ToolRequest, ToolSpec, ToolStarted, ToolType, nearest_name_suggestion,
 };
 
 use crate::connection::RouteError;
@@ -16,6 +16,13 @@ const MAX_DIAGNOSTIC_ITEMS: usize = 16;
 const MAX_DIAGNOSTIC_ITEM_CHARS: usize = 40;
 const MAX_DIAGNOSTIC_MESSAGE_CHARS: usize = 1024;
 const MAX_DIAGNOSTIC_PATH_CHARS: usize = 200;
+const MAX_TOOL_EXAMPLES: usize = 32;
+const MAX_TOOL_EXAMPLE_ID_CHARS: usize = 64;
+const MAX_TOOL_EXAMPLE_TEXT_CHARS: usize = 120;
+const MAX_TOOL_EXAMPLE_SELECTOR_PATH: usize = 8;
+const MAX_TOOL_EXAMPLE_ARGUMENT_CHARS: usize = 600;
+const MAX_TOOL_EXAMPLE_ARGUMENT_NODES: usize = 128;
+const MAX_TOOL_EXAMPLE_HINT_CHARS: usize = 1200;
 
 /// Kind of provider registered for a tool name.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -52,10 +59,38 @@ pub enum ToolRegistryWarning {
     },
 }
 
+/// Error emitted by the tool registry while rejecting a bad registration.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ToolRegistrationError {
+    InvalidExample {
+        tool_name: ToolName,
+        example_id: String,
+        reason: String,
+    },
+}
+
+impl fmt::Display for ToolRegistrationError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidExample {
+                tool_name,
+                example_id,
+                reason,
+            } => write!(
+                f,
+                "invalid example `{example_id}` for tool `{tool_name}`: {reason}"
+            ),
+        }
+    }
+}
+
+impl Error for ToolRegistrationError {}
+
 /// Summary of one registration call.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct RegisterToolReport {
     pub warnings: Vec<ToolRegistryWarning>,
+    pub errors: Vec<ToolRegistrationError>,
 }
 
 /// Error returned when a tool tool request cannot be routed.
@@ -149,6 +184,290 @@ pub fn validate_tool_arguments(
         return Ok(());
     };
     validate_json_schema(schema, arguments, "$")
+}
+
+/// Validates provider-owned examples attached to a tool registration.
+pub fn validate_tool_examples(tool: &ToolSpec) -> Result<(), ToolRegistrationError> {
+    if tool.examples.len() > MAX_TOOL_EXAMPLES {
+        return Err(invalid_example(
+            tool,
+            "<tool>",
+            format!("too many examples; maximum is {MAX_TOOL_EXAMPLES}"),
+        ));
+    }
+
+    let mut seen_ids = std::collections::HashSet::new();
+    for example in &tool.examples {
+        validate_tool_example(tool, example, &mut seen_ids)?;
+    }
+    Ok(())
+}
+
+fn validate_tool_example(
+    tool: &ToolSpec,
+    example: &ToolExample,
+    seen_ids: &mut std::collections::HashSet<String>,
+) -> Result<(), ToolRegistrationError> {
+    if example.id.trim().is_empty() {
+        return Err(invalid_example(tool, "<empty>", "id must not be empty"));
+    }
+    if example.id.chars().count() > MAX_TOOL_EXAMPLE_ID_CHARS {
+        return Err(invalid_example(tool, &example.id, "id is too long"));
+    }
+    if !seen_ids.insert(example.id.clone()) {
+        return Err(invalid_example(tool, &example.id, "duplicate id"));
+    }
+    for (field, value) in [
+        ("title", example.title.as_deref()),
+        ("note", example.note.as_deref()),
+    ] {
+        if value.is_some_and(|value| value.chars().count() > MAX_TOOL_EXAMPLE_TEXT_CHARS) {
+            return Err(invalid_example(
+                tool,
+                &example.id,
+                format!("{field} is too long"),
+            ));
+        }
+    }
+    if let Some(selector) = &example.subcommand {
+        validate_tool_example_selector(tool, example, selector)?;
+    }
+    if !cbor_value_within_budget(
+        &example.arguments,
+        MAX_TOOL_EXAMPLE_ARGUMENT_CHARS,
+        MAX_TOOL_EXAMPLE_ARGUMENT_NODES,
+    ) {
+        return Err(invalid_example(
+            tool,
+            &example.id,
+            "arguments are too large for a compact example",
+        ));
+    }
+    validate_tool_arguments(tool, &example.arguments)
+        .map_err(|error| invalid_example(tool, &example.id, error.to_string()))
+}
+
+fn validate_tool_example_selector(
+    tool: &ToolSpec,
+    example: &ToolExample,
+    selector: &ToolExampleSelector,
+) -> Result<(), ToolRegistrationError> {
+    if selector.path.is_empty() {
+        return Err(invalid_example(
+            tool,
+            &example.id,
+            "subcommand selector path must not be empty",
+        ));
+    }
+    if selector.path.len() > MAX_TOOL_EXAMPLE_SELECTOR_PATH {
+        return Err(invalid_example(
+            tool,
+            &example.id,
+            "subcommand selector path is too long",
+        ));
+    }
+    if selector.path.iter().any(|segment| {
+        segment.trim().is_empty() || segment.chars().count() > MAX_DIAGNOSTIC_ITEM_CHARS
+    }) {
+        return Err(invalid_example(
+            tool,
+            &example.id,
+            "subcommand selector path contains an invalid segment",
+        ));
+    }
+    match cbor_path_value(&example.arguments, &selector.path) {
+        Some(value) if value == &selector.value => Ok(()),
+        Some(_) => Err(invalid_example(
+            tool,
+            &example.id,
+            "subcommand selector value does not match example arguments",
+        )),
+        None => Err(invalid_example(
+            tool,
+            &example.id,
+            "subcommand selector path is absent from example arguments",
+        )),
+    }
+}
+
+fn invalid_example(
+    tool: &ToolSpec,
+    example_id: impl Into<String>,
+    reason: impl Into<String>,
+) -> ToolRegistrationError {
+    ToolRegistrationError::InvalidExample {
+        tool_name: tool.name.clone(),
+        example_id: bounded_text(&example_id.into(), MAX_TOOL_EXAMPLE_ID_CHARS),
+        reason: bounded_text(&reason.into(), MAX_DIAGNOSTIC_MESSAGE_CHARS),
+    }
+}
+
+/// Selects and renders one compact model-visible repair hint for a failed call.
+pub fn tool_example_hint(tool: &ToolSpec, failed_arguments: &CborValue) -> Option<String> {
+    let example = select_tool_example(tool, failed_arguments)?;
+    let mut hint = String::from("\n\nExample valid call");
+    if let Some(title) = example.title.as_deref() {
+        hint.push_str(": ");
+        hint.push_str(&bounded_text(title, MAX_TOOL_EXAMPLE_TEXT_CHARS));
+    }
+    hint.push_str(":\n");
+    hint.push_str(&bounded_text(
+        &render_cbor_json(&example.arguments),
+        MAX_TOOL_EXAMPLE_HINT_CHARS / 2,
+    ));
+    if let Some(note) = example.note.as_deref() {
+        hint.push_str("\nNote: ");
+        hint.push_str(&bounded_text(note, MAX_TOOL_EXAMPLE_TEXT_CHARS));
+    }
+    if let Some(allowed) = selector_allowed_values(tool, failed_arguments) {
+        hint.push_str("\nSubcommand values include: ");
+        hint.push_str(&allowed);
+    }
+    Some(bounded_text(&hint, MAX_TOOL_EXAMPLE_HINT_CHARS))
+}
+
+fn select_tool_example<'a>(
+    tool: &'a ToolSpec,
+    failed_arguments: &CborValue,
+) -> Option<&'a ToolExample> {
+    if tool.examples.is_empty() {
+        return None;
+    }
+    let mut examples = tool.examples.iter().collect::<Vec<_>>();
+    examples.sort_by(|a, b| a.id.cmp(&b.id));
+
+    let matching_subcommand = examples.iter().copied().find(|example| {
+        let Some(selector) = &example.subcommand else {
+            return false;
+        };
+        cbor_path_value(failed_arguments, &selector.path) == Some(&selector.value)
+    });
+    matching_subcommand
+        .or_else(|| {
+            examples
+                .iter()
+                .copied()
+                .find(|example| example.subcommand.is_none())
+        })
+        .or_else(|| examples.first().copied())
+}
+
+fn selector_allowed_values(tool: &ToolSpec, failed_arguments: &CborValue) -> Option<String> {
+    if tool.examples.iter().any(|example| {
+        example.subcommand.as_ref().is_some_and(|selector| {
+            cbor_path_value(failed_arguments, &selector.path) == Some(&selector.value)
+        })
+    }) {
+        return None;
+    }
+    let mut values = tool
+        .examples
+        .iter()
+        .filter_map(|example| example.subcommand.as_ref())
+        .map(|selector| short_cbor_value(&selector.value))
+        .collect::<Vec<_>>();
+    if values.is_empty() {
+        None
+    } else {
+        values.sort();
+        values.dedup();
+        let total = values.len();
+        let values = values.into_iter().take(MAX_DIAGNOSTIC_ITEMS).collect();
+        Some(bounded_list(values, total))
+    }
+}
+
+fn cbor_path_value<'a>(value: &'a CborValue, path: &[String]) -> Option<&'a CborValue> {
+    let mut current = value;
+    for segment in path {
+        let CborValue::Map(entries) = current else {
+            return None;
+        };
+        current = entries.iter().find_map(|(key, value)| match key {
+            CborValue::Text(key) if key == segment => Some(value),
+            _ => None,
+        })?;
+    }
+    Some(current)
+}
+
+fn cbor_value_within_budget(value: &CborValue, char_budget: usize, node_budget: usize) -> bool {
+    fn consume(value: &CborValue, chars: &mut usize, nodes: &mut usize) -> bool {
+        let Some(remaining_nodes) = nodes.checked_sub(1) else {
+            return false;
+        };
+        *nodes = remaining_nodes;
+        match value {
+            CborValue::Null => consume_chars(chars, 4),
+            CborValue::Bool(value) => consume_chars(chars, if *value { 4 } else { 5 }),
+            CborValue::Integer(value) => {
+                let value: i128 = (*value).into();
+                consume_chars(chars, value.to_string().len())
+            }
+            CborValue::Float(value) => consume_chars(chars, value.to_string().len()),
+            CborValue::Text(value) => consume_bounded_text(chars, value),
+            CborValue::Bytes(bytes) => consume_chars(chars, bytes.len().min(*chars + 1)),
+            CborValue::Array(values) => values.iter().all(|value| consume(value, chars, nodes)),
+            CborValue::Map(entries) => entries
+                .iter()
+                .all(|(key, value)| consume(key, chars, nodes) && consume(value, chars, nodes)),
+            CborValue::Tag(_, value) => consume(value, chars, nodes),
+            _ => false,
+        }
+    }
+
+    fn consume_chars(remaining: &mut usize, len: usize) -> bool {
+        let Some(next) = remaining.checked_sub(len) else {
+            return false;
+        };
+        *remaining = next;
+        true
+    }
+
+    fn consume_bounded_text(remaining: &mut usize, value: &str) -> bool {
+        let len = value.chars().take(*remaining + 1).count();
+        consume_chars(remaining, len)
+    }
+
+    let mut chars = char_budget;
+    let mut nodes = node_budget;
+    consume(value, &mut chars, &mut nodes)
+}
+
+fn render_cbor_json(value: &CborValue) -> String {
+    serde_json::to_string(&cbor_to_json_value(value)).unwrap_or_else(|_| format!("{value:?}"))
+}
+
+fn cbor_to_json_value(value: &CborValue) -> serde_json::Value {
+    match value {
+        CborValue::Null => serde_json::Value::Null,
+        CborValue::Bool(value) => serde_json::Value::Bool(*value),
+        CborValue::Integer(value) => {
+            let value: i128 = (*value).into();
+            if let Ok(value) = i64::try_from(value) {
+                serde_json::Value::Number(value.into())
+            } else {
+                serde_json::Value::String(value.to_string())
+            }
+        }
+        CborValue::Float(value) => serde_json::Number::from_f64(*value)
+            .map_or(serde_json::Value::Null, serde_json::Value::Number),
+        CborValue::Text(value) => serde_json::Value::String(value.clone()),
+        CborValue::Array(values) => {
+            serde_json::Value::Array(values.iter().map(cbor_to_json_value).collect())
+        }
+        CborValue::Map(entries) => serde_json::Value::Object(
+            entries
+                .iter()
+                .filter_map(|(key, value)| match key {
+                    CborValue::Text(key) => Some((key.clone(), cbor_to_json_value(value))),
+                    _ => None,
+                })
+                .collect(),
+        ),
+        CborValue::Tag(_, value) => cbor_to_json_value(value),
+        _ => serde_json::Value::Null,
+    }
 }
 
 fn validate_json_schema(
@@ -644,6 +963,11 @@ impl ToolRegistry {
             tool_group,
             prompt_fragment,
         } = registration;
+        let mut report = RegisterToolReport::default();
+        if let Err(error) = validate_tool_examples(&tool) {
+            report.errors.push(error);
+            return report;
+        }
         let tool_name = tool.name.clone();
         let providers = self.providers_by_tool.entry(tool_name.clone()).or_default();
 
@@ -651,7 +975,6 @@ impl ToolRegistry {
             .iter()
             .map(|provider| provider.connection_id.clone())
             .collect::<Vec<_>>();
-        let mut report = RegisterToolReport::default();
         if !existing_provider_ids.is_empty() {
             report
                 .warnings

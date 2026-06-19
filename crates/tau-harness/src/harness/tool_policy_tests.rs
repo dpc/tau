@@ -33,6 +33,7 @@ fn tagged_tool(name: &str, enabled_by_default: bool, tags: &[&str]) -> ToolSpec 
         tags: tags.iter().map(|tag| ToolTag::new(*tag)).collect(),
         enabled_by_default,
         background_support: Some(BackgroundSupport::Never),
+        examples: Vec::new(),
     }
 }
 

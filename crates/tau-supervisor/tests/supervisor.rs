@@ -369,6 +369,7 @@ fn supervised_child_exchanges_protocol_events_over_stdio() {
                 tags: Vec::new(),
                 enabled_by_default: true,
                 background_support: None,
+                examples: Vec::new(),
             },
             tool_group: None,
             prompt_fragment: None,

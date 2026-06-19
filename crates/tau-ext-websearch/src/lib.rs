@@ -247,6 +247,7 @@ fn exa_tool_spec() -> ToolSpec {
         tags: Vec::new(),
         enabled_by_default: true,
         background_support: None,
+        examples: Vec::new(),
     }
 }
 
@@ -273,6 +274,7 @@ fn parallel_search_tool_spec() -> ToolSpec {
         tags: Vec::new(),
         enabled_by_default: false,
         background_support: None,
+        examples: Vec::new(),
     }
 }
 
@@ -299,6 +301,7 @@ fn parallel_fetch_tool_spec() -> ToolSpec {
         tags: Vec::new(),
         enabled_by_default: false,
         background_support: None,
+        examples: Vec::new(),
     }
 }
 

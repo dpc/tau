@@ -4570,6 +4570,7 @@ fn email_envelope_tool_spec(name: &str) -> ToolSpec {
         tags: Vec::new(),
         enabled_by_default: false,
         background_support: None,
+        examples: Vec::new(),
     }
 }
 

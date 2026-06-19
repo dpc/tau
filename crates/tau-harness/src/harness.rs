@@ -15,7 +15,7 @@ use rand::rngs::StdRng;
 use tau_core::{
     ActionRegistry, AgentStore, Connection, ConnectionMetadata, ConnectionOrigin,
     DefaultSubscriptionPolicy, EventBus, NodeId, PolicyStore, RouteError, SessionStore,
-    ToolRegistry, ToolRouteError, ToolRouteTarget, validate_tool_arguments,
+    ToolRegistry, ToolRouteError, ToolRouteTarget, tool_example_hint, validate_tool_arguments,
 };
 use tau_proto::{
     ActionError, ActionInvocationId, ActionInvoke, ActionResult, ActionSchemaPublished, AgentId,
@@ -1305,6 +1305,11 @@ pub struct Harness {
         std::collections::HashMap<AgentPromptId, Vec<tau_proto::ToolSpec>>,
     /// Prompt snapshot owner for each provider-emitted tool call id.
     pub(crate) prompt_tool_call_prompts: std::collections::HashMap<ToolCallId, AgentPromptId>,
+    /// Model-visible tool examples already shown after a failure in this agent
+    /// branch. Keyed by owning agent, tool, and rendered hint to avoid tight
+    /// repetition while allowing distinct branches to receive local repair
+    /// help.
+    pub(crate) shown_tool_failure_examples: HashSet<(AgentId, ToolName, String)>,
     /// Selected skill winners, keyed by name.
     pub(crate) discovered_skills: std::collections::HashMap<tau_proto::SkillName, DiscoveredSkill>,
     /// All discovered skill candidates, keyed by name, so removing the winner
@@ -1679,6 +1684,7 @@ impl Harness {
             prompt_models: HashMap::new(),
             prompt_tool_specs: HashMap::new(),
             prompt_tool_call_prompts: HashMap::new(),
+            shown_tool_failure_examples: HashSet::new(),
             discovered_skills,
             discovered_skill_candidates,
             discovered_agents_files: Vec::new(),
@@ -3750,9 +3756,26 @@ impl Harness {
             .registry
             .providers_for(internal_name.as_str())
             .is_empty();
-        let _ = self
+        let report = self
             .registry
             .register_with_prompt_fragment(source_id, registration);
+        if !report.errors.is_empty() {
+            for error in report.errors {
+                tracing::warn!(
+                    target: "tau_harness",
+                    connection_id = %source_id,
+                    error = %error,
+                    "rejected invalid tool registration"
+                );
+                self.emit_notice(
+                    tau_proto::notice_kind::HARNESS_INTERNAL_WARNING,
+                    tau_proto::NoticeLevel::Critical,
+                    true,
+                    &format!("Rejected tool registration from `{source_id}`: {error}"),
+                );
+            }
+            return;
+        }
         self.ensure_tool_started_subscription(source_id);
         if !was_available {
             self.mark_tool_available_for_notice(internal_name, visible_name);
@@ -7898,6 +7921,7 @@ impl Harness {
         self.prompt_models.clear();
         self.prompt_tool_specs.clear();
         self.prompt_tool_call_prompts.clear();
+        self.shown_tool_failure_examples.clear();
         self.suppressed_background_completion_prompts.clear();
         self.background_completion_targets.clear();
         self.canceled_prompts.clear();
@@ -8547,6 +8571,8 @@ impl Harness {
     }
 
     fn remove_agent(&mut self, cid: &AgentId) -> Option<Agent> {
+        self.shown_tool_failure_examples
+            .retain(|(agent_id, _, _)| agent_id != cid);
         if let Some(conv) = self.agents.get(cid)
             && let Some(agent_id) = conv.agent_id.clone()
         {
@@ -10878,12 +10904,14 @@ impl Harness {
             .is_some()
             && let Err(error) = validate_tool_arguments(tool_spec, &call.arguments)
         {
-            self.reject_agent_tool_call_before_dispatch(
-                cid,
-                call,
-                visible_tool_name,
-                format!("invalid arguments for tool `{tool_name}`: {error}"),
-            );
+            let mut message = format!("invalid arguments for tool `{tool_name}`: {error}");
+            if let Some(hint) = tool_example_hint(tool_spec, &call.arguments) {
+                let key = (cid.clone(), visible_tool_name.clone(), hint.clone());
+                if self.shown_tool_failure_examples.insert(key) {
+                    message.push_str(&hint);
+                }
+            }
+            self.reject_agent_tool_call_before_dispatch(cid, call, visible_tool_name, message);
             return Ok(());
         }
 

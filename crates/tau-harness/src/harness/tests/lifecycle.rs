@@ -122,6 +122,7 @@ fn staged_tool_spec(name: &str) -> ToolSpec {
         tags: Vec::new(),
         enabled_by_default: true,
         background_support: Some(tau_proto::BackgroundSupport::Never),
+        examples: Vec::new(),
     }
 }
 
@@ -2850,6 +2851,7 @@ fn empty_tool_call_id_becomes_model_visible_tool_error() {
             tags: Vec::new(),
             enabled_by_default: true,
             background_support: None,
+            examples: Vec::new(),
         },
     );
     let cid = ensure_test_user_agent(&mut h);
@@ -3602,6 +3604,7 @@ fn disconnect_unregisters_tools_before_advancing_queued_prompt() {
             tags: Vec::new(),
             enabled_by_default: true,
             background_support: None,
+            examples: Vec::new(),
         },
     );
     let cid = ensure_test_user_agent(&mut h);
@@ -3644,6 +3647,7 @@ fn disconnect_session_init_completion_waits_until_tool_cleanup() {
             tags: Vec::new(),
             enabled_by_default: true,
             background_support: None,
+            examples: Vec::new(),
         },
     );
     h.turn_state = TurnState::InitializingSession {

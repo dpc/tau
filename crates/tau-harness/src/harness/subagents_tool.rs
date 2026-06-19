@@ -607,6 +607,7 @@ fn test_tool_spec(
         tags: Vec::new(),
         enabled_by_default: true,
         background_support,
+        examples: Vec::new(),
     }
 }
 

@@ -68,6 +68,7 @@ fn representative_events() -> Vec<Event> {
                 tags: Vec::new(),
                 enabled_by_default: true,
                 background_support: None,
+                examples: Vec::new(),
             },
             tool_group: None,
             prompt_fragment: None,
@@ -1441,6 +1442,7 @@ fn tool_spec_defaults_and_background_support() {
         tags: Vec::new(),
         enabled_by_default: false,
         background_support: None,
+        examples: Vec::new(),
     };
     let serialized = serde_json::to_value(&disabled).expect("serialize disabled tool spec");
     assert_eq!(
@@ -1482,6 +1484,7 @@ fn echo_tool_spec() -> ToolSpec {
         tags: Vec::new(),
         enabled_by_default: true,
         background_support: None,
+        examples: Vec::new(),
     }
 }
 
@@ -1884,4 +1887,52 @@ fn nearest_name_suggestion_suppresses_overlong_names() {
         nearest_name_suggestion("reed", ["read", overlong.as_str()].into_iter()),
         Some("read".to_owned())
     );
+}
+
+/// Ensures tool examples are protocol-optional so older tool registrations
+/// deserialize without changing shape.
+#[test]
+fn tool_spec_examples_default_to_empty() {
+    let value = serde_json::json!({
+        "name": "read",
+        "tool_type": "function"
+    });
+
+    let spec: ToolSpec = serde_json::from_value(value).expect("legacy tool spec");
+
+    assert!(spec.examples.is_empty());
+}
+
+/// Ensures example metadata can round-trip when providers opt into it.
+#[test]
+fn tool_spec_examples_round_trip() {
+    let spec = ToolSpec {
+        name: ToolName::new("edit"),
+        model_visible_name: None,
+        description: None,
+        tool_type: ToolType::Function,
+        parameters: None,
+        format: None,
+        tags: Vec::new(),
+        enabled_by_default: true,
+        background_support: None,
+        examples: vec![ToolExample {
+            id: "replace".to_owned(),
+            title: Some("Replace".to_owned()),
+            arguments: CborValue::Map(vec![(
+                CborValue::Text("operation".to_owned()),
+                CborValue::Text("replace".to_owned()),
+            )]),
+            note: Some("Use exact field names.".to_owned()),
+            subcommand: Some(ToolExampleSelector {
+                path: vec!["operation".to_owned()],
+                value: CborValue::Text("replace".to_owned()),
+            }),
+        }],
+    };
+
+    let encoded = serde_json::to_value(&spec).expect("serialize");
+    let decoded: ToolSpec = serde_json::from_value(encoded).expect("deserialize");
+
+    assert_eq!(decoded, spec);
 }

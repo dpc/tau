@@ -18,7 +18,7 @@ use tau_proto::{
     CborValue, ConfigError, Event, ExtAgentContextPublish, ExtPromptFragmentPublish,
     ExtensionContextReady, HarnessInputMessage, HarnessOutputMessage, PeerInputReader,
     PeerOutputWriter, PromptContent, PromptFragment, PromptPriority, SessionAgentLoaded,
-    SessionStarted, ToolCancelled, ToolResult, ToolResultKind, ToolSpec, ToolTag,
+    SessionStarted, ToolCancelled, ToolExample, ToolResult, ToolResultKind, ToolSpec, ToolTag,
 };
 use tracing::{debug, trace};
 
@@ -97,6 +97,7 @@ where
         tags: tool_tags(&["test:echo"]),
         enabled_by_default: false,
         background_support: None,
+        examples: Vec::new(),
     });
     #[cfg(not(any(test, feature = "echo-agent")))]
     let echo_tool: Option<ToolSpec> = None;
@@ -172,6 +173,16 @@ where
             tags: tool_tags(&["shell:read"]),
             enabled_by_default: true,
             background_support: None,
+            examples: vec![ToolExample {
+                id: "read-file".to_owned(),
+                title: Some("Read a file".to_owned()),
+                arguments: CborValue::Map(vec![(
+                    CborValue::Text("path".to_owned()),
+                    CborValue::Text("src/main.rs".to_owned()),
+                )]),
+                note: Some("Use only the path field for a full-file read.".to_owned()),
+                subcommand: None,
+            }],
         },
         ToolSpec {
             name: tau_proto::ToolName::new(EDIT_TOOL_NAME),
@@ -239,6 +250,39 @@ where
             tags: tool_tags(&["shell:edit", "shell:edit:line", "shell:mutates-files"]),
             enabled_by_default: true,
             background_support: None,
+            examples: vec![ToolExample {
+                id: "replace-lines".to_owned(),
+                title: Some("Replace one line".to_owned()),
+                arguments: CborValue::Map(vec![
+                    (
+                        CborValue::Text("path".to_owned()),
+                        CborValue::Text("src/main.rs".to_owned()),
+                    ),
+                    (
+                        CborValue::Text("edits".to_owned()),
+                        CborValue::Array(vec![CborValue::Map(vec![
+                            (
+                                CborValue::Text("start_line".to_owned()),
+                                CborValue::Integer(10.into()),
+                            ),
+                            (
+                                CborValue::Text("end_line_exclusive".to_owned()),
+                                CborValue::Integer(11.into()),
+                            ),
+                            (
+                                CborValue::Text("newText".to_owned()),
+                                CborValue::Text("replacement line".to_owned()),
+                            ),
+                            (
+                                CborValue::Text("context_line".to_owned()),
+                                CborValue::Text("line before replacement".to_owned()),
+                            ),
+                        ])]),
+                    ),
+                ]),
+                note: Some("end_line_exclusive is one past the last line replaced.".to_owned()),
+                subcommand: None,
+            }],
         },
         ToolSpec {
             name: tau_proto::ToolName::new(APPLY_PATCH_TOOL_NAME),
@@ -253,6 +297,7 @@ where
             tags: tool_tags(&["shell:edit", "shell:edit:apply_patch", "shell:mutates-files"]),
             enabled_by_default: false,
             background_support: None,
+            examples: Vec::new(),
         },
         dir_lock_tool_spec(config.dir_lock.enable),
         ToolSpec {
@@ -305,6 +350,7 @@ where
             tags: tool_tags(&["shell:read", "shell:search"]),
             enabled_by_default: true,
             background_support: None,
+            examples: Vec::new(),
         },
         ToolSpec {
             name: tau_proto::ToolName::new(FIND_TOOL_NAME),
@@ -340,6 +386,7 @@ where
             tags: tool_tags(&["shell:read", "shell:search"]),
             enabled_by_default: true,
             background_support: None,
+            examples: Vec::new(),
         },
         ToolSpec {
             name: tau_proto::ToolName::new(LS_TOOL_NAME),
@@ -373,6 +420,7 @@ where
             tags: tool_tags(&["shell:read", "shell:list"]),
             enabled_by_default: true,
             background_support: None,
+            examples: Vec::new(),
         },
         ToolSpec {
             name: tau_proto::ToolName::new(CD_TOOL_NAME),
@@ -389,6 +437,7 @@ where
             tags: tool_tags(&["shell:cd"]),
             enabled_by_default: true,
             background_support: None,
+            examples: Vec::new(),
         },
         ToolSpec {
             name: tau_proto::ToolName::new(SHELL_TOOL_NAME),
@@ -435,6 +484,7 @@ where
             tags: tool_tags(&["shell:exec", "shell:exec:generic"]),
             enabled_by_default: true,
             background_support: None,
+            examples: Vec::new(),
         },
         ToolSpec {
             name: tau_proto::ToolName::new(GPT_SHELL_TOOL_NAME),
@@ -469,6 +519,7 @@ where
             tags: tool_tags(&["shell:exec", "shell:exec:shell_command"]),
             enabled_by_default: false,
             background_support: None,
+            examples: Vec::new(),
         },
     ]);
 
@@ -929,6 +980,7 @@ fn dir_lock_tool_spec(enabled_by_default: bool) -> ToolSpec {
         tags,
         enabled_by_default,
         background_support: None,
+        examples: Vec::new(),
     }
 }
 

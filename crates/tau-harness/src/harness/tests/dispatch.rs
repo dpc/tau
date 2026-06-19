@@ -826,6 +826,7 @@ fn shared_test_tool_spec(name: &str) -> ToolSpec {
         tags: Vec::new(),
         enabled_by_default: true,
         background_support: None,
+        examples: Vec::new(),
     }
 }
 
@@ -923,6 +924,16 @@ fn invalid_tool_arguments_are_rejected_before_logical_dispatch() {
         "required": ["allowed"],
         "additionalProperties": false
     }));
+    spec.examples = vec![tau_proto::ToolExample {
+        id: "allowed-string".to_owned(),
+        title: Some("Allowed string".to_owned()),
+        arguments: CborValue::Map(vec![(
+            CborValue::Text("allowed".to_owned()),
+            CborValue::Text("ok".to_owned()),
+        )]),
+        note: Some("Only include schema-declared fields.".to_owned()),
+        subcommand: None,
+    }];
     h.registry.register("conn-strict-tool", spec);
 
     let cid = ensure_test_user_agent(&mut h);
@@ -986,10 +997,147 @@ fn invalid_tool_arguments_are_rejected_before_logical_dispatch() {
     assert!(provider_error.contains("invalid arguments for tool `strict_tool`"));
     assert!(provider_error.contains("unexpected argument(s): `extra`"));
     assert!(provider_error.contains("allowed fields: `allowed`"));
+    assert!(provider_error.contains("Example valid call:"));
+    assert!(provider_error.contains("\"allowed\":\"ok\""));
     assert_eq!(logical_events, vec!["tool.error"]);
     assert!(tool_invoke_call_ids(&tool_events).is_empty());
 
+    h.execute_agent_tool_call(
+        &cid,
+        &crate::harness::AgentToolCall {
+            id: "bad-args-repeat".into(),
+            name: ToolName::new("strict_tool"),
+            tool_type: tau_proto::ToolType::Function,
+            arguments: CborValue::Map(vec![
+                (
+                    CborValue::Text("allowed".to_owned()),
+                    CborValue::Text("ok".to_owned()),
+                ),
+                (
+                    CborValue::Text("extra".to_owned()),
+                    CborValue::Text("nope".to_owned()),
+                ),
+            ]),
+        },
+    )
+    .expect("repeat tool call handled");
+
+    let mut repeat_error = None;
+    let mut seq = crate::event_log::EventLogSeq::new(0);
+    while let Some(entry) = h.event_log.get_next_from(seq) {
+        seq = entry.seq.next();
+        if let Event::ProviderToolError(error) = &entry.event
+            && error.call_id.as_str() == "bad-args-repeat"
+        {
+            repeat_error = Some(error.message.clone());
+        }
+    }
+    let repeat_error = repeat_error.expect("repeat provider tool error");
+    assert!(repeat_error.contains("invalid arguments for tool `strict_tool`"));
+    assert!(!repeat_error.contains("Example valid call:"));
+
     h.shutdown().expect("shutdown");
+}
+
+#[test]
+fn rendered_tool_definitions_do_not_include_examples() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let h = echo_harness(&sp).expect("start");
+    let mut spec = shared_test_tool_spec("example_tool");
+    spec.description = Some("visible description".to_owned());
+    spec.examples = vec![tau_proto::ToolExample {
+        id: "repair".to_owned(),
+        title: Some("Repair".to_owned()),
+        arguments: CborValue::Map(vec![(
+            CborValue::Text("field".to_owned()),
+            CborValue::Text("value".to_owned()),
+        )]),
+        note: Some("This should not be in prompt tool definitions.".to_owned()),
+        subcommand: None,
+    }];
+
+    let definitions = h.tool_definitions_from_specs(&[spec]);
+    let rendered = serde_json::to_string(&definitions).expect("definitions serialize");
+
+    assert!(rendered.contains("visible description"));
+    assert!(!rendered.contains("examples"));
+    assert!(!rendered.contains("Repair"));
+    assert!(!rendered.contains("This should not be in prompt"));
+}
+
+#[test]
+fn invalid_tool_example_registration_is_rejected_with_notice() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    let _events = connect_test_tool(&mut h, "conn-invalid-example");
+    let mut spec = shared_test_tool_spec("invalid_example_tool");
+    spec.parameters = Some(serde_json::json!({
+        "type": "object",
+        "properties": { "path": { "type": "string" } },
+        "required": ["path"],
+        "additionalProperties": false
+    }));
+    spec.examples = vec![tau_proto::ToolExample {
+        id: "bad".to_owned(),
+        title: None,
+        arguments: CborValue::Map(vec![(
+            CborValue::Text("path".to_owned()),
+            CborValue::Integer(1.into()),
+        )]),
+        note: None,
+        subcommand: None,
+    }];
+
+    h.handle_extension_event_inner(
+        "conn-invalid-example",
+        Event::ToolRegister(tau_proto::ToolRegister {
+            tool: spec,
+            tool_group: None,
+            prompt_fragment: None,
+        }),
+    )
+    .expect("registration handled");
+
+    assert!(h.registry.providers_for("invalid_example_tool").is_empty());
+    assert!(event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::HarnessNotice(notice)
+            if notice.level == tau_proto::NoticeLevel::Critical
+                && notice.always_show
+                && notice.message.contains("Rejected tool registration")
+                && notice.message.contains("invalid example `bad`")
+                && notice.message.contains("$.path: expected string")
+    )));
+}
+
+#[test]
+fn shown_tool_failure_examples_are_session_and_agent_scoped() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    let cid = ensure_test_user_agent(&mut h);
+    h.shown_tool_failure_examples.insert((
+        cid.clone(),
+        ToolName::new("example_tool"),
+        "hint".to_owned(),
+    ));
+
+    h.remove_agent(&cid);
+
+    assert!(h.shown_tool_failure_examples.is_empty());
+
+    let cid = ensure_test_user_agent(&mut h);
+    h.shown_tool_failure_examples
+        .insert((cid, ToolName::new("example_tool"), "hint".to_owned()));
+    h.switch_session(
+        tau_proto::SessionId::new("session-after-example-hint"),
+        tau_proto::SessionStartReason::New,
+    )
+    .expect("switch session");
+
+    assert!(h.shown_tool_failure_examples.is_empty());
 }
 
 /// Ensures unavailable-tool diagnostics distinguish a misspelled/unknown tool
@@ -4112,6 +4260,7 @@ fn tools_drift_invalidates_chain_anchor() {
             tags: Vec::new(),
             enabled_by_default: true,
             background_support: None,
+            examples: Vec::new(),
         },
     );
 
@@ -4876,6 +5025,7 @@ fn instant_background_test_tool_spec(name: &str) -> ToolSpec {
         tags: Vec::new(),
         enabled_by_default: true,
         background_support: Some(tau_proto::BackgroundSupport::Instant),
+        examples: Vec::new(),
     }
 }
 
@@ -5323,6 +5473,7 @@ fn start_agent_request_dispatches_while_tool_is_running_and_restores_turn() {
             tags: Vec::new(),
             enabled_by_default: true,
             background_support: None,
+            examples: Vec::new(),
         },
     );
     let cid = ensure_test_user_agent(&mut h);
@@ -5824,6 +5975,7 @@ fn start_agent_request_during_tool_call_branches_off_unresolved_tool_use() {
             tags: Vec::new(),
             enabled_by_default: true,
             background_support: None,
+            examples: Vec::new(),
         },
     );
     let cid = ensure_test_user_agent(&mut h);
@@ -6220,6 +6372,7 @@ fn delegate_start_agent_request_keeps_tool_choice_auto() {
             tags: Vec::new(),
             enabled_by_default: true,
             background_support: None,
+            examples: Vec::new(),
         },
     );
 
@@ -6409,6 +6562,7 @@ fn side_conversation_shared_tool_dispatches_through_parent_exclusive_delegate() 
             tags: Vec::new(),
             enabled_by_default: true,
             background_support: None,
+            examples: Vec::new(),
         },
     );
     let websearch_events = connect_test_tool(&mut h, "conn-websearch");
@@ -6424,6 +6578,7 @@ fn side_conversation_shared_tool_dispatches_through_parent_exclusive_delegate() 
             tags: Vec::new(),
             enabled_by_default: true,
             background_support: None,
+            examples: Vec::new(),
         },
     );
 
@@ -6583,6 +6738,7 @@ fn background_completion_from_preserved_delegate_queues_on_delegate() {
             tags: Vec::new(),
             enabled_by_default: true,
             background_support: None,
+            examples: Vec::new(),
         },
     );
     let _ = connect_test_tool(&mut h, "conn-slow");
@@ -6598,6 +6754,7 @@ fn background_completion_from_preserved_delegate_queues_on_delegate() {
             tags: Vec::new(),
             enabled_by_default: true,
             background_support: Some(tau_proto::BackgroundSupport::Instant),
+            examples: Vec::new(),
         },
     );
 
@@ -6784,6 +6941,7 @@ fn background_completion_from_removed_side_conversation_queues_on_parent() {
             tags: Vec::new(),
             enabled_by_default: true,
             background_support: Some(tau_proto::BackgroundSupport::Instant),
+            examples: Vec::new(),
         },
     );
 
@@ -6843,6 +7001,7 @@ fn canceled_side_conversation_drops_inner_background_completion() {
             tags: Vec::new(),
             enabled_by_default: true,
             background_support: None,
+            examples: Vec::new(),
         },
     );
     let _ = connect_test_tool(&mut h, "conn-slow");
@@ -6858,6 +7017,7 @@ fn canceled_side_conversation_drops_inner_background_completion() {
             tags: Vec::new(),
             enabled_by_default: true,
             background_support: Some(tau_proto::BackgroundSupport::Instant),
+            examples: Vec::new(),
         },
     );
 
@@ -6989,6 +7149,7 @@ fn background_notification_suppression_keeps_error_event_but_skips_prompt() {
             tags: Vec::new(),
             enabled_by_default: true,
             background_support: Some(tau_proto::BackgroundSupport::Instant),
+            examples: Vec::new(),
         },
     );
 
@@ -7212,6 +7373,7 @@ fn backgrounded_tool_progress_is_not_published() {
             tags: Vec::new(),
             enabled_by_default: true,
             background_support: Some(tau_proto::BackgroundSupport::Instant),
+            examples: Vec::new(),
         },
     );
 
@@ -7548,6 +7710,7 @@ fn delegate_launcher_does_not_block_same_turn_exclusive_tool() {
             tags: Vec::new(),
             enabled_by_default: true,
             background_support: None,
+            examples: Vec::new(),
         },
     );
     let _ = connect_test_tool(&mut h, "conn-mutate");
@@ -7563,6 +7726,7 @@ fn delegate_launcher_does_not_block_same_turn_exclusive_tool() {
             tags: Vec::new(),
             enabled_by_default: true,
             background_support: None,
+            examples: Vec::new(),
         },
     );
 
@@ -7633,6 +7797,7 @@ fn mutating_tools_in_distinct_side_conversations_dispatch_concurrently() {
             tags: Vec::new(),
             enabled_by_default: true,
             background_support: None,
+            examples: Vec::new(),
         },
     );
     let _ = connect_test_tool(&mut h, "conn-mutate");
@@ -7648,6 +7813,7 @@ fn mutating_tools_in_distinct_side_conversations_dispatch_concurrently() {
             tags: Vec::new(),
             enabled_by_default: true,
             background_support: None,
+            examples: Vec::new(),
         },
     );
 
@@ -7858,6 +8024,7 @@ fn delegate_emits_progress_as_sub_agent_makes_progress() {
             tags: Vec::new(),
             enabled_by_default: true,
             background_support: None,
+            examples: Vec::new(),
         },
     );
     let _websearch_events = connect_test_tool(&mut h, "conn-websearch");
@@ -7873,6 +8040,7 @@ fn delegate_emits_progress_as_sub_agent_makes_progress() {
             tags: Vec::new(),
             enabled_by_default: true,
             background_support: None,
+            examples: Vec::new(),
         },
     );
 
@@ -8083,6 +8251,7 @@ fn provider_disconnect_for_backgrounded_delegate_tool_updates_progress_and_targe
             tags: Vec::new(),
             enabled_by_default: true,
             background_support: None,
+            examples: Vec::new(),
         },
     );
     let _websearch_events = connect_test_tool(&mut h, "conn-websearch");
@@ -8098,6 +8267,7 @@ fn provider_disconnect_for_backgrounded_delegate_tool_updates_progress_and_targe
             tags: Vec::new(),
             enabled_by_default: true,
             background_support: Some(tau_proto::BackgroundSupport::Instant),
+            examples: Vec::new(),
         },
     );
 
@@ -8325,6 +8495,7 @@ fn delegate_explicit_role_uses_role_model_params_prompt_and_tools() {
                 tags: Vec::new(),
                 enabled_by_default: false,
                 background_support: None,
+                examples: Vec::new(),
             },
             tool_group: None,
             prompt_fragment: Some(tau_proto::PromptFragment::new(
@@ -8347,6 +8518,7 @@ fn delegate_explicit_role_uses_role_model_params_prompt_and_tools() {
                 tags: Vec::new(),
                 enabled_by_default: false,
                 background_support: None,
+                examples: Vec::new(),
             },
             tool_group: None,
             prompt_fragment: Some(tau_proto::PromptFragment::new(
@@ -8369,6 +8541,7 @@ fn delegate_explicit_role_uses_role_model_params_prompt_and_tools() {
                 tags: Vec::new(),
                 enabled_by_default: true,
                 background_support: None,
+                examples: Vec::new(),
             },
             tool_group: None,
             prompt_fragment: Some(tau_proto::PromptFragment::new(
@@ -8391,6 +8564,7 @@ fn delegate_explicit_role_uses_role_model_params_prompt_and_tools() {
                 tags: Vec::new(),
                 enabled_by_default: true,
                 background_support: None,
+                examples: Vec::new(),
             },
             tool_group: None,
             prompt_fragment: Some(tau_proto::PromptFragment::new(
@@ -8635,6 +8809,7 @@ fn sibling_side_conv_teardown_does_not_misplace_other_side_conv_tool_result() {
             tags: Vec::new(),
             enabled_by_default: true,
             background_support: None,
+            examples: Vec::new(),
         },
     );
 
@@ -8895,6 +9070,7 @@ fn nested_start_agent_request_branches_from_tool_owner_conversation() {
             tags: Vec::new(),
             enabled_by_default: true,
             background_support: None,
+            examples: Vec::new(),
         },
     );
 
@@ -9061,6 +9237,7 @@ fn completed_side_conversation_tool_result_reprompts_parent() {
             tags: Vec::new(),
             enabled_by_default: true,
             background_support: None,
+            examples: Vec::new(),
         },
     );
 
@@ -9226,6 +9403,7 @@ fn recursive_delegate_prompt_contains_only_leaf_instruction() {
             tags: Vec::new(),
             enabled_by_default: true,
             background_support: None,
+            examples: Vec::new(),
         },
     );
 
@@ -9996,6 +10174,7 @@ fn tool_group_overrides_apply_before_individual_tool_overrides() {
                     tags: Vec::new(),
                     enabled_by_default: false,
                     background_support: None,
+                    examples: Vec::new(),
                 },
                 tool_group: Some(tau_proto::ToolGroup {
                     name: tau_proto::ToolGroupName::new(group),

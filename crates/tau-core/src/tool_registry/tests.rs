@@ -11,6 +11,7 @@ fn strict_tool(parameters: serde_json::Value) -> ToolSpec {
         enabled_by_default: true,
         tags: Vec::new(),
         background_support: None,
+        examples: Vec::new(),
     }
 }
 
@@ -176,5 +177,277 @@ fn validation_error_reports_unknown_and_allowed_fields() {
     assert_eq!(
         error.to_string(),
         "unexpected argument(s): `foo`, `bar`; allowed fields: `edits`, `path`"
+    );
+}
+
+#[test]
+fn invalid_tool_example_rejects_registration() {
+    let mut tool = strict_tool(serde_json::json!({
+        "type": "object",
+        "properties": { "path": { "type": "string" } },
+        "required": ["path"],
+        "additionalProperties": false
+    }));
+    tool.examples.push(ToolExample {
+        id: "bad".to_owned(),
+        title: None,
+        arguments: CborValue::Map(vec![(
+            CborValue::Text("path".to_owned()),
+            CborValue::Integer(1.into()),
+        )]),
+        note: None,
+        subcommand: None,
+    });
+
+    let mut registry = ToolRegistry::new();
+    let report = registry.register("ext", tool);
+
+    assert!(registry.providers_for("strict").is_empty());
+    assert_eq!(report.errors.len(), 1);
+    assert!(
+        report.errors[0]
+            .to_string()
+            .contains("$.path: expected string")
+    );
+}
+
+#[test]
+fn oversized_tool_example_rejects_registration() {
+    let mut tool = strict_tool(serde_json::json!({
+        "type": "object",
+        "properties": { "path": { "type": "string" } },
+        "required": ["path"],
+        "additionalProperties": false
+    }));
+    tool.examples.push(ToolExample {
+        id: "huge".to_owned(),
+        title: None,
+        arguments: CborValue::Map(vec![(
+            CborValue::Text("path".to_owned()),
+            CborValue::Text("x".repeat(MAX_TOOL_EXAMPLE_ARGUMENT_CHARS + 1)),
+        )]),
+        note: None,
+        subcommand: None,
+    });
+
+    let error = validate_tool_examples(&tool).expect_err("oversized example must fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("arguments are too large for a compact example")
+    );
+}
+
+#[test]
+fn tool_example_hint_selects_matching_subcommand_deterministically() {
+    let mut tool = strict_tool(serde_json::json!({
+        "type": "object",
+        "properties": {
+            "operation": { "type": "string", "enum": ["insert", "replace"] },
+            "path": { "type": "string" }
+        },
+        "required": ["operation", "path"],
+        "additionalProperties": false
+    }));
+    tool.examples = vec![
+        ToolExample {
+            id: "replace".to_owned(),
+            title: Some("Replace".to_owned()),
+            arguments: CborValue::Map(vec![
+                (
+                    CborValue::Text("operation".to_owned()),
+                    CborValue::Text("replace".to_owned()),
+                ),
+                (
+                    CborValue::Text("path".to_owned()),
+                    CborValue::Text("src/lib.rs".to_owned()),
+                ),
+            ]),
+            note: None,
+            subcommand: Some(ToolExampleSelector {
+                path: vec!["operation".to_owned()],
+                value: CborValue::Text("replace".to_owned()),
+            }),
+        },
+        ToolExample {
+            id: "insert".to_owned(),
+            title: Some("Insert".to_owned()),
+            arguments: CborValue::Map(vec![
+                (
+                    CborValue::Text("operation".to_owned()),
+                    CborValue::Text("insert".to_owned()),
+                ),
+                (
+                    CborValue::Text("path".to_owned()),
+                    CborValue::Text("src/lib.rs".to_owned()),
+                ),
+            ]),
+            note: None,
+            subcommand: Some(ToolExampleSelector {
+                path: vec!["operation".to_owned()],
+                value: CborValue::Text("insert".to_owned()),
+            }),
+        },
+    ];
+
+    validate_tool_examples(&tool).expect("examples should be valid");
+    let hint = tool_example_hint(
+        &tool,
+        &CborValue::Map(vec![(
+            CborValue::Text("operation".to_owned()),
+            CborValue::Text("replace".to_owned()),
+        )]),
+    )
+    .expect("hint");
+
+    assert!(hint.contains("Replace"));
+    assert!(hint.contains("\"operation\":\"replace\""));
+    assert!(!hint.contains("\"operation\":\"insert\""));
+}
+
+#[test]
+fn tool_example_hint_falls_back_and_lists_subcommand_values() {
+    let mut tool = strict_tool(serde_json::json!({
+        "type": "object",
+        "properties": {
+            "operation": { "type": "string", "enum": ["insert"] },
+            "path": { "type": "string" }
+        },
+        "required": ["operation", "path"],
+        "additionalProperties": false
+    }));
+    tool.examples = vec![
+        ToolExample {
+            id: "generic".to_owned(),
+            title: Some("Generic".to_owned()),
+            arguments: CborValue::Map(vec![
+                (
+                    CborValue::Text("operation".to_owned()),
+                    CborValue::Text("insert".to_owned()),
+                ),
+                (
+                    CborValue::Text("path".to_owned()),
+                    CborValue::Text("src/lib.rs".to_owned()),
+                ),
+            ]),
+            note: None,
+            subcommand: None,
+        },
+        ToolExample {
+            id: "insert".to_owned(),
+            title: Some("Insert".to_owned()),
+            arguments: CborValue::Map(vec![
+                (
+                    CborValue::Text("operation".to_owned()),
+                    CborValue::Text("insert".to_owned()),
+                ),
+                (
+                    CborValue::Text("path".to_owned()),
+                    CborValue::Text("src/lib.rs".to_owned()),
+                ),
+            ]),
+            note: None,
+            subcommand: Some(ToolExampleSelector {
+                path: vec!["operation".to_owned()],
+                value: CborValue::Text("insert".to_owned()),
+            }),
+        },
+    ];
+
+    let hint = tool_example_hint(&tool, &CborValue::Map(Vec::new())).expect("hint");
+
+    assert!(hint.contains("Generic"));
+    assert!(hint.contains("Subcommand values include: `insert`"));
+    assert!(hint.chars().count() <= MAX_TOOL_EXAMPLE_HINT_CHARS);
+
+    let invalid_value_hint = tool_example_hint(
+        &tool,
+        &CborValue::Map(vec![(
+            CborValue::Text("operation".to_owned()),
+            CborValue::Text("delete".to_owned()),
+        )]),
+    )
+    .expect("hint for invalid selector value");
+    assert!(invalid_value_hint.contains("Subcommand values include: `insert`"));
+}
+
+#[test]
+fn tool_example_validation_reports_selector_path_errors() {
+    let mut tool = strict_tool(serde_json::json!({
+        "type": "object",
+        "properties": {
+            "operation": { "type": "string", "enum": ["insert"] },
+            "path": { "type": "string" }
+        },
+        "required": ["operation", "path"],
+        "additionalProperties": false
+    }));
+    tool.examples.push(ToolExample {
+        id: "missing-selector-path".to_owned(),
+        title: None,
+        arguments: CborValue::Map(vec![
+            (
+                CborValue::Text("operation".to_owned()),
+                CborValue::Text("insert".to_owned()),
+            ),
+            (
+                CborValue::Text("path".to_owned()),
+                CborValue::Text("src/lib.rs".to_owned()),
+            ),
+        ]),
+        note: None,
+        subcommand: Some(ToolExampleSelector {
+            path: vec!["command".to_owned()],
+            value: CborValue::Text("insert".to_owned()),
+        }),
+    });
+
+    let error = validate_tool_examples(&tool).expect_err("selector path must fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("subcommand selector path is absent")
+    );
+}
+
+#[test]
+fn tool_example_validation_reports_selector_value_errors() {
+    let mut tool = strict_tool(serde_json::json!({
+        "type": "object",
+        "properties": {
+            "operation": { "type": "string", "enum": ["insert", "replace"] },
+            "path": { "type": "string" }
+        },
+        "required": ["operation", "path"],
+        "additionalProperties": false
+    }));
+    tool.examples.push(ToolExample {
+        id: "mismatched-selector-value".to_owned(),
+        title: None,
+        arguments: CborValue::Map(vec![
+            (
+                CborValue::Text("operation".to_owned()),
+                CborValue::Text("insert".to_owned()),
+            ),
+            (
+                CborValue::Text("path".to_owned()),
+                CborValue::Text("src/lib.rs".to_owned()),
+            ),
+        ]),
+        note: None,
+        subcommand: Some(ToolExampleSelector {
+            path: vec!["operation".to_owned()],
+            value: CborValue::Text("replace".to_owned()),
+        }),
+    });
+
+    let error = validate_tool_examples(&tool).expect_err("selector value must fail");
+
+    assert!(
+        error
+            .to_string()
+            .contains("subcommand selector value does not match")
     );
 }

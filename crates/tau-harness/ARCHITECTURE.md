@@ -66,6 +66,9 @@ Provider tool calls are evaluated against the tool snapshot owned by the prompt
 that produced them. Model-visible rejection diagnostics for those calls must use
 that same snapshot for availability wording and near-name suggestions; current
 role/model policy is only the authority when no prompt-owned snapshot exists.
+Tool examples are registration metadata, not prompt-surface definitions: rendered
+tool definitions omit them, and the harness surfaces at most one bounded relevant
+example after a failed call in an agent branch.
 
 Extensions that need to turn external user input into a normal agent prompt use
 `extension.prompt_submit_request`. The harness accepts this request only on the

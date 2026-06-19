@@ -913,6 +913,39 @@ pub struct ToolSpec {
     /// [`BackgroundSupport::MinForegroundSeconds`]`(5)`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub background_support: Option<BackgroundSupport>,
+    /// Optional compact examples owned by the tool provider. The harness keeps
+    /// these out of provider-visible tool definitions and may surface one after
+    /// a failed call to help the model repair mechanical argument mistakes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub examples: Vec<ToolExample>,
+}
+
+/// Compact example arguments for a tool.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ToolExample {
+    /// Stable provider-owned id for de-duplication and deterministic selection.
+    pub id: String,
+    /// Optional short human-readable label.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// Arguments that form a valid call for this tool.
+    pub arguments: CborValue,
+    /// Optional short note explaining when to use the example.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    /// Optional declarative subcommand selector. The harness only compares this
+    /// exact argument-path value; it never infers subcommands from prose.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subcommand: Option<ToolExampleSelector>,
+}
+
+/// Declarative selector for a tool example subcommand.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ToolExampleSelector {
+    /// Path through the argument object, e.g. `["operation"]`.
+    pub path: Vec<String>,
+    /// Exact value at `path` for this subcommand.
+    pub value: CborValue,
 }
 
 const fn tool_enabled_by_default() -> bool {

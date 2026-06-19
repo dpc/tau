@@ -53,6 +53,12 @@ schema validation, and path suggestion text deterministic and bounded so
 extension-provided schemas, filesystem names, or model arguments cannot amplify
 unbounded work or prompt content.
 
+Failure-triggered tool examples are diagnostic metadata in the same prompt-surface
+class. Providers may attach compact examples to tool registrations, but the
+harness must validate them at registration, reject invalid examples visibly, omit
+them from normal provider tool definitions, and surface at most bounded example
+text after a failed call.
+
 ## Skills
 
 Skills are prompt instructions loaded from local/project Markdown files, not a sandbox or permission boundary. Project skills can be malicious prompt content. `disable-model-invocation` hides a skill from Tau's model-visible skill surfaces, but a model with filesystem tools could still read the underlying file if it learns the path. `allowed-tools` and similar frontmatter fields do not grant or restrict Tau tool permissions.

@@ -132,6 +132,7 @@ where
                 tags: Vec::new(),
                 enabled_by_default: true,
                 background_support: None,
+                examples: Vec::new(),
             },
             Some(tau_proto::ToolGroup {
                 name: tau_proto::ToolGroupName::new("test"),

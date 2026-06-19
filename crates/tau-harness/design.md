@@ -41,6 +41,16 @@ authority boundary. If a rejected call is tied to an `AgentPromptId`, unavailabl
 or near-name diagnostic text must derive from that prompt's tool snapshot rather
 than the current role/model surface.
 
+Tool examples attached to registrations are deliberately excluded from rendered
+provider tool definitions. The harness may append one bounded example to a
+model-visible failure for the owning agent branch, then remembers that example so
+retry loops do not receive repeated scaffold text.
+
+Harness tests should assert both sides of that contract: examples are omitted from
+rendered provider tool definitions for good calls, and failure-triggered injection
+is one-shot per agent branch while invalid registrations produce mandatory
+diagnostics.
+
 Testing is split by owner. `tau-config` tests cover file and CLI alias
 normalization, keyed rule layering, and tag-pattern parsing/rejection.
 `tau-harness` tests cover evaluator ordering, role broad-to-specific overrides,
