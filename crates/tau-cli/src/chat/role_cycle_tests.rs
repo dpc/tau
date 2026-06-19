@@ -30,7 +30,7 @@ fn agent_completer_offers_subcommands_first() {
         entries,
         vec![
             ("new", "Clear the selected agent"),
-            ("switch", "Route prompts to an active agent"),
+            ("switch", "Show a known agent transcript"),
             ("suspend", "Hide an active agent transcript"),
             ("resume", "Show a suspended agent transcript"),
             ("name", "Set an agent display name"),
@@ -193,8 +193,9 @@ fn agent_mention_completer_offers_only_active_agents() {
 
 #[test]
 fn agent_completer_filters_active_and_suspended_agents() {
-    // Suspended delegate agents should disappear from switch/suspend menus
-    // but remain available for explicit resume.
+    // Suspended delegate agents should disappear from switch/suspend menus so
+    // tab completion stays focused on active choices, but remain available for
+    // explicit resume.
     let known = Arc::new(Mutex::new(vec!["helper".to_owned(), "worker".to_owned()]));
     let live = Arc::new(Mutex::new(std::collections::HashSet::from([
         "helper".to_owned(),
@@ -224,6 +225,39 @@ fn agent_completer_filters_active_and_suspended_agents() {
     assert_eq!(switch_values, vec!["none", "worker"]);
     assert_eq!(suspend_values, vec!["worker"]);
     assert_eq!(resume_values, vec!["helper"]);
+}
+
+#[test]
+fn agent_switch_accepts_explicit_suspended_agent_id() {
+    // Explicit `/agent switch <agent_id>` is intentional routing by id. This
+    // command path must select a known suspended agent and notify the renderer
+    // without printing the resume-only local error that completions are meant to
+    // avoid.
+    let known = Arc::new(Mutex::new(vec!["helper".to_owned(), "worker".to_owned()]));
+    let live = Arc::new(Mutex::new(std::collections::HashSet::from([
+        "helper".to_owned(),
+        "worker".to_owned(),
+    ])));
+    let suspended = Arc::new(Mutex::new(std::collections::HashSet::from([
+        "helper".to_owned()
+    ])));
+    let routing = routing_state(known, live, suspended);
+    let (renderer_tx, renderer_rx) = mpsc::channel();
+    let messages = Arc::new(Mutex::new(Vec::new()));
+
+    handle_agent_switch_command(&routing, &renderer_tx, Some("helper"), &|message| {
+        messages
+            .lock()
+            .expect("messages lock poisoned")
+            .push(message.to_owned());
+    });
+
+    assert!(messages.lock().expect("messages lock poisoned").is_empty());
+    assert_eq!(routing.selected_agent_id().as_deref(), Some("helper"));
+    match renderer_rx.try_recv().expect("renderer command") {
+        RendererCmd::SwitchAgent { agent_id } => assert_eq!(agent_id, "helper"),
+        _ => panic!("expected switch renderer command"),
+    }
 }
 
 #[test]

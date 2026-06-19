@@ -1221,7 +1221,7 @@ enum RendererCmd {
         name: String,
         value: String,
     },
-    /// `/agent switch <agent_id>` — switch visible agent transcript.
+    /// `/agent switch <agent_id>` — switch visible known agent transcript.
     SwitchAgent {
         agent_id: String,
     },
@@ -1362,6 +1362,19 @@ impl InputRoutingState {
         agent_is_active_in_sets(&live, &suspended, agent_id)
     }
 
+    fn agent_switch_target(&self, target: Option<&str>) -> Result<Option<String>, String> {
+        let Some(arg) = target.map(str::trim).filter(|arg| !arg.is_empty()) else {
+            return Err("/agent switch <agent_id|none>".to_owned());
+        };
+        if arg == "none" {
+            return Ok(None);
+        }
+        if !self.agent_is_known(arg) {
+            return Err(format!("unknown agent: {arg}"));
+        }
+        Ok(Some(arg.to_owned()))
+    }
+
     fn mark_suspended(&self, agent_id: &str) {
         mark_agent_suspended(&self.suspended_agents, agent_id);
     }
@@ -1439,6 +1452,35 @@ fn handle_agent_resume_command(
     }
     routing.mark_resumed(&agent_id);
     let _ = renderer_tx.send(RendererCmd::ResumeAgent { agent_id });
+}
+
+enum AgentSwitchCommandAction {
+    ClearedSelection,
+    SwitchedAgent,
+}
+
+fn handle_agent_switch_command(
+    routing: &InputRoutingState,
+    renderer_tx: &mpsc::Sender<RendererCmd>,
+    target: Option<&str>,
+    print_local: &impl Fn(&str),
+) -> Option<AgentSwitchCommandAction> {
+    match routing.agent_switch_target(target) {
+        Ok(None) => {
+            routing.set_selected_agent(None);
+            let _ = renderer_tx.send(RendererCmd::ClearSelectedAgent);
+            Some(AgentSwitchCommandAction::ClearedSelection)
+        }
+        Ok(Some(agent_id)) => {
+            routing.set_selected_agent(Some(agent_id.clone()));
+            let _ = renderer_tx.send(RendererCmd::SwitchAgent { agent_id });
+            Some(AgentSwitchCommandAction::SwitchedAgent)
+        }
+        Err(message) => {
+            print_local(&message);
+            None
+        }
+    }
 }
 
 /// Local UI output used by the input thread while it holds `&mut HighTerm`.
@@ -2081,25 +2123,22 @@ impl<'a> TerminalInputSession<'a> {
     }
 
     fn handle_agent_switch(&mut self, target: Option<&str>) {
-        let Some(arg) = target.map(str::trim).filter(|arg| !arg.is_empty()) else {
-            self.output.system_info("/agent switch <agent_id|none>");
-            return;
-        };
-        if arg == "none" {
-            self.clear_selected_agent();
-            return;
+        let action = handle_agent_switch_command(
+            &self.ctx.routing,
+            &self.ctx.renderer_tx,
+            target,
+            &|message| self.output.system_info(message),
+        );
+        match action {
+            Some(AgentSwitchCommandAction::ClearedSelection) => {
+                self.dismiss_completion_menu();
+            }
+            Some(AgentSwitchCommandAction::SwitchedAgent) => {
+                self.pending_new_agent_model.clear();
+                self.dismiss_completion_menu();
+            }
+            None => {}
         }
-        if !self.agent_is_known(arg) {
-            self.output.system_info(&format!("unknown agent: {arg}"));
-            return;
-        }
-        if !self.agent_is_active(arg) {
-            self.output.system_info(&format!(
-                "agent is suspended: {arg} (use /agent resume {arg})"
-            ));
-            return;
-        }
-        self.switch_to_agent(arg.to_owned());
     }
 
     fn handle_agent_suspend(&self, target: Option<&str>) {
@@ -2563,7 +2602,7 @@ const SESSION_SUBCOMMAND_COMPLETIONS: &[(&str, &str)] = &[("new", "Start a fresh
 
 const AGENT_SUBCOMMAND_COMPLETIONS: &[(&str, &str)] = &[
     ("new", "Clear the selected agent"),
-    ("switch", "Route prompts to an active agent"),
+    ("switch", "Show a known agent transcript"),
     ("suspend", "Hide an active agent transcript"),
     ("resume", "Show a suspended agent transcript"),
     ("name", "Set an agent display name"),

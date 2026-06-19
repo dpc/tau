@@ -75,6 +75,13 @@ emits a targeted `ui.agent_model_select`; after `/new`, with no selected agent,
 it stages a one-shot `ui.create_agent.model_override` for the next prompt-created
 agent instead of sending an untargeted agent update.
 
+Agent switch commands distinguish known transcript selection from active prompt
+routing. `/agent switch` completions list active agents and `none`, keeping
+suspended agents out of ordinary switch suggestions. An explicitly typed known
+suspended agent id is still accepted so the UI can view that transcript; prompt
+submission remains blocked while the selected agent is suspended until `/agent
+resume` or `/resume` marks it active again.
+
 Only after those owners decline a line may the CLI treat an unrecognized leading
 slash token as an unknown-action notice. That fallback is intentionally limited
 to leading slash roots; ordinary prompt text that contains slashes later in the

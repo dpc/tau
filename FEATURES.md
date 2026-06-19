@@ -555,7 +555,7 @@ Type `/` for menu autocompletion. The built-in set:
 | `/detach`           | Leave the UI, keep the harness running for reattach  |
 | `/session new`      | Close the current session and start a fresh session |
 | `/agent new`        | Clear this UI's selected agent; next untargeted prompt mints a new agent |
-| `/agent switch <id>` | Switch this UI to an active loaded-agent transcript (`none` clears selection) |
+| `/agent switch <id>` | Switch this UI to a known loaded-agent transcript (`none` clears selection) |
 | `/agent suspend [id]` | Hide a loaded agent from this UI's active choices until resumed |
 | `/agent resume <id>` | Return a hidden loaded agent to this UI's active choices |
 | `/suspend` / `/resume` | Suspend or resume this UI's currently selected agent |
@@ -578,6 +578,12 @@ agents whose transcripts are stored under `<state_dir>/agents/<agent_id>/`. The
 switch`, `/agent suspend`, `/agent resume`, `/suspend`, and `/resume` do not
 synchronize selection or
 hidden-agent preferences to other UIs.
+
+`/agent switch` completion lists active agents so suspended transcripts stay out
+of normal prompt-routing choices. If you explicitly type a known suspended agent
+id, `/agent switch <id>` still selects that transcript for viewing; prompts
+remain blocked for that selected agent until `/agent resume <id>` or `/resume`
+marks it active again.
 
 Available `/set` names include `show-diff` (expanded vs. compact diffs),
 `show-thinking` (agent reasoning summaries), `show-turn-stats` (per-turn
