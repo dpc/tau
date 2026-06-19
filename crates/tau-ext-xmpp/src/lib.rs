@@ -14,15 +14,16 @@ use std::time::Duration;
 use futures_util::StreamExt;
 use rand::RngCore;
 use tau_proto::{
-    AgentId, CborValue, ConfigError, Event, ExtPromptSubmitRequest, HarnessInputMessage,
-    HarnessOutputMessage, PeerInputReader, PeerOutputWriter, ToolError, ToolProgress, ToolResult,
-    ToolSpec, ToolStarted, ToolUseState, ToolUseStatus,
+    AgentId, CborValue, ConfigError, Configure, Event, EventDelivery, ExtPromptSubmitRequest,
+    HarnessInputMessage, HarnessOutputMessage, PeerInputReader, PeerOutputWriter, SessionId,
+    ToolError, ToolProgress, ToolResult, ToolSpec, ToolStarted, ToolUseState, ToolUseStatus,
 };
 use tokio_xmpp::Client;
 use xmpp_parsers::delay::Delay;
 use xmpp_parsers::jid::{BareJid, Jid};
 use xmpp_parsers::message::{Lang, Message, MessageType};
 use xmpp_parsers::muc::muc::History;
+use xmpp_parsers::muc::user::Invite;
 use xmpp_parsers::muc::{Muc, MucUser};
 use xmpp_parsers::presence::{Presence, Type as PresenceType};
 use xmpp_parsers::stanza::Stanza;
@@ -51,6 +52,7 @@ const DEFAULT_MESSAGE_LIMIT: usize = 16 * 1024;
 const MAX_MESSAGE_LIMIT: usize = 128 * 1024;
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(60);
 const REGISTER_TIMEOUT: Duration = Duration::from_secs(45);
+const ONLINE_WAIT_TIMEOUT: Duration = Duration::from_secs(5);
 const STANZA_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// Run the XMPP extension over stdio.
@@ -79,7 +81,12 @@ trait XmppBridge: Send + Sync + 'static {
     ) -> Result<(), String>;
 
     /// Register one agent conversation and return its XMPP address.
-    fn register_agent(&self, cfg: &RuntimeConfig, agent_id: &AgentId) -> Result<String, String>;
+    fn register_agent(
+        &self,
+        cfg: &RuntimeConfig,
+        session_id: &SessionId,
+        agent_id: &AgentId,
+    ) -> Result<String, String>;
 
     /// Remove one registered agent conversation from the bridge.
     fn unregister_agent(&self, agent_id: &AgentId) -> Result<(), String>;
@@ -267,11 +274,17 @@ impl ExtConfig {
             other => return Err(format!("unsupported xmpp routing.mode `{other}`")),
         };
         let muc_service = match self.muc.service {
-            Some(service) => Some(
-                Jid::new(&service)
-                    .map_err(|e| format!("invalid xmpp muc.service: {e}"))?
-                    .to_bare(),
-            ),
+            Some(service) => {
+                let jid =
+                    Jid::new(&service).map_err(|e| format!("invalid xmpp muc.service: {e}"))?;
+                if jid.node().is_some() || jid.resource().is_some() {
+                    return Err(
+                        "xmpp `muc.service` must be a domain-only JID like `conference.example.org`"
+                            .to_owned(),
+                    );
+                }
+                Some(jid.to_bare())
+            }
             None => None,
         };
         if routing_mode == RoutingMode::Muc && muc_service.is_none() {
@@ -325,6 +338,8 @@ struct State {
     agent_labels: HashMap<AgentId, String>,
     /// XMPP conversation address per agent.
     conversations: HashMap<AgentId, String>,
+    /// Current Tau session id used for stable per-session room names.
+    current_session_id: Option<SessionId>,
     /// Whether the XMPP bridge has been started.
     bridge_started: bool,
 }
@@ -391,6 +406,12 @@ impl Extension {
                 let Some(cfg) = state.config.clone() else {
                     return tool_error(invoke, "xmpp extension is not configured".to_owned());
                 };
+                if state.current_session_id.is_none() {
+                    return tool_error(
+                        invoke,
+                        "xmpp_register requires an active Tau session; no session_started event has been observed yet".to_owned(),
+                    );
+                }
                 if !state.bridge_started {
                     if let Err(message) = self.bridge.ensure_started(
                         cfg.clone(),
@@ -403,7 +424,20 @@ impl Extension {
                 }
                 cfg
             };
-            let address = match self.bridge.register_agent(&cfg, &invoke.agent_id) {
+            let session_id = {
+                let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+                let Some(session_id) = state.current_session_id.clone() else {
+                    return tool_error(
+                        invoke,
+                        "xmpp_register requires an active Tau session; no session_started event has been observed yet".to_owned(),
+                    );
+                };
+                session_id
+            };
+            let address = match self
+                .bridge
+                .register_agent(&cfg, &session_id, &invoke.agent_id)
+            {
                 Ok(address) => address,
                 Err(message) => return tool_error(invoke, message),
             };
@@ -483,6 +517,8 @@ struct LiveXmppBridge {
 
 enum XmppCommand {
     Register {
+        /// Tau session containing the agent.
+        session_id: SessionId,
         /// Agent to register.
         agent_id: AgentId,
         /// Response channel carrying the conversation address.
@@ -523,10 +559,16 @@ impl XmppBridge for LiveXmppBridge {
         Ok(())
     }
 
-    fn register_agent(&self, _cfg: &RuntimeConfig, agent_id: &AgentId) -> Result<String, String> {
+    fn register_agent(
+        &self,
+        _cfg: &RuntimeConfig,
+        session_id: &SessionId,
+        agent_id: &AgentId,
+    ) -> Result<String, String> {
         let tx = self.command_sender()?;
         let (response_tx, response_rx) = mpsc::channel();
         tx.send(XmppCommand::Register {
+            session_id: session_id.clone(),
             agent_id: agent_id.clone(),
             response: response_tx,
         })
@@ -607,11 +649,15 @@ async fn xmpp_worker(
     let mut worker = WorkerState::new(cfg, tx);
     loop {
         if shutdown.load(Ordering::Relaxed) {
+            worker.leave_all(&mut client).await;
             return;
         }
         tokio::select! {
             event = client.next() => {
-                let Some(event) = event else { return; };
+                let Some(event) = event else {
+                    worker.leave_all(&mut client).await;
+                    return;
+                };
                 match event {
                     tokio_xmpp::Event::Online { bound_jid, .. } => {
                         worker.handle_online(bound_jid, &mut client).await;
@@ -623,7 +669,10 @@ async fn xmpp_worker(
                 }
             }
             command = command_rx.recv() => {
-                let Some(command) = command else { return; };
+                let Some(command) = command else {
+                    worker.leave_all(&mut client).await;
+                    return;
+                };
                 worker.handle_command(command, &mut client).await;
             }
             _ = tokio::time::sleep(Duration::from_millis(200)) => {}
@@ -658,8 +707,6 @@ struct WorkerState {
     room_to_agent: HashMap<BareJid, AgentId>,
     /// MUC occupant real JID cache.
     occupant_real_jids: HashMap<Jid, Jid>,
-    /// Per-worker random token used to make room names session-specific.
-    session_token: String,
 }
 
 impl WorkerState {
@@ -672,28 +719,34 @@ impl WorkerState {
             conversations: HashMap::new(),
             room_to_agent: HashMap::new(),
             occupant_real_jids: HashMap::new(),
-            session_token: short_random_hex(),
         }
     }
 
     /// Process one command from tool handlers.
     async fn handle_command(&mut self, command: XmppCommand, client: &mut Client) {
         match command {
-            XmppCommand::Register { agent_id, response } => {
+            XmppCommand::Register {
+                session_id,
+                agent_id,
+                response,
+            } => {
                 let result = match tokio::time::timeout(
                     REGISTER_TIMEOUT,
-                    self.register_agent(agent_id.clone(), client),
+                    self.register_agent(session_id, agent_id.clone(), client),
                 )
                 .await
                 {
                     Ok(result) => result,
-                    Err(_) => Err("timed out registering xmpp conversation".to_owned()),
+                    Err(_) => {
+                        self.unregister_agent(&agent_id, client).await;
+                        Err("timed out registering xmpp conversation".to_owned())
+                    }
                 };
-                self.finish_register_response(&agent_id, result, response);
+                self.finish_register_response(&agent_id, result, response, client)
+                    .await;
             }
             XmppCommand::Unregister { agent_id } => {
-                self.conversations.remove(&agent_id);
-                self.room_to_agent.retain(|_, mapped| mapped != &agent_id);
+                self.unregister_agent(&agent_id, client).await;
             }
             XmppCommand::Send {
                 agent_id,
@@ -708,22 +761,23 @@ impl WorkerState {
 
     /// Send a register response and roll back worker routing if the caller has
     /// already timed out and dropped its receiver.
-    fn finish_register_response(
+    async fn finish_register_response(
         &mut self,
         agent_id: &AgentId,
         result: Result<String, String>,
         response: mpsc::Sender<Result<String, String>>,
+        client: &mut Client,
     ) {
         let registered = result.is_ok();
         if response.send(result).is_err() && registered {
-            self.conversations.remove(agent_id);
-            self.room_to_agent.retain(|_, mapped| mapped != agent_id);
+            self.unregister_agent(agent_id, client).await;
         }
     }
 
     /// Register one agent conversation.
     async fn register_agent(
         &mut self,
+        session_id: SessionId,
         agent_id: AgentId,
         client: &mut Client,
     ) -> Result<String, String> {
@@ -732,39 +786,48 @@ impl WorkerState {
         }
         let conversation = match self.cfg.routing_mode {
             RoutingMode::Muc => {
-                if self.bound_jid.is_none() {
-                    return Err(
-                        "xmpp connection is not online yet; retry after the account connects"
-                            .to_owned(),
-                    );
-                }
-                let service = self
-                    .cfg
-                    .muc
-                    .service
-                    .clone()
-                    .ok_or_else(|| "xmpp muc.service is not configured".to_owned())?;
-                let room = Jid::new(&format!(
-                    "{}-{}-{}@{}",
-                    self.cfg.muc.room_prefix,
-                    clean_token(agent_id.as_ref()),
-                    self.session_token,
-                    service.domain()
-                ))
-                .map_err(|e| format!("failed to build muc room jid: {e}"))?
-                .to_bare();
+                self.ensure_online(client).await?;
+                let room = self.muc_room_for(&session_id, &agent_id)?;
                 let nick = format!("{}-{}", self.cfg.resource_prefix, short_random_hex());
                 join_room(client, &room, &nick).await?;
+                self.room_to_agent.insert(room.clone(), agent_id.clone());
+                let conversation = Conversation::Muc {
+                    room: room.clone(),
+                    nick,
+                };
+                self.conversations
+                    .insert(agent_id.clone(), conversation.clone());
                 if self.cfg.muc.invite_default_recipient {
+                    let invite_status = match send_muc_invite(
+                        client,
+                        room.clone(),
+                        self.cfg.default_recipient.clone(),
+                        &format!(
+                            "Tau agent {} registered this private room (plaintext over TLS; no OMEMO/E2EE).",
+                            agent_id.as_ref()
+                        ),
+                    )
+                    .await
+                    {
+                        Ok(()) => "sent a MUC invite for",
+                        Err(error) => {
+                            tracing::warn!(target: LOG_TARGET, %error, room = %room, "failed to send xmpp muc invite; sending direct diagnostic notice");
+                            "could not send a MUC invite for"
+                        }
+                    };
                     let notice = format!(
-                        "Tau agent {} registered an XMPP room: {} (plaintext over TLS; no OMEMO/E2EE).",
+                        "Tau agent {} {} room {}. If your client did not show the invite, join this room manually; replies to this direct notice are not routed in MUC mode. Plaintext over TLS; no OMEMO/E2EE.",
                         agent_id.as_ref(),
+                        invite_status,
                         room
                     );
-                    send_chat(client, self.cfg.default_recipient.clone(), &notice).await?;
+                    if let Err(error) =
+                        send_chat(client, self.cfg.default_recipient.clone(), &notice).await
+                    {
+                        tracing::warn!(target: LOG_TARGET, %error, room = %room, "failed to send xmpp muc fallback notice after join");
+                    }
                 }
-                self.room_to_agent.insert(room.clone(), agent_id.clone());
-                Conversation::Muc { room, nick }
+                conversation
             }
             RoutingMode::DirectResource => {
                 if self
@@ -772,11 +835,13 @@ impl WorkerState {
                     .values()
                     .any(|conversation| matches!(conversation, Conversation::Direct { .. }))
                 {
-                    return Err("direct_resource mode supports only one registered agent per extension instance".to_owned());
+                    return Err("direct_resource mode supports only one registered agent per extension instance; use routing.mode `muc` for multiple Tau agents or separate conversations".to_owned());
                 }
-                let Some(bound) = self.bound_jid.clone() else {
-                    return Err("xmpp connection is not online yet".to_owned());
-                };
+                self.ensure_online(client).await?;
+                let bound = self
+                    .bound_jid
+                    .clone()
+                    .ok_or_else(|| "xmpp connection is not online yet".to_owned())?;
                 let notice = format!(
                     "Tau agent {} is available at {} (plaintext over TLS; no OMEMO/E2EE).",
                     agent_id.as_ref(),
@@ -787,8 +852,95 @@ impl WorkerState {
             }
         };
         let address = conversation.address();
-        self.conversations.insert(agent_id, conversation);
+        self.conversations.entry(agent_id).or_insert(conversation);
         Ok(address)
+    }
+
+    /// Build the stable MUC room JID for a Tau session and agent pair.
+    fn muc_room_for(&self, session_id: &SessionId, agent_id: &AgentId) -> Result<BareJid, String> {
+        let service = self
+            .cfg
+            .muc
+            .service
+            .clone()
+            .ok_or_else(|| "xmpp muc.service is not configured".to_owned())?;
+        Jid::new(&format!(
+            "{}-s{}-a{}@{}",
+            self.cfg.muc.room_prefix,
+            hex_token(session_id.as_ref()),
+            hex_token(agent_id.as_ref()),
+            service.domain()
+        ))
+        .map_err(|e| format!("failed to build muc room jid: {e}"))
+        .map(|jid| jid.to_bare())
+    }
+
+    /// Wait briefly for the XMPP stream to become online and process any
+    /// intervening stanzas needed to keep routing state fresh.
+    async fn ensure_online(&mut self, client: &mut Client) -> Result<(), String> {
+        if self.bound_jid.is_some() {
+            return Ok(());
+        }
+        let wait = async {
+            loop {
+                let Some(event) = client.next().await else {
+                    return Err("xmpp connection ended before becoming online".to_owned());
+                };
+                match event {
+                    tokio_xmpp::Event::Online { bound_jid, .. } => {
+                        self.handle_online(bound_jid, client).await;
+                        return Ok(());
+                    }
+                    tokio_xmpp::Event::Disconnected(error) => {
+                        tracing::warn!(target: LOG_TARGET, %error, "xmpp disconnected while waiting for online state");
+                    }
+                    tokio_xmpp::Event::Stanza(stanza) => self.handle_stanza(stanza),
+                }
+            }
+        };
+        tokio::time::timeout(ONLINE_WAIT_TIMEOUT, wait)
+            .await
+            .map_err(|_| {
+                "xmpp connection is not online yet; retry after the account connects".to_owned()
+            })?
+    }
+
+    /// Unregister one agent and leave its MUC room when applicable.
+    async fn unregister_agent(&mut self, agent_id: &AgentId, client: &mut Client) {
+        if let Some(conversation) = self.remove_conversation(agent_id) {
+            self.leave_conversation(&conversation, client).await;
+        }
+    }
+
+    /// Remove one registered conversation and its room mapping.
+    fn remove_conversation(&mut self, agent_id: &AgentId) -> Option<Conversation> {
+        let conversation = self.conversations.remove(agent_id);
+        self.room_to_agent.retain(|_, mapped| mapped != agent_id);
+        conversation
+    }
+
+    /// Leave all registered MUC conversations before worker shutdown.
+    async fn leave_all(&mut self, client: &mut Client) {
+        let conversations = self
+            .conversations
+            .drain()
+            .map(|(_, conv)| conv)
+            .collect::<Vec<_>>();
+        for conversation in conversations {
+            self.leave_conversation(&conversation, client).await;
+        }
+        self.room_to_agent.clear();
+        self.occupant_real_jids.clear();
+    }
+
+    /// Send leave presence for a MUC conversation. Direct conversations require
+    /// no per-conversation unavailable stanza.
+    async fn leave_conversation(&self, conversation: &Conversation, client: &mut Client) {
+        if let Conversation::Muc { room, nick } = conversation
+            && let Err(error) = leave_room(client, room, nick).await
+        {
+            tracing::warn!(target: LOG_TARGET, %error, room = %room, "failed to leave xmpp muc room");
+        }
     }
 
     /// Refresh connection-dependent state after the XMPP stream comes online.
@@ -989,6 +1141,7 @@ impl WorkerState {
             })
             .collect();
         if agents.len() != 1 {
+            tracing::warn!(target: LOG_TARGET, sender = %from, "dropping direct xmpp message with no registered direct-resource agent; in MUC mode, send messages in the agent room instead of replying to direct notices");
             return;
         }
         self.route(
@@ -1024,6 +1177,7 @@ impl WorkerState {
     }
 }
 
+#[derive(Clone)]
 enum Conversation {
     /// MUC room conversation.
     Muc {
@@ -1060,6 +1214,19 @@ async fn join_room(client: &mut Client, room: &BareJid, nick: &str) -> Result<()
         .map_err(|e| format!("failed to join xmpp muc room: {e}"))
 }
 
+async fn leave_room(client: &mut Client, room: &BareJid, nick: &str) -> Result<(), String> {
+    let presence = leave_presence(room, nick)?;
+    send_presence(client, presence)
+        .await
+        .map_err(|e| format!("failed to leave xmpp muc room: {e}"))
+}
+
+fn leave_presence(room: &BareJid, nick: &str) -> Result<Presence, String> {
+    let to = Jid::new(&format!("{room}/{nick}"))
+        .map_err(|e| format!("invalid muc occupant jid: {e}"))?;
+    Ok(Presence::unavailable().with_to(to))
+}
+
 async fn send_presence(client: &mut Client, presence: Presence) -> Result<(), String> {
     send_stanza_with_timeout(client, presence.into()).await
 }
@@ -1086,6 +1253,30 @@ async fn send_groupchat(client: &mut Client, to: Jid, text: &str) -> Result<(), 
         .map_err(|e| format!("failed to send xmpp groupchat message: {e}"))
 }
 
+async fn send_muc_invite(
+    client: &mut Client,
+    room: BareJid,
+    to: Jid,
+    reason: &str,
+) -> Result<(), String> {
+    let message = muc_invite_message(room, to, reason);
+    send_stanza_with_timeout(client, message.into())
+        .await
+        .map_err(|e| format!("failed to send xmpp muc invite: {e}"))
+}
+
+fn muc_invite_message(room: BareJid, to: Jid, reason: &str) -> Message {
+    let invite = MucUser {
+        invite: Some(Invite {
+            from: None,
+            to: Some(to),
+            reason: Some(reason.to_owned()),
+        }),
+        ..MucUser::new()
+    };
+    Message::normal(Jid::from(room)).with_payload(invite)
+}
+
 fn run_with_bridge<R, W>(
     reader: R,
     writer: W,
@@ -1100,6 +1291,7 @@ where
     tau_extension::Handshake::tool("tau-ext-xmpp")
         .subscribe([
             tau_proto::EventName::TOOL_STARTED,
+            tau_proto::EventName::SESSION_STARTED,
             tau_proto::EventName::AGENT_DISPLAY_NAME_SET,
             tau_proto::EventName::AGENT_STARTED,
             tau_proto::EventName::SESSION_AGENT_UNLOADED,
@@ -1134,62 +1326,8 @@ where
 
     while let Some(message) = reader.read_message()? {
         match message {
-            HarnessOutputMessage::Configure(msg) => {
-                match tau_extension::parse_config::<ExtConfig>(&msg.config).and_then(|cfg| {
-                    cfg.validate(&msg.secrets, msg.instance_name.map(|name| name.to_string()))
-                }) {
-                    Ok(cfg) => ext.apply_config(cfg),
-                    Err(message) => {
-                        let _ = tx.send(HarnessInputMessage::ConfigError(ConfigError { message }));
-                    }
-                }
-            }
-            HarnessOutputMessage::Deliver(delivery) => {
-                if delivery.is_replay() {
-                    continue;
-                }
-                match delivery.into_event() {
-                    Event::ToolStarted(invoke)
-                        if matches!(
-                            invoke.tool_name.as_str(),
-                            REGISTER_TOOL_NAME | SEND_TOOL_NAME
-                        ) =>
-                    {
-                        ext.dispatch_tool(invoke);
-                    }
-                    Event::AgentDisplayNameSet(name) => {
-                        let mut state = ext.state.lock().unwrap_or_else(|e| e.into_inner());
-                        state.agent_labels.insert(name.agent_id, name.display_name);
-                    }
-                    Event::AgentStarted(started) => {
-                        if let Some(display_name) = started.display_name {
-                            let mut state = ext.state.lock().unwrap_or_else(|e| e.into_inner());
-                            state.agent_labels.insert(started.agent_id, display_name);
-                        }
-                    }
-                    Event::SessionAgentUnloaded(unloaded) => {
-                        let _ = ext.bridge.unregister_agent(&unloaded.agent_id);
-                        let mut state = ext.state.lock().unwrap_or_else(|e| e.into_inner());
-                        state.registered_agents.remove(&unloaded.agent_id);
-                        state.agent_labels.remove(&unloaded.agent_id);
-                        state.conversations.remove(&unloaded.agent_id);
-                    }
-                    Event::SessionShutdown(_) => {
-                        let agents: Vec<_> = {
-                            let mut state = ext.state.lock().unwrap_or_else(|e| e.into_inner());
-                            let agents =
-                                state.registered_agents.iter().cloned().collect::<Vec<_>>();
-                            state.registered_agents.clear();
-                            state.conversations.clear();
-                            agents
-                        };
-                        for agent in agents {
-                            let _ = ext.bridge.unregister_agent(&agent);
-                        }
-                    }
-                    _ => {}
-                }
-            }
+            HarnessOutputMessage::Configure(msg) => handle_configure(&ext, &tx, msg),
+            HarnessOutputMessage::Deliver(delivery) => handle_delivery(&ext, delivery),
             _ => {}
         }
     }
@@ -1199,6 +1337,76 @@ where
         Ok(Ok(())) => Ok(()),
         Ok(Err(error)) => Err(error),
         Err(_) => Err("xmpp writer thread panicked".into()),
+    }
+}
+
+fn handle_configure(ext: &Extension, tx: &mpsc::Sender<HarnessInputMessage>, msg: Configure) {
+    match tau_extension::parse_config::<ExtConfig>(&msg.config)
+        .and_then(|cfg| cfg.validate(&msg.secrets, msg.instance_name.map(|name| name.to_string())))
+    {
+        Ok(cfg) => ext.apply_config(cfg),
+        Err(message) => {
+            let _ = tx.send(HarnessInputMessage::ConfigError(ConfigError { message }));
+        }
+    }
+}
+
+fn handle_delivery(ext: &Extension, delivery: EventDelivery) {
+    let is_replay = delivery.is_replay();
+    match delivery.into_event() {
+        Event::SessionStarted(started) => {
+            let mut state = ext.state.lock().unwrap_or_else(|e| e.into_inner());
+            state.current_session_id = Some(started.session_id);
+        }
+        Event::ToolStarted(invoke)
+            if matches!(
+                invoke.tool_name.as_str(),
+                REGISTER_TOOL_NAME | SEND_TOOL_NAME
+            ) && !is_replay =>
+        {
+            ext.dispatch_tool(invoke);
+        }
+        Event::AgentDisplayNameSet(name) if !is_replay => {
+            let mut state = ext.state.lock().unwrap_or_else(|e| e.into_inner());
+            state.agent_labels.insert(name.agent_id, name.display_name);
+        }
+        Event::AgentStarted(started) if !is_replay => {
+            if let Some(display_name) = started.display_name {
+                let mut state = ext.state.lock().unwrap_or_else(|e| e.into_inner());
+                state.agent_labels.insert(started.agent_id, display_name);
+            }
+        }
+        Event::SessionAgentUnloaded(unloaded) if !is_replay => {
+            unload_agent(ext, unloaded.agent_id);
+        }
+        Event::SessionShutdown(shutdown) if !is_replay => {
+            shutdown_session(ext, shutdown.session_id);
+        }
+        _ => {}
+    }
+}
+
+fn unload_agent(ext: &Extension, agent_id: AgentId) {
+    let _ = ext.bridge.unregister_agent(&agent_id);
+    let mut state = ext.state.lock().unwrap_or_else(|e| e.into_inner());
+    state.registered_agents.remove(&agent_id);
+    state.agent_labels.remove(&agent_id);
+    state.conversations.remove(&agent_id);
+}
+
+fn shutdown_session(ext: &Extension, session_id: SessionId) {
+    let agents: Vec<_> = {
+        let mut state = ext.state.lock().unwrap_or_else(|e| e.into_inner());
+        let agents = state.registered_agents.iter().cloned().collect::<Vec<_>>();
+        state.registered_agents.clear();
+        state.conversations.clear();
+        if state.current_session_id.as_ref() == Some(&session_id) {
+            state.current_session_id = None;
+        }
+        agents
+    };
+    for agent in agents {
+        let _ = ext.bridge.unregister_agent(&agent);
     }
 }
 
@@ -1336,6 +1544,14 @@ fn short_random_hex() -> String {
     let mut bytes = [0u8; 8];
     rand::thread_rng().fill_bytes(&mut bytes);
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn hex_token(input: &str) -> String {
+    input
+        .as_bytes()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 fn generated_resource(cfg: &RuntimeConfig) -> String {

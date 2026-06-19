@@ -73,7 +73,8 @@ untrusted external XMPP text into Tau prompts. When enabled, it requires an
 explicit password secret, a non-empty `allowed_jids` allowlist, and a
 `default_recipient` that matches that allowlist. The model cannot choose
 arbitrary destination JIDs: outgoing messages use only the registered agent
-conversation. Outbound MUC messages are visible to room occupants. The MVP is
+conversation, and MUC invites/notices go only to the configured allowlisted
+default recipient. Outbound MUC messages are visible to room occupants. The MVP is
 plaintext XMPP over TLS only and does not implement OMEMO/E2EE, so XMPP
 servers/operators can read message content. Tau does not currently configure
 MUC privacy or member affiliations itself; private/hidden/members-only policy
@@ -81,8 +82,11 @@ must come from server defaults or preconfiguration. MUC mode must verify real
 sender JIDs from room presence by default; if a server hides real JIDs, the
 extension fails closed unless the user explicitly configures trust in
 server-side room membership. Runtime registrations and room mappings are
-in-memory only. Avoid logs that include XMPP passwords or private message
-content.
+in-memory only; MUC room routing keys use normalization-stable hex encodings and
+must not collapse distinct valid Tau agent ids after XMPP JID normalization, and
+successfully joined rooms must remain tracked until leave/unavailable presence
+can be sent or the connection is gone. Avoid logs that include XMPP passwords or
+private message content.
 
 ## Rhai scripting extension
 

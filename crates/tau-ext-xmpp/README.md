@@ -84,12 +84,14 @@ extensions:
       default_recipient: me@example.org
       routing: { mode: muc }
       muc:
+        # Domain-only MUC service JID; localparts/resources are rejected.
         service: conference.example.org
         room_prefix: tau
         expose_real_jids: true
         # Set true only if the room server enforces membership and intentionally
         # hides real JIDs from Tau.
         trust_muc_membership: false
+        # Send a formal XEP-0045 mediated invite plus a direct fallback notice.
         invite_default_recipient: true
       # Default: 16384 bytes. Valid range: 1..=131072 (128 KiB).
       max_message_bytes: 16384
@@ -102,16 +104,34 @@ room occupants.
 
 ## Routing modes
 
-- `muc` (recommended): creates/joins one room per Tau worker session and agent.
+- `muc` (recommended): creates/joins one room per Tau session id and agent id.
   This gives ordinary XMPP clients a separate conversation per registered agent,
-  while Tau enforces `allowed_jids` from current real-JID presence when
-  available.
+  while resumed Tau sessions return to the same room address. The room name uses
+  lowercase hex encodings of the full session id and agent id so XMPP JID
+  normalization cannot merge distinct Tau agents. Tau sends a formal XEP-0045
+  mediated invite to `default_recipient` plus a direct fallback notice with the
+  room JID, and enforces `allowed_jids` from current real-JID presence when
+  available. Invite and fallback notice delivery are best-effort after the room
+  is joined; Tau still tracks and leaves the room on registration rollback,
+  unregister, or shutdown.
 - `direct_resource`: announces the current bound full JID to `default_recipient`
   and accepts only direct messages addressed exactly to the current server-bound
   full JID. This mode supports only one registered agent per extension instance;
-  if reconnect changes the resource, Tau sends the default recipient a new
-  address notice.
+  use `routing.mode: muc` for multiple Tau agents or separate conversations. If
+  reconnect changes the resource, Tau sends the default recipient a new address
+  notice.
 
 Tau requests zero MUC history on join and drops delayed/history message stanzas
 if they are still delivered, so initial room backlog is not converted into
-prompts.
+prompts. Tau sends unavailable presence when unregistering an agent or shutting
+down a session so the XMPP account leaves no-longer-registered MUC rooms.
+
+## Troubleshooting Conversations/Android MUC replies
+
+In MUC mode, reply in the joined room conversation, not in the 1:1 direct notice
+chat from the Tau XMPP account. Direct notice replies are ignored because they do
+not identify which registered agent room should receive the prompt. If room
+messages still do not reach Tau, check Tau logs for "dropping muc message without
+real jid proof"; that means the MUC service is hiding occupant real JIDs and Tau
+is correctly failing closed unless `trust_muc_membership: true` is explicitly
+configured for a members-only server-side room.

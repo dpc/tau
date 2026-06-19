@@ -833,12 +833,13 @@ trees, including abandoned branches, are preserved across restarts.
 
 ## XMPP agent chat bridge
 
-Tau includes a disabled-by-default `std-xmpp` extension for personal 1-to-1
-chat with agents over XMPP. Agents opt in with `xmpp_register`, reply with
-`xmpp_send`, and cannot choose arbitrary destination JIDs. The recommended
-configuration uses a MUC room per registered agent conversation so multiple Tau
-processes can share one XMPP account without resource conflicts. Tau joins the
-room and enforces allowlisted real sender JIDs, but the MVP relies on server
-configuration/defaults for private, hidden, and members-only room policy.
-The MVP sends ordinary plaintext XMPP messages over TLS only; it does not
-provide OMEMO or other end-to-end encryption.
+Tau includes a disabled-by-default `std-xmpp` extension for personal chat with
+agents over XMPP. Agents opt in with `xmpp_register`, reply with `xmpp_send`,
+and cannot choose arbitrary destination JIDs. The recommended configuration uses
+a MUC room per Tau session id and agent id, sends an XEP-0045 mediated invite
+plus a direct fallback notice, and lets multiple Tau processes share one XMPP
+account without resource conflicts. Tau joins the room, leaves it on unregister
+or session shutdown, and enforces allowlisted real sender JIDs, but the MVP
+relies on server configuration/defaults for private, hidden, and members-only
+room policy. The MVP sends ordinary plaintext XMPP messages over TLS only; it
+does not provide OMEMO or other end-to-end encryption.

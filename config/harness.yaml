@@ -88,6 +88,7 @@
 #       default_recipient: me@example.org
 #       routing: { mode: muc } # or: { mode: direct_resource }
 #       muc:
+#         # Domain-only MUC service JID.
 #         service: conference.example.org
 #         room_prefix: tau
 #         # Recommended: configure Prosody/MUC defaults to create hidden,
@@ -96,6 +97,8 @@
 #         # Set true only when server-side room membership is the intended
 #         # authorization boundary and real JIDs are intentionally hidden.
 #         trust_muc_membership: false
+#         # Send XEP-0045 mediated invites plus a direct fallback notice.
+#         invite_default_recipient: true
 #       # Default: 16384 bytes. Valid range: 1..=131072 (128 KiB).
 #       max_message_bytes: 16384
 #   std-pim:

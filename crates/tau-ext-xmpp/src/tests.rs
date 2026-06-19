@@ -28,12 +28,18 @@ impl XmppBridge for FakeBridge {
         Ok(())
     }
 
-    fn register_agent(&self, cfg: &RuntimeConfig, agent_id: &AgentId) -> Result<String, String> {
+    fn register_agent(
+        &self,
+        cfg: &RuntimeConfig,
+        session_id: &SessionId,
+        agent_id: &AgentId,
+    ) -> Result<String, String> {
         let address = match cfg.routing_mode {
             RoutingMode::Muc => format!(
-                "{}-{}@conference.example.org",
+                "{}-s{}-a{}@conference.example.org",
                 cfg.muc.room_prefix,
-                agent_id.as_ref()
+                hex_token(session_id.as_ref()),
+                hex_token(agent_id.as_ref())
             ),
             RoutingMode::DirectResource => "tau@example.org/tau-test".to_owned(),
         };
@@ -149,6 +155,7 @@ fn extension() -> (
     let bridge = FakeBridge::new();
     let ext = Extension::new(bridge.clone(), tx);
     ext.apply_config(cfg());
+    ext.state.lock().expect("lock").current_session_id = Some("session-1".into());
     (ext, rx, bridge)
 }
 
@@ -228,6 +235,25 @@ fn config_rejects_unsafe_shapes() {
     .err()
     .expect("oversized limit rejected");
     assert!(err.contains("max_message_bytes"));
+
+    let err = ExtConfig {
+        jid: Some("tau@example.org".to_owned()),
+        password_secret: Some("xmpp_password".to_owned()),
+        allowed_jids: vec!["me@example.org".to_owned()],
+        default_recipient: Some("me@example.org".to_owned()),
+        routing: RoutingConfig {
+            mode: Some("muc".to_owned()),
+        },
+        muc: MucConfigRaw {
+            service: Some("room@conference.example.org/tau".to_owned()),
+            ..Default::default()
+        },
+        ..Default::default()
+    }
+    .validate(&secrets(), None)
+    .err()
+    .expect("muc service with localpart/resource rejected");
+    assert!(err.contains("domain-only"));
 }
 
 /// `xmpp_send` is gated on prior registration so an arbitrary agent cannot send
@@ -259,6 +285,48 @@ fn xmpp_register_true_registers_agent_and_starts_bridge() {
     let state = ext.state.lock().expect("lock");
     assert!(state.registered_agents.contains(&agent_id("agent-1")));
     assert!(state.conversations.contains_key(&agent_id("agent-1")));
+}
+
+/// MUC room identity needs the current Tau session id; registration should fail
+/// before starting XMPP if the extension has not observed `session.started`.
+#[test]
+fn xmpp_register_requires_active_session_before_starting_bridge() {
+    let (tx, rx) = mpsc::channel();
+    let bridge = FakeBridge::new();
+    let ext = Extension::new(bridge.clone(), tx);
+    ext.apply_config(cfg());
+
+    ext.dispatch_tool(tool(REGISTER_TOOL_NAME, "agent-1", bool_args(true)));
+    let _progress = rx.recv().expect("progress");
+    let msg = rx.recv().expect("result");
+    let HarnessInputMessage::Emit(emit) = msg else {
+        panic!("emit")
+    };
+    let Event::ToolError(error) = *emit.event else {
+        panic!("tool error")
+    };
+    assert!(error.message.contains("active Tau session"));
+    assert_eq!(*bridge.started.lock().expect("lock"), 0);
+}
+
+/// In MUC mode, two agents in the same Tau session can register at the same
+/// time and receive separate stable room addresses keyed by session plus agent.
+#[test]
+fn xmpp_register_allows_two_muc_agents_in_same_session() {
+    let (ext, rx, bridge) = extension();
+    ext.dispatch_tool(tool(REGISTER_TOOL_NAME, "agent-1", bool_args(true)));
+    let _ = rx.recv();
+    let _ = rx.recv();
+    ext.dispatch_tool(tool(REGISTER_TOOL_NAME, "agent-2", bool_args(true)));
+    let _ = rx.recv();
+    let _ = rx.recv();
+
+    let registered = bridge.registered.lock().expect("lock");
+    let agent_1 = registered.get(&agent_id("agent-1")).expect("agent 1");
+    let agent_2 = registered.get(&agent_id("agent-2")).expect("agent 2");
+    assert_ne!(agent_1, agent_2);
+    assert!(agent_1.contains("s73657373696f6e2d31"));
+    assert!(agent_2.contains("s73657373696f6e2d31"));
 }
 
 /// `xmpp_register` rejects unexpected arguments so registration cannot grow a
@@ -397,21 +465,91 @@ fn muc_message_without_real_jid_is_not_routed() {
     assert!(rx.try_recv().is_err());
 }
 
-/// MUC registration requires an online stream so callers get a clear diagnostic
-/// instead of an ambiguous stanza-send timeout while disconnected.
-#[tokio::test]
-async fn muc_registration_requires_online_stream() {
+/// MUC room identity is deterministic from the Tau session and agent so a
+/// resumed session returns to the same XMPP conversation address.
+#[test]
+fn muc_room_identity_uses_stable_session_and_agent() {
     let (tx, _rx) = mpsc::channel();
-    let mut worker = WorkerState::new(cfg(), tx);
-    let mut client = Client::new(
-        Jid::new("tau@example.org/tau-resource").expect("jid"),
-        "unused".to_owned(),
+    let worker = WorkerState::new(cfg(), tx);
+    let room = worker
+        .muc_room_for(&"session-1".into(), &agent_id("agent-1"))
+        .expect("room");
+    assert_eq!(
+        room.to_string(),
+        "tau-s73657373696f6e2d31-a6167656e742d31@conference.example.org"
     );
-    let err = worker
-        .register_agent(agent_id("agent-1"), &mut client)
-        .await
-        .expect_err("offline muc registration rejected");
-    assert!(err.contains("not online"));
+}
+
+/// Full agent ids participate in MUC room identity so long ids with identical
+/// display prefixes cannot collapse onto one room and overwrite inbound
+/// routing.
+#[test]
+fn muc_room_identity_does_not_truncate_long_agent_ids() {
+    let (tx, _rx) = mpsc::channel();
+    let worker = WorkerState::new(cfg(), tx);
+    let first = agent_id(&format!("{}{}", "a".repeat(48), "b".repeat(16)));
+    let second = agent_id(&format!("{}{}", "a".repeat(48), "c".repeat(16)));
+
+    let first_room = worker
+        .muc_room_for(&"session-1".into(), &first)
+        .expect("first room");
+    let second_room = worker
+        .muc_room_for(&"session-1".into(), &second)
+        .expect("second room");
+
+    assert_ne!(first_room, second_room);
+    assert_eq!(
+        first_room.to_string(),
+        "tau-s73657373696f6e2d31-a61616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616162626262626262626262626262626262@conference.example.org"
+    );
+    assert_eq!(
+        second_room.to_string(),
+        "tau-s73657373696f6e2d31-a61616161616161616161616161616161616161616161616161616161616161616161616161616161616161616161616163636363636363636363636363636363@conference.example.org"
+    );
+}
+
+/// Agent ids that differ only by case remain distinct after XMPP JID parsing
+/// and normalization because room identity uses lowercase hex encodings, not
+/// raw nodes.
+#[test]
+fn muc_room_identity_is_stable_across_xmpp_nodeprep_casefolding() {
+    let (tx, _rx) = mpsc::channel();
+    let worker = WorkerState::new(cfg(), tx);
+    let uppercase = worker
+        .muc_room_for(&"session-1".into(), &agent_id("AgentA"))
+        .expect("uppercase room");
+    let lowercase = worker
+        .muc_room_for(&"session-1".into(), &agent_id("agenta"))
+        .expect("lowercase room");
+
+    assert_eq!(
+        uppercase.to_string(),
+        "tau-s73657373696f6e2d31-a4167656e7441@conference.example.org"
+    );
+    assert_eq!(
+        lowercase.to_string(),
+        "tau-s73657373696f6e2d31-a6167656e7461@conference.example.org"
+    );
+    assert_ne!(uppercase, lowercase);
+}
+
+/// Formal MUC invitations use XEP-0045 mediated invite payloads addressed to
+/// the room so clients can present the room as a joinable conversation.
+#[test]
+fn muc_invite_message_contains_mediated_invite_payload() {
+    let room = Jid::new("tau-s1-aagent-1@conference.example.org")
+        .expect("room")
+        .to_bare();
+    let recipient = Jid::new("me@example.org").expect("recipient");
+    let message = muc_invite_message(room.clone(), recipient.clone(), "join this Tau room");
+
+    assert_eq!(message.type_, MessageType::Normal);
+    assert_eq!(message.to, Some(room.into()));
+    let payload = message.payloads.first().expect("muc user payload").clone();
+    let muc_user = MucUser::try_from(payload).expect("muc user");
+    let invite = muc_user.invite.expect("invite");
+    assert_eq!(invite.to, Some(recipient));
+    assert_eq!(invite.reason.as_deref(), Some("join this Tau room"));
 }
 
 /// Allowed MUC text with a cached real JID routes exactly one prompt through
@@ -670,17 +808,17 @@ async fn direct_registration_rejects_second_agent() {
         "unused".to_owned(),
     );
     let err = worker
-        .register_agent(agent_id("agent-2"), &mut client)
+        .register_agent("session-1".into(), agent_id("agent-2"), &mut client)
         .await
         .expect_err("second direct registration rejected");
     assert!(err.contains("only one registered agent"));
+    assert!(err.contains("routing.mode `muc`"));
 }
 
-/// If a tool caller times out and drops the register response receiver, the
-/// worker must roll back routing state so later XMPP stanzas cannot reach an
-/// agent that the extension did not mark as registered.
+/// Removing a post-join MUC registration returns the tracked room and nick used
+/// for unavailable leave presence and clears inbound routing maps.
 #[test]
-fn register_response_drop_rolls_back_worker_routing() {
+fn removing_muc_conversation_tracks_leave_and_clears_routing() {
     let (tx, _rx) = mpsc::channel();
     let mut worker = WorkerState::new(cfg(), tx);
     let agent = agent_id("agent-1");
@@ -695,15 +833,20 @@ fn register_response_drop_rolls_back_worker_routing() {
             nick: "tau-self".to_owned(),
         },
     );
-    let (response_tx, response_rx) = mpsc::channel();
-    drop(response_rx);
 
-    worker.finish_register_response(
-        &agent,
-        Ok("tau-agent-1@conference.example.org".to_owned()),
-        response_tx,
-    );
+    let removed = worker
+        .remove_conversation(&agent)
+        .expect("removed conversation");
 
     assert!(!worker.conversations.contains_key(&agent));
     assert!(worker.room_to_agent.values().all(|mapped| mapped != &agent));
+    let Conversation::Muc { room, nick } = removed else {
+        panic!("muc conversation")
+    };
+    let presence = leave_presence(&room, &nick).expect("leave presence");
+    assert_eq!(presence.type_, PresenceType::Unavailable);
+    assert_eq!(
+        presence.to,
+        Some(Jid::new("tau-agent-1@conference.example.org/tau-self").expect("jid"))
+    );
 }

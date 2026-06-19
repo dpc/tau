@@ -30,13 +30,19 @@ The extension generates a high-entropy resource for the configured bare account 
 
 Status: unconfirmed
 
-Recommended routing is one MUC room per extension-worker session and agent. The room name includes a random worker token so concurrent Tau sessions do not collide.
+Recommended routing is one MUC room per Tau session id and agent id. The room name includes normalization-stable lowercase hex encodings of the full session id and full validated agent id, so resumed Tau sessions return to the same XMPP room while different sessions and agents remain separate conversations. The room identity must not collapse distinct valid `AgentId`s, including ids that differ only by case or long ids that share a display prefix.
+
+## MUC invitations and lifecycle
+
+Status: unconfirmed
+
+MUC registration sends a formal XEP-0045 mediated invite to `default_recipient`, followed by a direct fallback notice containing the room JID for clients that do not surface mediated invites. After a MUC join succeeds, invite and fallback notice delivery are best-effort: the joined room is tracked immediately so timeout, dropped registration response, unregister, and session shutdown can send unavailable presence before removing routing state where the worker is still connected.
 
 ## Direct-resource fallback scope
 
 Status: unconfirmed
 
-Direct-resource routing is a fallback. It supports one registered direct agent per extension instance because one bound full JID cannot distinguish multiple agents for inbound direct messages. On reconnect, a changed bound resource is announced to the default recipient.
+Direct-resource routing is a fallback. It supports one registered direct agent per extension instance because one bound full JID cannot distinguish multiple agents for inbound direct messages. The second-registration error explicitly points users to `routing.mode: muc` for multiple agents or separate conversations. On reconnect, a changed bound resource is announced to the default recipient.
 
 ## MUC deployment preconditions
 
@@ -56,10 +62,10 @@ The MVP sends ordinary XMPP text protected by TLS certificate validation. It doe
 
 Status: unconfirmed
 
-Unit tests with fake or state-only XMPP surfaces cover config validation, opt-in tool metadata, send-before-register rejection, registration state, MUC real-JID allowlist routing, hidden-real-JID fail-closed behavior, explicit membership-trust behavior, own-message suppression, stale occupant cache invalidation, delayed/history drops, message-size drops, unknown tool-argument rejection, direct full-JID exact-to routing, and reconnect state updates. Live Prosody testing is still future work.
+Unit tests with fake or state-only XMPP surfaces cover config validation, opt-in tool metadata, send-before-register rejection, registration state, multiple MUC agents in one Tau session, stable session/agent room identity, long-agent-id and case-folding non-collapse, MUC mediated invite payloads, MUC leave presence construction, MUC real-JID allowlist routing, hidden-real-JID fail-closed behavior, explicit membership-trust behavior, own-message suppression, stale occupant cache invalidation, delayed/history drops, message-size drops, unknown tool-argument rejection, direct full-JID exact-to routing, and reconnect state updates. Live Prosody testing is still future work.
 
 ## Registration timeout rollback
 
 Status: unconfirmed
 
-Registration commands have an overall worker-side timeout shorter than the outer tool-call wait. If the caller has already timed out and dropped the response receiver anyway, the worker rolls back conversation maps so a failed registration cannot leave ghost XMPP routing state.
+Registration commands have an overall worker-side timeout shorter than the outer tool-call wait. If registration times out after a successful MUC join, or if the caller has already timed out and dropped the response receiver anyway, the worker rolls back conversation maps and sends unavailable presence so a failed registration cannot leave ghost XMPP routing state or a stale room occupant.
