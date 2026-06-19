@@ -3021,6 +3021,8 @@ pub enum ProviderStopReason {
     Length,
     /// The turn ended with a provider/runtime error.
     Error,
+    /// The provider aborted a tight exact streaming repetition.
+    RepetitionDetected,
 }
 
 impl ProviderStopReason {

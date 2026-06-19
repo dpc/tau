@@ -1832,3 +1832,187 @@ fn apply_event_error_without_code_omits_suffix() {
         other => panic!("expected HttpStatus(0, ...), got {other:?}"),
     }
 }
+
+#[test]
+fn repeated_output_text_delta_aborts_before_appending_more_output() {
+    // Ensures the Responses stream guard aborts tight exact assistant text loops
+    // before the repeated suffix can be emitted as a normal update.
+    let mut state = crate::common::StreamState::new();
+    let ev = serde_json::json!({
+        "type": "response.output_text.delta",
+        "output_index": 0,
+        "delta": ".".repeat(1024),
+    });
+    let result = apply_event(&mut state, &ev, &mut |_| {});
+    assert!(matches!(
+        result,
+        Err(crate::common::LlmError::RepetitionDetected(_))
+    ));
+    assert!(state.text.is_empty());
+}
+
+#[test]
+fn repeated_tool_argument_delta_aborts_before_appending_more_arguments() {
+    // Ensures tool-call argument streams use the same tight exact guard, because
+    // argument loops can otherwise burn the provider output budget unseen.
+    let mut state = crate::common::StreamState::new();
+    let ev = serde_json::json!({
+        "type": "response.function_call_arguments.delta",
+        "output_index": 0,
+        "delta": "_clone".repeat(180),
+    });
+    let result = apply_event(&mut state, &ev, &mut |_| {});
+    assert!(matches!(
+        result,
+        Err(crate::common::LlmError::RepetitionDetected(_))
+    ));
+    assert!(state.output_items.is_empty());
+}
+
+#[test]
+fn repeated_output_text_done_aborts_without_appending_snapshot() {
+    // Done snapshots can carry all text without prior deltas; they must be guarded
+    // before becoming assistant output.
+    let mut state = crate::common::StreamState::new();
+    let ev = serde_json::json!({
+        "type": "response.output_text.done",
+        "output_index": 0,
+        "text": ".".repeat(1024),
+    });
+    let result = apply_event(&mut state, &ev, &mut |_| {});
+    assert!(matches!(
+        result,
+        Err(crate::common::LlmError::RepetitionDetected(_))
+    ));
+    assert!(state.text.is_empty());
+}
+
+#[test]
+fn non_repeating_output_text_done_is_accepted() {
+    // Non-repeating final snapshots are normal Responses events and must not be
+    // rejected just because they bypassed delta streaming.
+    let mut state = crate::common::StreamState::new();
+    let ev = serde_json::json!({
+        "type": "response.output_text.done",
+        "output_index": 0,
+        "text": "This is a concise non-repeating answer.",
+    });
+    let done = apply_event(&mut state, &ev, &mut |_| {}).expect("done snapshot should apply");
+    assert!(!done);
+    assert_eq!(state.text, "This is a concise non-repeating answer.");
+}
+
+#[test]
+fn repeated_function_arguments_done_aborts_without_appending_snapshot() {
+    // Function argument done events can provide a full final argument string; the
+    // guard must check it even when no argument deltas were sent.
+    let mut state = crate::common::StreamState::new();
+    let ev = serde_json::json!({
+        "type": "response.function_call_arguments.done",
+        "output_index": 0,
+        "arguments": "_clone".repeat(180),
+    });
+    let result = apply_event(&mut state, &ev, &mut |_| {});
+    assert!(matches!(
+        result,
+        Err(crate::common::LlmError::RepetitionDetected(_))
+    ));
+    assert!(state.output_items.is_empty());
+}
+
+#[test]
+fn repeated_custom_tool_input_done_aborts_without_appending_snapshot() {
+    // Custom tool input done events share the same final-snapshot bypass risk as
+    // function arguments.
+    let mut state = crate::common::StreamState::new();
+    let ev = serde_json::json!({
+        "type": "response.custom_tool_call_input.done",
+        "output_index": 0,
+        "input": "_clone".repeat(180),
+    });
+    let result = apply_event(&mut state, &ev, &mut |_| {});
+    assert!(matches!(
+        result,
+        Err(crate::common::LlmError::RepetitionDetected(_))
+    ));
+    assert!(state.output_items.is_empty());
+}
+
+#[test]
+fn repeated_output_item_done_message_aborts_without_appending_snapshot() {
+    // Message output_item.done fallbacks are guarded in addition to the dedicated
+    // output_text.done event.
+    let mut state = crate::common::StreamState::new();
+    let ev = serde_json::json!({
+        "type": "response.output_item.done",
+        "output_index": 0,
+        "item": {
+            "type": "message",
+            "content": [{ "type": "output_text", "text": ".".repeat(1024) }]
+        }
+    });
+    let result = apply_event(&mut state, &ev, &mut |_| {});
+    assert!(matches!(
+        result,
+        Err(crate::common::LlmError::RepetitionDetected(_))
+    ));
+    assert!(state.text.is_empty());
+}
+
+#[test]
+fn repeated_output_item_done_tool_arguments_abort_without_appending_snapshot() {
+    // Tool output_item.done fallbacks are guarded before final arguments are
+    // accepted into the tool-call accumulator.
+    let mut state = crate::common::StreamState::new();
+    let ev = serde_json::json!({
+        "type": "response.output_item.done",
+        "output_index": 0,
+        "item": {
+            "type": "function_call",
+            "call_id": "call-1",
+            "name": "shell",
+            "arguments": "_clone".repeat(180)
+        }
+    });
+    let result = apply_event(&mut state, &ev, &mut |_| {});
+    assert!(matches!(
+        result,
+        Err(crate::common::LlmError::RepetitionDetected(_))
+    ));
+    assert!(state.output_items.is_empty());
+}
+
+#[test]
+fn repeated_reasoning_summary_delta_aborts_before_appending() {
+    // Reasoning summaries are visible stream components and need the same tight
+    // exact-loop protection as assistant text.
+    let mut state = crate::common::StreamState::new();
+    let ev = serde_json::json!({
+        "type": "response.reasoning_summary_text.delta",
+        "output_index": 0,
+        "delta": ".".repeat(1024),
+    });
+    let result = apply_event(&mut state, &ev, &mut |_| {});
+    assert!(matches!(
+        result,
+        Err(crate::common::LlmError::RepetitionDetected(_))
+    ));
+    assert!(state.thinking.is_none());
+}
+
+#[test]
+fn repeated_custom_tool_input_delta_aborts_before_appending() {
+    // Custom tool input deltas are guarded independently from function arguments.
+    let mut state = crate::common::StreamState::new();
+    let ev = serde_json::json!({
+        "type": "response.custom_tool_call_input.delta",
+        "output_index": 0,
+        "delta": "_clone".repeat(180),
+    });
+    let result = apply_event(&mut state, &ev, &mut |_| {});
+    assert!(matches!(
+        result,
+        Err(crate::common::LlmError::RepetitionDetected(_))
+    ));
+    assert!(state.output_items.is_empty());
+}

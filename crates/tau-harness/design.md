@@ -73,6 +73,10 @@ injects at most one internal pivot prompt for an obvious repeated cycle, and the
 stops automatic continuation with a mandatory notice if the same cycle persists
 after the breaker was dispatched.
 
+Provider `repetition_detected` responses are treated as a loop-guard trigger with
+a fixed harness-authored reason. The provider error is display-only; it is not
+used as trusted pivot text.
+
 New non-internal user input resets the guard even when the prompt is queued, and
 successful foreground or background tool results reset it as clear progress.
 Progress resets clear detector/breaker history and stale queued pivots but keep

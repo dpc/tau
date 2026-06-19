@@ -39,3 +39,13 @@ regression coverage. Reusable steps live in
 ## Provider response streaming tests
 
 Tests for `provider.response_updated` should use append-delta semantics: multi-update assistant/reasoning cases send only the newly appended suffix in each update. Do not feed full accumulated snapshots through delta helpers unless the test is explicitly checking legacy/invalid payload handling. Final-response tests should continue to assert complete `provider.response_finished.output_items`.
+
+
+## Provider stream repetition guard
+
+When changing provider streaming parsers, add focused tests for assistant text, reasoning text, and tool-argument deltas. Tests should include high-volume exact loops that abort and negative cases for short repeated words, repeated prefixes with changing payloads, and line blocks below threshold.
+
+Responses-style parsers must also cover final snapshot/done events (for example
+`response.output_text.done`, tool argument/input done events, and
+`response.output_item.done`) because providers can send complete content there
+without earlier deltas.

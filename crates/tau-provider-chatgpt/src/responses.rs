@@ -461,6 +461,7 @@ pub fn apply_event(
         "response.output_text.delta" => {
             if let Some(delta) = event["delta"].as_str() {
                 let output_index = event["output_index"].as_u64().unwrap_or(0) as usize;
+                state.check_message_delta(output_index, delta)?;
                 state.append_message_delta_at(output_index, delta);
                 on_update(state);
             }
@@ -468,6 +469,7 @@ pub fn apply_event(
         "response.output_text.done" => {
             if let Some(text) = event["text"].as_str() {
                 let output_index = event["output_index"].as_u64().unwrap_or(0) as usize;
+                state.check_message_snapshot(output_index, text)?;
                 state.set_message_text_at(output_index, text);
                 on_update(state);
             }
@@ -475,6 +477,7 @@ pub fn apply_event(
         "response.reasoning_summary_text.delta" => {
             if let Some(delta) = event["delta"].as_str() {
                 let output_index = event["output_index"].as_u64().unwrap_or(0) as usize;
+                state.check_reasoning_delta(output_index, delta)?;
                 state.append_reasoning_summary_delta_at(output_index, delta);
                 on_update(state);
             }
@@ -489,6 +492,7 @@ pub fn apply_event(
         "response.function_call_arguments.delta" => {
             let output_index = event["output_index"].as_u64().unwrap_or(0) as usize;
             if let Some(delta) = event["delta"].as_str() {
+                state.check_function_arguments_delta(output_index, delta)?;
                 state
                     .tool_call_at_mut(output_index, tau_proto::ToolType::Function)
                     .arguments_json
@@ -499,6 +503,7 @@ pub fn apply_event(
         "response.function_call_arguments.done" => {
             let output_index = event["output_index"].as_u64().unwrap_or(0) as usize;
             if let Some(arguments) = event["arguments"].as_str() {
+                state.check_function_arguments_snapshot(output_index, arguments)?;
                 state
                     .tool_call_at_mut(output_index, tau_proto::ToolType::Function)
                     .arguments_json = arguments.to_owned();
@@ -508,6 +513,7 @@ pub fn apply_event(
         "response.custom_tool_call_input.delta" => {
             let output_index = event["output_index"].as_u64().unwrap_or(0) as usize;
             if let Some(delta) = event["delta"].as_str() {
+                state.check_custom_tool_input_delta(output_index, delta)?;
                 state
                     .tool_call_at_mut(output_index, tau_proto::ToolType::Custom)
                     .arguments_json
@@ -518,6 +524,7 @@ pub fn apply_event(
         "response.custom_tool_call_input.done" => {
             let output_index = event["output_index"].as_u64().unwrap_or(0) as usize;
             if let Some(input) = event["input"].as_str() {
+                state.check_custom_tool_input_snapshot(output_index, input)?;
                 state
                     .tool_call_at_mut(output_index, tau_proto::ToolType::Custom)
                     .arguments_json = input.to_owned();
@@ -534,6 +541,20 @@ pub fn apply_event(
                 };
                 let output_index = event["output_index"].as_u64().unwrap_or(0) as usize;
                 if let Some(tool_type) = tool_type {
+                    if event_type == "response.output_item.done" {
+                        let final_input = match tool_type {
+                            tau_proto::ToolType::Function => item["arguments"].as_str(),
+                            tau_proto::ToolType::Custom => item["input"].as_str(),
+                        };
+                        if let Some(final_input) = final_input {
+                            match tool_type {
+                                tau_proto::ToolType::Function => state
+                                    .check_function_arguments_snapshot(output_index, final_input)?,
+                                tau_proto::ToolType::Custom => state
+                                    .check_custom_tool_input_snapshot(output_index, final_input)?,
+                            }
+                        }
+                    }
                     let call = state.tool_call_at_mut(output_index, tool_type);
                     if let Some(id) = item["call_id"].as_str() {
                         call.id = id.to_owned();
@@ -560,6 +581,7 @@ pub fn apply_event(
                     if event_type == "response.output_item.done"
                         && let Some(text) = message_text_from_output_item(item)
                     {
+                        state.check_message_snapshot(output_index, &text)?;
                         let previous_text = state.text.clone();
                         state.set_message_text_at(output_index, &text);
                         changed |= state.text != previous_text;

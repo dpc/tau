@@ -17,7 +17,7 @@
 - `crates/tau-ext-xmpp` — disabled-by-default XMPP text bridge extension
 - `crates/tau-extension` — extension-side protocol/runtime helpers
 - `crates/tau-harness` — harness daemon: extensions, bus, sessions, socket server, harness-owned delegate/wait tools
-- `crates/tau-provider` — provider credential/config library (storage and OAuth helpers)
+- `crates/tau-provider` — provider credential/config library plus shared provider runtime utilities (OAuth, storage, stream guards)
 - `crates/tau-provider-chat-completions` — OpenAI-compatible Chat Completions backend helpers
 - `crates/tau-provider-chatgpt` — ChatGPT/Codex Responses backend helpers, including HTTP/SSE, WebSocket, and pool logic
 - `crates/tau-ext-provider-builtin` — built-in provider extension plus `tau provider {add,remove,list}` profile CLI

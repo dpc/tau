@@ -399,3 +399,8 @@ the UI is the only consumer. Components without a terminal silently no-op.
 - **`term.bell`** — Ask the attached terminal UI to ring/flash according to the
   user's terminal settings. It may become a sound, visual flash, desktop
   notification, or no-op.
+
+
+## Provider repetition stop reason
+
+`provider.response_finished.stop_reason` may be `repetition_detected` when a provider aborts a tight exact streaming loop. Such responses have no tool request, use empty `output_items`, and carry a bounded display-only `error`; clients should treat prior transient deltas as cleared when the preceding status update has `clear_response: true`.

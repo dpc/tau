@@ -9,6 +9,7 @@ use tau_proto::{
     ProviderResponseCompactionUpdate, ProviderResponseTextDelta, ProviderTokenUsage,
     ReasoningTextItem, ReasoningTextKind, SessionId, ToolCallItem, ToolDefinition,
 };
+use tau_provider::{StreamRepetitionGuard, StreamRepetitionKey};
 use uuid::Uuid;
 
 /// The parts of a prompt needed by an LLM backend client.
@@ -67,6 +68,7 @@ pub enum LlmError {
     Io(std::io::Error),
     Json(serde_json::Error),
     Vcr(tau_vcr::VcrError),
+    RepetitionDetected(tau_provider::StreamRepetition),
 }
 
 impl std::fmt::Display for LlmError {
@@ -77,6 +79,7 @@ impl std::fmt::Display for LlmError {
             Self::Io(e) => write!(f, "I/O error: {e}"),
             Self::Json(e) => write!(f, "JSON error: {e}"),
             Self::Vcr(e) => write!(f, "VCR error: {e}"),
+            Self::RepetitionDetected(repetition) => write!(f, "{repetition}"),
         }
     }
 }
@@ -88,6 +91,7 @@ impl std::error::Error for LlmError {
             Self::Io(e) => Some(e),
             Self::Json(e) => Some(e),
             Self::Vcr(e) => Some(e),
+            Self::RepetitionDetected(_) => None,
             Self::HttpStatus(_, _) => None,
         }
     }
@@ -106,7 +110,7 @@ impl LlmError {
         match self {
             Self::Http(_) => Some(Duration::ZERO),
             Self::Io(_) => Some(Duration::ZERO),
-            Self::Json(_) | Self::Vcr(_) => None,
+            Self::Json(_) | Self::Vcr(_) | Self::RepetitionDetected(_) => None,
             Self::HttpStatus(code, body) => match *code {
                 408 | 425 => Some(Duration::ZERO),
                 429 => usage_limit_retry_after(body),
@@ -220,6 +224,8 @@ pub struct StreamState {
     pub stale_chain_fallback: bool,
     /// Synthesized item slot for plain assistant text content.
     chat_message_item_index: Option<usize>,
+    /// Bounded exact repetition guard for this provider generation.
+    repetition_guard: StreamRepetitionGuard,
 }
 
 /// Tracks text already emitted to transient response update streams.
@@ -372,6 +378,117 @@ impl StreamState {
             provider_terminal_event: None,
             stale_chain_fallback: false,
             chat_message_item_index: None,
+            repetition_guard: StreamRepetitionGuard::new(),
+        }
+    }
+
+    pub fn check_message_delta(
+        &mut self,
+        output_index: usize,
+        delta: &str,
+    ) -> Result<(), LlmError> {
+        if let Some(repetition) = self
+            .repetition_guard
+            .push_delta(StreamRepetitionKey::AssistantText { output_index }, delta)
+        {
+            return Err(LlmError::RepetitionDetected(repetition));
+        }
+        Ok(())
+    }
+
+    pub fn check_message_snapshot(
+        &mut self,
+        output_index: usize,
+        text: &str,
+    ) -> Result<(), LlmError> {
+        let current = self.message_text_at(output_index).unwrap_or_default();
+        if let Some(delta) = text.strip_prefix(current) {
+            self.check_message_delta(output_index, delta)
+        } else if let Some(repetition) = self
+            .repetition_guard
+            .replace_tail(StreamRepetitionKey::AssistantText { output_index }, text)
+        {
+            Err(LlmError::RepetitionDetected(repetition))
+        } else {
+            Ok(())
+        }
+    }
+
+    pub fn check_reasoning_delta(
+        &mut self,
+        output_index: usize,
+        delta: &str,
+    ) -> Result<(), LlmError> {
+        if let Some(repetition) = self
+            .repetition_guard
+            .push_delta(StreamRepetitionKey::ReasoningText { output_index }, delta)
+        {
+            return Err(LlmError::RepetitionDetected(repetition));
+        }
+        Ok(())
+    }
+
+    pub fn check_function_arguments_delta(
+        &mut self,
+        output_index: usize,
+        delta: &str,
+    ) -> Result<(), LlmError> {
+        if let Some(repetition) = self.repetition_guard.push_delta(
+            StreamRepetitionKey::FunctionCallArguments { output_index },
+            delta,
+        ) {
+            return Err(LlmError::RepetitionDetected(repetition));
+        }
+        Ok(())
+    }
+
+    pub fn check_function_arguments_snapshot(
+        &mut self,
+        output_index: usize,
+        text: &str,
+    ) -> Result<(), LlmError> {
+        let current = self.tool_arguments_at(output_index).unwrap_or_default();
+        if let Some(delta) = text.strip_prefix(current) {
+            self.check_function_arguments_delta(output_index, delta)
+        } else if let Some(repetition) = self.repetition_guard.replace_tail(
+            StreamRepetitionKey::FunctionCallArguments { output_index },
+            text,
+        ) {
+            Err(LlmError::RepetitionDetected(repetition))
+        } else {
+            Ok(())
+        }
+    }
+
+    pub fn check_custom_tool_input_delta(
+        &mut self,
+        output_index: usize,
+        delta: &str,
+    ) -> Result<(), LlmError> {
+        if let Some(repetition) = self
+            .repetition_guard
+            .push_delta(StreamRepetitionKey::CustomToolInput { output_index }, delta)
+        {
+            return Err(LlmError::RepetitionDetected(repetition));
+        }
+        Ok(())
+    }
+
+    pub fn check_custom_tool_input_snapshot(
+        &mut self,
+        output_index: usize,
+        text: &str,
+    ) -> Result<(), LlmError> {
+        let current = self.tool_arguments_at(output_index).unwrap_or_default();
+        if let Some(delta) = text.strip_prefix(current) {
+            self.check_custom_tool_input_delta(output_index, delta)
+        } else if let Some(repetition) = self
+            .repetition_guard
+            .replace_tail(StreamRepetitionKey::CustomToolInput { output_index }, text)
+        {
+            Err(LlmError::RepetitionDetected(repetition))
+        } else {
+            Ok(())
         }
     }
 
@@ -394,6 +511,20 @@ impl StreamState {
             unreachable!("message slot was just initialized");
         };
         message
+    }
+
+    fn message_text_at(&self, output_index: usize) -> Option<&str> {
+        match self.output_items.get(output_index) {
+            Some(OutputItemAccumulator::Message(message)) => Some(&message.text),
+            _ => None,
+        }
+    }
+
+    fn tool_arguments_at(&self, output_index: usize) -> Option<&str> {
+        match self.output_items.get(output_index) {
+            Some(OutputItemAccumulator::ToolCall(call)) => Some(&call.arguments_json),
+            _ => None,
+        }
     }
 
     pub fn append_message_delta_at(&mut self, output_index: usize, delta: &str) {

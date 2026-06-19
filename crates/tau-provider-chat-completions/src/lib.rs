@@ -17,6 +17,7 @@ use tau_proto::{
     ReasoningTextKind, ThinkingSummary, ToolCallItem, ToolChoice, ToolDefinition,
     ToolResponseHeader, ToolResultStatus, ToolType,
 };
+use tau_provider::{StreamRepetitionGuard, StreamRepetitionKey};
 
 const DEFAULT_CONTEXT_WINDOW: u64 = 128_000;
 const LOG_TARGET: &str = "provider-chat-completions";
@@ -194,6 +195,13 @@ fn run_prompt<W: Write>(
                     writer,
                 );
             }
+            Err(error @ LlmError::RepetitionDetected(_)) => {
+                let LlmError::RepetitionDetected(repetition) = &error else {
+                    unreachable!()
+                };
+                emit_repetition_detected_update(agent_prompt_id, prompt, repetition, writer);
+                return finish_error(agent_prompt_id, prompt, &provider, error);
+            }
             Err(error) => return finish_error(agent_prompt_id, prompt, &provider, error),
         }
     }
@@ -208,6 +216,31 @@ fn emit_empty_response_retry_update<W: Write>(
     let text = format!(
         "provider returned an empty response; retrying ({retry}/{EMPTY_RESPONSE_MAX_RETRIES})"
     );
+    let _ = writer.write_message(&HarnessInputMessage::emit(Event::ProviderResponseUpdated(
+        ProviderResponseUpdated {
+            agent_prompt_id: agent_prompt_id.clone(),
+            agent_id: prompt.agent_id.clone(),
+            deltas: Vec::new(),
+            compaction: None,
+            status: Some(ProviderResponseStatusUpdate {
+                text,
+                clear_response: true,
+            }),
+            originator: prompt.originator.clone(),
+        },
+    )));
+    let _ = writer.flush();
+}
+
+fn emit_repetition_detected_update<W: Write>(
+    agent_prompt_id: &AgentPromptId,
+    prompt: &tau_proto::AgentPromptCreated,
+    repetition: &tau_provider::StreamRepetition,
+    writer: &mut PeerOutputWriter<W>,
+) {
+    let text = bounded_provider_error(&format!(
+        "provider stream repetition detected; aborting response ({repetition})"
+    ));
     let _ = writer.write_message(&HarnessInputMessage::emit(Event::ProviderResponseUpdated(
         ProviderResponseUpdated {
             agent_prompt_id: agent_prompt_id.clone(),
@@ -312,6 +345,7 @@ enum LlmError {
     HttpStatus(u16, String),
     Io(std::io::Error),
     Json(serde_json::Error),
+    RepetitionDetected(tau_provider::StreamRepetition),
 }
 
 impl std::fmt::Display for LlmError {
@@ -322,6 +356,7 @@ impl std::fmt::Display for LlmError {
             Self::HttpStatus(code, body) => write!(f, "HTTP {code}: {body}"),
             Self::Io(error) => write!(f, "I/O error: {error}"),
             Self::Json(error) => write!(f, "JSON error: {error}"),
+            Self::RepetitionDetected(repetition) => write!(f, "{repetition}"),
         }
     }
 }
@@ -337,6 +372,7 @@ struct StreamState {
     cached_tokens: Option<u64>,
     output_tokens: Option<u64>,
     stop_reason: ProviderStopReason,
+    repetition_guard: StreamRepetitionGuard,
 }
 
 /// Tracks displayable text already emitted on transient response updates.
@@ -415,6 +451,7 @@ impl StreamState {
             cached_tokens: None,
             output_tokens: None,
             stop_reason: ProviderStopReason::EndTurn,
+            repetition_guard: StreamRepetitionGuard::new(),
         }
     }
 
@@ -425,9 +462,19 @@ impl StreamState {
             .collect()
     }
 
-    fn append_assistant_text_delta(&mut self, delta: &str) {
+    fn append_assistant_text_delta(&mut self, delta: &str) -> Result<(), LlmError> {
         if delta.is_empty() {
-            return;
+            return Ok(());
+        }
+        let output_index = match self.output_items.last() {
+            Some(OutputItemAccumulator::Message(_)) => self.output_items.len() - 1,
+            _ => self.output_items.len(),
+        };
+        if let Some(repetition) = self
+            .repetition_guard
+            .push_delta(StreamRepetitionKey::AssistantText { output_index }, delta)
+        {
+            return Err(LlmError::RepetitionDetected(repetition));
         }
         self.text.push_str(delta);
         if let Some(OutputItemAccumulator::Message(text)) = self.output_items.last_mut() {
@@ -436,11 +483,22 @@ impl StreamState {
             self.output_items
                 .push(OutputItemAccumulator::Message(delta.to_owned()));
         }
+        Ok(())
     }
 
-    fn append_reasoning_delta(&mut self, delta: &str) {
+    fn append_reasoning_delta(&mut self, delta: &str) -> Result<(), LlmError> {
         if delta.is_empty() {
-            return;
+            return Ok(());
+        }
+        let output_index = match self.output_items.last() {
+            Some(OutputItemAccumulator::Reasoning(_)) => self.output_items.len() - 1,
+            _ => self.output_items.len(),
+        };
+        if let Some(repetition) = self
+            .repetition_guard
+            .push_delta(StreamRepetitionKey::ReasoningText { output_index }, delta)
+        {
+            return Err(LlmError::RepetitionDetected(repetition));
         }
         self.thinking.push_str(delta);
         if let Some(OutputItemAccumulator::Reasoning(reasoning)) = self.output_items.last_mut() {
@@ -449,6 +507,28 @@ impl StreamState {
             self.output_items
                 .push(OutputItemAccumulator::Reasoning(delta.to_owned()));
         }
+        Ok(())
+    }
+
+    fn append_tool_arguments_delta(
+        &mut self,
+        stream_index: usize,
+        delta: &str,
+    ) -> Result<(), LlmError> {
+        let output_index = *self
+            .tool_call_output_indices
+            .get(&stream_index)
+            .unwrap_or(&self.output_items.len());
+        if let Some(repetition) = self.repetition_guard.push_delta(
+            StreamRepetitionKey::FunctionCallArguments { output_index },
+            delta,
+        ) {
+            return Err(LlmError::RepetitionDetected(repetition));
+        }
+        self.tool_call_at_mut(stream_index)
+            .arguments
+            .push_str(delta);
+        Ok(())
     }
 
     fn tool_call_at_mut(&mut self, stream_index: usize) -> &mut ToolCallAccumulator {
@@ -583,9 +663,9 @@ fn chat_completions_stream(
             Err(_) => continue,
         };
         raw_events.push(event.clone());
-        apply_event(&mut state, &event, on_update);
+        apply_event(&mut state, &event, on_update)?;
     }
-    flush_pending_content(&mut state, on_update);
+    flush_pending_content(&mut state, on_update)?;
     maybe_debug_write_provider_response(prompt, model, &state, &raw_events);
     ensure_non_empty_end_turn(state)
 }
@@ -994,7 +1074,7 @@ fn apply_event(
     state: &mut StreamState,
     event: &serde_json::Value,
     on_update: &mut impl FnMut(&StreamState),
-) {
+) -> Result<(), LlmError> {
     if let Some(usage) = event.get("usage") {
         capture_usage(state, usage);
     }
@@ -1006,16 +1086,16 @@ fn apply_event(
             text.push_str("\n\n");
         }
         text.push_str(&format!("[OpenRouter Stream Error: {message}]"));
-        state.append_assistant_text_delta(&text);
+        state.append_assistant_text_delta(&text)?;
         state.stop_reason = ProviderStopReason::Error;
         on_update(state);
-        return;
+        return Ok(());
     }
     let Some(choice) = event["choices"]
         .as_array()
         .and_then(|choices| choices.first())
     else {
-        return;
+        return Ok(());
     };
     let delta = &choice["delta"];
     let mut changed = false;
@@ -1023,14 +1103,14 @@ fn apply_event(
         if let Some(reasoning) = delta[key].as_str()
             && !reasoning.is_empty()
         {
-            state.append_reasoning_delta(reasoning);
+            state.append_reasoning_delta(reasoning)?;
             changed = true;
         }
     }
     if let Some(content) = delta["content"].as_str()
         && !content.is_empty()
     {
-        changed |= append_content_delta(state, content);
+        changed |= append_content_delta(state, content)?;
     }
     if changed {
         on_update(state);
@@ -1039,22 +1119,24 @@ fn apply_event(
         let mut changed_tools = false;
         for tool_call in tool_calls {
             let index = tool_call["index"].as_u64().unwrap_or(0) as usize;
-            let entry = state.tool_call_at_mut(index);
-            if let Some(id) = tool_call["id"].as_str()
-                && !id.is_empty()
-            {
-                entry.id = id.to_owned();
-                changed_tools = true;
-            }
             let function = &tool_call["function"];
-            if let Some(name) = function["name"].as_str()
-                && !name.is_empty()
             {
-                entry.name = name.to_owned();
-                changed_tools = true;
+                let entry = state.tool_call_at_mut(index);
+                if let Some(id) = tool_call["id"].as_str()
+                    && !id.is_empty()
+                {
+                    entry.id = id.to_owned();
+                    changed_tools = true;
+                }
+                if let Some(name) = function["name"].as_str()
+                    && !name.is_empty()
+                {
+                    entry.name = name.to_owned();
+                    changed_tools = true;
+                }
             }
             if let Some(arguments) = function["arguments"].as_str() {
-                entry.arguments.push_str(arguments);
+                state.append_tool_arguments_delta(index, arguments)?;
                 changed_tools = true;
             }
         }
@@ -1068,19 +1150,20 @@ fn apply_event(
         Some("length") => state.stop_reason = ProviderStopReason::Length,
         _ => {}
     }
+    Ok(())
 }
 
-fn append_content_delta(state: &mut StreamState, content: &str) -> bool {
+fn append_content_delta(state: &mut StreamState, content: &str) -> Result<bool, LlmError> {
     state.pending_content.push_str(content);
     let mut changed = false;
     loop {
         if state.pending_content.is_empty() {
-            return changed;
+            return Ok(changed);
         }
         if state.in_think_tag {
             if let Some(index) = state.pending_content.find("</think>") {
                 let reasoning = state.pending_content[..index].to_owned();
-                state.append_reasoning_delta(&reasoning);
+                state.append_reasoning_delta(&reasoning)?;
                 state.pending_content.drain(..index + "</think>".len());
                 state.in_think_tag = false;
                 changed = true;
@@ -1089,17 +1172,17 @@ fn append_content_delta(state: &mut StreamState, content: &str) -> bool {
             let keep = partial_tag_suffix_len(&state.pending_content, "</think>");
             let emit_len = state.pending_content.len() - keep;
             if emit_len == 0 {
-                return changed;
+                return Ok(changed);
             }
             let reasoning = state.pending_content[..emit_len].to_owned();
-            state.append_reasoning_delta(&reasoning);
+            state.append_reasoning_delta(&reasoning)?;
             state.pending_content.drain(..emit_len);
-            return true;
+            return Ok(true);
         }
 
         if let Some(index) = state.pending_content.find("<think>") {
             let text = state.pending_content[..index].to_owned();
-            state.append_assistant_text_delta(&text);
+            state.append_assistant_text_delta(&text)?;
             state.pending_content.drain(..index + "<think>".len());
             state.in_think_tag = true;
             changed = true;
@@ -1108,12 +1191,12 @@ fn append_content_delta(state: &mut StreamState, content: &str) -> bool {
         let keep = partial_tag_suffix_len(&state.pending_content, "<think>");
         let emit_len = state.pending_content.len() - keep;
         if emit_len == 0 {
-            return changed;
+            return Ok(changed);
         }
         let text = state.pending_content[..emit_len].to_owned();
-        state.append_assistant_text_delta(&text);
+        state.append_assistant_text_delta(&text)?;
         state.pending_content.drain(..emit_len);
-        return true;
+        return Ok(true);
     }
 }
 
@@ -1127,19 +1210,23 @@ fn partial_tag_suffix_len(text: &str, tag: &str) -> usize {
     keep
 }
 
-fn flush_pending_content(state: &mut StreamState, on_update: &mut impl FnMut(&StreamState)) {
+fn flush_pending_content(
+    state: &mut StreamState,
+    on_update: &mut impl FnMut(&StreamState),
+) -> Result<(), LlmError> {
     if state.pending_content.is_empty() {
-        return;
+        return Ok(());
     }
     if state.in_think_tag {
         let reasoning = state.pending_content.clone();
-        state.append_reasoning_delta(&reasoning);
+        state.append_reasoning_delta(&reasoning)?;
     } else {
         let text = state.pending_content.clone();
-        state.append_assistant_text_delta(&text);
+        state.append_assistant_text_delta(&text)?;
     }
     state.pending_content.clear();
     on_update(state);
+    Ok(())
 }
 
 fn capture_usage(state: &mut StreamState, usage: &serde_json::Value) {
@@ -1180,8 +1267,11 @@ fn finish_error(
         agent_prompt_id: agent_prompt_id.clone(),
         agent_id: prompt.agent_id.clone(),
         output_items: Vec::new(),
-        stop_reason: ProviderStopReason::Error,
-        error: Some(format!("LLM error: {error}")),
+        stop_reason: match &error {
+            LlmError::RepetitionDetected(_) => ProviderStopReason::RepetitionDetected,
+            _ => ProviderStopReason::Error,
+        },
+        error: Some(bounded_provider_error(&format!("LLM error: {error}"))),
         originator: prompt.originator.clone(),
         usage: None,
         compaction_original_input_tokens: None,
@@ -1190,6 +1280,15 @@ fn finish_error(
         provider_response_id: None,
         ws_pool_delta: None,
     }
+}
+
+fn bounded_provider_error(text: &str) -> String {
+    const MAX_CHARS: usize = 512;
+    let mut out = text.chars().take(MAX_CHARS).collect::<String>();
+    if text.chars().nth(MAX_CHARS).is_some() {
+        out.push('…');
+    }
+    out
 }
 
 fn backend_descriptor(provider: &ResolvedProvider) -> ProviderBackend {

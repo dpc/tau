@@ -1023,6 +1023,17 @@ fn provider_response_updated_requires_delta_routing_fields() {
     );
 }
 
+/// Ensures the provider repetition stop reason has a stable protocol spelling.
+#[test]
+fn provider_stop_reason_repetition_detected_uses_snake_case_wire_value() {
+    let json = serde_json::to_value(ProviderStopReason::RepetitionDetected)
+        .expect("serialize stop reason");
+    assert_eq!(json, serde_json::json!("repetition_detected"));
+    let decoded: ProviderStopReason =
+        serde_json::from_value(json).expect("deserialize stop reason");
+    assert_eq!(decoded, ProviderStopReason::RepetitionDetected);
+}
+
 /// Ensures harness role info remains backward compatible when role descriptions
 /// are omitted.
 #[test]

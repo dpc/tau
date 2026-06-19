@@ -537,6 +537,26 @@ fn provider_text_response(
     }
 }
 
+fn provider_repetition_response(
+    spid: &AgentPromptId,
+    agent_id: tau_proto::AgentId,
+) -> ProviderResponseFinished {
+    ProviderResponseFinished {
+        agent_prompt_id: spid.clone(),
+        agent_id,
+        output_items: Vec::new(),
+        stop_reason: tau_proto::ProviderStopReason::RepetitionDetected,
+        error: Some("provider stream repetition detected".to_owned()),
+        usage: None,
+        originator: tau_proto::PromptOriginator::User,
+        compaction_original_input_tokens: None,
+        compaction_compacted_input_tokens: None,
+        backend: None,
+        provider_response_id: None,
+        ws_pool_delta: None,
+    }
+}
+
 fn seed_prior_user_message(state_dir: &Path, text: &str) {
     seed_prior_user_message_at(state_dir, text, tau_proto::UnixMicros::now());
 }
@@ -1418,6 +1438,218 @@ fn loop_guard_repeated_assistant_text_flows_through_provider_responses() {
         Event::HarnessNotice(notice)
             if notice.message.contains("Loop guard stopped automatic continuation")
     )));
+}
+
+#[test]
+fn loop_guard_provider_repetition_response_queues_pivot_then_blocks() {
+    // Provider-side stream repetition is trusted only as a loop-guard trigger:
+    // the provider's error is display text, while the harness uses a fixed pivot
+    // reason and blocks only after the breaker was tried.
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    h.selected_model = Some("test/model".into());
+    let cid = ensure_test_user_agent(&mut h);
+
+    let spid: AgentPromptId = "sp-provider-repetition-1".into();
+    seed_agent_thinking(&mut h, &cid, spid.as_str());
+    h.prompt_agents.insert(spid.clone(), cid.clone());
+    h.handle_provider_response_finished(provider_repetition_response(
+        &spid,
+        tau_proto::AgentId::parse("main").expect("agent id"),
+    ))
+    .expect("response handled");
+
+    assert!(event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::AgentPromptSteered(steered)
+            if steered.message_class == tau_proto::PromptMessageClass::Internal
+                && steered.text.contains("provider detected a tight exact stream repetition")
+    )));
+    let spid = h
+        .agents
+        .get(&cid)
+        .and_then(|conv| conv.in_flight_prompt.clone())
+        .expect("loop breaker prompt dispatched");
+    h.handle_provider_response_finished(provider_repetition_response(
+        &spid,
+        tau_proto::AgentId::parse("main").expect("agent id"),
+    ))
+    .expect("response handled");
+
+    assert!(
+        h.agents
+            .get(&cid)
+            .expect("agent")
+            .loop_guard
+            .stop_automatic_continuation()
+    );
+    assert!(event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::HarnessNotice(notice)
+            if notice.level == tau_proto::NoticeLevel::Warning
+                && notice.always_show
+                && notice.message.contains("Loop guard stopped automatic continuation")
+    )));
+}
+
+#[test]
+fn repetition_response_with_output_items_is_cleared_before_persisting() {
+    // The harness enforces the repetition-detected empty-output invariant at the
+    // provider boundary so a buggy provider cannot smuggle text or tool calls in
+    // a loop-guard terminal response.
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    h.selected_model = Some("test/model".into());
+    let cid = ensure_test_user_agent(&mut h);
+    let spid: AgentPromptId = "sp-provider-repetition-malformed".into();
+    seed_agent_thinking(&mut h, &cid, spid.as_str());
+    h.prompt_agents.insert(spid.clone(), cid.clone());
+    let mut response =
+        provider_repetition_response(&spid, tau_proto::AgentId::parse("main").expect("agent id"));
+    response.output_items = provider_text_response(
+        &spid,
+        tau_proto::AgentId::parse("main").expect("agent id"),
+        "this text must be discarded",
+    )
+    .output_items;
+
+    h.handle_provider_response_finished(response)
+        .expect("response handled");
+
+    assert!(!event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::ProviderResponseFinished(finished)
+            if finished
+                .output_items
+                .iter()
+                .any(|item| matches!(item, ContextItem::Message(_)))
+    )));
+}
+
+#[test]
+fn side_agent_repetition_response_propagates_error_result() {
+    // Empty repetition/error provider responses from extension-originated side
+    // agents must not look like successful empty delegation results.
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    h.selected_model = Some("test/model".into());
+    let frames = connect_test_client(&mut h, "conn-side", tau_proto::ClientKind::External);
+
+    h.handle_start_agent_request(
+        "conn-side",
+        StartAgentRequest {
+            parent_agent: None,
+            query_id: "q-repetition".to_owned(),
+            instruction: "Summarize in one sentence.".to_owned(),
+            role: None,
+            input_stats: tau_proto::ToolUseStats::default(),
+            tool_call_id: None,
+            task_name: None,
+        },
+    )
+    .expect("start-agent request");
+    let (side_spid, side_cid) = h
+        .prompt_agents
+        .iter()
+        .find_map(|(spid, prompt_cid)| {
+            (prompt_cid.as_str() != "default").then(|| (spid.clone(), prompt_cid.clone()))
+        })
+        .expect("side prompt id");
+    let mut response = provider_repetition_response(
+        &side_spid,
+        tau_proto::AgentId::parse("side").expect("agent id"),
+    );
+    response.originator = tau_proto::PromptOriginator::Extension {
+        name: "conn-side".into(),
+        query_id: "q-repetition".to_owned(),
+    };
+    response.error = Some("provider stream repetition detected".to_owned());
+
+    h.handle_provider_response_finished(response)
+        .expect("side response handled");
+
+    assert!(!h.agents.contains_key(&side_cid));
+    let result = frames
+        .lock()
+        .expect("frames")
+        .iter()
+        .find_map(|routed| match peel_inner_event(&routed.frame) {
+            Some(Event::StartAgentResult(result)) if result.query_id == "q-repetition" => {
+                Some(result.clone())
+            }
+            _ => None,
+        })
+        .expect("start-agent result routed");
+    assert!(result.text.is_empty());
+    assert_eq!(
+        result.error.as_deref(),
+        Some("provider stream repetition detected")
+    );
+}
+
+#[test]
+fn side_agent_error_response_propagates_error_result() {
+    // Plain provider errors with no assistant text should also reach the
+    // StartAgentResult error field instead of becoming silent empty text.
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    h.selected_model = Some("test/model".into());
+    let frames = connect_test_client(&mut h, "conn-side-error", tau_proto::ClientKind::External);
+
+    h.handle_start_agent_request(
+        "conn-side-error",
+        StartAgentRequest {
+            parent_agent: None,
+            query_id: "q-error".to_owned(),
+            instruction: "Summarize in one sentence.".to_owned(),
+            role: None,
+            input_stats: tau_proto::ToolUseStats::default(),
+            tool_call_id: None,
+            task_name: None,
+        },
+    )
+    .expect("start-agent request");
+    let side_spid = h
+        .prompt_agents
+        .iter()
+        .find_map(|(spid, prompt_cid)| (prompt_cid.as_str() != "default").then_some(spid.clone()))
+        .expect("side prompt id");
+    h.handle_provider_response_finished(ProviderResponseFinished {
+        agent_prompt_id: side_spid,
+        agent_id: tau_proto::AgentId::parse("side").expect("agent id"),
+        output_items: Vec::new(),
+        stop_reason: tau_proto::ProviderStopReason::Error,
+        error: Some("provider failed".to_owned()),
+        usage: None,
+        originator: tau_proto::PromptOriginator::Extension {
+            name: "conn-side-error".into(),
+            query_id: "q-error".to_owned(),
+        },
+        compaction_original_input_tokens: None,
+        compaction_compacted_input_tokens: None,
+        backend: None,
+        provider_response_id: None,
+        ws_pool_delta: None,
+    })
+    .expect("side response handled");
+
+    let result = frames
+        .lock()
+        .expect("frames")
+        .iter()
+        .find_map(|routed| match peel_inner_event(&routed.frame) {
+            Some(Event::StartAgentResult(result)) if result.query_id == "q-error" => {
+                Some(result.clone())
+            }
+            _ => None,
+        })
+        .expect("start-agent result routed");
+    assert!(result.text.is_empty());
+    assert_eq!(result.error.as_deref(), Some("provider failed"));
 }
 
 #[test]

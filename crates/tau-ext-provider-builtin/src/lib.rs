@@ -1461,6 +1461,28 @@ where
         Err(error) if is_canceled_by_harness(&error) => {
             finish_canceled(agent_prompt_id, prompt, writer)?
         }
+        Err(error @ common::LlmError::RepetitionDetected(_)) => {
+            let common::LlmError::RepetitionDetected(repetition) = &error else {
+                unreachable!()
+            };
+            emit_repetition_detected_update(
+                agent_prompt_id,
+                &prompt.agent_id,
+                &originator,
+                repetition,
+                writer,
+            );
+            let backend = backend_descriptor(config, transport_taken, false);
+            finish_error(
+                prompt.session_id.as_str(),
+                agent_prompt_id,
+                prompt,
+                &backend,
+                error,
+                ws_pool_delta,
+                writer,
+            )?
+        }
         Err(error) => {
             let backend = backend_descriptor(config, transport_taken, false);
             finish_error(
@@ -1653,8 +1675,11 @@ fn finish_error<W: Write>(
         agent_prompt_id: agent_prompt_id.into(),
         agent_id: prompt.agent_id.clone(),
         output_items: Vec::new(),
-        stop_reason: ProviderStopReason::Error,
-        error: Some(format!("LLM error: {error}")),
+        stop_reason: match &error {
+            common::LlmError::RepetitionDetected(_) => ProviderStopReason::RepetitionDetected,
+            _ => ProviderStopReason::Error,
+        },
+        error: Some(bounded_provider_error(&format!("LLM error: {error}"))),
         originator: prompt.originator.clone(),
         usage: None,
         compaction_original_input_tokens: None,
@@ -1669,6 +1694,41 @@ fn finish_error<W: Write>(
     )))?;
     writer.flush()?;
     Ok(())
+}
+
+fn emit_repetition_detected_update<W: Write>(
+    agent_prompt_id: &str,
+    agent_id: &tau_proto::AgentId,
+    originator: &tau_proto::PromptOriginator,
+    repetition: &tau_provider::StreamRepetition,
+    writer: &mut PeerOutputWriter<W>,
+) {
+    let text = bounded_provider_error(&format!(
+        "provider stream repetition detected; aborting response ({repetition})"
+    ));
+    let _ = writer.write_message(&HarnessInputMessage::emit(Event::ProviderResponseUpdated(
+        ProviderResponseUpdated {
+            agent_prompt_id: agent_prompt_id.into(),
+            agent_id: agent_id.clone(),
+            deltas: Vec::new(),
+            compaction: None,
+            status: Some(ProviderResponseStatusUpdate {
+                text,
+                clear_response: true,
+            }),
+            originator: originator.clone(),
+        },
+    )));
+    let _ = writer.flush();
+}
+
+fn bounded_provider_error(text: &str) -> String {
+    const MAX_CHARS: usize = 512;
+    let mut out = text.chars().take(MAX_CHARS).collect::<String>();
+    if text.chars().nth(MAX_CHARS).is_some() {
+        out.push('…');
+    }
+    out
 }
 
 #[cfg(test)]

@@ -146,6 +146,11 @@ tool-call argument signatures for sibling calls in the same turn. Branch/head
 moves invalidate the whole guard, including in-flight signatures, and remove
 pending loop-guard pivots.
 
+Provider-side `repetition_detected` final responses feed this same lifecycle with
+a fixed harness-authored reason: first occurrence queues the pivot, recurrence
+after that pivot stops automatic continuation. Provider error text is displayed
+but is not trusted as model-visible guard instruction.
+
 ## Lifecycle events
 
 Harness lifecycle events such as session start/shutdown and extension status are

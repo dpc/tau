@@ -91,6 +91,12 @@ tool calls and opaque provider items, are committed. Provider-authored retry or
 diagnostic text must be sent as update `status`, not as assistant message
 deltas.
 
+First-party providers abort high-confidence tight stream loops with
+`stop_reason: repetition_detected`: assistant/reasoning/tool-argument deltas are
+checked per output item with bounded exact-match suffix detectors. On abort the
+provider sends a `provider.response_updated` status with `clear_response: true`,
+then a final response with empty `output_items` and a bounded display `error`.
+
 Provider final responses may contain tool calls, but providers do not execute Tau tools.
 The harness routes tools and sends follow-up prompts back to the selected provider when needed.
 

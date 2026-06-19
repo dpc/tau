@@ -9729,6 +9729,15 @@ impl Harness {
         source: Option<&str>,
         mut response: ProviderResponseFinished,
     ) -> Result<(), HarnessError> {
+        if response.stop_reason == ProviderStopReason::RepetitionDetected
+            && !response.output_items.is_empty()
+        {
+            self.emit_info(&format!(
+                "provider response {} used repetition_detected with output items; clearing malformed output",
+                response.agent_prompt_id
+            ));
+            response.output_items.clear();
+        }
         let mut tool_calls = tool_calls_from_output_items(&response.output_items);
         let mut requested_tool_calls = response_requests_tool_calls(&response);
         let assistant_text = assistant_text_from_output_items(&response.output_items);
@@ -10036,6 +10045,13 @@ impl Harness {
                     "non-tool extension query attempted to call {} tool(s); refusing to execute",
                     tool_calls.len()
                 ))
+            } else if assistant_text.as_deref().unwrap_or_default().is_empty()
+                && matches!(
+                    response.stop_reason,
+                    ProviderStopReason::Error | ProviderStopReason::RepetitionDetected
+                )
+            {
+                response.error.clone()
             } else {
                 None
             };
@@ -10151,7 +10167,15 @@ impl Harness {
             self.drain_pending_tool_invocations()?;
         } else {
             self.clear_prompt_tool_snapshot(&response.agent_prompt_id);
-            self.record_assistant_loop_signature(&cid, assistant_text.as_deref());
+            if response.stop_reason == ProviderStopReason::RepetitionDetected {
+                self.handle_loop_guard_trigger(
+                    &cid,
+                    "provider-repetition-detected".to_owned(),
+                    "provider detected a tight exact stream repetition".to_owned(),
+                );
+            } else {
+                self.record_assistant_loop_signature(&cid, assistant_text.as_deref());
+            }
             self.set_agent_turn_state(&cid, AgentTurnState::Idle);
             if self.agents.get(&cid).is_some_and(|conv| {
                 conv.pending_prompts

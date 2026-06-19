@@ -66,8 +66,12 @@ fn stream_delta_emitter_emits_append_deltas() {
     let mut state = StreamState::new();
     let mut emitter = StreamDeltaEmitter::default();
 
-    state.append_assistant_text_delta("hel");
-    state.append_reasoning_delta("think");
+    state
+        .append_assistant_text_delta("hel")
+        .expect("stream event should apply");
+    state
+        .append_reasoning_delta("think")
+        .expect("stream event should apply");
     assert_eq!(
         emitter.deltas(&state),
         vec![
@@ -84,7 +88,9 @@ fn stream_delta_emitter_emits_append_deltas() {
         ]
     );
 
-    state.append_assistant_text_delta("lo");
+    state
+        .append_assistant_text_delta("lo")
+        .expect("stream event should apply");
     assert_eq!(
         emitter.deltas(&state),
         vec![tau_proto::ProviderResponseTextDelta::Message {
@@ -102,7 +108,9 @@ fn stream_delta_emitter_drops_non_prefix_corrections() {
     let mut state = StreamState::new();
     let mut emitter = StreamDeltaEmitter::default();
 
-    state.append_assistant_text_delta("abcd");
+    state
+        .append_assistant_text_delta("abcd")
+        .expect("stream event should apply");
     assert_eq!(
         emitter.deltas(&state),
         vec![tau_proto::ProviderResponseTextDelta::Message {
@@ -252,7 +260,8 @@ fn reasoning_content_is_persisted_and_replayed_with_tool_call() {
             }]
         }),
         &mut |_| {},
-    );
+    )
+    .expect("stream event should apply");
     apply_event(
         &mut state,
         &serde_json::json!({
@@ -269,7 +278,8 @@ fn reasoning_content_is_persisted_and_replayed_with_tool_call() {
             }]
         }),
         &mut |_| {},
-    );
+    )
+    .expect("stream event should apply");
     let items = state.output_items();
     assert!(matches!(items[0], ContextItem::ReasoningText(_)));
     assert!(matches!(items[1], ContextItem::ToolCall(_)));
@@ -319,7 +329,8 @@ fn replay_coalesces_assistant_text_and_tool_calls_in_stream_order() {
             }]
         }),
         &mut |_| {},
-    );
+    )
+    .expect("stream event should apply");
     apply_event(
         &mut state,
         &serde_json::json!({
@@ -341,7 +352,8 @@ fn replay_coalesces_assistant_text_and_tool_calls_in_stream_order() {
             }]
         }),
         &mut |_| {},
-    );
+    )
+    .expect("stream event should apply");
     let items = state.output_items();
     assert!(matches!(items[0], ContextItem::ReasoningText(_)));
     assert!(matches!(items[1], ContextItem::Message(_)));
@@ -386,7 +398,8 @@ fn think_tags_are_persisted_as_reasoning_content() {
             }]
         }),
         &mut |_| {},
-    );
+    )
+    .expect("stream event should apply");
     let items = state.output_items();
     assert!(matches!(items[0], ContextItem::ReasoningText(_)));
     let ContextItem::Message(message) = &items[1] else {
@@ -498,7 +511,8 @@ fn length_finish_reason_maps_to_length_stop_reason() {
             }]
         }),
         &mut |_| {},
-    );
+    )
+    .expect("stream event should apply");
 
     assert_eq!(state.stop_reason, ProviderStopReason::Length);
 }
@@ -522,7 +536,9 @@ fn non_empty_end_turn_is_accepted() {
     // A normal assistant text response should not be affected by the empty-turn
     // guard.
     let mut state = StreamState::new();
-    state.append_assistant_text_delta("done");
+    state
+        .append_assistant_text_delta("done")
+        .expect("stream event should apply");
 
     assert!(ensure_non_empty_end_turn(state).is_ok());
 }
@@ -539,4 +555,118 @@ fn tool_call_turn_is_accepted_without_text() {
     call.arguments = "{}".to_owned();
 
     assert!(ensure_non_empty_end_turn(state).is_ok());
+}
+
+#[test]
+fn repeated_assistant_content_delta_aborts_stream_event() {
+    // Ensures Chat Completions catches tight assistant text loops while parsing
+    // stream deltas, before they become final assistant output.
+    let mut state = StreamState::new();
+    let result = apply_event(
+        &mut state,
+        &serde_json::json!({
+            "choices": [{
+                "delta": { "content": ".".repeat(1024) },
+                "finish_reason": null
+            }]
+        }),
+        &mut |_| {},
+    );
+    assert!(matches!(result, Err(LlmError::RepetitionDetected(_))));
+    assert!(state.output_items().is_empty());
+}
+
+#[test]
+fn repeated_tool_argument_delta_aborts_stream_event() {
+    // Ensures Chat Completions catches tight exact function-argument loops from
+    // providers before accepting the generated argument suffix.
+    let mut state = StreamState::new();
+    let result = apply_event(
+        &mut state,
+        &serde_json::json!({
+            "choices": [{
+                "delta": {
+                    "tool_calls": [{
+                        "index": 0,
+                        "type": "function",
+                        "function": { "name": "shell", "arguments": "_clone".repeat(180) }
+                    }]
+                },
+                "finish_reason": null
+            }]
+        }),
+        &mut |_| {},
+    );
+    assert!(matches!(result, Err(LlmError::RepetitionDetected(_))));
+    let OutputItemAccumulator::ToolCall(call) = &state.output_items[0] else {
+        panic!("tool call accumulator should exist");
+    };
+    assert!(call.arguments.is_empty());
+}
+
+#[test]
+fn repeated_reasoning_delta_aborts_stream_event() {
+    // Ensures Chat Completions catches tight reasoning loops independently from
+    // assistant text and before accepting the reasoning suffix.
+    let mut state = StreamState::new();
+    let result = apply_event(
+        &mut state,
+        &serde_json::json!({
+            "choices": [{
+                "delta": { "reasoning_content": ".".repeat(1024) },
+                "finish_reason": null
+            }]
+        }),
+        &mut |_| {},
+    );
+    assert!(matches!(result, Err(LlmError::RepetitionDetected(_))));
+    assert!(state.output_items().is_empty());
+}
+
+#[test]
+fn repetition_error_finishes_with_clear_response_contract() {
+    // The Chat Completions provider must clear transient output and then finish
+    // with an empty repetition-detected response instead of retrying or shipping
+    // partial model text.
+    let prompt = prompt();
+    let repetition = tau_provider::StreamRepetition {
+        key: tau_provider::StreamRepetitionKey::AssistantText { output_index: 0 },
+        mode: tau_provider::RepetitionMode::Fragment,
+        snippet: ".".to_owned(),
+    };
+    let mut bytes = Vec::new();
+    {
+        let mut writer = tau_proto::PeerOutputWriter::new(&mut bytes);
+        emit_repetition_detected_update(&"ap-test".into(), &prompt, &repetition, &mut writer);
+    }
+    let frames = decode_frames(&bytes);
+    let Some(HarnessInputMessage::Emit(emit)) = frames.first() else {
+        panic!("expected emitted repetition update frame: {frames:?}");
+    };
+    let Event::ProviderResponseUpdated(update) = emit.event.as_ref() else {
+        panic!("expected provider response update: {:?}", emit.event);
+    };
+    assert!(matches!(
+        &update.status,
+        Some(tau_proto::ProviderResponseStatusUpdate {
+            clear_response: true,
+            text,
+        }) if text.contains("repetition detected")
+    ));
+
+    let finished = finish_error(
+        &"ap-test".into(),
+        &prompt,
+        &ResolvedProvider {
+            base_url: "https://example.invalid".to_owned(),
+            api_key: String::new(),
+            max_output_tokens: DEFAULT_MAX_OUTPUT_TOKENS,
+            extra_body: BTreeMap::new(),
+            compat: ChatCompletionsCompat::default(),
+        },
+        LlmError::RepetitionDetected(repetition),
+    );
+    assert_eq!(finished.stop_reason, ProviderStopReason::RepetitionDetected);
+    assert!(finished.output_items.is_empty());
+    assert!(finished.error.as_deref().unwrap_or_default().len() <= 520);
 }
