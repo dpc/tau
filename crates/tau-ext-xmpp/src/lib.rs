@@ -1327,8 +1327,12 @@ impl WorkerState {
             tracing::warn!(target: LOG_TARGET, room = %room, sender = %real_jid, "dropping muc message from non-allowlisted real jid");
             return;
         }
-        let source = real.map_or_else(|| from.to_string(), |jid| jid.to_string());
-        self.route(agent_id, format!("[xmpp room {room} from {source}] {body}"));
+        let room_label = display_room_label(&agent_id);
+        let source = display_muc_source(real.as_ref(), &from);
+        self.route(
+            agent_id,
+            format!("[xmpp room {room_label} from {source}] {body}"),
+        );
     }
 
     /// Process inbound direct chat fallback.
@@ -1363,7 +1367,7 @@ impl WorkerState {
         }
         self.route(
             agents[0].clone(),
-            format!("[xmpp direct from {from}] {body}"),
+            format!("[xmpp direct from {}] {body}", from.to_bare()),
         );
     }
 
@@ -1392,6 +1396,22 @@ impl WorkerState {
                 },
             )));
     }
+}
+
+/// Return a concise stable room label for user-visible inbound prompt context.
+fn display_room_label(agent_id: &AgentId) -> String {
+    agent_id.as_ref().to_owned()
+}
+
+/// Return a concise sender label for user-visible inbound MUC prompt context.
+fn display_muc_source(real: Option<&Jid>, occupant: &Jid) -> String {
+    if let Some(real) = real {
+        return real.to_bare().to_string();
+    }
+    occupant
+        .resource()
+        .map(|resource| format!("occupant {}", resource.as_str()))
+        .unwrap_or_else(|| occupant.to_string())
 }
 
 #[derive(Clone)]

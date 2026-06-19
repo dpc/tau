@@ -885,10 +885,7 @@ fn allowed_muc_message_routes_prompt() {
         panic!("prompt request")
     };
     assert_eq!(req.agent_id, agent_id("agent-1"));
-    assert_eq!(
-        req.text,
-        "[xmpp room tau-agent-1@conference.example.org from me@example.org/dino] hello"
-    );
+    assert_eq!(req.text, "[xmpp room agent-1 from me@example.org] hello");
 }
 
 /// MUC messages with an unallowlisted real JID must be dropped even when they
@@ -929,10 +926,7 @@ fn muc_hidden_real_jid_with_trust_routes() {
     let Event::ExtPromptSubmitRequest(req) = *emit.event else {
         panic!("prompt request")
     };
-    assert_eq!(
-        req.text,
-        "[xmpp room tau-agent-1@conference.example.org from tau-agent-1@conference.example.org/alice] hello"
-    );
+    assert_eq!(req.text, "[xmpp room agent-1 from occupant alice] hello");
 }
 
 /// The bridge must suppress groupchat echoes from its own occupant nick so
@@ -1082,7 +1076,7 @@ fn direct_message_requires_exact_bound_full_jid() {
     let Event::ExtPromptSubmitRequest(req) = *emit.event else {
         panic!("prompt request")
     };
-    assert_eq!(req.text, "[xmpp direct from me@example.org/dino] hello");
+    assert_eq!(req.text, "[xmpp direct from me@example.org] hello");
 }
 
 /// Direct-resource fallback refuses a second registration because one bound JID
