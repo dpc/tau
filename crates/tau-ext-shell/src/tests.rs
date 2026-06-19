@@ -2569,7 +2569,10 @@ fn edit_context_line_rejects_invalid_utf8_original_line() {
     ))
     .expect_err("invalid UTF-8 context_line should fail");
 
-    assert_eq!(error.message, "context_line before line 2 did not match");
+    assert_eq!(
+        error.message,
+        "context_line wrong - current line 1 is not valid UTF-8, so no context_line string can match it; see current content in the response"
+    );
     let details = error.details.as_deref().expect("details");
     assert_eq!(
         cbor_map_text(details, "line-numbered content"),
@@ -4216,7 +4219,10 @@ fn edit_context_line_rejects_stale_line_number_and_returns_context_line_context(
         .map(|line| format!("{line} line {line:03}"))
         .collect::<Vec<_>>()
         .join("\n");
-    assert_eq!(error.message, "context_line before line 12 did not match");
+    assert_eq!(
+        error.message,
+        "context_line wrong - must equal current line 11, see current content in the response"
+    );
     let details = error.details.as_deref().expect("details");
     assert_eq!(
         cbor_map_text(details, "line-numbered content"),
@@ -4246,8 +4252,39 @@ fn edit_rejects_non_empty_context_line_for_missing_file_insertion() {
     ))
     .expect_err("non-empty context_line on missing-file insertion should fail");
 
-    assert_eq!(error.message, "context_line before line 1 did not match");
+    assert_eq!(
+        error.message,
+        "context_line wrong - must equal \"\" for file start, see current content in the response"
+    );
     assert!(!file_path.exists());
+}
+
+#[test]
+fn edit_rejects_non_empty_context_line_at_file_start_with_recovery_context() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let file_path = tempdir.path().join("edit.txt");
+    fs::write(&file_path, "alpha\nbeta\n").expect("write");
+
+    let error = edit_file(&edit_arguments(
+        &file_path,
+        vec![context_line_edit(1, 1, "ALPHA\n", "not-empty")],
+    ))
+    .expect_err("non-empty context_line at file start should fail");
+
+    assert_eq!(
+        error.message,
+        "context_line wrong - must equal \"\" for file start, see current content in the response"
+    );
+    let details = error.details.as_deref().expect("details");
+    assert_eq!(cbor_int_field(details, "context_line_number"), Some(0));
+    assert_eq!(
+        cbor_map_text(details, "line-numbered content"),
+        Some("1 alpha\n2 beta")
+    );
+    assert_eq!(
+        fs::read_to_string(&file_path).expect("read back"),
+        "alpha\nbeta\n"
+    );
 }
 
 #[test]
@@ -4262,7 +4299,10 @@ fn edit_empty_insertion_rejects_following_line_as_context_line() {
     ))
     .expect_err("empty insertion should reject following-line context");
 
-    assert_eq!(error.message, "context_line before line 2 did not match");
+    assert_eq!(
+        error.message,
+        "context_line wrong - must equal current line 1, see current content in the response"
+    );
     assert_eq!(
         fs::read_to_string(&file_path).expect("read back"),
         "one\ntwo\n"
@@ -6688,7 +6728,10 @@ fn edit_context_line_rejects_invalid_utf8_bytes_without_writing() {
     ))
     .expect_err("invalid UTF-8 context_line should fail");
 
-    assert_eq!(error.message, "context_line before line 2 did not match");
+    assert_eq!(
+        error.message,
+        "context_line wrong - current line 1 is not valid UTF-8, so no context_line string can match it; see current content in the response"
+    );
     assert_eq!(
         fs::read(&file_path).expect("read back"),
         b"abc\xffdef\nsecond\n"

@@ -283,6 +283,12 @@ impl LineIndex {
     fn total_lines(&self) -> usize {
         self.spans.len()
     }
+
+    fn has_line(&self, line: usize) -> bool {
+        line.checked_sub(1)
+            .is_some_and(|index| self.spans.get(index).is_some())
+    }
+
     fn max_valid_start_line(&self) -> usize {
         self.spans.len().saturating_add(1)
     }
@@ -338,10 +344,14 @@ fn validate_context_lines(
         if actual_context_line == Some(context_line) {
             continue;
         }
+        let current_context_line_invalid_utf8 = context_line_number != 0
+            && original_lines.has_line(context_line_number)
+            && actual_context_line.is_none();
         return Err(context_line_mismatch_failure(
             replacement,
             original_bytes,
             display_args,
+            current_context_line_invalid_utf8,
         ));
     }
     Ok(())
@@ -351,6 +361,7 @@ fn context_line_mismatch_failure(
     replacement: &LineReplacement<'_>,
     original_bytes: &[u8],
     display_args: &str,
+    current_context_line_invalid_utf8: bool,
 ) -> ToolFailure {
     let start_line = replacement.start_line;
     let context_line_number = start_line.saturating_sub(1);
@@ -398,11 +409,21 @@ fn context_line_mismatch_failure(
         ));
     }
 
-    let mut failure = ToolFailure::new(format!(
-        "context_line before line {start_line} did not match"
-    ))
-    .with_args(display_args.to_owned())
-    .with_details(CborValue::Map(details));
+    let message = if current_context_line_invalid_utf8 {
+        format!(
+            "context_line wrong - current line {context_line_number} is not valid UTF-8, so no context_line string can match it; see current content in the response"
+        )
+    } else if context_line_number == 0 {
+        "context_line wrong - must equal \"\" for file start, see current content in the response"
+            .to_owned()
+    } else {
+        format!(
+            "context_line wrong - must equal current line {context_line_number}, see current content in the response"
+        )
+    };
+    let mut failure = ToolFailure::new(message)
+        .with_args(display_args.to_owned())
+        .with_details(CborValue::Map(details));
     failure.display.stats = text_stats(&truncated.content);
     failure
 }
