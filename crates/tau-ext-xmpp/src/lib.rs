@@ -59,6 +59,9 @@ const ONLINE_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
 const READY_RESPONSE_SLACK: Duration = Duration::from_secs(1);
 const STANZA_TIMEOUT: Duration = Duration::from_secs(20);
 const MUC_OWNER_NS: &str = "http://jabber.org/protocol/muc#owner";
+const MUC_ROOM_DISAMBIGUATOR_BYTES: usize = 5;
+const MUC_SESSION_SLUG_MAX_CHARS: usize = 16;
+const MUC_AGENT_SLUG_MAX_CHARS: usize = 18;
 
 /// Run the XMPP extension over stdio.
 pub fn run_stdio() -> Result<(), Box<dyn Error>> {
@@ -841,6 +844,7 @@ impl WorkerState {
             RoutingMode::Muc => {
                 self.ensure_online(client).await?;
                 let room = self.muc_room_for(&session_id, &agent_id)?;
+                self.ensure_muc_room_available(&room, &agent_id)?;
                 let nick = format!("{}-{}", self.cfg.resource_prefix, short_random_hex());
                 let occupant = MucOccupant::new(room.clone(), nick);
                 join_room(client, &occupant.room, &occupant.nick).await?;
@@ -926,14 +930,36 @@ impl WorkerState {
             .clone()
             .ok_or_else(|| "xmpp muc.service is not configured".to_owned())?;
         Jid::new(&format!(
-            "{}-s{}-a{}@{}",
+            "{}-{}@{}",
             self.cfg.muc.room_prefix,
-            hex_token(session_id.as_ref()),
-            hex_token(agent_id.as_ref()),
+            muc_room_label(session_id, agent_id),
             service.domain()
         ))
         .map_err(|e| format!("failed to build muc room jid: {e}"))
         .map(|jid| jid.to_bare())
+    }
+
+    /// Fail closed if a generated MUC room is already owned by another agent.
+    fn ensure_muc_room_available(&self, room: &BareJid, agent_id: &AgentId) -> Result<(), String> {
+        if let Some(existing) = self.room_to_agent.get(room)
+            && existing != agent_id
+        {
+            return Err(format!(
+                "generated xmpp muc room collision for {room}; refusing to overwrite routing from agent {} to agent {}",
+                existing.as_ref(),
+                agent_id.as_ref()
+            ));
+        }
+        if self
+            .pending_muc_joins
+            .iter()
+            .any(|(pending_agent, occupant)| pending_agent != agent_id && &occupant.room == room)
+        {
+            return Err(format!(
+                "generated xmpp muc room collision for {room}; another agent is already joining this room"
+            ));
+        }
+        Ok(())
     }
 
     /// Wait up to the standard readiness timeout for the XMPP stream to
@@ -1898,14 +1924,6 @@ fn short_random_hex() -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
-fn hex_token(input: &str) -> String {
-    input
-        .as_bytes()
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
-}
-
 fn generated_resource(cfg: &RuntimeConfig) -> String {
     let instance = cfg
         .instance_name
@@ -1919,6 +1937,100 @@ fn generated_resource(cfg: &RuntimeConfig) -> String {
         std::process::id(),
         short_random_hex()
     )
+}
+
+/// Return a short, readable, normalization-safe MUC room identity label.
+fn muc_room_label(session_id: &SessionId, agent_id: &AgentId) -> String {
+    let session_slug = localpart_slug(session_id.as_ref(), MUC_SESSION_SLUG_MAX_CHARS);
+    let agent_slug = agent_room_slug(agent_id);
+    let disambiguator = muc_room_disambiguator(session_id, agent_id);
+    format!("{session_slug}-{agent_slug}-{disambiguator}")
+}
+
+fn muc_room_disambiguator(session_id: &SessionId, agent_id: &AgentId) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"tau-ext-xmpp muc room v1\0session\0");
+    hasher.update(session_id.as_ref().as_bytes());
+    hasher.update(b"\0agent\0");
+    hasher.update(agent_id.as_ref().as_bytes());
+    let hash = hasher.finalize();
+    base32_token(&hash.as_bytes()[..MUC_ROOM_DISAMBIGUATOR_BYTES])
+}
+
+fn agent_room_slug(agent_id: &AgentId) -> String {
+    let mut segments = localpart_segments(agent_id.as_ref());
+    if let Some(suffix) = likely_generated_agent_suffix(agent_id.as_ref())
+        && segments.last() == Some(&suffix)
+    {
+        segments.pop();
+    }
+    join_slug_segments(&segments, MUC_AGENT_SLUG_MAX_CHARS)
+}
+
+fn likely_generated_agent_suffix(input: &str) -> Option<String> {
+    // Tau-generated agent ids commonly end with a short mixed-case/digit suffix
+    // (for example `manager-Y3KG`). Hide that visual noise from room slugs while
+    // still feeding the complete AgentId into the disambiguator.
+    input
+        .rsplit_once(|ch: char| !ch.is_ascii_alphanumeric())
+        .map(|(_, suffix)| suffix)
+        .filter(|suffix| {
+            (4..=8).contains(&suffix.len())
+                && suffix.chars().any(|ch| ch.is_ascii_uppercase())
+                && suffix.chars().any(|ch| ch.is_ascii_digit())
+        })
+        .map(|suffix| suffix.to_ascii_lowercase())
+}
+
+fn localpart_slug(input: &str, max_chars: usize) -> String {
+    join_slug_segments(&localpart_segments(input), max_chars)
+}
+
+fn localpart_segments(input: &str) -> Vec<String> {
+    input
+        .split(|ch: char| !ch.is_ascii_alphanumeric())
+        .filter(|segment| !segment.is_empty())
+        .map(str::to_ascii_lowercase)
+        .collect()
+}
+
+fn join_slug_segments(segments: &[String], max_chars: usize) -> String {
+    let mut out = String::new();
+    for segment in segments {
+        if out.len() >= max_chars {
+            break;
+        }
+        if !out.is_empty() {
+            out.push('-');
+        }
+        let remaining = max_chars.saturating_sub(out.len());
+        out.extend(segment.chars().take(remaining));
+        while out.ends_with('-') {
+            out.pop();
+        }
+    }
+    if out.is_empty() { "x".to_owned() } else { out }
+}
+
+fn base32_token(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 32] = b"0123456789abcdefghjkmnpqrstvwxyz";
+    let mut out = String::new();
+    let mut buffer = 0u16;
+    let mut bits = 0u8;
+    for byte in bytes {
+        buffer = (buffer << 8) | u16::from(*byte);
+        bits += 8;
+        while bits >= 5 {
+            bits -= 5;
+            let index = usize::from((buffer >> bits) & 0b1_1111);
+            out.push(char::from(ALPHABET[index]));
+        }
+    }
+    if bits > 0 {
+        let index = usize::from((buffer << (5 - bits)) & 0b1_1111);
+        out.push(char::from(ALPHABET[index]));
+    }
+    out
 }
 
 fn has_delay_payload(message: &Message) -> bool {

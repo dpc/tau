@@ -83,11 +83,15 @@ must come from server defaults or preconfiguration. MUC mode must verify real
 sender JIDs from room presence by default; if a server hides real JIDs, the
 extension fails closed unless the user explicitly configures trust in
 server-side room membership. Runtime registrations and room mappings are
-in-memory only; MUC room routing keys use normalization-stable hex encodings and
-must not collapse distinct valid Tau agent ids after XMPP JID normalization, and
-successfully joined rooms must remain tracked until leave/unavailable presence
-can be sent or the connection is gone. Avoid logs that include XMPP passwords or
-private message content.
+in-memory only; MUC room localparts use short readable session/agent slugs plus a
+compact lowercase-base32, domain-separated BLAKE3 disambiguator over the full Tau
+session id and validated agent id. The readable slugs are not authoritative for
+routing, and the intentionally short disambiguator is not injective: if generated
+rooms ever collide in-process after XMPP JID normalization, registration must
+fail closed instead of overwriting an existing room mapping. Successfully joined
+rooms must remain tracked until leave/unavailable presence can be sent or the
+connection is gone. Avoid logs that include XMPP passwords or private message
+content.
 
 ## Rhai scripting extension
 

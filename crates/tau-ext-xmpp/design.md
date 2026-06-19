@@ -30,7 +30,7 @@ The extension generates a high-entropy resource for the configured bare account 
 
 Status: unconfirmed
 
-Recommended routing is one MUC room per Tau session id and agent id. The room name includes normalization-stable lowercase hex encodings of the full session id and full validated agent id, so resumed Tau sessions return to the same XMPP room while different sessions and agents remain separate conversations. The room identity must not collapse distinct valid `AgentId`s, including ids that differ only by case or long ids that share a display prefix.
+Recommended routing is one MUC room per Tau session id and agent id. The room name uses `<room_prefix>-<session-slug>-<agent-slug>-<8-char-disambiguator>`, where the slugs are short normalized lowercase hints and the disambiguator is compact base32 over a domain-separated BLAKE3 label of the full session id and full validated agent id. This keeps resumed Tau sessions on the same XMPP room while different sessions and agents remain collision-resistant separate conversations, without exposing long raw Tau ids or creating unbounded room localparts. The readable slug identity must not be treated as authoritative: the short disambiguator covers valid `AgentId`s and `SessionId`s that differ only by case, by generated suffix, or after slug truncation, but it is intentionally not injective. If a normalized generated room is already active or pending for a different agent, the worker rejects registration before join/routing insertion instead of overwriting `room_to_agent`.
 
 ## MUC invitations and lifecycle
 
@@ -68,7 +68,7 @@ The MVP sends ordinary XMPP text protected by TLS certificate validation. It doe
 
 Status: unconfirmed
 
-Unit tests with fake or state-only XMPP surfaces cover config validation, opt-in tool metadata, send-before-register rejection, registration state, bounded register/send readiness waits and timeout propagation, disconnect readiness/cache invalidation, multiple MUC agents in one Tau session, stable session/agent room identity, long-agent-id and case-folding non-collapse, MUC self-presence status 201 detection, MUC join error surfacing, exact room/nick join correlation, MUC mediated invite payloads, MUC leave presence construction, MUC real-JID allowlist routing, hidden-real-JID fail-closed behavior, explicit membership-trust behavior, own-message suppression, stale occupant cache invalidation, delayed/history drops, message-size drops, unknown tool-argument rejection, direct full-JID exact-to routing, and reconnect state updates. Live Prosody testing is still future work.
+Unit tests with fake or state-only XMPP surfaces cover config validation, opt-in tool metadata, send-before-register rejection, registration state, bounded register/send readiness waits and timeout propagation, disconnect readiness/cache invalidation, multiple MUC agents in one Tau session, stable session/agent room identity, long-session-id/long-agent-id and case-folding non-collapse, generated-room active/pending collision rejection, MUC self-presence status 201 detection, MUC join error surfacing, exact room/nick join correlation, MUC mediated invite payloads, MUC leave presence construction, MUC real-JID allowlist routing, hidden-real-JID fail-closed behavior, explicit membership-trust behavior, own-message suppression, stale occupant cache invalidation, delayed/history drops, message-size drops, unknown tool-argument rejection, direct full-JID exact-to routing, and reconnect state updates. Live Prosody testing is still future work.
 
 ## Registration timeout rollback
 

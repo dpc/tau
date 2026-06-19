@@ -3392,6 +3392,7 @@ dependencies = [
 name = "tau-ext-xmpp"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "futures-util",
  "rand 0.8.6",
  "serde",

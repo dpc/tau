@@ -109,18 +109,25 @@ still requires an existing registered conversation after that wait.
 
 - `muc` (recommended): creates/joins one room per Tau session id and agent id.
   This gives ordinary XMPP clients a separate conversation per registered agent,
-  while resumed Tau sessions return to the same room address. The room name uses
-  lowercase hex encodings of the full session id and agent id so XMPP JID
-  normalization cannot merge distinct Tau agents. Tau sends a formal XEP-0045
-  mediated invite to `default_recipient` plus a direct fallback notice with the
-  room JID, and enforces `allowed_jids` from current real-JID presence when
-  available. Registration waits for the exact post-join `room/nick`
+  while resumed Tau sessions return to the same room address. The room localpart
+  is a short readable label like `tau-duvp2c-manager-m4tptqqs`:
+  `<room_prefix>-<session-slug>-<agent-slug>-<8-char-disambiguator>`. Slugs are
+  normalized lowercase hints capped to short lengths; generated-looking agent
+  suffixes such as `-Y3KG` are omitted from the visible slug. The disambiguator
+  is compact base32 over a domain-separated BLAKE3 label of the full Tau session
+  id plus full agent id, so distinct sessions/agents remain collision-resistant
+  after XMPP JID normalization without exposing long raw ids. Tau sends a formal
+  XEP-0045 mediated invite to `default_recipient` plus a direct fallback notice
+  with the room JID, and enforces `allowed_jids` from current real-JID presence
+  when available. Registration waits for the exact post-join `room/nick`
   self-presence or presence error. A self-presence with status 201 triggers an
   instant-room owner config submit; presence/config errors or timeouts are
   returned from `xmpp_register` instead of silently claiming a usable room.
   Invite and fallback notice delivery are best-effort after the room is joined
   and unlocked; Tau still tracks and leaves the room on registration rollback,
-  unregister, or shutdown.
+  unregister, or shutdown. Changing the room-name derivation means existing rooms
+  created by older Tau builds are not reused; users may leave or delete old
+  `tau-s...-a...` rooms manually.
 - `direct_resource`: announces the current bound full JID to `default_recipient`
   and accepts only direct messages addressed exactly to the current server-bound
   full JID. This mode supports only one registered agent per extension instance;
