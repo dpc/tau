@@ -591,6 +591,7 @@ const EOF_DURING_AGENT_NOTICE: &str =
     "An agent is still running; use /quit to terminate the session in progress.";
 pub(crate) const SUSPENDED_AGENT_PROMPT: &str =
     "This agent is suspended. Use `/resume` to resume it before sending messages.";
+const TREE_NAVIGATION_USAGE: &str = "/tree: use a prompt anchor, `root`, or explicit `node <id>`";
 const BUILTIN_SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/quit", "Exit the chat session"),
     ("/cancel", "Cancel the current in-flight prompt"),
@@ -621,7 +622,7 @@ const BUILTIN_SLASH_COMMANDS: &[(&str, &str)] = &[
     ),
     (
         "/tree",
-        "Print the selected agent tree (`/tree <id>` rewinds head to that node)",
+        "Print prompt rewind anchors (`/tree <anchor>` rewinds before that prompt)",
     ),
     (
         "/compact",
@@ -1593,6 +1594,29 @@ impl PendingNewAgentModel {
     }
 }
 
+fn tree_command_event(
+    session_id: &str,
+    target_agent_id: Option<tau_proto::AgentId>,
+    text: &str,
+) -> Result<Option<Event>, &'static str> {
+    if text == "/tree" {
+        return Ok(Some(crate::ui_events::tree_request(
+            session_id,
+            target_agent_id,
+        )));
+    }
+    if let Some(arg) = text.strip_prefix("/tree ") {
+        let target = crate::ui_commands::parse_tree_navigation_target(arg)
+            .map_err(|()| TREE_NAVIGATION_USAGE)?;
+        return Ok(Some(crate::ui_events::navigate_tree(
+            session_id,
+            target_agent_id,
+            target,
+        )));
+    }
+    Ok(None)
+}
+
 impl<'a> TerminalInputSession<'a> {
     fn run(&mut self) -> Result<InputLoopExit, CliError> {
         loop {
@@ -1834,35 +1858,15 @@ impl<'a> TerminalInputSession<'a> {
     }
 
     fn handle_tree_command(&self, text: &str) -> bool {
-        if text == "/tree" {
-            let _ = send_event(
-                self.writer,
-                &crate::ui_events::tree_request(self.session_id, self.selected_side_agent_id()),
-            );
-            return true;
-        }
-        if let Some(arg) = text.strip_prefix("/tree ") {
-            self.navigate_tree(arg.trim());
-            return true;
-        }
-        false
-    }
-
-    fn navigate_tree(&self, arg: &str) {
-        match arg.parse::<u64>() {
-            Ok(node_id) => {
-                let _ = send_event(
-                    self.writer,
-                    &crate::ui_events::navigate_tree(
-                        self.session_id,
-                        self.selected_side_agent_id(),
-                        node_id,
-                    ),
-                );
+        match tree_command_event(self.session_id, self.selected_side_agent_id(), text) {
+            Ok(Some(event)) => {
+                let _ = send_event(self.writer, &event);
+                true
             }
-            Err(_) => {
-                self.output
-                    .system_info("/tree <id>: id must be a non-negative integer");
+            Ok(None) => false,
+            Err(message) => {
+                self.output.system_info(message);
+                true
             }
         }
     }

@@ -40,9 +40,9 @@ fn event_for_line(session_id: &str, text: &str) -> Option<Event> {
         return Some(crate::ui_events::tree_request(session_id, None));
     }
     if let Some(arg) = text.strip_prefix("/tree ")
-        && let Ok(node_id) = arg.trim().parse::<u64>()
+        && let Ok(target) = crate::ui_commands::parse_tree_navigation_target(arg)
     {
-        return Some(crate::ui_events::navigate_tree(session_id, None, node_id));
+        return Some(crate::ui_events::navigate_tree(session_id, None, target));
     }
     if text == "/compact" {
         return Some(crate::ui_events::compact_request(session_id, None));

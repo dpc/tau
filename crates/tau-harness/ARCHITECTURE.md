@@ -151,6 +151,27 @@ a fixed harness-authored reason: first occurrence queues the pivot, recurrence
 after that pivot stops automatic continuation. Provider error text is displayed
 but is not trusted as model-visible guard instruction.
 
+## Durable branch-head navigation
+
+The harness presents `/tree` as prompt rewind anchors by default. Numeric
+anchors are one-based user-facing prompt positions; resolving an anchor moves
+the durable branch head to that prompt node's parent, so the next user prompt
+replaces or branches before the selected prompt. Root/before-first navigation is
+represented by an explicit durable root head, while raw transcript node
+navigation is only accepted through the explicit debug node target.
+Default anchors are derived from durable prompt provenance, not merely from the
+folded `UserInput` node shape: visible user-originated `agent.prompt_submitted`
+facts and visible queued-user `agent.prompt_steered` facts are anchors, while
+injected user messages, internal prompts, compaction triggers, assistant/tool
+nodes, and agent-message projections are not.
+
+`agent.head_moved` is durable cursor state, but it is not a permanent override
+over later transcript records. Agent-log replay folds head moves and
+node-producing events in chronological order; every later prompt/assistant/tool
+node advances the folded `AgentTree::head()`. Resume therefore restores the
+conversation cursor from the replayed tree head, preserving root head moves only
+until a later branch-advancing event supersedes them.
+
 ## Lifecycle events
 
 Harness lifecycle events such as session start/shutdown and extension status are

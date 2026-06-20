@@ -79,8 +79,10 @@ $ tau -r                  # pick a recent session for this cwd
 $ tau -r <id>             # resume a specific one
 ```
 
-Inside the UI, `/tree` prints the selected agent's branch graph and `/tree
-<node-id>` rewinds that agent's head to the node.
+Inside the UI, `/tree` prints one-based prompt rewind anchors for the selected
+agent. `/tree <anchor>` rewinds to before that prompt, `/tree 0` or `/tree
+root` selects the root before the first prompt, and `/tree node <node-id>` is
+the explicit expert escape hatch for raw transcript-node navigation.
 
 Any subscriber that joins after a session is initialized — UI clients and
 extensions alike — gets the same subscribe-time catch-up: the current session
@@ -562,7 +564,7 @@ Type `/` for menu autocompletion. The built-in set:
 | `/model <provider>/<model>` | Switch selected agent model                         |
 | `/role <role> ...`  | Switch, create, edit, or delete an agent role        |
 | `/fast`             | Toggle Codex Fast mode (`service_tier: fast`)        |
-| `/tree [id]`        | Print selected agent tree; with `id`, rewind head    |
+| `/tree [anchor]`    | Print prompt rewind anchors; with `anchor`, rewind before that prompt |
 | `/set <name> <val>` | Set a UI setting (Tab cycles names + values)         |
 | `/skill <name> [args]` | Invoke a user-invocable skill; `/skill:<name>` is also accepted |
 

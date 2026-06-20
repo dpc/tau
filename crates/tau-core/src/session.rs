@@ -12,7 +12,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 use tau_proto::{
-    AgentHeadMoved, AgentId, AgentMessageId, AgentMessageKind, AgentMessageReceived,
+    AgentHead, AgentHeadMoved, AgentId, AgentMessageId, AgentMessageKind, AgentMessageReceived,
     AgentMessageRecipient, AgentMessageSent, ConnectionId, ContentPart, ContextItem, ContextRole,
     Event, MessageItem, PromptOriginator, ProviderBackend, ProviderTokenUsage, ToolBackgroundError,
     ToolBackgroundResult, ToolCallId, ToolCallItem, ToolName, ToolResultItem, ToolResultKind,
@@ -785,8 +785,8 @@ impl AgentTree {
                 output: tau_proto::ToolResponse::from_cbor(&tau_proto::CborValue::Null),
             }),
             Event::AgentHeadMoved(moved) => {
-                if moved.agent_id == self.agent_id && self.node(moved.node_id).is_some() {
-                    self.head = Some(moved.node_id);
+                if moved.agent_id == self.agent_id && self.validate_head_moved(moved).is_ok() {
+                    self.head = moved.head.as_option();
                 }
                 None
             }
@@ -952,10 +952,11 @@ impl AgentTree {
     }
 
     fn validate_head_moved(&self, moved: &AgentHeadMoved) -> Result<(), AgentEventValidationError> {
-        if self.node(moved.node_id).is_none() {
+        if let AgentHead::Node(node_id) = moved.head
+            && self.node(node_id).is_none()
+        {
             return Err(AgentEventValidationError::new(format!(
-                "head move referenced unknown node_id: {}",
-                moved.node_id
+                "head move referenced unknown node_id: {node_id}",
             )));
         }
         Ok(())

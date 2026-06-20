@@ -28,12 +28,12 @@ pub(crate) fn tree_request(session_id: &str, target_agent_id: Option<tau_proto::
 pub(crate) fn navigate_tree(
     session_id: &str,
     target_agent_id: Option<tau_proto::AgentId>,
-    node_id: u64,
+    target: tau_proto::UiTreeNavigationTarget,
 ) -> Event {
     Event::UiNavigateTree(tau_proto::UiNavigateTree {
         session_id: session_id.into(),
         target_agent_id,
-        node_id,
+        target,
     })
 }
 

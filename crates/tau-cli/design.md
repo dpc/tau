@@ -87,6 +87,13 @@ slash token as an unknown-action notice. That fallback is intentionally limited
 to leading slash roots; ordinary prompt text that contains slashes later in the
 line remains normal prompt text.
 
+`/tree` argument parsing is CLI-owned, while anchor resolution is harness-owned.
+The CLI maps `/tree <positive-integer>` to a one-based prompt anchor target,
+`/tree 0` and `/tree root` to the explicit root/before-first target, and
+`/tree node <non-negative-integer>` to the raw-node expert target. It must not
+send bare numeric arguments as raw transcript node ids; the harness resolves
+prompt anchors against the selected agent's durable prompt provenance.
+
 ## Theme defaults
 
 Status: confirmed, 2026-06-17, dpc

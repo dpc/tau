@@ -1,9 +1,32 @@
 //! Shared parsing for UI slash-command subsets.
 
+#[cfg(test)]
+mod tests;
+
 use tau_proto::Event;
 
 fn is_reset_value(value: &str) -> bool {
     value == "reset"
+}
+
+pub(crate) fn parse_tree_navigation_target(
+    arg: &str,
+) -> Result<tau_proto::UiTreeNavigationTarget, ()> {
+    let arg = arg.trim();
+    if arg == "root" || arg == "0" {
+        return Ok(tau_proto::UiTreeNavigationTarget::Root);
+    }
+    if let Some(rest) = arg.strip_prefix("node ") {
+        let node_id = rest.trim().parse::<u64>().map_err(|_| ())?;
+        return Ok(tau_proto::UiTreeNavigationTarget::Node(
+            tau_proto::NodeId::new(node_id),
+        ));
+    }
+    let anchor = arg.parse::<u64>().map_err(|_| ())?;
+    if anchor == 0 {
+        return Ok(tau_proto::UiTreeNavigationTarget::Root);
+    }
+    Ok(tau_proto::UiTreeNavigationTarget::PromptAnchor(anchor))
 }
 
 fn parse_service_tier_update(value: &str) -> Result<Option<tau_proto::ServiceTier>, String> {

@@ -134,7 +134,8 @@ of an agent log.
   `parent_agent`; inheritable metadata from that parent is copied into the new
   agent after this fact commits and before the agent is announced loaded.
 - **`agent.head_moved`** — Durable fact that changes an agent's selected tree
-  head after navigation, so future prompts branch from the requested node.
+  head after navigation, so future prompts branch from the requested root or
+  node target.
 
 ## Provider execution
 
@@ -355,9 +356,12 @@ intent.
   correlation id, and optional `model_override`; when present, `model_override`
   is installed on the new agent before its first prompt is queued or routed.
 - **`ui.tree_request`** — User typed `/tree`: render the selected or targeted
-  agent branching tree to chat.
-- **`ui.navigate_tree`** — User typed `/tree <id>`: move the selected or targeted
-  agent head to that node so the next prompt branches off there.
+  agent's prompt rewind anchors to chat.
+- **`ui.navigate_tree`** — User typed `/tree <anchor>`, `/tree root`, or the
+  expert `/tree node <node-id>` form: move the selected or targeted agent head
+  to the resolved root-or-node target so the next prompt branches there.
+  Prompt anchors are one-based; UI parsers should encode `/tree 0` as the
+  explicit root target before the first prompt.
 - **`ui.compact_request`** — User typed `/compact`: request provider-side
   compaction for the selected or targeted agent before the next prompt.
 - **`ui.cancel_prompt`** — User requests cancellation of a prompt by session,

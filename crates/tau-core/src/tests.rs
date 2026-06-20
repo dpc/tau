@@ -1,8 +1,8 @@
 use std::path::PathBuf;
 
 use tau_proto::{
-    AgentDisplayNameSet, AgentHeadMoved, AgentId, AgentPromptSubmitted, Event, PromptMessageClass,
-    PromptOriginator, SessionAgentLoaded, SessionAgentUnloaded, SessionId,
+    AgentDisplayNameSet, AgentHead, AgentHeadMoved, AgentId, AgentPromptSubmitted, Event,
+    PromptMessageClass, PromptOriginator, SessionAgentLoaded, SessionAgentUnloaded, SessionId,
 };
 
 use crate::{
@@ -264,7 +264,7 @@ fn agent_store_restores_head_move_before_next_append() {
             None,
             Event::AgentHeadMoved(AgentHeadMoved {
                 agent_id: AgentId::parse("agent-1").expect("agent id"),
-                node_id: NodeId::new(0),
+                head: AgentHead::Node(NodeId::new(0)),
             }),
         )
         .expect("persist head move");
@@ -285,6 +285,49 @@ fn agent_store_restores_head_move_before_next_append() {
     let tree = reopened.agent("agent-1").expect("agent tree after append");
     let branched = tree.nodes().last().expect("branched node");
     assert_eq!(branched.parent_id, Some(NodeId::new(0)));
+
+    let _ = std::fs::remove_dir_all(agents_dir);
+}
+
+#[test]
+fn agent_store_restores_root_head_move_before_next_append() {
+    // Rewinding to before the first prompt is represented by a durable
+    // `AgentHead::Root` head move. Replaying the agent log must preserve that
+    // root cursor so the next user prompt starts a new root branch after
+    // restart instead of inheriting the previous leaf.
+    let agents_dir = temp_dir("agents-root-head-move");
+    let mut store = AgentStore::open(&agents_dir).expect("open agent store");
+
+    store
+        .append_agent_event("agent-1", None, agent_prompt("agent-1", "first"))
+        .expect("append first prompt");
+    store
+        .append_agent_event(
+            "agent-1",
+            None,
+            Event::AgentHeadMoved(AgentHeadMoved {
+                agent_id: AgentId::parse("agent-1").expect("agent id"),
+                head: AgentHead::Root,
+            }),
+        )
+        .expect("persist root head move");
+    drop(store);
+
+    let mut reopened = AgentStore::open(&agents_dir).expect("reopen agent store");
+    let tree = reopened.agent("agent-1").expect("agent tree after reopen");
+    assert_eq!(tree.head(), None);
+
+    reopened
+        .append_agent_event(
+            "agent-1",
+            None,
+            agent_prompt("agent-1", "branched from root after resume"),
+        )
+        .expect("append resumed root branch prompt");
+
+    let tree = reopened.agent("agent-1").expect("agent tree after append");
+    let branched = tree.nodes().last().expect("branched node");
+    assert_eq!(branched.parent_id, None);
 
     let _ = std::fs::remove_dir_all(agents_dir);
 }

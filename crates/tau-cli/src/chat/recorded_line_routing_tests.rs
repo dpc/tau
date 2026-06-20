@@ -44,6 +44,61 @@ fn route_line(line: &str, dynamic_consumes: bool) -> Vec<String> {
     handlers.outputs
 }
 
+struct TestTreeCommandHandlers {
+    outputs: Vec<String>,
+}
+
+impl TestTreeCommandHandlers {
+    fn new() -> Self {
+        Self {
+            outputs: Vec::new(),
+        }
+    }
+}
+
+impl RecordedLineHandlers for TestTreeCommandHandlers {
+    fn handle_known_command(&mut self, text: &str) -> Result<CommandOutcome, CliError> {
+        match tree_command_event("s1", None, text) {
+            Ok(Some(event)) => {
+                self.outputs.push(format_tree_event(&event));
+                Ok(CommandOutcome::Continue)
+            }
+            Ok(None) => Ok(CommandOutcome::NotHandled),
+            Err(message) => {
+                self.system_info(message);
+                Ok(CommandOutcome::Continue)
+            }
+        }
+    }
+
+    fn handle_dynamic_action(&mut self, _text: &str) -> CommandOutcome {
+        CommandOutcome::NotHandled
+    }
+
+    fn submit_prompt(&mut self, text: &str) -> Option<InputLoopExit> {
+        self.outputs.push(format!("prompt:{text}"));
+        None
+    }
+
+    fn system_info(&mut self, message: &str) {
+        self.outputs.push(format!("notice:{message}"));
+    }
+}
+
+fn format_tree_event(event: &Event) -> String {
+    match event {
+        Event::UiTreeRequest(_) => "tree:request".to_owned(),
+        Event::UiNavigateTree(req) => format!("tree:navigate:{:?}", req.target),
+        other => panic!("expected tree event, got {other:?}"),
+    }
+}
+
+fn route_tree_line(line: &str) -> Vec<String> {
+    let mut handlers = TestTreeCommandHandlers::new();
+    handle_recorded_line_with_handlers(line, &mut handlers).expect("line routes");
+    handlers.outputs
+}
+
 /// Exercises the shared input-loop routing implementation, ensuring unknown
 /// leading slash roots become local notices and are not sent to the harness
 /// as prompts.
@@ -52,6 +107,34 @@ fn unknown_leading_slash_action_emits_notice_without_prompt_submission() {
     assert_eq!(
         route_line("/typo arg", false),
         ["notice:unknown CLI action `/typo`"]
+    );
+}
+
+/// Exercises the interactive input-loop routing for `/tree`: bare numeric
+/// arguments are prompt anchors, root is explicit, and raw node ids require the
+/// expert `node` keyword.
+#[test]
+fn tree_command_routes_anchors_root_and_raw_nodes() {
+    assert_eq!(route_tree_line("/tree"), ["tree:request"]);
+    assert_eq!(
+        route_tree_line("/tree 42"),
+        ["tree:navigate:PromptAnchor(42)"]
+    );
+    assert_eq!(route_tree_line("/tree 0"), ["tree:navigate:Root"]);
+    assert_eq!(route_tree_line("/tree root"), ["tree:navigate:Root"]);
+    assert_eq!(
+        route_tree_line("/tree node 42"),
+        ["tree:navigate:Node(NodeId(42))"]
+    );
+}
+
+/// Invalid interactive `/tree` arguments are local validation notices. They
+/// must not fall through to prompt submission or the unknown-slash fallback.
+#[test]
+fn invalid_tree_command_emits_notice_without_prompt_submission() {
+    assert_eq!(
+        route_tree_line("/tree nope"),
+        ["notice:/tree: use a prompt anchor, `root`, or explicit `node <id>`"]
     );
 }
 

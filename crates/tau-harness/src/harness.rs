@@ -14,13 +14,13 @@ use rand::SeedableRng as _;
 use rand::rngs::StdRng;
 use tau_core::{
     ActionRegistry, AgentStore, Connection, ConnectionMetadata, ConnectionOrigin,
-    DefaultSubscriptionPolicy, EventBus, NodeId, PolicyStore, RouteError, SessionStore,
-    ToolRegistry, ToolRouteError, ToolRouteTarget, repair_tool_arguments, tool_example_hint,
+    DefaultSubscriptionPolicy, EventBus, PolicyStore, RouteError, SessionStore, ToolRegistry,
+    ToolRouteError, ToolRouteTarget, repair_tool_arguments, tool_example_hint,
     validate_tool_arguments,
 };
 use tau_proto::{
-    ActionError, ActionInvocationId, ActionInvoke, ActionResult, ActionSchemaPublished, AgentId,
-    AgentPromptCreated, AgentPromptId, AgentPromptQueued, AgentPromptRecalled,
+    ActionError, ActionInvocationId, ActionInvoke, ActionResult, ActionSchemaPublished, AgentHead,
+    AgentId, AgentPromptCreated, AgentPromptId, AgentPromptQueued, AgentPromptRecalled,
     AgentPromptTerminated, AgentPromptTerminationReason, BackgroundSupport, CborValue, ClientKind,
     ConnectionId, ContentPart, ContextItem, ContextRole, Disconnect, Event, EventSelector,
     ExtensionName, HarnessAgentContextUsageChanged, HarnessContextUsageChanged,
@@ -29,7 +29,7 @@ use tau_proto::{
     ProviderResponseFinished, ProviderStopReason, ProviderTokenUsage, SecretValue, SessionId,
     ToolBackgroundError, ToolBackgroundResult, ToolCallId, ToolCallItem, ToolCancelled,
     ToolDefinition, ToolError, ToolName, ToolRegister, ToolRejected, ToolRequest, ToolResult,
-    ToolResultKind, ToolType, UiCancelPrompt, nearest_name_suggestion,
+    ToolResultKind, ToolType, UiCancelPrompt, UiTreeNavigationTarget, nearest_name_suggestion,
 };
 
 use crate::agent::{
@@ -1646,6 +1646,75 @@ struct HarnessBaseParts {
     dirs: tau_config::settings::TauDirs,
 }
 
+/// One user-facing `/tree` prompt rewind anchor derived from durable prompt
+/// provenance and resolved through the folded agent tree.
+struct PromptAnchorTarget<'a> {
+    /// One-based prompt anchor shown to the user.
+    anchor: u64,
+    /// Branch head selected when rewinding before this prompt.
+    head: AgentHead,
+    /// Prompt node whose preview explains the anchor.
+    prompt_node: &'a tau_core::AgentNode,
+}
+
+/// Builds one-based prompt anchors from visible prompt-provenance events.
+fn prompt_anchor_targets<'a>(
+    tree: &'a tau_core::AgentTree,
+    agent_id: &tau_proto::AgentId,
+    events: &[tau_core::PersistedAgentEvent],
+) -> Vec<PromptAnchorTarget<'a>> {
+    let mut replay = tau_core::AgentTree::from_events(agent_id.clone(), &[]);
+    let mut anchors = Vec::new();
+    for record in events {
+        let is_anchor_event = is_prompt_anchor_event(agent_id, &record.event);
+        let folded_node_id = replay.apply_event_at(record.parent, &record.event);
+        if !is_anchor_event {
+            continue;
+        }
+        if let Some(prompt_node) = folded_node_id.and_then(|node_id| tree.node(node_id)) {
+            anchors.push(PromptAnchorTarget {
+                anchor: anchors.len() as u64 + 1,
+                head: prompt_node
+                    .parent_id
+                    .map(AgentHead::Node)
+                    .unwrap_or(AgentHead::Root),
+                prompt_node,
+            });
+        }
+    }
+    anchors
+}
+
+/// Returns whether a durable event should receive a default `/tree` prompt
+/// anchor.
+///
+/// Default anchors are intentionally provenance-based: visible prompts
+/// submitted by the user, plus visible queued user prompts steered into an
+/// in-flight turn. Synthetic injections, internal control prompts, compaction
+/// triggers, and assistant/tool/message nodes remain reachable only through
+/// explicit raw-node debug navigation.
+fn is_prompt_anchor_event(agent_id: &tau_proto::AgentId, event: &Event) -> bool {
+    match event {
+        Event::AgentPromptSubmitted(prompt) => {
+            &prompt.agent_id == agent_id
+                && prompt.originator.is_user()
+                && !prompt.message_class.is_internal()
+        }
+        Event::AgentPromptSteered(steered) => {
+            &steered.agent_id == agent_id && !steered.message_class.is_internal()
+        }
+        _ => false,
+    }
+}
+
+/// Formats a branch head for concise user-facing navigation notices.
+fn format_agent_head(head: AgentHead) -> String {
+    match head {
+        AgentHead::Root => "root".to_owned(),
+        AgentHead::Node(node_id) => format!("node {node_id}"),
+    }
+}
+
 impl Harness {
     /// Enables the test-only echo tool explicitly for every configured role.
     #[cfg(any(test, feature = "echo-agent"))]
@@ -2817,7 +2886,7 @@ impl Harness {
         {
             match (&event, folded_node_id) {
                 (Event::AgentHeadMoved(moved), _) => {
-                    c.head = Some(moved.node_id);
+                    c.head = moved.head.as_option();
                     c.loop_guard.invalidate_branch();
                     c.pending_prompts.retain(|prompt| !prompt.is_loop_guard());
                 }
@@ -5149,20 +5218,20 @@ impl Harness {
         _client_id: &str,
         req: tau_proto::UiNavigateTree,
     ) -> Result<bool, HarnessError> {
-        // Validate the target node exists in *this* harness's bound
+        // Validate the requested target against *this* harness's bound
         // session before publishing. The durable branch-state fact is
         // agent-owned (`agent.head_moved`), not the UI-scoped request.
-        if let Some((cid, agent_id, node_id)) = self.validate_navigate_tree_target(
+        if let Some((cid, agent_id, head)) = self.validate_navigate_tree_target(
             &req.session_id,
             req.target_agent_id.as_deref(),
-            req.node_id,
+            req.target,
         ) {
             self.publish_event_for_agent(
                 &cid,
                 None,
-                Event::AgentHeadMoved(tau_proto::AgentHeadMoved { agent_id, node_id }),
+                Event::AgentHeadMoved(tau_proto::AgentHeadMoved { agent_id, head }),
             );
-            self.emit_info(&format!("navigated to node {}", req.node_id));
+            self.emit_info(&format!("navigated to {}", format_agent_head(head)));
         }
         Ok(true)
     }
@@ -7832,7 +7901,7 @@ impl Harness {
         }
     }
 
-    /// Renders the selected agent tree as one `harness.notice` line per node.
+    /// Renders the selected agent tree as user-facing rewind anchors.
     /// Bound-session-only: refuses if `session_id` doesn't match.
     fn handle_tree_request(&mut self, session_id: &SessionId, target_agent_id: Option<&str>) {
         if session_id != &self.current_session_id {
@@ -7850,31 +7919,47 @@ impl Harness {
         let agent_id = self
             .target_agent_id_for_agent(&cid)
             .expect("agent has durable id");
+        let parsed_agent_id = crate::parse_agent_id(&agent_id);
+        let events = match self.agent_store.agent_events(&agent_id) {
+            Ok(events) => events,
+            Err(error) => {
+                self.emit_info(&format!(
+                    "tree request ignored: failed to load agent log: {error}"
+                ));
+                return;
+            }
+        };
         let lines: Vec<String> = match self.agent_store.agent(&agent_id) {
             Some(tree) if !tree.nodes().is_empty() => {
                 let selected_head = self.agents.get(&cid).and_then(|conv| conv.head);
-                tree.nodes()
-                    .iter()
-                    .map(|node| {
-                        let marker = if Some(node.id) == selected_head {
-                            '*'
-                        } else {
-                            ' '
-                        };
-                        let parent = node
-                            .parent_id
-                            .map(|p| format!("<- {}", p.get()))
-                            .unwrap_or_else(|| "(root)".to_owned());
-                        let preview = render_entry_preview(&node.entry);
-                        format!(
-                            "  {:>3} {} {:>8}  {}",
-                            node.id.get(),
-                            marker,
-                            parent,
-                            preview
-                        )
-                    })
-                    .collect()
+                let mut lines = Vec::new();
+                let root_marker = if selected_head.is_none() { '*' } else { ' ' };
+                lines.push(format!(
+                    "  {:>3} {} before first prompt (root)",
+                    0, root_marker
+                ));
+                lines.extend(
+                    prompt_anchor_targets(tree, &parsed_agent_id, &events)
+                        .into_iter()
+                        .map(
+                            |PromptAnchorTarget {
+                                 anchor,
+                                 head,
+                                 prompt_node,
+                             }| {
+                                let marker = if !matches!(head, AgentHead::Root)
+                                    && head.as_option() == selected_head
+                                {
+                                    '*'
+                                } else {
+                                    ' '
+                                };
+                                let preview = render_entry_preview(&prompt_node.entry);
+                                format!("  {anchor:>3} {marker} before prompt  {preview}")
+                            },
+                        ),
+                );
+                lines
             }
             _ => {
                 self.emit_info(&format!("agent `{}` has no entries yet", agent_id));
@@ -7892,8 +7977,8 @@ impl Harness {
         &mut self,
         session_id: &SessionId,
         target_agent_id: Option<&str>,
-        node_id: u64,
-    ) -> Option<(AgentId, tau_proto::AgentId, tau_core::NodeId)> {
+        target: UiTreeNavigationTarget,
+    ) -> Option<(AgentId, tau_proto::AgentId, AgentHead)> {
         if session_id != &self.current_session_id {
             self.emit_info(&format!(
                 "navigate ignored: harness is bound to `{}`",
@@ -7909,17 +7994,42 @@ impl Harness {
             self.target_agent_id_for_agent(&cid)
                 .expect("agent has durable id"),
         );
-        let node_id = tau_core::NodeId::new(node_id);
-        let valid = self
-            .agent_store
-            .agent(agent_id.as_str())
-            .and_then(|t| t.node(node_id))
-            .is_some();
-        if !valid {
-            self.emit_info(&format!("no node `{}` in session", node_id.get()));
-            return None;
-        }
-        Some((cid, agent_id, node_id))
+        let tree = self.agent_store.agent(agent_id.as_str());
+        let events = match self.agent_store.agent_events(agent_id.as_str()) {
+            Ok(events) => events,
+            Err(error) => {
+                self.emit_info(&format!(
+                    "navigate ignored: failed to load agent log: {error}"
+                ));
+                return None;
+            }
+        };
+        let head = match target {
+            UiTreeNavigationTarget::Root => AgentHead::Root,
+            UiTreeNavigationTarget::PromptAnchor(anchor) => {
+                let Some(tree) = tree else {
+                    self.emit_info("navigate ignored: agent tree is not loaded");
+                    return None;
+                };
+                let Some(target) = prompt_anchor_targets(tree, &agent_id, &events)
+                    .into_iter()
+                    .find(|candidate| candidate.anchor == anchor)
+                else {
+                    self.emit_info(&format!("no prompt anchor `{anchor}` in agent tree"));
+                    return None;
+                };
+                target.head
+            }
+            UiTreeNavigationTarget::Node(node_id) => {
+                let valid = tree.and_then(|t| t.node(node_id)).is_some();
+                if !valid {
+                    self.emit_info(&format!("no node `{}` in agent tree", node_id.get()));
+                    return None;
+                }
+                AgentHead::Node(node_id)
+            }
+        };
+        Some((cid, agent_id, head))
     }
 
     /// Tear down the current session and bind the harness to a new one.
@@ -8684,12 +8794,9 @@ impl Harness {
                 continue;
             }
             let head = self
-                .agent_head_moved_from_log(agent_id.as_str())
-                .or_else(|| {
-                    self.agent_store
-                        .agent(agent_id.as_str())
-                        .and_then(|tree| tree.head())
-                });
+                .agent_store
+                .agent(agent_id.as_str())
+                .and_then(|tree| tree.head());
             let cid: AgentId = crate::parse_agent_id(&agent_id_string);
             let meta = self
                 .agent_store
@@ -8726,21 +8833,6 @@ impl Harness {
             self.agent_states
                 .insert(agent_id_string, AgentState::Active);
         }
-    }
-
-    fn agent_head_moved_from_log(&self, agent_id: &str) -> Option<NodeId> {
-        self.agent_store
-            .agent_events(agent_id)
-            .inspect_err(|error| {
-                tracing::warn!(target: "tau_harness", %agent_id, %error, "failed to load agent events for head restore");
-            })
-            .ok()?
-            .into_iter()
-            .filter_map(|record| match record.event {
-                Event::AgentHeadMoved(moved) => Some(moved.node_id),
-                _ => None,
-            })
-            .next_back()
     }
 
     fn agent_originator_from_log(&self, agent_id: &str) -> tau_proto::PromptOriginator {

@@ -2167,7 +2167,7 @@ fn loop_guard_resets_on_agent_head_move() {
         &cid,
         Event::AgentHeadMoved(tau_proto::AgentHeadMoved {
             agent_id: crate::parse_agent_id(&agent_id),
-            node_id,
+            head: tau_proto::AgentHead::Node(node_id),
         }),
     );
 
@@ -4439,7 +4439,7 @@ fn ui_navigate_tree_can_reselect_agent_head_after_resume() {
             tau_proto::UiNavigateTree {
                 session_id: "s1".into(),
                 target_agent_id: Some(agent_id.clone()),
-                node_id: first_user_head.get(),
+                target: tau_proto::UiTreeNavigationTarget::Node(first_user_head),
             },
         )
         .expect("navigate tree");
@@ -4450,7 +4450,7 @@ fn ui_navigate_tree_can_reselect_agent_head_after_resume() {
                 event,
                 Event::AgentHeadMoved(tau_proto::AgentHeadMoved {
                     agent_id: ref moved_agent_id,
-                    node_id,
+                    head: tau_proto::AgentHead::Node(node_id),
                 }) if moved_agent_id == &agent_id && node_id == first_user_head
             )
         }));
@@ -4470,7 +4470,7 @@ fn ui_navigate_tree_can_reselect_agent_head_after_resume() {
             tau_proto::UiNavigateTree {
                 session_id: "s1".into(),
                 target_agent_id: Some(agent_id.clone()),
-                node_id: first_user_head.get(),
+                target: tau_proto::UiTreeNavigationTarget::Node(first_user_head),
             },
         )
         .expect("reselect tree head after resume");
@@ -4486,6 +4486,350 @@ fn ui_navigate_tree_can_reselect_agent_head_after_resume() {
 
         h.shutdown().expect("shutdown");
     }
+}
+
+#[test]
+fn ui_tree_prompt_anchor_rewinds_before_prompt_not_to_raw_node() {
+    // Default `/tree <anchor>` navigation uses prompt rewind anchors. A
+    // numeric anchor matching an assistant node id must not silently select
+    // that raw node; raw node selection requires the explicit `node` target.
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    let cid = ensure_test_user_agent(&mut h);
+    let agent_id = durable_agent_id_for_conversation(&h, &cid);
+
+    append_user_message_via_event(&mut h, "s1", "first prompt");
+    let first_prompt_node = h.agents[&cid].head.expect("first prompt node");
+    h.publish_for_agent(
+        &cid,
+        Event::ProviderResponseFinished(provider_text_response(
+            &"sp-tree-anchor".into(),
+            agent_id.clone(),
+            "assistant answer",
+        )),
+    );
+    let assistant_node = h.agents[&cid].head.expect("assistant node");
+    assert_ne!(first_prompt_node, assistant_node);
+
+    h.handle_ui_navigate_tree(
+        "ui",
+        tau_proto::UiNavigateTree {
+            session_id: "s1".into(),
+            target_agent_id: Some(agent_id.clone()),
+            target: tau_proto::UiTreeNavigationTarget::PromptAnchor(1),
+        },
+    )
+    .expect("navigate to first prompt anchor");
+    assert_eq!(
+        h.agents[&cid].head, None,
+        "anchor 1 rewinds before the first prompt instead of selecting raw node 1"
+    );
+
+    h.handle_ui_navigate_tree(
+        "ui",
+        tau_proto::UiNavigateTree {
+            session_id: "s1".into(),
+            target_agent_id: Some(agent_id.clone()),
+            target: tau_proto::UiTreeNavigationTarget::Node(assistant_node),
+        },
+    )
+    .expect("navigate to raw assistant node explicitly");
+    assert_eq!(h.agents[&cid].head, Some(assistant_node));
+}
+
+#[test]
+fn ui_tree_prompt_anchor_rewinds_before_later_prompt() {
+    // Selecting a later prompt anchor should move the branch head to that
+    // prompt node's parent, so the next prompt replaces/branches before the
+    // selected user prompt.
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    let cid = ensure_test_user_agent(&mut h);
+    let agent_id = durable_agent_id_for_conversation(&h, &cid);
+
+    append_user_message_via_event(&mut h, "s1", "first prompt");
+    h.publish_for_agent(
+        &cid,
+        Event::AgentUserMessageInjected(tau_proto::AgentUserMessageInjected {
+            agent_id: agent_id.clone(),
+            text: "synthetic injected input should not be listed".to_owned(),
+            message_class: tau_proto::PromptMessageClass::User,
+        }),
+    );
+    h.publish_for_agent(
+        &cid,
+        Event::AgentCompactionTriggered(tau_proto::AgentCompactionTriggered {
+            agent_id: agent_id.clone(),
+            originator: tau_proto::PromptOriginator::User,
+        }),
+    );
+    h.publish_for_agent(
+        &cid,
+        Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+            agent_id: agent_id.clone(),
+            text: "internal prompt should not be listed".to_owned(),
+            message_class: tau_proto::PromptMessageClass::Internal,
+            originator: tau_proto::PromptOriginator::User,
+            display_name: None,
+            ctx_id: None,
+        }),
+    );
+    h.publish_for_agent(
+        &cid,
+        Event::ProviderResponseFinished(provider_text_response(
+            &"sp-tree-anchor-parent".into(),
+            agent_id.clone(),
+            "assistant answer",
+        )),
+    );
+    let assistant_node = h.agents[&cid].head.expect("assistant node");
+    append_user_message_via_event(&mut h, "s1", "second prompt");
+
+    h.handle_ui_navigate_tree(
+        "ui",
+        tau_proto::UiNavigateTree {
+            session_id: "s1".into(),
+            target_agent_id: Some(agent_id.clone()),
+            target: tau_proto::UiTreeNavigationTarget::PromptAnchor(2),
+        },
+    )
+    .expect("navigate before second prompt");
+    assert_eq!(h.agents[&cid].head, Some(assistant_node));
+
+    append_user_message_via_event(&mut h, "s1", "replacement second prompt");
+    let branched = default_agent_tree(&h)
+        .nodes()
+        .last()
+        .expect("branched prompt");
+    assert_eq!(branched.parent_id, Some(assistant_node));
+}
+
+#[test]
+fn ui_tree_root_navigation_persists_across_resume() {
+    // Root navigation must be a durable head state, not just a runtime `None`,
+    // so resuming the session keeps the next prompt branching before the first
+    // prompt.
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let agent_id: tau_proto::AgentId;
+
+    {
+        let mut h = echo_harness(&sp).expect("start");
+        append_user_message_via_event(&mut h, "s1", "first prompt");
+        let cid = ensure_test_user_agent(&mut h);
+        agent_id = durable_agent_id_for_conversation(&h, &cid);
+
+        h.handle_ui_navigate_tree(
+            "ui",
+            tau_proto::UiNavigateTree {
+                session_id: "s1".into(),
+                target_agent_id: Some(agent_id.clone()),
+                target: tau_proto::UiTreeNavigationTarget::Root,
+            },
+        )
+        .expect("navigate to root");
+        assert_eq!(h.agents[&cid].head, None);
+        assert!(loaded_agent_events(&h, "s1").into_iter().any(|event| {
+            matches!(
+                event,
+                Event::AgentHeadMoved(tau_proto::AgentHeadMoved {
+                    agent_id: ref moved_agent_id,
+                    head: tau_proto::AgentHead::Root,
+                }) if moved_agent_id == &agent_id
+            )
+        }));
+
+        h.shutdown().expect("shutdown");
+    }
+    wait_for_session_unlock(&sp, "s1");
+
+    {
+        let mut h =
+            echo_harness_with_start_reason("s1", &sp, tau_proto::SessionStartReason::Resume)
+                .expect("resume");
+        let cid = ensure_test_user_agent(&mut h);
+        assert_eq!(h.agents[&cid].head, None);
+
+        append_user_message_via_event(&mut h, "s1", "root branch after resume");
+        let branched = default_agent_tree(&h)
+            .nodes()
+            .last()
+            .expect("branched prompt after resume");
+        assert_eq!(branched.parent_id, None);
+
+        h.shutdown().expect("shutdown");
+    }
+}
+
+#[test]
+fn resume_keeps_prompt_appended_after_root_rewind_as_head() {
+    // A durable root head move is only the cursor until a later transcript node
+    // is appended. Resume must restore the replayed final tree head, not the
+    // stale root rewind event.
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let replacement_node: tau_core::NodeId;
+
+    {
+        let mut h = echo_harness(&sp).expect("start");
+        append_user_message_via_event(&mut h, "s1", "first prompt");
+        let cid = ensure_test_user_agent(&mut h);
+        let agent_id = durable_agent_id_for_conversation(&h, &cid);
+
+        h.handle_ui_navigate_tree(
+            "ui",
+            tau_proto::UiNavigateTree {
+                session_id: "s1".into(),
+                target_agent_id: Some(agent_id),
+                target: tau_proto::UiTreeNavigationTarget::Root,
+            },
+        )
+        .expect("navigate to root");
+        append_user_message_via_event(&mut h, "s1", "replacement root prompt");
+        replacement_node = h.agents[&cid].head.expect("replacement node");
+
+        h.shutdown().expect("shutdown");
+    }
+    wait_for_session_unlock(&sp, "s1");
+
+    {
+        let mut h =
+            echo_harness_with_start_reason("s1", &sp, tau_proto::SessionStartReason::Resume)
+                .expect("resume");
+        let cid = ensure_test_user_agent(&mut h);
+        assert_eq!(h.agents[&cid].head, Some(replacement_node));
+
+        append_user_message_via_event(&mut h, "s1", "continues after replacement");
+        let continued = default_agent_tree(&h)
+            .nodes()
+            .last()
+            .expect("continued prompt after resume");
+        assert_eq!(continued.parent_id, Some(replacement_node));
+
+        h.shutdown().expect("shutdown");
+    }
+}
+
+#[test]
+fn resume_keeps_prompt_appended_after_anchor_rewind_as_head() {
+    // A prompt-anchor rewind moves the cursor to the selected prompt's parent,
+    // but a later replacement prompt must become the restored head after resume.
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let replacement_node: tau_core::NodeId;
+
+    {
+        let mut h = echo_harness(&sp).expect("start");
+        let cid = ensure_test_user_agent(&mut h);
+        let agent_id = durable_agent_id_for_conversation(&h, &cid);
+
+        append_user_message_via_event(&mut h, "s1", "first prompt");
+        h.publish_for_agent(
+            &cid,
+            Event::ProviderResponseFinished(provider_text_response(
+                &"sp-tree-resume-anchor".into(),
+                agent_id.clone(),
+                "assistant answer",
+            )),
+        );
+        append_user_message_via_event(&mut h, "s1", "second prompt");
+
+        h.handle_ui_navigate_tree(
+            "ui",
+            tau_proto::UiNavigateTree {
+                session_id: "s1".into(),
+                target_agent_id: Some(agent_id),
+                target: tau_proto::UiTreeNavigationTarget::PromptAnchor(2),
+            },
+        )
+        .expect("navigate before second prompt");
+        append_user_message_via_event(&mut h, "s1", "replacement second prompt");
+        replacement_node = h.agents[&cid].head.expect("replacement node");
+
+        h.shutdown().expect("shutdown");
+    }
+    wait_for_session_unlock(&sp, "s1");
+
+    {
+        let mut h =
+            echo_harness_with_start_reason("s1", &sp, tau_proto::SessionStartReason::Resume)
+                .expect("resume");
+        let cid = ensure_test_user_agent(&mut h);
+        assert_eq!(h.agents[&cid].head, Some(replacement_node));
+
+        append_user_message_via_event(&mut h, "s1", "continues after replacement");
+        let continued = default_agent_tree(&h)
+            .nodes()
+            .last()
+            .expect("continued prompt after resume");
+        assert_eq!(continued.parent_id, Some(replacement_node));
+
+        h.shutdown().expect("shutdown");
+    }
+}
+
+#[test]
+fn ui_tree_request_lists_prompt_anchors_without_raw_nodes() {
+    // The default tree view is the user-facing rewind surface: it lists root
+    // plus prompt anchors and does not expose assistant/tool raw node ids.
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    let cid = ensure_test_user_agent(&mut h);
+    let agent_id = durable_agent_id_for_conversation(&h, &cid);
+
+    append_user_message_via_event(&mut h, "s1", "first prompt");
+    h.publish_for_agent(
+        &cid,
+        Event::ProviderResponseFinished(provider_text_response(
+            &"sp-tree-view".into(),
+            agent_id.clone(),
+            "assistant answer should not be listed",
+        )),
+    );
+    append_user_message_via_event(&mut h, "s1", "second prompt");
+
+    h.handle_tree_request(&"s1".into(), Some(agent_id.as_str()));
+    let notice_messages: Vec<String> = event_log_events(&h)
+        .into_iter()
+        .filter_map(|event| match event {
+            Event::HarnessNotice(notice) => Some(notice.message),
+            _ => None,
+        })
+        .collect();
+
+    assert!(
+        notice_messages
+            .iter()
+            .any(|message| message.contains("0") && message.contains("before first prompt")),
+        "root anchor should be listed: {notice_messages:?}"
+    );
+    assert!(
+        notice_messages
+            .iter()
+            .any(|message| message.contains("1") && message.contains("first prompt")),
+        "first prompt anchor should be listed: {notice_messages:?}"
+    );
+    assert!(
+        notice_messages
+            .iter()
+            .any(|message| message.contains("2") && message.contains("second prompt")),
+        "second prompt anchor should be listed without synthetic inputs shifting numbering: {notice_messages:?}"
+    );
+    assert!(
+        !notice_messages
+            .iter()
+            .any(|message| message.contains("assistant answer should not be listed")),
+        "assistant raw node should not be part of default /tree output: {notice_messages:?}"
+    );
+    assert!(
+        !notice_messages.iter().any(|message| message
+            .contains("synthetic injected input should not be listed")
+            || message.contains("internal prompt should not be listed")),
+        "synthetic/internal inputs should not be part of default /tree output: {notice_messages:?}"
+    );
 }
 
 #[test]

@@ -70,6 +70,40 @@ impl fmt::Display for NodeId {
     }
 }
 
+/// Durable branch-head target for one agent transcript tree.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind", content = "node_id")]
+pub enum AgentHead {
+    /// Select the transcript root before any materialized node.
+    Root,
+    /// Select an existing transcript node as the branch head.
+    Node(NodeId),
+}
+
+impl AgentHead {
+    /// Converts this durable target to the in-memory optional head pointer.
+    #[must_use]
+    pub const fn as_option(self) -> Option<NodeId> {
+        match self {
+            Self::Root => None,
+            Self::Node(node_id) => Some(node_id),
+        }
+    }
+}
+
+/// Target requested by a UI tree navigation command.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind", content = "value")]
+pub enum UiTreeNavigationTarget {
+    /// Rewind to the transcript root before any prompt.
+    Root,
+    /// Rewind to before the user-facing prompt anchor with this one-based
+    /// ordinal. UIs should encode `0` as [`Self::Root`], not as this variant.
+    PromptAnchor(u64),
+    /// Expert/debug navigation to an existing raw transcript node.
+    Node(NodeId),
+}
+
 // ---------------------------------------------------------------------------
 // Harness notices
 // ---------------------------------------------------------------------------
@@ -1785,14 +1819,14 @@ pub struct AgentMessageReceived {
     pub message: String,
 }
 
-/// Durable agent branch-state fact: the selected head moved to an existing
-/// transcript node, so the next append should branch from there.
+/// Durable agent branch-state fact: the selected head moved, so the next
+/// append should branch from that root-or-node target.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct AgentHeadMoved {
     /// Agent whose selected branch head changed.
     pub agent_id: AgentId,
-    /// Existing transcript node that is now the selected branch head.
-    pub node_id: NodeId,
+    /// Root or existing transcript node now selected as the branch head.
+    pub head: AgentHead,
 }
 
 /// Immutable agent creation fact recorded at the start of an agent log.
@@ -2418,8 +2452,8 @@ pub struct UiSetAgentDisplayName {
     pub display_name: String,
 }
 
-/// The user typed `/tree`: render an agent's branching tree (one
-/// `harness.notice` line per node) to the chat output.
+/// The user typed `/tree`: render an agent's user-facing rewind anchors to
+/// the chat output.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct UiTreeRequest {
     pub session_id: SessionId,
@@ -2429,8 +2463,8 @@ pub struct UiTreeRequest {
     pub target_agent_id: Option<AgentId>,
 }
 
-/// The user typed `/tree <id>`: move an agent's head pointer to the given node,
-/// so the next prompt branches off there.
+/// The user typed `/tree <target>`: move an agent's head pointer to a
+/// user-facing prompt anchor, root, or explicit raw node.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct UiNavigateTree {
     pub session_id: SessionId,
@@ -2438,7 +2472,8 @@ pub struct UiNavigateTree {
     /// current/default conversation state.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_agent_id: Option<AgentId>,
-    pub node_id: u64,
+    /// User-facing or explicit expert navigation target.
+    pub target: UiTreeNavigationTarget,
 }
 
 /// The user typed `/compact`: force a provider-side compaction pass on

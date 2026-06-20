@@ -1,4 +1,4 @@
-use tau_proto::{Event, PromptOriginator, UiRoleUpdateAction};
+use tau_proto::{Event, NodeId, PromptOriginator, UiRoleUpdateAction, UiTreeNavigationTarget};
 
 use super::event_for_line;
 use crate::ui_prompt::DEFAULT_AGENT_ROLE;
@@ -56,7 +56,23 @@ fn tree_commands_request_or_navigate_tree() {
     match event("/tree 42").expect("navigate event") {
         Event::UiNavigateTree(req) => {
             assert_eq!(req.session_id, SESSION_ID);
-            assert_eq!(req.node_id, 42);
+            assert_eq!(req.target, UiTreeNavigationTarget::PromptAnchor(42));
+        }
+        other => panic!("expected UiNavigateTree, got {other:?}"),
+    }
+
+    match event("/tree 0").expect("root navigate event") {
+        Event::UiNavigateTree(req) => {
+            assert_eq!(req.session_id, SESSION_ID);
+            assert_eq!(req.target, UiTreeNavigationTarget::Root);
+        }
+        other => panic!("expected UiNavigateTree, got {other:?}"),
+    }
+
+    match event("/tree node 42").expect("raw node navigate event") {
+        Event::UiNavigateTree(req) => {
+            assert_eq!(req.session_id, SESSION_ID);
+            assert_eq!(req.target, UiTreeNavigationTarget::Node(NodeId::new(42)));
         }
         other => panic!("expected UiNavigateTree, got {other:?}"),
     }

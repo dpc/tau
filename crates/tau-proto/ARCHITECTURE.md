@@ -27,6 +27,15 @@ bounded, outputs deterministic, and tests close to the exported helper.
 First-party event categories (`tool`, `action`, `agent`, `extension`, `provider`, `harness`, `ui`, `shell`, `session`, and `term`) are reserved for typed protocol events. `CustomEvent` names must use extension-owned categories so extension payloads cannot spoof first-party routing or policy keys.
 Parsed event names and custom event payload names must have non-empty category and call segments; empty segments are malformed protocol data rather than extension-owned names.
 
+## Tree navigation targets
+
+UI tree navigation is protocol-modeled in user-facing terms. The default
+`ui.navigate_tree` target is a one-based prompt anchor, not a raw transcript
+node id; `0`/before-first is represented as an explicit root target; and raw
+node navigation is reserved for an explicit node target. Durable
+`agent.head_moved` records the resolved root-or-node branch head, so replay can
+restore both ordinary node heads and the root cursor.
+
 ## Harness notices
 
 `harness.notice` carries a stable `kind`, a user-facing `message`, a `NoticeLevel`, and optional `always_show`. Treat `kind` values as protocol identifiers: UIs may special-case them, so do not derive them from unstable connection ids or free-form message text. `critical` notices and `always_show` warnings represent mandatory diagnostics; the harness must keep emitting them even if a UI filters routine notices locally.
