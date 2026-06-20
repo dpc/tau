@@ -6367,7 +6367,7 @@ fn format_turn_stats_line_formats_short_latencies_as_millis() {
         Some(Duration::from_millis(4_560)),
     );
 
-    assert_eq!(line, "Δ97% 16.8k/17.3k ↑0 ↓29 1240ms Σ ↑50k/100k ↓0 4560ms",);
+    assert_eq!(line, "Δ97% 16.8k/17.3k ↑0 ↓29 1240ms Σ↑50k/100k ↓0 4560ms",);
 }
 
 #[test]
@@ -6389,7 +6389,7 @@ fn format_turn_stats_line_formats_long_latencies_compactly() {
         Some(Duration::from_secs(5 * 60 + 1)),
     );
 
-    assert_eq!(line, "Δ0% 0/0 ↑0 ↓0 18s Σ ↑0/1k ↓0 5m");
+    assert_eq!(line, "Δ0% 0/0 ↑0 ↓0 18s Σ↑0/1k ↓0 5m");
 }
 
 #[test]
@@ -6413,7 +6413,7 @@ fn format_turn_stats_line_uses_previous_turn_for_hit_percent() {
     };
     let line = format_turn_stats_line(&usage, Some(&previous_usage), None, None);
 
-    assert_eq!(line, "Δ95% 19k/20k ↑100 ↓0 Σ ↑19k/40.1k ↓0");
+    assert_eq!(line, "Δ95% 19k/20k ↑100 ↓0 Σ↑19k/40.1k ↓0");
 }
 
 #[test]
@@ -6431,7 +6431,7 @@ fn format_turn_stats_line_shows_zero_hit_when_nothing_could_be_cached() {
     };
     let line = format_turn_stats_line(&usage, None, None, None);
 
-    assert_eq!(line, "Δ0% 0/0 ↑1k ↓0 Σ ↑0/1k ↓0");
+    assert_eq!(line, "Δ0% 0/0 ↑1k ↓0 Σ↑0/1k ↓0");
 }
 
 #[test]
@@ -6439,7 +6439,7 @@ fn format_turn_stats_line_shows_zero_hit_when_no_prompt_sent() {
     let usage = tau_proto::ProviderTokenUsage::default();
     let line = format_turn_stats_line(&usage, None, None, None);
 
-    assert_eq!(line, "Δ0% 0/0 ↑0 ↓0 Σ ↑0/0 ↓0");
+    assert_eq!(line, "Δ0% 0/0 ↑0 ↓0 Σ↑0/0 ↓0");
 }
 
 #[test]

@@ -104,7 +104,7 @@ fn turn_stats_parts(
     }
 
     parts.push(TurnStatsPart::new(" Σ", names::TOKEN_STATS_SIGMA));
-    parts.push(TurnStatsPart::new(" ↑", names::TOKEN_STATS_UP));
+    parts.push(TurnStatsPart::new("↑", names::TOKEN_STATS_UP));
     parts.push(TurnStatsPart::new(
         format!(
             "{}/{}",
