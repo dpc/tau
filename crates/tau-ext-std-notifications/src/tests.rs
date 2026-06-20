@@ -241,6 +241,7 @@ fn session_agent_loaded(session_id: &str, agent_id: &str) -> Event {
     Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
         session_id: session_id.into(),
         agent_id: tau_proto::AgentId::parse(agent_id).expect("agent id"),
+        ephemeral: false,
     })
 }
 fn session_agent_unloaded(session_id: &str, agent_id: &str) -> Event {

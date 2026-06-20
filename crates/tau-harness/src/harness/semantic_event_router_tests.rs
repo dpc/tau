@@ -14,6 +14,7 @@ fn transient_non_tool_event_is_not_persisted() {
         role: "default".into(),
         display_name: None,
         metadata: Vec::new(),
+        ephemeral: false,
     });
 
     assert!(!should_persist_event(&event, true));
@@ -40,6 +41,7 @@ fn session_membership_events_route_to_session_log() {
     let loaded = Event::SessionAgentLoaded(SessionAgentLoaded {
         session_id: "session-1".into(),
         agent_id: parse_agent_id("agent-1"),
+        ephemeral: false,
     });
     let unloaded = Event::SessionAgentUnloaded(SessionAgentUnloaded {
         session_id: "session-2".into(),

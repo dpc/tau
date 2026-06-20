@@ -566,6 +566,7 @@ pub fn send_daemon_message_with_trace(
             message_class: tau_proto::PromptMessageClass::User,
             originator: tau_proto::PromptOriginator::User,
             ctx_id: Some(ctx_id.clone()),
+            ephemeral: false,
         },
     )))?;
 

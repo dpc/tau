@@ -8,24 +8,34 @@ use tau_proto::{
 /// role from session state.
 pub(crate) const DEFAULT_AGENT_ROLE: &str = "senior-engineer";
 
+/// One-shot options applied while building a user-owned agent creation request.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct CreateUserAgentPromptOptions {
+    /// Model override installed before the first prompt is dispatched.
+    pub(crate) model_override: Option<tau_proto::ModelId>,
+    /// Whether the new agent should be memory-only for the daemon lifetime.
+    pub(crate) ephemeral: bool,
+}
+
 /// Build the standard user-originated create-agent event used by interactive
 /// chat and one-shot/headless prompt submission paths.
 pub(crate) fn create_user_agent_prompt(
     session_id: &str,
     role: impl Into<String>,
     prompt: impl Into<String>,
-    model_override: Option<tau_proto::ModelId>,
+    options: CreateUserAgentPromptOptions,
 ) -> Event {
     Event::UiCreateAgent(UiCreateAgent {
         parent_agent: None,
         session_id: session_id.into(),
         role: role.into(),
-        model_override,
+        model_override: options.model_override,
         metadata: shell_cwd_metadata(),
         initial_prompt: Some(prompt.into()),
         message_class: PromptMessageClass::User,
         originator: PromptOriginator::User,
         ctx_id: None,
+        ephemeral: options.ephemeral,
     })
 }
 
@@ -57,12 +67,37 @@ mod tests {
     #[test]
     fn create_user_agent_prompt_preserves_model_override() {
         let model: tau_proto::ModelId = "test/override".parse().expect("model id");
-        let Event::UiCreateAgent(req) =
-            create_user_agent_prompt("s1", "engineer", "hello", Some(model.clone()))
-        else {
+        let Event::UiCreateAgent(req) = create_user_agent_prompt(
+            "s1",
+            "engineer",
+            "hello",
+            CreateUserAgentPromptOptions {
+                model_override: Some(model.clone()),
+                ephemeral: false,
+            },
+        ) else {
             panic!("expected create agent event");
         };
 
         assert_eq!(req.model_override, Some(model));
+    }
+
+    /// The interactive `/new` + `/ephemeral` flow must be able to carry a
+    /// one-shot memory-only request through the create-agent event.
+    #[test]
+    fn create_user_agent_prompt_preserves_ephemeral_flag() {
+        let Event::UiCreateAgent(req) = create_user_agent_prompt(
+            "s1",
+            "engineer",
+            "hello",
+            CreateUserAgentPromptOptions {
+                model_override: None,
+                ephemeral: true,
+            },
+        ) else {
+            panic!("expected create agent event");
+        };
+
+        assert!(req.ephemeral);
     }
 }

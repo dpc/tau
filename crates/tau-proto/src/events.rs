@@ -356,10 +356,10 @@ pub struct HarnessContextUsageChanged {
     pub percent_used: Option<u8>,
 }
 
-/// Current context usage for one durable agent transcript.
+/// Current context usage for one agent transcript.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct HarnessAgentContextUsageChanged {
-    /// Durable agent whose context usage changed.
+    /// Agent whose context usage changed.
     pub agent_id: AgentId,
     /// Input tokens consumed by that agent's most recent response, if the
     /// provider reported it.
@@ -1186,7 +1186,7 @@ pub struct ToolRequest {
     /// Raw CBOR arguments supplied by the requester. These are not trusted
     /// until the harness validates and routes the request.
     pub arguments: CborValue,
-    /// Durable agent that owns this tool call.
+    /// Agent that owns this tool call.
     pub agent_id: AgentId,
     /// Who started the prompt that produced this tool call. The
     /// harness stamps this from the call's owning conversation so
@@ -1214,7 +1214,7 @@ pub struct ToolStarted {
     /// Arguments to pass to the selected tool provider. These are copied from
     /// the accepted request after harness validation/routing.
     pub arguments: CborValue,
-    /// Durable agent that owns this tool call.
+    /// Agent that owns this tool call.
     pub agent_id: AgentId,
     /// Echo of [`ToolRequest::originator`]. Tools usually don't
     /// branch on it, but it's available for logging / progress
@@ -1703,7 +1703,7 @@ pub struct ExtensionContextProviderRegister {}
 pub struct ExtensionContextReady {
     /// Session containing the loaded agent.
     pub session_id: SessionId,
-    /// Durable agent whose context contributions are complete for now.
+    /// Agent whose context contributions are complete for now.
     pub agent_id: AgentId,
 }
 
@@ -1715,7 +1715,7 @@ pub struct AgentContextValue(pub serde_json::Value);
 /// An extension publishes its complete agent-scoped contribution for one key.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ExtAgentContextPublish {
-    /// Durable agent this context belongs to.
+    /// Agent this context belongs to.
     pub agent_id: AgentId,
     /// Top-level context key exposed to templates under
     /// `agent_context.<key>`.
@@ -1741,7 +1741,7 @@ pub struct ExtPromptFragmentPublish {
 /// extensions must not publish `agent.prompt_submitted` directly.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ExtPromptSubmitRequest {
-    /// Loaded durable agent that should receive the prompt.
+    /// Loaded agent that should receive the prompt.
     pub agent_id: AgentId,
     /// User-style prompt text to submit.
     pub text: String,
@@ -1834,7 +1834,7 @@ pub struct AgentHeadMoved {
 /// Immutable agent creation fact recorded at the start of an agent log.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct AgentStarted {
-    /// Durable agent this log belongs to.
+    /// Agent this log belongs to.
     pub agent_id: AgentId,
     /// Optional parent agent whose inheritable metadata was copied at creation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1847,6 +1847,10 @@ pub struct AgentStarted {
     /// Metadata facts present at creation time.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub metadata: Vec<AgentInitialMetadata>,
+    /// Whether this agent's semantic transcript is memory-only in the current
+    /// daemon and should not be expected after restart/resume.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub ephemeral: bool,
 }
 
 /// Durable per-agent metadata value update.
@@ -1885,21 +1889,28 @@ pub struct AgentDisplayNameSet {
     pub display_name: String,
 }
 
-/// Durable session membership fact: an agent is now loaded in a session.
+/// Session membership fact: an agent is now loaded in a session.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct SessionAgentLoaded {
     /// Session membership container.
     pub session_id: SessionId,
-    /// Durable agent now available in the session.
+    /// Agent now available in the session.
     pub agent_id: AgentId,
+    /// Whether this membership is live/memory-only because the agent is
+    /// ephemeral in the current daemon.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub ephemeral: bool,
 }
 
-/// Durable session membership fact: an agent is no longer loaded in a session.
+/// Session membership fact: an agent is no longer loaded in a session.
+///
+/// Durable agents record this in the session store; ephemeral agents only fold
+/// it into the live in-memory session view.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct SessionAgentUnloaded {
     /// Session membership container.
     pub session_id: SessionId,
-    /// Durable agent removed from the session.
+    /// Agent removed from the session.
     pub agent_id: AgentId,
 }
 
@@ -2393,15 +2404,14 @@ pub struct UiSwitchSession {
     pub reason: SessionStartReason,
 }
 
-/// The UI requests creation of a durable agent and may include the first prompt
+/// The UI requests creation of an agent and may include the first prompt
 /// that should be submitted to it. This is the explicit boundary between
-/// pre-agent UI state (role/cwd can still change freely) and durable agent
-/// state.
+/// pre-agent UI state (role/cwd can still change freely) and agent state.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct UiCreateAgent {
     /// Session in which the agent should be loaded.
     pub session_id: SessionId,
-    /// Role to bind to the new durable agent.
+    /// Role to bind to the new agent.
     pub role: String,
     /// Model override to apply to the new agent before its first prompt is
     /// dispatched.
@@ -2429,6 +2439,10 @@ pub struct UiCreateAgent {
     /// Optional parent agent whose inheritable metadata should be copied.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_agent: Option<AgentId>,
+    /// Whether the new agent should keep its semantic transcript and session
+    /// membership in memory only for the lifetime of the current daemon.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub ephemeral: bool,
 }
 
 /// Initial metadata value requested while creating a new UI-owned agent.
@@ -2443,7 +2457,7 @@ pub struct AgentInitialMetadata {
     pub inheritable: bool,
 }
 
-/// UI request to set a durable agent display name.
+/// UI request to set an agent display name.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct UiSetAgentDisplayName {
     /// Session in which the target agent must be loaded or known.

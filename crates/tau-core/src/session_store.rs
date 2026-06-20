@@ -454,11 +454,33 @@ impl SessionStore {
         event: Event,
         recorded_at: UnixMicros,
     ) -> Result<AppendOutcome, SessionStoreError> {
+        self.append_session_event_at_with_persistence(
+            session_id,
+            source,
+            event,
+            recorded_at,
+            SessionPersistenceMode::Durable,
+        )
+    }
+
+    /// Like [`Self::append_session_event_at`] but lets callers keep a single
+    /// membership fact memory-only even when the store itself is durable.
+    pub fn append_session_event_at_with_persistence(
+        &mut self,
+        session_id: &str,
+        source: Option<ConnectionId>,
+        event: Event,
+        recorded_at: UnixMicros,
+        event_persistence: SessionPersistenceMode,
+    ) -> Result<AppendOutcome, SessionStoreError> {
         validate_membership_event(session_id, &event)?;
-        self.ensure_locked(session_id)?;
+        let write_to_disk = self.mode.is_durable() && event_persistence.is_durable();
+        if write_to_disk {
+            self.ensure_locked(session_id)?;
+        }
         self.load_session_if_needed(session_id)?;
         let session_dir = self.session_dir(session_id);
-        if self.mode.is_durable() {
+        if write_to_disk {
             fs::create_dir_all(&session_dir).map_err(|source| {
                 SessionStoreError::CreateParentDirectory {
                     path: session_dir.clone(),
@@ -478,7 +500,7 @@ impl SessionStore {
             event: event.clone(),
             recorded_at,
         };
-        if self.mode.is_durable() {
+        if write_to_disk {
             append_cbor_record(&session_dir.join("events.cbor"), &record)?;
         }
         tree.apply_event(&event);
@@ -486,7 +508,7 @@ impl SessionStore {
         // Sidecar metadata is derived from the durable event stream. Do not let
         // a sidecar write failure make the caller retry this already-persisted
         // sequence and create a duplicate record.
-        if self.mode.is_durable() {
+        if write_to_disk {
             let _ = touch_meta(&session_dir.join("meta.json"));
         }
         Ok(AppendOutcome {

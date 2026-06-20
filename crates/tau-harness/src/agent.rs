@@ -1,7 +1,7 @@
 //! Per-agent runtime state tracked by the harness.
 //!
 //! An [`Agent`] is one live prompt/tool execution context loaded into the
-//! current harness session. The durable transcript lives in `tau-core`'s
+//! current harness session. The semantic transcript lives in `tau-core`'s
 //! `AgentTree`; this module stores the harness-owned runtime state layered on
 //! top of that transcript: the selected branch head, queued prompts, turn
 //! lifecycle, tool progress, and side-agent ancestry used for routing.
@@ -16,7 +16,7 @@ mod loop_guard;
 use std::collections::VecDeque;
 
 pub(crate) use loop_guard::{LoopCycleState, LoopGuardState, LoopGuardTrigger, LoopTurnSignature};
-use tau_core::NodeId;
+use tau_core::{AgentPersistenceMode, NodeId};
 use tau_proto::{
     AgentId, AgentPromptId, ConnectionId, ModelId, PromptMessageClass, PromptOriginator, SessionId,
     ToolCallId, ToolUseStats,
@@ -49,7 +49,8 @@ pub(crate) struct PendingCancel {
 /// The user's main interactive agent is always present while the harness runs.
 /// Additional agents may be loaded for extension side work, delegated tasks, or
 /// compaction flows, and can later be removed from live runtime state while
-/// leaving their durable transcripts intact.
+/// leaving their semantic transcripts intact (durable by default, memory-only
+/// for ephemeral agents).
 #[derive(Debug)]
 pub(crate) struct Agent {
     /// Owning agent id. Duplicates the key in the harness's agent map, but
@@ -90,11 +91,11 @@ pub(crate) struct Agent {
     /// repeating the full conversation history.
     pub(crate) last_prompt_id: Option<AgentPromptId>,
     /// Next per-agent index used when minting an [`AgentPromptId`] for this
-    /// conversation. Initialized from durable agent events when the agent is
-    /// loaded, then incremented for each materialized provider prompt.
+    /// conversation. Initialized from the known agent event stream when the
+    /// agent is loaded, then incremented for each materialized provider prompt.
     pub(crate) next_prompt_index: u64,
-    /// Whether [`Self::next_prompt_index`] has been initialized from the
-    /// loaded durable agent state for this harness run.
+    /// Whether [`Self::next_prompt_index`] has been initialized from the loaded
+    /// agent state for this harness run.
     pub(crate) prompt_index_initialized: bool,
     /// Correlation tag carried in by a [`tau_proto::UiPromptSubmitted`]
     /// and copied onto the next [`tau_proto::AgentPromptCreated`] this
@@ -115,7 +116,7 @@ pub(crate) struct Agent {
     /// routing map can be cleared before teardown needs to hand background
     /// completions back to the parent.
     pub(crate) parent_agent_id: Option<AgentId>,
-    /// Human-friendly name shown in UIs. Falls back to the durable agent id.
+    /// Human-friendly name shown in UIs. Falls back to the stable agent id.
     pub(crate) display_name: Option<String>,
     /// Display name supplied by the parent agent for the delegated
     /// task, surfaced in the UI alongside `parent_tool_call_id`. Only
@@ -133,6 +134,8 @@ pub(crate) struct Agent {
     pub(crate) model_override: Option<ModelId>,
     /// Stable id assigned when this conversation first starts an agent turn.
     pub(crate) agent_id: Option<String>,
+    /// Whether this agent's semantic transcript is durable or memory-only.
+    pub(crate) persistence: AgentPersistenceMode,
     /// Number of tool calls currently in flight on this conversation.
     pub(crate) tools_in_flight: u32,
     /// Cumulative tool calls this conversation has started (in-flight
@@ -300,6 +303,7 @@ impl Agent {
             role: None,
             model_override: None,
             agent_id: None,
+            persistence: AgentPersistenceMode::Durable,
             tools_in_flight: 0,
             tools_total: 0,
             context_input_tokens: None,

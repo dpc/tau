@@ -121,6 +121,7 @@ impl Harness {
             let event = Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
                 session_id: self.current_session_id.clone(),
                 agent_id: agent_id.clone(),
+                ephemeral: self.agent_is_ephemeral(agent_id),
             });
             if selector_matches_event(selectors, &event) {
                 let _ = self

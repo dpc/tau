@@ -134,10 +134,13 @@ This avoids split authority:
 
 ## Debug trace
 
-`events.jsonl` remains an append-only debugging trace. It includes every event
-committed onto the harness runtime event log, including events that are not
-persisted into session or agent `events.cbor` streams. It may therefore duplicate
-facts that also appear in durable semantic logs.
+For durable sessions, `events.jsonl` remains an append-only debugging trace. It
+includes committed harness runtime events, including some events that are not
+persisted into session or agent `events.cbor` streams. Ephemeral-session mode
+does not create this file, and ephemeral-agent transcript/debug entries are
+suppressed so the debug trace does not become a parallel durable transcript. The
+file may therefore duplicate facts that also appear in durable semantic logs, but
+it is not a complete audit stream for memory-only agents.
 
 `events.jsonl` is not authoritative state: it is not used for prompt assembly,
 session recovery, or agent recovery. The durable semantic sources remain the
@@ -183,8 +186,8 @@ Cutover rules:
 - normal transcript facts are never written to the session log and the session
   log does not contain per-agent event references. Semantic duplication is
   limited to intentional projections such as `agent.message_sent` and
-  `agent.message_received`; `events.jsonl` may still mirror every runtime event
-  for debugging;
+  `agent.message_received`; durable `events.jsonl` is a debug mirror for
+  durable-agent runtime events and intentionally omits ephemeral-agent content;
 - tests should assert absence of old transcript facts in the session log.
 
 A good crate-by-crate order is:
@@ -232,7 +235,8 @@ A good crate-by-crate order is:
    - Route persistence from the runtime event log: membership facts go to the
      session store; transcript/tool/compaction/metadata facts go to the relevant
      agent store; cross-agent messages write the sender/recipient projections;
-     `events.jsonl` records every committed runtime event.
+     durable `events.jsonl` records committed runtime events except
+     ephemeral-agent content.
    - Prompt assembly reads only the target agent's tree/log. The session log is
      consulted only to decide which agents are loaded.
    - Change prompt/tool bookkeeping from session branch cursors to agent branch
@@ -271,8 +275,9 @@ A good crate-by-crate order is:
      from session `events.cbor`; interrupted tools are repaired from agent logs.
    - Cross-agent tests: sender outbound and recipient inbound projections share a
      `message_id`; user-recipient messages do not require a recipient agent log.
-   - Debug-log tests: `events.jsonl` receives all committed runtime events,
-     including runtime-only events not present in semantic CBOR logs.
+   - Debug-log tests: `events.jsonl` receives durable-agent runtime events,
+     including runtime-only events not present in semantic CBOR logs, while
+     omitting ephemeral-agent content.
    - CLI/UI tests: reconnect renders loaded agents and transcripts from agent
      replay without historical load/unload spam.
    - Update docs and remove old comments that describe sessions as transcript

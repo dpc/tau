@@ -790,6 +790,7 @@ fn agent_started_event(role: &str) -> Event {
         role: role.to_owned(),
         display_name: Some("Started Test".to_owned()),
         metadata: Vec::new(),
+        ephemeral: false,
     })
 }
 
@@ -876,6 +877,7 @@ fn session_agent_loaded_event(agent_id: &str) -> Event {
     Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
         session_id: "session-intercept".into(),
         agent_id: tau_proto::AgentId::parse(agent_id).expect("agent id"),
+        ephemeral: false,
     })
 }
 

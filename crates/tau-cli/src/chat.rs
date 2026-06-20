@@ -25,7 +25,9 @@ use crate::daemon::{DaemonCliOverrides, DaemonHandle, daemon_output_for_session,
 use crate::event_renderer::{EventRenderer, ToolTimerNotifier, ToolTimerState, UiIoStats};
 use crate::prompt_history::PromptHistoryStore;
 use crate::tool_render::ui_dir_block;
-use crate::ui_prompt::{DEFAULT_AGENT_ROLE, create_user_agent_prompt};
+use crate::ui_prompt::{
+    CreateUserAgentPromptOptions, DEFAULT_AGENT_ROLE, create_user_agent_prompt,
+};
 use crate::{CliError, MUTEX_POISONED, build_banner, locked, ui_logging};
 
 const UI_IO_SAMPLE_WINDOW_SECS: usize = 30;
@@ -605,6 +607,10 @@ const BUILTIN_SLASH_COMMANDS: &[(&str, &str)] = &[
     ),
     ("/agent", "Manage visible/suspended agent transcripts"),
     ("/new", "Alias for /agent new"),
+    (
+        "/ephemeral",
+        "Stage the next /new agent as memory-only (/ephemeral on|off)",
+    ),
     ("/suspend", "Alias for /agent suspend on the selected agent"),
     ("/resume", "Alias for /agent resume on the selected agent"),
     ("/role", "Switch, create, edit, or delete an agent role"),
@@ -986,11 +992,13 @@ pub(crate) fn run_chat(
     let known_agents = renderer.known_agents();
     let agent_display_names = renderer.agent_display_names();
     let live_agents = renderer.live_agents();
+    let ephemeral_agents = renderer.ephemeral_agents();
     let suspended_agents = renderer.suspended_agents();
     let input_routing = InputRoutingState::new(
         current_agent_state.clone(),
         known_agents.clone(),
         live_agents.clone(),
+        ephemeral_agents.clone(),
         suspended_agents.clone(),
     );
     completion_data.set_arg_completer(
@@ -1278,6 +1286,7 @@ struct InputRoutingState {
     current_agent_state: Arc<Mutex<Option<String>>>,
     known_agents: Arc<Mutex<Vec<String>>>,
     live_agents: Arc<Mutex<std::collections::HashSet<String>>>,
+    ephemeral_agents: Arc<Mutex<std::collections::HashSet<String>>>,
     suspended_agents: Arc<Mutex<std::collections::HashSet<String>>>,
 }
 
@@ -1286,12 +1295,14 @@ impl InputRoutingState {
         current_agent_state: Arc<Mutex<Option<String>>>,
         known_agents: Arc<Mutex<Vec<String>>>,
         live_agents: Arc<Mutex<std::collections::HashSet<String>>>,
+        ephemeral_agents: Arc<Mutex<std::collections::HashSet<String>>>,
         suspended_agents: Arc<Mutex<std::collections::HashSet<String>>>,
     ) -> Self {
         Self {
             current_agent_state,
             known_agents,
             live_agents,
+            ephemeral_agents,
             suspended_agents,
         }
     }
@@ -1361,6 +1372,13 @@ impl InputRoutingState {
             .map(|agents| agents.clone())
             .unwrap_or_default();
         agent_is_active_in_sets(&live, &suspended, agent_id)
+    }
+
+    fn agent_is_ephemeral(&self, agent_id: &str) -> bool {
+        self.ephemeral_agents
+            .lock()
+            .map(|agents| agents.contains(agent_id))
+            .unwrap_or(false)
     }
 
     fn agent_switch_target(&self, target: Option<&str>) -> Result<Option<String>, String> {
@@ -1553,17 +1571,20 @@ struct TerminalInputSession<'a> {
     session_id: &'a mut String,
     ctx: TerminalInputLoopCtx,
     output: LocalTerminalOutput,
-    pending_new_agent_model: PendingNewAgentModel,
+    pending_new_agent_options: PendingNewAgentOptions,
 }
 
-/// One-shot model override staged while the UI is in new-agent mode.
+/// One-shot options staged while the UI is in new-agent mode.
 #[derive(Default)]
-struct PendingNewAgentModel {
+struct PendingNewAgentOptions {
+    /// Optional model override for the next created agent.
     model: Option<tau_proto::ModelId>,
+    /// Whether the next created agent should be memory-only.
+    ephemeral: bool,
 }
 
-impl PendingNewAgentModel {
-    fn apply_selection(
+impl PendingNewAgentOptions {
+    fn apply_model_selection(
         &mut self,
         session_id: &str,
         selected_agent_id: Option<tau_proto::AgentId>,
@@ -1585,12 +1606,25 @@ impl PendingNewAgentModel {
         self.model = Some(model);
     }
 
-    fn take(&mut self) -> Option<tau_proto::ModelId> {
+    fn take_model(&mut self) -> Option<tau_proto::ModelId> {
         self.model.take()
+    }
+
+    fn take_ephemeral(&mut self) -> bool {
+        std::mem::take(&mut self.ephemeral)
+    }
+
+    fn set_ephemeral(&mut self, ephemeral: bool) {
+        self.ephemeral = ephemeral;
+    }
+
+    fn ephemeral(&self) -> bool {
+        self.ephemeral
     }
 
     fn clear(&mut self) {
         self.model = None;
+        self.ephemeral = false;
     }
 }
 
@@ -1615,6 +1649,63 @@ fn tree_command_event(
         )));
     }
     Ok(None)
+}
+
+fn prompt_line_targets_ephemeral_agent_state(
+    text: &str,
+    selected_agent_is_ephemeral: bool,
+    has_selected_agent: bool,
+    pending_new_agent_ephemeral: bool,
+    local_or_action: bool,
+) -> bool {
+    if text.starts_with('!') && selected_agent_is_ephemeral {
+        return true;
+    }
+    if local_or_action {
+        return false;
+    }
+    if has_selected_agent {
+        return selected_agent_is_ephemeral;
+    }
+    pending_new_agent_ephemeral
+}
+
+fn apply_ephemeral_staging_command(
+    text: &str,
+    has_selected_agent: bool,
+    pending: &mut PendingNewAgentOptions,
+    mut system_info: impl FnMut(&str),
+) -> bool {
+    if text != "/ephemeral" && !text.starts_with("/ephemeral ") {
+        return false;
+    }
+    let Some(rest) = text.strip_prefix("/ephemeral") else {
+        return false;
+    };
+    let rest = rest.trim();
+    if !rest.is_empty() && !matches!(rest, "on" | "off") || text.split_whitespace().count() > 2 {
+        system_info("/ephemeral [on|off]");
+        return true;
+    }
+    if has_selected_agent {
+        system_info("Use /new first; /ephemeral controls only the next new agent.");
+        return true;
+    }
+    match rest {
+        "on" => pending.set_ephemeral(true),
+        "off" => pending.set_ephemeral(false),
+        "" => {
+            let next = !pending.ephemeral();
+            pending.set_ephemeral(next);
+        }
+        _ => unreachable!("validated above"),
+    }
+    if pending.ephemeral() {
+        system_info("next agent will be ephemeral (forgotten when this daemon exits)");
+    } else {
+        system_info("next agent will be persistent");
+    }
+    true
 }
 
 impl<'a> TerminalInputSession<'a> {
@@ -1708,7 +1799,7 @@ impl<'a> TerminalInputSession<'a> {
         // Preserve the original side-effect order: every non-empty line is
         // recorded before command handling, and local slash commands are echoed
         // before they produce validation errors or exit the loop.
-        self.record_prompt_line(line, text);
+        self.record_prompt_line_if_persistent(line, text);
         if is_local_slash_command(text) || self.ctx.action_state.is_known_action_line(text) {
             self.output.command_echo(text);
         }
@@ -1768,18 +1859,48 @@ impl<'a> TerminalInputSession<'a> {
     }
 
     fn handle_utility_or_shell_shortcut(&mut self, text: &str) -> bool {
-        self.handle_utility_command(text)
+        self.handle_ephemeral_command(text)
+            || self.handle_utility_command(text)
             || self.handle_role_selection_command(text)
             || self.handle_shell_shortcut(text)
     }
 
-    fn record_prompt_line(&self, line: &str, text: &str) {
+    fn handle_ephemeral_command(&mut self, text: &str) -> bool {
+        apply_ephemeral_staging_command(
+            text,
+            self.selected_agent_id().is_some(),
+            &mut self.pending_new_agent_options,
+            |message| self.output.system_info(message),
+        )
+    }
+
+    fn record_prompt_line_if_persistent(&self, line: &str, text: &str) {
+        if self.prompt_line_targets_ephemeral_agent(text) {
+            if let Ok(mut context) = self.ctx.editor_context.lock() {
+                context.previous_prompt = Some(text.to_owned());
+            }
+            return;
+        }
         if let Err(error) = self.ctx.prompt_history.append(line) {
             tracing::warn!(target: "tau_cli::ui", %error, "failed to append persistent prompt history");
         }
         if let Ok(mut context) = self.ctx.editor_context.lock() {
             context.previous_prompt = Some(text.to_owned());
         }
+    }
+
+    fn prompt_line_targets_ephemeral_agent(&self, text: &str) -> bool {
+        let selected_agent_id = self.selected_agent_id();
+        let selected_agent_is_ephemeral = selected_agent_id
+            .as_deref()
+            .is_some_and(|agent_id| self.ctx.routing.agent_is_ephemeral(agent_id));
+        prompt_line_targets_ephemeral_agent_state(
+            text,
+            selected_agent_is_ephemeral,
+            selected_agent_id.is_some(),
+            self.pending_new_agent_options.ephemeral(),
+            is_local_slash_command(text) || self.ctx.action_state.is_known_action_line(text),
+        )
     }
 
     fn handle_session_command(&mut self, text: &str) -> Result<CommandOutcome, CliError> {
@@ -1838,6 +1959,7 @@ impl<'a> TerminalInputSession<'a> {
             }),
         );
         *self.session_id = new_id;
+        self.pending_new_agent_options.clear();
         self.clear_selected_agent();
         Ok(())
     }
@@ -2138,7 +2260,7 @@ impl<'a> TerminalInputSession<'a> {
                 self.dismiss_completion_menu();
             }
             Some(AgentSwitchCommandAction::SwitchedAgent) => {
-                self.pending_new_agent_model.clear();
+                self.pending_new_agent_options.clear();
                 self.dismiss_completion_menu();
             }
             None => {}
@@ -2186,7 +2308,7 @@ impl<'a> TerminalInputSession<'a> {
             if !model.is_empty() {
                 match model.parse::<tau_proto::ModelId>() {
                     Ok(model) => {
-                        if let Some(event) = self.pending_new_agent_model.apply_selection(
+                        if let Some(event) = self.pending_new_agent_options.apply_model_selection(
                             self.session_id,
                             self.ctx.routing.selected_side_agent_id(),
                             model.clone(),
@@ -2307,8 +2429,17 @@ impl<'a> TerminalInputSession<'a> {
                 .ok()
                 .and_then(|role| role.clone())
                 .unwrap_or_else(|| DEFAULT_AGENT_ROLE.to_owned());
-            let model_override = self.pending_new_agent_model.take();
-            create_user_agent_prompt(self.session_id, role, text, model_override)
+            let model_override = self.pending_new_agent_options.take_model();
+            let ephemeral = self.pending_new_agent_options.take_ephemeral();
+            create_user_agent_prompt(
+                self.session_id,
+                role,
+                text,
+                CreateUserAgentPromptOptions {
+                    model_override,
+                    ephemeral,
+                },
+            )
         };
         if send_event(self.writer, &event).is_err() {
             return Some(InputLoopExit::Quit);
@@ -2401,7 +2532,7 @@ impl<'a> TerminalInputSession<'a> {
     }
 
     fn switch_to_agent(&mut self, agent_id: String) {
-        self.pending_new_agent_model.clear();
+        self.pending_new_agent_options.clear();
         self.ctx.routing.set_selected_agent(Some(agent_id.clone()));
         self.dismiss_completion_menu();
         let _ = self
@@ -2550,7 +2681,7 @@ fn terminal_input_loop(
         session_id,
         ctx,
         output,
-        pending_new_agent_model: PendingNewAgentModel::default(),
+        pending_new_agent_options: PendingNewAgentOptions::default(),
     }
     .run()
 }
@@ -2923,6 +3054,7 @@ pub(crate) fn is_local_slash_command(text: &str) -> bool {
             | "/provider-auth"
             | "/agent"
             | "/new"
+            | "/ephemeral"
             | "/suspend"
             | "/resume"
             | "/set"

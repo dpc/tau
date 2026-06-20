@@ -566,6 +566,7 @@ Type `/` for menu autocompletion. The built-in set:
 | `/detach`           | Leave the UI, keep the harness running for reattach  |
 | `/session new`      | Close the current session and start a fresh session |
 | `/agent new`        | Clear this UI's selected agent; next untargeted prompt mints a new agent |
+| `/ephemeral [on\|off]` | After `/new`, toggle or set whether the next new agent is memory-only |
 | `/agent switch <id>` | Switch this UI to a known loaded-agent transcript (`none` clears selection) |
 | `/agent suspend [id]` | Hide a loaded agent from this UI's active choices until resumed |
 | `/agent resume <id>` | Return a hidden loaded agent to this UI's active choices |
@@ -850,6 +851,15 @@ trees, including abandoned branches, are preserved across restarts.
 Use `tau --ephemeral` for a non-resumable live session that does not leave
 session directories or session logs behind. Agent histories are still durable,
 so use a separate agent mode (not this flag) if you need non-persistent agents.
+
+Use `/new` followed by `/ephemeral on` (or bare `/ephemeral` to toggle) before
+the first prompt to create an
+ephemeral agent. Ephemeral agents keep normal live behavior, can be reattached to
+while the same daemon is running, and compose with staged `/model`, but their
+agent transcript and session membership are memory-only and disappear on daemon
+exit/cold resume. Children spawned by an ephemeral parent default to ephemeral;
+session `--ephemeral` remains independent and does not make agents ephemeral by
+default.
 
 
 ## XMPP agent chat bridge

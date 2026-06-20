@@ -48,6 +48,14 @@ directory exists. In session-ephemeral mode the harness reports
 consumers must treat that as "no inspectable session directory"; they must not
 try to derive persistent session storage from the sentinel path.
 
+## Ephemeral agent markers
+
+`ui.create_agent.ephemeral` requests a memory-only agent at the UI-to-harness
+creation boundary. `agent.started.ephemeral` and
+`session.agent_loaded.ephemeral` announce the resulting live state to UIs and
+extensions. These markers describe Tau's local semantic stores only: protocol
+consumers must not assume providers, tools, durable recipient agents, or
+extensions forget data merely because an agent is ephemeral.
 
 ## Validated identifiers
 

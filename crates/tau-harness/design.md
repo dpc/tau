@@ -102,11 +102,13 @@ that harness process: session membership logs, session metadata/locks,
 not written. `harness.session_dir` uses status `ephemeral` and a display-only
 `<ephemeral>` path so UIs do not advertise a usable session directory.
 
-Agent transcripts remain durable by design, including sub-agents started by
-`agent_start`. Provider state, credentials, policy/config files, runtime sockets,
-and user/cache extension data keep their normal persistence. Future
-non-persistent agents should be a separate per-agent creation mode rather than a
-semantic change to session ephemerality.
+Agent transcripts remain durable by default, including sub-agents started by
+`agent_start`. Per-agent ephemerality is a separate creation policy staged from
+the TUI with `/new` then `/ephemeral on`; it keeps that agent's semantic
+transcript, metadata, and session membership in memory until daemon exit.
+Children of ephemeral parents inherit ephemerality. Provider state, credentials,
+policy/config files, runtime sockets, user/cache extension data, durable
+recipients/parents, and tool side effects keep their normal persistence.
 
 ## System prompts are assembled only through templates
 

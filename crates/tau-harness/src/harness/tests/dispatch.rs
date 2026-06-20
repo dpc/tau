@@ -154,6 +154,7 @@ fn queued_first_user_prompt_publishes_replayable_agent_target() {
         message_class: tau_proto::PromptMessageClass::User,
         originator: tau_proto::PromptOriginator::User,
         ctx_id: None,
+        ephemeral: false,
     })
     .expect("create agent with queued first prompt");
 
@@ -243,6 +244,7 @@ fn ui_create_agent_embeds_shell_cwd_metadata_in_agent_started() {
         message_class: tau_proto::PromptMessageClass::User,
         originator: tau_proto::PromptOriginator::User,
         ctx_id: None,
+        ephemeral: false,
     })
     .expect("create agent");
 
@@ -278,6 +280,7 @@ fn resume_ignores_later_side_queued_or_steered_default_agent_candidates() {
                     Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
                         session_id: "s1".into(),
                         agent_id: crate::parse_agent_id(agent_id),
+                        ephemeral: false,
                     }),
                 )
                 .expect("seed session membership");
@@ -593,6 +596,7 @@ fn seed_main_agent_loaded(state_dir: &Path) {
             Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
                 session_id: "s1".into(),
                 agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
+                ephemeral: false,
             }),
         )
         .expect("seed session membership");
@@ -11392,6 +11396,7 @@ fn inbound_non_extension_owned_fallback_events_are_ignored() {
         Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
             session_id: "forged-session".into(),
             agent_id: crate::parse_agent_id("forged-agent"),
+            ephemeral: false,
         }),
         Event::SessionAgentUnloaded(tau_proto::SessionAgentUnloaded {
             session_id: "forged-session".into(),
@@ -11403,6 +11408,7 @@ fn inbound_non_extension_owned_fallback_events_are_ignored() {
             role: "engineer".to_owned(),
             display_name: None,
             metadata: Vec::new(),
+            ephemeral: false,
         }),
         Event::StartAgentAccepted(tau_proto::StartAgentAccepted {
             query_id: "delegate-0".to_owned(),

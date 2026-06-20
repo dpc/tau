@@ -4,7 +4,13 @@ fn routing_state(
     live: Arc<Mutex<std::collections::HashSet<String>>>,
     suspended: Arc<Mutex<std::collections::HashSet<String>>>,
 ) -> InputRoutingState {
-    InputRoutingState::new(Arc::new(Mutex::new(None)), known, live, suspended)
+    InputRoutingState::new(
+        Arc::new(Mutex::new(None)),
+        known,
+        live,
+        Arc::new(Mutex::new(std::collections::HashSet::new())),
+        suspended,
+    )
 }
 
 #[test]

@@ -1345,6 +1345,7 @@ fn first_agent_event_does_not_force_full_redraw() {
         role: "engineer".to_owned(),
         display_name: None,
         metadata: Vec::new(),
+        ephemeral: false,
     }));
     renderer.handle(&Event::AgentPromptCreated(AgentPromptCreated {
         agent_id: agent_id("engineer_abc12345"),
@@ -1617,6 +1618,7 @@ fn delegate_progress_does_not_overwrite_display_name_with_task_name() {
         role: "senior-engineer".to_owned(),
         display_name: Some("senior-engineer: look it up".to_owned()),
         metadata: Vec::new(),
+        ephemeral: false,
     }));
     renderer.handle(&Event::ToolDelegateProgress(tau_proto::DelegateProgress {
         call_id: "delegate-call".into(),
@@ -3093,6 +3095,7 @@ fn status_agent_chip_keeps_id_primary_and_display_name_secondary() {
         role: "junior-engineer".to_owned(),
         display_name: Some("sleep 6".to_owned()),
         metadata: Vec::new(),
+        ephemeral: false,
     }));
     renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
         session_id: "s1".into(),

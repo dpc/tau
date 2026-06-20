@@ -125,6 +125,11 @@ Requests choose a storage scope and an operation:
 - Supported operations are whole-file read/write/create/append/delete/rename and
   direct-child directory listing.
 
+Semantic events may still be live/memory-only even when their message wrapper is
+not marked `transient`: session `--ephemeral` and per-agent ephemerality both
+fold state for the running daemon without necessarily writing the corresponding
+session or agent event stream to disk.
+
 The harness enforces per-file and per-directory-list quotas. A request that
 exceeds those limits fails with `quota_exceeded`. Current limits are 16 MiB per
 file for read/write/create/append operations and 4096 scanned directory entries

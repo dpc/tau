@@ -74,12 +74,15 @@ membership journal, not a transcript.
   harness is leaving the current session, emitted before `session.started` for
   the next one. Extensions flush or drop per-session state. Interceptors cannot
   drop or rewrite it.
-- **`session.agent_loaded`** — Durable membership fact: a global agent is
-  loaded into this session. The session log folds these facts to determine the
-  current loaded-agent set on resume. Interceptors cannot drop or rewrite this
-  immutable membership fact.
-- **`session.agent_unloaded`** — Durable membership fact: a global agent is no
-  longer loaded into this session. Interceptors cannot drop or rewrite this
+- **`session.agent_loaded`** — Membership fact: a global agent is loaded into
+  this session. Durable agents write this to the session log so resume can fold
+  the loaded-agent set. Ephemeral agents set `ephemeral: true`; the fact is
+  delivered live/replayed while the daemon runs but is memory-only and omitted
+  from cold resume. Interceptors cannot drop or rewrite this immutable
+  membership fact.
+- **`session.agent_unloaded`** — Membership fact: a global agent is no longer
+  loaded into this session. Like load facts, this is durable for durable agents
+  and memory-only for ephemeral agents. Interceptors cannot drop or rewrite this
   immutable membership fact.
 
 Historical load/unload facts are not transcript history. On reconnect/resume the
@@ -90,8 +93,8 @@ agent log once.
 
 Emitted mostly by the harness as it routes UI requests into concrete global
 agents. Durable transcript facts are written to the owning agent log, not the
-session log. `agent.started` is the durable, immutable creation fact at the start
-of an agent log.
+session log. Ephemeral agents use the same event stream while the daemon lives
+but keep it in memory only; `agent.started.ephemeral` marks that boundary.
 
 - **`agent.prompt_submitted`** — A `ui.prompt_submitted` request was accepted
   into a concrete agent transcript. Carries `agent_id`, text, originator, and
@@ -132,9 +135,10 @@ of an agent log.
   arbitrary CBOR capped at 64 KiB, and `metadata_set` carries an `inheritable`
   flag copied to child agents at creation time. Extensions use these facts for
   extension-visible state such as `ext_core-shell_cwd`.
-- **`agent.started`** — Durable creation fact for an agent. It carries optional
-  `parent_agent`; inheritable metadata from that parent is copied into the new
-  agent after this fact commits and before the agent is announced loaded.
+- **`agent.started`** — Creation fact for an agent. Durable agents write it to
+  their event log; ephemeral agents replay it from memory only. It carries
+  optional `parent_agent`; inheritable metadata from that parent is copied into
+  the new agent after this fact commits and before the agent is announced loaded.
 - **`agent.head_moved`** — Durable fact that changes an agent's selected tree
   head after navigation, so future prompts branch from the requested root or
   node target.
@@ -352,11 +356,13 @@ intent.
   `include_in_context` flag.
 - **`ui.switch_session`** — User wants to switch to a different session
   in the same daemon, with `new`/`resume` reason.
-- **`ui.create_agent`** — UI requests creation of a durable user-owned agent,
-  optionally with the first prompt to append after context loads. The request
-  carries the role, initial metadata, optional parent agent, optional prompt
-  correlation id, and optional `model_override`; when present, `model_override`
-  is installed on the new agent before its first prompt is queued or routed.
+- **`ui.create_agent`** — UI requests creation of a user-owned agent, optionally
+  with the first prompt to append after context loads. The request carries the
+  role, initial metadata, optional parent agent, optional prompt correlation id,
+  optional `model_override`, and optional `ephemeral`; when present,
+  `model_override` is installed on the new agent before its first prompt is
+  queued or routed, and `ephemeral: true` keeps the agent transcript and session
+  membership memory-only for the daemon lifetime.
 - **`ui.tree_request`** — User typed `/tree`: render the selected or targeted
   agent's prompt rewind anchors to chat.
 - **`ui.navigate_tree`** — User typed `/tree <anchor>`, `/tree root`, or the

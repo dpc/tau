@@ -1,13 +1,13 @@
-//! Append-only on-disk persistence of per-agent protocol events.
+//! Per-agent protocol event storage.
 //!
-//! Each agent is just a CBOR event log plus a small JSON sidecar.
-//! The in-memory [`AgentTree`] is a *derived* view, folded from the
-//! persisted events via [`AgentTree::from_events`]; nothing else
-//! mutates it. Writers go through [`AgentStore::append_agent_event`],
-//! which appends one durable record to disk and applies the same
-//! event to the cached tree.
+//! Durable agents are CBOR event logs plus small JSON sidecars. Ephemeral
+//! agents use the same in-memory [`AgentTree`] and replay event records, but
+//! those records live only inside the currently running store. Writers go
+//! through [`AgentStore::append_agent_event`], which applies each accepted
+//! event to the cached tree after either writing it to disk or retaining it in
+//! memory.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
@@ -67,6 +67,11 @@ pub enum AgentStoreError {
         expected: PersistedAgentEventSeq,
         actual: PersistedAgentEventSeq,
     },
+    /// Requested memory-only storage for an id already reserved on disk.
+    PersistenceConflict {
+        agent_id: AgentId,
+        path: PathBuf,
+    },
 }
 
 impl fmt::Display for AgentStoreError {
@@ -121,6 +126,11 @@ impl fmt::Display for AgentStoreError {
                 "invalid agent event sequence in {}: expected {expected}, got {actual}",
                 path.display()
             ),
+            Self::PersistenceConflict { agent_id, path } => write!(
+                f,
+                "cannot mark agent `{agent_id}` ephemeral because durable state already exists at {}",
+                path.display()
+            ),
         }
     }
 }
@@ -135,17 +145,56 @@ impl Error for AgentStoreError {
             Self::Decode { source, .. } => Some(source),
             Self::Encode { source, .. } => Some(source),
             Self::InvalidEvent { source } => Some(source),
-            Self::Locked { .. } | Self::InvalidAgentDir { .. } | Self::InvalidSequence { .. } => {
-                None
-            }
+            Self::Locked { .. }
+            | Self::InvalidAgentDir { .. }
+            | Self::InvalidSequence { .. }
+            | Self::PersistenceConflict { .. } => None,
         }
     }
 }
 
-/// Append-only persistence for per-agent protocol events, with a
-/// derived [`AgentTree`] cached in memory.
+/// Persistence policy for one agent transcript.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum AgentPersistenceMode {
+    /// Write transcript events, metadata, and locks under the agents root.
+    #[default]
+    Durable,
+    /// Keep transcript events and metadata in memory for this process only.
+    Ephemeral,
+}
+
+impl AgentPersistenceMode {
+    /// Returns true when the agent transcript should be written to disk.
+    #[must_use]
+    pub const fn is_durable(self) -> bool {
+        matches!(self, Self::Durable)
+    }
+
+    /// Returns true when the agent transcript should stay memory-only.
+    #[must_use]
+    pub const fn is_ephemeral(self) -> bool {
+        matches!(self, Self::Ephemeral)
+    }
+}
+
+/// Result of one [`AgentStore::append_agent_event_at`] call:
+/// the agent-event sequence and, when the event produced a tree node,
+/// that node's id. Callers maintaining a per-conversation branch
+/// cursor advance it from `folded_node_id` rather than from the
+/// global `tree.head()` so non-folding events (e.g. an
+/// `ProviderResponseFinished` carrying only tool calls) don't sync
+/// the cursor onto a sibling conversation's last fold.
+#[derive(Clone, Debug)]
+pub struct AgentAppendOutcome {
+    /// Sequence assigned to the record in this agent's event stream.
+    pub seq: PersistedAgentEventSeq,
+    /// Folded tree node produced by this event, if any.
+    pub folded_node_id: Option<NodeId>,
+}
+
+/// Agent protocol event store with a derived [`AgentTree`] cached in memory.
 ///
-/// Each agent lives in its own directory under `agents_dir` (the
+/// Each durable agent lives in its own directory under `agents_dir` (the
 /// per-agent subdirectory of `state_dir`, typically
 /// `<state_dir>/agents/`):
 ///
@@ -156,30 +205,22 @@ impl Error for AgentStoreError {
 ///   lock          # exclusively flock'd while this store has the agent loaded for write
 /// ```
 ///
-/// Existing agent dirs are loaded lazily. Startup constructs an
-/// empty store and loads individual agent trees on first access.
-/// Flocks are still taken lazily on first write so read-only
-/// consumers (e.g. inspection commands) don't contend with a running
-/// daemon.
-/// Result of one [`AgentStore::append_agent_event_at`] call:
-/// the durable agent-event sequence and, when the event produced a tree node,
-/// that node's id. Callers maintaining a per-conversation branch
-/// cursor advance it from `folded_node_id` rather than from the
-/// global `tree.head()` so non-folding events (e.g. an
-/// `ProviderResponseFinished` carrying only tool calls) don't sync
-/// the cursor onto a sibling conversation's last fold.
-#[derive(Clone, Debug)]
-pub struct AgentAppendOutcome {
-    /// Sequence assigned to the record in this agent's durable event log.
-    pub seq: PersistedAgentEventSeq,
-    /// Folded tree node produced by this event, if any.
-    pub folded_node_id: Option<NodeId>,
-}
-
+/// Ephemeral agents are explicitly marked before their first write and keep the
+/// same event stream, metadata, and folded tree in memory only. Existing
+/// durable agent dirs are loaded lazily. Startup constructs an empty store and
+/// loads individual agent trees on first access. Flocks are still taken lazily
+/// on first durable write so read-only consumers (e.g. inspection commands)
+/// don't contend with a running daemon.
 #[derive(Debug)]
 pub struct AgentStore {
     agents_dir: PathBuf,
     agents: HashMap<AgentId, AgentTree>,
+    /// Memory-only agent ids owned by this process.
+    ephemeral_agents: HashSet<AgentId>,
+    /// Replay records for memory-only agents.
+    ephemeral_events: HashMap<AgentId, Vec<PersistedAgentEvent>>,
+    /// Sidecar metadata for memory-only agents.
+    ephemeral_meta: HashMap<AgentId, AgentMeta>,
     /// Held flocks per agent, acquired lazily on first write. Released
     /// when this store is dropped (the OS releases the flock when the
     /// file handle closes).
@@ -239,6 +280,9 @@ impl AgentStore {
         Ok(Self {
             agents_dir,
             agents: HashMap::new(),
+            ephemeral_agents: HashSet::new(),
+            ephemeral_events: HashMap::new(),
+            ephemeral_meta: HashMap::new(),
             locks: HashMap::new(),
         })
     }
@@ -246,6 +290,9 @@ impl AgentStore {
     fn load_agent_if_needed(&mut self, agent_id: &str) -> Result<(), AgentStoreError> {
         let aid = AgentId::parse(agent_id).expect("agent store load requires parsed agent id");
         if self.agents.contains_key(&aid) {
+            return Ok(());
+        }
+        if self.ephemeral_agents.contains(&aid) {
             return Ok(());
         }
         let events_path = self.agent_dir(agent_id).join("events.cbor");
@@ -276,8 +323,43 @@ impl AgentStore {
         if self.agents.contains_key(&aid) {
             return true;
         }
+        if self.ephemeral_agents.contains(&aid) {
+            return true;
+        }
         let agent_dir = self.agent_dir(agent_id);
         agent_dir.join("events.cbor").exists() || agent_dir.join("meta.json").exists()
+    }
+
+    /// Marks an agent id as memory-only before its first transcript write.
+    ///
+    /// The id must not already be reserved by durable events or metadata. Once
+    /// marked, all future event and metadata operations for this id stay
+    /// process-local and [`Self::agent_events`] returns the in-memory replay
+    /// stream.
+    pub fn mark_agent_ephemeral(&mut self, agent_id: &str) -> Result<(), AgentStoreError> {
+        let aid = AgentId::parse(agent_id).expect("ephemeral agent id requires parsed agent id");
+        let agent_dir = self.agent_dir(agent_id);
+        if agent_dir.join("events.cbor").exists() || agent_dir.join("meta.json").exists() {
+            return Err(AgentStoreError::PersistenceConflict {
+                agent_id: aid,
+                path: agent_dir,
+            });
+        }
+        self.ephemeral_agents.insert(aid);
+        Ok(())
+    }
+
+    /// Returns the persistence policy currently known for `agent_id`.
+    #[must_use]
+    pub fn agent_persistence(&self, agent_id: &str) -> AgentPersistenceMode {
+        let Ok(agent_id) = AgentId::parse(agent_id) else {
+            return AgentPersistenceMode::Durable;
+        };
+        if self.ephemeral_agents.contains(&agent_id) {
+            AgentPersistenceMode::Ephemeral
+        } else {
+            AgentPersistenceMode::Durable
+        }
     }
 
     /// Acquires an exclusive flock on the agent's `lock` file if not
@@ -340,11 +422,13 @@ impl AgentStore {
         Ok(())
     }
 
-    /// Appends one non-transient protocol event to the durable
-    /// per-agent event log and applies it to the in-memory tree.
-    /// The persisted event is the single source of truth — both the
-    /// on-disk log and the derived [`AgentTree`] are populated from
-    /// it here, so they cannot drift.
+    /// Appends one non-transient protocol event to the per-agent event stream
+    /// and applies it to the in-memory tree.
+    ///
+    /// Durable agents write the record to disk; ephemeral agents keep the same
+    /// record in memory. In both cases the derived [`AgentTree`] is populated
+    /// from the accepted record here, so the replay stream and tree cannot
+    /// drift.
     ///
     /// Convenience wrapper around
     /// [`AgentStore::append_agent_event_at`] that uses the
@@ -378,22 +462,26 @@ impl AgentStore {
         event: Event,
         recorded_at: UnixMicros,
     ) -> Result<AgentAppendOutcome, AgentStoreError> {
-        self.ensure_locked(agent_id)?;
+        let sid = AgentId::parse(agent_id).expect("agent event append requires parsed agent id");
+        let persistence = self.agent_persistence(agent_id);
+        if persistence.is_durable() {
+            self.ensure_locked(agent_id)?;
+        }
         self.load_agent_if_needed(agent_id)?;
         let agent_dir = self.agent_dir(agent_id);
-        fs::create_dir_all(&agent_dir).map_err(|source| {
-            AgentStoreError::CreateParentDirectory {
-                path: agent_dir.clone(),
-                source,
-            }
-        })?;
-        let events_path = agent_dir.join("events.cbor");
+        if persistence.is_durable() {
+            fs::create_dir_all(&agent_dir).map_err(|source| {
+                AgentStoreError::CreateParentDirectory {
+                    path: agent_dir.clone(),
+                    source,
+                }
+            })?;
+        }
 
-        let sid = AgentId::parse(agent_id).expect("agent event append requires parsed agent id");
         let tree = self
             .agents
             .entry(sid.clone())
-            .or_insert_with(|| AgentTree::from_events(sid, &[]));
+            .or_insert_with(|| AgentTree::from_events(sid.clone(), &[]));
         tree.validate_event(&event)
             .map_err(|source| AgentStoreError::InvalidEvent { source })?;
         tree.validate_event_parent(parent)
@@ -410,14 +498,29 @@ impl AgentStore {
             parent,
             recorded_at,
         };
-        append_cbor_record(&events_path, &record)?;
+        if persistence.is_durable() {
+            append_cbor_record(&agent_dir.join("events.cbor"), &record)?;
+        } else {
+            self.ephemeral_events
+                .entry(sid.clone())
+                .or_default()
+                .push(record);
+        }
 
         let folded_node_id = tree.apply_event_at(parent, &event);
         tree.advance_next_event_seq();
-        // Sidecar metadata is derived from the durable event stream. Do not let
-        // a sidecar write failure make the caller retry this already-persisted
-        // sequence and create a duplicate record.
-        let _ = touch_meta_for_event(&agent_dir.join("meta.json"), &event);
+        // Sidecar metadata is derived from the event stream. Do not let a
+        // sidecar write failure make the caller retry this already-persisted
+        // durable sequence and create a duplicate record.
+        if persistence.is_durable() {
+            let _ = touch_meta_for_event(&agent_dir.join("meta.json"), &event);
+        } else {
+            touch_ephemeral_meta_for_event(
+                self.ephemeral_meta.entry(sid).or_default(),
+                &event,
+                unix_now(),
+            );
+        }
 
         Ok(AgentAppendOutcome {
             seq: next_seq,
@@ -425,11 +528,21 @@ impl AgentStore {
         })
     }
 
-    /// Loads durable per-agent protocol events.
+    /// Loads per-agent protocol events from disk or the memory-only replay
+    /// stream for ephemeral agents.
     pub fn agent_events(
         &self,
         agent_id: &str,
     ) -> Result<Vec<PersistedAgentEvent>, AgentStoreError> {
+        if let Ok(agent_id) = AgentId::parse(agent_id)
+            && self.ephemeral_agents.contains(&agent_id)
+        {
+            return Ok(self
+                .ephemeral_events
+                .get(&agent_id)
+                .cloned()
+                .unwrap_or_default());
+        }
         let path = self.agent_dir(agent_id).join("events.cbor");
         load_agent_events(&path)
     }
@@ -466,8 +579,13 @@ impl AgentStore {
         self.agents.values().collect()
     }
 
-    /// Reads persisted sidecar metadata for one agent, if it exists.
+    /// Reads sidecar metadata for one durable or ephemeral agent, if it exists.
     pub fn agent_meta(&self, agent_id: &str) -> io::Result<Option<AgentMeta>> {
+        if let Ok(agent_id) = AgentId::parse(agent_id)
+            && self.ephemeral_agents.contains(&agent_id)
+        {
+            return Ok(self.ephemeral_meta.get(&agent_id).cloned());
+        }
         let path = self.agent_dir(agent_id).join("meta.json");
         match read_meta(&path) {
             Ok(meta) => Ok(Some(meta)),
@@ -480,6 +598,15 @@ impl AgentStore {
     ///
     /// Idempotent: subsequent calls only update `last_touched`.
     pub fn record_agent_meta(&mut self, agent_id: &str) -> Result<(), AgentStoreError> {
+        let aid = AgentId::parse(agent_id).expect("agent metadata requires parsed agent id");
+        if self.ephemeral_agents.contains(&aid) {
+            initialize_ephemeral_meta(
+                self.ephemeral_meta.entry(aid).or_default(),
+                unix_now(),
+                true,
+            );
+            return Ok(());
+        }
         self.ensure_locked(agent_id)?;
         let path = self.agent_dir(agent_id).join("meta.json");
         let now = unix_now();
@@ -496,6 +623,15 @@ impl AgentStore {
 
     /// Records that a human user interacted with an existing agent.
     pub fn record_agent_user_interaction(&mut self, agent_id: &str) -> Result<(), AgentStoreError> {
+        let aid =
+            AgentId::parse(agent_id).expect("agent user interaction requires parsed agent id");
+        if self.ephemeral_agents.contains(&aid) {
+            let now = unix_now();
+            let meta = self.ephemeral_meta.entry(aid).or_default();
+            initialize_ephemeral_meta(meta, now, false);
+            meta.last_user_interaction_time = now;
+            return Ok(());
+        }
         self.ensure_locked(agent_id)?;
         let path = self.agent_dir(agent_id).join("meta.json");
         let now = unix_now();
@@ -611,6 +747,31 @@ fn touch_meta_for_event(path: &Path, event: &Event) -> Result<(), AgentStoreErro
         meta.latest_user_prompt_preview = Some(preview_text(text, 48));
     }
     write_meta(path, &meta)
+}
+
+fn initialize_ephemeral_meta(meta: &mut AgentMeta, now: u64, initialize_user_interaction: bool) {
+    if meta.created_at == 0 {
+        meta.created_at = now;
+    }
+    if meta.last_touched == 0 {
+        meta.last_touched = now;
+    }
+    if initialize_user_interaction && meta.last_user_interaction_time == 0 {
+        meta.last_user_interaction_time = now;
+    }
+}
+
+fn touch_ephemeral_meta_for_event(meta: &mut AgentMeta, event: &Event, now: u64) {
+    if meta.created_at == 0 {
+        meta.created_at = now;
+    }
+    meta.last_touched = now;
+    if let Some(display_name) = display_name_for_event(event).and_then(normalize_display_name) {
+        meta.display_name = Some(display_name);
+    }
+    if let Some(text) = user_prompt_text(event) {
+        meta.latest_user_prompt_preview = Some(preview_text(text, 48));
+    }
 }
 
 fn normalize_display_name(value: &str) -> Option<String> {

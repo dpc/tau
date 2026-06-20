@@ -12,7 +12,9 @@ use tau_proto::{
 
 use crate::CliError;
 use crate::daemon::{DaemonCliOverrides, DaemonHandle, daemon_output_for_session, resolve_daemon};
-use crate::ui_prompt::{DEFAULT_AGENT_ROLE, create_user_agent_prompt};
+use crate::ui_prompt::{
+    CreateUserAgentPromptOptions, DEFAULT_AGENT_ROLE, create_user_agent_prompt,
+};
 
 /// Read a single user prompt from stdin, submit it to a daemon, print the final
 /// reasoning snapshots and answer, then exit.
@@ -102,7 +104,12 @@ fn submit_prompt(
 ) -> io::Result<()> {
     crate::ui_client::send_message(
         writer,
-        &HarnessInputMessage::emit(create_user_agent_prompt(session_id, role, prompt, None)),
+        &HarnessInputMessage::emit(create_user_agent_prompt(
+            session_id,
+            role,
+            prompt,
+            CreateUserAgentPromptOptions::default(),
+        )),
     )
 }
 fn read_one_shot_result(

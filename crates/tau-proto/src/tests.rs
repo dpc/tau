@@ -173,6 +173,7 @@ fn representative_events() -> Vec<Event> {
         Event::SessionAgentLoaded(SessionAgentLoaded {
             session_id: "s1".into(),
             agent_id: agent_id("engineer_abcd1234"),
+            ephemeral: false,
         }),
         Event::AgentPromptSubmitted(AgentPromptSubmitted {
             agent_id: agent_id("engineer_abcd1234"),
@@ -1335,6 +1336,7 @@ fn event_defaults_to_transient_marks_progress_kinds() {
         Event::SessionAgentLoaded(SessionAgentLoaded {
             session_id: "s1".into(),
             agent_id: agent_id("worker"),
+            ephemeral: false,
         }),
         Event::AgentMetadataSet(AgentMetadataSet {
             agent_id: agent_id("worker"),
@@ -1416,6 +1418,37 @@ fn prompt_message_class_defaults_to_user_when_omitted() {
     })
     .expect("serialize steered prompt");
     assert_eq!(internal["message_class"], serde_json::json!("internal"));
+}
+
+/// Ephemeral-agent markers must be backwards-compatible with peers that do not
+/// yet send the field, and compact on the wire for the durable default.
+#[test]
+fn ephemeral_agent_fields_default_false_and_skip_serializing() {
+    let create: UiCreateAgent = serde_json::from_value(serde_json::json!({
+        "session_id": "s1",
+        "role": "senior-engineer"
+    }))
+    .expect("legacy create-agent");
+    assert!(!create.ephemeral);
+
+    let started = AgentStarted {
+        agent_id: AgentId::parse("agent-1").expect("agent id"),
+        parent_agent: None,
+        role: "senior-engineer".to_owned(),
+        display_name: None,
+        metadata: Vec::new(),
+        ephemeral: false,
+    };
+    let json = serde_json::to_value(&started).expect("serialize started");
+    assert!(json.get("ephemeral").is_none());
+
+    let loaded = SessionAgentLoaded {
+        session_id: "s1".into(),
+        agent_id: AgentId::parse("agent-1").expect("agent id"),
+        ephemeral: true,
+    };
+    let json = serde_json::to_value(&loaded).expect("serialize loaded");
+    assert_eq!(json["ephemeral"], serde_json::json!(true));
 }
 
 /// Tool specs default to enabled and omit default-valued fields for compact

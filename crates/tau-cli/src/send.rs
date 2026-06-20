@@ -6,7 +6,9 @@ use std::path::PathBuf;
 use tau_proto::{Event, HarnessInputMessage};
 
 use crate::CliError;
-use crate::ui_prompt::{DEFAULT_AGENT_ROLE, create_user_agent_prompt};
+use crate::ui_prompt::{
+    CreateUserAgentPromptOptions, DEFAULT_AGENT_ROLE, create_user_agent_prompt,
+};
 
 pub(crate) fn run_send(session_id: &str, line: &str) -> Result<(), CliError> {
     let text = line.trim();
@@ -88,7 +90,7 @@ fn event_for_line(session_id: &str, text: &str) -> Option<Event> {
         session_id,
         DEFAULT_AGENT_ROLE,
         text,
-        None,
+        CreateUserAgentPromptOptions::default(),
     ))
 }
 

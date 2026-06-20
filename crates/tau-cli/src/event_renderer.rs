@@ -74,6 +74,8 @@ pub(crate) struct EventRenderer {
     agent_display_names: std::sync::Arc<std::sync::Mutex<HashMap<String, String>>>,
     /// Agent ids that the harness has announced as live.
     live_agents: std::sync::Arc<std::sync::Mutex<HashSet<String>>>,
+    /// Agent ids whose transcripts are memory-only in the current daemon.
+    ephemeral_agents: std::sync::Arc<std::sync::Mutex<HashSet<String>>>,
     /// Agent ids locally hidden from active prompt targets until explicitly
     /// resumed. Effective active agents are `live_agents - suspended_agents`.
     suspended_agents: std::sync::Arc<std::sync::Mutex<HashSet<String>>>,
@@ -1005,6 +1007,7 @@ impl EventRenderer {
             known_agents: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             agent_display_names: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
             live_agents: std::sync::Arc::new(std::sync::Mutex::new(HashSet::new())),
+            ephemeral_agents: std::sync::Arc::new(std::sync::Mutex::new(HashSet::new())),
             suspended_agents: std::sync::Arc::new(std::sync::Mutex::new(HashSet::new())),
             query_agents: HashMap::new(),
             prompt_agents: HashMap::new(),
@@ -1099,6 +1102,10 @@ impl EventRenderer {
 
     pub(crate) fn live_agents(&self) -> std::sync::Arc<std::sync::Mutex<HashSet<String>>> {
         self.live_agents.clone()
+    }
+
+    pub(crate) fn ephemeral_agents(&self) -> std::sync::Arc<std::sync::Mutex<HashSet<String>>> {
+        self.ephemeral_agents.clone()
     }
 
     pub(crate) fn suspended_agents(&self) -> std::sync::Arc<std::sync::Mutex<HashSet<String>>> {
@@ -1313,6 +1320,12 @@ impl EventRenderer {
             agents.insert(agent_id);
         }
         self.render_model_status_if_present();
+    }
+
+    fn remember_agent_ephemeral(&mut self, agent_id: &str) {
+        if let Ok(mut agents) = self.ephemeral_agents.lock() {
+            agents.insert(agent_id.to_owned());
+        }
     }
 
     fn mark_agent_live_and_unsuspended(&mut self, agent_id: String) {
@@ -1924,6 +1937,9 @@ impl EventRenderer {
             agents.clear();
         }
         if let Ok(mut agents) = self.live_agents.lock() {
+            agents.clear();
+        }
+        if let Ok(mut agents) = self.ephemeral_agents.lock() {
             agents.clear();
         }
         if let Ok(mut agents) = self.suspended_agents.lock() {
@@ -2701,6 +2717,9 @@ impl EventRenderer {
             Event::AgentStarted(started) => {
                 let agent_id = started.agent_id.to_string();
                 self.remember_agent(agent_id.clone());
+                if started.ephemeral {
+                    self.remember_agent_ephemeral(&agent_id);
+                }
                 if let Some(display_name) = started.display_name.as_ref() {
                     self.remember_agent_display_name(&agent_id, display_name);
                 }

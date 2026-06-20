@@ -53,6 +53,21 @@ normal persistence. User/cache extension data, provider state, credentials,
 policy/config files, and runtime sockets are also outside the session-ephemeral
 boundary.
 
+Agents can separately be staged as ephemeral from the TUI (`/new` then
+`/ephemeral on`). That policy is per agent: the harness marks the agent id before
+the first semantic write, stores its transcript and metadata in the live
+`AgentStore` only, and folds its `session.agent_loaded` membership fact in memory
+without appending it to a durable session journal. Late subscribers attached to
+the same daemon replay those memory records, but cold resume sees only durable
+agents. Children of ephemeral parents inherit the memory-only policy so delegated
+work does not accidentally create durable child transcripts.
+
+The debug JSONL mirror is part of this boundary: content-bearing agent, prompt,
+provider, tool, shell, or delegation events for ephemeral agents must be
+classified before logging. New event kinds that carry agent transcript content or
+reference prompt/tool-call ids must update that classifier and its regression
+tests.
+
 ## Extension boundary
 
 Extensions are less-trusted peers connected over the Tau protocol. They may

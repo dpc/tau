@@ -43,6 +43,20 @@ Testing strategy: cover every allowed repair, valid-argument no-ops, ambiguous
 non-repairs, and cases where a local repair still requires final schema
 revalidation.
 
+## Semantic stores can be durable or memory-only
+
+Status: unconfirmed
+
+`AgentStore` and `SessionStore` both support normal durable event streams and
+selected memory-only streams used by ephemeral agents/sessions. The memory-only
+path must fold the same semantic facts for live replay while avoiding creation of
+reserved state directories, sidecars, locks, and event files.
+
+Testing strategy: every new semantic write path should cover both persistence
+modes, including a negative filesystem assertion for memory-only records and a
+positive replay/folding assertion that the in-memory state still behaves like the
+durable equivalent while the process lives.
+
 ## Tool examples are registration-validated repair metadata
 
 Status: unconfirmed

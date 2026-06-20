@@ -21,7 +21,8 @@ pub use action_registry::{
     ActionProviderSchema, ActionRegistry, ActionRegistryError, ActionRouteError,
 };
 pub use agent_store::{
-    AgentAppendOutcome, AgentStore, AgentStoreError, agent_is_locked, list_agent_metas,
+    AgentAppendOutcome, AgentPersistenceMode, AgentStore, AgentStoreError, agent_is_locked,
+    list_agent_metas,
 };
 pub use bus::EventBus;
 pub use connection::{

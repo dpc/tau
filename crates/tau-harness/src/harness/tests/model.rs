@@ -454,6 +454,7 @@ fn ui_create_agent_applies_initial_model_override() {
         message_class: tau_proto::PromptMessageClass::User,
         originator: tau_proto::PromptOriginator::User,
         ctx_id: None,
+        ephemeral: false,
     })
     .expect("create agent");
 
@@ -490,6 +491,7 @@ fn ui_create_agent_preserves_model_override_until_cold_provider_models_arrive() 
         message_class: tau_proto::PromptMessageClass::User,
         originator: tau_proto::PromptOriginator::User,
         ctx_id: None,
+        ephemeral: false,
     })
     .expect("create queued agent");
 

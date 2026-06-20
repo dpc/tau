@@ -1915,6 +1915,7 @@ fn session_agent_loaded_publishes_current_directory_context_for_agent() {
         tau_proto::SessionAgentLoaded {
             session_id: tau_proto::SessionId::new("session-1"),
             agent_id: tau_proto::AgentId::parse("agent-1").expect("agent id"),
+            ephemeral: false,
         },
         &tx,
         &cwd_state,
@@ -2370,6 +2371,7 @@ fn session_agent_loaded_emits_ready_after_agent_context_publish() {
         .write_event(&Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
             session_id: "s1".into(),
             agent_id: tau_proto::AgentId::parse("agent-1").expect("agent id"),
+            ephemeral: false,
         }))
         .expect("request");
     writer.flush().expect("flush");
@@ -7151,6 +7153,7 @@ fn malformed_cwd_metadata_does_not_wedge_context_ready() {
         .write_event(&Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
             session_id: "s1".into(),
             agent_id: agent_id.clone(),
+            ephemeral: false,
         }))
         .expect("load");
     writer.flush().expect("flush load");

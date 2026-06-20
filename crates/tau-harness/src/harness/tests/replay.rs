@@ -71,6 +71,7 @@ fn seed_restored_tool_round(state_dir: &Path, call_ids: &[&str], completed_call_
             Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
                 session_id: "s1".into(),
                 agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
+                ephemeral: false,
             }),
         )
         .expect("seed session membership");
@@ -86,6 +87,7 @@ fn seed_restored_tool_round(state_dir: &Path, call_ids: &[&str], completed_call_
                 role: "engineer".to_owned(),
                 display_name: None,
                 metadata: Vec::new(),
+                ephemeral: false,
             }),
         )
         .expect("seed agent start");
@@ -137,6 +139,7 @@ fn seed_restored_tool_round_for_agent(
             Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
                 session_id: session_id.into(),
                 agent_id: crate::parse_agent_id(agent_id),
+                ephemeral: false,
             }),
         )
         .expect("seed session membership");
@@ -152,6 +155,7 @@ fn seed_restored_tool_round_for_agent(
                 role: "engineer".to_owned(),
                 display_name: None,
                 metadata: Vec::new(),
+                ephemeral: false,
             }),
         )
         .expect("seed agent start");
@@ -325,6 +329,7 @@ fn late_joining_ui_client_receives_replayed_agent_message_exact_selector() {
             Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
                 session_id: "s1".into(),
                 agent_id: tau_proto::AgentId::parse("agent-1").expect("agent id"),
+                ephemeral: false,
             }),
         )
         .expect("seed session membership");
@@ -1431,6 +1436,7 @@ fn replay_emits_latest_agent_metadata_before_session_agent_loaded() {
                 Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
                     session_id: "s1".into(),
                     agent_id: crate::parse_agent_id("agent-replay-meta"),
+                    ephemeral: false,
                 }),
             )
             .expect("seed session membership");

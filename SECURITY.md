@@ -203,11 +203,22 @@ non-terminal history.
 prevents the current harness process from writing session membership logs,
 session metadata/locks, per-session debug `events.jsonl`, per-session
 harness/extension stderr logs, session-scoped extension data, and terminal UI
-logs. Agent transcripts remain durable under the global agent store, and
-provider state, credentials, user/cache extension data, policy/config files,
-runtime sockets, and trusted tools/extensions keep their normal persistence and
-filesystem access. Do not use `--ephemeral` as a guarantee that prompt contents,
-tool results, or extension-observed data cannot be persisted elsewhere.
+logs. Agent transcripts remain durable under the global agent store unless an
+agent is explicitly staged as ephemeral with `/new` then `/ephemeral on`.
+
+Ephemeral agents are also local Tau persistence controls, not confidentiality
+boundaries. Their own semantic transcript, metadata, durable session membership,
+ephemeral-agent debug JSONL entries, and prompt-history rows stay memory-only
+while the daemon lives, but durable recipients/parents may persist projected
+messages or results, and provider state, credentials, user/cache extension data,
+policy/config files, runtime sockets, external services, interceptors, and
+trusted tools/extensions keep their normal persistence and filesystem access. Do
+not use session or agent ephemerality as a guarantee that prompt contents, tool
+results, or extension-observed data cannot be persisted elsewhere.
+
+Future event kinds that carry agent prompts, provider output, tool payloads, or
+extension-observed content must update the durable debug-log suppression rules
+and regression tests before they are emitted for ephemeral agents.
 
 ## Reporting guidance
 

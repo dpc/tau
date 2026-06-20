@@ -1106,6 +1106,7 @@ struct PendingStartAgentRequest {
     cid: AgentId,
     parent_cid: Option<AgentId>,
     agent_id: String,
+    persistence: tau_core::AgentPersistenceMode,
     pending_agent_messages: VecDeque<PendingPrompt>,
 }
 
@@ -1198,7 +1199,8 @@ pub struct Harness {
     /// `<state_dir>/sessions/<session_id>/events.cbor` or from the live
     /// in-memory view for ephemeral sessions.
     pub(crate) store: SessionStore,
-    /// Append-only global per-agent transcript store under `<state>/agents`.
+    /// Global per-agent transcript store under `<state>/agents`, with
+    /// memory-only records for explicitly ephemeral agents.
     pub(crate) agent_store: AgentStore,
     /// Session persistence policy. Agent transcripts and user/cache extension
     /// data remain on their normal persistent paths; ephemeral mode suppresses
@@ -1224,8 +1226,8 @@ pub struct Harness {
     /// / `ToolProgress` events back to the originating conversation.
     pub(crate) tool_agents: std::collections::HashMap<ToolCallId, AgentId>,
     /// `call_id` → pending tool metadata for in-flight calls. Used to
-    /// enrich terminal runtime events before they are folded into
-    /// durable transcript facts.
+    /// enrich terminal runtime events before they are folded into transcript
+    /// facts.
     pub(crate) pending_tools: std::collections::HashMap<ToolCallId, PendingTool>,
     /// Tool call ids that were known to this harness and reached a terminal
     /// state. Used to distinguish completed calls from typos in user-facing
@@ -1269,7 +1271,7 @@ pub struct Harness {
     /// `prompt_sessions[spid]` lookups become two hops:
     /// `prompt_agents[spid]` → `agents[cid].session_id`.
     pub(crate) prompt_agents: std::collections::HashMap<AgentPromptId, AgentId>,
-    /// All in-flight agents keyed by durable `AgentId`. User agents and side
+    /// All in-flight agents keyed by stable `AgentId`. User agents and side
     /// agents use the same identity; there is no default/main alias.
     pub(crate) agents: std::collections::HashMap<AgentId, Agent>,
     /// Agent id to conversation routing for addressable agents in the current
@@ -1341,7 +1343,7 @@ pub struct Harness {
     pub(crate) available_role_groups: Vec<tau_proto::HarnessRoleGroup>,
     /// Reusable prompt templates from the effective startup harness settings.
     pub(crate) custom_prompts: Vec<tau_proto::HarnessCustomPrompt>,
-    /// Handlebars template used to mint new durable agent identifiers.
+    /// Handlebars template used to mint new stable agent identifiers.
     pub(crate) agent_id_template: String,
     /// Optional Handlebars template used to name newly created agents.
     pub(crate) agent_display_name_template: Option<String>,
@@ -2431,9 +2433,22 @@ impl Harness {
     }
 
     fn log_event(&mut self, harness_event: &HarnessEvent) {
+        if self.debug_harness_event_targets_ephemeral_agent(harness_event) {
+            return;
+        }
         if let Some(log) = &mut self.debug_log {
             log.log_harness_event(harness_event);
         }
+    }
+
+    fn debug_harness_event_targets_ephemeral_agent(&self, harness_event: &HarnessEvent) -> bool {
+        let HarnessEvent::FromConnection { message, .. } = harness_event else {
+            return false;
+        };
+        let tau_proto::HarnessInputMessage::Emit(emit) = message.as_ref() else {
+            return false;
+        };
+        self.event_targets_ephemeral_agent(&emit.event)
     }
 
     fn queue_extension_connect(
@@ -2915,7 +2930,8 @@ impl Harness {
         // outbound copy. Offline cache/cost analysis tools that read
         // `events.jsonl` would otherwise see zeros where the running
         // session totals belong.
-        if let Some(log) = &mut self.debug_log {
+        let skip_debug_log = self.event_targets_ephemeral_agent(&event);
+        if !skip_debug_log && let Some(log) = &mut self.debug_log {
             log.log_published_event(source_id.as_ref(), &event, recorded_at);
         }
         let folded_node_id = match self.persist_semantic_event(
@@ -3173,10 +3189,12 @@ impl Harness {
         self.set_agent_turn_state(cid, AgentTurnState::Idle);
     }
 
-    /// Persists `event` to its durable semantic log and folds it into the
+    /// Writes or retains `event` in its semantic store and folds it into the
     /// corresponding in-memory view. Session membership facts go to the session
-    /// log; agent transcript facts go to the owning agent log. Returns the id
-    /// of the just-folded agent transcript node, when one was produced.
+    /// store; agent transcript facts go to the owning agent store. Either store
+    /// may choose a durable or memory-only path based on session/agent
+    /// persistence. Returns the id of the just-folded agent transcript node,
+    /// when one was produced.
     fn persist_semantic_event(
         &mut self,
         source: Option<&str>,
@@ -3191,11 +3209,13 @@ impl Harness {
         }
         let source = source.map(tau_proto::ConnectionId::from);
         if let Some(session_id) = semantic_event_router::session_membership_id_for_event(event) {
-            self.store.append_session_event_at(
+            let event_persistence = self.session_membership_event_persistence(event);
+            self.store.append_session_event_at_with_persistence(
                 session_id.as_str(),
                 source,
                 event.clone(),
                 recorded_at,
+                event_persistence,
             )?;
             return Ok(None);
         }
@@ -3215,6 +3235,36 @@ impl Harness {
                 recorded_at,
             )?
             .folded_node_id)
+    }
+
+    fn session_membership_event_persistence(
+        &self,
+        event: &Event,
+    ) -> tau_core::SessionPersistenceMode {
+        let agent_id = match event {
+            Event::SessionAgentLoaded(loaded) => &loaded.agent_id,
+            Event::SessionAgentUnloaded(unloaded) => &unloaded.agent_id,
+            _ => return tau_core::SessionPersistenceMode::Durable,
+        };
+        if self.agent_is_ephemeral(agent_id) {
+            tau_core::SessionPersistenceMode::Ephemeral
+        } else {
+            tau_core::SessionPersistenceMode::Durable
+        }
+    }
+
+    fn agent_is_ephemeral(&self, agent_id: &tau_proto::AgentId) -> bool {
+        if self
+            .agent_routes
+            .get(agent_id.as_str())
+            .and_then(|cid| self.agents.get(cid))
+            .is_some_and(|agent| agent.persistence.is_ephemeral())
+        {
+            return true;
+        }
+        self.agent_store
+            .agent_persistence(agent_id.as_str())
+            .is_ephemeral()
     }
 
     fn agent_scoped_agent_id_for_event(
@@ -3242,6 +3292,97 @@ impl Harness {
                 .cloned()
                 .map(crate::parse_agent_id)
         })
+    }
+
+    fn event_targets_ephemeral_agent(&self, event: &Event) -> bool {
+        match event {
+            Event::UiCreateAgent(req) => {
+                return req.ephemeral
+                    || req
+                        .parent_agent
+                        .as_ref()
+                        .is_some_and(|agent_id| self.agent_is_ephemeral(agent_id));
+            }
+            Event::UiPromptSubmitted(prompt) => {
+                return self.agent_is_ephemeral(&prompt.agent_id);
+            }
+            Event::StartAgentRequest(request) => {
+                return request
+                    .parent_agent
+                    .as_ref()
+                    .is_some_and(|agent_id| self.agent_is_ephemeral(agent_id))
+                    || request
+                        .tool_call_id
+                        .as_ref()
+                        .and_then(|call_id| self.tool_agents.get(call_id))
+                        .and_then(|cid| self.agents.get(cid))
+                        .is_some_and(|agent| agent.persistence.is_ephemeral());
+            }
+            Event::UiShellCommand(command) => {
+                return command
+                    .target_agent_id
+                    .as_ref()
+                    .is_some_and(|agent_id| self.agent_is_ephemeral(agent_id));
+            }
+            Event::ShellCommandProgress(progress) => {
+                return progress
+                    .target_agent_id
+                    .as_ref()
+                    .is_some_and(|agent_id| self.agent_is_ephemeral(agent_id));
+            }
+            Event::ShellCommandFinished(finished) => {
+                return finished
+                    .target_agent_id
+                    .as_ref()
+                    .is_some_and(|agent_id| self.agent_is_ephemeral(agent_id));
+            }
+            Event::AgentPromptCreated(prompt) => return self.agent_is_ephemeral(&prompt.agent_id),
+            Event::AgentPromptQueued(prompt) => return self.agent_is_ephemeral(&prompt.agent_id),
+            Event::AgentPromptRecalled(prompt) => return self.agent_is_ephemeral(&prompt.agent_id),
+            Event::AgentPromptTerminated(prompt) => {
+                return self.agent_is_ephemeral(&prompt.agent_id);
+            }
+            Event::AgentPromptPrewarmRequested(prompt) => {
+                return self.agent_is_ephemeral(&prompt.agent_id);
+            }
+            Event::ExtPromptSubmitRequest(request) => {
+                return self.agent_is_ephemeral(&request.agent_id);
+            }
+            Event::ProviderResponseUpdated(updated) => {
+                return self.agent_is_ephemeral(&updated.agent_id);
+            }
+            Event::ToolRequest(request) => return self.agent_is_ephemeral(&request.agent_id),
+            Event::ToolStarted(started) => return self.agent_is_ephemeral(&started.agent_id),
+            Event::ToolRejected(rejected) => {
+                return self.tool_call_targets_ephemeral_agent(&rejected.call_id);
+            }
+            Event::ToolResult(result) => {
+                return self.tool_call_targets_ephemeral_agent(&result.call_id);
+            }
+            Event::ToolProgress(progress) => {
+                return self.tool_call_targets_ephemeral_agent(&progress.call_id);
+            }
+            Event::ToolCancelRequest(cancel) => {
+                return self.tool_call_targets_ephemeral_agent(&cancel.target_call_id);
+            }
+            Event::ToolCancelled(cancelled) => {
+                return self.tool_call_targets_ephemeral_agent(&cancelled.call_id);
+            }
+            Event::ToolDelegateProgress(progress) => {
+                return self.tool_call_targets_ephemeral_agent(&progress.call_id);
+            }
+            _ => {}
+        }
+        self.agent_id_for_event(event)
+            .or_else(|| self.agent_scoped_agent_id_for_event(event, None))
+            .is_some_and(|agent_id| self.agent_is_ephemeral(&agent_id))
+    }
+
+    fn tool_call_targets_ephemeral_agent(&self, call_id: &tau_proto::ToolCallId) -> bool {
+        self.tool_agents
+            .get(call_id)
+            .and_then(|cid| self.agents.get(cid))
+            .is_some_and(|agent| agent.persistence.is_ephemeral())
     }
 
     pub(crate) fn agent_display_name_for_cid(&self, cid: &AgentId) -> Option<String> {
@@ -5243,11 +5384,21 @@ impl Harness {
         } else {
             None
         };
-        let cid = self.create_durable_user_agent_with_parent(
+        let parent_ephemeral = parent_cid
+            .as_ref()
+            .and_then(|cid| self.agents.get(cid))
+            .is_some_and(|agent| agent.persistence.is_ephemeral());
+        let persistence = if req.ephemeral || parent_ephemeral {
+            tau_core::AgentPersistenceMode::Ephemeral
+        } else {
+            tau_core::AgentPersistenceMode::Durable
+        };
+        let cid = self.create_user_agent_with_parent(
             req.session_id.clone(),
             &req.role,
             parent_cid,
             req.metadata,
+            persistence,
         );
         if let Some(conv) = self.agents.get_mut(&cid) {
             conv.next_ctx_id = req.ctx_id.clone();
@@ -6848,6 +6999,7 @@ impl Harness {
     ) -> HashSet<tau_proto::ConnectionId> {
         let event = Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
             session_id: self.current_session_id.clone(),
+            ephemeral: self.agent_is_ephemeral(&agent_id),
             agent_id,
         });
         self.tool_connections_subscribed_to(&event)
@@ -7233,6 +7385,18 @@ impl Harness {
         // owns the triggering tool call; non-tool requests use an explicit
         // `parent_agent` when provided; otherwise they start with no parent.
         let parent_cid = self.resolve_start_agent_parent_cid(&query)?;
+        let persistence = parent_cid
+            .as_ref()
+            .and_then(|cid| self.agents.get(cid))
+            .map(|agent| agent.persistence)
+            .unwrap_or_default();
+        if persistence.is_ephemeral()
+            && let Err(error) = self.agent_store.mark_agent_ephemeral(&agent_id)
+        {
+            return Err(format!(
+                "failed to mark child agent `{agent_id}` ephemeral: {error}"
+            ));
+        }
 
         Ok(Some(PendingStartAgentRequest {
             source_id: source_id.to_owned(),
@@ -7242,6 +7406,7 @@ impl Harness {
             cid,
             parent_cid,
             agent_id,
+            persistence,
             pending_agent_messages: VecDeque::new(),
         }))
     }
@@ -7299,6 +7464,7 @@ impl Harness {
             cid,
             parent_cid,
             agent_id,
+            persistence,
             pending_agent_messages,
         } = pending;
         let parent_call_id = query.tool_call_id.clone();
@@ -7347,6 +7513,7 @@ impl Harness {
         conv.delegate_input_stats = query.input_stats;
         conv.role = conversation_role;
         conv.agent_id = Some(agent_id.clone());
+        conv.persistence = persistence;
         conv.pending_prompts = pending_agent_messages;
         self.agent_routes.insert(agent_id.clone(), cid.clone());
         self.agents.insert(cid.clone(), conv);
@@ -8913,11 +9080,13 @@ impl Harness {
                 .or_else(|| meta.and_then(|meta| meta.display_name));
             let role = self.agent_role_from_log(agent_id.as_str());
             let originator = self.agent_originator_from_log(agent_id.as_str());
+            let persistence = self.agent_store.agent_persistence(agent_id.as_str());
             if let Some(conv) = self.agents.get_mut(&cid) {
                 conv.agent_id = Some(agent_id_string.clone());
                 conv.head = head;
                 conv.role = role.clone();
                 conv.display_name = display_name.clone();
+                conv.persistence = persistence;
             } else {
                 let mut conv = Agent::new(
                     cid.clone(),
@@ -8929,6 +9098,7 @@ impl Harness {
                 conv.agent_id = Some(agent_id_string.clone());
                 conv.role = role.clone();
                 conv.display_name = display_name.clone();
+                conv.persistence = persistence;
                 self.agents.insert(cid.clone(), conv);
             }
             self.agent_routes.insert(agent_id_string.clone(), cid);
@@ -9083,7 +9253,29 @@ impl Harness {
         parent_cid: Option<AgentId>,
         metadata: Vec<tau_proto::AgentInitialMetadata>,
     ) -> AgentId {
+        self.create_user_agent_with_parent(
+            session_id,
+            role,
+            parent_cid,
+            metadata,
+            tau_core::AgentPersistenceMode::Durable,
+        )
+    }
+
+    pub(crate) fn create_user_agent_with_parent(
+        &mut self,
+        session_id: SessionId,
+        role: &str,
+        parent_cid: Option<AgentId>,
+        metadata: Vec<tau_proto::AgentInitialMetadata>,
+        persistence: tau_core::AgentPersistenceMode,
+    ) -> AgentId {
         let agent_id = self.mint_available_agent_id_for_role(role);
+        if persistence.is_ephemeral() {
+            self.agent_store
+                .mark_agent_ephemeral(&agent_id)
+                .expect("freshly minted agent id can be marked ephemeral");
+        }
         let display_name = self.display_name_for_new_agent(&agent_id, role, None);
         let cid: AgentId = crate::parse_agent_id(&agent_id);
         let mut conv = Agent::new(
@@ -9097,6 +9289,7 @@ impl Harness {
         conv.parent_agent_id = parent_cid;
         conv.agent_id = Some(agent_id.clone());
         conv.display_name = display_name;
+        conv.persistence = persistence;
         self.agents.insert(cid.clone(), conv);
         self.publish_delegate_roles_context();
         let _ = self.agent_store.record_agent_meta(&agent_id);
@@ -9119,6 +9312,16 @@ impl Harness {
             .map(|conv| self.role_name_for_agent(conv))?;
         let agent_id = self.mint_available_agent_id_for_role(&role);
         let display_name = self.display_name_for_new_agent(&agent_id, &role, None);
+        let persistence = self
+            .agents
+            .get(cid)
+            .map(|conv| conv.persistence)
+            .unwrap_or_default();
+        if persistence.is_ephemeral() {
+            self.agent_store
+                .mark_agent_ephemeral(&agent_id)
+                .expect("freshly minted agent id can be marked ephemeral");
+        }
         if let Some(conv) = self.agents.get_mut(cid) {
             conv.agent_id = Some(agent_id.clone());
             if normalize_display_name(conv.display_name.as_deref()).is_none() {
@@ -9146,6 +9349,11 @@ impl Harness {
             .agents
             .get(cid)
             .map(|conv| self.role_name_for_agent(conv));
+        let persistence = self
+            .agents
+            .get(cid)
+            .map(|conv| conv.persistence)
+            .unwrap_or_default();
         let _ = self.agent_store.record_agent_meta(agent_id);
         let agent_id_proto: tau_proto::AgentId = crate::parse_agent_id(agent_id);
         let prompt_index_initialized = self
@@ -9196,6 +9404,7 @@ impl Harness {
                         .get(cid)
                         .and_then(|conv| normalize_display_name(conv.display_name.as_deref())),
                     metadata: initial_metadata,
+                    ephemeral: persistence.is_ephemeral(),
                 });
                 self.enqueue_publish(
                     None,
@@ -9230,6 +9439,7 @@ impl Harness {
                 Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
                     session_id: self.current_session_id.clone(),
                     agent_id: agent_id_proto,
+                    ephemeral: persistence.is_ephemeral(),
                 }),
             );
         }

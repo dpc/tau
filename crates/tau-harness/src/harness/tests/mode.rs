@@ -197,6 +197,276 @@ fn ephemeral_harness_rejects_resume_launch() {
     );
 }
 
+/// Guards per-agent ephemerality in an otherwise durable session: creation
+/// facts must be live/replayable from memory while neither the agent transcript
+/// nor the session membership fact is written under Tau state.
+#[test]
+fn ephemeral_agent_uses_memory_only_agent_and_membership_stores() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = quiet_provider_harness(&sp).expect("harness");
+
+    h.handle_ui_create_agent(tau_proto::UiCreateAgent {
+        session_id: "s1".into(),
+        role: "senior-engineer".to_owned(),
+        model_override: None,
+        metadata: Vec::new(),
+        initial_prompt: None,
+        message_class: tau_proto::PromptMessageClass::User,
+        originator: tau_proto::PromptOriginator::User,
+        ctx_id: None,
+        parent_agent: None,
+        ephemeral: true,
+    })
+    .expect("create ephemeral agent");
+
+    let started = event_log_events(&h)
+        .into_iter()
+        .find_map(|event| match event {
+            Event::AgentStarted(started) if started.ephemeral => Some(started),
+            _ => None,
+        })
+        .expect("ephemeral agent.started");
+    let agent_id = started.agent_id;
+    assert!(
+        event_log_events(&h).into_iter().any(|event| matches!(
+            event,
+            Event::SessionAgentLoaded(loaded)
+                if loaded.agent_id == agent_id && loaded.ephemeral
+        )),
+        "ephemeral session.agent_loaded should be announced live"
+    );
+    assert!(
+        !sp.join("agents").join(agent_id.as_str()).exists(),
+        "ephemeral agent must not create an agent directory"
+    );
+    assert!(
+        h.store
+            .session_events("s1")
+            .expect("durable session events")
+            .into_iter()
+            .all(|record| match record.event {
+                Event::SessionAgentLoaded(loaded) => loaded.agent_id != agent_id,
+                Event::SessionAgentUnloaded(unloaded) => unloaded.agent_id != agent_id,
+                _ => true,
+            }),
+        "ephemeral agent membership must not be durable"
+    );
+    assert!(
+        !h.agent_store
+            .agent_events(agent_id.as_str())
+            .expect("memory replay events")
+            .is_empty(),
+        "ephemeral agent creation should be replayable while daemon lives"
+    );
+}
+
+/// Prevents the durable debug JSONL mirror from becoming a parallel transcript
+/// for the first prompt of an ephemeral agent created by a socket UI.
+#[test]
+fn ephemeral_agent_create_request_is_suppressed_from_debug_log() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = quiet_provider_harness(&sp).expect("harness");
+    let request = tau_proto::UiCreateAgent {
+        session_id: "s1".into(),
+        role: "senior-engineer".to_owned(),
+        model_override: None,
+        metadata: Vec::new(),
+        initial_prompt: Some("debug-log-secret".to_owned()),
+        message_class: tau_proto::PromptMessageClass::User,
+        originator: tau_proto::PromptOriginator::User,
+        ctx_id: None,
+        parent_agent: None,
+        ephemeral: true,
+    };
+
+    h.log_event(&crate::event::HarnessEvent::FromConnection {
+        connection_id: "ui-test".into(),
+        message: Box::new(tau_proto::HarnessInputMessage::emit(Event::UiCreateAgent(
+            request,
+        ))),
+    });
+    h.handle_ui_create_agent(tau_proto::UiCreateAgent {
+        session_id: "s1".into(),
+        role: "senior-engineer".to_owned(),
+        model_override: None,
+        metadata: Vec::new(),
+        initial_prompt: None,
+        message_class: tau_proto::PromptMessageClass::User,
+        originator: tau_proto::PromptOriginator::User,
+        ctx_id: None,
+        parent_agent: None,
+        ephemeral: true,
+    })
+    .expect("create ephemeral agent");
+    let agent_id = event_log_events(&h)
+        .into_iter()
+        .find_map(|event| match event {
+            Event::AgentStarted(started) if started.ephemeral => Some(started.agent_id),
+            _ => None,
+        })
+        .expect("ephemeral agent");
+    let cid = h
+        .agent_routes
+        .get(agent_id.as_str())
+        .cloned()
+        .expect("ephemeral route");
+    h.publish_for_agent(
+        &cid,
+        Event::AgentPromptQueued(tau_proto::AgentPromptQueued {
+            agent_id: agent_id.clone(),
+            text: "published-debug-secret".to_owned(),
+            message_class: tau_proto::PromptMessageClass::User,
+        }),
+    );
+    let tool_call_id = ToolCallId::from("ephemeral-debug-tool-call");
+    h.tool_agents.insert(tool_call_id.clone(), cid);
+    h.publish_event(
+        None,
+        Event::ToolResult(ToolResult {
+            call_id: tool_call_id,
+            tool_name: ToolName::new("debug_secret_tool"),
+            tool_type: tau_proto::ToolType::Function,
+            result: CborValue::Text("tool-result-debug-secret".to_owned()),
+            kind: tau_proto::ToolResultKind::Final,
+            display: None,
+            originator: tau_proto::PromptOriginator::User,
+        }),
+    );
+
+    let jsonl = std::fs::read_to_string(
+        tau_config::settings::sessions_dir_of(&sp)
+            .join("s1")
+            .join("events.jsonl"),
+    )
+    .expect("durable session debug log exists");
+    assert!(
+        !jsonl.contains("debug-log-secret"),
+        "ephemeral create-agent prompt must not be mirrored into debug JSONL"
+    );
+    assert!(
+        !jsonl.contains("published-debug-secret"),
+        "published ephemeral agent content must not be mirrored into debug JSONL"
+    );
+    assert!(
+        !jsonl.contains("tool-result-debug-secret"),
+        "tool results owned by an ephemeral agent must not be mirrored into debug JSONL"
+    );
+}
+
+/// Prevents delegated work from leaking an ephemeral parent's task into a
+/// durable child transcript: children inherit the parent's memory-only policy
+/// unless the parent is durable.
+#[test]
+fn ephemeral_parent_start_agent_request_creates_ephemeral_child() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = quiet_provider_harness(&sp).expect("harness");
+
+    h.handle_ui_create_agent(tau_proto::UiCreateAgent {
+        session_id: "s1".into(),
+        role: "senior-engineer".to_owned(),
+        model_override: None,
+        metadata: Vec::new(),
+        initial_prompt: None,
+        message_class: tau_proto::PromptMessageClass::User,
+        originator: tau_proto::PromptOriginator::User,
+        ctx_id: None,
+        parent_agent: None,
+        ephemeral: true,
+    })
+    .expect("create ephemeral parent");
+    let parent_id = event_log_events(&h)
+        .into_iter()
+        .find_map(|event| match event {
+            Event::AgentStarted(started) if started.ephemeral => Some(started.agent_id),
+            _ => None,
+        })
+        .expect("ephemeral parent");
+
+    h.handle_start_agent_request(
+        "conn-delegate",
+        tau_proto::StartAgentRequest {
+            query_id: "q-ephemeral-child".to_owned(),
+            instruction: "delegate without durable transcript".to_owned(),
+            role: Some("senior-engineer".to_owned()),
+            input_stats: tau_proto::ToolUseStats::default(),
+            tool_call_id: None,
+            task_name: None,
+            parent_agent: Some(parent_id),
+        },
+    )
+    .expect("start child");
+
+    let child = event_log_events(&h)
+        .into_iter()
+        .rev()
+        .filter_map(|event| match event {
+            Event::AgentStarted(started) if started.ephemeral => Some(started.agent_id),
+            _ => None,
+        })
+        .next()
+        .expect("ephemeral child");
+    assert!(
+        !sp.join("agents").join(child.as_str()).exists(),
+        "child of ephemeral parent must not create durable agent state"
+    );
+}
+
+/// UI-created agents with an ephemeral parent inherit memory-only persistence;
+/// default-false `ui.create_agent.ephemeral` is not an opt-out switch.
+#[test]
+fn ui_create_agent_inherits_ephemeral_parent_persistence() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = quiet_provider_harness(&sp).expect("harness");
+
+    h.handle_ui_create_agent(tau_proto::UiCreateAgent {
+        session_id: "s1".into(),
+        role: "senior-engineer".to_owned(),
+        model_override: None,
+        metadata: Vec::new(),
+        initial_prompt: None,
+        message_class: tau_proto::PromptMessageClass::User,
+        originator: tau_proto::PromptOriginator::User,
+        ctx_id: None,
+        parent_agent: None,
+        ephemeral: true,
+    })
+    .expect("create parent");
+    let parent_id = event_log_events(&h)
+        .into_iter()
+        .find_map(|event| match event {
+            Event::AgentStarted(started) if started.ephemeral => Some(started.agent_id),
+            _ => None,
+        })
+        .expect("parent");
+
+    h.handle_ui_create_agent(tau_proto::UiCreateAgent {
+        session_id: "s1".into(),
+        role: "senior-engineer".to_owned(),
+        model_override: None,
+        metadata: Vec::new(),
+        initial_prompt: None,
+        message_class: tau_proto::PromptMessageClass::User,
+        originator: tau_proto::PromptOriginator::User,
+        ctx_id: None,
+        parent_agent: Some(parent_id),
+        ephemeral: false,
+    })
+    .expect("create child");
+
+    let ephemeral_started = event_log_events(&h)
+        .into_iter()
+        .filter(|event| matches!(event, Event::AgentStarted(started) if started.ephemeral))
+        .count();
+    assert_eq!(
+        ephemeral_started, 2,
+        "UI child of ephemeral parent must also be ephemeral"
+    );
+}
+
 /// Ensures daemon mode accepts multiple later socket clients and persists both
 /// cycles.
 #[test]

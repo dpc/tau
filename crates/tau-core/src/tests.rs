@@ -158,6 +158,58 @@ fn agent_store_persists_transcript_under_agent_directory() {
     let _ = std::fs::remove_dir_all(agents_dir);
 }
 
+/// Ephemeral agents must have normal live transcript semantics without
+/// reserving any durable agent directory, event log, metadata, or lock file.
+#[test]
+fn agent_store_ephemeral_transcript_folds_and_replays_without_files() {
+    let agents_dir = temp_dir("agents-ephemeral");
+    let mut store = AgentStore::open_lazy(&agents_dir).expect("open agent store");
+
+    store
+        .mark_agent_ephemeral("agent-ephemeral")
+        .expect("mark ephemeral");
+    assert!(store.agent_exists("agent-ephemeral"));
+    let outcome = store
+        .append_agent_event(
+            "agent-ephemeral",
+            None,
+            agent_prompt("agent-ephemeral", "keep this live only"),
+        )
+        .expect("append ephemeral event");
+
+    assert_eq!(outcome.seq.get(), 0);
+    assert_eq!(outcome.folded_node_id.map(|id| id.get()), Some(0));
+    assert!(
+        !agents_dir.join("agent-ephemeral").exists(),
+        "ephemeral agent must not create durable state"
+    );
+    let tree = store
+        .agent("agent-ephemeral")
+        .expect("ephemeral tree should be live");
+    assert_eq!(tree.current_branch().len(), 1);
+    let events = store
+        .agent_events("agent-ephemeral")
+        .expect("ephemeral replay events");
+    assert_eq!(events.len(), 1);
+    assert_eq!(
+        store
+            .agent_meta("agent-ephemeral")
+            .expect("read ephemeral meta")
+            .expect("ephemeral meta")
+            .latest_user_prompt_preview
+            .as_deref(),
+        Some("keep this live only")
+    );
+
+    let reopened = AgentStore::open_lazy(&agents_dir).expect("reopen agent store");
+    assert!(
+        !reopened.agent_exists("agent-ephemeral"),
+        "ephemeral agent must be forgotten on store reopen"
+    );
+
+    let _ = std::fs::remove_dir_all(agents_dir);
+}
+
 #[test]
 fn agent_store_rejects_non_sequential_persisted_sequence_on_load() {
     let agents_dir = temp_dir("agents-bad-seq");
@@ -340,6 +392,7 @@ fn session_store_persists_only_membership_facts() {
     let loaded = Event::SessionAgentLoaded(SessionAgentLoaded {
         session_id: SessionId::from("session-1"),
         agent_id: AgentId::parse("agent-1").expect("agent id"),
+        ephemeral: false,
     });
     let outcome = store
         .append_session_event("session-1", None, loaded.clone())
@@ -377,6 +430,51 @@ fn session_store_persists_only_membership_facts() {
     let _ = std::fs::remove_dir_all(sessions_dir);
 }
 
+/// Per-agent ephemerality uses memory-only session membership facts: the live
+/// daemon must know the agent is loaded, but session resume must not learn that
+/// agent id from disk.
+#[test]
+fn session_store_can_fold_one_membership_fact_without_persisting_it() {
+    let sessions_dir = temp_dir("sessions-one-ephemeral");
+    let mut store = SessionStore::open(&sessions_dir).expect("open session store");
+    let event = Event::SessionAgentLoaded(SessionAgentLoaded {
+        session_id: SessionId::from("session-1"),
+        agent_id: AgentId::parse("agent-ephemeral").expect("agent id"),
+        ephemeral: true,
+    });
+
+    store
+        .append_session_event_at_with_persistence(
+            "session-1",
+            None,
+            event,
+            tau_proto::UnixMicros::now(),
+            crate::SessionPersistenceMode::Ephemeral,
+        )
+        .expect("append memory-only membership");
+
+    assert!(
+        store
+            .session("session-1")
+            .expect("live membership")
+            .contains_agent(&AgentId::parse("agent-ephemeral").expect("agent id"))
+    );
+    assert!(
+        !sessions_dir.join("session-1").exists(),
+        "memory-only membership must not create a session directory"
+    );
+    let reopened = SessionStore::open_lazy(&sessions_dir).expect("reopen session store");
+    assert!(
+        reopened
+            .session_events("session-1")
+            .expect("events")
+            .is_empty(),
+        "memory-only membership must be absent from durable replay"
+    );
+
+    let _ = std::fs::remove_dir_all(sessions_dir);
+}
+
 #[test]
 fn session_store_rejects_non_sequential_persisted_sequence_on_load() {
     let sessions_dir = temp_dir("sessions-bad-seq");
@@ -393,6 +491,7 @@ fn session_store_rejects_non_sequential_persisted_sequence_on_load() {
             event: Event::SessionAgentLoaded(SessionAgentLoaded {
                 session_id: SessionId::from("session-1"),
                 agent_id: AgentId::parse("agent-1").expect("agent id"),
+                ephemeral: false,
             }),
             recorded_at: tau_proto::UnixMicros::now(),
         },
@@ -412,6 +511,7 @@ fn agent_store_rejects_non_agent_transcript_events() {
     let session_event = Event::SessionAgentLoaded(SessionAgentLoaded {
         session_id: SessionId::from("session-1"),
         agent_id: AgentId::parse("agent-1").expect("agent id"),
+        ephemeral: false,
     });
     let error = store
         .append_agent_event("agent-1", None, session_event)
