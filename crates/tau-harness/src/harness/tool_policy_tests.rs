@@ -65,6 +65,7 @@ fn policy_harness(model_tags: &[&str], role: AgentRole) -> PolicyHarness {
         Vec::new(),
         "test-session",
         tau_proto::SessionStartReason::Initial,
+        tau_core::SessionPersistenceMode::Durable,
     )
     .expect("harness");
     harness.available_roles = HashMap::from([(ROLE.to_owned(), role)]);

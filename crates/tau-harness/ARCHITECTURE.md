@@ -43,6 +43,16 @@ inheritable entries are copied to child agents when an explicit or derived
 parent is known. Tests should assert durable stores, not only runtime delivery,
 when changing durable facts.
 
+Ephemeral session mode (`tau --ephemeral`) replaces the session membership store
+with an in-memory store for the current harness process and suppresses
+session-owned disk artifacts: membership logs, metadata/locks, debug
+`events.jsonl`, per-session stderr logs, and session-scoped extension data.
+This does not make agents ephemeral: the global agent store remains durable, so
+prompts, responses, tool results, metadata, and sub-agent transcripts keep their
+normal persistence. User/cache extension data, provider state, credentials,
+policy/config files, and runtime sockets are also outside the session-ephemeral
+boundary.
+
 ## Extension boundary
 
 Extensions are less-trusted peers connected over the Tau protocol. They may
@@ -98,6 +108,10 @@ and symlink escapes, write private files/directories where supported, and enforc
 per-file/per-directory-list quotas. Quota failures are reported as
 `quota_exceeded`. These limits bound individual harness operations, not aggregate
 extension disk usage across many files.
+
+In ephemeral session mode, `ExtensionDataScope::Session` is rejected before any
+session data root is created. `User` and `Cache` scopes remain durable because
+they are extension-owned non-session storage.
 
 ## Skills
 

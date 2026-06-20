@@ -40,6 +40,14 @@ restore both ordinary node heads and the root cursor.
 
 `harness.notice` carries a stable `kind`, a user-facing `message`, a `NoticeLevel`, and optional `always_show`. Treat `kind` values as protocol identifiers: UIs may special-case them, so do not derive them from unstable connection ids or free-form message text. `critical` notices and `always_show` warnings represent mandatory diagnostics; the harness must keep emitting them even if a UI filters routine notices locally.
 
+## Session directory status
+
+`harness.session_dir` is a UI/status snapshot, not proof that a durable session
+directory exists. In session-ephemeral mode the harness reports
+`SessionDirStatus::Ephemeral` and a display-only `<ephemeral>` path. Protocol
+consumers must treat that as "no inspectable session directory"; they must not
+try to derive persistent session storage from the sentinel path.
+
 
 ## Validated identifiers
 

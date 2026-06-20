@@ -114,6 +114,30 @@ pub fn init(state_dir: &Path) -> io::Result<UiLogging> {
     })
 }
 
+/// Initialize tracing for an ephemeral terminal UI without creating a UI log.
+///
+/// This preserves normal in-process tracing setup while directing records to an
+/// in-memory sink so `tau --ephemeral` does not leave UI log artifacts on disk.
+/// The returned paths are display-only sentinels.
+pub fn init_ephemeral() -> UiLogging {
+    let filter = EnvFilter::try_from_env(UI_LOG_ENV)
+        .or_else(|_| EnvFilter::try_new(DEFAULT_FILTER))
+        .unwrap_or_else(|_| EnvFilter::new(DEFAULT_FILTER));
+    let subscriber = tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_writer(io::sink)
+        .with_ansi(false)
+        .with_timer(tracing_subscriber::fmt::time::SystemTime)
+        .finish();
+    let _ = tracing::subscriber::set_global_default(subscriber);
+
+    UiLogging {
+        ui_id: "ephemeral".to_owned(),
+        dir: PathBuf::from("<ephemeral>"),
+        log_path: PathBuf::from("<ephemeral>"),
+    }
+}
+
 fn mint_ui_id() -> String {
     let millis = SystemTime::now()
         .duration_since(UNIX_EPOCH)

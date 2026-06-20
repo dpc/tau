@@ -199,6 +199,16 @@ scrollback after a full redraw. It does not truncate in-memory UI state,
 protocol events, durable session logs, provider/model context, or any other
 non-terminal history.
 
+`tau --ephemeral` is a session-persistence mode, not a privacy sandbox. It
+prevents the current harness process from writing session membership logs,
+session metadata/locks, per-session debug `events.jsonl`, per-session
+harness/extension stderr logs, session-scoped extension data, and terminal UI
+logs. Agent transcripts remain durable under the global agent store, and
+provider state, credentials, user/cache extension data, policy/config files,
+runtime sockets, and trusted tools/extensions keep their normal persistence and
+filesystem access. Do not use `--ephemeral` as a guarantee that prompt contents,
+tool results, or extension-observed data cannot be persisted elsewhere.
+
 ## Reporting guidance
 
 When reporting a vulnerability, include:

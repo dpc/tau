@@ -735,14 +735,17 @@ pub(crate) fn run_chat(
     attach: bool,
     session_status: SessionLaunchStatus,
     startup_role: Option<&str>,
-    role_cli_overrides: &[tau_config::settings::RoleCliOverride],
-    extension_cli_overrides: &[tau_config::settings::ExtensionCliOverride],
-    harness_config_overrides: &[tau_config::settings::HarnessConfigCliOverride],
+    cli_overrides: DaemonCliOverrides<'_>,
+    ephemeral: bool,
 ) -> Result<(), CliError> {
     use tau_cli_term::{HighTerm, SlashCommand};
 
     let state_dir = tau_session_inspect::default_state_dir();
-    let ui_logging = ui_logging::init(&state_dir)?;
+    let ui_logging = if ephemeral {
+        ui_logging::init_ephemeral()
+    } else {
+        ui_logging::init(&state_dir)?
+    };
     tracing::info!(
         target: "tau_cli::ui",
         ui_id = ui_logging.ui_id(),
@@ -757,7 +760,7 @@ pub(crate) fn run_chat(
     let daemon_output = if attach {
         None
     } else {
-        Some(daemon_output_for_session(session_id)?)
+        Some(daemon_output_for_session(session_id, ephemeral)?)
     };
     let mut daemon = resolve_daemon(
         attach,
@@ -765,11 +768,8 @@ pub(crate) fn run_chat(
         session_status,
         daemon_output,
         startup_role,
-        DaemonCliOverrides {
-            role: role_cli_overrides,
-            extension: extension_cli_overrides,
-            harness_config: harness_config_overrides,
-        },
+        cli_overrides,
+        ephemeral,
     )?;
     let ui_io_meter = UiIoMeter::default();
     let UiConnection {

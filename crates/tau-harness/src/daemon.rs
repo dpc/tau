@@ -19,8 +19,8 @@ use crate::error::HarnessError;
 use crate::event::HarnessEvent;
 use crate::format::{format_extension_event, format_tool_progress};
 use crate::harness::{
-    Harness, InitialClient, InitialClientStartupErrorOutput, assistant_text_from_output_items,
-    tool_calls_from_output_items,
+    Harness, HarnessSessionLaunch, InitialClient, InitialClientStartupErrorOutput,
+    assistant_text_from_output_items, tool_calls_from_output_items,
 };
 use crate::runtime_dir;
 use crate::settings::{Config, resolve_config, resolve_config_in};
@@ -44,6 +44,10 @@ impl SessionLaunchStatus {
         }
     }
 }
+
+/// Environment flag set by the CLI when the harness should avoid durable
+/// session membership, metadata, debug, and per-session stderr logs.
+pub const EPHEMERAL_ENV: &str = "TAU_EPHEMERAL";
 
 impl From<SessionLaunchStatus> for tau_proto::SessionDirStatus {
     fn from(status: SessionLaunchStatus) -> Self {
@@ -83,6 +87,15 @@ pub struct ServeOptions {
     /// Directory layout (config + state) the harness reads. Defaults to
     /// [`tau_config::settings::TauDirs::default()`] on the call site.
     pub dirs: Option<tau_config::settings::TauDirs>,
+    /// Persistence policy for session membership, metadata, debug event logs,
+    /// per-session harness/extension stderr logs, and session-scoped extension
+    /// data for this harness process.
+    ///
+    /// Agent transcripts, provider state, credentials, user/cache extension
+    /// data, runtime sockets, and policy/config state keep their normal
+    /// persistence behavior.
+    #[builder(default = tau_core::SessionPersistenceMode::Durable)]
+    pub session_persistence: tau_core::SessionPersistenceMode,
 }
 
 impl Default for ServeOptions {
@@ -92,8 +105,20 @@ impl Default for ServeOptions {
             exit_on_disconnect: false,
             session_status: SessionLaunchStatus::New,
             dirs: None,
+            session_persistence: tau_core::SessionPersistenceMode::Durable,
         }
     }
+}
+
+fn validate_serve_options(options: &ServeOptions) -> Result<(), HarnessError> {
+    if options.session_persistence.is_ephemeral()
+        && matches!(options.session_status, SessionLaunchStatus::Resumed)
+    {
+        return Err(HarnessError::Participant(
+            "ephemeral sessions cannot resume persisted session state".to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 /// One completed user interaction with optional progress updates.
@@ -274,6 +299,7 @@ pub fn run_embedded_message_with_options(
         dirs,
         session_id,
         tau_proto::SessionStartReason::Initial,
+        tau_core::SessionPersistenceMode::Durable,
     )?;
     let mut outcome = match harness.send_user_message(session_id, message, None) {
         Ok(outcome) => outcome,
@@ -310,6 +336,7 @@ pub fn run_embedded_message_with_echo(
         echo_tools(),
         session_id,
         tau_proto::SessionStartReason::Initial,
+        tau_core::SessionPersistenceMode::Durable,
     )?;
     disable_echo_tool_context_gate_for_tests(&mut harness);
     harness.enable_echo_tool_for_tests();
@@ -359,6 +386,7 @@ pub fn run_daemon(
     eager_session_id: &str,
     options: ServeOptions,
 ) -> Result<(), HarnessError> {
+    validate_serve_options(&options)?;
     let socket_path = socket_path.into();
     let state_dir = state_dir.into();
     let listener_handle = open_listener(&socket_path)?;
@@ -384,6 +412,7 @@ pub fn run_daemon(
         dirs,
         eager_session_id,
         session_start_reason(options.session_status),
+        options.session_persistence,
     )?;
 
     let tx = harness.tx.clone();
@@ -406,6 +435,7 @@ pub fn run_daemon_with_echo(
     eager_session_id: &str,
     options: ServeOptions,
 ) -> Result<(), HarnessError> {
+    validate_serve_options(&options)?;
     fn echo_runner(r: UnixStream, w: UnixStream) -> Result<(), String> {
         crate::harness::run_echo_provider(r, w).map_err(|e| e.to_string())
     }
@@ -426,6 +456,7 @@ pub fn run_daemon_with_echo(
         echo_tools(),
         eager_session_id,
         session_start_reason(options.session_status),
+        options.session_persistence,
     )?;
     disable_echo_tool_context_gate_for_tests(&mut harness);
     harness.enable_echo_tool_for_tests();
@@ -448,6 +479,7 @@ pub fn run_daemon_with_config(
     eager_session_id: &str,
     options: ServeOptions,
 ) -> Result<(), HarnessError> {
+    validate_serve_options(&options)?;
     let socket_path = socket_path.into();
     let state_dir = state_dir.into();
     let listener_handle = open_listener(&socket_path)?;
@@ -458,6 +490,7 @@ pub fn run_daemon_with_config(
         dirs,
         eager_session_id,
         session_start_reason(options.session_status),
+        options.session_persistence,
     )?;
 
     let tx = harness.tx.clone();
@@ -813,6 +846,7 @@ fn run_harness_daemon_with_internal_tools_and_initial_client(
     initial_client: Option<InitialClient>,
     mut initial_client_error_stream: Option<InitialClientStartupErrorOutput>,
 ) -> Result<(), HarnessError> {
+    validate_serve_options(&options)?;
     let startup_started_at = Instant::now();
     tracing::debug!(target: "tau_harness::startup", project_root = %project_root.display(), eager_session_id, "starting harness daemon");
     let harness_paths = notify_startup_error(
@@ -834,7 +868,10 @@ fn run_harness_daemon_with_internal_tools_and_initial_client(
             &state_dir,
             dirs,
             eager_session_id,
-            session_start_reason(options.session_status),
+            HarnessSessionLaunch {
+                reason: session_start_reason(options.session_status),
+                session_persistence: options.session_persistence,
+            },
             initial_client,
             &mut initial_client_error_stream,
         ),
@@ -930,6 +967,11 @@ fn run_component_with_internal_tools_and_initial_client(
             Ok("resumed") => crate::daemon::SessionLaunchStatus::Resumed,
             _ => crate::daemon::SessionLaunchStatus::New,
         };
+        let session_persistence = if std::env::var_os(EPHEMERAL_ENV).is_some() {
+            tau_core::SessionPersistenceMode::Ephemeral
+        } else {
+            tau_core::SessionPersistenceMode::Durable
+        };
         run_harness_daemon_with_internal_tools_and_initial_client(
             &project_root,
             &config,
@@ -940,6 +982,7 @@ fn run_component_with_internal_tools_and_initial_client(
             ServeOptions {
                 exit_on_disconnect: true,
                 session_status,
+                session_persistence,
                 ..Default::default()
             },
             internal_tool_handlers,

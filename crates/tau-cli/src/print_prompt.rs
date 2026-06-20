@@ -52,7 +52,7 @@ fn launch_render_daemon(
     harness_config_overrides: &[tau_config::settings::HarnessConfigCliOverride],
 ) -> Result<DaemonHandle, CliError> {
     let session_id = mint_short_id(session_prefix);
-    let output = daemon_output_for_session(&session_id)?;
+    let output = daemon_output_for_session(&session_id, false)?;
     resolve_daemon(
         false,
         &session_id,
@@ -64,6 +64,7 @@ fn launch_render_daemon(
             extension: extension_cli_overrides,
             harness_config: harness_config_overrides,
         },
+        false,
     )
 }
 

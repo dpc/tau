@@ -78,6 +78,28 @@ fn dev_print_prompt_uses_shared_role_flag() {
     ));
 }
 
+/// Ensures the root run command accepts `--ephemeral` as an explicit
+/// session-persistence mode without affecting the separate attach/resume flags.
+#[test]
+fn run_parses_ephemeral_flag() {
+    let cli = super::cli::Cli::parse_from(["tau", "--ephemeral"]);
+    assert!(cli.run.ephemeral);
+    assert!(!cli.run.attach);
+    assert!(cli.run.resume.is_none());
+    assert!(cli.command.is_none());
+}
+
+/// Prevents `--ephemeral` from becoming a misleading modifier for an already
+/// running or persisted session, where the new process cannot guarantee a clean
+/// session-persistence boundary.
+#[test]
+fn run_rejects_ephemeral_with_attach_or_resume() {
+    assert!(super::reject_ephemeral_incompatible(true, true, None).is_err());
+    assert!(super::reject_ephemeral_incompatible(true, false, Some("")).is_err());
+    assert!(super::reject_ephemeral_incompatible(true, false, Some("s1")).is_err());
+    assert!(super::reject_ephemeral_incompatible(true, false, None).is_ok());
+}
+
 #[test]
 fn dev_print_prompt_accepts_agents_md_toggle() {
     let cli =

@@ -79,6 +79,15 @@ $ tau -r                  # pick a recent session for this cwd
 $ tau -r <id>             # resume a specific one
 ```
 
+`tau --ephemeral` starts a normal live harness session without writing the
+session membership journal, session metadata/lock files, debug `events.jsonl`,
+per-session harness/extension stderr logs, session-scoped extension data, or
+the terminal UI log to disk. This is session-scoped only: agent transcripts
+under `<state_dir>/agents/`, provider credentials/state, user/cache extension
+data, policy/config files, and runtime sockets keep their normal persistence
+behavior. `--ephemeral` is therefore incompatible with `--resume` and
+`--attach`, and spawned/loaded agents remain persistent.
+
 Inside the UI, `/tree` prints one-based prompt rewind anchors for the selected
 agent. `/tree <anchor>` rewinds to before that prompt, `/tree 0` or `/tree
 root` selects the root before the first prompt, and `/tree node <node-id>` is
@@ -837,6 +846,10 @@ the background; `tau --attach` reconnects later. `tau -r` opens a picker for
 recent sessions in the current `cwd` (showing lock status and the latest user
 prompt), `tau -r <id>` picks a specific one. Session membership and loaded agent
 trees, including abandoned branches, are preserved across restarts.
+
+Use `tau --ephemeral` for a non-resumable live session that does not leave
+session directories or session logs behind. Agent histories are still durable,
+so use a separate agent mode (not this flag) if you need non-persistent agents.
 
 
 ## XMPP agent chat bridge

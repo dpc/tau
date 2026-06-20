@@ -188,7 +188,15 @@ pub(crate) struct DaemonOutput {
     pub(crate) stderr: Stdio,
 }
 
-pub(crate) fn daemon_output_for_session(session_id: &str) -> Result<DaemonOutput, CliError> {
+pub(crate) fn daemon_output_for_session(
+    session_id: &str,
+    ephemeral: bool,
+) -> Result<DaemonOutput, CliError> {
+    if ephemeral {
+        return Ok(DaemonOutput {
+            stderr: Stdio::null(),
+        });
+    }
     // Route the daemon's stderr (where its tracing subscriber writes) into the
     // per-session harness log so it sits next to per-extension logs under
     // `<session>/logs/`. The CLI's own tracing still goes to `ui.log`; the two
@@ -220,6 +228,7 @@ pub(crate) fn resolve_daemon(
     daemon_output: Option<DaemonOutput>,
     startup_role: Option<&str>,
     cli_overrides: DaemonCliOverrides<'_>,
+    ephemeral: bool,
 ) -> Result<DaemonHandle, CliError> {
     tracing::debug!(target: "tau_cli::startup", attach, session_id, "resolving harness daemon");
     let project_root = std::env::current_dir()?;
@@ -236,6 +245,7 @@ pub(crate) fn resolve_daemon(
         daemon_output.expect("daemon output for spawned harness"),
         startup_role,
         cli_overrides,
+        ephemeral,
     )
 }
 
@@ -250,6 +260,7 @@ fn start_daemon(
     output: DaemonOutput,
     startup_role: Option<&str>,
     cli_overrides: DaemonCliOverrides<'_>,
+    ephemeral: bool,
 ) -> Result<DaemonHandle, CliError> {
     let tau_binary = std::env::current_exe()?;
     tracing::debug!(target: "tau_cli::startup", tau_binary = %tau_binary.display(), session_id, "spawning harness daemon");
@@ -263,6 +274,7 @@ fn start_daemon(
         stdin: Stdio::piped(),
         startup_role,
         cli_overrides,
+        ephemeral,
     })
     .spawn();
 
@@ -294,6 +306,7 @@ struct DaemonCommandSpec<'a> {
     stdin: Stdio,
     startup_role: Option<&'a str>,
     cli_overrides: DaemonCliOverrides<'a>,
+    ephemeral: bool,
 }
 
 /// Build the `tau component harness` command, reserving stdio for the initial
@@ -332,6 +345,11 @@ fn build_daemon_command(spec: DaemonCommandSpec<'_>) -> Command {
 
     if let Some(role) = spec.startup_role.filter(|role| !role.is_empty()) {
         cmd.env(tau_harness::STARTUP_ROLE_ENV, role);
+    }
+    if spec.ephemeral {
+        cmd.env(tau_harness::EPHEMERAL_ENV, "1");
+    } else {
+        cmd.env_remove(tau_harness::EPHEMERAL_ENV);
     }
     if !spec.cli_overrides.role.is_empty() {
         cmd.env(

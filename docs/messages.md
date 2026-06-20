@@ -113,7 +113,9 @@ constants currently live in
 
 Requests choose a storage scope and an operation:
 
-- `session` scope stores data under the extension's current-session root.
+- `session` scope stores data under the extension's current-session root. In
+  `tau --ephemeral` sessions this scope is unavailable; requests are rejected
+  with a `permission` error before any session directory is created.
 - `user` scope stores persistent data under the harness state directory for that
   extension.
 - `cache` scope stores cache data under the user cache directory for that

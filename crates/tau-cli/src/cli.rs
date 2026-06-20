@@ -104,6 +104,17 @@ pub struct RunArgs {
     /// spawning a new one. Errors if no daemon is running.
     #[arg(short = 'a', long)]
     pub attach: bool,
+
+    /// Run without writing session membership, session metadata, session debug
+    /// events, per-session logs, session-scoped extension data, or the terminal
+    /// UI log to disk.
+    ///
+    /// Agent transcripts, provider state, credentials, user/cache extension
+    /// data, runtime sockets, and policy/config state keep their normal
+    /// persistence behavior.
+    /// Cannot be combined with --resume or --attach.
+    #[arg(long)]
+    pub ephemeral: bool,
 }
 
 #[derive(Subcommand)]

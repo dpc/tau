@@ -90,6 +90,24 @@ queued user-input reset, success reset, branch invalidation, bounded breaker
 state, argument-sensitive tool failures, and same-batch tool failures that must
 receive the breaker before blocking.
 
+## Ephemeral sessions suppress only session-owned persistence
+
+Status: unconfirmed
+
+`tau --ephemeral` is a harness/session launch mode, not an agent privacy mode.
+It keeps the live session state machine, interception, prompt dispatch, and
+agent stores working normally, but session-owned persistence is runtime-only for
+that harness process: session membership logs, session metadata/locks,
+`events.jsonl`, per-session stderr logs, and session-scoped extension data are
+not written. `harness.session_dir` uses status `ephemeral` and a display-only
+`<ephemeral>` path so UIs do not advertise a usable session directory.
+
+Agent transcripts remain durable by design, including sub-agents started by
+`agent_start`. Provider state, credentials, policy/config files, runtime sockets,
+and user/cache extension data keep their normal persistence. Future
+non-persistent agents should be a separate per-agent creation mode rather than a
+semantic change to session ephemerality.
+
 ## System prompts are assembled only through templates
 
 Status: confirmed, 2026-06-17, dpc

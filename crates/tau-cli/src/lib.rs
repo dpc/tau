@@ -398,6 +398,24 @@ fn reject_attach_startup_overrides(
     Ok(())
 }
 
+fn reject_ephemeral_incompatible(
+    ephemeral: bool,
+    attach: bool,
+    resume: Option<&str>,
+) -> Result<(), CliError> {
+    if ephemeral && attach {
+        return Err(CliError::Participant(
+            "--ephemeral cannot be combined with --attach".to_owned(),
+        ));
+    }
+    if ephemeral && resume.is_some() {
+        return Err(CliError::Participant(
+            "--ephemeral cannot be combined with --resume".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
 fn required_harness_role<'a>(role: Option<&'a str>, command: &str) -> Result<&'a str, CliError> {
     role.ok_or_else(|| CliError::Participant(format!("tau dev {command} requires --role <role>")))
 }
@@ -590,8 +608,10 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
                 config,
                 prompt_stdin,
                 attach,
+                ephemeral,
             }) => {
                 reject_legacy_config_path(config.as_deref())?;
+                reject_ephemeral_incompatible(ephemeral, attach, resume.as_deref())?;
                 if attach {
                     reject_attach_startup_overrides(
                         prompt_stdin,
@@ -629,9 +649,12 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
                         attach,
                         session_status,
                         harness.role.as_deref(),
-                        &role_cli_overrides,
-                        &extension_cli_overrides,
-                        &harness_config_overrides,
+                        crate::daemon::DaemonCliOverrides {
+                            role: &role_cli_overrides,
+                            extension: &extension_cli_overrides,
+                            harness_config: &harness_config_overrides,
+                        },
+                        ephemeral,
                     )
                 } else {
                     run_chat(
@@ -639,9 +662,12 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
                         attach,
                         session_status,
                         harness.role.as_deref(),
-                        &role_cli_overrides,
-                        &extension_cli_overrides,
-                        &harness_config_overrides,
+                        crate::daemon::DaemonCliOverrides {
+                            role: &role_cli_overrides,
+                            extension: &extension_cli_overrides,
+                            harness_config: &harness_config_overrides,
+                        },
+                        ephemeral,
                     )
                 }
             }

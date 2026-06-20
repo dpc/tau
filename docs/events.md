@@ -35,7 +35,9 @@ for control of the emit/intercept pipeline.
   Extension-authored skill diagnostics are sanitized to `extension.notice`; add a
   first-party kind here only when the harness owns and preserves it.
 - **`harness.session_dir`** — Announces the current session directory for UIs
-  and extensions that need to present or inspect session-local paths.
+  and extensions that need to present or inspect session-local paths. In
+  `--ephemeral` mode this carries status `ephemeral` and a display-only
+  `<ephemeral>` path because no session directory is written.
 - **`harness.ui_dir`** — Announces the UI state directory for UI-facing helpers.
 - **`harness.models_available`** — The full provider-published model list
   as `provider/model_id` strings. Re-emitted when provider snapshots change.

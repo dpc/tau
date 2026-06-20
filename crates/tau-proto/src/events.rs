@@ -198,6 +198,7 @@ pub enum SessionDirStatus {
     #[default]
     New,
     Resumed,
+    Ephemeral,
 }
 
 impl SessionDirStatus {
@@ -206,6 +207,7 @@ impl SessionDirStatus {
         match self {
             Self::New => "new",
             Self::Resumed => "resumed",
+            Self::Ephemeral => "ephemeral",
         }
     }
 }

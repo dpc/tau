@@ -1,7 +1,9 @@
-//! Append-only on-disk persistence of session membership facts.
+//! Session membership store for loaded-agent facts.
 //!
-//! Sessions are durable membership containers only. Agent transcripts live in
-//! [`crate::AgentStore`] under the global agents directory.
+//! Durable sessions are membership containers backed by append-only on-disk
+//! logs. Ephemeral sessions keep the same folded membership view in memory
+//! only. Agent transcripts live in [`crate::AgentStore`] under the global
+//! agents directory in both modes.
 
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
@@ -16,6 +18,31 @@ use serde::{Deserialize, Serialize};
 use tau_proto::{AgentId, ConnectionId, Event, SessionId, UnixMicros};
 
 use crate::session::SessionMeta;
+
+/// Persistence policy for session membership and sidecar state.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum SessionPersistenceMode {
+    /// Write membership events, metadata, and locks under the sessions root.
+    #[default]
+    Durable,
+    /// Keep membership state in memory only and never create session files.
+    Ephemeral,
+}
+
+impl SessionPersistenceMode {
+    /// Returns true when session membership and sidecars should be written to
+    /// disk.
+    #[must_use]
+    pub const fn is_durable(self) -> bool {
+        matches!(self, Self::Durable)
+    }
+
+    /// Returns true when session membership should remain process-local only.
+    #[must_use]
+    pub const fn is_ephemeral(self) -> bool {
+        matches!(self, Self::Ephemeral)
+    }
+}
 
 /// Monotonic sequence number in one persisted session membership log.
 ///
@@ -262,12 +289,19 @@ impl SessionMembership {
     }
 }
 
-/// Append-only persistence for session membership facts.
+/// Session membership store for loaded-agent facts.
+///
+/// Durable stores append membership facts to `<sessions_dir>/<session_id>` and
+/// maintain the corresponding metadata/lock sidecars. Ephemeral stores keep the
+/// folded membership view in memory only: they never create the sessions root,
+/// session directories, event logs, metadata, or locks, and `session_events`
+/// reports no durable records.
 #[derive(Debug)]
 pub struct SessionStore {
     sessions_dir: PathBuf,
     sessions: HashMap<SessionId, SessionMembership>,
     locks: HashMap<SessionId, File>,
+    mode: SessionPersistenceMode,
 }
 
 impl SessionStore {
@@ -309,6 +343,21 @@ impl SessionStore {
             sessions_dir,
             sessions: HashMap::new(),
             locks: HashMap::new(),
+            mode: SessionPersistenceMode::Durable,
+        })
+    }
+
+    /// Opens an in-memory session store that never reads or writes session
+    /// membership state, metadata, or locks below `sessions_dir`.
+    ///
+    /// The path is retained only so callers can keep using the same layout
+    /// helpers for diagnostics; no directory is created by this constructor.
+    pub fn open_ephemeral(sessions_dir: impl Into<PathBuf>) -> Result<Self, SessionStoreError> {
+        Ok(Self {
+            sessions_dir: sessions_dir.into(),
+            sessions: HashMap::new(),
+            locks: HashMap::new(),
+            mode: SessionPersistenceMode::Ephemeral,
         })
     }
 
@@ -317,6 +366,9 @@ impl SessionStore {
     }
 
     fn load_session_if_needed(&mut self, session_id: &str) -> Result<(), SessionStoreError> {
+        if self.mode.is_ephemeral() {
+            return Ok(());
+        }
         let sid = SessionId::from(session_id);
         if self.sessions.contains_key(&sid) {
             return Ok(());
@@ -332,6 +384,9 @@ impl SessionStore {
     }
 
     fn ensure_locked(&mut self, session_id: &str) -> Result<(), SessionStoreError> {
+        if self.mode.is_ephemeral() {
+            return Ok(());
+        }
         let sid = SessionId::from(session_id);
         if self.locks.contains_key(&sid) {
             return Ok(());
@@ -403,12 +458,14 @@ impl SessionStore {
         self.ensure_locked(session_id)?;
         self.load_session_if_needed(session_id)?;
         let session_dir = self.session_dir(session_id);
-        fs::create_dir_all(&session_dir).map_err(|source| {
-            SessionStoreError::CreateParentDirectory {
-                path: session_dir.clone(),
-                source,
-            }
-        })?;
+        if self.mode.is_durable() {
+            fs::create_dir_all(&session_dir).map_err(|source| {
+                SessionStoreError::CreateParentDirectory {
+                    path: session_dir.clone(),
+                    source,
+                }
+            })?;
+        }
         let sid = SessionId::from(session_id);
         let tree = self
             .sessions
@@ -421,13 +478,17 @@ impl SessionStore {
             event: event.clone(),
             recorded_at,
         };
-        append_cbor_record(&session_dir.join("events.cbor"), &record)?;
+        if self.mode.is_durable() {
+            append_cbor_record(&session_dir.join("events.cbor"), &record)?;
+        }
         tree.apply_event(&event);
         tree.advance_next_event_seq();
         // Sidecar metadata is derived from the durable event stream. Do not let
         // a sidecar write failure make the caller retry this already-persisted
         // sequence and create a duplicate record.
-        let _ = touch_meta(&session_dir.join("meta.json"));
+        if self.mode.is_durable() {
+            let _ = touch_meta(&session_dir.join("meta.json"));
+        }
         Ok(AppendOutcome {
             seq,
             folded_node_id: None,
@@ -439,6 +500,9 @@ impl SessionStore {
         &self,
         session_id: &str,
     ) -> Result<Vec<PersistedSessionEvent>, SessionStoreError> {
+        if self.mode.is_ephemeral() {
+            return Ok(Vec::new());
+        }
         load_session_events(&self.session_dir(session_id).join("events.cbor"))
     }
 
@@ -471,6 +535,9 @@ impl SessionStore {
 
     /// Records or refreshes session metadata without storing workspace state.
     pub fn record_session_meta(&mut self, session_id: &str) -> Result<(), SessionStoreError> {
+        if self.mode.is_ephemeral() {
+            return Ok(());
+        }
         self.ensure_locked(session_id)?;
         let path = self.session_dir(session_id).join("meta.json");
         let now = unix_now();

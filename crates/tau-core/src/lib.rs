@@ -40,7 +40,7 @@ pub use session::{
 };
 pub use session_store::{
     AppendOutcome, PersistedSessionEvent, PersistedSessionEventSeq, SessionMembership,
-    SessionStore, SessionStoreError, list_session_metas, session_is_locked,
+    SessionPersistenceMode, SessionStore, SessionStoreError, list_session_metas, session_is_locked,
 };
 pub use tool_registry::{
     RegisterToolReport, ToolArgumentRepair, ToolArgumentValidationError, ToolProvider,

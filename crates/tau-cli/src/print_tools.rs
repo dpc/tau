@@ -13,7 +13,7 @@ pub(crate) fn run_print_tools(
     harness_config_overrides: &[tau_config::settings::HarnessConfigCliOverride],
 ) -> Result<(), CliError> {
     let session_id = mint_short_id("print-tools");
-    let output = daemon_output_for_session(&session_id)?;
+    let output = daemon_output_for_session(&session_id, false)?;
     let mut daemon = resolve_daemon(
         false,
         &session_id,
@@ -25,6 +25,7 @@ pub(crate) fn run_print_tools(
             extension: extension_cli_overrides,
             harness_config: harness_config_overrides,
         },
+        false,
     )?;
 
     let tools = get_rendered_tool_definitions(&mut daemon, role)?;

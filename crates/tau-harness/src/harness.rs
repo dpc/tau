@@ -1139,6 +1139,30 @@ pub(crate) enum InitialClientStartupErrorOutput {
     Stdout,
 }
 
+/// Session launch policy used while constructing the harness.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct HarnessSessionLaunch {
+    /// Lifecycle reason announced in `session.started`.
+    pub(crate) reason: tau_proto::SessionStartReason,
+    /// Whether session-owned durable artifacts are suppressed for this process.
+    pub(crate) session_persistence: tau_core::SessionPersistenceMode,
+}
+
+impl HarnessSessionLaunch {
+    /// Returns an error if the requested launch mode is internally
+    /// inconsistent.
+    fn validate(self) -> Result<Self, HarnessError> {
+        if self.session_persistence.is_ephemeral()
+            && matches!(self.reason, tau_proto::SessionStartReason::Resume)
+        {
+            return Err(HarnessError::Participant(
+                "ephemeral sessions cannot resume persisted session state".to_owned(),
+            ));
+        }
+        Ok(self)
+    }
+}
+
 /// Central harness event loop and runtime state.
 ///
 /// `Harness` owns the event bus, live connections, durable session and agent
@@ -1169,12 +1193,18 @@ pub struct Harness {
     /// Runtime state root for this harness. Extension-specific persistent
     /// directories are allocated below this path and sent in Configure.
     pub(crate) state_dir: PathBuf,
-    /// Append-only on-disk session membership store. Owns the folded
-    /// loaded-agent set for each session id, derived from the durable
-    /// membership journal at `<state_dir>/sessions/<session_id>/events.cbor`.
+    /// Session membership store. Owns the folded loaded-agent set for each
+    /// session id, either from the durable membership journal at
+    /// `<state_dir>/sessions/<session_id>/events.cbor` or from the live
+    /// in-memory view for ephemeral sessions.
     pub(crate) store: SessionStore,
     /// Append-only global per-agent transcript store under `<state>/agents`.
     pub(crate) agent_store: AgentStore,
+    /// Session persistence policy. Agent transcripts and user/cache extension
+    /// data remain on their normal persistent paths; ephemeral mode suppresses
+    /// session membership/debug/log artifacts and session-scoped extension
+    /// data.
+    pub(crate) session_persistence: tau_core::SessionPersistenceMode,
     /// The single session this harness owns. UserMessages with a
     /// different `session_id` are rejected. Pi-style: one harness =
     /// one active session at a time. Switching sessions tears the
@@ -1618,6 +1648,9 @@ struct HarnessBaseParts {
     store: SessionStore,
     /// Per-agent transcript store.
     agent_store: AgentStore,
+    /// Persistence policy for session metadata, membership logs, debug event
+    /// traces, per-session stderr logs, and session-scoped extension data.
+    session_persistence: tau_core::SessionPersistenceMode,
     /// Session id the harness is initially bound to.
     current_session_id: SessionId,
     /// Reason associated with the initial session binding.
@@ -1743,6 +1776,7 @@ impl Harness {
             state_dir: parts.state_dir,
             store: parts.store,
             agent_store: parts.agent_store,
+            session_persistence: parts.session_persistence,
             current_session_id: parts.current_session_id,
             current_session_start_reason: parts.current_session_start_reason,
             agent_id_rng: StdRng::from_entropy(),
@@ -1817,7 +1851,14 @@ impl Harness {
         tools: Vec<InProcessTool>,
         eager_session_id: &str,
         eager_session_start_reason: tau_proto::SessionStartReason,
+        session_persistence: tau_core::SessionPersistenceMode,
     ) -> Result<Self, HarnessError> {
+        let launch = HarnessSessionLaunch {
+            reason: eager_session_start_reason,
+            session_persistence,
+        }
+        .validate()?;
+        let session_persistence = launch.session_persistence;
         let state_dir = state_dir.into();
         let sessions_dir = tau_config::settings::sessions_dir_of(&state_dir);
         let (tx, rx) = mpsc::channel();
@@ -1830,7 +1871,11 @@ impl Harness {
         // load on first access. Avoids a startup walk over every
         // historical session dir.
         let agents_dir = state_dir.join("agents");
-        let store = SessionStore::open_lazy(&sessions_dir)?;
+        let store = if session_persistence.is_ephemeral() {
+            SessionStore::open_ephemeral(&sessions_dir)?
+        } else {
+            SessionStore::open_lazy(&sessions_dir)?
+        };
         let agent_store = AgentStore::open_lazy(&agents_dir)?;
 
         let own_pid = std::process::id();
@@ -1912,10 +1957,12 @@ impl Harness {
         }
         let selected_model =
             select_model_for_role(&HashMap::new(), &available_roles, &selected_role);
-        crate::session_cleanup::spawn_session_cleanup(
-            sessions_dir.clone(),
-            harness_settings.session_retention(),
-        );
+        if session_persistence.is_durable() {
+            crate::session_cleanup::spawn_session_cleanup(
+                sessions_dir.clone(),
+                harness_settings.session_retention(),
+            );
+        }
         let mut store = store;
         let _ = store.load_session(eager_session_id)?;
         let mut harness = Self::from_base_parts(HarnessBaseParts {
@@ -1925,8 +1972,9 @@ impl Harness {
             state_dir: state_dir.clone(),
             store,
             agent_store,
+            session_persistence,
             current_session_id: eager_session_id.into(),
-            current_session_start_reason: eager_session_start_reason,
+            current_session_start_reason: launch.reason,
             available_roles,
             available_role_groups,
             custom_prompts,
@@ -1940,19 +1988,18 @@ impl Harness {
             dirs,
         });
 
-        // Debug log lives next to the eager-init session's events file
-        // so the session dir stays self-contained: `events.cbor` +
-        // `events.jsonl` + `meta.json` + `lock`.
-        let _ = harness.enable_debug_log(&sessions_dir.join(eager_session_id))?;
-        // Record metadata so `-r` can find this session even before it has
-        // membership entries. Also acquires the flock on
-        // `<sessions_dir>/<eager_session_id>/lock`.
-        harness.store.record_session_meta(eager_session_id)?;
+        if session_persistence.is_durable() {
+            // Debug log lives next to the eager-init session's events file
+            // so the session dir stays self-contained: `events.cbor` +
+            // `events.jsonl` + `meta.json` + `lock`.
+            let _ = harness.enable_debug_log(&sessions_dir.join(eager_session_id))?;
+            // Record metadata so `-r` can find this session even before it has
+            // membership entries. Also acquires the flock on
+            // `<sessions_dir>/<eager_session_id>/lock`.
+            harness.store.record_session_meta(eager_session_id)?;
+        }
 
-        if matches!(
-            eager_session_start_reason,
-            tau_proto::SessionStartReason::Resume
-        ) {
+        if matches!(launch.reason, tau_proto::SessionStartReason::Resume) {
             harness.rehydrate_agents_from_session();
         }
         harness.publish_current_session_dir();
@@ -1991,7 +2038,7 @@ impl Harness {
         // Every past agent that touched this code has "noticed" that
         // the CLI uses `chat-<ts>` session ids and concluded the eager
         // init is wasted work. It isn't. Please resist the urge.
-        harness.start_session_init(eager_session_id.into(), eager_session_start_reason);
+        harness.start_session_init(eager_session_id.into(), launch.reason);
         harness.wait_for_session_init()?;
         Ok(harness)
     }
@@ -2003,6 +2050,7 @@ impl Harness {
         dirs: tau_config::settings::TauDirs,
         eager_session_id: &str,
         eager_session_start_reason: tau_proto::SessionStartReason,
+        session_persistence: tau_core::SessionPersistenceMode,
     ) -> Result<Self, HarnessError> {
         let mut initial_client_error_stream = None;
         Self::from_config_with_initial_client(
@@ -2010,7 +2058,10 @@ impl Harness {
             state_dir,
             dirs,
             eager_session_id,
-            eager_session_start_reason,
+            HarnessSessionLaunch {
+                reason: eager_session_start_reason,
+                session_persistence,
+            },
             None,
             &mut initial_client_error_stream,
         )
@@ -2022,10 +2073,12 @@ impl Harness {
         state_dir: impl Into<PathBuf>,
         dirs: tau_config::settings::TauDirs,
         eager_session_id: &str,
-        eager_session_start_reason: tau_proto::SessionStartReason,
+        launch: HarnessSessionLaunch,
         initial_client: Option<InitialClient>,
         initial_client_error_stream: &mut Option<InitialClientStartupErrorOutput>,
     ) -> Result<(Self, Option<ConnectionId>), HarnessError> {
+        let launch = launch.validate()?;
+        let session_persistence = launch.session_persistence;
         let startup_started_at = Instant::now();
         tracing::debug!(target: "tau_harness::startup", eager_session_id, "constructing harness from config");
         let state_dir = state_dir.into();
@@ -2039,7 +2092,11 @@ impl Harness {
         ));
         tracing::debug!(target: "tau_harness::startup", elapsed_ms = startup_started_at.elapsed().as_millis(), "opening session store");
         let agents_dir = state_dir.join("agents");
-        let store = SessionStore::open_lazy(&sessions_dir)?;
+        let store = if session_persistence.is_ephemeral() {
+            SessionStore::open_ephemeral(&sessions_dir)?
+        } else {
+            SessionStore::open_lazy(&sessions_dir)?
+        };
         let agent_store = AgentStore::open_lazy(&agents_dir)?;
         tracing::debug!(target: "tau_harness::startup", elapsed_ms = startup_started_at.elapsed().as_millis(), "session store opened");
 
@@ -2074,10 +2131,12 @@ impl Harness {
         let selected_model =
             select_model_for_role(&HashMap::new(), &available_roles, &selected_role);
         tracing::debug!(target: "tau_harness::startup", selected_model = ?selected_model, elapsed_ms = startup_started_at.elapsed().as_millis(), "harness settings loaded");
-        crate::session_cleanup::spawn_session_cleanup(
-            sessions_dir.clone(),
-            harness_settings.session_retention(),
-        );
+        if session_persistence.is_durable() {
+            crate::session_cleanup::spawn_session_cleanup(
+                sessions_dir.clone(),
+                harness_settings.session_retention(),
+            );
+        }
         let mut store = store;
         let _ = store.load_session(eager_session_id)?;
         let mut harness = Self::from_base_parts(HarnessBaseParts {
@@ -2087,8 +2146,9 @@ impl Harness {
             state_dir: state_dir.clone(),
             store,
             agent_store,
+            session_persistence,
             current_session_id: eager_session_id.into(),
-            current_session_start_reason: eager_session_start_reason,
+            current_session_start_reason: launch.reason,
             available_roles,
             available_role_groups,
             custom_prompts,
@@ -2102,18 +2162,17 @@ impl Harness {
             dirs,
         });
 
-        let _ = harness.enable_debug_log(&sessions_dir.join(eager_session_id))?;
-        tracing::debug!(target: "tau_harness::startup", elapsed_ms = startup_started_at.elapsed().as_millis(), "debug event log enabled");
-        // Record metadata so `-r` can find this session even before it has
-        // membership entries. Also acquires the flock on
-        // `<sessions_dir>/<eager_session_id>/lock`.
-        harness.store.record_session_meta(eager_session_id)?;
-        tracing::debug!(target: "tau_harness::startup", elapsed_ms = startup_started_at.elapsed().as_millis(), "session metadata recorded");
+        if session_persistence.is_durable() {
+            let _ = harness.enable_debug_log(&sessions_dir.join(eager_session_id))?;
+            tracing::debug!(target: "tau_harness::startup", elapsed_ms = startup_started_at.elapsed().as_millis(), "debug event log enabled");
+            // Record metadata so `-r` can find this session even before it has
+            // membership entries. Also acquires the flock on
+            // `<sessions_dir>/<eager_session_id>/lock`.
+            harness.store.record_session_meta(eager_session_id)?;
+            tracing::debug!(target: "tau_harness::startup", elapsed_ms = startup_started_at.elapsed().as_millis(), "session metadata recorded");
+        }
 
-        if matches!(
-            eager_session_start_reason,
-            tau_proto::SessionStartReason::Resume
-        ) {
+        if matches!(launch.reason, tau_proto::SessionStartReason::Resume) {
             harness.rehydrate_agents_from_session();
         }
         let initial_client_id = if let Some(initial_client) = initial_client {
@@ -2158,7 +2217,7 @@ impl Harness {
         harness.emit_missing_default_role(missing_default_role);
         tracing::debug!(target: "tau_harness::startup", elapsed_ms = startup_started_at.elapsed().as_millis(), "config checks complete");
 
-        harness.start_session_init(eager_session_id.into(), eager_session_start_reason);
+        harness.start_session_init(eager_session_id.into(), launch.reason);
         tracing::debug!(target: "tau_harness::startup", elapsed_ms = startup_started_at.elapsed().as_millis(), "session init started");
         if let Err(error) = harness.wait_for_session_init() {
             harness.send_startup_disconnect_to_initial_client(initial_client_id.as_ref(), &error);
@@ -2196,11 +2255,15 @@ impl Harness {
                 _ => ClientKind::Tool,
             };
 
-            let log_path =
-                extension_stderr_log_path(sessions_dir, eager_session_id, &ext_config.name)
-                    .map_err(|error| HarnessError::Participant(error.to_string()))?;
-            let spawned = match spawn_supervised(ext_config, kind.clone(), Some(log_path), &self.tx)
-            {
+            let log_path = if self.session_persistence.is_ephemeral() {
+                None
+            } else {
+                Some(
+                    extension_stderr_log_path(sessions_dir, eager_session_id, &ext_config.name)
+                        .map_err(|error| HarnessError::Participant(error.to_string()))?,
+                )
+            };
+            let spawned = match spawn_supervised(ext_config, kind.clone(), log_path, &self.tx) {
                 Ok(spawned) => spawned,
                 Err(error) if !ext_config.require => {
                     tracing::warn!(
@@ -3681,11 +3744,7 @@ impl Harness {
         scope: tau_proto::ExtensionDataScope,
         op: tau_proto::ExtensionDataRequestOp,
     ) -> Result<tau_proto::ExtensionDataValue, ExtensionDataError> {
-        let root = self
-            .extension_data_scope_root(connection_id, scope)
-            .map_err(|message| {
-                ExtensionDataError::new(tau_proto::ExtensionDataErrorKind::Io, message)
-            })?;
+        let root = self.extension_data_scope_root(connection_id, scope)?;
         match op {
             tau_proto::ExtensionDataRequestOp::ReadFile { path } => {
                 run_extension_data_read_file(&root, path.into_string())
@@ -3715,29 +3774,53 @@ impl Harness {
         &self,
         connection_id: &str,
         scope: tau_proto::ExtensionDataScope,
-    ) -> Result<PathBuf, String> {
+    ) -> Result<PathBuf, ExtensionDataError> {
         let name = self
             .extensions
             .entries
             .get(connection_id)
             .map(|entry| entry.name.as_str())
-            .ok_or_else(|| "unknown extension connection".to_owned())?;
-        tau_config::settings::validate_extension_name(name).map_err(|error| error.to_string())?;
+            .ok_or_else(|| {
+                ExtensionDataError::new(
+                    tau_proto::ExtensionDataErrorKind::Io,
+                    "unknown extension connection",
+                )
+            })?;
+        tau_config::settings::validate_extension_name(name).map_err(|error| {
+            ExtensionDataError::new(
+                tau_proto::ExtensionDataErrorKind::InvalidPath,
+                error.to_string(),
+            )
+        })?;
         match scope {
             tau_proto::ExtensionDataScope::Session => {
+                if self.session_persistence.is_ephemeral() {
+                    return Err(ExtensionDataError::new(
+                        tau_proto::ExtensionDataErrorKind::Permission,
+                        "session-scoped extension data is unavailable in ephemeral sessions",
+                    ));
+                }
                 Ok(tau_config::settings::sessions_dir_of(&self.state_dir)
                     .join(self.current_session_id.as_str())
                     .join("ext")
                     .join("data")
                     .join(name))
             }
-            tau_proto::ExtensionDataScope::User => {
-                tau_config::settings::extension_state_dir_of(&self.state_dir, name)
-                    .map_err(|error| error.to_string())
-            }
+            tau_proto::ExtensionDataScope::User => tau_config::settings::extension_state_dir_of(
+                &self.state_dir,
+                name,
+            )
+            .map_err(|error| {
+                ExtensionDataError::new(tau_proto::ExtensionDataErrorKind::Io, error.to_string())
+            }),
             tau_proto::ExtensionDataScope::Cache => dirs::cache_dir()
                 .map(|dir| dir.join("tau").join("ext").join(name))
-                .ok_or_else(|| "could not determine user cache directory".to_owned()),
+                .ok_or_else(|| {
+                    ExtensionDataError::new(
+                        tau_proto::ExtensionDataErrorKind::Io,
+                        "could not determine user cache directory",
+                    )
+                }),
         }
     }
 
@@ -6159,12 +6242,18 @@ impl Harness {
             }),
         );
 
-        let log_path = extension_stderr_log_path(
-            &self.sessions_dir(),
-            self.current_session_id.as_str(),
-            &config.name,
-        )
-        .map_err(|error| HarnessError::Participant(error.to_string()))?;
+        let log_path = if self.session_persistence.is_ephemeral() {
+            None
+        } else {
+            Some(
+                extension_stderr_log_path(
+                    &self.sessions_dir(),
+                    self.current_session_id.as_str(),
+                    &config.name,
+                )
+                .map_err(|error| HarnessError::Participant(error.to_string()))?,
+            )
+        };
         tracing::info!(
             target: "tau_harness::startup",
             extension = %config.name,
@@ -6173,7 +6262,7 @@ impl Harness {
             attempt,
             "respawning extension",
         );
-        let spawned = spawn_supervised(&config, kind.clone(), Some(log_path), &self.tx)?;
+        let spawned = spawn_supervised(&config, kind.clone(), log_path, &self.tx)?;
         let new_connection_id = spawned.connection_id.clone();
         tracing::info!(
             target: "tau_harness::startup",
@@ -8113,27 +8202,41 @@ impl Harness {
         }
         self.publish_delegate_roles_context();
 
-        // Record session metadata + acquire the new session dir flock before
-        // anyone tries to write to its membership log.
-        self.store.record_session_meta(new_session_id.as_str())?;
+        if self.session_persistence.is_durable() {
+            // Record session metadata + acquire the new session dir flock before
+            // anyone tries to write to its membership log.
+            self.store.record_session_meta(new_session_id.as_str())?;
 
-        // Send the new debug log to the new session's dir, so each
-        // session is self-contained.
-        let _ = self.enable_debug_log(&self.sessions_dir().join(new_session_id.as_str()));
+            // Send the new debug log to the new session's dir, so each
+            // session is self-contained.
+            let _ = self.enable_debug_log(&self.sessions_dir().join(new_session_id.as_str()));
+        }
         self.start_session_init(new_session_id.clone(), reason);
         self.publish_current_session_dir();
         Ok(())
     }
 
     fn publish_current_session_dir(&mut self) {
-        self.publish_event(
-            None,
-            Event::HarnessSessionDir(tau_proto::HarnessSessionDir {
-                session_id: self.current_session_id.clone(),
-                path: self.sessions_dir().join(self.current_session_id.as_str()),
-                status: session_dir_status_from_reason(self.current_session_start_reason),
-            }),
-        );
+        self.publish_event(None, self.current_session_dir_event());
+    }
+
+    pub(crate) fn current_session_dir_event(&self) -> Event {
+        let (path, status) = if self.session_persistence.is_ephemeral() {
+            (
+                PathBuf::from("<ephemeral>"),
+                tau_proto::SessionDirStatus::Ephemeral,
+            )
+        } else {
+            (
+                self.sessions_dir().join(self.current_session_id.as_str()),
+                session_dir_status_from_reason(self.current_session_start_reason),
+            )
+        };
+        Event::HarnessSessionDir(tau_proto::HarnessSessionDir {
+            session_id: self.current_session_id.clone(),
+            path,
+            status,
+        })
     }
 
     fn sessions_dir(&self) -> PathBuf {
@@ -11476,6 +11579,7 @@ impl Harness {
             tau_config::settings::TauDirs::default(),
             "s1",
             tau_proto::SessionStartReason::Initial,
+            tau_core::SessionPersistenceMode::Durable,
         )?;
         harness.selected_model = Some("test/model".parse().expect("model id"));
 

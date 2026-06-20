@@ -1118,6 +1118,7 @@ fn echo_harness_with_dirs_and_start_reason(
         }],
         session_id,
         start_reason,
+        tau_core::SessionPersistenceMode::Durable,
     )?;
     h.agent_id_rng = super::deterministic_agent_id_rng();
     h.enable_echo_tool_for_tests();
@@ -1129,12 +1130,38 @@ fn echo_harness_with_dirs_and_start_reason(
 }
 
 fn quiet_provider_harness(state_dir: impl Into<PathBuf>) -> Result<Harness, HarnessError> {
-    quiet_provider_harness_with_start_reason(state_dir, tau_proto::SessionStartReason::Initial)
+    quiet_provider_harness_with_start_reason_and_persistence(
+        state_dir,
+        tau_proto::SessionStartReason::Initial,
+        tau_core::SessionPersistenceMode::Durable,
+    )
 }
 
 fn quiet_provider_harness_with_start_reason(
     state_dir: impl Into<PathBuf>,
     start_reason: tau_proto::SessionStartReason,
+) -> Result<Harness, HarnessError> {
+    quiet_provider_harness_with_start_reason_and_persistence(
+        state_dir,
+        start_reason,
+        tau_core::SessionPersistenceMode::Durable,
+    )
+}
+
+fn quiet_provider_harness_ephemeral(
+    state_dir: impl Into<PathBuf>,
+) -> Result<Harness, HarnessError> {
+    quiet_provider_harness_with_start_reason_and_persistence(
+        state_dir,
+        tau_proto::SessionStartReason::Initial,
+        tau_core::SessionPersistenceMode::Ephemeral,
+    )
+}
+
+fn quiet_provider_harness_with_start_reason_and_persistence(
+    state_dir: impl Into<PathBuf>,
+    start_reason: tau_proto::SessionStartReason,
+    session_persistence: tau_core::SessionPersistenceMode,
 ) -> Result<Harness, HarnessError> {
     fn quiet_provider_runner(r: UnixStream, w: UnixStream) -> Result<(), String> {
         fn inner(r: UnixStream, w: UnixStream) -> Result<(), Box<dyn std::error::Error>> {
@@ -1194,6 +1221,7 @@ fn quiet_provider_harness_with_start_reason(
         Vec::new(),
         "s1",
         start_reason,
+        session_persistence,
     )?;
     h.agent_id_rng = super::deterministic_agent_id_rng();
     Ok(h)

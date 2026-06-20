@@ -21,9 +21,8 @@ pub(crate) fn run_prompt_stdin(
     attach: bool,
     session_status: SessionLaunchStatus,
     startup_role: Option<&str>,
-    role_cli_overrides: &[tau_config::settings::RoleCliOverride],
-    extension_cli_overrides: &[tau_config::settings::ExtensionCliOverride],
-    harness_config_overrides: &[tau_config::settings::HarnessConfigCliOverride],
+    cli_overrides: DaemonCliOverrides<'_>,
+    ephemeral: bool,
 ) -> Result<(), CliError> {
     let mut prompt = String::new();
     io::stdin().read_to_string(&mut prompt)?;
@@ -35,7 +34,7 @@ pub(crate) fn run_prompt_stdin(
     let daemon_output = if attach {
         None
     } else {
-        Some(daemon_output_for_session(session_id)?)
+        Some(daemon_output_for_session(session_id, ephemeral)?)
     };
     let mut daemon = resolve_daemon(
         attach,
@@ -43,11 +42,8 @@ pub(crate) fn run_prompt_stdin(
         session_status,
         daemon_output,
         startup_role,
-        DaemonCliOverrides {
-            role: role_cli_overrides,
-            extension: extension_cli_overrides,
-            harness_config: harness_config_overrides,
-        },
+        cli_overrides,
+        ephemeral,
     )?;
     let (mut reader, mut writer) = connect_prompt_stdin_client(&mut daemon)?;
     let role = prompt_stdin_role(startup_role);

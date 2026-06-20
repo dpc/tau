@@ -475,6 +475,9 @@ pub struct RenderedToolDefinitionsResult {
 #[serde(rename_all = "snake_case")]
 pub enum ExtensionDataScope {
     /// Session-local data under `<session_data_dir>/ext/data/<ext-name>`.
+    ///
+    /// The harness rejects this scope in session-ephemeral mode because there
+    /// is no durable session data directory.
     Session,
     /// User-persistent data under `~/.local/state/tau/ext/<ext-name>`.
     User,
@@ -656,7 +659,7 @@ pub enum ExtensionDataErrorKind {
     NotFile,
     /// Requested directory operation targeted a file or non-directory.
     NotDir,
-    /// Permission denied by the operating system.
+    /// Permission denied by the operating system or harness policy.
     Permission,
     /// Operation exceeded a harness-enforced resource quota.
     QuotaExceeded,

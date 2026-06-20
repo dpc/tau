@@ -50,7 +50,7 @@ pub(crate) fn parse_agent_id(value: impl AsRef<str>) -> AgentId {
 }
 
 pub use crate::daemon::{
-    EmbeddedOptions, InteractionOutcome, ServeOptions, SessionLaunchStatus,
+    EPHEMERAL_ENV, EmbeddedOptions, InteractionOutcome, ServeOptions, SessionLaunchStatus,
     get_daemon_rendered_system_prompt, get_daemon_rendered_tool_definitions, run_component,
     run_component_with_internal_tools, run_component_with_internal_tools_and_initial_ui_stdio,
     run_daemon, run_daemon_with_config, run_embedded_message, run_embedded_message_with_options,

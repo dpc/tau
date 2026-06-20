@@ -30,7 +30,7 @@ use tau_proto::{
     HarnessModelsAvailable, HarnessOutputMessage, HarnessRoleSelected, HarnessRolesAvailable,
 };
 
-use super::{agent_runtime_state_for_turn, session_dir_status_from_reason};
+use super::agent_runtime_state_for_turn;
 use crate::extension::ExtensionState;
 use crate::harness::{Harness, selector_matches_event};
 use crate::model::{
@@ -235,11 +235,7 @@ impl Harness {
     /// transcript catch-up path above comes from durable agent logs, while this
     /// method reconstructs current harness status snapshots.
     pub(crate) fn replay_harness_notice(&mut self, client_id: &str, selectors: &[EventSelector]) {
-        let session_dir_event = Event::HarnessSessionDir(tau_proto::HarnessSessionDir {
-            session_id: self.current_session_id.clone(),
-            path: self.sessions_dir().join(self.current_session_id.as_str()),
-            status: session_dir_status_from_reason(self.current_session_start_reason),
-        });
+        let session_dir_event = self.current_session_dir_event();
         if selector_matches_event(selectors, &session_dir_event) {
             let _ = self.bus.send_to(
                 client_id,

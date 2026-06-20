@@ -58,6 +58,145 @@ fn embedded_mode_returns_provider_response_and_persists_history() {
     );
 }
 
+/// Guards the `--ephemeral` persistence boundary: the harness must not create
+/// per-session metadata, locks, debug traces, or stderr log directories, while
+/// the current product decision keeps agent transcripts durable.
+#[test]
+fn ephemeral_daemon_suppresses_session_artifacts_but_keeps_agents() {
+    let td = TempDir::new().expect("tempdir");
+    let sock = td.path().join("daemon.sock");
+    let sp = td.path().join("state");
+
+    let server = thread::spawn({
+        let sock = sock.clone();
+        let sp = sp.clone();
+        move || {
+            run_daemon_with_echo(
+                sock,
+                sp,
+                "s1",
+                ServeOptions {
+                    max_clients: Some(1),
+                    session_persistence: tau_core::SessionPersistenceMode::Ephemeral,
+                    ..Default::default()
+                },
+            )
+        }
+    });
+
+    wait_for_socket(&sock);
+
+    let response = send_daemon_message(&sock, "s1", "hello").expect("prompt");
+    assert_eq!(response, "hello");
+
+    server.join().expect("join").expect("daemon clean exit");
+
+    let sessions_dir = tau_config::settings::sessions_dir_of(&sp);
+    assert!(
+        !sessions_dir.join("s1").exists(),
+        "ephemeral session must not create a per-session state directory"
+    );
+
+    let agent_store = AgentStore::open(sp.join("agents")).expect("agent store");
+    let persisted_nodes: usize = agent_store
+        .agents()
+        .into_iter()
+        .map(|agent| agent.nodes().len())
+        .sum();
+    assert!(
+        2 <= persisted_nodes,
+        "agent transcripts remain persistent in session-ephemeral mode"
+    );
+}
+
+/// Documents the live protocol contract for session-ephemeral harnesses:
+/// subscribers see an explicit ephemeral marker instead of a real session path.
+#[test]
+fn ephemeral_harness_reports_display_only_session_dir() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let h = quiet_provider_harness_ephemeral(&sp).expect("harness");
+
+    let session_dirs: Vec<_> = event_log_events(&h)
+        .into_iter()
+        .filter_map(|event| match event {
+            Event::HarnessSessionDir(session_dir) => Some(session_dir),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        session_dirs.iter().any(|session_dir| {
+            session_dir.session_id == "s1"
+                && session_dir.status == tau_proto::SessionDirStatus::Ephemeral
+                && session_dir.path.as_os_str() == "<ephemeral>"
+        }),
+        "ephemeral harness must announce a display-only session dir marker: {session_dirs:?}"
+    );
+}
+
+/// Prevents session-scoped extension data from punching a persistence hole in
+/// `--ephemeral`: the request is rejected before helpers can create
+/// `<state>/sessions/<session_id>/ext/data/...`.
+#[test]
+fn ephemeral_harness_rejects_session_scoped_extension_data() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let h = quiet_provider_harness_ephemeral(&sp).expect("harness");
+    let provider_connection = h
+        .extension_connection_id("provider")
+        .expect("provider connection")
+        .to_owned();
+
+    let error = h
+        .run_extension_data_request(
+            provider_connection.as_str(),
+            tau_proto::ExtensionDataScope::Session,
+            tau_proto::ExtensionDataRequestOp::WriteFile {
+                path: tau_proto::ExtensionDataPath::from("notes.txt"),
+                contents: b"secret-ish session data".to_vec(),
+            },
+        )
+        .expect_err("session-scoped extension data should be unavailable");
+
+    assert_eq!(error.kind, tau_proto::ExtensionDataErrorKind::Permission);
+    assert!(
+        error.message.contains("ephemeral"),
+        "error should explain the ephemeral boundary: {}",
+        error.message
+    );
+    assert!(
+        !tau_config::settings::sessions_dir_of(&sp)
+            .join("s1")
+            .exists(),
+        "rejected session-scoped extension data must not create a session directory"
+    );
+}
+
+/// Keeps the harness API aligned with the CLI: an ephemeral launch must start a
+/// fresh runtime-only session instead of claiming to resume durable session
+/// state that it deliberately does not load or update.
+#[test]
+fn ephemeral_harness_rejects_resume_launch() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let error = match quiet_provider_harness_with_start_reason_and_persistence(
+        &sp,
+        tau_proto::SessionStartReason::Resume,
+        tau_core::SessionPersistenceMode::Ephemeral,
+    ) {
+        Ok(mut harness) => {
+            let _ = harness.shutdown();
+            panic!("ephemeral resume should be rejected");
+        }
+        Err(error) => error,
+    };
+
+    assert!(
+        error.to_string().contains("cannot resume"),
+        "error should explain the invalid launch mode: {error}"
+    );
+}
+
 /// Ensures daemon mode accepts multiple later socket clients and persists both
 /// cycles.
 #[test]
