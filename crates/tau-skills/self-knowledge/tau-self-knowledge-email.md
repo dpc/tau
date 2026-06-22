@@ -37,6 +37,12 @@ extensions:
     enable: true
     secrets:
       mail_password: {}
+      google_mail_client_id:
+        optional: true
+      google_mail_client_secret:
+        optional: true
+      google_mail_refresh_token:
+        optional: true
     config:
       email:
         enable: true
@@ -58,6 +64,16 @@ extensions:
             auth:
               method: password
               password_secret: mail_password
+              # Gmail OAuth alternative:
+              # method: oauth2
+              # provider: google
+              # client_id_secret: google_mail_client_id
+              # client_secret_secret: google_mail_client_secret
+              # Omit refresh_token_secret and authorize with:
+              #   /email auth google start work
+              #   /email auth google finish work
+              # Or set refresh_token_secret for a manually provisioned token:
+              # refresh_token_secret: google_mail_refresh_token
             folders:
               allow:
                 - INBOX
@@ -83,8 +99,8 @@ Important fields:
 - IMAP default: port 993 with `tls: required`.
 - SMTP default: port 587 with `tls: start_tls`.
 - Password auth requires `auth.password_secret` and a matching declaration under `extensions.std-pim.secrets`.
-- `auth.method: none` is only for SMTP-only or relay-style setups; IMAP requires password auth.
-- OAuth and command-based password sources are not implemented or are rejected.
+- `auth.method: none` is only for SMTP-only or relay-style setups; IMAP requires password auth or Gmail OAuth.
+- Gmail OAuth uses `auth.method: oauth2`, `auth.provider: google`, `auth.client_id_secret`, optional `auth.client_secret_secret`, and either `/email auth google start <account>` plus `/email auth google finish <account>` for private state-owned refresh tokens or `auth.refresh_token_secret` for a manual refresh token. Other generic OAuth providers are not implied. Deprecated command-based password/token sources are rejected.
 - List-style email outputs use Tau's header-then-payload tool-output shape: headers such as `format: ...` first, one empty line, then plain unindented rows. Message rows start with UID. Pass that row UID as `email_id` to message-targeting split tools. Folder ids are opaque tokens returned by `email_list_folders`; pass them back exactly as returned, without decoding or rewriting them. Attachment metadata inside `email_read` is structured detail metadata, not a top-level list response.
 
 
@@ -192,12 +208,20 @@ Whitelist actions:
 - `/email out whitelist <pattern>` persists an outgoing pattern.
 - These actions only affect policy when `policy.allow_state_policy_extensions` is true.
 
+Google OAuth actions:
+
+- `/email auth google start <account>` prints a Google device-flow URL and user code for Gmail OAuth.
+- `/email auth google finish <account>` completes OAuth and stores the refresh token privately.
+- These actions are separate from `policy.allow_state_policy_extensions`; that policy controls whitelist actions only. `/email auth google` is refused for accounts that set `auth.refresh_token_secret`, because those accounts use a manually supplied token secret.
+
 
 ## Troubleshooting
 
 If the extension is unavailable, check both enable flags: `extensions.std-pim.enable` and `extensions.std-pim.config.email.enable`.
 
 If startup reports a missing secret, confirm the secret is declared under `extensions.std-pim.secrets` and that the secret file or `TAU_SECRET_*` variable uses the same normalized name.
+
+For Gmail OAuth, the Google device flow requests the broad `https://mail.google.com/` scope. Use a Google OAuth client of type `TVs and Limited Input devices`; other client types can fail with `invalid_client: Invalid client type`. Some organizations require an internal or org-approved OAuth client before Gmail scopes can be granted. If `refresh_token_secret` is configured, `/email auth google` refuses to overwrite it; remove that field first to use state-owned OAuth.
 
 If all incoming reads require approval, inspect raw message headers and configure `trusted_authserv_ids` for the trusted provider's authserv-id. With `incoming_auth.require: true` and no trusted authserv-id, fail-closed approval is expected.
 

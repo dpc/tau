@@ -3,6 +3,12 @@ extensions:
     enable: true
     secrets:
       mail_password: {}
+      google_mail_client_id:
+        optional: true
+      google_mail_client_secret:
+        optional: true
+      google_mail_refresh_token:
+        optional: true
       personal_calendar_ics_url: {}
       google_calendar_client_id: {}
       google_calendar_client_secret: {}
@@ -27,6 +33,16 @@ extensions:
             auth:
               method: password
               password_secret: mail_password
+              # Gmail OAuth alternative:
+              # method: oauth2
+              # provider: google
+              # client_id_secret: google_mail_client_id
+              # client_secret_secret: google_mail_client_secret
+              # Omit refresh_token_secret and authorize with:
+              #   /email auth google start work
+              #   /email auth google finish work
+              # Or set refresh_token_secret for a manually provisioned token.
+              # refresh_token_secret: google_mail_refresh_token
             folders:
               allow:
                 - INBOX

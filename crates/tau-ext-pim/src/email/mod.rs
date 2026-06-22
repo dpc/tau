@@ -43,6 +43,9 @@ const EMAIL_LOG_TITLE_MAX_CHARS: usize = 80;
 const ACCESS_FULL: &str = "full";
 const ACCESS_PREVIEW: &str = "preview";
 const ACCESS_NONE: &str = "none";
+const GOOGLE_AUTH_SCHEMA: u32 = 1;
+const GOOGLE_AUTH_PENDING_SCHEMA: u32 = 1;
+const MAX_GOOGLE_AUTH_FIELD_CHARS: usize = 4096;
 
 use tau_proto::{
     ACTION_SCHEMA_VERSION, ActionArg, ActionArgKind, ActionChoice, ActionCommand, ActionError,
@@ -284,7 +287,7 @@ impl Default for SmtpConfig {
     }
 }
 
-/// Authentication method for password-style account credentials.
+/// Authentication method for account credentials.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum AuthMethod {
@@ -295,9 +298,16 @@ pub enum AuthMethod {
     Command,
     /// Do not configure SMTP authentication. IMAP still requires a password.
     None,
-    /// OAuth is parsed for forward compatibility but not implemented yet.
-    #[serde(alias = "oauth2_token")]
+    /// Google OAuth2/XOAUTH2 authentication.
     Oauth2,
+}
+
+/// OAuth2 provider for an email account.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum EmailOauth2Provider {
+    /// Google Gmail IMAP/SMTP using XOAUTH2.
+    Google,
 }
 
 /// Authentication configuration. Secrets are loaded at use time and are never
@@ -317,6 +327,14 @@ pub struct AuthConfig {
     pub password_command: Option<Vec<String>>,
     /// Deprecated OAuth token command placeholder.
     pub oauth2_token_command: Option<Vec<String>>,
+    /// OAuth2 provider. The MVP supports only `google`.
+    pub provider: Option<EmailOauth2Provider>,
+    /// Secret containing the Google OAuth client id.
+    pub client_id_secret: Option<String>,
+    /// Optional secret containing the Google OAuth client secret.
+    pub client_secret_secret: Option<String>,
+    /// Optional secret containing a manually provisioned Google refresh token.
+    pub refresh_token_secret: Option<String>,
 }
 
 /// Folder visibility policy for an account.
@@ -522,6 +540,14 @@ pub struct ValidatedAuthConfig {
     pub method: AuthMethod,
     /// Name of the Tau secret containing the password.
     pub password_secret: Option<String>,
+    /// OAuth2 provider for OAuth accounts.
+    pub provider: Option<EmailOauth2Provider>,
+    /// Secret containing the Google OAuth client id.
+    pub client_id_secret: Option<String>,
+    /// Optional secret containing the Google OAuth client secret.
+    pub client_secret_secret: Option<String>,
+    /// Optional secret containing a pre-provisioned Google refresh token.
+    pub refresh_token_secret: Option<String>,
 }
 
 impl ValidatedAccount {
@@ -622,8 +648,44 @@ fn validate_auth_config(
         return Err(migration_error(account_id, "auth.method command"));
     }
     if matches!(config.method, AuthMethod::Oauth2) {
+        if config.password_secret.is_some() {
+            return Err(format!(
+                "account `{account_id}` auth.password_secret is only valid for password auth"
+            ));
+        }
+        if config.provider != Some(EmailOauth2Provider::Google) {
+            return Err(format!(
+                "account `{account_id}` auth.provider must be google for oauth2 email auth"
+            ));
+        }
+        let client_id_secret = config.client_id_secret.ok_or_else(|| {
+            format!(
+                "account `{account_id}` auth.client_id_secret is required for oauth2 google auth"
+            )
+        })?;
+        validate_secret_name(account_id, "auth.client_id_secret", &client_id_secret)?;
+        if let Some(secret) = &config.client_secret_secret {
+            validate_secret_name(account_id, "auth.client_secret_secret", secret)?;
+        }
+        if let Some(secret) = &config.refresh_token_secret {
+            validate_secret_name(account_id, "auth.refresh_token_secret", secret)?;
+        }
+        return Ok(Some(ValidatedAuthConfig {
+            method: config.method,
+            password_secret: None,
+            provider: config.provider,
+            client_id_secret: Some(client_id_secret),
+            client_secret_secret: config.client_secret_secret,
+            refresh_token_secret: config.refresh_token_secret,
+        }));
+    }
+    if config.provider.is_some()
+        || config.client_id_secret.is_some()
+        || config.client_secret_secret.is_some()
+        || config.refresh_token_secret.is_some()
+    {
         return Err(format!(
-            "account `{account_id}` oauth2 authentication is not implemented; migrate token sources to Tau secrets when OAuth support is added"
+            "account `{account_id}` OAuth fields require auth.method oauth2"
         ));
     }
     if matches!(config.method, AuthMethod::Password) && config.password_secret.is_none() {
@@ -632,15 +694,17 @@ fn validate_auth_config(
         ));
     }
     if let Some(secret) = &config.password_secret
-        && secret.trim().is_empty()
+        && let Err(message) = validate_secret_name(account_id, "auth.password_secret", secret)
     {
-        return Err(format!(
-            "account `{account_id}` auth.password_secret must not be empty"
-        ));
+        return Err(message);
     }
     Ok(Some(ValidatedAuthConfig {
         method: config.method,
         password_secret: config.password_secret,
+        provider: None,
+        client_id_secret: None,
+        client_secret_secret: None,
+        refresh_token_secret: None,
     }))
 }
 
@@ -648,6 +712,10 @@ fn inactive_auth_config(config: Option<AuthConfig>) -> Option<ValidatedAuthConfi
     config.map(|config| ValidatedAuthConfig {
         method: config.method,
         password_secret: config.password_secret,
+        provider: config.provider,
+        client_id_secret: config.client_id_secret,
+        client_secret_secret: config.client_secret_secret,
+        refresh_token_secret: config.refresh_token_secret,
     })
 }
 
@@ -672,12 +740,25 @@ fn validate_account_auth_support(
             "account `{account_id}` auth.method none is not supported for IMAP accounts"
         )),
         None => Err(format!(
-            "account `{account_id}` IMAP configuration requires password auth with auth.password_secret"
+            "account `{account_id}` IMAP configuration requires auth.method password or oauth2"
         )),
-        Some(AuthMethod::Oauth2) => Err(format!(
-            "account `{account_id}` oauth2 authentication is not implemented"
-        )),
+        Some(AuthMethod::Oauth2) => Ok(()),
     }
+}
+
+fn validate_secret_name(account_id: &str, field: &str, value: &str) -> Result<(), String> {
+    if value.trim().is_empty() {
+        return Err(format!("account `{account_id}` {field} must not be empty"));
+    }
+    if !value
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
+    {
+        return Err(format!(
+            "account `{account_id}` {field} may only contain ASCII letters, digits, '_', '-', '.'"
+        ));
+    }
+    Ok(())
 }
 
 fn validate_incoming_auth_policy(
@@ -732,6 +813,32 @@ fn validate_config_secrets(
                     "account `{}` auth.password_secret `{secret}` was not provided in Configure.secrets; declare it under the enabled extension's secrets",
                     account.id
                 ));
+            }
+        } else if matches!(auth.method, AuthMethod::Oauth2) {
+            let client_id_secret = auth.client_id_secret.as_deref().ok_or_else(|| {
+                format!(
+                    "account `{}` auth.client_id_secret is required for oauth2 auth",
+                    account.id
+                )
+            })?;
+            for (field, secret) in [
+                ("auth.client_id_secret", Some(client_id_secret)),
+                (
+                    "auth.client_secret_secret",
+                    auth.client_secret_secret.as_deref(),
+                ),
+                (
+                    "auth.refresh_token_secret",
+                    auth.refresh_token_secret.as_deref(),
+                ),
+            ] {
+                let Some(secret) = secret else { continue };
+                if !secrets.contains_key(secret) {
+                    return Err(format!(
+                        "account `{}` {field} `{secret}` was not provided in Configure.secrets; declare it under the enabled extension's secrets",
+                        account.id
+                    ));
+                }
             }
         }
     }
@@ -1035,6 +1142,75 @@ pub struct StatePattern {
     pub note: Option<String>,
 }
 
+/// Stored OAuth authorization for one Gmail email account.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub(crate) struct EmailGoogleStoredAuth {
+    /// Stored auth schema version.
+    pub(crate) schema: u32,
+    /// Configured email account id.
+    pub(crate) account: String,
+    /// Google OAuth refresh token.
+    pub(crate) refresh_token: String,
+}
+
+impl EmailGoogleStoredAuth {
+    /// Build a stored OAuth auth record.
+    pub(crate) fn new(account: &str, refresh_token: &str) -> Self {
+        Self {
+            schema: GOOGLE_AUTH_SCHEMA,
+            account: account.to_owned(),
+            refresh_token: refresh_token.to_owned(),
+        }
+    }
+}
+
+/// Pending Google device authorization request for one email account.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub(crate) struct EmailGooglePendingAuth {
+    /// Pending auth schema version.
+    pub(crate) schema: u32,
+    /// Configured email account id.
+    pub(crate) account: String,
+    /// Google OAuth device code. This is never shown back to the user.
+    pub(crate) device_code: String,
+    /// User-facing code entered on Google's verification page.
+    pub(crate) user_code: String,
+    /// Google verification URL for the user to open.
+    pub(crate) verification_uri: String,
+    /// Unix timestamp in milliseconds when this request expires.
+    pub(crate) expires_at_unix_ms: u64,
+    /// Suggested polling interval from Google.
+    pub(crate) interval_secs: u64,
+}
+
+impl EmailGooglePendingAuth {
+    /// Build a pending Google device authorization record.
+    pub(crate) fn new(
+        account: &str,
+        device_code: &str,
+        user_code: &str,
+        verification_uri: &str,
+        expires_in_secs: u64,
+        interval_secs: u64,
+    ) -> Self {
+        Self {
+            schema: GOOGLE_AUTH_PENDING_SCHEMA,
+            account: account.to_owned(),
+            device_code: device_code.to_owned(),
+            user_code: user_code.to_owned(),
+            verification_uri: verification_uri.to_owned(),
+            expires_at_unix_ms: current_unix_millis()
+                .saturating_add(expires_in_secs.saturating_mul(1000)),
+            interval_secs,
+        }
+    }
+
+    /// Return true when this pending authorization has expired.
+    pub(crate) fn expired(&self) -> bool {
+        self.expires_at_unix_ms <= current_unix_millis()
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct EmailLogEntry {
     schema: u32,
@@ -1071,6 +1247,7 @@ fn is_false(value: &bool) -> bool {
 }
 
 /// Persistent policy/approval state under the injected extension storage root.
+#[derive(Clone)]
 pub struct StateStore {
     storage: SharedStorage,
     /// Root state directory provided by the harness, kept for tests and
@@ -1223,8 +1400,74 @@ impl StateStore {
         Ok(entries.into_iter().collect())
     }
 
+    /// Store a Google OAuth refresh token for one email account.
+    pub(crate) fn save_google_refresh_token(
+        &self,
+        account: &str,
+        refresh_token: &str,
+    ) -> Result<(), String> {
+        let auth = EmailGoogleStoredAuth::new(account, refresh_token);
+        validate_google_stored_auth(&auth, Some(account))?;
+        self.write_json(&self.google_auth_path(account), &auth)
+    }
+
+    /// Load a stored Google OAuth refresh token for one email account.
+    pub(crate) fn google_refresh_token(&self, account: &str) -> Result<Option<String>, String> {
+        let path = self.google_auth_path(account);
+        let Some(bytes) = self.read_file(&path)? else {
+            return Ok(None);
+        };
+        let auth: EmailGoogleStoredAuth = serde_json::from_slice(&bytes)
+            .map_err(|error| format!("failed to parse {path}: {error}"))?;
+        validate_google_stored_auth(&auth, Some(account))?;
+        Ok(Some(auth.refresh_token))
+    }
+
+    /// Store a pending Google device authorization request for email.
+    pub(crate) fn save_pending_google_auth(
+        &self,
+        pending: &EmailGooglePendingAuth,
+    ) -> Result<(), String> {
+        validate_google_pending_auth(pending, Some(&pending.account))?;
+        self.write_json(&self.google_pending_auth_path(&pending.account), pending)
+    }
+
+    /// Load a pending Google device authorization request for email.
+    pub(crate) fn pending_google_auth(
+        &self,
+        account: &str,
+    ) -> Result<EmailGooglePendingAuth, String> {
+        let path = self.google_pending_auth_path(account);
+        let Some(bytes) = self.read_file(&path)? else {
+            return Err(format!(
+                "no pending Google authorization for account `{account}`"
+            ));
+        };
+        let pending: EmailGooglePendingAuth = serde_json::from_slice(&bytes)
+            .map_err(|error| format!("failed to parse {path}: {error}"))?;
+        validate_google_pending_auth(&pending, Some(account))?;
+        Ok(pending)
+    }
+
+    /// Clear a pending Google device authorization request for email.
+    pub(crate) fn clear_pending_google_auth(&self, account: &str) -> Result<(), String> {
+        self.storage
+            .delete_file(&self.google_pending_auth_path(account))
+    }
+
     fn email_log_path(&self) -> String {
         "logs/email.jsonl".to_owned()
+    }
+
+    fn google_auth_path(&self, account: &str) -> String {
+        format!("auth/email/google/{}.json", account_file_stem(account))
+    }
+
+    fn google_pending_auth_path(&self, account: &str) -> String {
+        format!(
+            "auth/email/google-pending/{}.json",
+            account_file_stem(account)
+        )
     }
 
     fn load_allow_file(&self, name: &str) -> Result<Vec<AddressPattern>, String> {
@@ -1530,6 +1773,65 @@ fn validate_approval_id(id: &str) -> Result<(), String> {
         return Err(format!("invalid approval id `{id}`"));
     }
     Ok(())
+}
+
+fn validate_google_stored_auth(
+    auth: &EmailGoogleStoredAuth,
+    expected_account: Option<&str>,
+) -> Result<(), String> {
+    if auth.schema != GOOGLE_AUTH_SCHEMA {
+        return Err("Google auth has unsupported schema".to_owned());
+    }
+    validate_google_auth_account(&auth.account, expected_account)?;
+    if !is_safe_persisted_line(&auth.refresh_token, MAX_GOOGLE_AUTH_FIELD_CHARS) {
+        return Err("Google auth refresh token contains unsafe text".to_owned());
+    }
+    Ok(())
+}
+
+fn validate_google_pending_auth(
+    pending: &EmailGooglePendingAuth,
+    expected_account: Option<&str>,
+) -> Result<(), String> {
+    if pending.schema != GOOGLE_AUTH_PENDING_SCHEMA {
+        return Err("pending Google auth has unsupported schema".to_owned());
+    }
+    validate_google_auth_account(&pending.account, expected_account)?;
+    for (field, value) in [
+        ("device_code", pending.device_code.as_str()),
+        ("user_code", pending.user_code.as_str()),
+        ("verification_uri", pending.verification_uri.as_str()),
+    ] {
+        if !is_safe_persisted_line(value, MAX_GOOGLE_AUTH_FIELD_CHARS) {
+            return Err(format!(
+                "pending Google auth field `{field}` contains unsafe text"
+            ));
+        }
+    }
+    if pending.expires_at_unix_ms == 0 || pending.interval_secs == 0 {
+        return Err("pending Google auth timing is invalid".to_owned());
+    }
+    Ok(())
+}
+
+fn validate_google_auth_account(
+    account: &str,
+    expected_account: Option<&str>,
+) -> Result<(), String> {
+    if account.trim().is_empty() || !is_safe_persisted_line(account, MAX_DISPLAY_LINE_CHARS) {
+        return Err("Google auth account id is invalid".to_owned());
+    }
+    if let Some(expected_account) = expected_account
+        && account != expected_account
+    {
+        return Err("Google auth account id mismatch".to_owned());
+    }
+    Ok(())
+}
+
+fn account_file_stem(account: &str) -> String {
+    let digest = blake3::hash(account.as_bytes());
+    digest.to_hex()[..16].to_owned()
 }
 
 fn is_safe_persisted_line(value: &str, max_chars: usize) -> bool {
@@ -1883,6 +2185,32 @@ pub trait EmailBackend {
     ) -> Result<String, String>;
     /// Send one already-approved outgoing message.
     fn send_message(&mut self, message: &OutgoingMessage) -> Result<String, String>;
+    /// Start Google OAuth authorization and return device_code, user_code,
+    /// verification_uri, expires_in_secs, and interval_secs.
+    fn start_google_device_auth(
+        &self,
+        _account: &str,
+    ) -> Result<(String, String, String, u64, u64), String> {
+        Err("auth_error: Google email OAuth is not available in this backend".to_owned())
+    }
+    /// Finish Google OAuth authorization and return refresh_token,
+    /// access_token, and expires_in_secs.
+    fn finish_google_device_auth(
+        &self,
+        _account: &str,
+        _device_code: &str,
+    ) -> Result<(String, Option<String>, Option<u64>), String> {
+        Err("auth_error: Google email OAuth is not available in this backend".to_owned())
+    }
+    /// Prime any backend access-token cache with a fresh Google access token.
+    fn prime_google_access_token_cache(
+        &self,
+        _account: &str,
+        _access_token: String,
+        _expires_in_secs: Option<u64>,
+    ) -> Result<(), String> {
+        Ok(())
+    }
 }
 
 /// One page of backend message metadata.
@@ -3779,6 +4107,12 @@ impl<B: EmailBackend> Engine<B> {
 
     fn dispatch_action(&mut self, action_id: &str, argv: &[String]) -> Result<String, String> {
         match action_id {
+            "email.auth.google.start" => {
+                require_one_arg(argv).and_then(|account| self.action_auth_google_start(account))
+            }
+            "email.auth.google.finish" => {
+                require_one_arg(argv).and_then(|account| self.action_auth_google_finish(account))
+            }
             "email.out.list" => require_no_args(argv).and_then(|()| self.action_out_list()),
             "email.out.open" => require_one_arg(argv).and_then(|id| self.action_out_open(id)),
             "email.out.approve" => self.action_out_approve_args(argv),
@@ -3796,6 +4130,96 @@ impl<B: EmailBackend> Engine<B> {
             }
             "email.log.last" => parse_log_limit(argv).and_then(|limit| self.action_log_last(limit)),
             _ => Err(format!("unsupported email action `{action_id}`")),
+        }
+    }
+
+    fn action_auth_google_start(&self, account_id: &str) -> Result<String, String> {
+        let account = self.google_oauth_state_account(account_id)?;
+        let (device_code, user_code, verification_uri, expires_in_secs, interval_secs) =
+            self.backend.start_google_device_auth(&account.id)?;
+        let pending = EmailGooglePendingAuth::new(
+            &account.id,
+            &device_code,
+            &user_code,
+            &verification_uri,
+            expires_in_secs,
+            interval_secs,
+        );
+        self.state.save_pending_google_auth(&pending)?;
+        Ok(format!(
+            "Google email authorization started for account {}.\nOpen this URL:\n{}\nEnter this code:\n{}\nThen run:\n/email auth google finish {}\nExpires in {} second(s). If authorization is still pending, wait at least {} second(s) before retrying finish.",
+            safe_display_line(&account.id),
+            safe_display_line(&verification_uri),
+            safe_display_line(&user_code),
+            safe_display_line(&account.id),
+            expires_in_secs,
+            interval_secs
+        ))
+    }
+
+    fn action_auth_google_finish(&mut self, account_id: &str) -> Result<String, String> {
+        let account_id = self.google_oauth_state_account(account_id)?.id.clone();
+        let pending = self.state.pending_google_auth(&account_id)?;
+        if pending.expired() {
+            self.state.clear_pending_google_auth(&account_id)?;
+            return Err(format!(
+                "Google authorization for account `{}` expired; run `/email auth google start {}` again",
+                safe_display_line(&account_id),
+                safe_display_line(&account_id)
+            ));
+        }
+        let (refresh_token, access_token, expires_in_secs) = self
+            .backend
+            .finish_google_device_auth(&account_id, &pending.device_code)?;
+        self.state
+            .save_google_refresh_token(&account_id, &refresh_token)?;
+        self.state.clear_pending_google_auth(&account_id)?;
+        if let Some(access_token) = access_token
+            && let Err(message) = self.backend.prime_google_access_token_cache(
+                &account_id,
+                access_token,
+                expires_in_secs,
+            )
+        {
+            tracing::warn!(target: LOG_TARGET, error = %message, "failed to prime Google email access token cache");
+        }
+        Ok(format!(
+            "Google email authorization stored for account {}.",
+            safe_display_line(&account_id)
+        ))
+    }
+
+    fn google_oauth_state_account(&self, account_id: &str) -> Result<&ValidatedAccount, String> {
+        if !self.config.enable {
+            return Err("email extension is disabled".to_owned());
+        }
+        let account = self
+            .config
+            .accounts
+            .get(account_id)
+            .ok_or_else(|| format!("email account `{account_id}` not found"))?;
+        if !account.enable {
+            return Err(format!("email account `{account_id}` is disabled"));
+        }
+        let Some(auth) = &account.auth else {
+            return Err(format!(
+                "email account `{account_id}` has no auth configuration"
+            ));
+        };
+        match (
+            auth.method,
+            auth.provider,
+            auth.refresh_token_secret.as_deref(),
+        ) {
+            (AuthMethod::Oauth2, Some(EmailOauth2Provider::Google), None) => Ok(account),
+            (AuthMethod::Oauth2, Some(EmailOauth2Provider::Google), Some(_)) => Err(format!(
+                "email account `{}` already uses refresh_token_secret; remove it before using `/email auth google`",
+                account.id
+            )),
+            _ => Err(format!(
+                "email account `{}` is not configured for oauth2 provider google",
+                account.id
+            )),
         }
     }
 
@@ -4456,10 +4880,11 @@ impl RuntimeState {
         let state_dir = state_dir.unwrap_or_default();
         let config = cfg.validate()?;
         validate_config_secrets(&config, &secrets)?;
-        let backend = RealEmailBackend::new(&config, secrets)?;
+        let state = StateStore::open_with_storage(state_dir, storage)?;
+        let backend = RealEmailBackend::new(&config, secrets, state.clone())?;
         Ok(Engine {
             config,
-            state: StateStore::open_with_storage(state_dir, storage)?,
+            state,
             backend,
         })
     }
@@ -4866,6 +5291,28 @@ pub fn email_action_schema() -> ActionSchema {
             action_id: None,
             args: Vec::new(),
             children: vec![
+                group(
+                    "auth",
+                    "Email account authorization actions",
+                    vec![group(
+                        "google",
+                        "Google Gmail OAuth device authorization",
+                        vec![
+                            leaf(
+                                "start",
+                                "email.auth.google.start",
+                                "Start Google email authorization",
+                                vec![string_arg("account", "Email account id")],
+                            ),
+                            leaf(
+                                "finish",
+                                "email.auth.google.finish",
+                                "Finish Google email authorization",
+                                vec![string_arg("account", "Email account id")],
+                            ),
+                        ],
+                    )],
+                ),
                 group(
                     "out",
                     "Outgoing email approval actions",

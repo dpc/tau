@@ -1,7 +1,5 @@
 use std::collections::BTreeMap;
 use std::io::Read;
-use std::sync::Mutex;
-use std::time::{Duration, Instant};
 
 use serde_json::{Map, Value, json};
 use tau_proto::SecretValue;
@@ -11,42 +9,27 @@ use url::form_urlencoded;
 
 use super::config::{ValidatedAccount, ValidatedBackendConfig};
 use super::ics_feed::TimeRange;
+use crate::google_oauth::{
+    GoogleDeviceAuthFinish, GoogleDeviceAuthStart, GoogleOauthClient, GoogleOauthSecretConfig,
+    google_http_agent,
+};
+#[cfg(test)]
+use crate::google_oauth::{
+    google_oauth_error_message, parse_access_token_response, parse_device_auth_start,
+};
 
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
-const GOOGLE_TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
-const GOOGLE_DEVICE_CODE_URL: &str = "https://oauth2.googleapis.com/device/code";
 const GOOGLE_OAUTH_SCOPE: &str = "https://www.googleapis.com/auth/calendar";
 const GOOGLE_CALENDAR_API_BASE: &str = "https://www.googleapis.com/calendar/v3";
 const GOOGLE_SEND_UPDATES: &str = "all";
 const MAX_ERROR_BODY_BYTES: usize = 4096;
 const MAX_JSON_BODY_BYTES: usize = 1024 * 1024;
 const MAX_PAGE_TOKEN_CHARS: usize = 4096;
-const MAX_OAUTH_FIELD_CHARS: usize = 4096;
-const TOKEN_CACHE_SKEW: Duration = Duration::from_secs(60);
 const GOOGLE_CURSOR_PREFIX: &str = "google:";
 
 /// Read/write-capable Google Calendar API backend.
 pub struct GoogleBackend {
-    secrets: BTreeMap<String, SecretValue>,
     agent: ureq::Agent,
-    access_token_cache: Mutex<BTreeMap<String, CachedAccessToken>>,
-}
-
-struct CachedAccessToken {
-    access_token: String,
-    expires_at: Instant,
-}
-
-struct GoogleOauthConfig<'a> {
-    client_id_secret: &'a str,
-    client_secret_secret: Option<&'a str>,
-    refresh_token_secret: Option<&'a str>,
-}
-
-#[derive(Debug)]
-struct GoogleAccessToken {
-    access_token: String,
-    expires_in_secs: Option<u64>,
+    oauth: GoogleOauthClient,
 }
 
 /// One Google calendar visible to the account.
@@ -104,30 +87,6 @@ pub struct GoogleEventPage {
     pub next_cursor: Option<String>,
 }
 
-/// User-facing information returned by Google device authorization start.
-pub struct GoogleDeviceAuthStart {
-    /// Provider device code used only by the extension to finish auth.
-    pub device_code: String,
-    /// User code to enter on Google's verification page.
-    pub user_code: String,
-    /// Verification URL to open manually.
-    pub verification_uri: String,
-    /// Number of seconds before the device authorization expires.
-    pub expires_in_secs: u64,
-    /// Suggested seconds to wait before retrying the finish action.
-    pub interval_secs: u64,
-}
-
-/// Tokens returned by Google after device authorization completes.
-pub struct GoogleDeviceAuthFinish {
-    /// Long-lived refresh token to store in private calendar state.
-    pub refresh_token: String,
-    /// Short-lived access token that can be primed into the in-memory cache.
-    pub access_token: Option<String>,
-    /// Seconds until the optional access token expires.
-    pub expires_in_secs: Option<u64>,
-}
-
 /// Event fields used by Google create/update requests.
 #[derive(Default)]
 pub struct GoogleEventWrite<'a> {
@@ -170,19 +129,9 @@ enum GoogleBoundary {
 impl GoogleBackend {
     /// Build a backend using the extension-authorized secret set.
     pub fn new(secrets: BTreeMap<String, SecretValue>) -> Self {
-        let tls_config = ureq::tls::TlsConfig::builder()
-            .root_certs(ureq::tls::RootCerts::PlatformVerifier)
-            .build();
-        let config = ureq::Agent::config_builder()
-            .timeout_global(Some(REQUEST_TIMEOUT))
-            .http_status_as_error(false)
-            .tls_config(tls_config)
-            .build();
-        let agent = ureq::Agent::new_with_config(config);
         Self {
-            secrets,
-            agent,
-            access_token_cache: Mutex::new(BTreeMap::new()),
+            agent: google_http_agent(),
+            oauth: GoogleOauthClient::new(secrets),
         }
     }
 
@@ -192,24 +141,7 @@ impl GoogleBackend {
         account: &ValidatedAccount,
     ) -> Result<GoogleDeviceAuthStart, String> {
         let config = google_oauth_config(account)?;
-        let client_id = self.secret(config.client_id_secret)?;
-        let mut body = form_urlencoded::Serializer::new(String::new());
-        body.append_pair("client_id", &client_id);
-        body.append_pair("scope", GOOGLE_OAUTH_SCOPE);
-        let mut response = self
-            .agent
-            .post(GOOGLE_DEVICE_CODE_URL)
-            .content_type("application/x-www-form-urlencoded")
-            .send(body.finish())
-            .map_err(|error| format!("starting Google authorization failed: {error}"))?;
-        if !response.status().is_success() {
-            return Err(google_oauth_http_error(
-                "starting Google authorization",
-                &mut response,
-            ));
-        }
-        let text = read_limited_body(&mut response, "Google device authorization response")?;
-        parse_device_auth_start(&text)
+        self.oauth.start_device_auth(config, GOOGLE_OAUTH_SCOPE)
     }
 
     /// Finish Google device authorization after the user approves it in the
@@ -220,39 +152,7 @@ impl GoogleBackend {
         device_code: &str,
     ) -> Result<GoogleDeviceAuthFinish, String> {
         let config = google_oauth_config(account)?;
-        let client_id = self.secret(config.client_id_secret)?;
-        let mut body = form_urlencoded::Serializer::new(String::new());
-        body.append_pair("client_id", &client_id);
-        body.append_pair("device_code", device_code);
-        body.append_pair("grant_type", "urn:ietf:params:oauth:grant-type:device_code");
-        if let Some(secret_name) = config.client_secret_secret {
-            body.append_pair("client_secret", &self.secret(secret_name)?);
-        }
-        let mut response = self
-            .agent
-            .post(GOOGLE_TOKEN_URL)
-            .content_type("application/x-www-form-urlencoded")
-            .send(body.finish())
-            .map_err(|error| format!("finishing Google authorization failed: {error}"))?;
-        if !response.status().is_success() {
-            return Err(google_oauth_http_error(
-                "finishing Google authorization",
-                &mut response,
-            ));
-        }
-        let text = read_limited_body(&mut response, "Google device token response")?;
-        let json: Value = serde_json::from_str(&text)
-            .map_err(|error| format!("Google device token response was not JSON: {error}"))?;
-        let refresh_token =
-            required_oauth_string(&json, "refresh_token", "Google device token response")?
-                .to_owned();
-        let access_token = optional_oauth_string(&json, "access_token")?.map(str::to_owned);
-        let expires_in_secs = optional_oauth_u64(&json, "expires_in")?;
-        Ok(GoogleDeviceAuthFinish {
-            refresh_token,
-            access_token,
-            expires_in_secs,
-        })
+        self.oauth.finish_device_auth(config, device_code)
     }
 
     /// Prime the access token cache from a freshly completed OAuth flow.
@@ -262,7 +162,8 @@ impl GoogleBackend {
         access_token: String,
         expires_in_secs: Option<u64>,
     ) -> Result<(), String> {
-        self.cache_access_token(account_id, access_token, expires_in_secs)
+        self.oauth
+            .prime_access_token_cache(account_id, access_token, expires_in_secs)
     }
 
     /// List Google calendars allowed by account policy.
@@ -500,104 +401,10 @@ impl GoogleBackend {
         account: &ValidatedAccount,
         stored_refresh_token: Option<&str>,
     ) -> Result<String, String> {
-        if let Some(access_token) = self.cached_access_token(&account.id)? {
-            return Ok(access_token);
-        }
         let config = google_oauth_config(account)?;
-        let client_id = self.secret(config.client_id_secret)?;
-        let refresh_token =
-            self.refresh_token(config.refresh_token_secret, stored_refresh_token)?;
-        let access_token =
-            self.exchange_refresh_token(&client_id, config.client_secret_secret, &refresh_token)?;
-        self.cache_access_token(
-            &account.id,
-            access_token.access_token.clone(),
-            access_token.expires_in_secs,
-        )?;
-        Ok(access_token.access_token)
-    }
-
-    fn refresh_token(
-        &self,
-        secret_name: Option<&str>,
-        stored_refresh_token: Option<&str>,
-    ) -> Result<String, String> {
-        if let Some(refresh_token) = stored_refresh_token {
-            return Ok(refresh_token.to_owned());
-        }
-        let Some(secret_name) = secret_name else {
-            return Err("Google calendar account is not authorized; run `/calendar auth google start <account>` and then `/calendar auth google finish <account>`".to_owned());
-        };
-        self.secret(secret_name)
-    }
-
-    fn exchange_refresh_token(
-        &self,
-        client_id: &str,
-        client_secret_secret: Option<&str>,
-        refresh_token: &str,
-    ) -> Result<GoogleAccessToken, String> {
-        let mut body = form_urlencoded::Serializer::new(String::new());
-        body.append_pair("client_id", client_id);
-        body.append_pair("refresh_token", refresh_token);
-        body.append_pair("grant_type", "refresh_token");
-        if let Some(secret_name) = client_secret_secret {
-            body.append_pair("client_secret", &self.secret(secret_name)?);
-        }
-        let mut response = self
-            .agent
-            .post(GOOGLE_TOKEN_URL)
-            .content_type("application/x-www-form-urlencoded")
-            .send(body.finish())
-            .map_err(|error| format!("refreshing Google access token failed: {error}"))?;
-        if !response.status().is_success() {
-            return Err(google_oauth_http_error(
-                "refreshing Google access token",
-                &mut response,
-            ));
-        }
-        let text = read_limited_body(&mut response, "Google token response")?;
-        parse_access_token_response(&text, "Google token response")
-    }
-
-    fn cached_access_token(&self, account_id: &str) -> Result<Option<String>, String> {
-        let now = Instant::now();
-        let mut cache = self
-            .access_token_cache
-            .lock()
-            .map_err(|_| "Google access token cache lock was poisoned".to_owned())?;
-        if let Some(cached) = cache.get(account_id)
-            && now + TOKEN_CACHE_SKEW < cached.expires_at
-        {
-            return Ok(Some(cached.access_token.clone()));
-        }
-        cache.remove(account_id);
-        Ok(None)
-    }
-
-    fn cache_access_token(
-        &self,
-        account_id: &str,
-        access_token: String,
-        expires_in_secs: Option<u64>,
-    ) -> Result<(), String> {
-        let expires_in_secs = expires_in_secs.unwrap_or(3600);
-        if expires_in_secs <= TOKEN_CACHE_SKEW.as_secs() {
-            return Ok(());
-        }
-        let expires_at = Instant::now() + Duration::from_secs(expires_in_secs);
-        let mut cache = self
-            .access_token_cache
-            .lock()
-            .map_err(|_| "Google access token cache lock was poisoned".to_owned())?;
-        cache.insert(
-            account_id.to_owned(),
-            CachedAccessToken {
-                access_token,
-                expires_at,
-            },
-        );
-        Ok(())
+        let message = "Google calendar account is not authorized; run `/calendar auth google start <account>` and then `/calendar auth google finish <account>`";
+        self.oauth
+            .access_token(&account.id, config, stored_refresh_token, message)
     }
 
     fn get_json(&self, url: &str, access_token: &str) -> Result<Value, String> {
@@ -664,16 +471,9 @@ impl GoogleBackend {
         serde_json::from_str(&text)
             .map_err(|error| format!("Google Calendar API response was not JSON: {error}"))
     }
-
-    fn secret(&self, name: &str) -> Result<String, String> {
-        self.secrets
-            .get(name)
-            .map(|secret| secret.expose_secret().to_owned())
-            .ok_or_else(|| format!("Google calendar secret `{name}` was not provided"))
-    }
 }
 
-fn google_oauth_config(account: &ValidatedAccount) -> Result<GoogleOauthConfig<'_>, String> {
+fn google_oauth_config(account: &ValidatedAccount) -> Result<GoogleOauthSecretConfig<'_>, String> {
     let Some(ValidatedBackendConfig::Google {
         client_id_secret,
         client_secret_secret,
@@ -686,137 +486,11 @@ fn google_oauth_config(account: &ValidatedAccount) -> Result<GoogleOauthConfig<'
             account.id
         ));
     };
-    Ok(GoogleOauthConfig {
+    Ok(GoogleOauthSecretConfig {
         client_id_secret,
         client_secret_secret: client_secret_secret.as_deref(),
         refresh_token_secret: refresh_token_secret.as_deref(),
     })
-}
-
-fn parse_device_auth_start(text: &str) -> Result<GoogleDeviceAuthStart, String> {
-    let json: Value = serde_json::from_str(text)
-        .map_err(|error| format!("Google device authorization response was not JSON: {error}"))?;
-    let verification_uri = json
-        .get("verification_uri")
-        .or_else(|| json.get("verification_url"))
-        .and_then(Value::as_str)
-        .ok_or_else(|| {
-            "Google device authorization response missing verification_uri".to_owned()
-        })?;
-    let expires_in_secs =
-        required_oauth_u64(&json, "expires_in", "Google device authorization response")?;
-    let interval_secs = optional_oauth_u64(&json, "interval")?.unwrap_or(5);
-    if expires_in_secs == 0 || interval_secs == 0 {
-        return Err("Google device authorization response had invalid timing".to_owned());
-    }
-    Ok(GoogleDeviceAuthStart {
-        device_code: required_oauth_string(
-            &json,
-            "device_code",
-            "Google device authorization response",
-        )?
-        .to_owned(),
-        user_code: required_oauth_string(
-            &json,
-            "user_code",
-            "Google device authorization response",
-        )?
-        .to_owned(),
-        verification_uri: validated_oauth_string(verification_uri, "verification_uri")?.to_owned(),
-        expires_in_secs,
-        interval_secs,
-    })
-}
-
-fn parse_access_token_response(text: &str, context: &str) -> Result<GoogleAccessToken, String> {
-    let json: Value =
-        serde_json::from_str(text).map_err(|error| format!("{context} was not JSON: {error}"))?;
-    Ok(GoogleAccessToken {
-        access_token: required_oauth_string(&json, "access_token", context)?.to_owned(),
-        expires_in_secs: optional_oauth_u64(&json, "expires_in")?,
-    })
-}
-
-fn required_oauth_string<'a>(
-    json: &'a Value,
-    field: &str,
-    context: &str,
-) -> Result<&'a str, String> {
-    let value = json
-        .get(field)
-        .and_then(Value::as_str)
-        .ok_or_else(|| format!("{context} missing {field}"))?;
-    validated_oauth_string(value, field)
-}
-
-fn optional_oauth_string<'a>(json: &'a Value, field: &str) -> Result<Option<&'a str>, String> {
-    let Some(value) = json.get(field) else {
-        return Ok(None);
-    };
-    let value = value
-        .as_str()
-        .ok_or_else(|| format!("Google OAuth field `{field}` was not a string"))?;
-    validated_oauth_string(value, field).map(Some)
-}
-
-fn validated_oauth_string<'a>(value: &'a str, field: &str) -> Result<&'a str, String> {
-    if value.trim().is_empty()
-        || MAX_OAUTH_FIELD_CHARS < value.chars().count()
-        || value.chars().any(char::is_control)
-    {
-        return Err(format!("Google OAuth field `{field}` was invalid"));
-    }
-    Ok(value)
-}
-
-fn required_oauth_u64(json: &Value, field: &str, context: &str) -> Result<u64, String> {
-    optional_oauth_u64(json, field)?.ok_or_else(|| format!("{context} missing {field}"))
-}
-
-fn optional_oauth_u64(json: &Value, field: &str) -> Result<Option<u64>, String> {
-    let Some(value) = json.get(field) else {
-        return Ok(None);
-    };
-    value
-        .as_u64()
-        .map(Some)
-        .ok_or_else(|| format!("Google OAuth field `{field}` was not an integer"))
-}
-
-fn google_oauth_http_error(
-    context: &str,
-    response: &mut ureq::http::Response<ureq::Body>,
-) -> String {
-    let status = response.status().as_u16();
-    let text = read_limited_body(response, context)
-        .unwrap_or_else(|error| format!("failed to read error response: {error}"));
-    let message = google_oauth_error_message(&text).unwrap_or_else(|| sanitize_error_text(&text));
-    format!("{context} returned HTTP {status}: {message}")
-}
-
-fn google_oauth_error_message(text: &str) -> Option<String> {
-    let json: Value = serde_json::from_str(text).ok()?;
-    let error = json.get("error").and_then(Value::as_str)?;
-    let safe_error = sanitize_error_text(error);
-    let message = match error {
-        "authorization_pending" => "Google authorization is still pending; approve it in the browser, then run the finish action again".to_owned(),
-        "slow_down" => "Google asked to slow down; wait before running the finish action again".to_owned(),
-        "expired_token" => "Google authorization expired; run `/calendar auth google start <account>` again".to_owned(),
-        "access_denied" => "Google authorization was denied".to_owned(),
-        _ => {
-            let description = json
-                .get("error_description")
-                .and_then(Value::as_str)
-                .map(sanitize_error_text)
-                .filter(|value| !value.is_empty());
-            if let Some(description) = description {
-                format!("{safe_error}: {description}")
-            } else {
-                safe_error
-            }
-        }
-    };
-    Some(message)
 }
 
 fn api_base(account: &ValidatedAccount) -> Result<&str, String> {

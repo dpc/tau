@@ -22,6 +22,7 @@ Email:
 - read full mail only when policy or exact user approval allows it
 - send, trash, star/unstar, mark read/unread
 - queue unsafe incoming reads and outgoing sends for `/email` approval actions
+- Gmail IMAP/SMTP Google OAuth2/XOAUTH2 via `/email auth google start <account>` and `/email auth google finish <account>`
 - append sanitized audit logs under the extension state directory
 
 Calendar:
@@ -59,13 +60,24 @@ Declare secret names under `extensions.std-pim.secrets`, then provide the values
 ```sh
 mkdir -p ~/.local/state/tau/secrets
 printf '%s\n' 'mail-password-or-app-token' > ~/.local/state/tau/secrets/mail_password.yaml
+printf '%s\n' 'google-mail-oauth-client-id' > ~/.local/state/tau/secrets/google_mail_client_id.yaml
+printf '%s\n' 'google-mail-oauth-client-secret' > ~/.local/state/tau/secrets/google_mail_client_secret.yaml
+# Optional when using auth.refresh_token_secret instead of /email auth google:
+printf '%s\n' 'google-mail-oauth-refresh-token' > ~/.local/state/tau/secrets/google_mail_refresh_token.yaml
 printf '%s\n' 'https://example.com/private.ics' > ~/.local/state/tau/secrets/personal_calendar_ics_url.yaml
 printf '%s\n' 'google-oauth-client-id' > ~/.local/state/tau/secrets/google_calendar_client_id.yaml
 printf '%s\n' 'google-oauth-client-secret' > ~/.local/state/tau/secrets/google_calendar_client_secret.yaml
 chmod 600 ~/.local/state/tau/secrets/*.yaml
 ```
 
-Or for one startup, use `TAU_SECRET_<NAME>`, for example `TAU_SECRET_MAIL_PASSWORD=... tau`. Do not put passwords, refresh tokens, app passwords, or private ICS URLs directly in `harness.yaml`.
+Or for one startup, use `TAU_SECRET_<NAME>`, for example `TAU_SECRET_MAIL_PASSWORD=... tau`. Do not put passwords, refresh tokens, app passwords, OAuth tokens, or private ICS URLs directly in `harness.yaml`.
+
+
+## Google email authorization
+
+For Gmail IMAP/SMTP, set `auth.method: oauth2`, `auth.provider: google`, `auth.client_id_secret`, and optionally `auth.client_secret_secret`. Omit `auth.refresh_token_secret` and authorize with `/email auth google start <account>` then `/email auth google finish <account>`, or set `refresh_token_secret` for a manually provisioned refresh token. The device flow requests the broad `https://mail.google.com/` scope required for Gmail IMAP/SMTP XOAUTH2.
+
+Use a Google OAuth client of type `TVs and Limited Input devices`; desktop, web, Android, and iOS client IDs may fail the device authorization start request with `invalid_client: Invalid client type`. Some organizations require an internal or org-approved OAuth client before Gmail scopes can be granted. If `refresh_token_secret` is set, `/email auth google` refuses to overwrite it; remove that field first to use state-owned OAuth. These OAuth actions are not controlled by `email.policy.allow_state_policy_extensions`; that policy only controls whitelist actions. Access tokens are cached in memory until near expiry and are retried once after IMAP/SMTP authentication failure. Action output never includes refresh or access tokens.
 
 
 ## Google Calendar authorization

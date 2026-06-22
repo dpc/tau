@@ -109,6 +109,12 @@
 #     # removed from the harness environment after startup).
 #     secrets:
 #       personal_mail_password: {}        # required by default
+#       google_mail_client_id:
+#         optional: true
+#       google_mail_client_secret:
+#         optional: true
+#       google_mail_refresh_token:
+#         optional: true
 #       personal_calendar_ics_url: {}
 #       google_calendar_client_id:
 #         optional: true
@@ -132,6 +138,16 @@
 #               # Replace legacy auth.password_env/auth.command/password_command
 #               # with auth.password_secret plus the declaration above.
 #               password_secret: personal_mail_password
+#             # Gmail OAuth2/XOAUTH2 alternative:
+#             # auth:
+#             #   method: oauth2
+#             #   provider: google
+#             #   client_id_secret: google_mail_client_id
+#             #   client_secret_secret: google_mail_client_secret
+#             #   # Omit refresh_token_secret and run:
+#             #   #   /email auth google start personal
+#             #   #   /email auth google finish personal
+#             #   # refresh_token_secret: google_mail_refresh_token
 #       calendar:
 #         enable: true
 #         accounts:

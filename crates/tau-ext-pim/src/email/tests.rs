@@ -89,6 +89,93 @@ struct SpyBackend {
     body_reads: RefCell<usize>,
 }
 
+#[derive(Default)]
+struct OAuthBackend {
+    primed: RefCell<Vec<(String, String, Option<u64>)>>,
+}
+
+impl EmailBackend for OAuthBackend {
+    fn list_folders(&self, _account: &str) -> Result<Vec<BackendFolder>, String> {
+        Ok(Vec::new())
+    }
+
+    fn list_messages(&self, _account: &str, _folder: &str) -> Result<Vec<BackendMessage>, String> {
+        Ok(Vec::new())
+    }
+
+    fn read_message(
+        &self,
+        _account: &str,
+        _folder: &str,
+        _uid: &str,
+    ) -> Result<BackendMessage, String> {
+        Err("not used".to_owned())
+    }
+
+    fn update_message_flags(
+        &mut self,
+        _account: &str,
+        _folder: &str,
+        _uid: &str,
+        _mutation: MessageFlagMutation,
+    ) -> Result<(), String> {
+        Ok(())
+    }
+
+    fn move_message_to_trash(
+        &mut self,
+        _account: &str,
+        _folder: &str,
+        _uid: &str,
+    ) -> Result<String, String> {
+        Ok("Trash".to_owned())
+    }
+
+    fn send_message(&mut self, _message: &OutgoingMessage) -> Result<String, String> {
+        Ok("message-id".to_owned())
+    }
+
+    fn start_google_device_auth(
+        &self,
+        account: &str,
+    ) -> Result<(String, String, String, u64, u64), String> {
+        assert_eq!(account, "work");
+        Ok((
+            "device-secret".to_owned(),
+            "USER-CODE".to_owned(),
+            "https://google.example/device".to_owned(),
+            600,
+            5,
+        ))
+    }
+
+    fn finish_google_device_auth(
+        &self,
+        account: &str,
+        device_code: &str,
+    ) -> Result<(String, Option<String>, Option<u64>), String> {
+        assert_eq!(account, "work");
+        assert_eq!(device_code, "device-secret");
+        Ok((
+            "refresh-secret".to_owned(),
+            Some("access-secret".to_owned()),
+            Some(3600),
+        ))
+    }
+
+    fn prime_google_access_token_cache(
+        &self,
+        account: &str,
+        access_token: String,
+        expires_in_secs: Option<u64>,
+    ) -> Result<(), String> {
+        self.primed
+            .borrow_mut()
+            .push((account.to_owned(), access_token, expires_in_secs));
+        Ok(())
+    }
+}
+
 impl EmailBackend for SpyBackend {
     fn list_folders(&self, _account: &str) -> Result<Vec<BackendFolder>, String> {
         Ok(Vec::new())
@@ -536,6 +623,8 @@ fn publishes_email_action_schema_at_startup() {
     assert_eq!(
         schema.executable_action_ids().expect("ids"),
         vec![
+            "email.auth.google.start".to_owned(),
+            "email.auth.google.finish".to_owned(),
             "email.out.list".to_owned(),
             "email.out.open".to_owned(),
             "email.out.approve".to_owned(),
@@ -556,6 +645,11 @@ fn publishes_email_action_schema_at_startup() {
     let parsed_log = schema.parse_line("/email log last 5").expect("parse log");
     assert_eq!(parsed_log.action_id, "email.log.last");
     assert_eq!(parsed_log.argv, vec!["5".to_owned()]);
+    let parsed_auth = schema
+        .parse_line("/email auth google start work")
+        .expect("parse auth");
+    assert_eq!(parsed_auth.action_id, "email.auth.google.start");
+    assert_eq!(parsed_auth.argv, vec!["work".to_owned()]);
     let default_log = schema
         .parse_line("/email log last")
         .expect("parse default log");
@@ -640,6 +734,213 @@ fn real_backend_config_requires_connection_identity_and_rejects_legacy_auth() {
         .err()
         .expect("IMAP with auth none is rejected");
     assert!(none_auth_error.contains("auth.method none"));
+}
+
+/// Ensures Gmail OAuth config validates Google-scoped secrets while still
+/// rejecting unsupported generic OAuth and legacy command token sources.
+#[test]
+fn google_oauth_config_validation_and_secret_checks() {
+    let mut oauth = cfg();
+    oauth.accounts[0].auth = Some(AuthConfig {
+        method: AuthMethod::Oauth2,
+        provider: Some(EmailOauth2Provider::Google),
+        client_id_secret: Some("google_client_id".to_owned()),
+        client_secret_secret: Some("google_client_secret".to_owned()),
+        refresh_token_secret: None,
+        ..Default::default()
+    });
+    let validated = oauth.clone().validate().expect("google oauth validates");
+    let auth = validated.accounts["work"].auth.as_ref().expect("auth");
+    assert_eq!(auth.method, AuthMethod::Oauth2);
+    assert_eq!(auth.provider, Some(EmailOauth2Provider::Google));
+
+    let secrets = std::collections::BTreeMap::from([
+        (
+            "google_client_id".to_owned(),
+            tau_proto::SecretValue::new("client-id"),
+        ),
+        (
+            "google_client_secret".to_owned(),
+            tau_proto::SecretValue::new("client-secret"),
+        ),
+    ]);
+    validate_config_secrets(&validated, &secrets).expect("state-owned refresh token is allowed");
+
+    let mut manual_refresh = oauth.clone();
+    manual_refresh.accounts[0]
+        .auth
+        .as_mut()
+        .expect("auth")
+        .refresh_token_secret = Some("google_refresh_token".to_owned());
+    let validated_manual = manual_refresh.validate().expect("manual refresh config");
+    let error = validate_config_secrets(&validated_manual, &secrets)
+        .expect_err("configured refresh token secret must be supplied");
+    assert!(error.contains("auth.refresh_token_secret"));
+
+    let mut missing_provider = oauth.clone();
+    missing_provider.accounts[0]
+        .auth
+        .as_mut()
+        .expect("auth")
+        .provider = None;
+    let error = match missing_provider.validate() {
+        Ok(_) => panic!("provider required"),
+        Err(error) => error,
+    };
+    assert!(error.contains("auth.provider"));
+
+    let mut missing_secret = oauth;
+    missing_secret.accounts[0]
+        .auth
+        .as_mut()
+        .expect("auth")
+        .client_id_secret = None;
+    let error = match missing_secret.validate() {
+        Ok(_) => panic!("client id required"),
+        Err(error) => error,
+    };
+    assert!(error.contains("auth.client_id_secret"));
+
+    let legacy_method = r#"
+enable: true
+accounts:
+  - id: work
+    enable: true
+    from: Alice <alice@company.com>
+    imap: { host: imap.company.com, login: alice@company.com }
+    auth:
+      method: oauth2_token
+      provider: google
+      client_id_secret: google_client_id
+"#;
+    let error = serde_yaml_ng::from_str::<EmailExtensionConfig>(legacy_method)
+        .expect_err("legacy oauth2_token spelling is rejected")
+        .to_string();
+    assert!(error.contains("oauth2_token"), "{error}");
+}
+
+/// Ensures email-owned Google refresh and pending device codes are persisted
+/// under the email namespace and validate embedded account ids on load.
+#[test]
+fn email_google_oauth_state_is_private_and_account_checked() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let state = StateStore::open(temp.path().join("state")).expect("state");
+    state
+        .save_google_refresh_token("work", "refresh-token")
+        .expect("save token");
+    assert_eq!(
+        state.google_refresh_token("work").expect("load token"),
+        Some("refresh-token".to_owned())
+    );
+    assert!(
+        temp.path()
+            .join("state/auth/email/google")
+            .read_dir()
+            .expect("auth dir")
+            .next()
+            .is_some()
+    );
+
+    let pending = EmailGooglePendingAuth::new(
+        "work",
+        "device-code",
+        "USER-CODE",
+        "https://example.test/device",
+        900,
+        5,
+    );
+    state
+        .save_pending_google_auth(&pending)
+        .expect("save pending auth");
+    assert_eq!(
+        state
+            .pending_google_auth("work")
+            .expect("pending")
+            .user_code,
+        "USER-CODE"
+    );
+    assert!(state.pending_google_auth("other").is_err());
+}
+
+/// Ensures `/email auth google` stores only private state secrets, omits
+/// provider device/refresh/access tokens from action output, and primes the
+/// access-token cache after finish.
+#[test]
+fn email_google_oauth_actions_manage_private_state_without_token_output() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut config = cfg();
+    config.accounts[0].auth = Some(AuthConfig {
+        method: AuthMethod::Oauth2,
+        provider: Some(EmailOauth2Provider::Google),
+        client_id_secret: Some("google_client_id".to_owned()),
+        client_secret_secret: Some("google_client_secret".to_owned()),
+        refresh_token_secret: None,
+        ..Default::default()
+    });
+    let state = StateStore::open(temp.path().join("email-state")).expect("state");
+    let mut engine = Engine {
+        config: config.validate().expect("oauth config"),
+        state,
+        backend: OAuthBackend::default(),
+    };
+
+    let start = engine
+        .dispatch_action("email.auth.google.start", &[String::from("work")])
+        .expect("start auth");
+    assert!(start.contains("USER-CODE"));
+    assert!(start.contains("https://google.example/device"));
+    assert!(!start.contains("device-secret"));
+    assert_eq!(
+        engine
+            .state
+            .pending_google_auth("work")
+            .expect("pending auth")
+            .device_code,
+        "device-secret"
+    );
+
+    let finish = engine
+        .dispatch_action("email.auth.google.finish", &[String::from("work")])
+        .expect("finish auth");
+    assert!(!finish.contains("refresh-secret"));
+    assert!(!finish.contains("access-secret"));
+    assert_eq!(
+        engine
+            .state
+            .google_refresh_token("work")
+            .expect("stored refresh token"),
+        Some("refresh-secret".to_owned())
+    );
+    assert!(engine.state.pending_google_auth("work").is_err());
+    assert_eq!(
+        engine.backend.primed.borrow().as_slice(),
+        &[("work".to_owned(), "access-secret".to_owned(), Some(3600))]
+    );
+}
+
+/// Ensures state-owned `/email auth google` refuses accounts that are
+/// explicitly configured to use a manual refresh-token secret.
+#[test]
+fn email_google_oauth_actions_reject_manual_refresh_token_accounts() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut config = cfg();
+    config.accounts[0].auth = Some(AuthConfig {
+        method: AuthMethod::Oauth2,
+        provider: Some(EmailOauth2Provider::Google),
+        client_id_secret: Some("google_client_id".to_owned()),
+        refresh_token_secret: Some("google_refresh_token".to_owned()),
+        ..Default::default()
+    });
+    let mut engine = Engine {
+        config: config.validate().expect("oauth config"),
+        state: StateStore::open(temp.path().join("email-state")).expect("state"),
+        backend: OAuthBackend::default(),
+    };
+
+    let error = engine
+        .dispatch_action("email.auth.google.start", &[String::from("work")])
+        .expect_err("manual refresh-token accounts reject state auth");
+    assert!(error.contains("refresh_token_secret"), "{error}");
 }
 
 #[test]

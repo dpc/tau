@@ -40,6 +40,38 @@ convention (for example `ext_<extension-instance>_cwd`); trusted extensions, UIs
 and interceptors that can emit protocol events can attempt to write any metadata
 key subject to harness validation.
 
+## PIM extension
+
+`std-pim` / `tau-ext-pim` is disabled by default because it bridges external
+email and calendar providers into Tau. Email messages, calendar events, folder
+names, calendar names, MIME headers, provider errors, ICS feeds, and Google API
+responses are untrusted data and can contain prompt injection, terminal control
+bytes, spoofing content, or huge payloads.
+
+PIM credentials are local secrets. Mail passwords, app passwords, OAuth client
+secrets, OAuth refresh tokens, access tokens, pending device codes, and private
+ICS URLs must come from Tau secrets or private extension state and must not be
+placed in model-visible output, action output, audit logs, tracing, notices, or
+config examples. Google email/calendar OAuth actions may display only the
+verification URL and user code; refresh tokens and access tokens stay private.
+Accounts configured with manual `refresh_token_secret` values must refuse
+state-owned OAuth actions so the extension does not overwrite secret ownership.
+
+Incoming email body reads are fail-closed behind policy or exact user approval.
+The extension may consume trusted provider-added `Authentication-Results`
+metadata for sender policy, but it does not cryptographically verify DKIM
+itself and raw authentication headers are not model-visible. Outgoing email
+approval must avoid partial sends, stale approvals, and duplicate sends. In
+particular, OAuth retry may retry authentication before SMTP message submission,
+but must not retry an entire message after SMTP submission may have begun.
+
+Calendar writes should require approval by default, keep provider concurrency
+tokens such as Google ETags internal, and avoid exposing private event details
+unless policy allows them. Email folder ids and calendar ids are model-visible
+opaque ids returned by list tools; do not document or expose internal encoding
+details in prompts, tool descriptions, docs, or self-knowledge intended for the
+model.
+
 ## Core shell extension
 
 `std-shell` / `tau-ext-shell` is Tau's local filesystem and subprocess boundary. Its tools can read local files, mutate files, and execute host commands with the user's permissions. Treat shell commands, user `!` commands, and model-requested filesystem writes as local code/data access rather than sandboxed operations.

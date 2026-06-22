@@ -17,6 +17,7 @@ use tau_proto::{
 
 pub mod calendar;
 pub mod email;
+mod google_oauth;
 mod opaque_id;
 mod storage;
 

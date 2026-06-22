@@ -8,12 +8,13 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_imap::imap_proto::types::NameAttribute;
 use async_imap::types::Flag;
-use async_imap::{Client, Session};
+use async_imap::{Authenticator, Client, Session};
 use futures_util::TryStreamExt;
 use lettre::message::Mailbox;
 use lettre::message::header::ContentType as LettreContentType;
-use lettre::transport::smtp::authentication::Credentials;
-use lettre::transport::smtp::client::{CertificateStore, Tls, TlsParameters};
+use lettre::transport::smtp::authentication::{Credentials, Mechanism};
+use lettre::transport::smtp::client::{AsyncSmtpConnection, CertificateStore, Tls, TlsParameters};
+use lettre::transport::smtp::extension::ClientId;
 use lettre::{AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor};
 use mail_parser::{Address as ParsedAddress, MessageParser, MimeHeaders};
 use rustls::pki_types::ServerName;
@@ -27,9 +28,11 @@ use tokio_rustls::client::TlsStream;
 
 use super::{
     AuthMethod, AuthenticationResultsEvidence, BackendAttachment, BackendFolder, BackendMessage,
-    BackendMessagePage, EmailBackend, MessageFlagMutation, OutgoingMessage, READ_BODY_MAX_BYTES,
-    TlsMode, ValidatedAuthConfig, ValidatedConfig, ValidatedImapConfig, ValidatedSmtpConfig,
+    BackendMessagePage, EmailBackend, EmailOauth2Provider, MessageFlagMutation, OutgoingMessage,
+    READ_BODY_MAX_BYTES, StateStore, TlsMode, ValidatedAuthConfig, ValidatedConfig,
+    ValidatedImapConfig, ValidatedSmtpConfig,
 };
+use crate::google_oauth::{GoogleOauthClient, GoogleOauthSecretConfig};
 
 pub(super) const READ_MESSAGE_FETCH_MAX_BYTES: usize = READ_BODY_MAX_BYTES * 4;
 pub(super) const METADATA_HEADER_FETCH_MAX_BYTES: usize = 32 * 1024;
@@ -42,14 +45,18 @@ pub(super) const FETCH_FULL_MESSAGE_ITEMS: &str =
 pub struct RealEmailBackend {
     accounts: BTreeMap<String, RealAccount>,
     runtime: Runtime,
+    oauth: Arc<GoogleOauthClient>,
 }
 
 #[derive(Clone)]
 struct RealAccount {
+    id: String,
     imap: Option<ValidatedImapConfig>,
     smtp: Option<ValidatedSmtpConfig>,
     auth: Option<ValidatedAuthConfig>,
     secrets: Arc<BTreeMap<String, tau_proto::SecretValue>>,
+    state: StateStore,
+    oauth: Arc<GoogleOauthClient>,
 }
 
 impl RealEmailBackend {
@@ -57,9 +64,11 @@ impl RealEmailBackend {
     pub fn new(
         config: &ValidatedConfig,
         secrets: BTreeMap<String, tau_proto::SecretValue>,
+        state: StateStore,
     ) -> Result<Self, String> {
         let runtime = Runtime::new()
             .map_err(|error| format!("internal_error: failed to start email runtime: {error}"))?;
+        let oauth = Arc::new(GoogleOauthClient::new(secrets.clone()));
         let secrets = Arc::new(secrets);
         let accounts = config
             .accounts
@@ -68,15 +77,22 @@ impl RealEmailBackend {
                 (
                     id.clone(),
                     RealAccount {
+                        id: id.clone(),
                         imap: account.imap.clone(),
                         smtp: account.smtp.clone(),
                         auth: account.auth.clone(),
                         secrets: Arc::clone(&secrets),
+                        state: state.clone(),
+                        oauth: Arc::clone(&oauth),
                     },
                 )
             })
             .collect();
-        Ok(Self { accounts, runtime })
+        Ok(Self {
+            accounts,
+            runtime,
+            oauth,
+        })
     }
 
     fn account(&self, id: &str) -> Result<RealAccount, String> {
@@ -226,6 +242,49 @@ impl EmailBackend for RealEmailBackend {
             send_message_async(&account, &message).await
         })
     }
+
+    fn start_google_device_auth(
+        &self,
+        account: &str,
+    ) -> Result<(String, String, String, u64, u64), String> {
+        let account = self.account(account)?;
+        let config = account.google_oauth_config()?;
+        let started = self
+            .oauth
+            .start_device_auth(config, "https://mail.google.com/")?;
+        Ok((
+            started.device_code,
+            started.user_code,
+            started.verification_uri,
+            started.expires_in_secs,
+            started.interval_secs,
+        ))
+    }
+
+    fn finish_google_device_auth(
+        &self,
+        account: &str,
+        device_code: &str,
+    ) -> Result<(String, Option<String>, Option<u64>), String> {
+        let account = self.account(account)?;
+        let config = account.google_oauth_config()?;
+        let finished = self.oauth.finish_device_auth(config, device_code)?;
+        Ok((
+            finished.refresh_token,
+            finished.access_token,
+            finished.expires_in_secs,
+        ))
+    }
+
+    fn prime_google_access_token_cache(
+        &self,
+        account: &str,
+        access_token: String,
+        expires_in_secs: Option<u64>,
+    ) -> Result<(), String> {
+        self.oauth
+            .prime_access_token_cache(account, access_token, expires_in_secs)
+    }
 }
 
 impl RealAccount {
@@ -240,12 +299,80 @@ impl RealAccount {
             .as_ref()
             .ok_or_else(|| "smtp_error: account has no SMTP configuration".to_owned())
     }
+
+    fn auth_config(&self) -> Result<&ValidatedAuthConfig, String> {
+        self.auth
+            .as_ref()
+            .ok_or_else(|| "auth_error: account auth is not configured".to_owned())
+    }
+
+    fn google_oauth_config(&self) -> Result<GoogleOauthSecretConfig<'_>, String> {
+        let auth = self.auth_config()?;
+        if auth.method != AuthMethod::Oauth2 || auth.provider != Some(EmailOauth2Provider::Google) {
+            return Err("auth_error: account is not configured for Google OAuth".to_owned());
+        }
+        let client_id_secret = auth.client_id_secret.as_deref().ok_or_else(|| {
+            "auth_error: Google OAuth client id secret is not configured".to_owned()
+        })?;
+        Ok(GoogleOauthSecretConfig {
+            client_id_secret,
+            client_secret_secret: auth.client_secret_secret.as_deref(),
+            refresh_token_secret: auth.refresh_token_secret.as_deref(),
+        })
+    }
+
+    fn google_access_token(&self) -> Result<String, String> {
+        let config = self.google_oauth_config()?;
+        let stored_refresh_token = if config.refresh_token_secret.is_some() {
+            None
+        } else {
+            Some(self.state.google_refresh_token(&self.id)?.ok_or_else(|| {
+                format!(
+                    "Google email account `{}` is not authorized; run `/email auth google start {}` and then `/email auth google finish {}`",
+                    self.id, self.id, self.id
+                )
+            })?)
+        };
+        self.oauth.access_token(
+            &self.id,
+            config,
+            stored_refresh_token.as_deref(),
+            &format!(
+                "Google email account `{}` is not authorized; run `/email auth google start {}` and then `/email auth google finish {}`",
+                self.id, self.id, self.id
+            ),
+        )
+    }
+
+    fn invalidate_google_access_token(&self) -> Result<(), String> {
+        self.oauth.invalidate_access_token(&self.id)
+    }
 }
 
 #[derive(Debug)]
 enum RealImapStream {
     Plain(TcpStream),
     Tls(Box<TlsStream<TcpStream>>),
+}
+
+struct Xoauth2Authenticator {
+    payload: Vec<u8>,
+}
+
+impl Xoauth2Authenticator {
+    fn new(login: &str, access_token: &str) -> Self {
+        Self {
+            payload: xoauth2_payload(login, access_token).into_bytes(),
+        }
+    }
+}
+
+impl Authenticator for Xoauth2Authenticator {
+    type Response = Vec<u8>;
+
+    fn process(&mut self, _challenge: &[u8]) -> Self::Response {
+        self.payload.clone()
+    }
 }
 
 impl AsyncRead for RealImapStream {
@@ -644,6 +771,13 @@ async fn send_message_async(
     let smtp = account.smtp_config()?;
     let message_id = generate_message_id(&smtp.host, outgoing);
     let email = build_lettre_message(outgoing, &message_id)?;
+    if matches!(
+        account.auth.as_ref().map(|auth| auth.method),
+        Some(AuthMethod::Oauth2)
+    ) {
+        send_message_oauth2_async(account, &email).await?;
+        return Ok(message_id);
+    }
     let mut builder = AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(&smtp.host)
         .port(smtp.port)
         .timeout(Some(Duration::from_secs(smtp.timeout_seconds)))
@@ -659,6 +793,108 @@ async fn send_message_async(
         )
     })?;
     Ok(message_id)
+}
+
+async fn send_message_oauth2_async(account: &RealAccount, email: &Message) -> Result<(), String> {
+    let smtp = account.smtp_config()?;
+    let mut access_token = account.google_access_token()?;
+    let mut conn = match connect_smtp_for_auth(account).await {
+        Ok(conn) => conn,
+        Err(error) => {
+            return Err(format!(
+                "smtp_error: SMTP connection to {}:{} failed: {}",
+                smtp.host,
+                smtp.port,
+                sanitized_backend_error(&error.to_string())
+            ));
+        }
+    };
+    if smtp_auth_xoauth2(&mut conn, smtp, &access_token)
+        .await
+        .is_err()
+    {
+        account.invalidate_google_access_token()?;
+        access_token = account.google_access_token()?;
+        conn = connect_smtp_for_auth(account).await.map_err(|error| {
+            format!(
+                "smtp_error: SMTP connection to {}:{} failed after auth retry: {}",
+                smtp.host,
+                smtp.port,
+                sanitized_backend_error_redacting(&error.to_string(), &access_token)
+            )
+        })?;
+        smtp_auth_xoauth2(&mut conn, smtp, &access_token)
+            .await
+            .map_err(|retry_error| {
+                format!(
+                    "auth_error: SMTP XOAUTH2 authentication failed for {}: {}",
+                    smtp.login,
+                    sanitized_backend_error_redacting(&retry_error.to_string(), &access_token)
+                )
+            })?;
+    }
+    conn.send(email.envelope(), &email.formatted())
+        .await
+        .map_err(|error| {
+            format!(
+                "smtp_error: SMTP send via {}:{} failed: {}",
+                smtp.host,
+                smtp.port,
+                sanitized_backend_error(&error.to_string())
+            )
+        })?;
+    let _ = conn.quit().await;
+    Ok(())
+}
+
+async fn connect_smtp_for_auth(account: &RealAccount) -> Result<AsyncSmtpConnection, String> {
+    let smtp = account.smtp_config()?;
+    let client_id = ClientId::default();
+    let tls_parameters = || {
+        TlsParameters::builder(smtp.host.clone())
+            .certificate_store(CertificateStore::WebpkiRoots)
+            .build()
+            .map_err(|_| "tls_error: failed to configure SMTP TLS".to_owned())
+    };
+    let mut conn = match smtp.tls {
+        TlsMode::Required => AsyncSmtpConnection::connect_tokio1(
+            (smtp.host.as_str(), smtp.port),
+            Some(Duration::from_secs(smtp.timeout_seconds)),
+            &client_id,
+            Some(tls_parameters()?),
+            None,
+        )
+        .await
+        .map_err(|error| error.to_string())?,
+        TlsMode::StartTls | TlsMode::None => AsyncSmtpConnection::connect_tokio1(
+            (smtp.host.as_str(), smtp.port),
+            Some(Duration::from_secs(smtp.timeout_seconds)),
+            &client_id,
+            None,
+            None,
+        )
+        .await
+        .map_err(|error| error.to_string())?,
+    };
+    if smtp.tls == TlsMode::StartTls {
+        conn.starttls(tls_parameters()?, &client_id)
+            .await
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(conn)
+}
+
+async fn smtp_auth_xoauth2(
+    conn: &mut AsyncSmtpConnection,
+    smtp: &ValidatedSmtpConfig,
+    access_token: &str,
+) -> Result<(), lettre::transport::smtp::Error> {
+    conn.auth(
+        &smtp_oauth_mechanisms(),
+        &Credentials::new(smtp.login.clone(), access_token.to_owned()),
+    )
+    .await
+    .map(|_| ())
 }
 
 async fn connect_imap(account: &RealAccount) -> Result<Session<RealImapStream>, String> {
@@ -692,15 +928,48 @@ async fn connect_imap(account: &RealAccount) -> Result<Session<RealImapStream>, 
             tls_connect(&imap.host, tcp).await?,
         )));
     }
-    let password = resolve_password(account.auth.as_ref(), &account.secrets)
-        .await?
-        .ok_or_else(|| "auth_error: IMAP password source is not configured".to_owned())?;
-    client.login(&imap.login, password).await.map_err(|error| {
-        format!(
-            "auth_error: IMAP authentication failed for {}: {:?}",
-            imap.login, error.0
-        )
-    })
+    match account.auth.as_ref().map(|auth| auth.method) {
+        Some(AuthMethod::Oauth2) => authenticate_imap_xoauth2(client, account, &imap.login).await,
+        _ => {
+            let password = resolve_password(account.auth.as_ref(), &account.secrets)
+                .await?
+                .ok_or_else(|| "auth_error: IMAP password source is not configured".to_owned())?;
+            client.login(&imap.login, password).await.map_err(|error| {
+                format!(
+                    "auth_error: IMAP authentication failed for {}: {:?}",
+                    imap.login, error.0
+                )
+            })
+        }
+    }
+}
+
+async fn authenticate_imap_xoauth2(
+    mut client: Client<RealImapStream>,
+    account: &RealAccount,
+    login: &str,
+) -> Result<Session<RealImapStream>, String> {
+    for attempt in 0..2 {
+        let access_token = account.google_access_token()?;
+        let authenticator = Xoauth2Authenticator::new(login, &access_token);
+        match client.authenticate("XOAUTH2", authenticator).await {
+            Ok(session) => return Ok(session),
+            Err((_, returned_client)) if attempt == 0 => {
+                client = returned_client;
+                account.invalidate_google_access_token()?;
+            }
+            Err(_) => {
+                return Err(format!(
+                    "auth_error: IMAP XOAUTH2 authentication failed for {}",
+                    login
+                ));
+            }
+        }
+    }
+    Err(format!(
+        "auth_error: IMAP XOAUTH2 authentication failed for {}",
+        login
+    ))
 }
 
 async fn read_imap_greeting(client: &mut Client<RealImapStream>) -> Result<(), String> {
@@ -750,6 +1019,33 @@ fn validated_uid_arg(uid: &str) -> Result<u32, String> {
         .ok_or_else(|| "invalid_input: uid must be a positive integer".to_owned())
 }
 
+fn xoauth2_payload(login: &str, access_token: &str) -> String {
+    format!("user={login}\x01auth=Bearer {access_token}\x01\x01")
+}
+
+fn sanitized_backend_error(value: &str) -> String {
+    const MAX_CHARS: usize = 256;
+    value
+        .chars()
+        .map(|ch| if ch.is_control() { ' ' } else { ch })
+        .take(MAX_CHARS)
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn sanitized_backend_error_redacting(value: &str, secret: &str) -> String {
+    if secret.is_empty() {
+        return sanitized_backend_error(value);
+    }
+    sanitized_backend_error(&value.replace(secret, "[redacted]"))
+}
+
+fn smtp_oauth_mechanisms() -> Vec<Mechanism> {
+    vec![Mechanism::Xoauth2]
+}
+
 async fn resolve_password(
     auth: Option<&ValidatedAuthConfig>,
     secrets: &BTreeMap<String, tau_proto::SecretValue>,
@@ -759,7 +1055,9 @@ async fn resolve_password(
     };
     match auth.method {
         AuthMethod::None => Ok(None),
-        AuthMethod::Oauth2 => Err("auth_error: OAuth authentication is not implemented".to_owned()),
+        AuthMethod::Oauth2 => {
+            Err("auth_error: OAuth accounts use provider-specific access tokens".to_owned())
+        }
         AuthMethod::Command => Err(
             "auth_error: password commands are no longer supported; use auth.password_secret"
                 .to_owned(),
@@ -1130,5 +1428,39 @@ impl fmt::Debug for RealEmailBackend {
         f.debug_struct("RealEmailBackend")
             .field("accounts", &self.accounts.keys().collect::<Vec<_>>())
             .finish_non_exhaustive()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Ensures the IMAP XOAUTH2 SASL payload matches Gmail's documented
+    /// `user=` and bearer-token control-A format exactly.
+    #[test]
+    fn xoauth2_payload_uses_gmail_sasl_format() {
+        assert_eq!(
+            xoauth2_payload("alice@example.com", "access-token"),
+            "user=alice@example.com\x01auth=Bearer access-token\x01\x01"
+        );
+    }
+
+    /// Ensures the SMTP OAuth path pins lettre to XOAUTH2 rather than allowing
+    /// the default PLAIN/LOGIN mechanism list for bearer-token credentials.
+    #[test]
+    fn smtp_oauth_mechanism_selection_is_xoauth2_only() {
+        assert_eq!(smtp_oauth_mechanisms(), vec![Mechanism::Xoauth2]);
+    }
+
+    /// Ensures SMTP diagnostics redact the exact bearer token before they can
+    /// reach action/tool errors or logs.
+    #[test]
+    fn smtp_error_sanitizer_redacts_access_token() {
+        let sanitized = sanitized_backend_error_redacting(
+            "server rejected bearer ya29.secret-token during auth",
+            "ya29.secret-token",
+        );
+        assert_eq!(sanitized, "server rejected bearer [redacted] during auth");
+        assert!(!sanitized.contains("ya29.secret-token"));
     }
 }
