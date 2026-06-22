@@ -1,3 +1,10 @@
+//! Test-only Tau extension used by harness integration tests.
+//!
+//! The extension registers the [`RESTART_TEST_DUMMY_TOOL_NAME`] fixture tool
+//! and an `agent.prompt_submitted` interceptor. It deliberately has no user
+//! facing production role; its behavior exists to exercise extension
+//! supervision, tool dispatch, replay suppression, and prompt interception.
+
 use std::error::Error;
 use std::io::{BufReader, BufWriter, Read, Write};
 
@@ -11,6 +18,8 @@ use tau_proto::{
     ToolSpec,
 };
 
+/// Tool name registered by this fixture extension for restart-supervision
+/// tests.
 pub const RESTART_TEST_DUMMY_TOOL_NAME: &str = "restart_test_dummy";
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Deserialize)]
@@ -40,8 +49,9 @@ struct ExtConfig {
 /// no replacement happened so the caller can short-circuit and reply
 /// with `Pass(None)` rather than re-publish an identical event.
 ///
-/// "tao" is matched as a whole word, not as a free-floating
-/// substring — the `tao` inside `taoism` is left alone.
+/// Only ASCII letters form word boundaries for this test fixture. `"tao"` is
+/// matched as a whole word, not as a free-floating substring — the `tao` inside
+/// `taoism` is left alone.
 fn correct_tao_to_tau(text: &str) -> Option<String> {
     let bytes = text.as_bytes();
     let mut out = String::with_capacity(text.len());
@@ -84,10 +94,12 @@ fn followed_by_letter(bytes: &[u8], i: usize) -> bool {
     bytes.get(i).is_some_and(|b| b.is_ascii_alphabetic())
 }
 
+/// Runs the dummy extension on standard input and standard output.
 pub fn run_stdio() -> Result<(), Box<dyn Error>> {
     run(std::io::stdin(), std::io::stdout())
 }
 
+/// Runs the dummy extension over the supplied harness protocol streams.
 pub fn run<R, W>(reader: R, writer: W) -> Result<(), Box<dyn Error>>
 where
     R: Read,
@@ -119,7 +131,7 @@ where
                 name: tau_proto::ToolName::new(RESTART_TEST_DUMMY_TOOL_NAME),
                 model_visible_name: None,
                 description: Some(
-                    "Test-only tool that randomly restarts the dummy extension or returns an error"
+                    "Test-only tool that restarts the dummy extension, returns an error, or follows configured restart_mode"
                         .to_owned(),
                 ),
                 tool_type: tau_proto::ToolType::Function,
@@ -153,7 +165,6 @@ where
                         correct_tao_to_tau(&prompt.text).map(|fixed| {
                             Event::AgentPromptSubmitted(AgentPromptSubmitted {
                                 text: fixed,
-                                message_class: tau_proto::PromptMessageClass::User,
                                 ..prompt.clone()
                             })
                         })
@@ -162,12 +173,11 @@ where
                 };
                 if mutated.is_some() {
                     writer.write_message(&HarnessInputMessage::Emit(Emit {
-                        event: Box::new(Event::HarnessNotice(HarnessNotice {
-                            kind: tau_proto::notice_kind::EXTENSION_NOTICE.to_owned(),
-                            message: "did you mean \"Tau\"? — corrected for you".to_owned(),
-                            level: NoticeLevel::Info,
-                            always_show: false,
-                        })),
+                        event: Box::new(Event::HarnessNotice(HarnessNotice::new(
+                            tau_proto::notice_kind::EXTENSION_NOTICE,
+                            "did you mean \"Tau\"? — corrected for you",
+                            NoticeLevel::Info,
+                        ))),
                         transient: true,
                     }))?;
                 }
