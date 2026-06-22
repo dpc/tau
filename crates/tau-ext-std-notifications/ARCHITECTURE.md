@@ -15,3 +15,18 @@ Prompt-start and turn-end notifications are user-visible main-turn effects. They
 ## Idle timers
 
 `agent_idle` timers are per completed user turn. `agent_idle_all` timers are keyed by session and are armed when a tracked session transitions from at least one running loaded agent to no running loaded agents. A visible `agent.state = running` clears only pending all-idle timers for sessions containing that running agent. Summary side agents spawned by this extension are correlated through `agent.start_accepted` for pending `idle-*` query ids and ignored for all-idle membership/busy tracking until the matching `agent.start_result`, so they cannot cancel the notification they are producing. `ui.prompt_draft` extends idle timers that have not yet started summary side queries.
+
+Idle summary side-agent requests include a bounded copy of the captured user
+prompt and assistant response in the instruction. Do not assume the side
+conversation has inherited the transcript that triggered the notification.
+
+## Testing strategy
+
+Unit tests drive the extension through encoded harness frames and assert emitted
+events. State-machine changes should add or update tests for event ordering,
+replay filtering, side-agent originator filtering, background-tool deferral,
+all-idle session membership, config reloads, and idle deadline timing. Keep
+timer windows short and bounded; use `UnixStream::pair` tests only when the test
+must observe an emitted request before sending the matching response. Terminal
+side-effect changes need regression coverage for config-time validation and
+runtime template-rendered data.

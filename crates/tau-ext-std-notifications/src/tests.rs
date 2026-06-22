@@ -315,6 +315,9 @@ fn tool_call_finished_response(
 /// surfacing.
 fn drain_lifecycle<R: std::io::Read>(_reader: &mut EventReader<R>) {}
 
+/// An explicit empty hook configuration should keep the extension completely
+/// silent. This protects users who disable notifications from receiving stale
+/// default side effects when prompts or responses arrive.
 #[test]
 fn empty_config_emits_no_notifications() {
     let mut input = Vec::new();
@@ -350,6 +353,9 @@ fn empty_config_emits_no_notifications() {
     assert!(reader.read_event().expect("read").is_none());
 }
 
+/// A normal user prompt followed by a final provider response should emit the
+/// configured start and end OSC user variables in order. This is the core
+/// sound-notification contract for interactive turns.
 #[test]
 fn emits_start_and_end_user_var_in_order() {
     let mut input = Vec::new();
@@ -526,6 +532,11 @@ fn agent_start_hook_renders_multiple_configured_actions() {
         other => panic!("expected Osc1337SetUserVar, got {other:?}"),
     }
 }
+
+/// Display-name updates should survive a later prompt whose embedded display
+/// name is blank, and templates should fall back to the stored name rather than
+/// the raw agent id. This prevents transient empty prompt metadata from
+/// degrading user-visible notifications.
 #[test]
 fn agent_start_hook_uses_display_name_set_with_id_fallback_for_blank_prompt_name() {
     let mut input = Vec::new();
@@ -634,6 +645,9 @@ fn mid_turn_finish_with_tool_calls_does_not_emit_end_sound() {
     );
 }
 
+/// A final response that arrives while a user-originated background tool is
+/// still active should defer the completion sound until that background result
+/// lands. This avoids announcing completion while side work is still running.
 #[test]
 fn final_response_waits_for_background_tools_before_end_sound() {
     let mut input = Vec::new();
@@ -687,11 +701,11 @@ fn final_response_waits_for_background_tools_before_end_sound() {
     assert!(reader.read_event().expect("read eof").is_none());
 }
 
+/// Starting a second prompt while an earlier final response is blocked on
+/// background work must not forget that background work. This is a regression
+/// test for premature completion sounds across adjacent turns.
 #[test]
 fn new_prompt_does_not_forget_previous_background_tool() {
-    // Regression: starting another user prompt while a prior final response was
-    // waiting on background tools must not clear those tools. Otherwise prompt 2
-    // can emit the end sound before prompt 1's background work is done.
     let mut input = Vec::new();
     let mut writer = EventWriter::new(&mut input);
     writer
@@ -740,6 +754,9 @@ fn new_prompt_does_not_forget_previous_background_tool() {
     );
 }
 
+/// If a final response is waiting on a background tool that never reports
+/// completion before disconnect, the completion sound must remain suppressed.
+/// This prevents false-positive "done" notifications for abandoned work.
 #[test]
 fn final_response_without_background_completion_does_not_emit_end_sound() {
     let mut input = Vec::new();
@@ -1293,6 +1310,60 @@ fn agent_idle_all_fires_when_busy_agent_unloads() {
     assert_eq!(osc.value, "agent_idle_all:other");
 }
 
+/// An all-idle summary can be armed by unloading the busy agent that made the
+/// session non-idle. The resulting side query must not name the unloaded agent
+/// as an explicit parent, because the harness may reject parents that are no
+/// longer loaded.
+#[test]
+fn agent_idle_all_summary_after_unload_uses_no_parent_agent() {
+    let mut input = Vec::new();
+    let mut writer = EventWriter::new(&mut input);
+    writer
+        .write_frame(&configure_frame(tau_proto::json_to_cbor(
+            &serde_json::json!({
+                "agent_idle_all": [{
+                    "delay_seconds": 0,
+                    "agent_summary": true,
+                    "osc1337": { "key": TEXT_VAR_NAME, "value": "{{turn.agent_summary}}" },
+                }],
+            }),
+        )))
+        .expect("write config");
+    writer
+        .write_event(&session_agent_loaded("s1", "main"))
+        .expect("load main");
+    writer
+        .write_event(&session_agent_loaded("s1", "other"))
+        .expect("load other");
+    writer
+        .write_event(&agent_state("main", tau_proto::AgentRuntimeState::Idle))
+        .expect("main idle");
+    writer
+        .write_event(&agent_state("other", tau_proto::AgentRuntimeState::Running))
+        .expect("other running");
+    writer
+        .write_event(&session_agent_unloaded("s1", "other"))
+        .expect("unload other");
+    writer.flush().expect("flush");
+
+    let mut output = Vec::new();
+    run_with_idle_and_summary_timeout(
+        Cursor::new(input),
+        &mut output,
+        Duration::from_millis(1),
+        Duration::from_millis(1),
+    )
+    .expect("run");
+
+    let mut reader = EventReader::new(Cursor::new(output));
+    drain_lifecycle(&mut reader);
+    let query = reader.read_event().expect("read").expect("summary query");
+    let Event::StartAgentRequest(query) = query else {
+        panic!("expected StartAgentRequest, got {query:?}");
+    };
+    assert_eq!(query.parent_agent, None);
+}
+
 /// Kebab-case hook keys are intentionally rejected; notification configuration
 /// keys are snake_case. This catches accidental reintroduction of the old
 /// `agent-idle` spelling.
@@ -1460,6 +1531,76 @@ fn summary_result_populates_notification_template() {
         "summary template variable should be trimmed",
     );
     // Cleanly disconnect so the extension exits.
+    writer.write_frame(&disconnect_frame(None)).expect("write");
+    writer.flush().expect("flush");
+    drop(writer);
+    drop(reader);
+    handle.join().expect("ext thread");
+}
+
+/// Idle summary result text is model-controlled, so it must be clamped before
+/// templates can copy it into terminal payloads or command args. This keeps a
+/// runaway side-agent response from producing unbounded notification output.
+#[test]
+fn long_summary_result_is_truncated_before_template_rendering() {
+    use std::os::unix::net::UnixStream;
+
+    let (test_side, ext_side) = UnixStream::pair().expect("pair");
+    let ext_reader = ext_side.try_clone().expect("clone");
+    let ext_writer = ext_side;
+    let handle = thread::spawn(move || {
+        run_with_idle_and_summary_timeout(
+            ext_reader,
+            ext_writer,
+            Duration::from_millis(1),
+            Duration::from_secs(5),
+        )
+        .expect("run");
+    });
+
+    let test_writer_stream = test_side.try_clone().expect("clone");
+    let mut writer = EventWriter::new(test_writer_stream);
+    let mut reader = EventReader::new(test_side);
+    drain_lifecycle(&mut reader);
+
+    writer
+        .write_frame(&immediate_idle_agent_summary_config_frame())
+        .expect("write");
+    writer
+        .write_event(&Event::ProviderResponseFinished(
+            assistant_finished_response("sp-0", "done", tau_proto::PromptOriginator::User),
+        ))
+        .expect("write");
+    writer.flush().expect("flush");
+
+    let _end = reader.read_event().expect("read").expect("end");
+    let query = reader.read_event().expect("read").expect("query");
+    let Event::StartAgentRequest(query) = query else {
+        panic!("expected StartAgentRequest, got {query:?}");
+    };
+    let long_summary = format!(
+        "{}TAIL",
+        "é".repeat((SUMMARY_TEXT_LIMIT_BYTES / "é".len()) + 10)
+    );
+    writer
+        .write_event(&Event::StartAgentResult(tau_proto::StartAgentResult {
+            query_id: query.query_id,
+            text: long_summary.clone(),
+            error: None,
+        }))
+        .expect("write");
+    writer.flush().expect("flush");
+
+    let text = reader.read_event().expect("read").expect("text");
+    let Event::Osc1337SetUserVar(osc) = text else {
+        panic!("expected text OSC, got {text:?}");
+    };
+    let payload: serde_json::Value = serde_json::from_str(&osc.value).expect("payload is JSON");
+    let summary = payload["summary"].as_str().expect("summary string");
+    assert!(summary.ends_with("… [truncated]"));
+    assert!(!summary.contains("TAIL"));
+    assert!(summary.is_char_boundary(summary.len()));
+
     writer.write_frame(&disconnect_frame(None)).expect("write");
     writer.flush().expect("flush");
     drop(writer);
@@ -1809,6 +1950,177 @@ fn invalid_hook_template_emits_config_error() {
     assert!(e.message.contains("missing"));
 }
 
+/// OSC 1337 user-var key validation is the last defense before names are
+/// embedded into terminal escape sequences. Cover every documented rejection
+/// class directly so integration tests do not have to exercise each one.
+#[test]
+fn osc1337_name_validator_covers_documented_constraints() {
+    let valid_128 = "a".repeat(128);
+    assert!(validate_osc1337_name(&valid_128).is_ok());
+
+    for (name, expected) in [
+        ("".to_owned(), "must not be empty"),
+        ("a".repeat(129), "at most 128"),
+        ("bad=key".to_owned(), "must not contain"),
+        ("bad\u{1b}key".to_owned(), "control"),
+        ("bad\u{7}key".to_owned(), "control"),
+        ("snowman-☃".to_owned(), "printable ASCII"),
+    ] {
+        let err = validate_osc1337_name(&name).expect_err("invalid key");
+        assert!(
+            err.contains(expected),
+            "expected error containing {expected:?}, got {err:?}",
+        );
+        assert!(
+            !err.contains('\u{1b}') && !err.contains('\u{7}'),
+            "validator errors must not echo raw controls: {err:?}",
+        );
+    }
+}
+
+/// A statically invalid OSC user-var key must fail configuration validation
+/// before any notification fires. The UI writes OSC names verbatim, so keys
+/// containing `=` would corrupt the SetUserVar escape sequence.
+#[test]
+fn invalid_static_osc1337_key_emits_config_error() {
+    let bad_config = tau_proto::json_to_cbor(&serde_json::json!({
+        "agent_start": [{ "osc1337": { "key": "bad=key", "value": "value" } }],
+    }));
+
+    let mut input = Vec::new();
+    let mut writer = EventWriter::new(&mut input);
+    writer
+        .write_frame(&configure_frame(bad_config))
+        .expect("write");
+    writer.write_frame(&disconnect_frame(None)).expect("write");
+    writer.flush().expect("flush");
+
+    let mut output = Vec::new();
+    run_with_idle(Cursor::new(input), &mut output, Duration::from_secs(3600)).expect("run");
+
+    let mut reader = EventReader::new(Cursor::new(output));
+    let err_frame = loop {
+        let frame = reader
+            .read_frame()
+            .expect("read")
+            .expect("config error frame");
+        if matches!(frame, HarnessInputMessage::ConfigError(_)) {
+            break frame;
+        }
+    };
+    let HarnessInputMessage::ConfigError(e) = err_frame else {
+        unreachable!()
+    };
+    assert!(e.message.contains("osc1337.key"));
+    assert!(e.message.contains("invalid"));
+}
+
+/// A template can render to a valid key during configuration but an invalid key
+/// at runtime because it uses untrusted event data. The extension must skip the
+/// OSC emission rather than sending a malformed terminal escape.
+#[test]
+fn runtime_invalid_osc1337_key_is_skipped() {
+    let mut input = Vec::new();
+    let mut writer = EventWriter::new(&mut input);
+    writer
+        .write_frame(&configure_frame(tau_proto::json_to_cbor(
+            &serde_json::json!({
+                "agent_start": [
+                    { "osc1337": { "key": "{{agent.name}}", "value": "value" } },
+                ],
+            }),
+        )))
+        .expect("write config");
+    writer
+        .write_event(&Event::AgentPromptSubmitted(AgentPromptSubmitted {
+            agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
+            text: "hello".to_owned(),
+            message_class: tau_proto::PromptMessageClass::User,
+            originator: tau_proto::PromptOriginator::User,
+            display_name: Some("bad=key".to_owned()),
+            ctx_id: None,
+        }))
+        .expect("write prompt");
+    writer.write_frame(&disconnect_frame(None)).expect("write");
+    writer.flush().expect("flush");
+
+    let mut output = Vec::new();
+    run_with_idle(Cursor::new(input), &mut output, Duration::from_secs(3600)).expect("run");
+
+    let mut reader = EventReader::new(Cursor::new(output));
+    drain_lifecycle(&mut reader);
+    assert!(
+        reader.read_event().expect("read").is_none(),
+        "runtime-invalid OSC key should skip emission",
+    );
+}
+
+/// Idle summary requests run in a side conversation, so the emitted instruction
+/// must carry bounded recent-turn context explicitly. This ensures the summary
+/// can describe the visible user prompt and assistant response it is notifying
+/// about.
+#[test]
+fn idle_summary_request_contains_recent_turn_context() {
+    let long_prompt = format!(
+        "please refactor the notification extension {} PROMPT_TAIL",
+        "é".repeat((SUMMARY_CONTEXT_LIMIT_BYTES / "é".len()) + 10),
+    );
+    let long_response = format!(
+        "updated docs and validation {} RESPONSE_TAIL",
+        "é".repeat((SUMMARY_CONTEXT_LIMIT_BYTES / "é".len()) + 10),
+    );
+    let mut input = Vec::new();
+    let mut writer = EventWriter::new(&mut input);
+    writer
+        .write_frame(&configure_frame(tau_proto::json_to_cbor(
+            &serde_json::json!({
+                "agent_idle": [idle_osc_config(0, true)],
+            }),
+        )))
+        .expect("write config");
+    writer
+        .write_event(&user_prompt_submitted(
+            long_prompt,
+            tau_proto::PromptOriginator::User,
+        ))
+        .expect("write prompt");
+    writer
+        .write_event(&Event::ProviderResponseFinished(
+            assistant_finished_response("sp-0", &long_response, tau_proto::PromptOriginator::User),
+        ))
+        .expect("write response");
+    writer.flush().expect("flush");
+
+    let mut output = Vec::new();
+    run_with_idle_and_summary_timeout(
+        Cursor::new(input),
+        &mut output,
+        Duration::from_millis(1),
+        Duration::from_millis(1),
+    )
+    .expect("run");
+
+    let mut reader = EventReader::new(Cursor::new(output));
+    drain_lifecycle(&mut reader);
+    let query = reader.read_event().expect("read").expect("summary query");
+    let Event::StartAgentRequest(query) = query else {
+        panic!("expected StartAgentRequest, got {query:?}");
+    };
+    assert_eq!(query.parent_agent, None);
+    assert!(query.instruction.contains("User prompt:"));
+    assert!(
+        query
+            .instruction
+            .contains("please refactor the notification extension")
+    );
+    assert!(!query.instruction.contains("PROMPT_TAIL"));
+    assert!(query.instruction.contains("Assistant response:"));
+    assert!(query.instruction.contains("updated docs and validation"));
+    assert!(!query.instruction.contains("RESPONSE_TAIL"));
+    assert!(query.instruction.contains("… [truncated]"));
+    assert!(query.instruction.is_char_boundary(query.instruction.len()));
+}
+
 /// Applying a new config while an idle deadline is pending must clear
 /// old pending hook indexes so later drafts or timeouts cannot index
 /// into the replacement config and panic.
@@ -2010,6 +2322,9 @@ fn sub_agent_prompts_and_responses_are_ignored() {
     );
 }
 
+/// Duplicate `AgentPromptSubmitted` events during one visible turn should emit
+/// only one start sound. This catches repeated prompt-delivery events from
+/// producing noisy duplicate notifications.
 #[test]
 fn duplicate_agent_prompt_submitted_during_same_turn_emits_one_start_sound() {
     let mut input = Vec::new();

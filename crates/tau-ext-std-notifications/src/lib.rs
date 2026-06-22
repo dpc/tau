@@ -61,12 +61,25 @@ pub const DEFAULT_IDLE_SECONDS: u64 = 60;
 /// provider is wedged or the model is unreachable.
 pub const SUMMARY_TIMEOUT_SECONDS: u64 = 10;
 
+/// Maximum OSC 1337 user-variable name length accepted by this extension.
+///
+/// The terminal UI passes names through verbatim into an escape sequence, so
+/// notification keys are intentionally short and restricted.
+const MAX_OSC1337_NAME_LEN: usize = 128;
+
 /// Instruction sent to the agent as a side prompt when the idle
 /// timer fires. Mirrors the prompt Pi's `idle-notification.ts` uses,
 /// adapted for our harness-mediated query path.
 const SUMMARY_INSTRUCTION: &str = "Summarize in one short sentence: what \
 is the last thing you did or what do you need from the user now? Keep it \
 under 200 characters. Output only the summary, nothing else.";
+
+/// Maximum captured user prompt or assistant response bytes copied into the
+/// side-query instruction for idle summaries.
+const SUMMARY_CONTEXT_LIMIT_BYTES: usize = 4 * 1024;
+
+/// Maximum summary text bytes exposed as `turn.agent_summary`.
+const SUMMARY_TEXT_LIMIT_BYTES: usize = 1024;
 
 /// Returns the system hostname via `gethostname(2)`. Falls back to
 /// `"host"` if the syscall fails or the bytes aren't UTF-8.
@@ -129,28 +142,40 @@ fn template_context<'a>(
 /// Runtime template context available to all configured hook actions.
 #[derive(serde::Serialize)]
 struct TemplateContext<'a> {
+    /// Name of the hook currently being rendered, e.g. `agent_start`.
     hook: &'a str,
+    /// Agent identity and display-name fields for the triggering agent.
     agent: AgentTemplateContext<'a>,
+    /// Hostname of the machine running the extension process.
     host: String,
+    /// Current working directory of the extension process.
     cwd: String,
+    /// Basename of [`TemplateContext::cwd`] for compact notification titles.
     cwd_basename: String,
+    /// Last visible user/assistant turn text for turn-aware templates.
     turn: TurnTemplateContext<'a>,
 }
 
 /// Agent fields exposed to notification hook templates.
 #[derive(serde::Serialize)]
 struct AgentTemplateContext<'a> {
+    /// Stable agent id, exposed as `agent.id`.
     id: &'a str,
+    /// Durable display name, or the id fallback, exposed as `agent.name`.
     name: &'a str,
 }
 
 /// Last known turn text exposed to notification hook templates.
 #[derive(serde::Serialize)]
 struct TurnTemplateContext<'a> {
+    /// Last user prompt text, exposed as `turn.user_prompt`.
     user_prompt: &'a str,
+    /// Last final assistant response text, exposed as `turn.agent_response`.
     agent_response: &'a str,
+    /// Optional idle-summary response text, exposed as `turn.agent_summary`.
     agent_summary: &'a str,
 }
+
 /// Phase of a single configured idle hook in the idle-watch state machine.
 enum IdleState {
     WaitingIdle { deadline: Instant },
@@ -383,11 +408,34 @@ impl IdleHookConfig {
             .unwrap_or(default_delay)
     }
 }
+/// Run the extension against process standard input and output.
+///
+/// This is the production entry point used by the crate binary. It initializes
+/// logging with the extension's tracing target before entering the protocol
+/// loop.
+///
+/// # Errors
+///
+/// Returns protocol I/O, handshake, event encoding, or hook template-rendering
+/// failures that prevent the extension from continuing. Configuration parse and
+/// validation failures are reported to the harness as `ConfigError` frames and
+/// are not returned from this function.
 pub fn run_stdio() -> Result<(), Box<dyn Error>> {
     tau_extension::init_logging_for(LOG_TARGET);
     run(std::io::stdin(), std::io::stdout())
 }
 
+/// Run the extension protocol over arbitrary reader and writer streams.
+///
+/// This uses [`DEFAULT_IDLE_SECONDS`] as the default idle delay for configured
+/// idle hooks that omit `delay_seconds`.
+///
+/// # Errors
+///
+/// Returns protocol I/O, handshake, event encoding, or hook template-rendering
+/// failures that prevent the extension from continuing. Configuration parse and
+/// validation failures are reported to the harness as `ConfigError` frames and
+/// are not returned from this function.
 pub fn run<R, W>(reader: R, writer: W) -> Result<(), Box<dyn Error>>
 where
     R: Read + Send + 'static,
@@ -410,6 +458,13 @@ enum InMsg {
 /// the summary fallback timer; tests that exercise the fallback path
 /// directly should call [`run_with_idle_and_summary_timeout`] with a
 /// shorter summary timeout instead.
+///
+/// # Errors
+///
+/// Returns protocol I/O, handshake, event encoding, or hook template-rendering
+/// failures that prevent the extension from continuing. Configuration parse and
+/// validation failures are reported to the harness as `ConfigError` frames and
+/// are not returned from this function.
 pub fn run_with_idle<R, W>(
     reader: R,
     writer: W,
@@ -430,6 +485,13 @@ where
 /// Test-friendly entry point with an overridable summary fallback
 /// timeout. Useful for exercising the wedged-agent path without
 /// blocking the test suite for [`SUMMARY_TIMEOUT_SECONDS`] seconds.
+///
+/// # Errors
+///
+/// Returns protocol I/O, handshake, event encoding, or hook template-rendering
+/// failures that prevent the extension from continuing. Configuration parse and
+/// validation failures are reported to the harness as `ConfigError` frames and
+/// are not returned from this function.
 pub fn run_with_idle_and_summary_timeout<R, W>(
     reader: R,
     writer: W,
@@ -951,7 +1013,7 @@ where
                             let agent_summary = if result.error.is_some() {
                                 String::new()
                             } else {
-                                result.text.trim().to_owned()
+                                truncate_for_summary_text(result.text.trim())
                             };
                             let agent_name =
                                 display_name_for_agent(&agent_display_names, &pending.agent_id);
@@ -1023,6 +1085,38 @@ where
     Ok(())
 }
 
+fn summary_instruction(user_prompt: &str, agent_response: &str) -> String {
+    format!(
+        "{SUMMARY_INSTRUCTION}\n\nRecent visible turn context follows. \
+         Summarize only this captured context; do not mention these labels.\n\n\
+         User prompt:\n{}\n\nAssistant response:\n{}",
+        truncate_for_summary_context(user_prompt),
+        truncate_for_summary_context(agent_response),
+    )
+}
+
+fn truncate_for_summary_context(text: &str) -> String {
+    truncate_utf8_with_marker(text, SUMMARY_CONTEXT_LIMIT_BYTES)
+}
+
+fn truncate_for_summary_text(text: &str) -> String {
+    truncate_utf8_with_marker(text, SUMMARY_TEXT_LIMIT_BYTES)
+}
+
+fn truncate_utf8_with_marker(text: &str, limit_bytes: usize) -> String {
+    if text.len() <= limit_bytes {
+        text.to_owned()
+    } else {
+        let end = text
+            .char_indices()
+            .map(|(index, _)| index)
+            .take_while(|index| *index <= limit_bytes)
+            .last()
+            .unwrap_or(0);
+        format!("{}… [truncated]", &text[..end])
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn process_due_idle_hooks<W: Write>(
     writer: &mut PeerOutputWriter<BufWriter<W>>,
@@ -1049,11 +1143,13 @@ fn process_due_idle_hooks<W: Write>(
                     query_id = %query_id,
                     "{log_prefix} deadline elapsed, requesting agent summary",
                 );
+                let instruction =
+                    summary_instruction(&pending.user_prompt, &pending.agent_response);
                 writer.write_message(&HarnessInputMessage::emit(Event::StartAgentRequest(
                     StartAgentRequest {
                         parent_agent: None,
                         query_id: query_id.clone(),
-                        instruction: SUMMARY_INSTRUCTION.to_owned(),
+                        instruction,
                         role: None,
                         input_stats: tau_proto::ToolUseStats::default(),
                         tool_call_id: None,
@@ -1305,9 +1401,19 @@ fn emit_hook<W: Write>(
     if let Some(osc) = &hook.osc1337 {
         let name = render_template(&osc.key, ctx)?;
         let value = render_template(&osc.value, ctx)?;
-        writer.write_message(&HarnessInputMessage::emit(Event::Osc1337SetUserVar(
-            Osc1337SetUserVar { name, value },
-        )))?;
+        match validate_osc1337_name(&name) {
+            Ok(()) => writer.write_message(&HarnessInputMessage::emit(
+                Event::Osc1337SetUserVar(Osc1337SetUserVar { name, value }),
+            ))?,
+            Err(message) => {
+                tracing::warn!(
+                    target: LOG_TARGET,
+                    name_len = name.len(),
+                    error = %message,
+                    "skipping notification with invalid OSC 1337 user-var name",
+                );
+            }
+        }
     }
     if let Some(command) = &hook.command {
         spawn_command(command, ctx);
@@ -1338,8 +1444,10 @@ fn validate_hook(name: &str, hook: &HookConfig) -> Result<(), String> {
         "agent summary",
     );
     if let Some(osc) = &hook.osc1337 {
-        render_template(&osc.key, &ctx)
+        let rendered_key = render_template(&osc.key, &ctx)
             .map_err(|e| format!("{name} osc1337.key template failed: {e}"))?;
+        validate_osc1337_name(&rendered_key)
+            .map_err(|e| format!("{name} osc1337.key is invalid: {e}"))?;
         render_template(&osc.value, &ctx)
             .map_err(|e| format!("{name} osc1337.value template failed: {e}"))?;
     }
@@ -1361,6 +1469,28 @@ fn render_template(template: &str, ctx: &TemplateContext<'_>) -> Result<String, 
     handlebars.register_escape_fn(handlebars::no_escape);
     Ok(handlebars.render_template(template, ctx)?)
 }
+
+fn validate_osc1337_name(name: &str) -> Result<(), String> {
+    if name.is_empty() {
+        return Err("must not be empty".to_owned());
+    }
+    if name.len() > MAX_OSC1337_NAME_LEN {
+        return Err(format!(
+            "must be at most {MAX_OSC1337_NAME_LEN} bytes, got {}",
+            name.len()
+        ));
+    }
+    for ch in name.chars() {
+        if !ch.is_ascii() {
+            return Err("must contain printable ASCII only".to_owned());
+        }
+        if ch.is_ascii_control() || ch == '=' {
+            return Err("must not contain '=', BEL/ESC, or control characters".to_owned());
+        }
+    }
+    Ok(())
+}
+
 /// True when `event` belongs to a side conversation spawned by an
 /// extension (`PromptOriginator::Extension`). Side conversations
 /// share the bus with the user's interactive turn; this extension
@@ -1378,13 +1508,21 @@ fn is_sub_agent_event(event: &Event) -> bool {
     }
 }
 
+/// Borrowed data needed to render and emit one configured idle hook.
 struct IdleHookEmission<'a> {
+    /// Template hook name to expose as `hook`.
     hook_name: &'a str,
+    /// Configured idle hook whose actions should be emitted.
     hook: &'a IdleHookConfig,
+    /// Agent id that supplies `agent.id` in templates.
     agent_id: &'a tau_proto::AgentId,
+    /// Agent display name that supplies `agent.name` in templates.
     agent_name: &'a str,
+    /// Captured user prompt that supplies `turn.user_prompt`.
     user_prompt: &'a str,
+    /// Captured assistant response that supplies `turn.agent_response`.
     agent_response: &'a str,
+    /// Optional summary text that supplies `turn.agent_summary`.
     agent_summary: &'a str,
 }
 

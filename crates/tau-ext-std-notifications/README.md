@@ -46,13 +46,18 @@ If an idle hook sets `agent_summary` to `true`, the extension first asks the
 agent for a one-sentence summary before firing that hook:
 
 1. The extension sends an `agent.start_request` to the harness asking for a
-   one-sentence summary of the conversation.
-2. The harness spawns a side conversation off the user's current branch,
-   dispatches the prompt to the agent, and routes the matching
-   `agent.start_result` back point-to-point.
+   one-sentence summary. The request instruction includes a bounded copy of the
+   captured user prompt and assistant response so the side conversation has the
+   turn context it is supposed to summarize.
+2. The harness spawns a fresh side conversation, dispatches the explicit-context
+   prompt to the agent, and routes the matching `agent.start_result` back
+   point-to-point. Parent linkage, when used by the harness, is only for
+   metadata/session inheritance; summary correctness must come from the prompt
+   context above.
 3. The extension exposes the result as `turn.agent_summary` while rendering the
-   configured hook templates. On timeout or error, `turn.agent_summary` is an
-   empty string. The configured template decides how, or whether, to include it.
+   configured hook templates. Long summaries are clamped before rendering. On
+   timeout or error, `turn.agent_summary` is an empty string. The configured
+   template decides how, or whether, to include it.
 
 The idle deadline resets on:
 
@@ -126,6 +131,17 @@ strict mode. Current variables include `hook`, `agent.id`, `agent.name`
 `cwd_basename`, `turn.user_prompt`, `turn.agent_response`, and
 `turn.agent_summary` (set only for idle hooks with
 `agent_summary: true`, empty on timeout/error).
+
+Rendered OSC user-var keys are validated before emission because the UI writes
+them into terminal escape sequences verbatim. Keys must be non-empty printable
+ASCII, must not contain `=`, BEL/ESC, or other control characters, and must be
+at most 128 bytes. A statically invalid key rejects the config; a key that only
+becomes invalid after rendering untrusted runtime data is skipped and logged.
+
+Command hooks are trusted local configuration. The extension spawns them
+detached from stdin/stdout/stderr, but each command runs in its own thread until
+the process exits. Keep commands short-lived and avoid hooks that can block
+indefinitely.
 
 ### Bell-only completion example
 

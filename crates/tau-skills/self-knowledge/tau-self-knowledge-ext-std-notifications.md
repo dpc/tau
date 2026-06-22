@@ -18,7 +18,7 @@ Tau's built-in configuration enables no notifications by default. A typical OSC 
 - `agent_idle`, after an idle window following a final response, whatever `user-text-notification` payload the user configured.
 - `agent_idle_all`, after an idle window once every loaded agent in the session is idle.
 
-If an idle hook's `agent_summary` is true, the idle path first asks the agent for a one-sentence summary before firing that hook. Hook commands are detached argv arrays rendered as Handlebars templates.
+If an idle hook's `agent_summary` is true, the idle path first asks the agent for a one-sentence summary before firing that hook. The side-query instruction includes a bounded copy of the recent user prompt and assistant response so the summary has explicit turn context, and long summary results are clamped before template rendering. Hook commands are detached argv arrays rendered as Handlebars templates; they are trusted local configuration and should be short-lived.
 
 Hook items can also emit `term.bell` with `bell: true`.
 
@@ -69,6 +69,8 @@ extensions:
 ```
 
 Each hook item must set at least one of `bell`, `command`, or `osc1337`. The `command`, `osc1337.key`, and `osc1337.value` fields are Handlebars templates.
+
+Rendered OSC user-var keys must be non-empty printable ASCII, must not contain `=`, BEL/ESC, or other control characters, and must be at most 128 bytes. Statically invalid keys reject the config; keys that become invalid only after runtime template rendering are skipped and logged.
 
 Template variables:
 
