@@ -25,7 +25,7 @@ Tau follows the XDG directories:
   - `meta.json` — session metadata such as creation time and last-touched time.
   - `lock` — flock used while the daemon has the session loaded for writing.
   - `events.jsonl` — debug runtime event log for the session. It mirrors committed bus events and is not authoritative replay state.
-  - `debug/provider-requests/*-{request,response}.json` — exact upstream Responses request bodies plus parsed/provider-terminal response captures written by provider extensions, keyed by timestamp, `agent_prompt_id`, and transport. These include full prompt content, tool results, and model outputs, but not auth headers/API keys.
+  - `debug/provider-requests/*-{request,response}.json` — exact upstream provider request bodies plus parsed response captures written by provider extensions only when the harness reports the current session as durable and the durable session directory already exists, keyed by timestamp, `agent_prompt_id`, and transport. These include full prompt content, tool results, and model outputs, but not auth headers/API keys.
   - `logs/tau-harness.log` — harness daemon stderr/tracing for the session.
   - `logs/<extension>.log` — stderr for each spawned extension.
 - Agents: `~/.local/state/tau/agents/<agent_id>/`

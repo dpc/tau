@@ -46,6 +46,14 @@ pub struct PromptPayload<'a> {
     pub session_id: &'a SessionId,
     /// Durable agent this prompt belongs to.
     pub agent_id: &'a tau_proto::AgentId,
+    /// Whether provider debug request/response captures may be written for this
+    /// prompt's current session.
+    ///
+    /// The harness must supply this from explicit session persistence state.
+    /// Backends must not infer durability from filesystem paths because an
+    /// ephemeral session can reuse a session id that already has durable state
+    /// from an earlier run.
+    pub debug_provider_requests: bool,
 }
 
 impl PromptPayload<'_> {

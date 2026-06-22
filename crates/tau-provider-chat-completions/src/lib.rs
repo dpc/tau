@@ -156,6 +156,7 @@ fn run_prompt<W: Write>(
     prompt: &tau_proto::AgentPromptCreated,
     mut provider: ResolvedProvider,
     model: ChatCompletionsModel,
+    debug_provider_requests: bool,
     writer: &mut PeerOutputWriter<W>,
 ) -> ProviderResponseFinished {
     if let Some(model_compat) = model.compat {
@@ -182,7 +183,13 @@ fn run_prompt<W: Write>(
                 ));
                 let _ = writer.flush();
             };
-            chat_completions_stream(&provider, &model, prompt, &mut on_update)
+            chat_completions_stream(
+                &provider,
+                &model,
+                prompt,
+                debug_provider_requests,
+                &mut on_update,
+            )
         };
         match result {
             Ok(state) => return finish_success(agent_prompt_id, prompt, &provider, state),
@@ -264,6 +271,7 @@ pub fn run_prompt_for_provider<W: Write>(
     prompt: &tau_proto::AgentPromptCreated,
     provider: &ChatCompletionsProvider,
     model: &ChatCompletionsModel,
+    debug_provider_requests: bool,
     writer: &mut PeerOutputWriter<W>,
 ) -> ProviderResponseFinished {
     run_prompt(
@@ -277,6 +285,7 @@ pub fn run_prompt_for_provider<W: Write>(
             compat: provider.compat,
         },
         model.clone(),
+        debug_provider_requests,
         writer,
     )
 }
@@ -621,6 +630,7 @@ fn chat_completions_stream(
     provider: &ResolvedProvider,
     model: &ChatCompletionsModel,
     prompt: &tau_proto::AgentPromptCreated,
+    debug_provider_requests: bool,
     on_update: &mut impl FnMut(&StreamState),
 ) -> Result<StreamState, LlmError> {
     let url = format!(
@@ -629,7 +639,7 @@ fn chat_completions_stream(
     );
     let body = build_request(provider, model, prompt);
     let body_str = serde_json::to_string(&body).map_err(LlmError::Json)?;
-    maybe_debug_write_provider_request(prompt, model, &body);
+    maybe_debug_write_provider_request(prompt, model, debug_provider_requests, &body);
     let mut request = tau_provider::oauth::proxy_agent()
         .post(&url)
         .content_type("application/json")
@@ -643,7 +653,7 @@ fn chat_completions_stream(
     if !response.status().is_success() {
         let code = response.status().as_u16();
         let body = response.body_mut().read_to_string().unwrap_or_default();
-        maybe_debug_write_provider_http_error(prompt, model, code, &body);
+        maybe_debug_write_provider_http_error(prompt, model, debug_provider_requests, code, &body);
         return Err(LlmError::HttpStatus(code, body));
     }
 
@@ -666,7 +676,13 @@ fn chat_completions_stream(
         apply_event(&mut state, &event, on_update)?;
     }
     flush_pending_content(&mut state, on_update)?;
-    maybe_debug_write_provider_response(prompt, model, &state, &raw_events);
+    maybe_debug_write_provider_response(
+        prompt,
+        model,
+        debug_provider_requests,
+        &state,
+        &raw_events,
+    );
     ensure_non_empty_end_turn(state)
 }
 
@@ -759,14 +775,23 @@ fn build_request(
     }
 }
 
-fn debug_provider_request_dir(session_id: &str) -> Option<PathBuf> {
+fn debug_provider_request_dir(session_id: &str, debug_provider_requests: bool) -> Option<PathBuf> {
     let state = tau_config::settings::state_dir()?;
-    Some(
-        tau_config::settings::sessions_dir_of(&state)
-            .join(session_id)
-            .join("debug")
-            .join("provider-requests"),
-    )
+    debug_provider_request_dir_in(&state, session_id, debug_provider_requests)
+}
+
+fn debug_provider_request_dir_in(
+    state: &std::path::Path,
+    session_id: &str,
+    debug_provider_requests: bool,
+) -> Option<PathBuf> {
+    if !debug_provider_requests {
+        return None;
+    }
+    let session_dir = tau_config::settings::sessions_dir_of(state).join(session_id);
+    session_dir
+        .is_dir()
+        .then(|| session_dir.join("debug").join("provider-requests"))
 }
 
 fn debug_file_prefix(
@@ -792,9 +817,11 @@ fn debug_timestamp_micros() -> u128 {
 fn write_debug_json(
     prompt: &tau_proto::AgentPromptCreated,
     suffix: &str,
+    debug_provider_requests: bool,
     metadata: &serde_json::Value,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let Some(dir) = debug_provider_request_dir(prompt.session_id.as_str()) else {
+    let Some(dir) = debug_provider_request_dir(prompt.session_id.as_str(), debug_provider_requests)
+    else {
         return Ok(());
     };
     std::fs::create_dir_all(&dir)?;
@@ -810,6 +837,7 @@ fn write_debug_json(
 fn maybe_debug_write_provider_request(
     prompt: &tau_proto::AgentPromptCreated,
     model: &ChatCompletionsModel,
+    debug_provider_requests: bool,
     body: &ChatRequest,
 ) {
     let metadata = serde_json::json!({
@@ -823,7 +851,7 @@ fn maybe_debug_write_provider_request(
         "tool_choice": prompt.tool_choice,
         "body": body,
     });
-    if let Err(error) = write_debug_json(prompt, "request", &metadata) {
+    if let Err(error) = write_debug_json(prompt, "request", debug_provider_requests, &metadata) {
         tracing::warn!(
             target: LOG_TARGET,
             session_id = %prompt.session_id,
@@ -836,6 +864,7 @@ fn maybe_debug_write_provider_request(
 fn maybe_debug_write_provider_response(
     prompt: &tau_proto::AgentPromptCreated,
     model: &ChatCompletionsModel,
+    debug_provider_requests: bool,
     state: &StreamState,
     raw_events: &[serde_json::Value],
 ) {
@@ -858,7 +887,7 @@ fn maybe_debug_write_provider_response(
             serde_json::Value::Array(raw_events.to_vec()),
         );
     }
-    if let Err(error) = write_debug_json(prompt, "response", &metadata) {
+    if let Err(error) = write_debug_json(prompt, "response", debug_provider_requests, &metadata) {
         tracing::warn!(
             target: LOG_TARGET,
             session_id = %prompt.session_id,
@@ -871,6 +900,7 @@ fn maybe_debug_write_provider_response(
 fn maybe_debug_write_provider_http_error(
     prompt: &tau_proto::AgentPromptCreated,
     model: &ChatCompletionsModel,
+    debug_provider_requests: bool,
     status: u16,
     body: &str,
 ) {
@@ -879,7 +909,7 @@ fn maybe_debug_write_provider_http_error(
         map.insert("http_status".to_owned(), serde_json::json!(status));
         map.insert("body".to_owned(), serde_json::json!(body));
     }
-    if let Err(error) = write_debug_json(prompt, "response", &metadata) {
+    if let Err(error) = write_debug_json(prompt, "response", debug_provider_requests, &metadata) {
         tracing::warn!(
             target: LOG_TARGET,
             session_id = %prompt.session_id,

@@ -110,6 +110,7 @@ fn pool_routes_each_thread_to_its_own_socket_and_reuses_them() {
             session_id: &session_id,
             agent_id: &agent_id,
             share_user_cache_key: false,
+            debug_provider_requests: false,
         };
         run_turn_through_pool(
             &mut pool,
@@ -263,6 +264,7 @@ fn shared_prewarm_skips_busy_same_key_without_waiting() {
                 session_id: &session_id,
                 agent_id: &tau_proto::AgentId::parse("test-agent").expect("agent id"),
                 share_user_cache_key: false,
+                debug_provider_requests: false,
             };
             let started = std::time::Instant::now();
             let result = run_prewarm_through_shared_pool(&pool, &config, "same-session", &request);
@@ -430,6 +432,7 @@ fn ws_turn_captures_response_id_for_chain_continuation() {
         session_id: &session_id,
         agent_id: &tau_proto::AgentId::parse("test-agent").expect("agent id"),
         share_user_cache_key: false,
+        debug_provider_requests: false,
     };
 
     let state = run_turn_through_pool(
@@ -474,6 +477,7 @@ fn ws_upgrade_thread_headers_match_prompt_cache_key() {
         session_id: &session_id,
         agent_id: &agent_id,
         share_user_cache_key: false,
+        debug_provider_requests: false,
     };
     let expected = request.prompt_cache_key(&config.base_url);
 
@@ -523,11 +527,13 @@ fn prewarm_warms_cache_without_chaining_next_turn() {
         session_id: &session_id,
         agent_id: &tau_proto::AgentId::parse("test-agent").expect("agent id"),
         share_user_cache_key: false,
+        debug_provider_requests: false,
     };
     run_prewarm_through_pool(&mut pool, &config, "session-prewarm", &prewarm).expect("prewarm ok");
 
     let real = PromptPayload {
         context: context(&real_messages),
+        debug_provider_requests: false,
         ..prewarm
     };
     run_turn_through_pool(
@@ -586,6 +592,7 @@ fn fresh_open_with_previous_response_rebuilds_ws_warmth() {
         session_id: &session_id,
         agent_id: &tau_proto::AgentId::parse("test-agent").expect("agent id"),
         share_user_cache_key: false,
+        debug_provider_requests: false,
     };
     run_turn_through_pool(
         &mut pool,
@@ -634,6 +641,7 @@ fn fresh_open_with_previous_response_preserves_compacted_items() {
         session_id: &session_id,
         agent_id: &tau_proto::AgentId::parse("test-agent").expect("agent id"),
         share_user_cache_key: false,
+        debug_provider_requests: false,
     };
 
     run_turn_through_pool(
@@ -691,6 +699,7 @@ fn mid_stream_close_with_chain_rebuilds_ws_warmth() {
         session_id: &session_id,
         agent_id: &tau_proto::AgentId::parse("test-agent").expect("agent id"),
         share_user_cache_key: false,
+        debug_provider_requests: false,
     };
     let state1 = run_turn_through_pool(
         &mut pool,
@@ -717,6 +726,7 @@ fn mid_stream_close_with_chain_rebuilds_ws_warmth() {
         session_id: &session_id,
         agent_id: &tau_proto::AgentId::parse("test-agent").expect("agent id"),
         share_user_cache_key: false,
+        debug_provider_requests: false,
     };
     run_turn_through_pool(
         &mut pool,
@@ -1020,6 +1030,7 @@ fn pool_key_for(
         session_id: &session_id,
         agent_id: &agent_id,
         share_user_cache_key,
+        debug_provider_requests: false,
     };
     PoolKey::for_request(config, &request)
 }
@@ -1063,6 +1074,7 @@ fn run_turn_for_agent(
         session_id: &session_id,
         agent_id: &agent_id,
         share_user_cache_key: false,
+        debug_provider_requests: false,
     };
     run_turn_through_pool(pool, config, session, "sp-test", &request, on_update).expect("turn ok");
 }
@@ -1097,6 +1109,7 @@ fn run_shared_turn_for_agent(
         session_id: &session_id,
         agent_id: &agent_id,
         share_user_cache_key: false,
+        debug_provider_requests: false,
     };
     let mut on_update = |_: &crate::common::StreamState| {};
     run_turn_through_shared_pool(

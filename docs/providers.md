@@ -128,24 +128,24 @@ A provider owns its own:
 - transport caches or pools
 - internal metadata
 
-For the first OpenAI Responses provider, auth presence is enough to enable the provider namespace:
+For the built-in ChatGPT/Codex Responses provider, auth presence is enough to enable the provider namespace:
 
 - `chatgpt/*` is available when ChatGPT OAuth state exists
 
-No separate enable flag is needed initially.
+No separate enable flag is needed for registered profiles.
 
-## Initial first-party provider
+## Built-in first-party provider
 
-The first provider extension covers only the ChatGPT/Codex Responses backend:
+The built-in provider extension currently covers three profile kinds:
 
 - `chatgpt/*` for the ChatGPT / Codex Responses backend
+- user-named OpenAI-compatible Chat Completions profiles with explicit model lists
+- user-named OpenRouter profiles with explicit or fetched model lists
 
 It lives in `crates/tau-ext-provider-builtin` and is spawned as the built-in `provider-builtin` extension.
-It publishes hardcoded model metadata, including required context windows, before `Ready` during extension startup.
-It owns Responses execution for that namespace and preserves the existing provider execution event semantics for streaming, tool calls, usage, and retries.
+It publishes hardcoded ChatGPT/Codex metadata and configured Chat Completions/OpenRouter model metadata before `Ready` during extension startup.
+It owns execution for those namespaces and preserves the existing provider execution event semantics for streaming, tool calls, usage, and retries.
 It publishes `chatgpt/*` only from auth named `chatgpt`; there is no `openai-codex` compatibility alias.
-
-Do not add public OpenAI API-key support, upstream model discovery, compat matrices, custom base URLs, or chat-completions support in the first cut.
 
 ## Summary
 

@@ -2,6 +2,21 @@ use tau_provider_chat_completions::openrouter::OpenRouterProfile;
 
 use super::*;
 
+struct RecordingRetrySleeper {
+    delays: Vec<std::time::Duration>,
+}
+
+impl RetrySleeper for RecordingRetrySleeper {
+    fn sleep_or_abort(&mut self, delay: std::time::Duration, _current_apid: &str) -> SleepOutcome {
+        self.delays.push(delay);
+        SleepOutcome::Aborted
+    }
+}
+
+fn model_ids(models: &[ProviderModelInfo]) -> Vec<String> {
+    models.iter().map(|model| model.id.to_string()).collect()
+}
+
 #[test]
 fn compaction_output_finishes_as_normal_end_turn() {
     // Regression: server-side compaction is now represented by a durable output
@@ -129,6 +144,140 @@ fn provider_profiles_reject_unknown_fields() {
     assert!(error.to_string().contains("unknown field"), "got: {error}");
 }
 
+fn test_chat_model(id: &str) -> ChatCompletionsModel {
+    ChatCompletionsModel {
+        id: ModelName::try_new(id.to_owned()).expect("valid model name"),
+        display_name: None,
+        context_window: 128_000,
+        compat: None,
+        tags: Vec::new(),
+    }
+}
+
+#[test]
+fn chat_completions_profiles_publish_and_route_only_configured_models() {
+    // Chat Completions provider profiles are user-configured namespaces. The
+    // provider must publish exactly the configured models and reject unknown
+    // model ids instead of falling back to any ChatGPT/Codex backend.
+    let provider_name = ProviderName::new("local");
+    let configured = test_chat_model("llama");
+    let provider = ChatCompletionsProvider {
+        base_url: "http://127.0.0.1:8080/v1".to_owned(),
+        api_key: String::new(),
+        models: vec![configured.clone()],
+        max_output_tokens: tau_provider_chat_completions::DEFAULT_MAX_OUTPUT_TOKENS,
+        extra_body: BTreeMap::new(),
+        tags: Vec::new(),
+        compat: chat_completions_add_compat(),
+    };
+    let mut profiles = BuiltinProviderProfiles {
+        providers: BTreeMap::from([(
+            provider_name.clone(),
+            BuiltinProviderProfile::ChatCompletions(provider),
+        )]),
+    };
+
+    let models = models_for_profiles(&profiles);
+    assert_eq!(model_ids(&models), vec!["local/llama"]);
+    assert!(matches!(
+        resolve_prompt_backend(
+            &ModelId::new(provider_name.clone(), configured.id.clone()),
+            &mut profiles
+        ),
+        Some(PromptBackend::ChatCompletions { model, .. }) if model.id == configured.id
+    ));
+    assert!(
+        resolve_prompt_backend(
+            &ModelId::new(provider_name, ModelName::new("missing")),
+            &mut profiles,
+        )
+        .is_none()
+    );
+}
+
+#[test]
+fn openrouter_profiles_publish_and_route_only_configured_models() {
+    // OpenRouter profiles are wrapped into Chat Completions at dispatch time.
+    // Keep coverage for both model publication and exact configured-model
+    // routing so profile conversion does not accidentally widen access.
+    let provider_name = ProviderName::new("openrouter");
+    let configured = test_chat_model("anthropic/claude-test");
+    let profile = OpenRouterProfile {
+        api_key: "key".to_owned(),
+        models: vec![configured.clone()],
+    };
+    let mut profiles = BuiltinProviderProfiles {
+        providers: BTreeMap::from([(
+            provider_name.clone(),
+            BuiltinProviderProfile::OpenRouter(profile),
+        )]),
+    };
+
+    let models = models_for_profiles(&profiles);
+    assert_eq!(model_ids(&models), vec!["openrouter/anthropic/claude-test"]);
+    assert!(matches!(
+        resolve_prompt_backend(
+            &ModelId::new(provider_name.clone(), configured.id.clone()),
+            &mut profiles
+        ),
+        Some(PromptBackend::ChatCompletions { provider, model })
+            if provider.base_url == "https://openrouter.ai/api/v1"
+                && model.id == configured.id
+    ));
+    assert!(
+        resolve_prompt_backend(
+            &ModelId::new(provider_name, ModelName::new("missing")),
+            &mut profiles,
+        )
+        .is_none()
+    );
+}
+
+#[test]
+fn provider_retry_after_delay_is_clamped_before_sleeping() {
+    // Upstream account-limit responses can advertise reset windows measured in
+    // hours. Prompt workers must clamp such delays before entering the sleeper
+    // so one provider response cannot monopolize a worker indefinitely.
+    let mut bytes = Vec::new();
+    let mut writer = PeerOutputWriter::new(&mut bytes);
+    let mut sleeper = RecordingRetrySleeper { delays: Vec::new() };
+    let body = serde_json::json!({
+        "error": {
+            "type": "usage_limit_reached",
+            "resets_in_seconds": u64::MAX,
+        },
+    })
+    .to_string();
+
+    let error = with_llm_retry(
+        "sp-huge-retry",
+        &tau_proto::AgentId::parse("agent").expect("agent id"),
+        &tau_proto::PromptOriginator::User,
+        &mut writer,
+        &mut sleeper,
+        |_writer, _sleeper| -> Result<(), common::LlmError> {
+            Err(common::LlmError::HttpStatus(429, body.clone()))
+        },
+    )
+    .expect_err("aborted retry should return original provider error");
+
+    assert!(matches!(error, common::LlmError::HttpStatus(429, _)));
+    assert_eq!(sleeper.delays, vec![LLM_MAX_RETRY_DELAY]);
+}
+
+#[test]
+fn cancellation_sleep_aborts_when_deadline_would_overflow() {
+    // `CancellationState` is the last line of defense for retry sleeping. Even
+    // if a future caller forgets to clamp, impossible deadlines should abort
+    // rather than panic on `Instant` arithmetic.
+    let cancellation = CancellationState::default();
+
+    assert_eq!(
+        cancellation.sleep_or_abort(std::time::Duration::MAX, "sp-overflow"),
+        SleepOutcome::Aborted
+    );
+}
+
 fn minimal_prompt() -> tau_proto::AgentPromptCreated {
     tau_proto::AgentPromptCreated {
         agent_prompt_id: "ap-test".into(),
@@ -203,12 +352,12 @@ fn chatgpt_repetition_error_uses_clear_response_and_empty_final_output() {
     {
         let mut writer = tau_proto::PeerOutputWriter::new(&mut bytes);
         finish_error(
-            "session-test",
             "ap-test",
             &prompt,
             &backend,
             tau_provider_chatgpt::common::LlmError::RepetitionDetected(repetition),
             None,
+            false,
             &mut writer,
         )
         .expect("finish repetition error");

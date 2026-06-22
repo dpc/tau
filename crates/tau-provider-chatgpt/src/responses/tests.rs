@@ -6,6 +6,17 @@ use tau_proto::{
 use super::*;
 use crate::common::LlmError;
 
+fn unique_temp_state_dir(label: &str) -> std::path::PathBuf {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock after epoch")
+        .as_nanos();
+    std::env::temp_dir().join(format!(
+        "tau-provider-chatgpt-state-{label}-{}-{nanos}",
+        std::process::id()
+    ))
+}
+
 fn context(items: &[ContextItem]) -> &'static tau_proto::PromptContext {
     Box::leak(Box::new(tau_proto::PromptContext {
         blocks: vec![tau_proto::ContextBlock::UserInput(
@@ -37,6 +48,48 @@ fn context_with_response_id(
 }
 
 #[test]
+fn debug_provider_request_dir_requires_existing_session_dir() {
+    // Provider diagnostics are allowed to create their own debug subdirectory,
+    // but must not create durable per-session roots for ephemeral sessions.
+    let state_dir = unique_temp_state_dir("missing-session");
+    let session_id = "session-missing";
+
+    assert!(debug_provider_request_dir_in(&state_dir, session_id, true).is_none());
+    assert!(
+        !state_dir.join("sessions").join(session_id).exists(),
+        "missing session dir should not be created"
+    );
+}
+
+#[test]
+fn debug_provider_request_dir_returns_debug_dir_for_existing_session() {
+    // Durable sessions create their session directory before provider calls; in
+    // that case provider diagnostics can write under the standard debug path.
+    let state_dir = unique_temp_state_dir("existing-session");
+    let session_id = "session-existing";
+    let session_dir = state_dir.join("sessions").join(session_id);
+    std::fs::create_dir_all(&session_dir).expect("create durable session dir");
+
+    assert_eq!(
+        debug_provider_request_dir_in(&state_dir, session_id, true),
+        Some(session_dir.join("debug").join("provider-requests"))
+    );
+}
+
+#[test]
+fn debug_provider_request_dir_rejects_ephemeral_session_with_existing_dir() {
+    // Explicit session persistence state wins over filesystem shape: an
+    // ephemeral current session can reuse an id that has an old durable
+    // directory, and provider diagnostics must still stay disabled.
+    let state_dir = unique_temp_state_dir("ephemeral-reuse");
+    let session_id = "session-reused";
+    let session_dir = state_dir.join("sessions").join(session_id);
+    std::fs::create_dir_all(&session_dir).expect("create old durable session dir");
+
+    assert!(debug_provider_request_dir_in(&state_dir, session_id, false).is_none());
+}
+
+#[test]
 fn build_request_includes_prompt_cache_key_when_supported() {
     let config = ResponsesConfig {
         surface: ResponsesSurface::ChatGpt,
@@ -65,6 +118,7 @@ fn build_request_includes_prompt_cache_key_when_supported() {
         session_id: &tau_proto::SessionId::new("test-session"),
         agent_id: &tau_proto::AgentId::parse("test-agent").expect("agent id"),
         share_user_cache_key: false,
+        debug_provider_requests: false,
     };
 
     let body = serde_json::to_value(build_request(&config, &request, None)).expect("serialize");
@@ -105,6 +159,7 @@ fn build_request_includes_service_tier_when_configured() {
         share_user_cache_key: false,
         session_id: &tau_proto::SessionId::new("test-session"),
         agent_id: &tau_proto::AgentId::parse("test-agent").expect("agent id"),
+        debug_provider_requests: false,
     };
 
     let body = serde_json::to_value(build_request(&config, &request, None)).expect("serialize");
@@ -132,6 +187,7 @@ fn build_request_maps_off_effort_to_openai_none() {
         session_id: &tau_proto::SessionId::new("test-session"),
         agent_id: &tau_proto::AgentId::parse("test-agent").expect("agent id"),
         share_user_cache_key: false,
+        debug_provider_requests: false,
     };
 
     let body = serde_json::to_value(build_request(&config, &request, None)).expect("serialize");
@@ -168,6 +224,7 @@ fn build_request_omits_prompt_cache_key_without_seed() {
         session_id: &tau_proto::SessionId::new("test-session"),
         agent_id: &tau_proto::AgentId::parse("test-agent").expect("agent id"),
         share_user_cache_key: false,
+        debug_provider_requests: false,
     };
 
     let body = serde_json::to_value(build_request(&config, &request, None)).expect("serialize");
@@ -196,6 +253,7 @@ fn build_request_first_turn_replays_full_history_without_chain() {
         session_id: &tau_proto::SessionId::new("test-session"),
         agent_id: &tau_proto::AgentId::parse("test-agent").expect("agent id"),
         share_user_cache_key: false,
+        debug_provider_requests: false,
     };
 
     let body = serde_json::to_value(build_request(&config, &request, None)).expect("serialize");
@@ -248,6 +306,7 @@ fn build_request_full_replay_serializes_restored_tool_error_before_next_user_mes
         session_id: &tau_proto::SessionId::new("test-session"),
         agent_id: &tau_proto::AgentId::parse("test-agent").expect("agent id"),
         share_user_cache_key: false,
+        debug_provider_requests: false,
     };
 
     let body = serde_json::to_value(build_request(&config, &request, None)).expect("serialize");
@@ -305,6 +364,7 @@ fn build_request_chain_turn_sends_delta_and_previous_response_id() {
         session_id: &tau_proto::SessionId::new("test-session"),
         agent_id: &tau_proto::AgentId::parse("test-agent").expect("agent id"),
         share_user_cache_key: false,
+        debug_provider_requests: false,
     };
 
     let body = serde_json::to_value(build_request(&config, &request, Some("resp_abc")))
@@ -342,6 +402,7 @@ fn build_request_cached_response_missing_from_context_falls_back_to_full_replay(
         session_id: &tau_proto::SessionId::new("test-session"),
         agent_id: &tau_proto::AgentId::parse("test-agent").expect("agent id"),
         share_user_cache_key: false,
+        debug_provider_requests: false,
     };
 
     let body =
@@ -385,6 +446,7 @@ fn build_request_chain_turn_still_emits_prompt_cache_key() {
         session_id: &tau_proto::SessionId::new("test-session"),
         agent_id: &tau_proto::AgentId::parse("test-agent").expect("agent id"),
         share_user_cache_key: false,
+        debug_provider_requests: false,
     };
 
     let body = serde_json::to_value(build_request(&config, &request, Some("resp_abc")))
@@ -419,6 +481,7 @@ fn build_request_prompt_cache_key_ignores_originator() {
         session_id: &tau_proto::SessionId::new("test-session"),
         agent_id: &tau_proto::AgentId::parse("test-agent").expect("agent id"),
         share_user_cache_key: false,
+        debug_provider_requests: false,
     };
     let ext_request = PromptPayload {
         system_prompt: "sys",
@@ -431,6 +494,7 @@ fn build_request_prompt_cache_key_ignores_originator() {
         session_id: &tau_proto::SessionId::new("test-session"),
         agent_id: &tau_proto::AgentId::parse("test-agent").expect("agent id"),
         share_user_cache_key: false,
+        debug_provider_requests: false,
     };
 
     let user_body =
@@ -468,11 +532,13 @@ fn build_request_share_user_cache_key_does_not_change_agent_bucket() {
         share_user_cache_key: true,
         session_id: &tau_proto::SessionId::new("test-session"),
         agent_id: &tau_proto::AgentId::parse("test-agent").expect("agent id"),
+        debug_provider_requests: false,
     };
     let body =
         serde_json::to_value(build_request(&config, &shared_request, None)).expect("serialize");
     let default_request = PromptPayload {
         share_user_cache_key: false,
+        debug_provider_requests: false,
         ..shared_request
     };
     let default_body =
@@ -523,6 +589,7 @@ fn build_request_extension_matches_user_wire_body_for_same_context() {
         share_user_cache_key: false,
         session_id: &tau_proto::SessionId::new("test-session"),
         agent_id: &tau_proto::AgentId::parse("test-agent").expect("agent id"),
+        debug_provider_requests: false,
     };
     let ext_request = PromptPayload {
         system_prompt: "sys",
@@ -535,6 +602,7 @@ fn build_request_extension_matches_user_wire_body_for_same_context() {
         share_user_cache_key: false,
         session_id: &tau_proto::SessionId::new("test-session"),
         agent_id: &tau_proto::AgentId::parse("test-agent").expect("agent id"),
+        debug_provider_requests: false,
     };
 
     let user_body =
@@ -577,6 +645,7 @@ fn build_request_emits_tool_choice_none_while_keeping_tools_declared() {
         session_id: &tau_proto::SessionId::new("test-session"),
         agent_id: &tau_proto::AgentId::parse("test-agent").expect("agent id"),
         share_user_cache_key: false,
+        debug_provider_requests: false,
     };
 
     let body = serde_json::to_value(build_request(&config, &request, None)).expect("serialize");
@@ -610,6 +679,7 @@ fn build_request_sends_compaction_context_management_and_trigger_item() {
         session_id: &tau_proto::SessionId::new("test-session"),
         agent_id: &tau_proto::AgentId::parse("test-agent").expect("agent id"),
         share_user_cache_key: false,
+        debug_provider_requests: false,
     };
 
     let body = serde_json::to_value(build_request(&config, &request, None)).expect("serialize");
@@ -649,6 +719,7 @@ fn build_request_trims_full_replay_before_latest_compaction_item() {
         session_id: &tau_proto::SessionId::new("test-session"),
         agent_id: &tau_proto::AgentId::parse("test-agent").expect("agent id"),
         share_user_cache_key: false,
+        debug_provider_requests: false,
     };
 
     let body = serde_json::to_value(build_request(&config, &request, None)).expect("serialize");
@@ -776,6 +847,7 @@ fn build_request_stamps_phase_on_assistant_messages_when_supported() {
         session_id: &tau_proto::SessionId::new("test-session"),
         agent_id: &tau_proto::AgentId::parse("test-agent").expect("agent id"),
         share_user_cache_key: false,
+        debug_provider_requests: false,
     };
     let body = serde_json::to_value(build_request(&config, &request, None)).expect("serialize");
     let input = body["input"].as_array().expect("input");
@@ -815,6 +887,7 @@ fn build_request_omits_phase_when_unsupported() {
         session_id: &tau_proto::SessionId::new("test-session"),
         agent_id: &tau_proto::AgentId::parse("test-agent").expect("agent id"),
         share_user_cache_key: false,
+        debug_provider_requests: false,
     };
     let body = serde_json::to_value(build_request(&config, &request, None)).expect("serialize");
     let input = body["input"].as_array().expect("input");
@@ -860,6 +933,7 @@ fn build_request_stamps_phase_on_pre_tool_call_text_flush() {
         session_id: &tau_proto::SessionId::new("test-session"),
         agent_id: &tau_proto::AgentId::parse("test-agent").expect("agent id"),
         share_user_cache_key: false,
+        debug_provider_requests: false,
     };
     let body = serde_json::to_value(build_request(&config, &request, None)).expect("serialize");
     let input = body["input"].as_array().expect("input");
@@ -953,6 +1027,7 @@ fn build_request_emits_include_when_encrypted_reasoning_supported() {
         session_id: &tau_proto::SessionId::new("test-session"),
         agent_id: &tau_proto::AgentId::parse("test-agent").expect("agent id"),
         share_user_cache_key: false,
+        debug_provider_requests: false,
     };
     let body = serde_json::to_value(build_request(&config, &request, None)).expect("serialize");
     let include = body["include"].as_array().expect("include array");
@@ -978,6 +1053,7 @@ fn build_request_omits_include_when_encrypted_reasoning_unsupported() {
         session_id: &tau_proto::SessionId::new("test-session"),
         agent_id: &tau_proto::AgentId::parse("test-agent").expect("agent id"),
         share_user_cache_key: false,
+        debug_provider_requests: false,
     };
     let body = serde_json::to_value(build_request(&config, &request, None)).expect("serialize");
     assert!(
@@ -1020,6 +1096,7 @@ fn build_request_replays_reasoning_item_as_top_level_input() {
         session_id: &tau_proto::SessionId::new("test-session"),
         agent_id: &tau_proto::AgentId::parse("test-agent").expect("agent id"),
         share_user_cache_key: false,
+        debug_provider_requests: false,
     };
     let body = serde_json::to_value(build_request(&config, &request, None)).expect("serialize");
     let input = body["input"].as_array().expect("input");
@@ -1083,6 +1160,7 @@ fn build_request_emits_custom_tool_definition_and_round_trips_custom_tool_output
         session_id: &tau_proto::SessionId::new("test-session"),
         agent_id: &tau_proto::AgentId::parse("test-agent").expect("agent id"),
         share_user_cache_key: false,
+        debug_provider_requests: false,
     };
 
     let body = serde_json::to_value(build_request(&config, &request, None)).expect("serialize");
@@ -1186,6 +1264,7 @@ fn build_request_chain_keeps_custom_tool_output_type_from_prior_history() {
         session_id: &tau_proto::SessionId::new("test-session"),
         agent_id: &tau_proto::AgentId::parse("test-agent").expect("agent id"),
         share_user_cache_key: false,
+        debug_provider_requests: false,
     };
 
     let body = serde_json::to_value(build_request(&config, &request, Some("resp_custom")))
@@ -1328,6 +1407,7 @@ fn ws_envelope_adds_type_and_drops_stream() {
         session_id: &tau_proto::SessionId::new("test-session"),
         agent_id: &tau_proto::AgentId::parse("test-agent").expect("agent id"),
         share_user_cache_key: false,
+        debug_provider_requests: false,
     };
 
     let http_body =
@@ -1367,6 +1447,7 @@ fn ws_prewarm_envelope_sets_generate_false_and_drops_previous_response() {
         session_id: &tau_proto::SessionId::new("test-session"),
         agent_id: &tau_proto::AgentId::parse("test-agent").expect("agent id"),
         share_user_cache_key: false,
+        debug_provider_requests: false,
     };
 
     let body = serde_json::to_value(build_ws_envelope(&config, &request, None, Some(false)))

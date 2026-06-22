@@ -1,3 +1,5 @@
 # tau-ext-provider-builtin
 
-After major changes to this extension's features, tool/action behavior, configuration options, provider/runtime behavior, or user-visible capabilities, update the built-in self-knowledge skill `tau-self-knowledge-ext-provider-builtin` so Tau can accurately explain the current extension behavior.
+Read `design.md` before changing provider profile ownership/model publication, prompt worker/cancellation/retry behavior, diagnostics/persistence boundaries, or this crate's testing boundary.
+
+After major changes to this extension's features, tool/action behavior, configuration options, provider/runtime behavior, or user-visible capabilities, update the built-in self-knowledge skill `tau-self-knowledge-ext-provider-builtin` and user-facing provider docs (`docs/providers.md`, `FEATURES.md` as applicable) so Tau and the docs accurately explain the current extension behavior.

@@ -123,6 +123,7 @@ fn cache_key(originator: &PromptOriginator, share_user_cache_key: bool) -> Strin
         share_user_cache_key,
         session_id: &session_id,
         agent_id: &agent_id,
+        debug_provider_requests: false,
     };
     payload.prompt_cache_key("https://api.openai.com/v1")
 }

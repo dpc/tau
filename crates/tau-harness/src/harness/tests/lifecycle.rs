@@ -1335,6 +1335,48 @@ fn startup_session_dir_is_reported_before_extension_ready() {
 }
 
 #[test]
+fn session_init_catchup_replays_current_session_dir_to_early_subscribers() {
+    // Regression coverage for configured extensions that subscribe during
+    // startup after the live `harness.session_dir` notice but before the session
+    // is marked initialized. Init completion must replay the current-state
+    // session-dir snapshot so extensions can apply the correct persistence
+    // policy.
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = quiet_provider_harness(&sp).expect("start");
+    let events = connect_test_client(&mut h, "early-session-dir", tau_proto::ClientKind::Provider);
+    h.initialized_sessions
+        .remove(&tau_proto::SessionId::new("s1"));
+
+    h.handle_extension_message(
+        "early-session-dir",
+        TestMessage::Subscribe(Subscribe {
+            selectors: vec![tau_proto::EventSelector::Exact(
+                tau_proto::EventName::HARNESS_SESSION_DIR,
+            )],
+        }),
+    )
+    .expect("subscribe during init");
+    assert!(
+        events.lock().expect("events").is_empty(),
+        "subscribe-time catch-up is skipped while session initialization is incomplete"
+    );
+
+    h.catch_up_subscribers_after_session_init();
+
+    assert!(
+        events.lock().expect("events").iter().any(|frame| matches!(
+            &frame.frame,
+            HarnessOutputMessage::Deliver(delivery)
+                if matches!(delivery.event.as_ref(), Event::HarnessSessionDir(_))
+        )),
+        "session init catch-up should deliver current harness.session_dir"
+    );
+
+    h.shutdown().expect("shutdown");
+}
+
+#[test]
 fn agents_context_ready_staged_until_ready_and_queue_waits() {
     // AGENTS.md discovery and the matching context-ready acknowledgement are
     // startup context state. A queued user prompt must wait for Ready, then see

@@ -162,8 +162,12 @@ impl Harness {
     /// the process and is never published live, so it is replayed here;
     /// otherwise a peer's view would depend on whether it subscribed before
     /// or after init. The `SessionStarted` snapshot is not resent: these
-    /// peers just saw it live from `start_session_init`. For fresh sessions
-    /// this pass is a no-op (no agents loaded yet).
+    /// peers just saw it live from `start_session_init`. Current harness
+    /// snapshots such as `harness.session_dir` are also replayed here because
+    /// configured extensions can subscribe after the live startup notice but
+    /// before the session is marked initialized. For fresh sessions the durable
+    /// history pass is a no-op (no agents loaded yet), but harness
+    /// current-state catch-up is still needed.
     pub(crate) fn catch_up_subscribers_after_session_init(&mut self) {
         let subscribers: Vec<(String, Vec<EventSelector>)> = self
             .bus
@@ -179,6 +183,7 @@ impl Harness {
             .collect();
         for (client_id, selectors) in subscribers {
             self.replay_session_history(&client_id, &selectors);
+            self.replay_harness_notice(&client_id, &selectors);
         }
     }
 

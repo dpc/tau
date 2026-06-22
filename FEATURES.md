@@ -480,10 +480,13 @@ email-only configs.
 
 ### `provider-builtin` — Built-in provider backend
 
-Publishes hardcoded `chatgpt/*` model metadata from provider-owned ChatGPT OAuth
-state and owns model execution for that namespace. The harness assembles prompts,
-then routes the selected provider's `agent.prompt_created` event directly to
-this extension; there is no built-in `core-agent` process.
+Publishes provider-owned model metadata for ChatGPT/Codex OAuth profiles,
+OpenAI-compatible Chat Completions endpoints, and OpenRouter profiles. ChatGPT
+publishes hardcoded `chatgpt/*` model metadata from OAuth state; Chat
+Completions and OpenRouter profiles publish their configured model lists under
+their provider namespaces. The harness assembles prompts, then routes the
+selected provider's `agent.prompt_created` event directly to this extension;
+there is no built-in `core-agent` process.
 
 Responses conversations chain via `previous_response_id` after the first turn:
 each follow-up request sends only the messages added since the prior

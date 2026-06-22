@@ -151,6 +151,9 @@ pub(super) fn maybe_debug_write_provider_request(
     transport: tau_proto::ProviderBackendTransport,
     body: &impl Serialize,
 ) {
+    if !request.debug_provider_requests {
+        return;
+    }
     if let Err(error) =
         debug_write_provider_request(agent_prompt_id, config, request, transport, body)
     {
@@ -163,14 +166,35 @@ pub(super) fn maybe_debug_write_provider_request(
     }
 }
 
-pub fn debug_provider_request_dir(session_id: &str) -> Option<PathBuf> {
+/// Return the provider request debug directory for an explicitly durable
+/// session.
+///
+/// This helper intentionally returns `None` unless the caller passes an
+/// explicit durable-session signal and the session directory already exists.
+/// Provider diagnostics must not infer persistence from filesystem shape or
+/// create per-session state directories on their own, because ephemeral
+/// sessions can reuse a session id with older durable state and must not gain
+/// durable debug artifacts as a side effect of provider execution.
+pub fn debug_provider_request_dir(
+    session_id: &str,
+    debug_provider_requests: bool,
+) -> Option<PathBuf> {
     let state = tau_config::settings::state_dir()?;
-    Some(
-        tau_config::settings::sessions_dir_of(&state)
-            .join(session_id)
-            .join("debug")
-            .join("provider-requests"),
-    )
+    debug_provider_request_dir_in(&state, session_id, debug_provider_requests)
+}
+
+fn debug_provider_request_dir_in(
+    state: &std::path::Path,
+    session_id: &str,
+    debug_provider_requests: bool,
+) -> Option<PathBuf> {
+    if !debug_provider_requests {
+        return None;
+    }
+    let session_dir = tau_config::settings::sessions_dir_of(state).join(session_id);
+    session_dir
+        .is_dir()
+        .then(|| session_dir.join("debug").join("provider-requests"))
 }
 
 fn debug_write_provider_request(
@@ -180,7 +204,8 @@ fn debug_write_provider_request(
     transport: tau_proto::ProviderBackendTransport,
     body: &impl Serialize,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let Some(dir) = debug_provider_request_dir(request.session_id) else {
+    let Some(dir) = debug_provider_request_dir(request.session_id, request.debug_provider_requests)
+    else {
         return Ok(());
     };
     std::fs::create_dir_all(&dir)?;

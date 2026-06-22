@@ -86,14 +86,22 @@ fn is_zero(value: &u64) -> bool {
 }
 
 /// Maximum number of retry attempts before giving up on a transient provider
-/// error. Combined with [`llm_retry_schedule`]'s fibonacci shape (min 10s),
-/// this caps total wait time at roughly 9 minutes.
+/// error.
 const LLM_MAX_RETRIES: usize = 8;
 
 /// Tighter cap for extension-originated turns (delegate sub-agents,
 /// notifications, etc.). These are best-effort from the user's perspective, and
 /// should not block the provider extension's single prompt slot for minutes.
 const LLM_MAX_RETRIES_EXTENSION: usize = 2;
+/// Maximum delay accepted from either Tau's retry schedule or provider-supplied
+/// `Retry-After` style limits.
+///
+/// Provider prompts run on a bounded worker pool. Upstream APIs can report
+/// account reset windows measured in hours, but sleeping a worker that long is
+/// indistinguishable from a stuck provider process from the harness's point of
+/// view. Keep retries useful for transient overload while guaranteeing a prompt
+/// slot returns in human-scale time.
+const LLM_MAX_RETRY_DELAY: Duration = Duration::from_secs(60);
 
 /// Default number of provider prompts allowed to execute concurrently.
 const DEFAULT_PROMPT_CONCURRENCY: usize = 4;
@@ -492,6 +500,7 @@ where
     tau_extension::Handshake::with_kind(EXTENSION_NAME, ClientKind::Provider)
         .subscribe([
             EventName::AGENT_PROMPT_PREWARM_REQUESTED,
+            EventName::HARNESS_SESSION_DIR,
             EventName::UI_CANCEL_PROMPT,
         ])
         .announce_event(Event::ProviderModelsUpdated(ProviderModelsUpdated {
@@ -525,6 +534,7 @@ where
     let chatgpt_runtime = Arc::new(ChatGptRuntime::new());
     let cancellation = Arc::new(CancellationState::default());
     let mut prompt_queue: VecDeque<PromptJob> = VecDeque::new();
+    let mut session_debug_allowed = BTreeMap::<tau_proto::SessionId, bool>::new();
     let prompt_worker_context = PromptWorkerContext {
         worker_tx: &worker_tx,
         prompt_executor: &prompt_executor,
@@ -573,12 +583,16 @@ where
 
         let event = match frame {
             HarnessOutputMessage::Deliver(delivery) => {
-                // Prompt execution is an effect; replay-marked frames
-                // re-send history and must never start a provider call.
-                if delivery.is_replay() {
+                let is_replay = delivery.is_replay();
+                let event = delivery.into_event();
+                // Prompt execution is an effect; replay-marked frames re-send
+                // history and must never start a provider call. Harness session
+                // directory announcements are current-state facts, so replay
+                // catch-up is allowed to update the diagnostics policy.
+                if is_replay && !matches!(event, Event::HarnessSessionDir(_)) {
                     None
                 } else {
-                    Some(delivery.into_event())
+                    Some(event)
                 }
             }
             HarnessOutputMessage::Disconnect(_) => {
@@ -588,9 +602,20 @@ where
             _ => None,
         };
         match event {
+            Some(Event::HarnessSessionDir(session_dir)) => {
+                session_debug_allowed.insert(
+                    session_dir.session_id,
+                    !matches!(session_dir.status, tau_proto::SessionDirStatus::Ephemeral),
+                );
+            }
             Some(Event::AgentPromptPrewarmRequested(prewarm)) => {
                 let mut profiles = load_prompt_profiles();
-                handle_prewarm(&prewarm, &mut profiles, &chatgpt_runtime);
+                handle_prewarm(
+                    &prewarm,
+                    &mut profiles,
+                    &chatgpt_runtime,
+                    &session_debug_allowed,
+                );
             }
             Some(Event::AgentPromptCreated(prompt)) => {
                 let agent_prompt_id = prompt.agent_prompt_id.clone();
@@ -609,6 +634,10 @@ where
                     Some(backend) => {
                         let job = PromptJob {
                             agent_prompt_id,
+                            debug_provider_requests: debug_provider_requests_for(
+                                &prompt.session_id,
+                                &session_debug_allowed,
+                            ),
                             prompt,
                             backend,
                         };
@@ -645,6 +674,7 @@ type PromptExecutor = Arc<dyn Fn(PromptExecution) + Send + Sync + 'static>;
 
 struct PromptJob {
     agent_prompt_id: tau_proto::AgentPromptId,
+    debug_provider_requests: bool,
     prompt: tau_proto::AgentPromptCreated,
     backend: PromptBackend,
 }
@@ -757,7 +787,9 @@ impl CancellationState {
     }
 
     fn sleep_or_abort(&self, delay: Duration, current_apid: &str) -> SleepOutcome {
-        let deadline = Instant::now() + delay;
+        let Some(deadline) = Instant::now().checked_add(delay) else {
+            return SleepOutcome::Aborted;
+        };
         let mut inner = match self.inner.lock() {
             Ok(inner) => inner,
             Err(_) => return SleepOutcome::Aborted,
@@ -798,6 +830,16 @@ fn prompt_concurrency_limit() -> usize {
         .unwrap_or(DEFAULT_PROMPT_CONCURRENCY)
 }
 
+fn debug_provider_requests_for(
+    session_id: &tau_proto::SessionId,
+    session_debug_allowed: &BTreeMap<tau_proto::SessionId, bool>,
+) -> bool {
+    session_debug_allowed
+        .get(session_id)
+        .copied()
+        .unwrap_or(false)
+}
+
 fn production_prompt_executor() -> PromptExecutor {
     Arc::new(|execution| {
         let agent_prompt_id = execution.job.agent_prompt_id.clone();
@@ -809,6 +851,7 @@ fn production_prompt_executor() -> PromptExecutor {
             &agent_prompt_id,
             &execution.job.backend,
             &execution.job.prompt,
+            execution.job.debug_provider_requests,
             &mut writer,
             &mut retry_ctx,
             &execution.chatgpt_runtime,
@@ -1224,7 +1267,7 @@ where
         let Some(backoff_delay) = backoff.next() else {
             return Err(error);
         };
-        let delay = retry_after.max(backoff_delay);
+        let delay = retry_after.max(backoff_delay).min(LLM_MAX_RETRY_DELAY);
         attempt += 1;
         tracing::warn!(
             target: LOG_TARGET,
@@ -1299,6 +1342,7 @@ fn handle_prewarm(
     prewarm: &tau_proto::AgentPromptPrewarmRequested,
     profiles: &mut BuiltinProviderProfiles,
     chatgpt_runtime: &ChatGptRuntime,
+    session_debug_allowed: &BTreeMap<tau_proto::SessionId, bool>,
 ) {
     let Some(model) = prewarm.model.as_ref() else {
         tracing::debug!(
@@ -1329,6 +1373,10 @@ fn handle_prewarm(
         share_user_cache_key: prewarm.share_user_cache_key,
         session_id: &prewarm.session_id,
         agent_id: &prewarm.agent_id,
+        debug_provider_requests: debug_provider_requests_for(
+            &prewarm.session_id,
+            session_debug_allowed,
+        ),
     };
     tracing::debug!(target: LOG_TARGET, session_id = session_id_str, "starting prompt prewarm");
     match chatgpt_runtime.prewarm(&config, session_id_str, &request) {
@@ -1347,6 +1395,7 @@ fn handle_prompt_backend<R, W: Write>(
     agent_prompt_id: &tau_proto::AgentPromptId,
     backend: &PromptBackend,
     prompt: &tau_proto::AgentPromptCreated,
+    debug_provider_requests: bool,
     writer: &mut PeerOutputWriter<W>,
     retry_ctx: &mut R,
     chatgpt_runtime: &ChatGptRuntime,
@@ -1359,14 +1408,21 @@ where
             agent_prompt_id.as_str(),
             config,
             prompt,
+            debug_provider_requests,
             writer,
             retry_ctx,
             chatgpt_runtime,
         ),
         PromptBackend::ChatCompletions { provider, model } => {
             write_prompt_submitted(agent_prompt_id, &prompt.originator, writer)?;
-            let finished =
-                run_chat_completions_prompt(agent_prompt_id, prompt, provider, model, writer);
+            let finished = run_chat_completions_prompt(
+                agent_prompt_id,
+                prompt,
+                provider,
+                model,
+                debug_provider_requests,
+                writer,
+            );
             writer.write_message(&HarnessInputMessage::emit(Event::ProviderResponseFinished(
                 finished,
             )))?;
@@ -1380,6 +1436,7 @@ fn handle_prompt<R, W: Write>(
     agent_prompt_id: &str,
     config: &responses::ResponsesConfig,
     prompt: &tau_proto::AgentPromptCreated,
+    debug_provider_requests: bool,
     writer: &mut PeerOutputWriter<W>,
     retry_ctx: &mut R,
     chatgpt_runtime: &ChatGptRuntime,
@@ -1399,6 +1456,7 @@ where
         share_user_cache_key: prompt.share_user_cache_key,
         session_id: &prompt.session_id,
         agent_id: &prompt.agent_id,
+        debug_provider_requests,
     };
 
     let originator = prompt.originator.clone();
@@ -1455,6 +1513,7 @@ where
                 &backend,
                 dispatch.state,
                 ws_pool_delta,
+                debug_provider_requests,
                 writer,
             )?
         }
@@ -1474,24 +1533,24 @@ where
             );
             let backend = backend_descriptor(config, transport_taken, false);
             finish_error(
-                prompt.session_id.as_str(),
                 agent_prompt_id,
                 prompt,
                 &backend,
                 error,
                 ws_pool_delta,
+                debug_provider_requests,
                 writer,
             )?
         }
         Err(error) => {
             let backend = backend_descriptor(config, transport_taken, false);
             finish_error(
-                prompt.session_id.as_str(),
                 agent_prompt_id,
                 prompt,
                 &backend,
                 error,
                 ws_pool_delta,
+                debug_provider_requests,
                 writer,
             )?
         }
@@ -1515,15 +1574,20 @@ fn backend_descriptor(
 fn maybe_debug_write_provider_response(
     session_id: &str,
     response: &ProviderResponseFinished,
+    debug_provider_requests: bool,
     provider_terminal_event: Option<&serde_json::Value>,
 ) {
+    if !debug_provider_requests {
+        return;
+    }
     let Some(backend) = response.backend.as_ref() else {
         return;
     };
     if !matches!(backend.kind, ProviderBackendKind::Responses) {
         return;
     }
-    let Some(dir) = responses::debug_provider_request_dir(session_id) else {
+    let Some(dir) = responses::debug_provider_request_dir(session_id, debug_provider_requests)
+    else {
         return;
     };
     if let Err(error) = std::fs::create_dir_all(&dir) {
@@ -1579,6 +1643,7 @@ fn finish_stream<W: Write>(
     backend: &ProviderBackend,
     mut state: common::StreamState,
     ws_pool_delta: Option<tau_proto::WsPoolDelta>,
+    debug_provider_requests: bool,
     writer: &mut PeerOutputWriter<W>,
 ) -> Result<(), Box<dyn Error>> {
     let input_tokens = state.input_tokens;
@@ -1610,7 +1675,12 @@ fn finish_stream<W: Write>(
         provider_response_id,
         ws_pool_delta,
     };
-    maybe_debug_write_provider_response(session_id, &finished, provider_terminal_event.as_ref());
+    maybe_debug_write_provider_response(
+        session_id,
+        &finished,
+        debug_provider_requests,
+        provider_terminal_event.as_ref(),
+    );
     let diagnostic = cache_miss_diagnostic(prompt, request, &finished);
     if let Some(diagnostic) = diagnostic {
         writer.write_message(&HarnessInputMessage::emit(
@@ -1663,12 +1733,12 @@ fn cache_miss_diagnostic(
 }
 
 fn finish_error<W: Write>(
-    session_id: &str,
     agent_prompt_id: &str,
     prompt: &tau_proto::AgentPromptCreated,
     backend: &ProviderBackend,
     error: common::LlmError,
     ws_pool_delta: Option<tau_proto::WsPoolDelta>,
+    debug_provider_requests: bool,
     writer: &mut PeerOutputWriter<W>,
 ) -> Result<(), Box<dyn Error>> {
     let finished = ProviderResponseFinished {
@@ -1688,7 +1758,12 @@ fn finish_error<W: Write>(
         provider_response_id: None,
         ws_pool_delta,
     };
-    maybe_debug_write_provider_response(session_id, &finished, None);
+    maybe_debug_write_provider_response(
+        prompt.session_id.as_str(),
+        &finished,
+        debug_provider_requests,
+        None,
+    );
     writer.write_message(&HarnessInputMessage::emit(Event::ProviderResponseFinished(
         finished,
     )))?;
