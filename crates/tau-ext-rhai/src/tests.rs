@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::io::{Cursor, Write};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use tau_proto::{
     CborValue, Configure, Event, EventSelector, HarnessInputMessage, HarnessInputReader,
@@ -61,6 +62,23 @@ fn empty_configure() -> HarnessOutputMessage {
     })
 }
 
+fn configure_with_script_and_extra(
+    path: &Path,
+    mut extra: Vec<(CborValue, CborValue)>,
+) -> HarnessOutputMessage {
+    let mut config = vec![(
+        CborValue::Text("script".to_owned()),
+        CborValue::Text(path.display().to_string()),
+    )];
+    config.append(&mut extra);
+    HarnessOutputMessage::Configure(Configure {
+        instance_name: None,
+        config: CborValue::Map(config),
+        state_dir: None,
+        secrets: BTreeMap::new(),
+    })
+}
+
 fn prompt_event(text: &str) -> Event {
     Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
@@ -103,6 +121,13 @@ fn run_frames(input_frames: &[HarnessOutputMessage]) -> Vec<HarnessInputMessage>
 fn emitted_event(message: &HarnessInputMessage) -> Option<&Event> {
     match message {
         HarnessInputMessage::Emit(emit) => Some(emit.event.as_ref()),
+        _ => None,
+    }
+}
+
+fn emitted_transient(message: &HarnessInputMessage) -> Option<bool> {
+    match message {
+        HarnessInputMessage::Emit(emit) => Some(emit.transient),
         _ => None,
     }
 }
@@ -309,6 +334,52 @@ fn start_error_reports_but_keeps_extension_ready() {
 }
 
 #[test]
+fn tau_emit_respects_transient_flag_and_reports_invalid_events() {
+    // The two event-emission host functions differ only in durability metadata,
+    // and invalid script-shaped events must become diagnostics instead of being
+    // silently dropped.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let script = write_script(
+        &dir,
+        r#"
+            fn start(config) {
+                let event = #{
+                    event: "harness.notice",
+                    payload: #{
+                        kind: "extension.notice",
+                        message: "from rhai",
+                        level: "info",
+                        always_show: false,
+                    },
+                };
+                tau_emit(event);
+                tau_emit_transient(event);
+                tau_emit(#{ event: "not.a.real.event", payload: #{} });
+            }
+        "#,
+    );
+
+    let frames = run_frames(&[configure_with_script(&script)]);
+
+    let notice_emits: Vec<_> = frames
+        .iter()
+        .filter(|frame| {
+            matches!(
+                emitted_event(frame),
+                Some(Event::HarnessNotice(info)) if info.message == "from rhai"
+            )
+        })
+        .collect();
+    assert_eq!(notice_emits.len(), 2);
+    assert_eq!(emitted_transient(notice_emits[0]), Some(false));
+    assert_eq!(emitted_transient(notice_emits[1]), Some(true));
+    assert!(frames.iter().any(|frame| matches!(
+        emitted_event(frame),
+        Some(Event::HarnessNotice(info)) if info.message.contains("rhai invalid event")
+    )));
+}
+
+#[test]
 fn missing_script_config_reports_error_and_stays_inert() {
     // Missing scripts are configuration errors, but the process stays
     // alive long enough to avoid a harness restart loop.
@@ -326,6 +397,61 @@ fn missing_script_config_reports_error_and_stays_inert() {
             .as_deref()
             .is_some_and(|m| m.contains("disabled"))
     );
+}
+
+#[test]
+fn unknown_config_field_reports_config_error() {
+    // Extension config uses deny_unknown_fields so misspelled options fail
+    // closed and do not silently disable intended limits or script settings.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let script = write_script(&dir, "");
+    let configure = configure_with_script_and_extra(
+        &script,
+        vec![(CborValue::Text("unknown".to_owned()), CborValue::Bool(true))],
+    );
+
+    let frames = run_frames(&[configure]);
+
+    assert!(frames.iter().any(|frame| matches!(
+        frame,
+        HarnessInputMessage::ConfigError(error) if error.message.contains("unknown field")
+    )));
+}
+
+#[test]
+fn max_operations_limit_aborts_runaway_callback() {
+    // Script operation limits are a key guardrail for callbacks that accidentally
+    // spin forever while handling harness events.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let script = write_script(
+        &dir,
+        r#"
+            fn init(config) {
+                return #{ subscribe: [#{ kind: "exact", value: "agent.prompt_submitted" }] };
+            }
+            fn on_event(event, meta) {
+                while true {}
+            }
+        "#,
+    );
+    let configure = configure_with_script_and_extra(
+        &script,
+        vec![(
+            CborValue::Text("limits".to_owned()),
+            CborValue::Map(vec![(
+                CborValue::Text("max_operations".to_owned()),
+                CborValue::Integer(1000.into()),
+            )]),
+        )],
+    );
+    let delivered = HarnessOutputMessage::deliver_live(UnixMicros::new(1), prompt_event("loop"));
+
+    let frames = run_frames(&[configure, delivered]);
+
+    assert!(frames.iter().any(|frame| matches!(
+        emitted_event(frame),
+        Some(Event::HarnessNotice(info)) if info.message.contains("on_event failed")
+    )));
 }
 
 #[test]
@@ -741,6 +867,215 @@ fn shell_completion_callback_throw_emits_tool_error() {
     assert!(frames.iter().any(|frame| matches!(
         emitted_event(frame),
         Some(Event::ToolError(error)) if error.message.contains("callback boom")
+    )));
+}
+
+#[test]
+fn shell_result_includes_cwd_stderr_exit_and_start_error_shape() {
+    // The documented shell result map must expose working-directory behavior,
+    // stderr appending, nonzero process exits, and start failures in a stable
+    // JSON/CBOR-compatible shape for script tools.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let cwd = tempfile::tempdir().expect("tempdir");
+    std::fs::write(cwd.path().join("input.txt"), "ok").expect("write cwd input");
+    let missing_cwd = dir.path().join("missing");
+    let script = write_script(
+        &dir,
+        &format!(
+            r#"
+                fn init(config) {{
+                    register_tool("shell_contract", #{{}}, Fn("shell_contract"));
+                }}
+                fn shell_contract(args, c) {{
+                    if args["case"] == "cwd_stderr" {{
+                        return shell_spawn("cat input.txt; printf err >&2; exit 7", #{{
+                            cwd: "{}",
+                            timeout: 5,
+                        }});
+                    }}
+                    return shell_spawn("printf nope", #{{
+                        cwd: "{}",
+                        timeout: 5,
+                    }});
+                }}
+            "#,
+            cwd.path().display(),
+            missing_cwd.display()
+        ),
+    );
+    let ok = HarnessOutputMessage::deliver_live(
+        UnixMicros::new(1),
+        tool_started(
+            "shell_contract",
+            CborValue::Map(vec![(
+                CborValue::Text("case".to_owned()),
+                CborValue::Text("cwd_stderr".to_owned()),
+            )]),
+        ),
+    );
+    let start_error = HarnessOutputMessage::deliver_live(
+        UnixMicros::new(2),
+        tool_started(
+            "shell_contract",
+            CborValue::Map(vec![(
+                CborValue::Text("case".to_owned()),
+                CborValue::Text("start_error".to_owned()),
+            )]),
+        ),
+    );
+
+    let frames = run_frames(&[configure_with_script(&script), ok, start_error]);
+
+    let results: Vec<_> = frames
+        .iter()
+        .filter_map(|frame| match emitted_event(frame) {
+            Some(Event::ToolResult(result)) => Some(&result.result),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(results.len(), 2);
+    let cwd_result = results
+        .iter()
+        .find_map(|result| match result {
+            CborValue::Map(fields)
+                if fields.iter().any(|(key, value)| {
+                    matches!(
+                        (key, value),
+                        (CborValue::Text(key), CborValue::Text(output))
+                            if key == "output" && output.contains("ok")
+                    )
+                }) =>
+            {
+                Some(fields)
+            }
+            _ => None,
+        })
+        .expect("cwd shell result");
+    assert!(cwd_result.iter().any(|(key, value)| matches!(
+        (key, value),
+        (CborValue::Text(key), CborValue::Bool(false)) if key == "success"
+    )));
+    assert!(cwd_result.iter().any(|(key, value)| matches!(
+        (key, value),
+        (CborValue::Text(key), CborValue::Integer(status)) if key == "status" && *status == 7.into()
+    )));
+    assert!(cwd_result.iter().any(|(key, value)| matches!(
+        (key, value),
+        (CborValue::Text(key), CborValue::Text(output))
+            if key == "output" && output.contains("ok") && output.contains("[stderr]\nerr")
+    )));
+    let start_error_result = results
+        .iter()
+        .find_map(|result| match result {
+            CborValue::Map(fields)
+                if fields.iter().any(|(key, value)| {
+                    matches!(
+                        (key, value),
+                        (CborValue::Text(key), CborValue::Text(reason))
+                            if key == "termination_reason" && reason == "start_error"
+                    )
+                }) =>
+            {
+                Some(fields)
+            }
+            _ => None,
+        })
+        .expect("start error shell result");
+    assert!(start_error_result.iter().any(|(key, value)| matches!(
+        (key, value),
+        (CborValue::Text(key), CborValue::Text(reason)) if key == "termination_reason" && reason == "start_error"
+    )));
+}
+
+#[test]
+fn oversized_shell_timeout_is_rejected_before_pending_job_is_inserted() {
+    // Timeout validation must happen before the job enters the pending map; an
+    // overflowing deadline would otherwise panic the worker and wedge tool calls.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let script = write_script(
+        &dir,
+        r#"
+            fn init(config) { register_tool("huge_timeout", #{}, Fn("huge_timeout")); }
+            fn huge_timeout(args, c) {
+                return shell_spawn("printf never", #{ timeout: 999999999999999999 });
+            }
+        "#,
+    );
+    let started = HarnessOutputMessage::deliver_live(
+        UnixMicros::new(1),
+        tool_started("huge_timeout", CborValue::Map(Vec::new())),
+    );
+
+    let frames = run_frames(&[configure_with_script(&script), started]);
+
+    assert!(frames.iter().any(|frame| matches!(
+        emitted_event(frame),
+        Some(Event::ToolError(error)) if error.message.contains("timeout must be at most")
+    )));
+}
+
+#[test]
+fn disconnect_cancels_pending_shell_jobs() {
+    // On harness shutdown the extension must not leave trusted shell children
+    // running after its runtime exits.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let marker = dir.path().join("marker");
+    let script = write_script(
+        &dir,
+        &format!(
+            r#"
+                fn init(config) {{ register_tool("long_shell", #{{}}, Fn("long_shell")); }}
+                fn long_shell(args, c) {{
+                    return shell_spawn("sleep 2; touch '{}'", #{{ timeout: 10 }});
+                }}
+            "#,
+            marker.display()
+        ),
+    );
+    let started = HarnessOutputMessage::deliver_live(
+        UnixMicros::new(1),
+        tool_started("long_shell", CborValue::Map(Vec::new())),
+    );
+
+    let started_at = Instant::now();
+    let _frames = run_frames(&[
+        configure_with_script(&script),
+        started,
+        HarnessOutputMessage::Disconnect(tau_proto::Disconnect::default()),
+    ]);
+    assert!(started_at.elapsed() < Duration::from_secs(1));
+    std::thread::sleep(Duration::from_millis(2500));
+
+    assert!(!marker.exists());
+}
+
+#[test]
+fn shell_completion_kills_background_descendant_holding_output_pipe() {
+    // A shell that exits while a background child inherits stdout used to wedge
+    // when joining pipe readers. Completion must kill the remaining process
+    // group before waiting for captured output readers.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let script = write_script(
+        &dir,
+        r#"
+            fn init(config) { register_tool("background_pipe", #{}, Fn("background_pipe")); }
+            fn background_pipe(args, c) {
+                return shell_spawn("sleep 60 & printf done", #{ timeout: 10 });
+            }
+        "#,
+    );
+    let started = HarnessOutputMessage::deliver_live(
+        UnixMicros::new(1),
+        tool_started("background_pipe", CborValue::Map(Vec::new())),
+    );
+
+    let started_at = Instant::now();
+    let frames = run_frames(&[configure_with_script(&script), started]);
+
+    assert!(started_at.elapsed() < Duration::from_secs(1));
+    assert!(frames.iter().any(|frame| matches!(
+        emitted_event(frame),
+        Some(Event::ToolResult(result)) if result.result != CborValue::Null
     )));
 }
 

@@ -3,6 +3,11 @@
 //! The extension keeps Tau protocol handling in Rust and exposes delivered
 //! events to Rhai scripts as JSON-shaped maps matching Serde's JSON form.
 
+mod shell;
+
+#[cfg(test)]
+mod tests;
+
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
 use std::error::Error;
@@ -11,7 +16,7 @@ use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::mpsc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use rhai::{Array, Dynamic, Engine, EvalAltResult, FnPtr, ImmutableString, Map, Scope};
 use serde::Deserialize;
@@ -28,6 +33,12 @@ pub const LOG_TARGET: &str = "rhai";
 
 /// Maximum simultaneously pending Rhai-spawned shell jobs per extension.
 const MAX_PENDING_SHELL_JOBS: usize = 32;
+
+/// Maximum shell timeout accepted from scripts.
+const MAX_SHELL_TIMEOUT_SECS: i64 = 24 * 60 * 60;
+
+/// Maximum time to wait for a canceled shell worker to finish shutdown.
+const SHELL_SHUTDOWN_JOIN_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -127,7 +138,6 @@ struct PendingToolCall {
 }
 
 /// Shell job state kept until the worker thread reports completion.
-#[derive(Clone)]
 struct PendingShellJob {
     /// Command string passed to the host shell.
     command: String,
@@ -139,6 +149,10 @@ struct PendingShellJob {
     tool_claimed: bool,
     /// JSON-compatible user metadata copied into the job map.
     tag: Option<Dynamic>,
+    /// Cancellation and process-group handle shared with the shell worker.
+    cancel: shell::ShellCancel,
+    /// Worker thread running the shell command.
+    join_handle: std::thread::JoinHandle<()>,
 }
 
 /// Rhai-visible token identifying an asynchronous host shell job.
@@ -167,12 +181,21 @@ struct ScriptRuntime {
 }
 
 /// Run the extension over stdio.
+///
+/// # Errors
+///
+/// Returns protocol I/O and worker-thread failures from the extension run.
 pub fn run_stdio() -> Result<(), Box<dyn Error>> {
     tau_extension::init_logging_for(LOG_TARGET);
     run(std::io::stdin(), std::io::stdout())
 }
 
 /// Run the extension over the supplied reader/writer pair.
+///
+/// # Errors
+///
+/// Returns protocol I/O failures, initial output failures, or reader/writer
+/// worker failures encountered while serving the supplied streams.
 pub fn run<R, W>(reader: R, writer: W) -> Result<(), Box<dyn Error>>
 where
     R: Read + Send + 'static,
@@ -259,7 +282,12 @@ where
                     action,
                 }));
             }
-            RuntimeInput::Harness(HarnessOutputMessage::Disconnect(_)) => break,
+            RuntimeInput::Harness(HarnessOutputMessage::Disconnect(_)) => {
+                if let Some(runtime) = runtime.as_mut() {
+                    runtime.cancel_and_join_pending_shell_jobs();
+                }
+                break;
+            }
             RuntimeInput::ReaderClosed => {
                 reader_closed = true;
                 if runtime
@@ -645,6 +673,11 @@ fn shell_spawn(
     if timeout_secs < 0 {
         return Err("shell_spawn timeout must be non-negative".to_owned());
     }
+    if timeout_secs > MAX_SHELL_TIMEOUT_SECS {
+        return Err(format!(
+            "shell_spawn timeout must be at most {MAX_SHELL_TIMEOUT_SECS} seconds"
+        ));
+    }
     let cwd = optional_string_field(&opts, "cwd")?;
     let on_complete = opts
         .get("on_complete")
@@ -665,27 +698,34 @@ fn shell_spawn(
     }
     state_guard.next_shell_job_id += 1;
     let id = state_guard.next_shell_job_id;
-    state_guard.shell_jobs.insert(
-        id,
-        PendingShellJob {
-            command: command.clone(),
-            on_complete,
-            tool_call: None,
-            tool_claimed: false,
-            tag,
-        },
-    );
-    drop(state_guard);
-
+    let cancel = shell::ShellCancel::default();
+    let worker_cancel = cancel.clone();
     let tx = runtime_tx.clone();
-    std::thread::spawn(move || {
-        let result =
-            shell::run_shell_command(command, cwd, Duration::from_secs(timeout_secs as u64));
+    let worker_command = command.clone();
+    let join_handle = std::thread::spawn(move || {
+        let result = shell::run_shell_command(
+            worker_command,
+            cwd,
+            Duration::from_secs(timeout_secs as u64),
+            worker_cancel,
+        );
         let _ = tx.send(RuntimeInput::ShellComplete(ShellCompletion {
             job_id: id,
             result,
         }));
     });
+    state_guard.shell_jobs.insert(
+        id,
+        PendingShellJob {
+            command,
+            on_complete,
+            tool_call: None,
+            tool_claimed: false,
+            tag,
+            cancel,
+            join_handle,
+        },
+    );
     Ok(ShellJob { id })
 }
 
@@ -1118,6 +1158,47 @@ impl ScriptRuntime {
     fn has_pending_shell_jobs(&self) -> bool {
         !self.host_state.borrow().shell_jobs.is_empty()
     }
+
+    fn cancel_and_join_pending_shell_jobs(&self) {
+        let jobs: Vec<_> = self
+            .host_state
+            .borrow_mut()
+            .shell_jobs
+            .drain()
+            .map(|(_, job)| job)
+            .collect();
+        for job in &jobs {
+            job.cancel.cancel();
+        }
+        for job in jobs {
+            join_shell_worker_bounded(job);
+        }
+    }
+}
+
+impl Drop for ScriptRuntime {
+    fn drop(&mut self) {
+        self.cancel_and_join_pending_shell_jobs();
+    }
+}
+
+fn join_shell_worker_bounded(job: PendingShellJob) {
+    let deadline = Instant::now() + SHELL_SHUTDOWN_JOIN_TIMEOUT;
+    while !job.join_handle.is_finished() && Instant::now() < deadline {
+        job.cancel.cancel();
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    if job.join_handle.is_finished() {
+        if let Err(err) = job.join_handle.join() {
+            tracing::warn!(target: LOG_TARGET, ?err, "shell worker panicked during shutdown");
+        }
+    } else {
+        tracing::warn!(
+            target: LOG_TARGET,
+            command = %job.command,
+            "shell worker did not finish within shutdown timeout after cancellation"
+        );
+    }
 }
 
 fn report_callback_error(tx: &mpsc::Sender<HarnessInputMessage>, message: String) {
@@ -1345,8 +1426,3 @@ fn dynamic_to_json(value: &Dynamic) -> Result<serde_json::Value, String> {
         value.type_name()
     ))
 }
-
-mod shell;
-
-#[cfg(test)]
-mod tests;

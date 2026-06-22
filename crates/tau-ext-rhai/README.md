@@ -78,9 +78,9 @@ fn on_intercept(event, transient) {
 
 Tool handlers complete the call with their normal return value, fail it if they throw, or defer completion by returning a `ShellJob`. If a deferred shell job has an `on_complete` callback, that callback's return value becomes the tool result and a thrown callback becomes `tool.error`; without a callback, the full shell result map is returned.
 
-`call_info` contains `call_id`, `tool_name`, `agent_id`, `originator`, and `tool_type`. `register_tool_group` requires an empty spec map in v1. If a tool references an undeclared group, the registration auto-creates an empty group for that tool.
+`call_info` contains `call_id`, `tool_name`, `agent_id`, `originator`, and `tool_type`. `register_tool_group` requires an empty spec map in v1. If a tool references an undeclared group, the registration auto-creates an empty group for that tool. `register_tool` does not expose Tau tool tags yet; Rhai tools are currently registered without tag metadata.
 
-Shell results include `success`, `status`, `signal`, `timed_out`, `duration_seconds`, `termination_reason`, `output`, `truncated`, optional `total_lines`, optional `total_bytes`, and `valid_utf8`. The default timeout is 120 seconds, at most 32 shell jobs may be pending per extension, stdout is captured before stderr with stderr appended under `[stderr]`, and captured output is capped/truncated. Shell commands run directly in `tau-ext-rhai`; on Unix each command gets its own process group so timeout can kill descendants.
+Shell results include `success`, `status`, `signal`, `timed_out`, `duration_seconds`, `termination_reason`, `output`, `truncated`, optional `total_lines`, optional `total_bytes`, and `valid_utf8`. The default timeout is 120 seconds, the maximum timeout is 86400 seconds, at most 32 shell jobs may be pending per extension, stdout is captured before stderr with stderr appended under `[stderr]`, and captured output is capped/truncated. Shell commands run directly in `tau-ext-rhai`; on Unix each command gets its own process group so timeout and extension shutdown can kill descendants.
 
 Owned `tool.started` dispatch is name-based because the current Tau event carries no provider/extension owner identity; this relies on the harness-routed visible tool name being the available ownership signal.
 

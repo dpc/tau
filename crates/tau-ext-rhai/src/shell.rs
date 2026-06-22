@@ -2,13 +2,55 @@
 
 use std::io::Read;
 use std::process::{Command, Stdio};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::time::{Duration, Instant};
+
+/// Shared cancellation and process-group state for one shell worker.
+#[derive(Clone, Default)]
+pub(crate) struct ShellCancel {
+    /// Whether the runtime has requested cancellation.
+    requested: Arc<AtomicBool>,
+    /// Unix process group id for direct shutdown kill, or zero before spawn.
+    pgid: Arc<AtomicI32>,
+}
+
+impl ShellCancel {
+    /// Request cancellation and kill the known process group when available.
+    pub(crate) fn cancel(&self) {
+        self.requested.store(true, Ordering::SeqCst);
+        self.kill_process_group();
+    }
+
+    /// Check whether cancellation has been requested.
+    fn is_requested(&self) -> bool {
+        self.requested.load(Ordering::SeqCst)
+    }
+
+    /// Record the shell child's process group id.
+    fn set_process_group(&self, child: &std::process::Child) {
+        #[cfg(unix)]
+        self.pgid.store(child.id() as i32, Ordering::SeqCst);
+    }
+
+    /// Kill the recorded process group if this platform supports it.
+    fn kill_process_group(&self) {
+        #[cfg(unix)]
+        {
+            let pgid = self.pgid.load(Ordering::SeqCst);
+            if pgid > 0 {
+                kill_process_group_id(pgid);
+            }
+        }
+    }
+}
 
 /// Run one shell command to completion with bounded capture and timeout.
 pub(crate) fn run_shell_command(
     command: String,
     cwd: Option<String>,
     timeout: Duration,
+    cancel: ShellCancel,
 ) -> serde_json::Value {
     let started = Instant::now();
     let mut command_builder = Command::new("sh");
@@ -51,15 +93,24 @@ pub(crate) fn run_shell_command(
             });
         }
     };
+    cancel.set_process_group(&child);
 
     let stdout = child.stdout.take().map(read_pipe_capped);
     let stderr = child.stderr.take().map(read_pipe_capped);
-    let deadline = Instant::now() + timeout;
+    let deadline = Instant::now().checked_add(timeout);
     let mut timed_out = false;
+    let mut canceled = false;
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break Some(status),
-            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(10)),
+            Ok(None) if cancel.is_requested() => {
+                canceled = true;
+                kill_child_process_group(&mut child);
+                break child.wait().ok();
+            }
+            Ok(None) if deadline.is_some_and(|deadline| Instant::now() < deadline) => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
             Ok(None) => {
                 timed_out = true;
                 kill_child_process_group(&mut child);
@@ -68,6 +119,11 @@ pub(crate) fn run_shell_command(
             Err(_) => break None,
         }
     };
+    // A shell can exit while background descendants keep inherited stdout/stderr
+    // pipes open. Kill the process group before joining pipe readers so
+    // shutdown, timeout, and ordinary completion cannot wedge on those
+    // descendants.
+    cancel.kill_process_group();
 
     let out = stdout
         .map(|h| h.join().unwrap_or_default())
@@ -103,7 +159,9 @@ pub(crate) fn run_shell_command(
         .as_ref()
         .is_some_and(std::process::ExitStatus::success)
         && !timed_out;
-    let termination_reason = if timed_out {
+    let termination_reason = if canceled {
+        "canceled"
+    } else if timed_out {
         "timeout"
     } else if signal.is_some() {
         "signal"
@@ -130,20 +188,25 @@ pub(crate) fn run_shell_command(
 fn kill_child_process_group(child: &mut std::process::Child) {
     #[cfg(unix)]
     {
-        #[allow(unsafe_code)]
-        // SAFETY: the child was started in its own session/process group with
-        // pgid equal to its pid. Sending SIGKILL to `-pid` targets that group;
-        // if this fails we fall back to killing the immediate child handle.
-        unsafe {
-            let pid = child.id() as i32;
-            if libc::kill(-pid, libc::SIGKILL) == -1 {
-                let _ = child.kill();
-            }
+        let pid = child.id() as i32;
+        if kill_process_group_id(pid) == -1 {
+            let _ = child.kill();
         }
     }
     #[cfg(not(unix))]
     {
         let _ = child.kill();
+    }
+}
+
+#[cfg(unix)]
+fn kill_process_group_id(pgid: i32) -> i32 {
+    #[allow(unsafe_code)]
+    // SAFETY: `pgid` is recorded from the child pid after `setsid`, so `-pgid`
+    // targets that process group. Errors are intentionally ignored by callers
+    // because the group may already have exited.
+    unsafe {
+        libc::kill(-pgid, libc::SIGKILL)
     }
 }
 
