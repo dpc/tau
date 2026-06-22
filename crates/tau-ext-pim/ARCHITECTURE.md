@@ -30,22 +30,30 @@ own typed state helpers on top of it and must keep path components safe and
 account-scoped.
 
 Email state includes approval queues, message-send logs, Google OAuth refresh
-tokens, and pending Google device-authorization records. Calendar state includes
-calendar approval queues, cached provider metadata such as ETags where needed,
-Google OAuth refresh tokens, and pending Google device-authorization records.
+tokens, and pending Google installed-app PKCE authorization records. Calendar
+state includes calendar approval queues, cached provider metadata such as ETags
+where needed, Google OAuth refresh tokens, and pending Google
+device-authorization records.
 
-Provider credentials, refresh tokens, access tokens, device codes, and private
-provider URLs are private extension state or harness secrets. They must not be
-written to model-visible tool/action output, prompt fragments, self-knowledge, or
-diagnostics.
+Provider credentials, refresh tokens, access tokens, device codes, PKCE
+verifiers, and private provider URLs are private extension state or harness
+secrets. Pasted authorization-code redirect URLs are transient sensitive user
+input because they contain one-time authorization codes. None of these values
+may be written to model-visible tool/action output, prompt fragments,
+self-knowledge, or diagnostics.
 
 ## Shared Google OAuth
 
-`google_oauth.rs` is the shared Google OAuth 2.0 device-flow and token-refresh
-implementation for Gmail and Google Calendar. Email and calendar provide
-feature-specific account ids, OAuth scopes, and state read/write callbacks while
-the helper owns common request/response parsing, access-token caching, and
-secret lookup.
+`google_oauth.rs` is the shared Google OAuth 2.0 device-flow, installed-app
+PKCE, and token-refresh implementation. Gmail email uses the installed-app
+authorization-code flow with a Desktop OAuth client, a helper-owned fixed
+`https://mail.google.com/` scope, and a manually pasted loopback redirect URL
+because Google's device endpoint rejects the full Gmail IMAP/SMTP scope. Google
+Calendar keeps the device flow with a TVs/Limited Input OAuth client and passes
+its Calendar scope into the shared device-flow helper. Email and calendar
+provide feature-specific account ids and state read/write callbacks while the
+helper owns common request/response parsing, access-token caching, and secret
+lookup.
 
 Google OAuth configuration always names a harness secret for the OAuth client id
 and may also name an optional client-secret secret. Refresh tokens have two
@@ -54,8 +62,9 @@ modes:
 - Manual mode: config names a `refresh_token_secret`; auth actions are refused
   and the backend reads the refresh token from the harness secret map.
 - State-owned mode: no `refresh_token_secret` is configured; `/email auth google`
-  or `/calendar auth google` actions store the refresh token in private extension
-  state after the device flow completes.
+  stores the refresh token in private extension state after installed-app PKCE
+  authorization completes, while `/calendar auth google` stores it after the
+  device flow completes.
 
 Access tokens are cached in memory per account and refreshed on demand. When a
 provider reports an authentication failure, callers may invalidate the cache and

@@ -94,6 +94,7 @@ impl DebugEventLog {
         recorded_at: UnixMicros,
     ) {
         let mut event_json = serde_json::to_value(event).unwrap_or_default();
+        redact_debug_event(&mut event_json);
         compact_debug_json_strings(&mut event_json);
         let entry = serde_json::json!({
             "type": "published",
@@ -110,6 +111,35 @@ impl DebugEventLog {
         let _ = serde_json::to_writer(&mut self.file, entry);
         let _ = self.file.write_all(b"\n");
         let _ = self.file.flush();
+    }
+}
+
+fn redact_debug_event(value: &mut serde_json::Value) {
+    let Some(payload) = value.get_mut("payload") else {
+        return;
+    };
+    let is_sensitive_action = payload.get("action_id").and_then(serde_json::Value::as_str)
+        == Some("email.auth.google.finish");
+    if !is_sensitive_action {
+        return;
+    }
+    if let Some(raw_line) = payload.get_mut("raw_line") {
+        *raw_line = serde_json::Value::String(
+            "/email auth google finish <account> <redirect-url-redacted>".to_owned(),
+        );
+    }
+    if let Some(argv) = payload
+        .get_mut("argv")
+        .and_then(serde_json::Value::as_array_mut)
+        && 1 < argv.len()
+    {
+        argv.truncate(1);
+        argv.push(serde_json::Value::String(
+            "<redirect-url-redacted>".to_owned(),
+        ));
+    }
+    if let Some(arguments) = payload.get_mut("arguments") {
+        *arguments = serde_json::Value::String("<redacted>".to_owned());
     }
 }
 

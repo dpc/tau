@@ -116,7 +116,7 @@ Passwords are delivered through Tau extension secrets. Declare each secret under
 
 Deprecated password sources such as `auth.password_env`, `auth.command`, `auth.password_command`, and OAuth command placeholders are rejected. This avoids leaking credentials through child-process arguments, inherited environments, logs, or model-visible config.
 
-Gmail can use Google-only OAuth2/XOAUTH2 by setting `auth.method: oauth2` and `auth.provider: google`. Configure `client_id_secret`, optional `client_secret_secret`, and either omit `refresh_token_secret` to authorize with `/email auth google start <account>` then `/email auth google finish <account>`, or provide a manually provisioned refresh-token secret. The device flow requests the broad Gmail IMAP/SMTP scope `https://mail.google.com/`. Use a Google OAuth client of type `TVs and Limited Input devices`; desktop/web clients may fail the device authorization start request with `invalid_client: Invalid client type`, and many organizations require an internal or org-approved OAuth client. Refresh tokens and pending device codes are stored only in private extension state when state-owned auth is used; action output never includes refresh or access tokens. `/email auth google` is not controlled by `policy.allow_state_policy_extensions` and is refused when `auth.refresh_token_secret` is configured. Google access tokens are cached in memory until near expiry and are retried once after IMAP/SMTP authentication failure.
+Gmail can use Google-only OAuth2/XOAUTH2 by setting `auth.method: oauth2` and `auth.provider: google`. Configure `client_id_secret`, optional `client_secret_secret`, and either omit `refresh_token_secret` to authorize with `/email auth google start <account>` then `/email auth google finish <account> <copied-url>`, or provide a manually provisioned refresh-token secret. Gmail IMAP/SMTP requires the broad `https://mail.google.com/` scope, which Google's device flow rejects, so state-owned Gmail auth uses a Google OAuth client of type `Desktop app` with installed-app authorization-code + PKCE. Start prints a browser URL; after approval the browser fails to connect to `http://127.0.0.1:<port>/`, and the user pastes the full final address-bar URL into finish. Refresh tokens and pending PKCE state are stored only in private extension state when state-owned auth is used; action output never includes pasted codes, PKCE verifiers, refresh tokens, or access tokens. `/email auth google` is not controlled by `policy.allow_state_policy_extensions` and is refused when `auth.refresh_token_secret` is configured. Google access tokens are cached in memory until near expiry and are retried once after IMAP/SMTP authentication failure. Google OAuth apps left in Testing mode may issue refresh tokens that expire after roughly 7 days for sensitive/restricted scopes; real use should use an Internal/trusted Workspace app or a properly published/verified app. Workspace administrators may still block untrusted OAuth apps even when the app is technically valid.
 
 Use TLS defaults unless you are connecting to a trusted local relay:
 
@@ -139,15 +139,15 @@ extensions:
     enable: true
     secrets:
       mail_password: {}
-      google_mail_client_id:
+      google_mail_desktop_client_id:
         optional: true
-      google_mail_client_secret:
+      google_mail_desktop_client_secret:
         optional: true
       google_mail_refresh_token:
         optional: true
       personal_calendar_ics_url: {}
-      google_calendar_client_id: {}
-      google_calendar_client_secret:
+      google_calendar_device_client_id: {}
+      google_calendar_device_client_secret:
         optional: true
       google_calendar_refresh_token: {}
     config:
@@ -175,11 +175,13 @@ extensions:
             # auth:
             #   method: oauth2
             #   provider: google
-            #   client_id_secret: google_mail_client_id
-            #   client_secret_secret: google_mail_client_secret
-            #   # Omit refresh_token_secret and run:
+            #   client_id_secret: google_mail_desktop_client_id
+            #   client_secret_secret: google_mail_desktop_client_secret
+            #   # Use a Google OAuth client of type "Desktop app".
+            #   # Omit refresh_token_secret, run start, open the URL, then paste
+            #   # the full failed loopback address-bar URL into finish:
             #   #   /email auth google start work
-            #   #   /email auth google finish work
+            #   #   /email auth google finish work http://127.0.0.1:54321/?state=...&code=...
             #   # refresh_token_secret: google_mail_refresh_token
             folders:
               allow:
@@ -230,8 +232,9 @@ The `calendar.accounts[*].backend.type: google` backend uses the native Google C
   display_name: Google Calendar
   backend:
     type: google
-    client_id_secret: google_calendar_client_id
-    client_secret_secret: google_calendar_client_secret # optional for installed clients
+    client_id_secret: google_calendar_device_client_id
+    client_secret_secret: google_calendar_device_client_secret
+    # Use a Google OAuth client of type "TVs and Limited Input devices".
     # Omit refresh_token_secret and run /calendar auth google start google-calendar
     # then /calendar auth google finish google-calendar.
     # refresh_token_secret: google_calendar_refresh_token
@@ -250,13 +253,13 @@ Create the secret value as raw UTF-8 text. Despite the `.yaml` suffix, the secre
 ```sh
 mkdir -p ~/.local/state/tau/secrets
 printf '%s\n' 'app-password-or-token' > ~/.local/state/tau/secrets/mail_password.yaml
-printf '%s\n' 'google-mail-oauth-client-id' > ~/.local/state/tau/secrets/google_mail_client_id.yaml
-printf '%s\n' 'google-mail-oauth-client-secret' > ~/.local/state/tau/secrets/google_mail_client_secret.yaml
+printf '%s\n' 'google-mail-desktop-oauth-client-id' > ~/.local/state/tau/secrets/google_mail_desktop_client_id.yaml
+printf '%s\n' 'google-mail-desktop-oauth-client-secret' > ~/.local/state/tau/secrets/google_mail_desktop_client_secret.yaml
 # Optional when using auth.refresh_token_secret instead of /email auth google:
 printf '%s\n' 'google-mail-oauth-refresh-token' > ~/.local/state/tau/secrets/google_mail_refresh_token.yaml
 printf '%s\n' 'https://example.com/private-calendar.ics' > ~/.local/state/tau/secrets/personal_calendar_ics_url.yaml
-printf '%s\n' 'google-oauth-client-id' > ~/.local/state/tau/secrets/google_calendar_client_id.yaml
-printf '%s\n' 'google-oauth-client-secret' > ~/.local/state/tau/secrets/google_calendar_client_secret.yaml
+printf '%s\n' 'google-calendar-device-oauth-client-id' > ~/.local/state/tau/secrets/google_calendar_device_client_id.yaml
+printf '%s\n' 'google-calendar-device-oauth-client-secret' > ~/.local/state/tau/secrets/google_calendar_device_client_secret.yaml
 printf '%s\n' 'google-oauth-refresh-token' > ~/.local/state/tau/secrets/google_calendar_refresh_token.yaml
 chmod 600 ~/.local/state/tau/secrets/*.yaml
 ```
@@ -317,8 +320,8 @@ Calendar writes target Google accounts only. The default write policy queues `/c
 
 The extension publishes `/email` actions for review:
 
-- `/email auth google start <account>` — print a Google verification URL and user code for Gmail OAuth device authorization.
-- `/email auth google finish <account>` — complete OAuth after browser approval and store the refresh token privately.
+- `/email auth google start <account>` — print a Google installed-app authorization URL for Gmail OAuth.
+- `/email auth google finish <account> <copied-url>` — complete OAuth from the pasted failed loopback redirect URL and store the refresh token privately.
 - `/email log last [number]` — show recent agent email access and mutation log entries; defaults to 20.
 - `/email in list` — list pending incoming read approvals.
 - `/email in open <id>` — inspect an incoming message; may display email content to the user.

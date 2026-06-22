@@ -3,15 +3,15 @@ extensions:
     enable: true
     secrets:
       mail_password: {}
-      google_mail_client_id:
+      google_mail_desktop_client_id:
         optional: true
-      google_mail_client_secret:
+      google_mail_desktop_client_secret:
         optional: true
       google_mail_refresh_token:
         optional: true
       personal_calendar_ics_url: {}
-      google_calendar_client_id: {}
-      google_calendar_client_secret: {}
+      google_calendar_device_client_id: {}
+      google_calendar_device_client_secret: {}
     config:
       email:
         enable: true
@@ -36,11 +36,13 @@ extensions:
               # Gmail OAuth alternative:
               # method: oauth2
               # provider: google
-              # client_id_secret: google_mail_client_id
-              # client_secret_secret: google_mail_client_secret
-              # Omit refresh_token_secret and authorize with:
+              # client_id_secret: google_mail_desktop_client_id
+              # client_secret_secret: google_mail_desktop_client_secret
+              # Use a Google OAuth client of type "Desktop app".
+              # Omit refresh_token_secret, run start, open the URL, then paste
+              # the full failed loopback address-bar URL into finish:
               #   /email auth google start work
-              #   /email auth google finish work
+              #   /email auth google finish work http://127.0.0.1:54321/?state=...&code=...
               # Or set refresh_token_secret for a manually provisioned token.
               # refresh_token_secret: google_mail_refresh_token
             folders:
@@ -77,8 +79,8 @@ extensions:
             display_name: Google Calendar
             backend:
               type: google
-              client_id_secret: google_calendar_client_id
-              client_secret_secret: google_calendar_client_secret
+              client_id_secret: google_calendar_device_client_id
+              client_secret_secret: google_calendar_device_client_secret
               # Use a Google OAuth client of type "TVs and Limited Input devices".
               # Omit refresh_token_secret and authorize with:
               #   /calendar auth google start google

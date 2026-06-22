@@ -450,9 +450,12 @@ approve` accept multiple ids. Agent access and mutation activity is appended as
 JSONL and can be reviewed with `/email log last [number]`.
 Gmail accounts can use Google-only OAuth2/XOAUTH2 with the broad
 `https://mail.google.com/` scope, authorized by `/email auth google start
-<account>` and `/email auth google finish <account>` or by a manually supplied
-refresh-token secret. Refresh and pending device tokens are private extension
-state and access tokens are cached in memory until near expiry.
+<account>` and `/email auth google finish <account> <copied-url>` using a
+Google Desktop installed-app client and a manually pasted failed loopback
+redirect URL, or by a manually supplied refresh-token secret. Google Calendar
+keeps its separate TVs/Limited Input device flow. Refresh tokens and pending
+PKCE state are private extension state and access tokens are cached in memory
+until near expiry.
 
 The same extension also owns split calendar tools and the `/calendar` action
 schema. Read-only `ics_feed` accounts can list calendars with

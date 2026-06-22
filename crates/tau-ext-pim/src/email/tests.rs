@@ -92,6 +92,7 @@ struct SpyBackend {
 #[derive(Default)]
 struct OAuthBackend {
     primed: RefCell<Vec<(String, String, Option<u64>)>>,
+    exchanged: RefCell<Vec<(String, String, String, String)>>,
 }
 
 impl EmailBackend for OAuthBackend {
@@ -135,27 +136,34 @@ impl EmailBackend for OAuthBackend {
         Ok("message-id".to_owned())
     }
 
-    fn start_google_device_auth(
+    fn start_google_installed_app_auth(
         &self,
         account: &str,
-    ) -> Result<(String, String, String, u64, u64), String> {
+    ) -> Result<(String, String, String, String, u64), String> {
         assert_eq!(account, "work");
         Ok((
-            "device-secret".to_owned(),
-            "USER-CODE".to_owned(),
-            "https://google.example/device".to_owned(),
+            "https://accounts.google.com/o/oauth2/v2/auth?scope=https%3A%2F%2Fmail.google.com%2F&access_type=offline&prompt=consent&state=state-secret&code_challenge=challenge-secret&code_challenge_method=S256".to_owned(),
+            "state-secret".to_owned(),
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-.".to_owned(),
+            "http://127.0.0.1:54321/".to_owned(),
             600,
-            5,
         ))
     }
 
-    fn finish_google_device_auth(
+    fn finish_google_installed_app_auth(
         &self,
         account: &str,
-        device_code: &str,
+        code: &str,
+        pkce_verifier: &str,
+        redirect_uri: &str,
     ) -> Result<(String, Option<String>, Option<u64>), String> {
         assert_eq!(account, "work");
-        assert_eq!(device_code, "device-secret");
+        self.exchanged.borrow_mut().push((
+            account.to_owned(),
+            code.to_owned(),
+            pkce_verifier.to_owned(),
+            redirect_uri.to_owned(),
+        ));
         Ok((
             "refresh-secret".to_owned(),
             Some("access-secret".to_owned()),
@@ -650,6 +658,24 @@ fn publishes_email_action_schema_at_startup() {
         .expect("parse auth");
     assert_eq!(parsed_auth.action_id, "email.auth.google.start");
     assert_eq!(parsed_auth.argv, vec!["work".to_owned()]);
+    let parsed_finish = schema
+        .parse_line(
+            "/email auth google finish work http://127.0.0.1:54321/?state=state&code=secret",
+        )
+        .expect("parse auth finish");
+    assert_eq!(parsed_finish.action_id, "email.auth.google.finish");
+    assert_eq!(
+        parsed_finish.argv,
+        vec![
+            "work".to_owned(),
+            "http://127.0.0.1:54321/?state=state&code=secret".to_owned()
+        ]
+    );
+    assert!(matches!(
+        parsed_finish.named_args.get("redirect_url"),
+        Some(tau_proto::ParsedArgValue::String(value))
+            if value == "http://127.0.0.1:54321/?state=state&code=secret"
+    ));
     let default_log = schema
         .parse_line("/email log last")
         .expect("parse default log");
@@ -819,8 +845,9 @@ accounts:
     assert!(error.contains("oauth2_token"), "{error}");
 }
 
-/// Ensures email-owned Google refresh and pending device codes are persisted
-/// under the email namespace and validate embedded account ids on load.
+/// Ensures email-owned Google refresh tokens and pending PKCE state are
+/// persisted under the email namespace and validate embedded account ids on
+/// load.
 #[test]
 fn email_google_oauth_state_is_private_and_account_checked() {
     let temp = tempfile::tempdir().expect("tempdir");
@@ -841,30 +868,26 @@ fn email_google_oauth_state_is_private_and_account_checked() {
             .is_some()
     );
 
-    let pending = EmailGooglePendingAuth::new(
+    let pending = EmailGooglePendingAuth::installed_app(
         "work",
-        "device-code",
-        "USER-CODE",
-        "https://example.test/device",
+        "state-secret",
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-.",
+        "http://127.0.0.1:54321/",
         900,
-        5,
     );
     state
         .save_pending_google_auth(&pending)
         .expect("save pending auth");
-    assert_eq!(
-        state
-            .pending_google_auth("work")
-            .expect("pending")
-            .user_code,
-        "USER-CODE"
-    );
+    let loaded = state.pending_google_auth("work").expect("pending");
+    let installed_app = loaded.installed_app_data();
+    assert_eq!(installed_app.redirect_uri, "http://127.0.0.1:54321/");
+    assert_eq!(installed_app.state, "state-secret");
     assert!(state.pending_google_auth("other").is_err());
 }
 
-/// Ensures `/email auth google` stores only private state secrets, omits
-/// provider device/refresh/access tokens from action output, and primes the
-/// access-token cache after finish.
+/// Ensures `/email auth google` stores only private state secrets, accepts a
+/// pasted loopback redirect URL, omits token/code/verifier values from action
+/// output, and primes the access-token cache after finish.
 #[test]
 fn email_google_oauth_actions_manage_private_state_without_token_output() {
     let temp = tempfile::tempdir().expect("tempdir");
@@ -887,23 +910,36 @@ fn email_google_oauth_actions_manage_private_state_without_token_output() {
     let start = engine
         .dispatch_action("email.auth.google.start", &[String::from("work")])
         .expect("start auth");
-    assert!(start.contains("USER-CODE"));
-    assert!(start.contains("https://google.example/device"));
-    assert!(!start.contains("device-secret"));
-    assert_eq!(
-        engine
-            .state
-            .pending_google_auth("work")
-            .expect("pending auth")
-            .device_code,
-        "device-secret"
-    );
+    assert!(start.contains("accounts.google.com"));
+    assert!(start.contains("https%3A%2F%2Fmail.google.com%2F"));
+    assert!(start.contains("access_type=offline"));
+    assert!(start.contains("prompt=consent"));
+    assert!(start.contains("code_challenge=challenge-secret"));
+    assert!(start.contains("copy the full final address-bar URL"));
+    assert!(!start.contains("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"));
+    assert!(!start.contains("refresh-secret"));
+    assert!(!start.contains("access-secret"));
+    let pending = engine
+        .state
+        .pending_google_auth("work")
+        .expect("pending auth");
+    assert!(matches!(
+        pending.flow,
+        EmailGooglePendingAuthFlow::InstalledApp { .. }
+    ));
 
     let finish = engine
-        .dispatch_action("email.auth.google.finish", &[String::from("work")])
+        .dispatch_action(
+            "email.auth.google.finish",
+            &[
+                String::from("work"),
+                String::from("http://127.0.0.1:54321/?state=state-secret&code=auth-code-secret"),
+            ],
+        )
         .expect("finish auth");
     assert!(!finish.contains("refresh-secret"));
     assert!(!finish.contains("access-secret"));
+    assert!(!finish.contains("auth-code-secret"));
     assert_eq!(
         engine
             .state
@@ -916,6 +952,81 @@ fn email_google_oauth_actions_manage_private_state_without_token_output() {
         engine.backend.primed.borrow().as_slice(),
         &[("work".to_owned(), "access-secret".to_owned(), Some(3600))]
     );
+    assert_eq!(
+        engine.backend.exchanged.borrow().as_slice(),
+        &[(
+            "work".to_owned(),
+            "auth-code-secret".to_owned(),
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-.".to_owned(),
+            "http://127.0.0.1:54321/".to_owned()
+        )]
+    );
+}
+
+/// Ensures the Gmail finish action accepts only a full stored-loopback redirect
+/// URL and does not echo the pasted authorization code on validation errors.
+#[test]
+fn email_google_oauth_finish_rejects_invalid_redirect_urls_without_code_echo() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let mut config = cfg();
+    config.accounts[0].auth = Some(AuthConfig {
+        method: AuthMethod::Oauth2,
+        provider: Some(EmailOauth2Provider::Google),
+        client_id_secret: Some("google_client_id".to_owned()),
+        client_secret_secret: Some("google_client_secret".to_owned()),
+        refresh_token_secret: None,
+        ..Default::default()
+    });
+    let state = StateStore::open(temp.path().join("email-state")).expect("state");
+    let mut engine = Engine {
+        config: config.validate().expect("oauth config"),
+        state,
+        backend: OAuthBackend::default(),
+    };
+    engine
+        .dispatch_action("email.auth.google.start", &[String::from("work")])
+        .expect("start auth");
+
+    let missing = engine
+        .dispatch_action("email.auth.google.finish", &[String::from("work")])
+        .expect_err("finish requires redirect URL");
+    assert!(missing.contains("missing required action argument"));
+
+    let wrong_state = engine
+        .dispatch_action(
+            "email.auth.google.finish",
+            &[
+                String::from("work"),
+                String::from("http://127.0.0.1:54321/?state=wrong&code=auth-code-secret"),
+            ],
+        )
+        .expect_err("wrong state rejected");
+    assert!(wrong_state.contains("state"));
+    assert!(!wrong_state.contains("auth-code-secret"));
+    assert!(!wrong_state.contains("wrong"));
+
+    let wrong_host = engine
+        .dispatch_action(
+            "email.auth.google.finish",
+            &[
+                String::from("work"),
+                String::from("http://localhost:54321/?state=state-secret&code=auth-code-secret"),
+            ],
+        )
+        .expect_err("wrong host rejected");
+    assert!(wrong_host.contains("127.0.0.1"));
+    assert!(!wrong_host.contains("auth-code-secret"));
+
+    let denied = engine
+        .dispatch_action(
+            "email.auth.google.finish",
+            &[
+                String::from("work"),
+                String::from("http://127.0.0.1:54321/?state=state-secret&error=access_denied"),
+            ],
+        )
+        .expect_err("provider denial reported");
+    assert_eq!(denied, "Google authorization was denied");
 }
 
 /// Ensures state-owned `/email auth google` refuses accounts that are
@@ -941,6 +1052,20 @@ fn email_google_oauth_actions_reject_manual_refresh_token_accounts() {
         .dispatch_action("email.auth.google.start", &[String::from("work")])
         .expect_err("manual refresh-token accounts reject state auth");
     assert!(error.contains("refresh_token_secret"), "{error}");
+
+    let finish_error = engine
+        .dispatch_action(
+            "email.auth.google.finish",
+            &[
+                String::from("work"),
+                String::from("http://127.0.0.1:54321/?state=state&code=code"),
+            ],
+        )
+        .expect_err("manual refresh-token accounts reject finish");
+    assert!(
+        finish_error.contains("refresh_token_secret"),
+        "{finish_error}"
+    );
 }
 
 #[test]

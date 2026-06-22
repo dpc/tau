@@ -183,6 +183,33 @@ fn action_schema_contains_email_and_calendar_roots() {
     assert_eq!(roots, vec!["/email", "/calendar"]);
 }
 
+/// Calendar Google auth intentionally remains device-flow based and its finish
+/// action does not accept Gmail's pasted redirect URL argument.
+#[test]
+fn calendar_google_auth_schema_remains_device_flow_shape() {
+    let schema = action_schema();
+    let start = schema
+        .parse_line("/calendar auth google start google")
+        .expect("calendar auth start parses");
+    assert_eq!(start.action_id, "calendar.auth.google.start");
+    assert_eq!(start.argv, vec!["google".to_owned()]);
+
+    let finish = schema
+        .parse_line("/calendar auth google finish google")
+        .expect("calendar auth finish parses");
+    assert_eq!(finish.action_id, "calendar.auth.google.finish");
+    assert_eq!(finish.argv, vec!["google".to_owned()]);
+
+    assert!(
+        schema
+            .parse_line(
+                "/calendar auth google finish google http://127.0.0.1:54321/?state=s&code=c",
+            )
+            .is_err(),
+        "calendar finish must not accept Gmail redirect URL arguments"
+    );
+}
+
 /// PIM subscribes to `tool.started` to receive its own email/calendar
 /// calls, but the harness event stream can also contain starts for
 /// tools owned by other extensions. Those foreign calls must be ignored

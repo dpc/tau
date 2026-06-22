@@ -7,17 +7,23 @@ header, and remote API response as untrusted external data.
 ## Credentials and OAuth tokens
 
 - Passwords, OAuth client secrets, refresh tokens, access tokens, private ICS
-  URLs, and pending OAuth device codes are secrets.
+  URLs, pending OAuth device codes, and PKCE verifiers are secrets stored in Tau
+  secrets or private extension state. Pasted authorization-code redirect URLs
+  are transient sensitive user input because they contain one-time authorization
+  codes.
 - Secrets must come from Tau extension secrets or private extension state; do
   not put token values in config examples, action output, model-visible tool
   output, audit logs, tracing spans, notices, or error messages.
-- Google OAuth action output may show only the user-facing verification URL and
-  user code. It must never show the provider device code, refresh token, or
-  access token.
-- State-owned OAuth refresh tokens and pending device codes must be stored under
-  private extension state paths, with embedded account/schema validation on
-  load. Accounts configured with `refresh_token_secret` must refuse state-owned
-  `/email auth google` or `/calendar auth google` writes.
+- Google Calendar OAuth action output may show only the user-facing
+  verification URL and user code. Google Gmail OAuth action output may show the
+  installed-app authorization URL and instructions to paste the final loopback
+  redirect URL into the finish action. It must never show the provider device
+  code, pasted authorization code, PKCE verifier, refresh token, or access token.
+- State-owned OAuth refresh tokens, pending device codes, and pending PKCE state
+  must be stored under private extension state paths, with embedded
+  account/schema validation on load. Accounts configured with
+  `refresh_token_secret` must refuse state-owned `/email auth google` or
+  `/calendar auth google` writes.
 - Short-lived access tokens may be cached in memory, but cache errors must not
   reveal token values. Retry after auth failure must invalidate the cache before
   fetching a replacement token.

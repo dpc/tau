@@ -49,13 +49,18 @@ responses are untrusted data and can contain prompt injection, terminal control
 bytes, spoofing content, or huge payloads.
 
 PIM credentials are local secrets. Mail passwords, app passwords, OAuth client
-secrets, OAuth refresh tokens, access tokens, pending device codes, and private
-ICS URLs must come from Tau secrets or private extension state and must not be
-placed in model-visible output, action output, audit logs, tracing, notices, or
-config examples. Google email/calendar OAuth actions may display only the
-verification URL and user code; refresh tokens and access tokens stay private.
-Accounts configured with manual `refresh_token_secret` values must refuse
-state-owned OAuth actions so the extension does not overwrite secret ownership.
+secrets, OAuth refresh tokens, access tokens, pending device codes, PKCE
+verifiers, and private ICS URLs must come from Tau secrets or private extension
+state and must not be placed in model-visible output, action output, audit logs,
+tracing, notices, prompt history, debug logs, or config examples. Pasted
+authorization-code redirect URLs are transient sensitive user input because they
+contain one-time authorization codes; they likewise must not be persisted or
+echoed. Google Calendar OAuth actions may display only the verification URL and
+user code. Google Gmail OAuth actions may display the installed-app
+authorization URL, but must not echo the pasted redirect URL, authorization
+code, PKCE verifier, refresh token, or access token. Accounts configured with
+manual `refresh_token_secret` values must refuse state-owned OAuth actions so
+the extension does not overwrite secret ownership.
 
 Incoming email body reads are fail-closed behind policy or exact user approval.
 The extension may consume trusted provider-added `Authentication-Results`

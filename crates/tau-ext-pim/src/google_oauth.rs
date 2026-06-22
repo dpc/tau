@@ -1,20 +1,34 @@
-//! Shared Google OAuth2 device-flow and refresh-token helpers.
+//! Shared Google OAuth2 device-flow, installed-app PKCE, and refresh-token
+//! helpers.
 
 use std::collections::BTreeMap;
 use std::io::Read;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use rand::seq::SliceRandom;
+use rand::{Rng, RngCore};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use tau_proto::SecretValue;
-use url::form_urlencoded;
+use url::{Url, form_urlencoded};
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 const GOOGLE_TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
 const GOOGLE_DEVICE_CODE_URL: &str = "https://oauth2.googleapis.com/device/code";
+const GOOGLE_AUTHORIZATION_URL: &str = "https://accounts.google.com/o/oauth2/v2/auth";
 const MAX_JSON_BODY_BYTES: usize = 1024 * 1024;
 const MAX_OAUTH_FIELD_CHARS: usize = 4096;
+const MAX_REDIRECT_URL_CHARS: usize = 8192;
+const PKCE_VERIFIER_LEN: usize = 64;
+const PKCE_VERIFIER_MIN_CHARS: usize = 43;
+const PKCE_VERIFIER_MAX_CHARS: usize = 128;
+const GOOGLE_MAIL_SCOPE: &str = "https://mail.google.com/";
 const TOKEN_CACHE_SKEW: Duration = Duration::from_secs(60);
+const PKCE_VERIFIER_ALPHABET: &[u8] =
+    b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~";
 
 /// Google OAuth secret references for one configured account.
 #[derive(Clone, Copy)]
@@ -51,6 +65,45 @@ pub struct GoogleDeviceAuthFinish {
     pub expires_in_secs: Option<u64>,
 }
 
+/// User-facing information returned by Google installed-app authorization
+/// start.
+pub struct GoogleInstalledAppAuthStart {
+    /// Authorization URL to open in a browser.
+    pub authorization_url: String,
+    /// OAuth state parameter stored privately until finish.
+    pub state: String,
+    /// RFC 7636 PKCE verifier stored privately until finish.
+    pub pkce_verifier: String,
+    /// Exact loopback redirect URI to send during token exchange.
+    pub redirect_uri: String,
+    /// Number of seconds before the pending authorization should expire.
+    pub expires_in_secs: u64,
+}
+
+/// Validated data extracted from a pasted installed-app redirect URL.
+pub struct GoogleInstalledAppRedirect {
+    /// One-time authorization code returned by Google.
+    pub code: String,
+}
+
+impl std::fmt::Debug for GoogleInstalledAppRedirect {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GoogleInstalledAppRedirect")
+            .field("code", &"<redacted>")
+            .finish()
+    }
+}
+
+/// Tokens returned by Google after installed-app authorization completes.
+pub struct GoogleInstalledAppAuthFinish {
+    /// Long-lived refresh token to store in private extension state.
+    pub refresh_token: String,
+    /// Short-lived access token that can be primed into the in-memory cache.
+    pub access_token: Option<String>,
+    /// Seconds until the optional access token expires.
+    pub expires_in_secs: Option<u64>,
+}
+
 #[derive(Debug)]
 pub(crate) struct GoogleAccessToken {
     pub(crate) access_token: String,
@@ -79,6 +132,72 @@ impl GoogleOauthClient {
         }
     }
 
+    /// Start Gmail installed-app authorization with PKCE.
+    pub(crate) fn start_gmail_installed_app_auth(
+        &self,
+        config: GoogleOauthSecretConfig<'_>,
+    ) -> Result<GoogleInstalledAppAuthStart, String> {
+        let client_id = self.secret(config.client_id_secret)?;
+        let redirect_uri = random_loopback_redirect_uri();
+        let state = generate_oauth_state();
+        let pkce_verifier = generate_pkce_verifier();
+        let authorization_url = build_installed_app_authorization_url(
+            &client_id,
+            &redirect_uri,
+            GOOGLE_MAIL_SCOPE,
+            &state,
+            &pkce_s256_challenge(&pkce_verifier),
+        )?;
+        Ok(GoogleInstalledAppAuthStart {
+            authorization_url,
+            state,
+            pkce_verifier,
+            redirect_uri,
+            expires_in_secs: 10 * 60,
+        })
+    }
+
+    /// Finish Gmail installed-app authorization by exchanging an auth code.
+    pub(crate) fn finish_installed_app_auth(
+        &self,
+        config: GoogleOauthSecretConfig<'_>,
+        code: &str,
+        pkce_verifier: &str,
+        redirect_uri: &str,
+    ) -> Result<GoogleInstalledAppAuthFinish, String> {
+        let client_id = self.secret(config.client_id_secret)?;
+        let client_secret = config
+            .client_secret_secret
+            .map(|secret_name| self.secret(secret_name))
+            .transpose()?;
+        let body = build_installed_app_token_request_body(
+            &client_id,
+            client_secret.as_deref(),
+            code,
+            pkce_verifier,
+            redirect_uri,
+        );
+        let mut response = self
+            .agent
+            .post(GOOGLE_TOKEN_URL)
+            .content_type("application/x-www-form-urlencoded")
+            .send(body)
+            .map_err(|error| format!("finishing Google authorization failed: {error}"))?;
+        if !response.status().is_success() {
+            return Err(google_oauth_http_error(
+                "finishing Google authorization",
+                &mut response,
+                &[
+                    code,
+                    pkce_verifier,
+                    client_secret.as_deref().unwrap_or_default(),
+                ],
+            ));
+        }
+        let text = read_limited_body(&mut response, "Google authorization-code token response")?;
+        parse_installed_app_token_response(&text)
+    }
+
     /// Start Google device authorization for the requested OAuth scope.
     pub(crate) fn start_device_auth(
         &self,
@@ -99,6 +218,7 @@ impl GoogleOauthClient {
             return Err(google_oauth_http_error(
                 "starting Google authorization",
                 &mut response,
+                &[],
             ));
         }
         let text = read_limited_body(&mut response, "Google device authorization response")?;
@@ -116,8 +236,15 @@ impl GoogleOauthClient {
         body.append_pair("client_id", &client_id);
         body.append_pair("device_code", device_code);
         body.append_pair("grant_type", "urn:ietf:params:oauth:grant-type:device_code");
-        if let Some(secret_name) = config.client_secret_secret {
-            body.append_pair("client_secret", &self.secret(secret_name)?);
+        let client_secret = config
+            .client_secret_secret
+            .map(|secret_name| self.secret(secret_name))
+            .transpose()?;
+        if client_secret.is_some() {
+            body.append_pair(
+                "client_secret",
+                client_secret.as_deref().unwrap_or_default(),
+            );
         }
         let mut response = self
             .agent
@@ -129,6 +256,7 @@ impl GoogleOauthClient {
             return Err(google_oauth_http_error(
                 "finishing Google authorization",
                 &mut response,
+                &[device_code, client_secret.as_deref().unwrap_or_default()],
             ));
         }
         let text = read_limited_body(&mut response, "Google device token response")?;
@@ -218,8 +346,14 @@ impl GoogleOauthClient {
         body.append_pair("client_id", client_id);
         body.append_pair("refresh_token", refresh_token);
         body.append_pair("grant_type", "refresh_token");
-        if let Some(secret_name) = client_secret_secret {
-            body.append_pair("client_secret", &self.secret(secret_name)?);
+        let client_secret = client_secret_secret
+            .map(|secret_name| self.secret(secret_name))
+            .transpose()?;
+        if client_secret.is_some() {
+            body.append_pair(
+                "client_secret",
+                client_secret.as_deref().unwrap_or_default(),
+            );
         }
         let mut response = self
             .agent
@@ -231,6 +365,7 @@ impl GoogleOauthClient {
             return Err(google_oauth_http_error(
                 "refreshing Google access token",
                 &mut response,
+                &[refresh_token, client_secret.as_deref().unwrap_or_default()],
             ));
         }
         let text = read_limited_body(&mut response, "Google token response")?;
@@ -288,6 +423,148 @@ impl GoogleOauthClient {
     }
 }
 
+/// Build a Google installed-app authorization URL.
+pub(crate) fn build_installed_app_authorization_url(
+    client_id: &str,
+    redirect_uri: &str,
+    scope: &str,
+    state: &str,
+    code_challenge: &str,
+) -> Result<String, String> {
+    validate_loopback_redirect_uri(redirect_uri)?;
+    if !is_safe_oauth_parameter(client_id)
+        || !is_safe_oauth_parameter(scope)
+        || !is_safe_oauth_parameter(state)
+        || !is_safe_oauth_parameter(code_challenge)
+    {
+        return Err("Google authorization URL input contained unsafe text".to_owned());
+    }
+    let mut url = Url::parse(GOOGLE_AUTHORIZATION_URL)
+        .map_err(|error| format!("Google authorization endpoint was invalid: {error}"))?;
+    url.query_pairs_mut()
+        .append_pair("response_type", "code")
+        .append_pair("client_id", client_id)
+        .append_pair("redirect_uri", redirect_uri)
+        .append_pair("scope", scope)
+        .append_pair("access_type", "offline")
+        .append_pair("prompt", "consent")
+        .append_pair("state", state)
+        .append_pair("code_challenge", code_challenge)
+        .append_pair("code_challenge_method", "S256");
+    Ok(url.into())
+}
+
+/// Build the authorization-code token exchange body.
+pub(crate) fn build_installed_app_token_request_body(
+    client_id: &str,
+    client_secret: Option<&str>,
+    code: &str,
+    pkce_verifier: &str,
+    redirect_uri: &str,
+) -> String {
+    let mut body = form_urlencoded::Serializer::new(String::new());
+    body.append_pair("grant_type", "authorization_code");
+    body.append_pair("client_id", client_id);
+    if let Some(client_secret) = client_secret {
+        body.append_pair("client_secret", client_secret);
+    }
+    body.append_pair("code", code);
+    body.append_pair("code_verifier", pkce_verifier);
+    body.append_pair("redirect_uri", redirect_uri);
+    body.finish()
+}
+
+/// Parse and validate a pasted Google installed-app redirect URL.
+pub(crate) fn parse_installed_app_redirect_url(
+    pasted_url: &str,
+    stored_redirect_uri: &str,
+    expected_state: &str,
+) -> Result<GoogleInstalledAppRedirect, String> {
+    if pasted_url.trim().is_empty() || MAX_REDIRECT_URL_CHARS < pasted_url.chars().count() {
+        return Err("Google redirect URL was empty or too long".to_owned());
+    }
+    let stored = validate_loopback_redirect_uri(stored_redirect_uri)?;
+    let parsed =
+        Url::parse(pasted_url).map_err(|_| "Google redirect URL was not a valid URL".to_owned())?;
+    if parsed.scheme() != "http" || parsed.host_str() != Some("127.0.0.1") {
+        return Err(
+            "Google redirect URL must use the stored 127.0.0.1 loopback address".to_owned(),
+        );
+    }
+    if parsed.port_or_known_default() != stored.port_or_known_default()
+        || parsed.path() != stored.path()
+        || parsed.fragment().is_some()
+    {
+        return Err("Google redirect URL did not match the stored loopback redirect".to_owned());
+    }
+
+    let mut state = None;
+    let mut code = None;
+    let mut provider_error = None;
+    for (key, value) in parsed.query_pairs() {
+        match key.as_ref() {
+            "state" if state.is_none() => state = Some(value.into_owned()),
+            "state" => return Err("Google redirect URL contained duplicate state".to_owned()),
+            "code" if code.is_none() => code = Some(value.into_owned()),
+            "code" => return Err("Google redirect URL contained duplicate code".to_owned()),
+            "error" if provider_error.is_none() => provider_error = Some(value.into_owned()),
+            "error" => return Err("Google redirect URL contained duplicate error".to_owned()),
+            _ => {}
+        }
+    }
+    let state = state.ok_or_else(|| "Google redirect URL was missing state".to_owned())?;
+    if state != expected_state {
+        return Err("Google redirect URL state did not match pending authorization".to_owned());
+    }
+    if let Some(error) = provider_error {
+        let message = match error.as_str() {
+            "access_denied" => "Google authorization was denied".to_owned(),
+            _ => format!(
+                "Google authorization failed: {}",
+                sanitize_error_text(&error)
+            ),
+        };
+        return Err(message);
+    }
+    let code =
+        code.ok_or_else(|| "Google redirect URL was missing authorization code".to_owned())?;
+    if !is_safe_oauth_parameter(&code) {
+        return Err("Google redirect URL authorization code was invalid".to_owned());
+    }
+    Ok(GoogleInstalledAppRedirect { code })
+}
+
+/// Validate a stored loopback redirect URI and return its parsed URL.
+pub(crate) fn validate_loopback_redirect_uri(redirect_uri: &str) -> Result<Url, String> {
+    let parsed =
+        Url::parse(redirect_uri).map_err(|_| "Google redirect URI was invalid".to_owned())?;
+    if parsed.scheme() != "http"
+        || parsed.host_str() != Some("127.0.0.1")
+        || parsed.port().is_none()
+        || parsed.path() != "/"
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+    {
+        return Err("Google redirect URI must be http://127.0.0.1:<port>/".to_owned());
+    }
+    Ok(parsed)
+}
+
+/// Return true when a PKCE verifier satisfies RFC 7636 verifier syntax.
+pub(crate) fn is_valid_pkce_verifier(value: &str) -> bool {
+    let len = value.chars().count();
+    (PKCE_VERIFIER_MIN_CHARS..=PKCE_VERIFIER_MAX_CHARS).contains(&len)
+        && value
+            .bytes()
+            .all(|byte| PKCE_VERIFIER_ALPHABET.contains(&byte))
+}
+
+/// Compute the RFC 7636 S256 challenge for a PKCE verifier.
+pub(crate) fn pkce_s256_challenge(verifier: &str) -> String {
+    let hash = Sha256::digest(verifier.as_bytes());
+    URL_SAFE_NO_PAD.encode(hash)
+}
+
 /// Build a bounded, TLS-verifying HTTP agent for Google API calls.
 pub(crate) fn google_http_agent() -> ureq::Agent {
     let tls_config = ureq::tls::TlsConfig::builder()
@@ -299,6 +576,32 @@ pub(crate) fn google_http_agent() -> ureq::Agent {
         .tls_config(tls_config)
         .build();
     ureq::Agent::new_with_config(config)
+}
+
+fn parse_installed_app_token_response(text: &str) -> Result<GoogleInstalledAppAuthFinish, String> {
+    let json: Value = serde_json::from_str(text).map_err(|error| {
+        format!("Google authorization-code token response was not JSON: {error}")
+    })?;
+    let refresh_token = required_oauth_string(
+        &json,
+        "refresh_token",
+        "Google authorization-code token response",
+    )
+    .map_err(|error| {
+        if error.contains("missing refresh_token") {
+            "Google did not return a refresh token; run `/email auth google start <account>` again and approve the consent prompt".to_owned()
+        } else {
+            error
+        }
+    })?
+    .to_owned();
+    let access_token = optional_oauth_string(&json, "access_token")?.map(str::to_owned);
+    let expires_in_secs = optional_oauth_u64(&json, "expires_in")?;
+    Ok(GoogleInstalledAppAuthFinish {
+        refresh_token,
+        access_token,
+        expires_in_secs,
+    })
 }
 
 pub(crate) fn parse_device_auth_start(text: &str) -> Result<GoogleDeviceAuthStart, String> {
@@ -371,13 +674,16 @@ fn optional_oauth_string<'a>(json: &'a Value, field: &str) -> Result<Option<&'a 
 }
 
 fn validated_oauth_string<'a>(value: &'a str, field: &str) -> Result<&'a str, String> {
-    if value.trim().is_empty()
-        || MAX_OAUTH_FIELD_CHARS < value.chars().count()
-        || value.chars().any(char::is_control)
-    {
+    if !is_safe_oauth_parameter(value) {
         return Err(format!("Google OAuth field `{field}` was invalid"));
     }
     Ok(value)
+}
+
+fn is_safe_oauth_parameter(value: &str) -> bool {
+    !value.trim().is_empty()
+        && value.chars().count() <= MAX_OAUTH_FIELD_CHARS
+        && !value.chars().any(char::is_control)
 }
 
 fn required_oauth_u64(json: &Value, field: &str, context: &str) -> Result<u64, String> {
@@ -397,12 +703,34 @@ fn optional_oauth_u64(json: &Value, field: &str) -> Result<Option<u64>, String> 
 fn google_oauth_http_error(
     context: &str,
     response: &mut ureq::http::Response<ureq::Body>,
+    sensitive_values: &[&str],
 ) -> String {
     let status = response.status().as_u16();
     let text = read_limited_body(response, context)
         .unwrap_or_else(|error| format!("failed to read error response: {error}"));
+    format_google_oauth_http_error(context, status, &text, sensitive_values)
+}
+
+fn format_google_oauth_http_error(
+    context: &str,
+    status: u16,
+    text: &str,
+    sensitive_values: &[&str],
+) -> String {
+    let text = redact_exact_sensitive_values(text, sensitive_values);
     let message = google_oauth_error_message(&text).unwrap_or_else(|| sanitize_error_text(&text));
     format!("{context} returned HTTP {status}: {message}")
+}
+
+fn redact_exact_sensitive_values(text: &str, sensitive_values: &[&str]) -> String {
+    let mut redacted = text.to_owned();
+    for value in sensitive_values {
+        if value.is_empty() {
+            continue;
+        }
+        redacted = redacted.replace(value, "<redacted>");
+    }
+    redacted
 }
 
 pub(crate) fn google_oauth_error_message(text: &str) -> Option<String> {
@@ -457,6 +785,28 @@ fn sanitize_error_text(value: &str) -> String {
         .join(" ")
 }
 
+fn random_loopback_redirect_uri() -> String {
+    let port = rand::thread_rng().gen_range(49152..=65535);
+    format!("http://127.0.0.1:{port}/")
+}
+
+fn generate_pkce_verifier() -> String {
+    let mut rng = rand::thread_rng();
+    (0..PKCE_VERIFIER_LEN)
+        .map(|_| {
+            *PKCE_VERIFIER_ALPHABET
+                .choose(&mut rng)
+                .expect("PKCE alphabet is non-empty") as char
+        })
+        .collect()
+}
+
+fn generate_oauth_state() -> String {
+    let mut bytes = [0u8; 16];
+    rand::thread_rng().fill_bytes(&mut bytes);
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -484,6 +834,185 @@ mod tests {
         .expect_err("unsafe access token is rejected");
         assert_eq!(err, "Google OAuth field `access_token` was invalid");
         assert!(!err.contains("secret"));
+    }
+
+    /// Ensures PKCE challenge generation matches the RFC 7636 appendix B
+    /// example so Gmail installed-app auth remains provider-compatible.
+    #[test]
+    fn pkce_s256_challenge_matches_rfc7636_example() {
+        let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+        assert!(is_valid_pkce_verifier(verifier));
+        assert!(is_valid_pkce_verifier(&"A".repeat(43)));
+        assert!(is_valid_pkce_verifier(&"A".repeat(128)));
+        assert!(!is_valid_pkce_verifier(&"A".repeat(42)));
+        assert!(!is_valid_pkce_verifier(&"A".repeat(129)));
+        assert!(!is_valid_pkce_verifier(&"!".repeat(43)));
+        assert_eq!(
+            pkce_s256_challenge(verifier),
+            "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
+        );
+    }
+
+    /// Ensures the Gmail authorization URL contains the installed-app PKCE
+    /// parameters Google requires, without exposing the verifier.
+    #[test]
+    fn installed_app_authorization_url_contains_pkce_and_offline_access() {
+        let url = build_installed_app_authorization_url(
+            "client-id",
+            "http://127.0.0.1:54321/",
+            GOOGLE_MAIL_SCOPE,
+            "state-secret",
+            "challenge-secret",
+        )
+        .expect("authorization URL builds");
+        let parsed = Url::parse(&url).expect("URL parses");
+        let query = parsed.query_pairs().collect::<BTreeMap<_, _>>();
+        assert_eq!(
+            parsed.as_str().split('?').next(),
+            Some(GOOGLE_AUTHORIZATION_URL)
+        );
+        assert_eq!(query.get("response_type").map(|v| v.as_ref()), Some("code"));
+        assert_eq!(
+            query.get("scope").map(|v| v.as_ref()),
+            Some(GOOGLE_MAIL_SCOPE)
+        );
+        assert_eq!(
+            query.get("access_type").map(|v| v.as_ref()),
+            Some("offline")
+        );
+        assert_eq!(query.get("prompt").map(|v| v.as_ref()), Some("consent"));
+        assert_eq!(query.get("state").map(|v| v.as_ref()), Some("state-secret"));
+        assert_eq!(
+            query.get("code_challenge_method").map(|v| v.as_ref()),
+            Some("S256")
+        );
+        assert!(!url.contains("verifier"));
+    }
+
+    /// Ensures token exchanges use the exact stored redirect URI and PKCE
+    /// verifier instead of deriving redirect data from the pasted browser URL.
+    #[test]
+    fn installed_app_token_body_contains_verifier_and_exact_redirect_uri() {
+        let body = build_installed_app_token_request_body(
+            "client-id",
+            Some("client-secret"),
+            "auth-code",
+            "pkce-verifier",
+            "http://127.0.0.1:54321/",
+        );
+        let parsed = form_urlencoded::parse(body.as_bytes()).collect::<BTreeMap<_, _>>();
+        assert_eq!(
+            parsed.get("grant_type").map(|v| v.as_ref()),
+            Some("authorization_code")
+        );
+        assert_eq!(parsed.get("code").map(|v| v.as_ref()), Some("auth-code"));
+        assert_eq!(
+            parsed.get("code_verifier").map(|v| v.as_ref()),
+            Some("pkce-verifier")
+        );
+        assert_eq!(
+            parsed.get("redirect_uri").map(|v| v.as_ref()),
+            Some("http://127.0.0.1:54321/")
+        );
+    }
+
+    /// Ensures only the stored loopback redirect shape is accepted and the
+    /// authorization code is returned without echoing token-like URL values in
+    /// validation errors.
+    #[test]
+    fn parses_installed_app_redirect_url_against_stored_redirect() {
+        let redirect = parse_installed_app_redirect_url(
+            "http://127.0.0.1:54321/?state=expected&code=secret-code",
+            "http://127.0.0.1:54321/",
+            "expected",
+        )
+        .expect("redirect parses");
+        assert_eq!(redirect.code, "secret-code");
+
+        let err = parse_installed_app_redirect_url(
+            "https://evil.test/callback?state=expected&code=secret-code",
+            "http://127.0.0.1:54321/",
+            "expected",
+        )
+        .expect_err("non-loopback rejected");
+        assert!(!err.contains("secret-code"));
+
+        let err = parse_installed_app_redirect_url(
+            "http://127.0.0.1:54321/?state=wrong&code=secret-code",
+            "http://127.0.0.1:54321/",
+            "expected",
+        )
+        .expect_err("wrong state rejected");
+        assert!(!err.contains("wrong"));
+        assert!(!err.contains("secret-code"));
+
+        for (url, reason) in [
+            (
+                "http://127.0.0.1:54322/?state=expected&code=secret-code",
+                "wrong port",
+            ),
+            (
+                "http://127.0.0.1:54321/callback?state=expected&code=secret-code",
+                "wrong path",
+            ),
+            (
+                "http://127.0.0.1:54321/?state=expected&code=secret-code#fragment",
+                "fragment",
+            ),
+            ("http://127.0.0.1:54321/?code=secret-code", "missing state"),
+            ("http://127.0.0.1:54321/?state=expected", "missing code"),
+        ] {
+            let result =
+                parse_installed_app_redirect_url(url, "http://127.0.0.1:54321/", "expected");
+            let err = match result {
+                Ok(_) => panic!("{reason} should reject"),
+                Err(err) => err,
+            };
+            assert!(!err.contains("secret-code"), "{reason}: {err}");
+        }
+
+        let oversized = format!(
+            "http://127.0.0.1:54321/?state=expected&code={}",
+            "x".repeat(MAX_REDIRECT_URL_CHARS)
+        );
+        let err =
+            parse_installed_app_redirect_url(&oversized, "http://127.0.0.1:54321/", "expected")
+                .expect_err("oversized URL rejected");
+        assert!(!err.contains('x'));
+
+        let err = validate_loopback_redirect_uri("http://127.0.0.1:54321/callback")
+            .expect_err("stored non-root redirect rejected");
+        assert!(err.contains("127.0.0.1"));
+    }
+
+    /// Ensures user-denied Google redirects produce a short actionable error
+    /// after state validation and without echoing the full pasted URL.
+    #[test]
+    fn installed_app_redirect_handles_access_denied() {
+        let err = parse_installed_app_redirect_url(
+            "http://127.0.0.1:54321/?state=expected&error=access_denied",
+            "http://127.0.0.1:54321/",
+            "expected",
+        )
+        .expect_err("denial is reported");
+        assert_eq!(err, "Google authorization was denied");
+    }
+
+    /// Ensures OAuth HTTP errors redact exact request secrets before provider
+    /// response text can reach UI-facing diagnostics.
+    #[test]
+    fn oauth_http_errors_redact_submitted_secret_values() {
+        let message = format_google_oauth_http_error(
+            "finishing Google authorization",
+            400,
+            r#"{"error":"invalid_grant","error_description":"bad code auth-code-secret verifier pkce-verifier-secret client client-secret"}"#,
+            &["auth-code-secret", "pkce-verifier-secret", "client-secret"],
+        );
+        assert!(message.contains("invalid_grant"));
+        assert!(!message.contains("auth-code-secret"));
+        assert!(!message.contains("pkce-verifier-secret"));
+        assert!(!message.contains("client-secret"));
+        assert!(message.contains("<redacted>"));
     }
 
     /// Ensures malicious or malformed provider expiry values cannot panic the

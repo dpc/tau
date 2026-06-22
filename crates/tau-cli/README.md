@@ -18,6 +18,13 @@ UI code must render tool calls through generic `ToolUseState`, `ToolUsePayload`,
 
 The current documented exception is harness delegation. The harness emits `agent_start` tool calls together with side-conversation lifecycle events and `DelegateProgress`; the UI suppresses nested sub-agent tool spam and rolls it up into the parent delegation line. Delegate-specific code exists only to connect those harness-owned side-conversation events to the generic tool display shape and status chips. New delegate UI behavior should still prefer expressing data in `ToolUseState` / `DelegateProgress` rather than parsing tool names or payloads.
 
+There is also a narrow temporary action-input redaction exception: `/email auth
+google finish ...` command echo and prompt-history entries are redacted because
+the pasted Gmail loopback URL contains a one-time OAuth authorization code and
+the action schema does not yet provide sensitive-argument metadata. The emitted
+`ActionInvoke` still carries the raw argument to the owning extension; this UI
+special case should be replaced with schema/protocol metadata when available.
+
 ## Threading and shutdown direction
 
 The current implementation has a socket reader thread, renderer path, redraw/timer helpers, and a blocking prompt input loop. Remote disconnect handling is not yet fully unified with prompt input wakeup. Future changes should move toward explicit UI event ownership: daemon disconnect, terminal input, timers, and shutdown should be represented as events that drive one loop or a clearly joined set of owned workers.

@@ -16,6 +16,7 @@ workspace = true
 
 [dependencies]
 async-imap.workspace = true
+base64.workspace = true
 blake3.workspace = true
 calcard.workspace = true
 chrono.workspace = true
@@ -25,11 +26,13 @@ globset.workspace = true
 lettre.workspace = true
 mail-parser.workspace = true
 parse_datetime.workspace = true
+rand.workspace = true
 regex.workspace = true
 rrule.workspace = true
 rustls.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 tau-extension.workspace = true
 tau-proto.workspace = true
 time.workspace = true

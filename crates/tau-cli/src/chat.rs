@@ -1801,7 +1801,7 @@ impl<'a> TerminalInputSession<'a> {
         // before they produce validation errors or exit the loop.
         self.record_prompt_line_if_persistent(line, text);
         if is_local_slash_command(text) || self.ctx.action_state.is_known_action_line(text) {
-            self.output.command_echo(text);
+            self.output.command_echo(&redacted_command_echo_line(text));
         }
         self.handle_recorded_line(text)
     }
@@ -1881,7 +1881,8 @@ impl<'a> TerminalInputSession<'a> {
             }
             return;
         }
-        if let Err(error) = self.ctx.prompt_history.append(line) {
+        let history_line = redacted_prompt_history_line(line, text);
+        if let Err(error) = self.ctx.prompt_history.append(&history_line) {
             tracing::warn!(target: "tau_cli::ui", %error, "failed to append persistent prompt history");
         }
         if let Ok(mut context) = self.ctx.editor_context.lock() {
@@ -3003,6 +3004,27 @@ fn custom_prompt_ids(prompts: &[tau_proto::HarnessCustomPrompt]) -> String {
 pub(crate) fn leading_slash_action(text: &str) -> Option<&str> {
     let command = text.split_whitespace().next()?;
     command.starts_with('/').then_some(command)
+}
+
+pub(crate) fn redacted_command_echo_line(text: &str) -> String {
+    redact_sensitive_action_line(text).unwrap_or_else(|| text.to_owned())
+}
+
+pub(crate) fn redacted_prompt_history_line(line: &str, text: &str) -> String {
+    redact_sensitive_action_line(text).unwrap_or_else(|| line.to_owned())
+}
+
+fn redact_sensitive_action_line(text: &str) -> Option<String> {
+    let mut parts = text.split_whitespace();
+    let root = parts.next()?;
+    let auth = parts.next()?;
+    let provider = parts.next()?;
+    let finish = parts.next()?;
+    if root == "/email" && auth == "auth" && provider == "google" && finish == "finish" {
+        Some("/email auth google finish <redacted>".to_owned())
+    } else {
+        None
+    }
 }
 
 fn is_harness_prompt_slash_action(action: &str) -> bool {

@@ -82,6 +82,13 @@ prompt commands, currently `/skill <name> ...` and `/skill:<name> ...`, are
 completed and echoed by the CLI but must still be submitted as prompts so the
 harness can resolve skills and inject their content.
 
+Until action schemas can mark sensitive arguments, the CLI has one narrow
+action-specific redaction exception: `/email auth google finish ...` is redacted
+in command echo and persistent prompt history because its pasted loopback URL
+contains a one-time OAuth authorization code. The raw `ActionInvoke` still goes
+to the owning extension so the action can complete; future schema/protocol
+sensitive-argument metadata should replace this hard-coded action id.
+
 `/model <provider>/<model>` has two CLI-owned paths: with a selected agent it
 emits a targeted `ui.agent_model_select`; after `/new`, with no selected agent,
 it stages a one-shot `ui.create_agent.model_override` for the next prompt-created

@@ -68,6 +68,14 @@ classified before logging. New event kinds that carry agent transcript content o
 reference prompt/tool-call ids must update that classifier and its regression
 tests.
 
+The debug JSONL mirror also has a narrow temporary redaction exception for
+`action.invoke` events with action id `email.auth.google.finish`: the harness
+redacts raw action arguments because the current action schema cannot mark the
+pasted Gmail loopback URL as sensitive and that URL contains a one-time OAuth
+authorization code. Routed `ActionInvoke` delivery still carries the raw
+argument to the owning extension. Future schema/protocol sensitive-argument
+metadata should replace this action-id-specific debug-log redaction.
+
 ## Extension boundary
 
 Extensions are less-trusted peers connected over the Tau protocol. They may

@@ -15,6 +15,9 @@ use globset::{Glob, GlobMatcher};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 
+use crate::google_oauth::{
+    is_valid_pkce_verifier, parse_installed_app_redirect_url, validate_loopback_redirect_uri,
+};
 use crate::storage::{FsStorage, SharedStorage, StorageCreateError, file_name};
 
 mod real_backend;
@@ -44,7 +47,7 @@ const ACCESS_FULL: &str = "full";
 const ACCESS_PREVIEW: &str = "preview";
 const ACCESS_NONE: &str = "none";
 const GOOGLE_AUTH_SCHEMA: u32 = 1;
-const GOOGLE_AUTH_PENDING_SCHEMA: u32 = 1;
+const GOOGLE_AUTH_PENDING_SCHEMA: u32 = 2;
 const MAX_GOOGLE_AUTH_FIELD_CHARS: usize = 4096;
 
 use tau_proto::{
@@ -1143,7 +1146,7 @@ pub struct StatePattern {
 }
 
 /// Stored OAuth authorization for one Gmail email account.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
 pub(crate) struct EmailGoogleStoredAuth {
     /// Stored auth schema version.
     pub(crate) schema: u32,
@@ -1151,6 +1154,16 @@ pub(crate) struct EmailGoogleStoredAuth {
     pub(crate) account: String,
     /// Google OAuth refresh token.
     pub(crate) refresh_token: String,
+}
+
+impl std::fmt::Debug for EmailGoogleStoredAuth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EmailGoogleStoredAuth")
+            .field("schema", &self.schema)
+            .field("account", &self.account)
+            .field("refresh_token", &"<redacted>")
+            .finish()
+    }
 }
 
 impl EmailGoogleStoredAuth {
@@ -1164,51 +1177,118 @@ impl EmailGoogleStoredAuth {
     }
 }
 
-/// Pending Google device authorization request for one email account.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+/// Pending Google authorization request for one email account.
+#[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
 pub(crate) struct EmailGooglePendingAuth {
     /// Pending auth schema version.
     pub(crate) schema: u32,
     /// Configured email account id.
     pub(crate) account: String,
-    /// Google OAuth device code. This is never shown back to the user.
-    pub(crate) device_code: String,
-    /// User-facing code entered on Google's verification page.
-    pub(crate) user_code: String,
-    /// Google verification URL for the user to open.
-    pub(crate) verification_uri: String,
-    /// Unix timestamp in milliseconds when this request expires.
-    pub(crate) expires_at_unix_ms: u64,
-    /// Suggested polling interval from Google.
-    pub(crate) interval_secs: u64,
+    /// Flow-specific private pending auth data.
+    #[serde(flatten)]
+    pub(crate) flow: EmailGooglePendingAuthFlow,
+}
+
+/// Flow-specific private pending Google authorization data.
+#[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "flow", rename_all = "snake_case")]
+pub(crate) enum EmailGooglePendingAuthFlow {
+    /// Installed-app authorization-code flow with a manually pasted loopback
+    /// URL.
+    InstalledApp {
+        /// OAuth state parameter expected in the pasted loopback URL.
+        state: String,
+        /// RFC 7636 PKCE verifier used only during token exchange.
+        pkce_verifier: String,
+        /// Exact redirect URI saved at start and reused during token exchange.
+        redirect_uri: String,
+        /// Unix timestamp in milliseconds when this request was created.
+        created_at_unix_ms: u64,
+        /// Unix timestamp in milliseconds when this request expires.
+        expires_at_unix_ms: u64,
+    },
+}
+
+impl std::fmt::Debug for EmailGooglePendingAuth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EmailGooglePendingAuth")
+            .field("schema", &self.schema)
+            .field("account", &self.account)
+            .field("flow", &"<redacted>")
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for EmailGooglePendingAuthFlow {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InstalledApp { .. } => f.write_str("InstalledApp(<redacted>)"),
+        }
+    }
 }
 
 impl EmailGooglePendingAuth {
-    /// Build a pending Google device authorization record.
-    pub(crate) fn new(
+    /// Build a pending Google installed-app authorization record.
+    pub(crate) fn installed_app(
         account: &str,
-        device_code: &str,
-        user_code: &str,
-        verification_uri: &str,
+        state: &str,
+        pkce_verifier: &str,
+        redirect_uri: &str,
         expires_in_secs: u64,
-        interval_secs: u64,
     ) -> Self {
+        let created_at_unix_ms = current_unix_millis();
         Self {
             schema: GOOGLE_AUTH_PENDING_SCHEMA,
             account: account.to_owned(),
-            device_code: device_code.to_owned(),
-            user_code: user_code.to_owned(),
-            verification_uri: verification_uri.to_owned(),
-            expires_at_unix_ms: current_unix_millis()
-                .saturating_add(expires_in_secs.saturating_mul(1000)),
-            interval_secs,
+            flow: EmailGooglePendingAuthFlow::InstalledApp {
+                state: state.to_owned(),
+                pkce_verifier: pkce_verifier.to_owned(),
+                redirect_uri: redirect_uri.to_owned(),
+                created_at_unix_ms,
+                expires_at_unix_ms: created_at_unix_ms
+                    .saturating_add(expires_in_secs.saturating_mul(1000)),
+            },
         }
     }
 
     /// Return true when this pending authorization has expired.
     pub(crate) fn expired(&self) -> bool {
-        self.expires_at_unix_ms <= current_unix_millis()
+        self.expires_at_unix_ms() <= current_unix_millis()
     }
+
+    /// Return installed-app pending data.
+    pub(crate) fn installed_app_data(&self) -> InstalledAppPendingAuth<'_> {
+        match &self.flow {
+            EmailGooglePendingAuthFlow::InstalledApp {
+                state,
+                pkce_verifier,
+                redirect_uri,
+                ..
+            } => InstalledAppPendingAuth {
+                state,
+                pkce_verifier,
+                redirect_uri,
+            },
+        }
+    }
+
+    fn expires_at_unix_ms(&self) -> u64 {
+        match &self.flow {
+            EmailGooglePendingAuthFlow::InstalledApp {
+                expires_at_unix_ms, ..
+            } => *expires_at_unix_ms,
+        }
+    }
+}
+
+/// Borrowed installed-app pending authorization fields.
+pub(crate) struct InstalledAppPendingAuth<'a> {
+    /// OAuth state expected in the pasted redirect URL.
+    pub(crate) state: &'a str,
+    /// PKCE verifier saved at start.
+    pub(crate) pkce_verifier: &'a str,
+    /// Exact redirect URI saved at start.
+    pub(crate) redirect_uri: &'a str,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1423,7 +1503,7 @@ impl StateStore {
         Ok(Some(auth.refresh_token))
     }
 
-    /// Store a pending Google device authorization request for email.
+    /// Store a pending Google authorization request for email.
     pub(crate) fn save_pending_google_auth(
         &self,
         pending: &EmailGooglePendingAuth,
@@ -1432,7 +1512,7 @@ impl StateStore {
         self.write_json(&self.google_pending_auth_path(&pending.account), pending)
     }
 
-    /// Load a pending Google device authorization request for email.
+    /// Load a pending Google authorization request for email.
     pub(crate) fn pending_google_auth(
         &self,
         account: &str,
@@ -1443,13 +1523,14 @@ impl StateStore {
                 "no pending Google authorization for account `{account}`"
             ));
         };
-        let pending: EmailGooglePendingAuth = serde_json::from_slice(&bytes)
-            .map_err(|error| format!("failed to parse {path}: {error}"))?;
+        let pending: EmailGooglePendingAuth = serde_json::from_slice(&bytes).map_err(|_| {
+            "pending Google email authorization is unsupported or corrupt; run `/email auth google start <account>` again".to_owned()
+        })?;
         validate_google_pending_auth(&pending, Some(account))?;
         Ok(pending)
     }
 
-    /// Clear a pending Google device authorization request for email.
+    /// Clear a pending Google authorization request for email.
     pub(crate) fn clear_pending_google_auth(&self, account: &str) -> Result<(), String> {
         self.storage
             .delete_file(&self.google_pending_auth_path(account))
@@ -1797,19 +1878,33 @@ fn validate_google_pending_auth(
         return Err("pending Google auth has unsupported schema".to_owned());
     }
     validate_google_auth_account(&pending.account, expected_account)?;
-    for (field, value) in [
-        ("device_code", pending.device_code.as_str()),
-        ("user_code", pending.user_code.as_str()),
-        ("verification_uri", pending.verification_uri.as_str()),
-    ] {
-        if !is_safe_persisted_line(value, MAX_GOOGLE_AUTH_FIELD_CHARS) {
-            return Err(format!(
-                "pending Google auth field `{field}` contains unsafe text"
-            ));
+    match &pending.flow {
+        EmailGooglePendingAuthFlow::InstalledApp {
+            state,
+            pkce_verifier,
+            redirect_uri,
+            created_at_unix_ms,
+            expires_at_unix_ms,
+        } => {
+            for (field, value) in [
+                ("state", state.as_str()),
+                ("pkce_verifier", pkce_verifier.as_str()),
+                ("redirect_uri", redirect_uri.as_str()),
+            ] {
+                if !is_safe_persisted_line(value, MAX_GOOGLE_AUTH_FIELD_CHARS) {
+                    return Err(format!(
+                        "pending Google auth field `{field}` contains unsafe text"
+                    ));
+                }
+            }
+            if !is_valid_pkce_verifier(pkce_verifier) {
+                return Err("pending Google auth PKCE verifier is invalid".to_owned());
+            }
+            validate_loopback_redirect_uri(redirect_uri)?;
+            if *created_at_unix_ms == 0 || *expires_at_unix_ms <= *created_at_unix_ms {
+                return Err("pending Google auth timing is invalid".to_owned());
+            }
         }
-    }
-    if pending.expires_at_unix_ms == 0 || pending.interval_secs == 0 {
-        return Err("pending Google auth timing is invalid".to_owned());
     }
     Ok(())
 }
@@ -2185,20 +2280,23 @@ pub trait EmailBackend {
     ) -> Result<String, String>;
     /// Send one already-approved outgoing message.
     fn send_message(&mut self, message: &OutgoingMessage) -> Result<String, String>;
-    /// Start Google OAuth authorization and return device_code, user_code,
-    /// verification_uri, expires_in_secs, and interval_secs.
-    fn start_google_device_auth(
+    /// Start Google OAuth installed-app authorization and return
+    /// authorization_url, state, pkce_verifier, redirect_uri, and
+    /// expires_in_secs.
+    fn start_google_installed_app_auth(
         &self,
         _account: &str,
-    ) -> Result<(String, String, String, u64, u64), String> {
+    ) -> Result<(String, String, String, String, u64), String> {
         Err("auth_error: Google email OAuth is not available in this backend".to_owned())
     }
-    /// Finish Google OAuth authorization and return refresh_token,
-    /// access_token, and expires_in_secs.
-    fn finish_google_device_auth(
+    /// Finish Google OAuth installed-app authorization and return
+    /// refresh_token, access_token, and expires_in_secs.
+    fn finish_google_installed_app_auth(
         &self,
         _account: &str,
-        _device_code: &str,
+        _code: &str,
+        _pkce_verifier: &str,
+        _redirect_uri: &str,
     ) -> Result<(String, Option<String>, Option<u64>), String> {
         Err("auth_error: Google email OAuth is not available in this backend".to_owned())
     }
@@ -2523,6 +2621,10 @@ fn safe_text(value: &str, max_chars: usize, multiline: bool) -> String {
 
 fn safe_display_line(value: &str) -> String {
     safe_text(value, MAX_DISPLAY_LINE_CHARS, false)
+}
+
+fn safe_oauth_url_display(value: &str) -> String {
+    safe_text(value, MAX_GOOGLE_AUTH_FIELD_CHARS, false)
 }
 
 fn safe_display_text(value: &str) -> String {
@@ -4110,9 +4212,7 @@ impl<B: EmailBackend> Engine<B> {
             "email.auth.google.start" => {
                 require_one_arg(argv).and_then(|account| self.action_auth_google_start(account))
             }
-            "email.auth.google.finish" => {
-                require_one_arg(argv).and_then(|account| self.action_auth_google_finish(account))
-            }
+            "email.auth.google.finish" => self.action_auth_google_finish_args(argv),
             "email.out.list" => require_no_args(argv).and_then(|()| self.action_out_list()),
             "email.out.open" => require_one_arg(argv).and_then(|id| self.action_out_open(id)),
             "email.out.approve" => self.action_out_approve_args(argv),
@@ -4135,29 +4235,43 @@ impl<B: EmailBackend> Engine<B> {
 
     fn action_auth_google_start(&self, account_id: &str) -> Result<String, String> {
         let account = self.google_oauth_state_account(account_id)?;
-        let (device_code, user_code, verification_uri, expires_in_secs, interval_secs) =
-            self.backend.start_google_device_auth(&account.id)?;
-        let pending = EmailGooglePendingAuth::new(
+        let (authorization_url, state, pkce_verifier, redirect_uri, expires_in_secs) =
+            self.backend.start_google_installed_app_auth(&account.id)?;
+        let pending = EmailGooglePendingAuth::installed_app(
             &account.id,
-            &device_code,
-            &user_code,
-            &verification_uri,
+            &state,
+            &pkce_verifier,
+            &redirect_uri,
             expires_in_secs,
-            interval_secs,
         );
         self.state.save_pending_google_auth(&pending)?;
         Ok(format!(
-            "Google email authorization started for account {}.\nOpen this URL:\n{}\nEnter this code:\n{}\nThen run:\n/email auth google finish {}\nExpires in {} second(s). If authorization is still pending, wait at least {} second(s) before retrying finish.",
+            "Google email authorization started for account {}.\nOpen this URL:\n{}\nApprove access in the browser. The browser will fail to connect to localhost; copy the full final address-bar URL and run:\n/email auth google finish {} <copied-url>\nExpires in {} second(s).",
             safe_display_line(&account.id),
-            safe_display_line(&verification_uri),
-            safe_display_line(&user_code),
+            safe_oauth_url_display(&authorization_url),
             safe_display_line(&account.id),
             expires_in_secs,
-            interval_secs
         ))
     }
 
-    fn action_auth_google_finish(&mut self, account_id: &str) -> Result<String, String> {
+    fn action_auth_google_finish_args(&mut self, argv: &[String]) -> Result<String, String> {
+        match argv {
+            [account_id, redirect_url]
+                if !account_id.trim().is_empty() && !redirect_url.trim().is_empty() =>
+            {
+                self.action_auth_google_finish(account_id, redirect_url)
+            }
+            [_, _] => Err("action arguments must not be empty".to_owned()),
+            [] | [_] => Err("missing required action argument".to_owned()),
+            _ => Err("too many action arguments".to_owned()),
+        }
+    }
+
+    fn action_auth_google_finish(
+        &mut self,
+        account_id: &str,
+        redirect_url: &str,
+    ) -> Result<String, String> {
         let account_id = self.google_oauth_state_account(account_id)?.id.clone();
         let pending = self.state.pending_google_auth(&account_id)?;
         if pending.expired() {
@@ -4168,9 +4282,19 @@ impl<B: EmailBackend> Engine<B> {
                 safe_display_line(&account_id)
             ));
         }
-        let (refresh_token, access_token, expires_in_secs) = self
-            .backend
-            .finish_google_device_auth(&account_id, &pending.device_code)?;
+        let installed_app = pending.installed_app_data();
+        let redirect = parse_installed_app_redirect_url(
+            redirect_url,
+            installed_app.redirect_uri,
+            installed_app.state,
+        )?;
+        let (refresh_token, access_token, expires_in_secs) =
+            self.backend.finish_google_installed_app_auth(
+                &account_id,
+                &redirect.code,
+                installed_app.pkce_verifier,
+                installed_app.redirect_uri,
+            )?;
         self.state
             .save_google_refresh_token(&account_id, &refresh_token)?;
         self.state.clear_pending_google_auth(&account_id)?;
@@ -5296,7 +5420,7 @@ pub fn email_action_schema() -> ActionSchema {
                     "Email account authorization actions",
                     vec![group(
                         "google",
-                        "Google Gmail OAuth device authorization",
+                        "Google Gmail installed-app browser authorization",
                         vec![
                             leaf(
                                 "start",
@@ -5308,7 +5432,13 @@ pub fn email_action_schema() -> ActionSchema {
                                 "finish",
                                 "email.auth.google.finish",
                                 "Finish Google email authorization",
-                                vec![string_arg("account", "Email account id")],
+                                vec![
+                                    string_arg("account", "Email account id"),
+                                    rest_string_arg(
+                                        "redirect_url",
+                                        "Full failed loopback URL copied from the browser address bar",
+                                    ),
+                                ],
                             ),
                         ],
                     )],

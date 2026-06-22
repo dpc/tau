@@ -19,7 +19,8 @@ use tau_proto::{
 use super::chat::{
     DraftSlot, SUSPENDED_AGENT_PROMPT, agent_is_active_in_sets, custom_prompt_replacement,
     invalidate_pending_draft, is_local_slash_command, leading_slash_action, next_active_agent,
-    role_cycling_enabled, should_send_draft_snapshot,
+    redacted_command_echo_line, redacted_prompt_history_line, role_cycling_enabled,
+    should_send_draft_snapshot,
 };
 use super::event_renderer::EventRenderer;
 
@@ -672,6 +673,25 @@ fn local_slash_commands_are_identified_for_history_rendering() {
     assert!(is_local_slash_command("/skill:jujutsu args"));
     assert!(!is_local_slash_command("/skillx jujutsu"));
     assert!(!is_local_slash_command("hello /model engineer"));
+}
+
+#[test]
+fn gmail_oauth_finish_redirect_url_is_redacted_from_echo_and_prompt_history() {
+    let line = "/email auth google finish work http://127.0.0.1:54321/?state=state-secret&code=auth-code-secret";
+    let redacted = "/email auth google finish <redacted>";
+    assert_eq!(redacted_command_echo_line(line), redacted);
+    assert_eq!(redacted_prompt_history_line(line, line), redacted);
+    assert!(!redacted_command_echo_line(line).contains("auth-code-secret"));
+    let missing_account = "/email auth google finish http://127.0.0.1:54321/?state=state-secret&code=auth-code-secret";
+    assert_eq!(redacted_command_echo_line(missing_account), redacted);
+    assert!(
+        !redacted_prompt_history_line(missing_account, missing_account)
+            .contains("auth-code-secret")
+    );
+    assert_eq!(
+        redacted_command_echo_line("/email auth google start work"),
+        "/email auth google start work"
+    );
 }
 
 #[test]

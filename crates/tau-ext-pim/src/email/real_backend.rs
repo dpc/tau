@@ -243,32 +243,34 @@ impl EmailBackend for RealEmailBackend {
         })
     }
 
-    fn start_google_device_auth(
+    fn start_google_installed_app_auth(
         &self,
         account: &str,
-    ) -> Result<(String, String, String, u64, u64), String> {
+    ) -> Result<(String, String, String, String, u64), String> {
         let account = self.account(account)?;
         let config = account.google_oauth_config()?;
-        let started = self
-            .oauth
-            .start_device_auth(config, "https://mail.google.com/")?;
+        let started = self.oauth.start_gmail_installed_app_auth(config)?;
         Ok((
-            started.device_code,
-            started.user_code,
-            started.verification_uri,
+            started.authorization_url,
+            started.state,
+            started.pkce_verifier,
+            started.redirect_uri,
             started.expires_in_secs,
-            started.interval_secs,
         ))
     }
 
-    fn finish_google_device_auth(
+    fn finish_google_installed_app_auth(
         &self,
         account: &str,
-        device_code: &str,
+        code: &str,
+        pkce_verifier: &str,
+        redirect_uri: &str,
     ) -> Result<(String, Option<String>, Option<u64>), String> {
         let account = self.account(account)?;
         let config = account.google_oauth_config()?;
-        let finished = self.oauth.finish_device_auth(config, device_code)?;
+        let finished =
+            self.oauth
+                .finish_installed_app_auth(config, code, pkce_verifier, redirect_uri)?;
         Ok((
             finished.refresh_token,
             finished.access_token,
@@ -328,7 +330,7 @@ impl RealAccount {
         } else {
             Some(self.state.google_refresh_token(&self.id)?.ok_or_else(|| {
                 format!(
-                    "Google email account `{}` is not authorized; run `/email auth google start {}` and then `/email auth google finish {}`",
+                    "Google email account `{}` is not authorized; run `/email auth google start {}` and then `/email auth google finish {} <copied-url>`",
                     self.id, self.id, self.id
                 )
             })?)
@@ -338,7 +340,7 @@ impl RealAccount {
             config,
             stored_refresh_token.as_deref(),
             &format!(
-                "Google email account `{}` is not authorized; run `/email auth google start {}` and then `/email auth google finish {}`",
+                "Google email account `{}` is not authorized; run `/email auth google start {}` and then `/email auth google finish {} <copied-url>`",
                 self.id, self.id, self.id
             ),
         )

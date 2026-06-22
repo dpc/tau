@@ -1,6 +1,8 @@
 use tau_proto::{
-    AgentPromptId, HarnessInputMessage, ModelId, PromptOriginator, ProviderResponseFinished,
+    ActionInvocationId, AgentPromptId, CborValue, ExtensionInstanceId, ExtensionName,
+    HarnessInputMessage, ModelId, PromptOriginator, ProviderResponseFinished,
     ProviderResponseTextDelta, ProviderResponseUpdated, ProviderTokenUsage, ReasoningTextKind,
+    SessionId,
 };
 
 use super::*;
@@ -95,6 +97,45 @@ fn published_line_compacts_long_strings() {
         payload["deltas"][1]["text"],
         "αααααααααα┄total 126┄ωωωωωωωωωω"
     );
+}
+
+#[test]
+fn published_action_invoke_redacts_gmail_oauth_redirect_url() {
+    let td = tempfile::tempdir().expect("tempdir");
+    let mut log = DebugEventLog::open(td.path()).expect("open");
+    let event = Event::ActionInvoke(tau_proto::ActionInvoke {
+        invocation_id: ActionInvocationId::from("action-1"),
+        session_id: SessionId::from("s1"),
+        extension_name: ExtensionName::from("tau-ext-pim"),
+        instance_id: ExtensionInstanceId::from(0),
+        action_id: "email.auth.google.finish".to_owned(),
+        raw_line: "/email auth google finish work http://127.0.0.1:54321/?state=state-secret&code=auth-code-secret".to_owned(),
+        argv: vec![
+            "work".to_owned(),
+            "http://127.0.0.1:54321/?state=state-secret&code=auth-code-secret".to_owned(),
+        ],
+        arguments: CborValue::Map(vec![
+            (
+                CborValue::Text("account".to_owned()),
+                CborValue::Text("work".to_owned()),
+            ),
+            (
+                CborValue::Text("redirect_url".to_owned()),
+                CborValue::Text(
+                    "http://127.0.0.1:54321/?state=state-secret&code=auth-code-secret"
+                        .to_owned(),
+                ),
+            ),
+        ]),
+    });
+
+    log.log_published_event(None, &event, UnixMicros::now());
+
+    let raw = std::fs::read_to_string(log.path()).expect("read events.jsonl");
+    assert!(!raw.contains("auth-code-secret"));
+    assert!(!raw.contains("state-secret"));
+    assert!(raw.contains("<redirect-url-redacted>"));
+    assert!(raw.contains("\"arguments\":\"<redacted>\""));
 }
 
 #[test]
