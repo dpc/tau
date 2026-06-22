@@ -755,6 +755,22 @@ fn folder_line_keeps_key_reversible_without_extra_columns() {
     );
 }
 
+/// Folder ids returned in list payloads are opaque tokens that the model passes
+/// back verbatim. Preserve spaces, percent signs, and provider hierarchy
+/// separators across that round trip so follow-up reads target the listed
+/// backend folder exactly.
+#[test]
+fn folder_ids_round_trip_model_visible_opaque_tokens() {
+    let folder_id = flatten_folder_id("work", "Project 100%/alpha beta");
+    assert_eq!(folder_id, "work/Project%20100%25%2Falpha%20beta");
+
+    let (account, folder) =
+        parse_flattened_folder_arg("read", Some(&folder_id)).expect("folder id parses");
+
+    assert_eq!(account, "work");
+    assert_eq!(folder, "Project 100%/alpha beta");
+}
+
 #[test]
 fn empty_list_render_uses_no_matches_payload() {
     let temp = tempfile::TempDir::new().expect("tempdir");

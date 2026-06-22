@@ -112,6 +112,7 @@ impl IcsFeedBackend {
         let config = ureq::Agent::config_builder()
             .timeout_global(Some(REQUEST_TIMEOUT))
             .http_status_as_error(false)
+            .max_redirects(0)
             .tls_config(tls_config)
             .build();
         let agent = ureq::Agent::new_with_config(config);
@@ -236,7 +237,12 @@ impl IcsFeedBackend {
     }
 
     fn feed_url(&self, account: &ValidatedAccount) -> Result<String, String> {
-        let Some(ValidatedBackendConfig::IcsFeed { url_secret, url }) = &account.backend else {
+        let Some(ValidatedBackendConfig::IcsFeed {
+            url_secret,
+            url,
+            allow_plain_http,
+        }) = &account.backend
+        else {
             return Err(format!(
                 "calendar account `{}` is not an ics_feed account",
                 account.id
@@ -257,11 +263,11 @@ impl IcsFeedBackend {
             (None, Some(url)) => url.clone(),
             _ => return Err("invalid ics_feed source configuration".to_owned()),
         };
-        normalize_feed_url(&url)
+        normalize_feed_url(&url, *allow_plain_http)
     }
 }
 
-fn normalize_feed_url(url: &str) -> Result<String, String> {
+fn normalize_feed_url(url: &str, allow_plain_http: bool) -> Result<String, String> {
     let trimmed = url.trim();
     if trimmed.is_empty() {
         return Err("iCalendar feed URL must not be empty".to_owned());
@@ -281,13 +287,26 @@ fn normalize_feed_url(url: &str) -> Result<String, String> {
     if !matches!(parsed.scheme(), "http" | "https") {
         return Err("iCalendar feed URL must use https://, http://, or webcal://".to_owned());
     }
-    if parsed.host_str().is_none() {
+    let Some(host) = parsed.host_str() else {
         return Err("iCalendar feed URL must include a host".to_owned());
-    }
+    };
     if !parsed.username().is_empty() || parsed.password().is_some() {
         return Err("iCalendar feed URL must not include credentials".to_owned());
     }
+    if parsed.scheme() == "http" && !allow_plain_http && !is_loopback_host(host) {
+        return Err(
+            "iCalendar feed URL must use https:// or webcal:// unless allow_plain_http is enabled"
+                .to_owned(),
+        );
+    }
     Ok(candidate.to_owned())
+}
+
+fn is_loopback_host(host: &str) -> bool {
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|address| address.is_loopback())
 }
 
 fn parse_ics_cursor(cursor: Option<&str>) -> Result<usize, String> {

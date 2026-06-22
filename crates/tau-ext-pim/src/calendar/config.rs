@@ -44,6 +44,11 @@ pub enum CalendarBackendConfig {
         url_secret: Option<String>,
         /// Literal feed URL. Prefer `url_secret` for private feeds.
         url: Option<String>,
+        /// Allow non-loopback `http://` feed URLs. This is unsafe because it
+        /// exposes private feed tokens/content and permits MITM event
+        /// injection.
+        #[serde(default)]
+        allow_plain_http: bool,
     },
     /// Native Google Calendar API backend.
     Google {
@@ -214,6 +219,8 @@ pub enum ValidatedBackendConfig {
         url_secret: Option<String>,
         /// Literal feed URL.
         url: Option<String>,
+        /// Whether non-loopback plain HTTP URLs are explicitly allowed.
+        allow_plain_http: bool,
     },
     /// Native Google Calendar API backend.
     Google {
@@ -306,9 +313,17 @@ impl CalendarPolicyConfig {
 impl ValidatedAccount {
     fn from_config(value: CalendarAccountConfig) -> Result<Self, String> {
         let backend = match value.backend {
-            Some(CalendarBackendConfig::IcsFeed { url_secret, url }) => {
-                validate_ics_feed_source(url_secret.as_deref(), url.as_deref())?;
-                Some(ValidatedBackendConfig::IcsFeed { url_secret, url })
+            Some(CalendarBackendConfig::IcsFeed {
+                url_secret,
+                url,
+                allow_plain_http,
+            }) => {
+                validate_ics_feed_source(url_secret.as_deref(), url.as_deref(), allow_plain_http)?;
+                Some(ValidatedBackendConfig::IcsFeed {
+                    url_secret,
+                    url,
+                    allow_plain_http,
+                })
             }
             Some(CalendarBackendConfig::Google {
                 client_id_secret,
@@ -366,7 +381,11 @@ impl ValidatedAccount {
     }
 }
 
-fn validate_ics_feed_source(url_secret: Option<&str>, url: Option<&str>) -> Result<(), String> {
+fn validate_ics_feed_source(
+    url_secret: Option<&str>,
+    url: Option<&str>,
+    allow_plain_http: bool,
+) -> Result<(), String> {
     match (url_secret, url) {
         (Some(secret), None) if secret.trim().is_empty() => {
             Err("ics_feed url_secret must not be empty".to_owned())
@@ -374,10 +393,31 @@ fn validate_ics_feed_source(url_secret: Option<&str>, url: Option<&str>) -> Resu
         (None, Some(url)) if url.trim().is_empty() => {
             Err("ics_feed url must not be empty".to_owned())
         }
-        (Some(_), None) | (None, Some(_)) => Ok(()),
+        (None, Some(url)) => validate_ics_feed_literal_url(url, allow_plain_http),
+        (Some(_), None) => Ok(()),
         (None, None) => Err("ics_feed requires exactly one of url_secret or url".to_owned()),
         (Some(_), Some(_)) => Err("ics_feed accepts only one of url_secret or url".to_owned()),
     }
+}
+
+fn validate_ics_feed_literal_url(url: &str, allow_plain_http: bool) -> Result<(), String> {
+    let candidate = url
+        .trim()
+        .strip_prefix("webcal://")
+        .map(|rest| format!("https://{rest}"))
+        .unwrap_or_else(|| url.trim().to_owned());
+    let parsed = Url::parse(&candidate)
+        .map_err(|error| format!("ics_feed url must be absolute: {error}"))?;
+    if parsed.scheme() == "http"
+        && !allow_plain_http
+        && !parsed.host_str().is_some_and(is_loopback_host)
+    {
+        return Err(
+            "ics_feed url must use https:// or webcal:// unless allow_plain_http is enabled"
+                .to_owned(),
+        );
+    }
+    Ok(())
 }
 
 fn normalize_backend_url(field: &str, value: &str) -> Result<String, String> {
@@ -412,9 +452,10 @@ fn normalize_backend_url(field: &str, value: &str) -> Result<String, String> {
 
 fn is_loopback_host(host: &str) -> bool {
     host.eq_ignore_ascii_case("localhost")
-        || host == "127.0.0.1"
-        || host == "::1"
-        || host == "[::1]"
+        || host
+            .trim_matches(['[', ']'])
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|address| address.is_loopback())
 }
 
 fn validate_secret_name(field: &str, value: &str) -> Result<(), String> {

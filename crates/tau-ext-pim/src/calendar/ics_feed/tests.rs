@@ -230,6 +230,7 @@ fn backend_fetches_and_lists_http_feed_events() {
             backend: Some(CalendarBackendConfig::IcsFeed {
                 url_secret: None,
                 url: Some(url),
+                allow_plain_http: false,
             }),
             calendars: CalendarSelectionConfig {
                 default: Some("main".to_owned()),
@@ -259,6 +260,89 @@ fn backend_fetches_and_lists_http_feed_events() {
     assert_eq!(events[0].summary, "UTC");
 }
 
+/// Plain HTTP calendar feeds can leak private feed tokens and allow event
+/// injection. Keep non-loopback HTTP blocked unless the account explicitly
+/// opts into that dangerous transport for a trusted deployment.
+#[test]
+fn non_loopback_http_feed_requires_explicit_opt_in() {
+    assert!(normalize_feed_url("http://example.test/calendar.ics", false).is_err());
+    assert_eq!(
+        normalize_feed_url("http://example.test/calendar.ics", true).expect("opted in"),
+        "http://example.test/calendar.ics"
+    );
+    assert_eq!(
+        normalize_feed_url("http://127.0.0.1/calendar.ics", false).expect("loopback"),
+        "http://127.0.0.1/calendar.ics"
+    );
+}
+
+/// The feed fetcher must not follow redirects without re-validating the target
+/// URL. Reject redirects outright so an allowed HTTPS/loopback/secret URL
+/// cannot downgrade to non-loopback plain HTTP behind the extension's policy
+/// checks.
+#[test]
+fn feed_fetch_rejects_redirects_for_literal_and_secret_urls() {
+    let (literal_url, literal_handle) = serve_redirect_once("http://example.test/calendar.ics");
+    let literal_cfg = CalendarExtensionConfig {
+        enable: true,
+        accounts: vec![CalendarAccountConfig {
+            id: "feed".to_owned(),
+            enable: true,
+            backend: Some(CalendarBackendConfig::IcsFeed {
+                url_secret: None,
+                url: Some(literal_url),
+                allow_plain_http: false,
+            }),
+            calendars: CalendarSelectionConfig {
+                default: Some("main".to_owned()),
+                allow: vec!["main".to_owned()],
+            },
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let literal_config = literal_cfg.validate().expect("literal config");
+    let literal_account = literal_config.accounts.get("feed").expect("literal feed");
+    let literal_backend = IcsFeedBackend::new(BTreeMap::new());
+
+    let err = literal_backend
+        .list_events(literal_account, "main", TimeRange::default(), 10)
+        .expect_err("redirect is rejected");
+    literal_handle.join().expect("literal server exits");
+    assert!(err.contains("HTTP 302"), "{err}");
+
+    let (secret_url, secret_handle) = serve_redirect_once("http://example.test/calendar.ics");
+    let secret_cfg = CalendarExtensionConfig {
+        enable: true,
+        accounts: vec![CalendarAccountConfig {
+            id: "feed".to_owned(),
+            enable: true,
+            backend: Some(CalendarBackendConfig::IcsFeed {
+                url_secret: Some("feed_url".to_owned()),
+                url: None,
+                allow_plain_http: false,
+            }),
+            calendars: CalendarSelectionConfig {
+                default: Some("main".to_owned()),
+                allow: vec!["main".to_owned()],
+            },
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let secret_config = secret_cfg.validate().expect("secret config");
+    let secret_account = secret_config.accounts.get("feed").expect("secret feed");
+    let mut secrets = BTreeMap::new();
+    secrets.insert("feed_url".to_owned(), SecretValue::new(secret_url));
+    let secret_backend = IcsFeedBackend::new(secrets);
+
+    let err = secret_backend
+        .list_events(secret_account, "main", TimeRange::default(), 10)
+        .expect_err("secret redirect is rejected");
+    secret_handle.join().expect("secret server exits");
+    assert!(err.contains("HTTP 302"), "{err}");
+}
+
 #[test]
 fn backend_lists_ics_events_with_cursor_pages() {
     // Cursor paging should let the model continue a bounded calendar read
@@ -273,6 +357,7 @@ fn backend_lists_ics_events_with_cursor_pages() {
             backend: Some(CalendarBackendConfig::IcsFeed {
                 url_secret: None,
                 url: Some(url),
+                allow_plain_http: false,
             }),
             calendars: CalendarSelectionConfig {
                 default: Some("main".to_owned()),
@@ -326,6 +411,7 @@ fn read_event_prefers_static_id_before_recurring_suffix_parse() {
             backend: Some(CalendarBackendConfig::IcsFeed {
                 url_secret: None,
                 url: Some(url),
+                allow_plain_http: false,
             }),
             calendars: CalendarSelectionConfig {
                 default: Some("main".to_owned()),
@@ -359,6 +445,22 @@ fn serve_ics_once(body: &'static str) -> (String, thread::JoinHandle<()>) {
             body.len(),
             body
         );
+        stream
+            .write_all(response.as_bytes())
+            .expect("write response");
+    });
+    (format!("http://{addr}/calendar.ics"), handle)
+}
+
+fn serve_redirect_once(location: &'static str) -> (String, thread::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
+    let addr = listener.local_addr().expect("local addr");
+    let handle = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept request");
+        let mut buf = [0_u8; 1024];
+        let _ = stream.read(&mut buf);
+        let response =
+            format!("HTTP/1.1 302 Found\r\nLocation: {location}\r\nConnection: close\r\n\r\n");
         stream
             .write_all(response.as_bytes())
             .expect("write response");

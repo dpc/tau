@@ -21,6 +21,21 @@ fn list_calendars_reports_flattened_calendar_ids() {
     );
 }
 
+/// Calendar ids in the first list column are opaque tokens for follow-up tool
+/// calls. Encode lossy display characters reversibly instead of applying
+/// display sanitization that would change spaces, percent signs, or slashes.
+#[test]
+fn calendar_ids_round_trip_model_visible_opaque_tokens() {
+    let calendar_id = flatten_calendar_id("feed", "Team 100%/primary");
+    assert_eq!(calendar_id, "feed/Team%20100%25%2Fprimary");
+
+    let (account, calendar) =
+        split_flattened_calendar_id(&calendar_id).expect("calendar id parses");
+
+    assert_eq!(account, "feed");
+    assert_eq!(calendar, "Team 100%/primary");
+}
+
 #[test]
 fn omitted_calendar_account_defaults_to_first_enabled_account() {
     // Match email's default-scope behavior so weaker local models that omit
@@ -37,6 +52,7 @@ fn omitted_calendar_account_defaults_to_first_enabled_account() {
             backend: Some(ValidatedBackendConfig::IcsFeed {
                 url_secret: None,
                 url: Some("https://example.test/later.ics".to_owned()),
+                allow_plain_http: false,
             }),
             default_calendar: Some("other".to_owned()),
             allowed_calendars: vec!["other".to_owned()],
@@ -991,6 +1007,7 @@ fn calendar_event_output_uses_account_timezone() {
         backend: Some(ValidatedBackendConfig::IcsFeed {
             url_secret: None,
             url: Some("https://example.test/calendar.ics".to_owned()),
+            allow_plain_http: false,
         }),
         default_calendar: Some("main".to_owned()),
         allowed_calendars: vec!["main".to_owned()],
@@ -1065,6 +1082,7 @@ fn read_event_validates_output_timezone_before_backend_access() {
             backend: Some(ValidatedBackendConfig::IcsFeed {
                 url_secret: None,
                 url: Some("not a url".to_owned()),
+                allow_plain_http: false,
             }),
             default_calendar: Some("main".to_owned()),
             allowed_calendars: vec!["main".to_owned()],
@@ -1321,6 +1339,7 @@ fn ics_feed_requires_exactly_one_url_source() {
             backend: Some(CalendarBackendConfig::IcsFeed {
                 url_secret: None,
                 url: None,
+                allow_plain_http: false,
             }),
             ..Default::default()
         }],
@@ -1334,6 +1353,38 @@ fn ics_feed_requires_exactly_one_url_source() {
     assert!(err.contains("requires exactly one"), "{err}");
 }
 
+/// Literal iCalendar feed URLs should fail configuration early when they use
+/// non-loopback plain HTTP, while still permitting loopback test feeds and
+/// explicit dangerous opt-in.
+#[test]
+fn ics_feed_plain_http_requires_loopback_or_opt_in() {
+    let cfg = |url: &str, allow_plain_http| CalendarExtensionConfig {
+        enable: true,
+        accounts: vec![CalendarAccountConfig {
+            id: "feed".to_owned(),
+            backend: Some(CalendarBackendConfig::IcsFeed {
+                url_secret: None,
+                url: Some(url.to_owned()),
+                allow_plain_http,
+            }),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+
+    assert!(
+        cfg("http://example.test/calendar.ics", false)
+            .validate()
+            .is_err()
+    );
+    cfg("http://127.0.0.1/calendar.ics", false)
+        .validate()
+        .expect("loopback HTTP is accepted for tests");
+    cfg("http://example.test/calendar.ics", true)
+        .validate()
+        .expect("explicit opt-in accepts plain HTTP");
+}
+
 fn test_engine(root: &std::path::Path) -> Engine {
     let cfg = CalendarExtensionConfig {
         enable: true,
@@ -1344,6 +1395,7 @@ fn test_engine(root: &std::path::Path) -> Engine {
             backend: Some(CalendarBackendConfig::IcsFeed {
                 url_secret: None,
                 url: Some("https://example.test/calendar.ics".to_owned()),
+                allow_plain_http: false,
             }),
             calendars: CalendarSelectionConfig {
                 default: Some("main".to_owned()),

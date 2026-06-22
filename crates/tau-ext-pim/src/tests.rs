@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::rc::Rc;
 
 use serde::Deserialize;
 use tau_proto::{
@@ -6,6 +7,139 @@ use tau_proto::{
 };
 
 use super::*;
+
+/// A failed PIM reconfigure may be an attempted policy revocation. Ensure the
+/// wrapper does not keep serving calls from a previously accepted email or
+/// calendar module state after reporting the new configuration as rejected.
+#[test]
+fn rejected_reconfigure_clears_previous_module_state() {
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let storage = Rc::new(storage::FsStorage::new(temp.path().join("storage")));
+    let mut runtime = RuntimeState::default();
+    runtime
+        .configure(
+            configure(CborValue::Map(vec![]), temp.path()),
+            storage.clone(),
+        )
+        .expect("initial default config is accepted");
+
+    let rejected = CborValue::Map(vec![
+        (
+            CborValue::Text("email".to_owned()),
+            CborValue::Map(Vec::new()),
+        ),
+        (
+            CborValue::Text("calendar".to_owned()),
+            CborValue::Map(vec![(
+                CborValue::Text("unknown".to_owned()),
+                CborValue::Bool(true),
+            )]),
+        ),
+    ]);
+    assert!(
+        runtime
+            .configure(configure(rejected, temp.path()), storage)
+            .is_err()
+    );
+
+    let event = runtime
+        .dispatch_tool(tau_proto::ToolStarted {
+            call_id: tau_proto::ToolCallId::new("call-email"),
+            tool_name: tau_proto::ToolName::new("email_list_folders"),
+            arguments: CborValue::Map(vec![]),
+            agent_id: tau_proto::AgentId::parse("agent-1").expect("agent id"),
+            originator: tau_proto::PromptOriginator::User,
+        })
+        .expect("email tool is handled by PIM");
+
+    let Event::ToolError(error) = event else {
+        panic!("rejected email module should return a tool error")
+    };
+    assert!(
+        error
+            .display
+            .expect("display")
+            .status_text
+            .contains("configuration was rejected")
+    );
+
+    let event = runtime
+        .dispatch_tool(tau_proto::ToolStarted {
+            call_id: tau_proto::ToolCallId::new("call-calendar"),
+            tool_name: tau_proto::ToolName::new("calendar_list_calendars"),
+            arguments: CborValue::Map(vec![]),
+            agent_id: tau_proto::AgentId::parse("agent-1").expect("agent id"),
+            originator: tau_proto::PromptOriginator::User,
+        })
+        .expect("calendar tool is handled by PIM");
+
+    let Event::ToolError(error) = event else {
+        panic!("rejected calendar module should return a tool error")
+    };
+    assert!(
+        error
+            .display
+            .expect("display")
+            .status_text
+            .contains("configuration was rejected")
+    );
+}
+
+/// Legacy email-shaped configs still pass through the PIM wrapper. If that
+/// fallback email configuration fails after a prior successful configure, the
+/// wrapper must reject both modules instead of leaving stale calendar access.
+#[test]
+fn rejected_legacy_fallback_reconfigure_clears_calendar_state() {
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let storage = Rc::new(storage::FsStorage::new(temp.path().join("storage")));
+    let mut runtime = RuntimeState::default();
+    runtime
+        .configure(
+            configure(CborValue::Map(vec![]), temp.path()),
+            storage.clone(),
+        )
+        .expect("initial default config is accepted");
+
+    let rejected = CborValue::Map(vec![(
+        CborValue::Text("accounts".to_owned()),
+        CborValue::Text("not an email account list".to_owned()),
+    )]);
+    assert!(
+        runtime
+            .configure(configure(rejected, temp.path()), storage)
+            .is_err()
+    );
+
+    let event = runtime
+        .dispatch_tool(tau_proto::ToolStarted {
+            call_id: tau_proto::ToolCallId::new("call-calendar"),
+            tool_name: tau_proto::ToolName::new("calendar_list_calendars"),
+            arguments: CborValue::Map(vec![]),
+            agent_id: tau_proto::AgentId::parse("agent-1").expect("agent id"),
+            originator: tau_proto::PromptOriginator::User,
+        })
+        .expect("calendar tool is handled by PIM");
+
+    let Event::ToolError(error) = event else {
+        panic!("rejected calendar module should return a tool error")
+    };
+    assert!(
+        error
+            .display
+            .expect("display")
+            .status_text
+            .contains("configuration was rejected")
+    );
+}
+
+fn configure(config: CborValue, state_root: &std::path::Path) -> tau_proto::Configure {
+    tau_proto::Configure {
+        config,
+        instance_name: None,
+        state_dir: Some(state_root.join("state")),
+        secrets: BTreeMap::new(),
+    }
+}
 
 #[test]
 fn self_knowledge_pim_example_matches_extension_config_shape() {

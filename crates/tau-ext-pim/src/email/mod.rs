@@ -2657,18 +2657,9 @@ fn format_folder_line(account_id: &str, folder: BackendFolder) -> CborValue {
     } else {
         "noselect"
     };
-    let name = safe_model_line(&folder.name, MAX_HEADER_VALUE_CHARS);
-    let name = if name.is_empty() {
-        "-".to_owned()
-    } else {
-        name
-    };
     CborValue::Text(format!(
         "{} {}",
-        list_token(
-            &flatten_folder_id(account_id, &name),
-            MAX_HEADER_VALUE_CHARS
-        ),
+        flatten_folder_id(account_id, &folder.name),
         flags
     ))
 }
@@ -4398,6 +4389,12 @@ enum ConfigState {
 }
 
 impl RuntimeState {
+    /// Mark the email module configuration as rejected without keeping stale
+    /// state.
+    pub(crate) fn reject(&mut self, reason: String) {
+        self.config_state = ConfigState::Rejected { reason };
+    }
+
     /// Configure the email module from harness-supplied extension config.
     pub(crate) fn configure(
         &mut self,
@@ -5367,6 +5364,20 @@ fn parse_flattened_folder_arg(
             "folder must be a folder id from email_list_folders",
         ));
     };
+    let account = crate::opaque_id::decode_component(account).map_err(|_| {
+        error_envelope(
+            Some(command),
+            "invalid_input",
+            "folder must be a folder id from email_list_folders",
+        )
+    })?;
+    let folder = crate::opaque_id::decode_component(folder).map_err(|_| {
+        error_envelope(
+            Some(command),
+            "invalid_input",
+            "folder must be a folder id from email_list_folders",
+        )
+    })?;
     if account.trim().is_empty() || folder.trim().is_empty() {
         return Err(error_envelope(
             Some(command),
@@ -5374,11 +5385,15 @@ fn parse_flattened_folder_arg(
             "folder must be a folder id from email_list_folders",
         ));
     }
-    Ok((account.to_owned(), folder.to_owned()))
+    Ok((account, folder))
 }
 
 fn flatten_folder_id(account: &str, folder: &str) -> String {
-    format!("{account}/{folder}")
+    format!(
+        "{}/{}",
+        crate::opaque_id::encode_component(account),
+        crate::opaque_id::encode_component(folder)
+    )
 }
 
 fn parse_message_target(

@@ -85,7 +85,7 @@ Important fields:
 - Password auth requires `auth.password_secret` and a matching declaration under `extensions.std-pim.secrets`.
 - `auth.method: none` is only for SMTP-only or relay-style setups; IMAP requires password auth.
 - OAuth and command-based password sources are not implemented or are rejected.
-- List-style email outputs use Tau's header-then-payload tool-output shape: headers such as `format: ...` first, one empty line, then plain unindented rows. Message rows start with UID. Pass that row UID as `email_id` to message-targeting split tools. Whitespace inside token fields is percent-encoded so follow-up keys stay one-column and reversible; percent-decode token fields before passing them back as tool arguments. Attachment metadata inside `email_read` is structured detail metadata, not a top-level list response.
+- List-style email outputs use Tau's header-then-payload tool-output shape: headers such as `format: ...` first, one empty line, then plain unindented rows. Message rows start with UID. Pass that row UID as `email_id` to message-targeting split tools. Folder ids are opaque tokens returned by `email_list_folders`; pass them back exactly as returned, without decoding or rewriting them. Attachment metadata inside `email_read` is structured detail metadata, not a top-level list response.
 
 
 ## Secrets
@@ -158,7 +158,7 @@ Advice:
 
 Incoming reads:
 
-- `email_list_folders` returns a `format` header plus one line per visible folder. Folder ids are opaque `<folder>` values to pass back to other email tools.
+- `email_list_folders` returns a `format` header plus one line per visible folder. Folder ids are opaque values to pass back exactly as returned to other email tools.
 - `email_list_recent` shows recent messages from IMAP internal-date search; omit `folder` to use the default folder. It returns a `format` header plus one line per message, redacts untrusted message details, and includes `access=full|preview|none`.
 - `email_read` returns full body content only when access is `full`, meaning policy passes or an exact incoming approval exists. Agent-visible read bodies are simplified and wrapped in `<external_unstrusted_message>...</external_unstrusted_message>`.
 - For `preview` access, `email_read` returns only a heavily stripped `body_preview`: HTML removed, links replaced with `LINK`, and only ASCII letters/digits, spaces, commas, and periods inside the wrapper. It does not ask the user for approval.

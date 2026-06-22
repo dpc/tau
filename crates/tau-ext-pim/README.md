@@ -189,6 +189,8 @@ extensions:
             backend:
               type: ics_feed
               url_secret: personal_calendar_ics_url
+              # Non-loopback http:// feeds require allow_plain_http: true.
+              # Prefer https:// or webcal:// for private feeds.
             calendars:
               default: main
               allow:
@@ -261,7 +263,7 @@ Folder allowlists are glob patterns over mailbox folder names. Empty `folders.al
 
 Email is exposed as split model-visible tools:
 
-- `email_list_folders` — returns `format: folder flags` plus one line per visible folder. Folder ids are the opaque `<folder>` values to pass back to other email tools; whitespace in list row fields is percent-encoded so ids remain single-column and reversible. Percent-decode token fields before passing them back as tool arguments.
+- `email_list_folders` — returns `format: folder flags` plus one line per visible folder. Folder ids are opaque single-column tokens; pass the returned token back exactly as shown.
 - `email_list_recent`
 - `email_read`
 - `email_request_access`
@@ -272,7 +274,7 @@ Email is exposed as split model-visible tools:
 - `email_trash`
 - `email_send`
 
-`email_list_recent` accepts optional `folder`, `limit`, `cursor`, and `days`; omitted `folder` defaults to the default folder, and `days` defaults to 7. List-style commands return a `format` header and one safe line per listed item, with the follow-up key first and whitespace/control-safe fields so rows cannot forge extra columns or lines; percent-decode token fields before reusing them as arguments. Message-targeting tools (`email_read`, `email_request_access`, `email_mark_read`, `email_mark_unread`, `email_star`, `email_unstar`, and `email_trash`) take the same `folder` plus `email_id` target; pass the list row `uid` value as `email_id`. `email_request_access` creates or reuses a pending incoming approval so the user can decide whether the agent may read the full message. Message-management commands do not require content approval. `email_trash` moves the message to Trash.
+`email_list_recent` accepts optional `folder`, `limit`, `cursor`, and `days`; omitted `folder` defaults to the default folder, and `days` defaults to 7. List-style commands return a `format` header and one safe line per listed item, with the follow-up key first and whitespace/control-safe fields so rows cannot forge extra columns or lines; reuse opaque id fields exactly as returned. Message-targeting tools (`email_read`, `email_request_access`, `email_mark_read`, `email_mark_unread`, `email_star`, `email_unstar`, and `email_trash`) take the same `folder` plus `email_id` target; pass the list row `uid` value as `email_id`. `email_request_access` creates or reuses a pending incoming approval so the user can decide whether the agent may read the full message. Message-management commands do not require content approval. `email_trash` moves the message to Trash.
 
 Calendar is exposed as split model-visible tools:
 

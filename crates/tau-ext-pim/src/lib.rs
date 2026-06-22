@@ -17,6 +17,7 @@ use tau_proto::{
 
 pub mod calendar;
 pub mod email;
+mod opaque_id;
 mod storage;
 
 /// `tracing` target for extension-level events emitted by the PIM wrapper.
@@ -102,21 +103,27 @@ impl RuntimeState {
         configure: tau_proto::Configure,
         storage: storage::SharedStorage,
     ) -> Result<(), String> {
-        match tau_extension::parse_config::<PimExtensionConfig>(&configure.config) {
+        let result = match tau_extension::parse_config::<PimExtensionConfig>(&configure.config) {
             Ok(pim) => self.configure_pim(pim, configure, storage),
             Err(message) if has_pim_module_keys(&configure.config) => Err(message),
             Err(_) => {
                 let calendar_secrets = configure.secrets.clone();
                 let calendar_state_dir = configure.state_dir.clone();
-                self.email.configure(configure, Rc::clone(&storage))?;
-                self.calendar.configure_with_config(
-                    calendar::CalendarExtensionConfig::default(),
-                    calendar_state_dir,
-                    calendar_secrets,
-                    storage,
-                )
+                match self.email.configure(configure, Rc::clone(&storage)) {
+                    Ok(()) => self.calendar.configure_with_config(
+                        calendar::CalendarExtensionConfig::default(),
+                        calendar_state_dir,
+                        calendar_secrets,
+                        storage,
+                    ),
+                    Err(message) => Err(message),
+                }
             }
+        };
+        if let Err(message) = &result {
+            self.reject_modules(message.clone());
         }
+        result
     }
 
     fn configure_pim(
@@ -140,6 +147,11 @@ impl RuntimeState {
             configure.secrets,
             storage,
         )
+    }
+
+    fn reject_modules(&mut self, reason: String) {
+        self.email.reject(reason.clone());
+        self.calendar.reject(reason);
     }
 
     fn initial_tool_progress(&self, invoke: &tau_proto::ToolStarted) -> Option<Event> {

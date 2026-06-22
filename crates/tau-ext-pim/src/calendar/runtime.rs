@@ -167,6 +167,12 @@ struct EventEtagKey {
 }
 
 impl RuntimeState {
+    /// Mark the calendar module configuration as rejected without keeping stale
+    /// state.
+    pub(crate) fn reject(&mut self, reason: String) {
+        self.config_state = ConfigState::Rejected { reason };
+    }
+
     /// Configure the calendar module from an already-decoded calendar config.
     pub(crate) fn configure_with_config(
         &mut self,
@@ -719,7 +725,7 @@ impl Engine {
                             };
                             rows.push(format!(
                                 "{} {} {}",
-                                safe_field(&flatten_calendar_id(&account.id, &calendar.id)),
+                                flatten_calendar_id(&account.id, &calendar.id),
                                 flags,
                                 quoted_display_field(&calendar.display_name)
                             ));
@@ -738,7 +744,7 @@ impl Engine {
                             };
                             rows.push(format!(
                                 "{} {} {}",
-                                safe_field(&flatten_calendar_id(&account.id, &calendar.id)),
+                                flatten_calendar_id(&account.id, &calendar.id),
                                 flags,
                                 quoted_display_field(&calendar.summary)
                             ));
@@ -1401,8 +1407,8 @@ impl Engine {
     ) -> Result<(&ValidatedAccount, String), String> {
         if let Some(calendar_id) = calendar {
             let (account_id, calendar) = split_flattened_calendar_id(calendar_id)?;
-            let account = self.account_by_id(account_id)?;
-            return Ok((account, calendar.to_owned()));
+            let account = self.account_by_id(&account_id)?;
+            return Ok((account, calendar));
         }
         let account = self.single_account(None)?;
         let Some(calendar) = default_calendar_id_for_account(account) else {
@@ -2543,13 +2549,21 @@ fn mutation_result_status(command: &str, result: &CalendarMutationResult) -> &'s
 }
 
 fn flatten_calendar_id(account: &str, calendar: &str) -> String {
-    format!("{account}/{calendar}")
+    format!(
+        "{}/{}",
+        crate::opaque_id::encode_component(account),
+        crate::opaque_id::encode_component(calendar)
+    )
 }
 
-fn split_flattened_calendar_id(calendar_id: &str) -> Result<(&str, &str), String> {
+fn split_flattened_calendar_id(calendar_id: &str) -> Result<(String, String), String> {
     let Some((account, calendar)) = calendar_id.split_once('/') else {
         return Err("calendar must be a calendar id from calendar_list_calendars".to_owned());
     };
+    let account = crate::opaque_id::decode_component(account)
+        .map_err(|_| "calendar must be a calendar id from calendar_list_calendars".to_owned())?;
+    let calendar = crate::opaque_id::decode_component(calendar)
+        .map_err(|_| "calendar must be a calendar id from calendar_list_calendars".to_owned())?;
     if account.trim().is_empty() || calendar.trim().is_empty() {
         return Err("calendar must be a calendar id from calendar_list_calendars".to_owned());
     }
