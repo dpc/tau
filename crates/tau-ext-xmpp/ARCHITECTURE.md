@@ -11,9 +11,12 @@ the server-returned bound full JID.
 The preferred routing mode is one MUC room per registered Tau session id and
 agent id. Registration waits up to 30 seconds for the initial XMPP online state,
 joins the room, waits for exact `room/nick` self-presence, submits XEP-0045
-instant-room owner config if status 201 reports a newly-created room, sends an
-XEP-0045 mediated invite plus a direct fallback notice to the default recipient,
-and leaves the room with unavailable presence on unregister or session shutdown.
+instant-room owner config if status 201 reports a newly-created room, then
+reports `xmpp_register` success. Only after that success response does Tau send
+the XEP-0045 mediated invite plus direct fallback notice to the default
+recipient; those notices are best-effort and must not delay registration success
+or shutdown cleanup. Tau leaves the room with unavailable presence on unregister
+or session shutdown.
 Room identity must remain stable and collision-resistant for registered routing
 keys after XMPP JID normalization: the room localpart is
 `<room_prefix>-<session-slug>-<agent-slug>-<8-char-disambiguator>`. The slugs are
@@ -47,6 +50,11 @@ registration. `xmpp_send` waits up to 30 seconds only after the bridge has
 already been started; startup remains registration-driven, and if no registered
 conversation exists after readiness the tool still fails with the explicit
 `xmpp_register(enabled: true)` requirement.
+
+Harness disconnect and extension drop request worker-wide shutdown. In-flight
+command, reconnect, readiness, join, rejoin, stanza-send, and best-effort notice
+work must be interrupted or bounded so the worker can prioritize unavailable MUC
+leave presence under the remaining cleanup budget.
 
 Incoming XMPP text is emitted as `extension.prompt_submit_request`. The harness
 validates the target loaded agent and owns the durable prompt fact.

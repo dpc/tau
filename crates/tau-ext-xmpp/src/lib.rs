@@ -9,6 +9,7 @@ use std::error::Error;
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
+use std::thread::JoinHandle;
 use std::time::Duration;
 
 use futures_util::StreamExt;
@@ -59,6 +60,9 @@ const REGISTER_TIMEOUT: Duration = Duration::from_secs(45);
 const ONLINE_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
 const READY_RESPONSE_SLACK: Duration = Duration::from_secs(1);
 const STANZA_TIMEOUT: Duration = Duration::from_secs(20);
+const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
+const WORKER_SHUTDOWN_CLEANUP_TIMEOUT: Duration = Duration::from_secs(4);
+const SHUTDOWN_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const MUC_OWNER_NS: &str = "http://jabber.org/protocol/muc#owner";
 const MUC_ROOM_DISAMBIGUATOR_BYTES: usize = 5;
 const MUC_SESSION_SLUG_MAX_CHARS: usize = 16;
@@ -105,6 +109,9 @@ trait XmppBridge: Send + Sync + 'static {
 
     /// Send text to the registered agent's conversation.
     fn send_message(&self, agent_id: &AgentId, text: &str) -> Result<(), String>;
+
+    /// Request bridge shutdown and wait briefly for best-effort cleanup.
+    fn shutdown(&self, timeout: Duration) -> Result<(), String>;
 }
 
 /// Validated runtime configuration, including resolved secret values.
@@ -317,18 +324,20 @@ impl ExtConfig {
             allowed_jids,
             default_recipient,
             routing_mode,
-            resource_prefix: clean_token(
+            resource_prefix: clean_token_or(
                 self.resource_prefix
                     .as_deref()
                     .unwrap_or(DEFAULT_RESOURCE_PREFIX),
+                DEFAULT_RESOURCE_PREFIX,
             ),
             muc: MucConfig {
                 service: muc_service,
-                room_prefix: clean_token(
+                room_prefix: clean_token_or(
                     self.muc
                         .room_prefix
                         .as_deref()
                         .unwrap_or(DEFAULT_ROOM_PREFIX),
+                    DEFAULT_ROOM_PREFIX,
                 ),
                 expose_real_jids: self.muc.expose_real_jids.unwrap_or(true),
                 trust_muc_membership: self.muc.trust_muc_membership.unwrap_or(false),
@@ -346,8 +355,6 @@ struct State {
     config: Option<RuntimeConfig>,
     /// Agents currently registered with the bridge.
     registered_agents: HashSet<AgentId>,
-    /// Human-readable agent labels.
-    agent_labels: HashMap<AgentId, String>,
     /// XMPP conversation address per agent.
     conversations: HashMap<AgentId, String>,
     /// Current Tau session id used for stable per-session room names.
@@ -459,10 +466,6 @@ impl Extension {
             let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
             state.registered_agents.insert(invoke.agent_id.clone());
             state
-                .agent_labels
-                .entry(invoke.agent_id.clone())
-                .or_insert_with(|| invoke.agent_id.to_string());
-            state
                 .conversations
                 .insert(invoke.agent_id.clone(), address.clone());
             tool_result(
@@ -535,6 +538,9 @@ impl Extension {
 impl Drop for Extension {
     fn drop(&mut self) {
         self.shutdown.store(true, Ordering::Relaxed);
+        if let Err(error) = self.bridge.shutdown(SHUTDOWN_TIMEOUT) {
+            tracing::warn!(target: LOG_TARGET, %error, "xmpp bridge shutdown did not finish cleanly");
+        }
     }
 }
 
@@ -543,6 +549,17 @@ impl Drop for Extension {
 struct LiveXmppBridge {
     /// Command channel to the XMPP worker.
     command_tx: Mutex<Option<mpsc::Sender<XmppCommand>>>,
+    /// Running worker thread and completion notification.
+    worker: Mutex<Option<XmppWorkerThread>>,
+    /// Shared shutdown flag used by the running worker.
+    shutdown: Mutex<Option<Arc<AtomicBool>>>,
+}
+
+struct XmppWorkerThread {
+    /// Worker thread handle.
+    join: JoinHandle<()>,
+    /// Notification sent after the worker thread exits.
+    done_rx: mpsc::Receiver<()>,
 }
 
 enum XmppCommand {
@@ -557,6 +574,8 @@ enum XmppCommand {
     Unregister {
         /// Agent to unregister.
         agent_id: AgentId,
+        /// Response channel after leave/unregister cleanup has been attempted.
+        response: mpsc::Sender<()>,
     },
     Send {
         /// Sending agent.
@@ -587,11 +606,19 @@ impl XmppBridge for LiveXmppBridge {
         }
         let (command_tx, command_rx) = mpsc::channel();
         let worker_tx = command_tx.clone();
-        std::thread::Builder::new()
+        let (done_tx, done_rx) = mpsc::channel();
+        let worker_shutdown = Arc::clone(&shutdown);
+        let join = std::thread::Builder::new()
             .name("tau-ext-xmpp".to_owned())
-            .spawn(move || xmpp_thread(cfg, command_rx, tx, shutdown))
+            .spawn(move || {
+                xmpp_thread(cfg, command_rx, tx, worker_shutdown);
+                let _ = done_tx.send(());
+            })
             .map_err(|e| format!("failed to spawn xmpp worker: {e}"))?;
         *guard = Some(worker_tx);
+        *self.shutdown.lock().unwrap_or_else(|e| e.into_inner()) = Some(shutdown);
+        *self.worker.lock().unwrap_or_else(|e| e.into_inner()) =
+            Some(XmppWorkerThread { join, done_rx });
         Ok(())
     }
 
@@ -616,10 +643,15 @@ impl XmppBridge for LiveXmppBridge {
 
     fn unregister_agent(&self, agent_id: &AgentId) -> Result<(), String> {
         let tx = self.command_sender()?;
+        let (response_tx, response_rx) = mpsc::channel();
         tx.send(XmppCommand::Unregister {
             agent_id: agent_id.clone(),
+            response: response_tx,
         })
-        .map_err(|_| "xmpp worker is not running".to_owned())
+        .map_err(|_| "xmpp worker is not running".to_owned())?;
+        response_rx
+            .recv_timeout(COMMAND_TIMEOUT)
+            .map_err(|_| "timed out waiting for xmpp unregister".to_owned())
     }
 
     fn wait_until_ready(&self, timeout: Duration) -> Result<(), String> {
@@ -647,6 +679,34 @@ impl XmppBridge for LiveXmppBridge {
         response_rx
             .recv_timeout(COMMAND_TIMEOUT)
             .map_err(|_| "timed out waiting for xmpp send".to_owned())?
+    }
+
+    fn shutdown(&self, timeout: Duration) -> Result<(), String> {
+        if let Some(shutdown) = self
+            .shutdown
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+        {
+            shutdown.store(true, Ordering::Relaxed);
+        }
+        self.command_tx
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take();
+        let mut worker = self.worker.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(worker_ref) = worker.as_ref() else {
+            return Ok(());
+        };
+        worker_ref
+            .done_rx
+            .recv_timeout(timeout)
+            .map_err(|_| "timed out waiting for xmpp worker shutdown".to_owned())?;
+        let worker = worker.take().expect("worker checked above");
+        worker
+            .join
+            .join()
+            .map_err(|_| "xmpp worker thread panicked during shutdown".to_owned())
     }
 }
 
@@ -695,21 +755,36 @@ async fn xmpp_worker(
     };
     let mut client = Client::new(login_jid, cfg.password.clone());
     let mut command_rx = std_to_tokio(command_rx);
-    let mut worker = WorkerState::new(cfg, tx);
+    let mut worker = WorkerState::new(cfg, tx, Arc::clone(&shutdown));
     loop {
         if shutdown.load(Ordering::Relaxed) {
-            worker.leave_all(&mut client).await;
+            worker
+                .leave_all_with_timeout(&mut client, WORKER_SHUTDOWN_CLEANUP_TIMEOUT)
+                .await;
             return;
         }
         tokio::select! {
             event = client.next() => {
                 let Some(event) = event else {
-                    worker.leave_all(&mut client).await;
+                    worker
+                        .leave_all_with_timeout(&mut client, WORKER_SHUTDOWN_CLEANUP_TIMEOUT)
+                        .await;
                     return;
                 };
                 match event {
                     tokio_xmpp::Event::Online { bound_jid, .. } => {
-                        worker.handle_online(bound_jid, &mut client).await;
+                        if run_until_worker_shutdown(
+                            Arc::clone(&shutdown),
+                            worker.handle_online(bound_jid, &mut client),
+                        )
+                        .await
+                        == WorkerRunOutcome::Shutdown
+                        {
+                            worker
+                                .leave_all_with_timeout(&mut client, WORKER_SHUTDOWN_CLEANUP_TIMEOUT)
+                                .await;
+                            return;
+                        }
                     }
                     tokio_xmpp::Event::Disconnected(error) => {
                         tracing::warn!(target: LOG_TARGET, %error, "xmpp disconnected");
@@ -720,10 +795,23 @@ async fn xmpp_worker(
             }
             command = command_rx.recv() => {
                 let Some(command) = command else {
-                    worker.leave_all(&mut client).await;
+                    worker
+                        .leave_all_with_timeout(&mut client, WORKER_SHUTDOWN_CLEANUP_TIMEOUT)
+                        .await;
                     return;
                 };
-                worker.handle_command(command, &mut client).await;
+                if run_until_worker_shutdown(
+                    Arc::clone(&shutdown),
+                    worker.handle_command(command, &mut client),
+                )
+                .await
+                == WorkerRunOutcome::Shutdown
+                {
+                    worker
+                        .leave_all_with_timeout(&mut client, WORKER_SHUTDOWN_CLEANUP_TIMEOUT)
+                        .await;
+                    return;
+                }
             }
             _ = tokio::time::sleep(Duration::from_millis(200)) => {}
         }
@@ -744,11 +832,37 @@ fn std_to_tokio<T: Send + 'static>(
     tokio_rx
 }
 
+async fn wait_for_shutdown(shutdown: Arc<AtomicBool>) {
+    while !shutdown.load(Ordering::Relaxed) {
+        tokio::time::sleep(SHUTDOWN_POLL_INTERVAL).await;
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WorkerRunOutcome {
+    /// The worker operation finished before shutdown was requested.
+    Completed,
+    /// Shutdown was requested before the worker operation finished.
+    Shutdown,
+}
+
+async fn run_until_worker_shutdown<F>(shutdown: Arc<AtomicBool>, operation: F) -> WorkerRunOutcome
+where
+    F: std::future::Future<Output = ()>,
+{
+    tokio::select! {
+        () = operation => WorkerRunOutcome::Completed,
+        () = wait_for_shutdown(shutdown) => WorkerRunOutcome::Shutdown,
+    }
+}
+
 struct WorkerState {
     /// Runtime config.
     cfg: RuntimeConfig,
     /// Writer channel toward the harness.
     tx: mpsc::Sender<HarnessInputMessage>,
+    /// Shared shutdown flag used to cancel long best-effort operations.
+    shutdown: Arc<AtomicBool>,
     /// Server-returned bound JID.
     bound_jid: Option<Jid>,
     /// Registered conversations.
@@ -763,10 +877,15 @@ struct WorkerState {
 
 impl WorkerState {
     /// Create a worker state.
-    fn new(cfg: RuntimeConfig, tx: mpsc::Sender<HarnessInputMessage>) -> Self {
+    fn new(
+        cfg: RuntimeConfig,
+        tx: mpsc::Sender<HarnessInputMessage>,
+        shutdown: Arc<AtomicBool>,
+    ) -> Self {
         Self {
             cfg,
             tx,
+            shutdown,
             bound_jid: None,
             conversations: HashMap::new(),
             pending_muc_joins: HashMap::new(),
@@ -795,11 +914,16 @@ impl WorkerState {
                         Err("timed out registering xmpp conversation".to_owned())
                     }
                 };
-                self.finish_register_response(&agent_id, result, response, client)
-                    .await;
+                if self
+                    .finish_register_response(&agent_id, result, response, client)
+                    .await
+                {
+                    self.send_post_register_notice(&agent_id, client).await;
+                }
             }
-            XmppCommand::Unregister { agent_id } => {
+            XmppCommand::Unregister { agent_id, response } => {
                 self.unregister_agent(&agent_id, client).await;
+                let _ = response.send(());
             }
             XmppCommand::Send {
                 agent_id,
@@ -816,19 +940,22 @@ impl WorkerState {
         }
     }
 
-    /// Send a register response and roll back worker routing if the caller has
-    /// already timed out and dropped its receiver.
+    /// Send a register response, roll back worker routing if the caller has
+    /// already timed out and dropped its receiver, and return whether the
+    /// registration remains active.
     async fn finish_register_response(
         &mut self,
         agent_id: &AgentId,
         result: Result<String, String>,
         response: mpsc::Sender<Result<String, String>>,
         client: &mut Client,
-    ) {
+    ) -> bool {
         let registered = result.is_ok();
         if response.send(result).is_err() && registered {
             self.unregister_agent(agent_id, client).await;
+            return false;
         }
+        registered
     }
 
     /// Register one agent conversation.
@@ -848,9 +975,12 @@ impl WorkerState {
                 self.ensure_muc_room_available(&room, &agent_id)?;
                 let nick = format!("{}-{}", self.cfg.resource_prefix, short_random_hex());
                 let occupant = MucOccupant::new(room.clone(), nick);
-                join_room(client, &occupant.room, &occupant.nick).await?;
                 self.pending_muc_joins
                     .insert(agent_id.clone(), occupant.clone());
+                if let Err(error) = join_room(client, &occupant.room, &occupant.nick).await {
+                    self.leave_pending_muc_join(&agent_id, client).await;
+                    return Err(error);
+                }
                 if let Err(error) = self.setup_joined_muc_room(client, &occupant).await {
                     self.leave_pending_muc_join(&agent_id, client).await;
                     return Err(error);
@@ -863,36 +993,6 @@ impl WorkerState {
                 self.pending_muc_joins.remove(&agent_id);
                 self.conversations
                     .insert(agent_id.clone(), conversation.clone());
-                if self.cfg.muc.invite_default_recipient {
-                    let invite_status = match send_muc_invite(
-                        client,
-                        room.clone(),
-                        self.cfg.default_recipient.clone(),
-                        &format!(
-                            "Tau agent {} registered this private room (plaintext over TLS; no OMEMO/E2EE).",
-                            agent_id.as_ref()
-                        ),
-                    )
-                    .await
-                    {
-                        Ok(()) => "sent a MUC invite for",
-                        Err(error) => {
-                            tracing::warn!(target: LOG_TARGET, %error, room = %room, "failed to send xmpp muc invite; sending direct diagnostic notice");
-                            "could not send a MUC invite for"
-                        }
-                    };
-                    let notice = format!(
-                        "Tau agent {} {} room {}. If your client did not show the invite, join this room manually; replies to this direct notice are not routed in MUC mode. Plaintext over TLS; no OMEMO/E2EE.",
-                        agent_id.as_ref(),
-                        invite_status,
-                        room
-                    );
-                    if let Err(error) =
-                        send_chat(client, self.cfg.default_recipient.clone(), &notice).await
-                    {
-                        tracing::warn!(target: LOG_TARGET, %error, room = %room, "failed to send xmpp muc fallback notice after join");
-                    }
-                }
                 conversation
             }
             RoutingMode::DirectResource => {
@@ -920,6 +1020,73 @@ impl WorkerState {
         let address = conversation.address();
         self.conversations.entry(agent_id).or_insert(conversation);
         Ok(address)
+    }
+
+    /// Send best-effort human notices after the registration response has
+    /// already been returned to the tool caller.
+    async fn send_post_register_notice(&self, agent_id: &AgentId, client: &mut Client) {
+        if !self.cfg.muc.invite_default_recipient || self.shutdown_requested() {
+            return;
+        }
+        let Some(Conversation::Muc { room, .. }) = self.conversations.get(agent_id).cloned() else {
+            return;
+        };
+        let invite_reason = format!(
+            "Tau agent {} registered this private room (plaintext over TLS; no OMEMO/E2EE).",
+            agent_id.as_ref()
+        );
+        let invite_status = match self
+            .until_shutdown(send_muc_invite(
+                client,
+                room.clone(),
+                self.cfg.default_recipient.clone(),
+                &invite_reason,
+            ))
+            .await
+        {
+            Ok(()) => "sent a MUC invite for",
+            Err(error) => {
+                tracing::warn!(target: LOG_TARGET, %error, room = %room, "failed to send xmpp muc invite; sending direct diagnostic notice");
+                "could not send a MUC invite for"
+            }
+        };
+        if self.shutdown_requested() {
+            return;
+        }
+        let notice = format!(
+            "Tau agent {} {} room {}. If your client did not show the invite, join this room manually; replies to this direct notice are not routed in MUC mode. Plaintext over TLS; no OMEMO/E2EE.",
+            agent_id.as_ref(),
+            invite_status,
+            room
+        );
+        if let Err(error) = self
+            .until_shutdown(send_chat(
+                client,
+                self.cfg.default_recipient.clone(),
+                &notice,
+            ))
+            .await
+        {
+            tracing::warn!(target: LOG_TARGET, %error, room = %room, "failed to send xmpp muc fallback notice after join");
+        }
+    }
+
+    /// Return whether shutdown has been requested.
+    fn shutdown_requested(&self) -> bool {
+        self.shutdown.load(Ordering::Relaxed)
+    }
+
+    /// Run a best-effort operation only while shutdown has not been requested.
+    async fn until_shutdown<F, T>(&self, operation: F) -> Result<T, String>
+    where
+        F: std::future::Future<Output = Result<T, String>>,
+    {
+        tokio::select! {
+            result = operation => result,
+            () = wait_for_shutdown(Arc::clone(&self.shutdown)) => {
+                Err("xmpp shutdown requested".to_owned())
+            }
+        }
     }
 
     /// Build the stable MUC room JID for a Tau session and agent pair.
@@ -1019,8 +1186,9 @@ impl WorkerState {
     /// Unregister one agent and leave its MUC room when applicable.
     async fn unregister_agent(&mut self, agent_id: &AgentId, client: &mut Client) {
         self.leave_pending_muc_join(agent_id, client).await;
-        if let Some(conversation) = self.remove_conversation(agent_id) {
+        if let Some(conversation) = self.conversations.get(agent_id).cloned() {
             self.leave_conversation(&conversation, client).await;
+            self.remove_conversation(agent_id);
         }
     }
 
@@ -1032,15 +1200,18 @@ impl WorkerState {
         conversation
     }
 
-    /// Leave all registered MUC conversations before worker shutdown.
-    async fn leave_all(&mut self, client: &mut Client) {
+    /// Leave all registered MUC conversations before worker shutdown, bounded
+    /// by one overall cleanup budget.
+    async fn leave_all_with_timeout(&mut self, client: &mut Client, timeout: Duration) {
+        let deadline = tokio::time::Instant::now() + timeout;
         let conversations = self
             .conversations
             .drain()
             .map(|(_, conv)| conv)
             .collect::<Vec<_>>();
         for conversation in conversations {
-            self.leave_conversation(&conversation, client).await;
+            self.leave_conversation_until(&conversation, client, deadline)
+                .await;
         }
         let pending = self
             .pending_muc_joins
@@ -1048,7 +1219,8 @@ impl WorkerState {
             .map(|(_, occupant)| occupant)
             .collect::<Vec<_>>();
         for occupant in pending {
-            self.leave_muc_occupant(&occupant, client).await;
+            self.leave_muc_occupant_until(&occupant, client, deadline)
+                .await;
         }
         self.room_to_agent.clear();
         self.occupant_real_jids.clear();
@@ -1064,10 +1236,25 @@ impl WorkerState {
         }
     }
 
+    /// Send leave presence for a MUC conversation within a shutdown deadline.
+    async fn leave_conversation_until(
+        &self,
+        conversation: &Conversation,
+        client: &mut Client,
+        deadline: tokio::time::Instant,
+    ) {
+        if let Conversation::Muc { room, nick } = conversation
+            && let Err(error) = leave_room_until(client, room, nick, deadline).await
+        {
+            tracing::warn!(target: LOG_TARGET, %error, room = %room, "failed to leave xmpp muc room during shutdown");
+        }
+    }
+
     /// Leave a pending MUC join and remove its non-routable registration state.
     async fn leave_pending_muc_join(&mut self, agent_id: &AgentId, client: &mut Client) {
-        if let Some(occupant) = self.pending_muc_joins.remove(agent_id) {
+        if let Some(occupant) = self.pending_muc_joins.get(agent_id).cloned() {
             self.leave_muc_occupant(&occupant, client).await;
+            self.pending_muc_joins.remove(agent_id);
         }
     }
 
@@ -1075,6 +1262,20 @@ impl WorkerState {
     async fn leave_muc_occupant(&self, occupant: &MucOccupant, client: &mut Client) {
         if let Err(error) = leave_room(client, &occupant.room, &occupant.nick).await {
             tracing::warn!(target: LOG_TARGET, %error, room = %occupant.room, "failed to leave pending xmpp muc room");
+        }
+    }
+
+    /// Send unavailable presence for one MUC room/nick pair within a shutdown
+    /// deadline.
+    async fn leave_muc_occupant_until(
+        &self,
+        occupant: &MucOccupant,
+        client: &mut Client,
+        deadline: tokio::time::Instant,
+    ) {
+        if let Err(error) = leave_room_until(client, &occupant.room, &occupant.nick, deadline).await
+        {
+            tracing::warn!(target: LOG_TARGET, %error, room = %occupant.room, "failed to leave pending xmpp muc room during shutdown");
         }
     }
 
@@ -1552,6 +1753,18 @@ async fn leave_room(client: &mut Client, room: &BareJid, nick: &str) -> Result<(
         .map_err(|e| format!("failed to leave xmpp muc room: {e}"))
 }
 
+async fn leave_room_until(
+    client: &mut Client,
+    room: &BareJid,
+    nick: &str,
+    deadline: tokio::time::Instant,
+) -> Result<(), String> {
+    let presence = leave_presence(room, nick)?;
+    send_stanza_until(client, presence.into(), deadline)
+        .await
+        .map_err(|e| format!("failed to leave xmpp muc room: {e}"))
+}
+
 fn leave_presence(room: &BareJid, nick: &str) -> Result<Presence, String> {
     let to = muc_occupant_jid(room, nick)?;
     Ok(Presence::unavailable().with_to(to))
@@ -1618,6 +1831,18 @@ async fn send_stanza_with_timeout(client: &mut Client, stanza: Stanza) -> Result
         .map_err(|e| e.to_string())
 }
 
+async fn send_stanza_until(
+    client: &mut Client,
+    stanza: Stanza,
+    deadline: tokio::time::Instant,
+) -> Result<(), String> {
+    tokio::time::timeout_at(deadline, client.send_stanza(stanza))
+        .await
+        .map_err(|_| "timed out sending xmpp stanza before shutdown deadline".to_owned())?
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
 async fn send_chat(client: &mut Client, to: Jid, text: &str) -> Result<(), String> {
     let message = Message::chat(to).with_body(Lang::new(), text.to_owned());
     send_stanza_with_timeout(client, message.into())
@@ -1671,8 +1896,6 @@ where
         .subscribe([
             tau_proto::EventName::TOOL_STARTED,
             tau_proto::EventName::SESSION_STARTED,
-            tau_proto::EventName::AGENT_DISPLAY_NAME_SET,
-            tau_proto::EventName::AGENT_STARTED,
             tau_proto::EventName::SESSION_AGENT_UNLOADED,
             tau_proto::EventName::SESSION_SHUTDOWN,
         ])
@@ -1691,32 +1914,63 @@ where
 
     let (tx, rx) = mpsc::channel::<HarnessInputMessage>();
     let ext = Extension::new(bridge, tx.clone());
-    let writer_handle = std::thread::spawn(move || -> Result<(), Box<dyn Error + Send>> {
-        for msg in rx {
-            writer
-                .write_message(&msg)
-                .map_err(|e| -> Box<dyn Error + Send> { Box::new(e) })?;
-            writer
-                .flush()
-                .map_err(|e| -> Box<dyn Error + Send> { Box::new(e) })?;
-        }
-        Ok(())
+    let (writer_done_tx, writer_done_rx) = mpsc::channel();
+    let writer_handle = std::thread::spawn(move || {
+        let result = (|| -> Result<(), Box<dyn Error + Send>> {
+            for msg in rx {
+                writer
+                    .write_message(&msg)
+                    .map_err(|e| -> Box<dyn Error + Send> { Box::new(e) })?;
+                writer
+                    .flush()
+                    .map_err(|e| -> Box<dyn Error + Send> { Box::new(e) })?;
+            }
+            Ok(())
+        })();
+        let _ = writer_done_tx.send(result);
     });
 
     while let Some(message) = reader.read_message()? {
-        match message {
-            HarnessOutputMessage::Configure(msg) => handle_configure(&ext, &tx, msg),
-            HarnessOutputMessage::Deliver(delivery) => handle_delivery(&ext, delivery),
-            _ => {}
+        if !handle_output_message(&ext, &tx, message) {
+            break;
         }
     }
+    ext.shutdown.store(true, Ordering::Relaxed);
     drop(ext);
     drop(tx);
-    match writer_handle.join() {
-        Ok(Ok(())) => Ok(()),
+    match writer_done_rx.recv_timeout(SHUTDOWN_TIMEOUT) {
+        Ok(Ok(())) => writer_handle
+            .join()
+            .map_err(|_| "xmpp writer thread panicked".into()),
         Ok(Err(error)) => Err(error),
-        Err(_) => Err("xmpp writer thread panicked".into()),
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            tracing::warn!(target: LOG_TARGET, "timed out waiting for xmpp writer thread shutdown");
+            Ok(())
+        }
+        Err(mpsc::RecvTimeoutError::Disconnected) => writer_handle
+            .join()
+            .map_err(|_| "xmpp writer thread panicked".into()),
     }
+}
+
+fn handle_output_message(
+    ext: &Extension,
+    tx: &mpsc::Sender<HarnessInputMessage>,
+    message: HarnessOutputMessage,
+) -> bool {
+    match message {
+        HarnessOutputMessage::Configure(msg) => handle_configure(ext, tx, msg),
+        HarnessOutputMessage::Deliver(delivery) => handle_delivery(ext, delivery),
+        HarnessOutputMessage::Disconnect(_) => {
+            ext.shutdown.store(true, Ordering::Relaxed);
+            if let Err(error) = ext.bridge.shutdown(SHUTDOWN_TIMEOUT) {
+                tracing::warn!(target: LOG_TARGET, %error, "xmpp bridge shutdown did not finish cleanly after harness disconnect");
+            }
+            return false;
+        }
+        _ => {}
+    }
+    true
 }
 
 fn handle_configure(ext: &Extension, tx: &mpsc::Sender<HarnessInputMessage>, msg: Configure) {
@@ -1745,16 +1999,6 @@ fn handle_delivery(ext: &Extension, delivery: EventDelivery) {
         {
             ext.dispatch_tool(invoke);
         }
-        Event::AgentDisplayNameSet(name) if !is_replay => {
-            let mut state = ext.state.lock().unwrap_or_else(|e| e.into_inner());
-            state.agent_labels.insert(name.agent_id, name.display_name);
-        }
-        Event::AgentStarted(started) if !is_replay => {
-            if let Some(display_name) = started.display_name {
-                let mut state = ext.state.lock().unwrap_or_else(|e| e.into_inner());
-                state.agent_labels.insert(started.agent_id, display_name);
-            }
-        }
         Event::SessionAgentUnloaded(unloaded) if !is_replay => {
             unload_agent(ext, unloaded.agent_id);
         }
@@ -1769,7 +2013,6 @@ fn unload_agent(ext: &Extension, agent_id: AgentId) {
     let _ = ext.bridge.unregister_agent(&agent_id);
     let mut state = ext.state.lock().unwrap_or_else(|e| e.into_inner());
     state.registered_agents.remove(&agent_id);
-    state.agent_labels.remove(&agent_id);
     state.conversations.remove(&agent_id);
 }
 
@@ -1932,14 +2175,14 @@ fn tool_error(invoke: ToolStarted, message: String) -> Event {
     })
 }
 
-fn clean_token(input: &str) -> String {
+fn clean_token_or(input: &str, fallback: &str) -> String {
     let mut out: String = input
         .chars()
         .filter(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_'))
         .take(48)
         .collect();
     if out.is_empty() {
-        out = DEFAULT_RESOURCE_PREFIX.to_owned();
+        out = fallback.to_owned();
     }
     out
 }
@@ -1954,7 +2197,7 @@ fn generated_resource(cfg: &RuntimeConfig) -> String {
     let instance = cfg
         .instance_name
         .as_deref()
-        .map(clean_token)
+        .map(|name| clean_token_or(name, "session"))
         .unwrap_or_else(|| "session".to_owned());
     format!(
         "{}-{}-{}-{}",

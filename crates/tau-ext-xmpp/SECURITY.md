@@ -29,6 +29,6 @@
   context before being submitted to Tau.
 - Tau sends unavailable presence for MUC rooms on unregister and session
   shutdown where the worker is still connected. After a successful MUC join,
-  failures in invite/fallback notice delivery must still leave tracked state that
-  can be cleaned up; server history/occupant policy remains a deployment
-  concern.
+  invite/fallback notices are best-effort, happen after `xmpp_register` success,
+  and are cancelled by shutdown so bounded cleanup can prioritize unavailable
+  presence; server history/occupant policy remains a deployment concern.

@@ -123,9 +123,11 @@ still requires an existing registered conversation after that wait.
   self-presence or presence error. A self-presence with status 201 triggers an
   instant-room owner config submit; presence/config errors or timeouts are
   returned from `xmpp_register` instead of silently claiming a usable room.
-  Invite and fallback notice delivery are best-effort after the room is joined
-  and unlocked; Tau still tracks and leaves the room on registration rollback,
-  unregister, or shutdown. Changing the room-name derivation means existing rooms
+  `xmpp_register` success is returned after the room is joined and unlocked but
+  before best-effort invite/fallback notice delivery; slow or failed notices do
+  not roll back a usable room and are cancelled during shutdown. Tau still tracks
+  and leaves the room on registration rollback, unregister, or shutdown.
+  Changing the room-name derivation means existing rooms
   created by older Tau builds are not reused; users may leave or delete old
   `tau-s...-a...` rooms manually.
 - `direct_resource`: announces the current bound full JID to `default_recipient`

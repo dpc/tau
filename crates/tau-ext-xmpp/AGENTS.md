@@ -9,4 +9,5 @@ Keep configuration keys snake_case and reject unknown fields. Never log XMPP
 passwords or private message bodies unless the surrounding code already treats
 them as user-visible prompt text.
 
-See `design.md` for MVP design decisions, testing strategy, and documented limitations.
+See `design.md` for MVP design decisions and documented limitations. See
+`testing.md` for unit-test expectations and the live Prosody smoke-test path.
