@@ -501,8 +501,13 @@ impl DirLockManager {
         removed
     }
 
-    /// Drop all manual locks, used when the whole session is shutting down.
-    pub(crate) fn release_all_manual(&self) -> usize {
+    /// Release all manual locks and cancel queued lock waiters.
+    ///
+    /// This is the directory-lock shutdown cleanup used before the worker
+    /// scheduler is dropped. Running scheduler jobs can be blocked inside
+    /// `acquire_auto`/`acquire_manual`; clearing waiters wakes those jobs so
+    /// scheduler shutdown can join worker threads deterministically.
+    pub(crate) fn shutdown(&self) -> (usize, usize) {
         let mut state = self.inner.state.lock().expect("dir lock state poisoned");
         let removed = state.manual.len();
         let cancelled = state.waiters.len();
@@ -511,7 +516,7 @@ impl DirLockManager {
         if 0 < removed + cancelled {
             self.inner.changed.notify_all();
         }
-        removed
+        (removed, cancelled)
     }
 
     /// Disable directory locking by releasing manual locks and cancelling

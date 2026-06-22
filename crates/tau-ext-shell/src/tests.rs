@@ -51,6 +51,10 @@ fn edit_file(
     edit_file_with_world(arguments, &mut world)
 }
 
+type TestExtensionReader = EventReader<BufReader<UnixStream>>;
+type TestExtensionWriter = EventWriter<BufWriter<UnixStream>>;
+type TestExtensionDone = std::sync::mpsc::Receiver<Result<(), String>>;
+
 /// Test-side wrapper around [`HarnessInputReader`] that exposes an
 /// `Event`-flavoured API so the existing tests can stay mechanical. Non-event
 /// messages are skipped by `read_event`.
@@ -159,16 +163,21 @@ fn cbor_map_field<'a>(value: &'a CborValue, key: &str) -> Option<&'a CborValue> 
     }
 }
 
-fn spawn_extension() -> (
-    EventReader<BufReader<UnixStream>>,
-    EventWriter<BufWriter<UnixStream>>,
-) {
+fn spawn_extension() -> (TestExtensionReader, TestExtensionWriter) {
+    let (reader, writer, _done_rx) = spawn_extension_with_exit();
+    (reader, writer)
+}
+
+fn spawn_extension_with_exit() -> (TestExtensionReader, TestExtensionWriter, TestExtensionDone) {
     let (runtime_stream, harness_stream) = UnixStream::pair().expect("stream pair should open");
     let reader_stream = runtime_stream
         .try_clone()
         .expect("runtime reader clone should succeed");
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
     thread::spawn(move || {
-        run_impl(reader_stream, runtime_stream).expect("extension should run");
+        let result = run_impl(reader_stream, runtime_stream)
+            .map_err(|error| format!("extension should run: {error}"));
+        let _ = done_tx.send(result);
     });
     (
         EventReader::new(BufReader::new(
@@ -177,6 +186,7 @@ fn spawn_extension() -> (
                 .expect("harness reader clone should succeed"),
         )),
         EventWriter::new(BufWriter::new(harness_stream)),
+        done_rx,
     )
 }
 
@@ -942,6 +952,68 @@ fn dir_lock_blocks_conflicting_edit_until_unlock() {
         .write_frame(&disconnect_frame(None))
         .expect("disconnect");
     writer.flush().expect("flush");
+}
+
+#[test]
+fn disconnect_cancels_active_dir_lock_waiter_before_scheduler_join() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let lock_dir = tempdir.path().to_path_buf();
+    let edit_path = lock_dir.join("file.txt");
+    let (mut reader, mut writer, done_rx) = spawn_extension_with_exit();
+    drain_startup(&mut reader);
+    send_dir_lock_config(&mut writer, true);
+
+    writer
+        .write_event(&tool_started(
+            "lock-root",
+            DIR_LOCK_TOOL_NAME,
+            cbor_text_map(vec![
+                ("command", "update"),
+                ("directory", &lock_dir.display().to_string()),
+            ]),
+            "agent-a",
+        ))
+        .expect("dir_lock update");
+    writer.flush().expect("flush lock");
+    loop {
+        match reader.read_event().expect("read") {
+            Some(Event::ToolResult(result)) if result.call_id.as_str() == "lock-root" => break,
+            Some(_) => continue,
+            None => panic!("extension closed before lock result"),
+        }
+    }
+
+    writer
+        .write_event(&tool_started(
+            "blocked-edit",
+            EDIT_TOOL_NAME,
+            edit_arguments(&edit_path, vec![context_half_open_edit(1, 1, "hello", "")]),
+            "agent-b",
+        ))
+        .expect("edit");
+    writer.flush().expect("flush edit");
+    loop {
+        match reader.read_event().expect("read") {
+            Some(Event::ToolProgress(progress)) if progress.call_id.as_str() == "blocked-edit" => {
+                break;
+            }
+            Some(Event::ToolResult(result)) if result.call_id.as_str() == "blocked-edit" => {
+                panic!("edit completed before conflicting lock was released: {result:?}");
+            }
+            Some(_) => continue,
+            None => panic!("extension closed before edit progress"),
+        }
+    }
+
+    writer
+        .write_frame(&disconnect_frame(None))
+        .expect("disconnect");
+    writer.flush().expect("flush disconnect");
+
+    done_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("extension should exit promptly after disconnect")
+        .expect("extension run should succeed");
 }
 
 #[test]

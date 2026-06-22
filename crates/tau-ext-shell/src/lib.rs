@@ -641,7 +641,27 @@ where
     // sequence that must be acknowledged after processing like other subscribed
     // events.
     let mut runtime_started = false;
-    while let Some(message) = reader.read_message()? {
+    let mut reader_error: Option<Box<dyn Error>> = None;
+    loop {
+        let message = match reader.read_message() {
+            Ok(Some(message)) => message,
+            Ok(None) => break,
+            Err(error) => {
+                reader_error = Some(Box::new(error));
+                break;
+            }
+        };
+        macro_rules! send_or_terminate {
+            ($message:expr) => {
+                if let Err(error) = tx.send($message) {
+                    reader_error = Some(Box::new(std::io::Error::new(
+                        std::io::ErrorKind::BrokenPipe,
+                        format!("response channel closed: {error}"),
+                    )));
+                    break;
+                }
+            };
+        }
         match message {
             HarnessOutputMessage::Configure(msg) => {
                 match tau_extension::parse_config::<ExtConfig>(&msg.config) {
@@ -655,7 +675,9 @@ where
                         if let Err(message) =
                             apply_working_directory(&config, &cfg, runtime_started)
                         {
-                            tx.send(HarnessInputMessage::ConfigError(ConfigError { message }))?;
+                            send_or_terminate!(HarnessInputMessage::ConfigError(ConfigError {
+                                message
+                            }));
                             continue;
                         }
                         let dir_lock_was_enabled = config.dir_lock.enable;
@@ -666,7 +688,7 @@ where
                             let _ = lock_manager.disable();
                         }
                         if dir_lock_changed {
-                            tx.send(HarnessInputMessage::emit(Event::ToolRegister(
+                            send_or_terminate!(HarnessInputMessage::emit(Event::ToolRegister(
                                 tau_proto::ToolRegister {
                                     tool: dir_lock_tool_spec(config.dir_lock.enable),
                                     tool_group: Some(tau_proto::ToolGroup {
@@ -675,11 +697,13 @@ where
                                     }),
                                     prompt_fragment: None,
                                 },
-                            )))?;
+                            )));
                         }
                     }
                     Err(message) => {
-                        tx.send(HarnessInputMessage::ConfigError(ConfigError { message }))?;
+                        send_or_terminate!(HarnessInputMessage::ConfigError(ConfigError {
+                            message
+                        }));
                     }
                 }
             }
@@ -889,7 +913,7 @@ where
                         }
                     }
                     Event::SessionShutdown(_) => {
-                        lock_manager.release_all_manual();
+                        lock_manager.shutdown();
                         scheduler.cancel_all_queued();
                         start_agent_owners.clear();
                     }
@@ -903,10 +927,10 @@ where
                         }
                     }
                     Event::ActionInvoke(invoke) => {
-                        tx.send(HarnessInputMessage::emit(dispatch_action_invoke(
+                        send_or_terminate!(HarnessInputMessage::emit(dispatch_action_invoke(
                             invoke,
                             &lock_manager,
-                        )))?;
+                        )));
                     }
                     Event::ToolCancelRequest(request) => {
                         if scheduler.cancel_queued_call(&request.target_call_id) {
@@ -945,6 +969,10 @@ where
         }
     }
 
+    // EOF/disconnect may arrive without a committed SessionShutdown event. Wake
+    // lock waiters before dropping the scheduler, because scheduler drop joins
+    // workers and active worker jobs may be blocked inside DirLockManager.
+    lock_manager.shutdown();
     scheduler.cancel_all_queued();
     drop(scheduler);
     // Drop the sender so the writer thread exits.
@@ -953,6 +981,9 @@ where
         .join()
         .map_err(|_| "writer thread panicked")?
         .map_err(|e| -> Box<dyn Error> { e })?;
+    if let Some(error) = reader_error {
+        return Err(error);
+    }
     Ok(())
 }
 

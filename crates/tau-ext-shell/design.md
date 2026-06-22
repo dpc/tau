@@ -30,6 +30,14 @@ through `DirLockManager` so stale or missing manual coverage cannot run as
 read-write.
 
 
+## Scheduler coverage
+
+Scheduler lifecycle tests should cover bounded admission, queued-call
+cancellation, and drop semantics. Dropping the scheduler is the shutdown boundary:
+queued work is discarded, worker threads are woken, and already-running work is
+joined before the protocol writer is expected to drain and exit.
+
+
 ## Discovery coverage
 
 AGENTS.md discovery tests should cover ancestor ordering, `.agents.local`

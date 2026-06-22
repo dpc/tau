@@ -42,6 +42,22 @@ covering manual-lock ownership at the moment the automatic lock is granted;
 otherwise it falls back to read-only execution instead of running under stale
 coverage.
 
+## Scheduler and shutdown ordering
+
+Tool invocations run through a fixed native-thread `WorkScheduler` with bounded
+priority queues. The scheduler owns worker threads and sender clones used to
+publish protocol messages. Dropping the scheduler is therefore a deterministic
+shutdown boundary: queued work is discarded, workers are woken, and already
+running jobs are joined before drop returns.
+
+At every post-scheduler termination path, including explicit
+`session_shutdown`, `disconnect`, EOF, reader decode errors, and response-send
+errors, ext-shell must shut down `DirLockManager` before dropping
+`WorkScheduler`. This releases manual locks and cancels queued lock waiters so
+worker jobs blocked in lock acquisition can exit. Only after scheduler drop
+should the main response sender be dropped and the protocol writer thread
+joined.
+
 ## Tool tags
 
 `tau-ext-shell` tags tools with neutral capability metadata such as

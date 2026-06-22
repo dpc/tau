@@ -7,10 +7,12 @@
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Condvar, Mutex, mpsc};
+use std::thread::JoinHandle;
 
 use tau_proto::{
     AgentId, Event, HarnessInputMessage, ToolCallId, ToolCancelled, ToolName, ToolType,
 };
+use tracing::warn;
 
 /// Default aggregate cap for approximated queued argument bytes.
 pub(crate) const DEFAULT_QUEUED_BYTES_LIMIT: usize = 1024 * 1024;
@@ -96,8 +98,14 @@ impl Default for SchedulerConfig {
 }
 
 /// Fixed-worker bounded priority scheduler for ext-shell work.
+///
+/// Dropping the scheduler is a shutdown boundary: queued work is discarded,
+/// workers are woken, and already-running worker jobs are joined before `Drop`
+/// returns. Callers that own blocking resources used by worker jobs must cancel
+/// those resources before dropping the scheduler.
 pub(crate) struct WorkScheduler {
     inner: Arc<Inner>,
+    worker_handles: Vec<JoinHandle<()>>,
 }
 
 struct Inner {
@@ -128,13 +136,14 @@ enum WorkerKind {
 impl WorkScheduler {
     /// Create a scheduler and spawn its bounded worker set.
     pub(crate) fn new(tx: mpsc::Sender<HarnessInputMessage>, config: SchedulerConfig) -> Self {
-        let scheduler = Self {
+        let mut scheduler = Self {
             inner: Arc::new(Inner {
                 state: Mutex::new(State::default()),
                 changed: Condvar::new(),
                 tx,
                 config,
             }),
+            worker_handles: Vec::new(),
         };
         scheduler.spawn_workers();
         scheduler
@@ -232,7 +241,7 @@ impl WorkScheduler {
         removed
     }
 
-    fn spawn_workers(&self) {
+    fn spawn_workers(&mut self) {
         let config = self.inner.config.clone();
         for _ in 0..config.control_workers {
             self.spawn_worker(WorkerKind::Control);
@@ -248,18 +257,27 @@ impl WorkScheduler {
         }
     }
 
-    fn spawn_worker(&self, kind: WorkerKind) {
+    fn spawn_worker(&mut self, kind: WorkerKind) {
         let inner = Arc::clone(&self.inner);
-        std::thread::spawn(move || worker_loop(inner, kind));
+        let handle = std::thread::spawn(move || worker_loop(inner, kind));
+        self.worker_handles.push(handle);
     }
 }
 
 impl Drop for WorkScheduler {
     fn drop(&mut self) {
-        let mut state = self.inner.state.lock().expect("scheduler state poisoned");
-        state.shutdown = true;
-        state.clear_queues();
-        self.inner.changed.notify_all();
+        {
+            let mut state = self.inner.state.lock().expect("scheduler state poisoned");
+            state.shutdown = true;
+            state.clear_queues();
+            self.inner.changed.notify_all();
+        }
+        let handles = std::mem::take(&mut self.worker_handles);
+        for handle in handles {
+            if handle.join().is_err() {
+                warn!("scheduler worker panicked during shutdown");
+            }
+        }
     }
 }
 
@@ -555,5 +573,68 @@ mod tests {
             .recv_timeout(std::time::Duration::from_secs(2))
             .expect("control worker should not be starved by bulk work");
         release_bulk_tx.send(()).expect("release bulk");
+    }
+
+    /// Ensures scheduler drop is a deterministic lifecycle boundary: queued
+    /// work is discarded, shutdown wakes workers, and drop waits for already
+    /// running work before returning.
+    #[test]
+    fn drop_cancels_queued_work_and_joins_running_workers() {
+        let (tx, _rx) = mpsc::channel();
+        let scheduler = WorkScheduler::new(
+            tx,
+            SchedulerConfig {
+                control_workers: 0,
+                user_workers: 0,
+                cheap_workers: 0,
+                general_workers: 1,
+                ..SchedulerConfig::default()
+            },
+        );
+        let (running_tx, running_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let (drop_done_tx, drop_done_rx) = mpsc::channel();
+        let (queued_drop_tx, queued_drop_rx) = mpsc::channel();
+        struct NotifyOnDrop(mpsc::Sender<()>);
+        impl Drop for NotifyOnDrop {
+            fn drop(&mut self) {
+                let _ = self.0.send(());
+            }
+        }
+
+        scheduler
+            .enqueue(WorkPriority::Bulk, test_meta("call-running"), move || {
+                running_tx.send(()).expect("running marker");
+                release_rx.recv().expect("release running work");
+            })
+            .expect("running work queued");
+        running_rx.recv().expect("worker started");
+        let queued_drop = NotifyOnDrop(queued_drop_tx);
+        scheduler
+            .enqueue(WorkPriority::Bulk, test_meta("call-queued"), move || {
+                let _queued_drop = queued_drop;
+                panic!("queued work must be cancelled on drop")
+            })
+            .expect("queued work accepted");
+
+        let dropper = std::thread::spawn(move || {
+            drop(scheduler);
+            drop_done_tx.send(()).expect("drop done marker");
+        });
+
+        queued_drop_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("queued work should be dropped during scheduler drop");
+        assert!(
+            drop_done_rx
+                .recv_timeout(std::time::Duration::from_millis(100))
+                .is_err(),
+            "drop must wait for the running worker to finish"
+        );
+        release_tx.send(()).expect("release running work");
+        drop_done_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("drop should finish after running worker exits");
+        dropper.join().expect("dropper thread");
     }
 }
