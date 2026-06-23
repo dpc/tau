@@ -1,18 +1,20 @@
+use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader as IoBufReader, Read as _};
 use std::net::TcpListener;
 use std::os::unix::net::UnixStream;
-use std::sync::Mutex;
+use std::sync::{Condvar, Mutex, mpsc};
 use std::thread;
+use std::time::Duration;
 
 use tau_proto::{
-    Event, HarnessInputMessage, HarnessInputReader, HarnessOutputMessage, HarnessOutputWriter,
-    ToolStarted,
+    ConfigError, Event, HarnessInputMessage, HarnessInputReader, HarnessOutputMessage,
+    HarnessOutputWriter, ToolStarted,
 };
 
 use super::*;
 
-/// Test-side wrapper around [`HarnessInputReader`] that exposes an
-/// `Event`-flavoured API (drops non-event messages).
+/// Test-side wrapper around [`HarnessInputReader`] that exposes helpers for
+/// protocol events and selected non-event control messages.
 struct EventReader<R> {
     inner: HarnessInputReader<R>,
 }
@@ -40,6 +42,16 @@ impl<R: std::io::Read> EventReader<R> {
             }
         }
     }
+
+    fn read_config_error(&mut self) -> Result<Option<ConfigError>, tau_proto::DecodeError> {
+        loop {
+            match self.inner.read_message()? {
+                None => return Ok(None),
+                Some(HarnessInputMessage::ConfigError(err)) => return Ok(Some(err)),
+                Some(_) => continue,
+            }
+        }
+    }
 }
 
 /// Test-side wrapper around [`HarnessOutputWriter`] that accepts `Event`
@@ -60,6 +72,13 @@ impl<W: std::io::Write> EventWriter<W> {
             .write_message(&HarnessOutputMessage::deliver(event.clone()))
     }
 
+    fn write_message(
+        &mut self,
+        message: &HarnessOutputMessage,
+    ) -> Result<(), tau_proto::EncodeError> {
+        self.inner.write_message(message)
+    }
+
     fn flush(&mut self) -> std::io::Result<()> {
         self.inner.flush()
     }
@@ -67,6 +86,7 @@ impl<W: std::io::Write> EventWriter<W> {
 
 struct StubSearcher {
     calls: Mutex<Vec<(String, u32)>>,
+    endpoints: Mutex<Vec<String>>,
     response: Mutex<Result<String, String>>,
 }
 
@@ -74,6 +94,7 @@ impl StubSearcher {
     fn ok(text: impl Into<String>) -> Arc<Self> {
         Arc::new(Self {
             calls: Mutex::new(Vec::new()),
+            endpoints: Mutex::new(Vec::new()),
             response: Mutex::new(Ok(text.into())),
         })
     }
@@ -81,6 +102,7 @@ impl StubSearcher {
     fn err(message: impl Into<String>) -> Arc<Self> {
         Arc::new(Self {
             calls: Mutex::new(Vec::new()),
+            endpoints: Mutex::new(Vec::new()),
             response: Mutex::new(Err(message.into())),
         })
     }
@@ -94,10 +116,58 @@ impl Searcher for StubSearcher {
             .push((query.to_owned(), num_results));
         self.response.lock().expect("lock").clone()
     }
+
+    fn set_endpoint(&self, endpoint: String) {
+        self.endpoints.lock().expect("lock").push(endpoint);
+    }
+}
+
+struct BlockingSearcher {
+    started: (Mutex<usize>, Condvar),
+    release: (Mutex<bool>, Condvar),
+}
+
+impl BlockingSearcher {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            started: (Mutex::new(0), Condvar::new()),
+            release: (Mutex::new(false), Condvar::new()),
+        })
+    }
+
+    fn wait_for_started(&self, expected: usize) {
+        let (lock, cond) = &self.started;
+        let mut started = lock.lock().expect("lock");
+        while *started < expected {
+            started = cond.wait(started).expect("wait");
+        }
+    }
+
+    fn release(&self) {
+        let (lock, cond) = &self.release;
+        *lock.lock().expect("lock") = true;
+        cond.notify_all();
+    }
+}
+
+impl Searcher for BlockingSearcher {
+    fn search(&self, _query: &str, _num_results: u32) -> Result<String, String> {
+        let (started_lock, started_cond) = &self.started;
+        *started_lock.lock().expect("lock") += 1;
+        started_cond.notify_all();
+
+        let (release_lock, release_cond) = &self.release;
+        let mut release = release_lock.lock().expect("lock");
+        while !*release {
+            release = release_cond.wait(release).expect("wait");
+        }
+        Ok("released".to_owned())
+    }
 }
 
 struct StubParallelClient {
     calls: Mutex<Vec<(String, serde_json::Value)>>,
+    endpoints: Mutex<Vec<String>>,
     response: Mutex<Result<String, String>>,
 }
 
@@ -105,6 +175,7 @@ impl StubParallelClient {
     fn ok(text: impl Into<String>) -> Arc<Self> {
         Arc::new(Self {
             calls: Mutex::new(Vec::new()),
+            endpoints: Mutex::new(Vec::new()),
             response: Mutex::new(Ok(text.into())),
         })
     }
@@ -118,6 +189,10 @@ impl ParallelClient for StubParallelClient {
             .push((remote_tool.to_owned(), arguments));
         self.response.lock().expect("lock").clone()
     }
+
+    fn set_endpoint(&self, endpoint: String) {
+        self.endpoints.lock().expect("lock").push(endpoint);
+    }
 }
 
 fn spawn_extension(
@@ -130,7 +205,10 @@ fn spawn_extension(
     let (ext_stream, harness_stream) = UnixStream::pair().expect("pair");
     let reader_stream = ext_stream.try_clone().expect("clone");
     thread::spawn(move || {
-        run_with_clients(reader_stream, ext_stream, searcher, parallel_client).expect("run");
+        // Behavior tests often close the harness side once the expected event is
+        // observed. Treat resulting extension I/O errors as teardown, not as a
+        // test-thread panic that can abort a later test run.
+        let _ = run_with_clients(reader_stream, ext_stream, searcher, parallel_client);
     });
     (
         EventReader::new(BufReader::new(
@@ -149,6 +227,28 @@ fn spawn_with_searcher(
     spawn_extension(searcher, StubParallelClient::ok("unused"))
 }
 
+fn exa_started(call_id: &str, query: &str) -> Event {
+    Event::ToolStarted(ToolStarted {
+        call_id: call_id.into(),
+        tool_name: tau_proto::ToolName::new(EXA_TOOL_NAME),
+        arguments: CborValue::Map(vec![(
+            CborValue::Text("query".to_owned()),
+            CborValue::Text(query.to_owned()),
+        )]),
+        agent_id: tau_proto::AgentId::parse("agent-1").expect("agent id"),
+        originator: tau_proto::PromptOriginator::User,
+    })
+}
+
+fn configure_message(config: serde_json::Value) -> HarnessOutputMessage {
+    HarnessOutputMessage::Configure(tau_proto::Configure {
+        config: tau_proto::json_to_cbor(&config),
+        instance_name: None,
+        state_dir: None,
+        secrets: BTreeMap::new(),
+    })
+}
+
 fn drain_startup(reader: &mut EventReader<BufReader<UnixStream>>) -> Vec<ToolSpec> {
     // Startup registers Exa plus Parallel search/fetch. Parallel tools are
     // disabled by default so roles can opt into them without duplicating the
@@ -164,6 +264,8 @@ fn drain_startup(reader: &mut EventReader<BufReader<UnixStream>>) -> Vec<ToolSpe
     tools
 }
 
+/// Ensures startup advertises the default Exa tool and opt-in Parallel tools
+/// without exposing duplicate enabled `web_search` entries.
 #[test]
 fn registers_exa_by_default_and_parallel_tools_disabled() {
     let searcher = StubSearcher::ok("unused");
@@ -209,6 +311,8 @@ fn registers_exa_by_default_and_parallel_tools_disabled() {
     assert!(!tools[2].enabled_by_default);
 }
 
+/// Ensures Exa invocations preserve model arguments, return text, and populate
+/// display stats for harness UI regressions.
 #[test]
 fn forwards_query_and_num_results_to_exa_searcher_and_returns_text() {
     let searcher = StubSearcher::ok("Title: hi\nURL: https://x\n");
@@ -257,6 +361,8 @@ fn forwards_query_and_num_results_to_exa_searcher_and_returns_text() {
     assert_eq!(calls[0].1, 3);
 }
 
+/// Ensures Exa searches keep the documented result-count default when callers
+/// omit the optional argument.
 #[test]
 fn defaults_num_results_when_omitted() {
     let searcher = StubSearcher::ok("ok");
@@ -285,6 +391,8 @@ fn defaults_num_results_when_omitted() {
     );
 }
 
+/// Ensures invalid Exa calls fail as tool errors instead of reaching the
+/// network implementation.
 #[test]
 fn missing_query_returns_tool_error() {
     let searcher = StubSearcher::ok("unused");
@@ -309,6 +417,7 @@ fn missing_query_returns_tool_error() {
     assert!(err.message.contains("query"), "message: {}", err.message);
 }
 
+/// Ensures upstream Exa failures are reported to the model as Tau tool errors.
 #[test]
 fn searcher_error_surfaces_as_tool_error() {
     let searcher = StubSearcher::err("upstream timed out");
@@ -336,6 +445,8 @@ fn searcher_error_surfaces_as_tool_error() {
     assert_eq!(err.message, "upstream timed out");
 }
 
+/// Ensures local Exa argument validation enforces the advertised result-count
+/// lower bound.
 #[test]
 fn rejects_num_results_out_of_range() {
     let searcher = StubSearcher::ok("unused");
@@ -369,6 +480,231 @@ fn rejects_num_results_out_of_range() {
     assert!(err.message.contains(">= 1"), "message: {}", err.message);
 }
 
+/// Ensures excess concurrent searches return a busy error instead of blocking
+/// the protocol reader behind the in-flight limit.
+#[test]
+fn returns_busy_error_when_in_flight_limit_is_full() {
+    let searcher = BlockingSearcher::new();
+    let (mut reader, mut writer) = spawn_with_searcher(searcher.clone());
+    drain_startup(&mut reader);
+
+    for idx in 0..MAX_IN_FLIGHT {
+        writer
+            .write_event(&exa_started(&format!("call-{idx}"), "blocked"))
+            .expect("write");
+    }
+    writer.flush().expect("flush");
+    searcher.wait_for_started(MAX_IN_FLIGHT);
+
+    writer
+        .write_event(&exa_started("busy-call", "blocked"))
+        .expect("write busy");
+    writer.flush().expect("flush busy");
+
+    let event = reader.read_event().expect("read").expect("event");
+    let Event::ToolError(err) = event else {
+        searcher.release();
+        panic!("expected ToolError, got {event:?}");
+    };
+    assert_eq!(err.call_id.as_str(), "busy-call");
+    assert!(err.message.contains("busy"), "message: {}", err.message);
+    searcher.release();
+    for _ in 0..MAX_IN_FLIGHT {
+        let event = reader.read_event().expect("read").expect("event");
+        assert!(matches!(event, Event::ToolResult(_)), "event: {event:?}");
+    }
+}
+
+/// Ensures `Disconnect` is handled by the protocol reader even while all
+/// in-flight search permits are occupied by blocked network calls.
+#[test]
+fn disconnect_exits_promptly_while_searches_are_in_flight() {
+    let searcher = BlockingSearcher::new();
+    let parallel = StubParallelClient::ok("unused");
+    let (ext_stream, harness_stream) = UnixStream::pair().expect("pair");
+    let reader_stream = ext_stream.try_clone().expect("clone");
+    let (done_tx, done_rx) = mpsc::channel();
+    let searcher_for_thread: Arc<dyn Searcher> = searcher.clone();
+    thread::spawn(move || {
+        let result = run_with_clients(reader_stream, ext_stream, searcher_for_thread, parallel);
+        done_tx.send(result.is_ok()).expect("send done");
+    });
+    let mut reader = EventReader::new(BufReader::new(
+        harness_stream.try_clone().expect("harness clone"),
+    ));
+    let mut writer = EventWriter::new(BufWriter::new(harness_stream));
+    drain_startup(&mut reader);
+
+    for idx in 0..MAX_IN_FLIGHT {
+        writer
+            .write_event(&exa_started(&format!("call-{idx}"), "blocked"))
+            .expect("write");
+    }
+    writer.flush().expect("flush");
+    searcher.wait_for_started(MAX_IN_FLIGHT);
+
+    writer
+        .write_message(&HarnessOutputMessage::Disconnect(tau_proto::Disconnect {
+            reason: Some("test shutdown".to_owned()),
+        }))
+        .expect("disconnect");
+    writer.flush().expect("flush disconnect");
+
+    let exited = done_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("extension should exit promptly after disconnect");
+    assert!(exited);
+    searcher.release();
+}
+
+/// Ensures endpoint config validation catches conflicting aliases before a
+/// later tool call and reports the problem as a configuration error.
+#[test]
+fn conflicting_endpoint_aliases_return_config_error() {
+    let searcher = StubSearcher::ok("unused");
+    let (mut reader, mut writer) = spawn_with_searcher(searcher);
+    drain_startup(&mut reader);
+
+    writer
+        .write_message(&configure_message(serde_json::json!({
+            "endpoint": "https://exa.example/mcp",
+            "exa_endpoint": "https://other.example/mcp",
+        })))
+        .expect("write configure");
+    writer.flush().expect("flush");
+
+    let err = reader
+        .read_config_error()
+        .expect("read")
+        .expect("config error");
+    assert!(err.message.contains("cannot both be set"), "err: {err:?}");
+}
+
+/// Ensures equal legacy and explicit Exa endpoint aliases are accepted and
+/// applied once, preserving backwards-compatible configuration.
+#[test]
+fn equal_endpoint_aliases_are_accepted_and_applied() {
+    let searcher = StubSearcher::ok("unused");
+    let parallel = StubParallelClient::ok("unused");
+    let (mut reader, mut writer) = spawn_extension(searcher.clone(), parallel);
+    drain_startup(&mut reader);
+
+    writer
+        .write_message(&configure_message(serde_json::json!({
+            "endpoint": "https://exa.example/mcp",
+            "exa_endpoint": "https://exa.example/mcp",
+        })))
+        .expect("write configure");
+    writer.flush().expect("flush");
+
+    for _ in 0..100 {
+        if !searcher.endpoints.lock().expect("lock").is_empty() {
+            break;
+        }
+        thread::sleep(Duration::from_millis(1));
+    }
+    assert_eq!(
+        searcher.endpoints.lock().expect("lock").as_slice(),
+        ["https://exa.example/mcp"]
+    );
+}
+
+/// Ensures endpoint validation rejects URL userinfo so providers cannot receive
+/// credentials through implicit HTTP Basic Authorization handling.
+#[test]
+fn endpoint_userinfo_is_rejected_during_configure() {
+    let searcher = StubSearcher::ok("unused");
+    let (mut reader, mut writer) = spawn_with_searcher(searcher);
+    drain_startup(&mut reader);
+
+    writer
+        .write_message(&configure_message(serde_json::json!({
+            "parallel_endpoint": "https://user:secret@example.com/mcp",
+        })))
+        .expect("write configure");
+    writer.flush().expect("flush");
+
+    let err = reader
+        .read_config_error()
+        .expect("read")
+        .expect("config error");
+    assert!(err.message.contains("userinfo"), "err: {err:?}");
+}
+
+/// Ensures plaintext HTTP endpoints are rejected unless they target loopback,
+/// keeping production provider traffic on HTTPS while preserving local tests.
+#[test]
+fn non_loopback_http_endpoint_is_rejected_during_configure() {
+    let searcher = StubSearcher::ok("unused");
+    let (mut reader, mut writer) = spawn_with_searcher(searcher);
+    drain_startup(&mut reader);
+
+    writer
+        .write_message(&configure_message(serde_json::json!({
+            "exa_endpoint": "http://example.com/mcp",
+        })))
+        .expect("write configure");
+    writer.flush().expect("flush");
+
+    let err = reader
+        .read_config_error()
+        .expect("read")
+        .expect("config error");
+    assert!(err.message.contains("https"), "err: {err:?}");
+}
+
+/// Ensures loopback HTTP endpoints are accepted for deterministic local tests
+/// while non-loopback plaintext provider endpoints stay rejected.
+#[test]
+fn loopback_http_endpoint_is_accepted_and_applied() {
+    let searcher = StubSearcher::ok("unused");
+    let parallel = StubParallelClient::ok("unused");
+    let (mut reader, mut writer) = spawn_extension(searcher.clone(), parallel);
+    drain_startup(&mut reader);
+
+    writer
+        .write_message(&configure_message(serde_json::json!({
+            "exa_endpoint": "http://127.0.0.1:8080/mcp",
+        })))
+        .expect("write configure");
+    writer.flush().expect("flush");
+
+    for _ in 0..100 {
+        if !searcher.endpoints.lock().expect("lock").is_empty() {
+            break;
+        }
+        thread::sleep(Duration::from_millis(1));
+    }
+    assert_eq!(
+        searcher.endpoints.lock().expect("lock").as_slice(),
+        ["http://127.0.0.1:8080/mcp"]
+    );
+}
+
+/// Ensures malformed URLs are reported during configuration instead of being
+/// deferred to the next tool invocation.
+#[test]
+fn malformed_endpoint_is_rejected_during_configure() {
+    let searcher = StubSearcher::ok("unused");
+    let (mut reader, mut writer) = spawn_with_searcher(searcher);
+    drain_startup(&mut reader);
+
+    writer
+        .write_message(&configure_message(serde_json::json!({
+            "exa_endpoint": "https://example.com:bad/mcp",
+        })))
+        .expect("write configure");
+    writer.flush().expect("flush");
+
+    let err = reader
+        .read_config_error()
+        .expect("read")
+        .expect("config error");
+    assert!(err.message.contains("valid URL"), "err: {err:?}");
+}
+
+/// Ensures Parallel search forwards provider-specific passthrough arguments to
+/// the remote MCP tool.
 #[test]
 fn forwards_parallel_search_to_web_search_and_returns_text() {
     let searcher = StubSearcher::ok("unused");
@@ -411,6 +747,8 @@ fn forwards_parallel_search_to_web_search_and_returns_text() {
     assert_eq!(calls[0].1["max_results"], 3);
 }
 
+/// Ensures Parallel fetch dispatches to the remote `web_fetch` MCP tool with
+/// its URL argument.
 #[test]
 fn forwards_parallel_fetch_to_web_fetch() {
     let searcher = StubSearcher::ok("unused");
@@ -441,6 +779,8 @@ fn forwards_parallel_fetch_to_web_fetch() {
     assert_eq!(calls[0].1["url"], "https://example.com");
 }
 
+/// Ensures Parallel JSON conversion rejects CBOR maps that cannot be
+/// represented as JSON objects.
 #[test]
 fn parallel_non_string_argument_keys_are_rejected_before_forwarding() {
     let searcher = StubSearcher::ok("unused");
@@ -476,6 +816,8 @@ fn parallel_non_string_argument_keys_are_rejected_before_forwarding() {
 
 // ---- Wire decoding ----
 
+/// Ensures hosted MCP server-sent-event responses are decoded from `data:`
+/// frames.
 #[test]
 fn decodes_sse_message_frame() {
     let body = "event: message\n\
@@ -485,6 +827,8 @@ fn decodes_sse_message_frame() {
     assert_eq!(text, "hello");
 }
 
+/// Ensures multiple textual MCP content parts are preserved in order for
+/// model-visible output.
 #[test]
 fn concatenates_multiple_text_content_parts() {
     let body = r#"{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"first"},{"type":"text","text":"second"}]}}"#;
@@ -492,6 +836,7 @@ fn concatenates_multiple_text_content_parts() {
     assert_eq!(text, "first\n\nsecond");
 }
 
+/// Ensures JSON-RPC errors from MCP providers surface their provider message.
 #[test]
 fn surfaces_jsonrpc_error_message() {
     let body = r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32602,"message":"bad params"}}"#;
@@ -499,6 +844,8 @@ fn surfaces_jsonrpc_error_message() {
     assert!(err.contains("bad params"), "err: {err}");
 }
 
+/// Ensures malformed successful MCP responses without text content are
+/// rejected.
 #[test]
 fn fails_when_response_has_no_text_content() {
     let body = r#"{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"image","data":""}]}}"#;
@@ -506,6 +853,8 @@ fn fails_when_response_has_no_text_content() {
     assert!(err.contains("no text content"), "err: {err}");
 }
 
+/// Ensures SSE decoding uses the first complete MCP message frame and ignores
+/// later frames.
 #[test]
 fn first_wellformed_sse_frame_wins() {
     // Two complete `message` frames, blank-line-terminated. The documented
@@ -520,18 +869,52 @@ fn first_wellformed_sse_frame_wins() {
     assert_eq!(text, "first");
 }
 
+/// Ensures successful MCP HTTP bodies are capped so a provider cannot force
+/// unbounded memory growth before JSON/SSE decoding.
+#[test]
+fn oversized_success_body_is_rejected() {
+    let body = vec![b'x'; SUCCESS_BODY_MAX_BYTES + 1];
+    let err = read_success_body(&body[..], "exa").expect_err("should fail");
+    assert!(err.contains("exceeded"), "err: {err}");
+}
+
+/// Ensures decoded text is capped before it becomes model-visible tool output.
+#[test]
+fn oversized_decoded_text_is_rejected() {
+    let err = limit_tool_output("x".repeat(TOOL_OUTPUT_MAX_BYTES + 1), "parallel")
+        .expect_err("should fail");
+    assert!(err.contains("exceeded"), "err: {err}");
+}
+
+/// Ensures endpoint redaction strips credentials and query strings from any
+/// transport error that includes the configured endpoint verbatim.
+#[test]
+fn endpoint_redaction_removes_query_and_userinfo_secrets() {
+    let endpoint = "https://user:secret@example.com/mcp?exaApiKey=secret#frag";
+    let redacted = redact_endpoint_in_error(&format!("failed to connect to {endpoint}"), endpoint);
+    assert!(!redacted.contains("secret"), "redacted: {redacted}");
+    assert!(!redacted.contains("exaApiKey"), "redacted: {redacted}");
+    assert_eq!(redacted, "failed to connect to https://example.com/mcp");
+}
+
+/// Ensures integer-valued CBOR floats remain compatible with callers that
+/// encode numbers as floats.
 #[test]
 fn parse_num_results_accepts_integer_valued_float() {
     let v = parse_num_results(&CborValue::Float(3.0)).expect("ok");
     assert_eq!(v, 3);
 }
 
+/// Ensures fractional numeric result counts are rejected before network
+/// dispatch.
 #[test]
 fn parse_num_results_rejects_non_integer_float() {
     let err = parse_num_results(&CborValue::Float(3.5)).expect_err("should fail");
     assert!(err.contains("integer"), "err: {err}");
 }
 
+/// Ensures stale Parallel credential config is rejected because the extension
+/// intentionally sends no auth header.
 #[test]
 fn parallel_config_rejects_api_key_field() {
     // Parallel runs against the unauthenticated Search MCP endpoint; keeping
@@ -543,6 +926,8 @@ fn parallel_config_rejects_api_key_field() {
     assert!(err.to_string().contains("api_key"), "err: {err}");
 }
 
+/// Ensures the real Parallel HTTP client sends MCP headers/body but never an
+/// Authorization header.
 #[test]
 fn parallel_http_client_posts_tools_call_without_authorization_header() {
     // Regression coverage for the Parallel.ai integration: the first-party

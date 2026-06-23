@@ -7,7 +7,7 @@
 
 use std::error::Error;
 use std::io::{BufReader, BufWriter, Read, Write};
-use std::sync::{Arc, Condvar, Mutex, mpsc};
+use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
 
 use tau_proto::{
@@ -15,6 +15,7 @@ use tau_proto::{
     PeerOutputWriter, ToolError, ToolProgress, ToolResult, ToolSpec, ToolStarted, ToolUseState,
     ToolUseStats, ToolUseStatus,
 };
+use url::Url;
 /// `tracing` target for events emitted from this extension.
 pub const LOG_TARGET: &str = "websearch";
 
@@ -58,14 +59,25 @@ const MAX_NUM_RESULTS: u32 = 100;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(45);
 const MAX_IN_FLIGHT: usize = 8;
 const ERROR_BODY_MAX_BYTES: usize = 64 * 1024;
+const SUCCESS_BODY_MAX_BYTES: usize = 1024 * 1024;
+const TOOL_OUTPUT_MAX_BYTES: usize = 512 * 1024;
 
 /// Run the extension over stdio.
+///
+/// # Errors
+///
+/// Returns an error if the Tau handshake, message decoding, or message encoding
+/// fails while the extension is connected to the harness.
 pub fn run_stdio() -> Result<(), Box<dyn Error>> {
     tau_extension::init_logging_for(LOG_TARGET);
     run(std::io::stdin(), std::io::stdout())
 }
 
 /// Run the extension over the supplied reader/writer pair.
+///
+/// # Errors
+///
+/// Returns an error if protocol I/O fails before the harness disconnects.
 pub fn run<R, W>(reader: R, writer: W) -> Result<(), Box<dyn Error>>
 where
     R: Read,
@@ -80,7 +92,7 @@ where
 }
 
 /// Performs one Exa search. Abstracted so tests can stub the network call.
-pub trait Searcher: Send + Sync + 'static {
+trait Searcher: Send + Sync + 'static {
     /// Search Exa for `query`, returning model-ready text.
     fn search(&self, query: &str, num_results: u32) -> Result<String, String>;
 
@@ -90,7 +102,7 @@ pub trait Searcher: Send + Sync + 'static {
 
 /// Performs one Parallel MCP tool call. Abstracted so tests can stub the
 /// network call without contacting Parallel.ai.
-pub trait ParallelClient: Send + Sync + 'static {
+trait ParallelClient: Send + Sync + 'static {
     /// Call one remote Parallel MCP tool with JSON arguments.
     fn call(&self, remote_tool: &str, arguments: serde_json::Value) -> Result<String, String>;
 
@@ -109,6 +121,29 @@ struct ExtConfig {
     /// Parallel endpoint override. No API-key/auth configuration is supported;
     /// Tau uses Parallel's default unauthenticated endpoint.
     parallel_endpoint: Option<String>,
+}
+
+impl ExtConfig {
+    fn validate(self) -> Result<Self, String> {
+        if self.endpoint.is_some()
+            && self.exa_endpoint.is_some()
+            && self.endpoint != self.exa_endpoint
+        {
+            return Err(
+                "`endpoint` and `exa_endpoint` cannot both be set to different values".to_owned(),
+            );
+        }
+        for (name, endpoint) in [
+            ("endpoint", self.endpoint.as_deref()),
+            ("exa_endpoint", self.exa_endpoint.as_deref()),
+            ("parallel_endpoint", self.parallel_endpoint.as_deref()),
+        ] {
+            if let Some(endpoint) = endpoint {
+                validate_endpoint(name, endpoint)?;
+            }
+        }
+        Ok(self)
+    }
 }
 
 fn run_with_clients<R, W>(
@@ -150,14 +185,16 @@ where
     while let Some(message) = reader.read_message()? {
         match message {
             HarnessOutputMessage::Configure(msg) => {
-                match tau_extension::parse_config::<ExtConfig>(&msg.config) {
+                match tau_extension::parse_config::<ExtConfig>(&msg.config)
+                    .and_then(ExtConfig::validate)
+                {
                     Ok(cfg) => {
                         if let Some(endpoint) = cfg.endpoint.or(cfg.exa_endpoint) {
-                            tracing::info!(target: LOG_TARGET, endpoint = %endpoint, "applying Exa endpoint override");
+                            tracing::info!(target: LOG_TARGET, provider = "exa", "applying endpoint override");
                             searcher.set_endpoint(endpoint);
                         }
                         if let Some(endpoint) = cfg.parallel_endpoint {
-                            tracing::info!(target: LOG_TARGET, endpoint = %endpoint, "applying Parallel endpoint override");
+                            tracing::info!(target: LOG_TARGET, provider = "parallel", "applying endpoint override");
                             parallel_client.set_endpoint(endpoint);
                         }
                     }
@@ -177,22 +214,28 @@ where
                     if !is_websearch_tool(invoke.tool_name.as_str()) {
                         continue;
                     }
-                    let permit = sem.acquire();
                     let tx = tx.clone();
                     let searcher = Arc::clone(&searcher);
                     let parallel_client = Arc::clone(&parallel_client);
-                    std::thread::spawn(move || {
-                        let _permit = permit;
-                        dispatch_tool_invoke(
+                    if let Some(permit) = sem.try_acquire() {
+                        std::thread::spawn(move || {
+                            let _permit = permit;
+                            dispatch_tool_invoke(
+                                invoke,
+                                searcher.as_ref(),
+                                parallel_client.as_ref(),
+                                &tx,
+                            );
+                        });
+                    } else {
+                        let _ = tx.send(HarnessInputMessage::emit(tool_error(
                             invoke,
-                            searcher.as_ref(),
-                            parallel_client.as_ref(),
-                            &tx,
-                        );
-                    });
+                            "websearch is busy; too many searches are already running".to_owned(),
+                        )));
+                    }
                 }
             }
-            HarnessOutputMessage::Disconnect(_) => break,
+            HarnessOutputMessage::Disconnect(_) => return Ok(()),
             _ => {}
         }
     }
@@ -203,6 +246,36 @@ where
         .map_err(|e| -> Box<dyn Error> { format!("writer thread panicked: {e:?}").into() })?
         .map_err(|e| -> Box<dyn Error> { e })?;
     Ok(())
+}
+
+fn validate_endpoint(name: &str, endpoint: &str) -> Result<(), String> {
+    let url = Url::parse(endpoint).map_err(|e| format!("`{name}` must be a valid URL: {e}"))?;
+    if url.cannot_be_a_base() || url.host_str().is_none() {
+        return Err(format!("`{name}` must include a valid host"));
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err(format!("`{name}` must not include userinfo credentials"));
+    }
+    match url.scheme() {
+        "https" => Ok(()),
+        "http" if is_loopback_url(&url) => Ok(()),
+        "http" => Err(format!(
+            "`{name}` must use https unless it points at loopback for tests"
+        )),
+        _ => Err(format!("`{name}` must use http:// or https://")),
+    }
+}
+
+fn is_loopback_url(url: &Url) -> bool {
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    if host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    host.parse::<std::net::IpAddr>()
+        .map(|addr| addr.is_loopback())
+        .unwrap_or(false)
 }
 
 fn is_websearch_tool(name: &str) -> bool {
@@ -268,7 +341,9 @@ fn parallel_search_tool_spec() -> ToolSpec {
                     "description": "Search query or natural-language description of the information to find."
                 }
             },
-            "required": ["query"]
+            "required": ["query"],
+            "additionalProperties": true,
+            "description": "Provider-specific Parallel MCP arguments may be passed through in addition to query."
         })),
         format: None,
         tags: Vec::new(),
@@ -295,7 +370,9 @@ fn parallel_fetch_tool_spec() -> ToolSpec {
                     "description": "URL to fetch."
                 }
             },
-            "required": ["url"]
+            "required": ["url"],
+            "additionalProperties": true,
+            "description": "Provider-specific Parallel MCP arguments may be passed through in addition to url."
         })),
         format: None,
         tags: Vec::new(),
@@ -610,7 +687,7 @@ impl Searcher for HttpExaSearcher {
             },
         });
         let payload = post_mcp(&self.agent, &endpoint, body, "exa")?;
-        decode_mcp_text_result(&payload, "exa")
+        limit_tool_output(decode_mcp_text_result(&payload, "exa")?, "exa")
     }
 
     fn set_endpoint(&self, endpoint: String) {
@@ -664,7 +741,7 @@ impl ParallelClient for HttpParallelClient {
             },
         });
         let payload = post_mcp(&self.agent, &endpoint, body, "parallel")?;
-        decode_mcp_text_result(&payload, "parallel")
+        limit_tool_output(decode_mcp_text_result(&payload, "parallel")?, "parallel")
     }
 
     fn set_endpoint(&self, endpoint: String) {
@@ -684,17 +761,59 @@ fn post_mcp(
         .header("Accept", "application/json, text/event-stream")
         .header("MCP-Protocol-Version", MCP_PROTOCOL_VERSION)
         .send(body.to_string())
-        .map_err(|e| format!("{provider} MCP transport error: {e}"))?;
+        .map_err(|e| {
+            format!(
+                "{provider} MCP transport error: {}",
+                redact_endpoint_in_error(&e.to_string(), endpoint)
+            )
+        })?;
     let mut response = response;
     if !response.status().is_success() {
         let code = response.status().as_u16();
         let body = read_capped(response.body_mut().as_reader());
         return Err(format!("{provider} MCP returned HTTP {code}: {body}"));
     }
-    response
-        .body_mut()
-        .read_to_string()
-        .map_err(|e| format!("reading {provider} MCP response: {e}"))
+    read_success_body(response.body_mut().as_reader(), provider)
+}
+
+fn read_success_body(reader: impl std::io::Read, provider: &str) -> Result<String, String> {
+    let mut buf = Vec::new();
+    reader
+        .take(SUCCESS_BODY_MAX_BYTES as u64 + 1)
+        .read_to_end(&mut buf)
+        .map_err(|e| format!("reading {provider} MCP response: {e}"))?;
+    if buf.len() > SUCCESS_BODY_MAX_BYTES {
+        return Err(format!(
+            "{provider} MCP response exceeded {SUCCESS_BODY_MAX_BYTES} bytes"
+        ));
+    }
+    String::from_utf8(buf).map_err(|e| format!("{provider} MCP response was not UTF-8: {e}"))
+}
+
+fn limit_tool_output(text: String, provider: &str) -> Result<String, String> {
+    if text.len() > TOOL_OUTPUT_MAX_BYTES {
+        Err(format!(
+            "{provider} MCP text result exceeded {TOOL_OUTPUT_MAX_BYTES} bytes"
+        ))
+    } else {
+        Ok(text)
+    }
+}
+
+fn redact_endpoint_in_error(message: &str, endpoint: &str) -> String {
+    message.replace(endpoint, &redact_endpoint(endpoint))
+}
+
+fn redact_endpoint(endpoint: &str) -> String {
+    let Some((scheme, rest)) = endpoint.split_once("://") else {
+        return "<redacted endpoint>".to_owned();
+    };
+    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let authority = &rest[..authority_end];
+    let host_port = authority.rsplit('@').next().unwrap_or(authority);
+    let path = &rest[authority_end..];
+    let path_end = path.find(['?', '#']).unwrap_or(path.len());
+    format!("{scheme}://{host_port}{}", &path[..path_end])
 }
 
 fn read_capped(reader: impl std::io::Read) -> String {
@@ -767,7 +886,6 @@ fn parse_sse_or_json(payload: &str, provider: &str) -> Result<serde_json::Value,
 
 struct Semaphore {
     state: Mutex<usize>,
-    cond: Condvar,
 }
 
 struct OwnedPermit(Arc<Semaphore>);
@@ -776,17 +894,16 @@ impl Semaphore {
     fn new(permits: usize) -> Self {
         Self {
             state: Mutex::new(permits),
-            cond: Condvar::new(),
         }
     }
 
-    fn acquire(self: &Arc<Self>) -> OwnedPermit {
+    fn try_acquire(self: &Arc<Self>) -> Option<OwnedPermit> {
         let mut count = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        while *count == 0 {
-            count = self.cond.wait(count).unwrap_or_else(|e| e.into_inner());
+        if *count == 0 {
+            return None;
         }
         *count -= 1;
-        OwnedPermit(Arc::clone(self))
+        Some(OwnedPermit(Arc::clone(self)))
     }
 }
 
@@ -794,7 +911,6 @@ impl Drop for OwnedPermit {
     fn drop(&mut self) {
         let mut count = self.0.state.lock().unwrap_or_else(|e| e.into_inner());
         *count += 1;
-        self.0.cond.notify_one();
     }
 }
 

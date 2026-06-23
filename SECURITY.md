@@ -77,6 +77,20 @@ opaque ids returned by list tools; do not document or expose internal encoding
 details in prompts, tool descriptions, docs, or self-knowledge intended for the
 model.
 
+## Websearch extension
+
+`std-websearch` / `tau-ext-websearch` is enabled by default and sends model tool
+arguments to external hosted MCP web providers. Treat provider responses as
+untrusted web content that can contain prompt injection, misleading text, or large
+payloads. The extension must keep successful response bodies, decoded
+model-visible output, and concurrency bounded.
+
+Endpoint override URLs are configuration but may still contain secrets in
+userinfo, query strings, or fragments. The extension must not log raw endpoint
+override URLs, must reject URL userinfo credentials and unsupported auth forms,
+and must not send Parallel Authorization headers. Production provider endpoints
+must use HTTPS; plaintext HTTP is only acceptable for loopback test endpoints.
+
 ## Core shell extension
 
 `std-shell` / `tau-ext-shell` is Tau's local filesystem and subprocess boundary. Its tools can read local files, mutate files, and execute host commands with the user's permissions. Treat shell commands, user `!` commands, and model-requested filesystem writes as local code/data access rather than sandboxed operations.

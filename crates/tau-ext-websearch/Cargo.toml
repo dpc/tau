@@ -21,3 +21,4 @@ tau-extension.workspace = true
 tau-proto.workspace = true
 tracing.workspace = true
 ureq.workspace = true
+url.workspace = true
