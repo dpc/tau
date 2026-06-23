@@ -10,8 +10,10 @@
 //!   request tools and no backgrounded main-agent tools remain active)
 //! - idle deadlines after a final response
 //!
-//! The idle timer resets on every user-originated `agent.prompt_submitted` /
-//! `provider.prompt_submitted`.
+//! The per-agent idle timer resets on every user-originated
+//! `agent.prompt_submitted` / `provider.prompt_submitted`; pending idle hooks
+//! that are still waiting for their idle deadline are extended by
+//! `ui.prompt_draft` typing pings.
 //!
 //! The downstream tooling (typically a terminal multiplexer status
 //! line or a `user-notification.sh` consumer wired to a sound file)
@@ -503,9 +505,15 @@ where
     W: Write,
 {
     let mut writer = PeerOutputWriter::new(BufWriter::new(writer));
-    // Live config. `idle_duration` is the default delay supplied by tests or
-    // production startup; explicit per-hook `delay_seconds` values override it.
-    let mut config = ExtConfig::default();
+    write_handshake(&mut writer)?;
+
+    let rx = spawn_reader_thread(reader);
+    NotificationLoop::new(writer, rx).run(idle_duration, summary_timeout)
+}
+
+fn write_handshake<W: Write>(
+    writer: &mut PeerOutputWriter<BufWriter<W>>,
+) -> Result<(), Box<dyn Error>> {
     // Subscribe-time catch-up delivers prior prompts/results as replay-marked
     // frames; the receive loop skips those so sounds and idle nudges only
     // fire for live activity.
@@ -520,21 +528,25 @@ where
             tau_proto::EventName::SESSION_AGENT_LOADED,
             tau_proto::EventName::SESSION_AGENT_UNLOADED,
             tau_proto::EventName::AGENT_START_ACCEPTED,
-            // Trailing-edge debounced typing pings from the UI:
-            // bumps the idle deadline so the desktop notification
-            // doesn't fire while the user is mid-sentence.
+            // Trailing-edge debounced typing pings from the UI bump the idle
+            // deadline so the desktop notification doesn't fire mid-sentence.
             tau_proto::EventName::UI_PROMPT_DRAFT,
             tau_proto::EventName::TOOL_RESULT,
             tau_proto::EventName::TOOL_BACKGROUND_RESULT,
             tau_proto::EventName::TOOL_BACKGROUND_ERROR,
-            // Side-query results come back point-to-point from the
-            // harness, but we subscribe defensively so the broadcast
-            // form (if it ever appears) also reaches us.
+            // Side-query results come back point-to-point from the harness, but
+            // subscribe defensively in case the broadcast form ever appears.
             tau_proto::EventName::AGENT_START_RESULT,
         ])
         .ready_message("std-notifications ready")
-        .run(&mut writer)?;
+        .run(writer)?;
+    Ok(())
+}
 
+fn spawn_reader_thread<R>(reader: R) -> mpsc::Receiver<InMsg>
+where
+    R: Read + Send + 'static,
+{
     // Spawn a reader thread so the main loop can wait on either an incoming
     // message or an idle deadline via `recv_timeout`. The reader exits
     // naturally when stdin closes, then the channel disconnects and the main
@@ -554,55 +566,164 @@ where
                     break;
                 }
                 Err(_) => {
-                    // Treat decode errors as end-of-stream. The
-                    // socket layer above will surface the failure
-                    // through its own channels.
+                    // Treat decode errors as end-of-stream. The socket layer
+                    // above will surface the failure through its own channels.
                     let _ = tx.send(InMsg::EndOfStream);
                     break;
                 }
             }
         }
     });
+    rx
+}
 
-    let mut idle: Vec<PendingIdleHook> = Vec::new();
-    let mut idle_all: Vec<PendingIdleHook> = Vec::new();
-    let mut session_idle = SessionIdleTracker::default();
-    let mut all_idle_context: HashMap<tau_proto::AgentId, AllIdleTurnContext> = HashMap::new();
-    // Pending idle-summary query id -> summary side-agent id. These agents are
-    // owned by this extension, so they are excluded from all-idle membership and
-    // busy-state tracking until the matching `StartAgentResult` lands.
-    let mut ignored_summary_agents: HashMap<String, tau_proto::AgentId> = HashMap::new();
-    let mut agent_display_names: HashMap<tau_proto::AgentId, String> = HashMap::new();
-    let mut input_closed = false;
-    let mut waiting_for_final_response = false;
-    let mut turn_end_emitted = false;
-    let mut final_response_pending_background_tools = false;
-    let mut pending_final_response_prompt: Option<tau_proto::AgentPromptId> = None;
-    let mut pending_final_response_agent: Option<tau_proto::AgentId> = None;
-    let mut pending_final_response_text = String::new();
-    let mut last_user_prompt = String::new();
-    let mut completed_response_prompts: HashSet<tau_proto::AgentPromptId> = HashSet::new();
-    let mut active_background_tools: HashSet<tau_proto::ToolCallId> = HashSet::new();
-    let mut next_query_id: u64 = 0;
-    loop {
-        let next_deadline = next_idle_deadline(&idle)
-            .into_iter()
-            .chain(next_idle_deadline(&idle_all))
-            .min();
-        let recv_result = match (next_deadline, input_closed) {
-            (Some(deadline), false) => {
-                let wait = deadline.saturating_duration_since(Instant::now());
-                rx.recv_timeout(wait)
+/// Mutable state for the std-notifications protocol loop.
+///
+/// The loop keeps per-user-turn state (`idle`, `waiting_for_final_response`,
+/// deferred background-tool fields) separate from all-agents-idle state
+/// (`idle_all`, `session_idle`, `all_idle_context`). All-idle tracking is
+/// updated before sub-agent filtering because harness-owned `agent.state` and
+/// session membership are the source of truth, while user-visible prompt/end
+/// hooks must ignore extension side conversations.
+struct NotificationLoop<W: Write> {
+    /// Protocol writer used for config errors, emitted events, and side-agent
+    /// requests.
+    writer: PeerOutputWriter<BufWriter<W>>,
+    /// Reader-thread channel that supplies decoded harness messages and EOF
+    /// markers.
+    rx: mpsc::Receiver<InMsg>,
+    /// Last valid live extension configuration accepted from the harness.
+    /// Reloading this clears pending idle hooks so stale hook indices cannot
+    /// render against a new configuration.
+    config: ExtConfig,
+    /// Pending per-agent idle hooks armed after a completed user turn.
+    idle: Vec<PendingIdleHook>,
+    /// Pending all-agents-idle hooks keyed by tracked session membership.
+    idle_all: Vec<PendingIdleHook>,
+    /// Session membership and busy/idle state used to detect all-idle
+    /// transitions.
+    session_idle: SessionIdleTracker,
+    /// Last visible turn text by agent for future all-idle template rendering.
+    all_idle_context: HashMap<tau_proto::AgentId, AllIdleTurnContext>,
+    /// Summary side agents by pending idle-summary query id. Entries are added
+    /// on matching `agent.start_accepted` and removed when the matching
+    /// `agent.start_result` arrives, so this extension's own side agents do not
+    /// perturb all-idle membership or busy tracking while producing a summary.
+    ignored_summary_agents: HashMap<String, tau_proto::AgentId>,
+    /// Durable agent display names used by hook template contexts.
+    agent_display_names: HashMap<tau_proto::AgentId, String>,
+    /// Whether inbound input is closed while idle notifications may still be
+    /// pending.
+    input_closed: bool,
+    /// Whether a visible user prompt has started and is awaiting a final
+    /// response.
+    waiting_for_final_response: bool,
+    /// Whether the current visible turn has already emitted its completion
+    /// hook.
+    turn_end_emitted: bool,
+    /// Whether the final response is deferred until all active user-originated
+    /// background tools finish; when set, the three pending-final-response
+    /// fields below describe the completion hook that may still be emitted.
+    final_response_pending_background_tools: bool,
+    /// Prompt id for a final response deferred behind background tool
+    /// completion.
+    pending_final_response_prompt: Option<tau_proto::AgentPromptId>,
+    /// Agent id for a final response deferred behind background tool
+    /// completion.
+    pending_final_response_agent: Option<tau_proto::AgentId>,
+    /// Assistant text for a final response deferred behind background tool
+    /// completion.
+    pending_final_response_text: String,
+    /// Last visible user prompt text supplied to turn-aware hook templates.
+    last_user_prompt: String,
+    /// Provider response prompt ids already consumed for end-of-turn
+    /// notification logic.
+    completed_response_prompts: HashSet<tau_proto::AgentPromptId>,
+    /// User-originated background tool calls still blocking completion
+    /// notification.
+    active_background_tools: HashSet<tau_proto::ToolCallId>,
+    /// Monotonic suffix for idle-summary side-agent query ids.
+    next_query_id: u64,
+}
+
+/// Action requested by a protocol-loop message handler.
+enum LoopControl {
+    /// Continue processing subsequent harness input or idle deadlines.
+    Continue,
+    /// Exit the protocol loop without waiting for pending idle deadlines.
+    Break,
+}
+
+impl<W: Write> NotificationLoop<W> {
+    fn new(writer: PeerOutputWriter<BufWriter<W>>, rx: mpsc::Receiver<InMsg>) -> Self {
+        Self {
+            writer,
+            rx,
+            config: ExtConfig::default(),
+            idle: Vec::new(),
+            idle_all: Vec::new(),
+            session_idle: SessionIdleTracker::default(),
+            all_idle_context: HashMap::new(),
+            ignored_summary_agents: HashMap::new(),
+            agent_display_names: HashMap::new(),
+            input_closed: false,
+            waiting_for_final_response: false,
+            turn_end_emitted: false,
+            final_response_pending_background_tools: false,
+            pending_final_response_prompt: None,
+            pending_final_response_agent: None,
+            pending_final_response_text: String::new(),
+            last_user_prompt: String::new(),
+            completed_response_prompts: HashSet::new(),
+            active_background_tools: HashSet::new(),
+            next_query_id: 0,
+        }
+    }
+
+    fn run(
+        mut self,
+        idle_duration: Duration,
+        summary_timeout: Duration,
+    ) -> Result<(), Box<dyn Error>> {
+        loop {
+            match self.recv_next_idle_or_message() {
+                Ok(InMsg::Message(message)) => {
+                    if let LoopControl::Break = self.handle_message(*message, idle_duration)? {
+                        break;
+                    }
+                }
+                Ok(InMsg::EndOfStream) | Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    self.input_closed = true;
+                    if self.no_pending_idle_hooks() {
+                        break;
+                    }
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    self.process_timeout(summary_timeout)?;
+                    if self.input_closed && self.no_pending_idle_hooks() {
+                        break;
+                    }
+                }
             }
-            (None, false) => match rx.recv() {
-                Ok(msg) => Ok(msg),
-                Err(_) => Err(mpsc::RecvTimeoutError::Disconnected),
-            },
-            // Input closed but a notification is still pending: the
-            // output side (the UI / terminal) is independent, so
-            // honor the deadline instead of dropping the warning.
-            // `recv_timeout` on a disconnected channel returns
-            // immediately, so explicitly sleep instead.
+        }
+        Ok(())
+    }
+
+    fn no_pending_idle_hooks(&self) -> bool {
+        self.idle.is_empty() && self.idle_all.is_empty()
+    }
+
+    fn recv_next_idle_or_message(&self) -> Result<InMsg, mpsc::RecvTimeoutError> {
+        match (self.next_deadline(), self.input_closed) {
+            (Some(deadline), false) => self
+                .rx
+                .recv_timeout(deadline.saturating_duration_since(Instant::now())),
+            (None, false) => self
+                .rx
+                .recv()
+                .map_err(|_| mpsc::RecvTimeoutError::Disconnected),
+            // Input closed but a notification is still pending: the output side
+            // is independent, so honor the deadline instead of dropping it.
             (Some(deadline), true) => {
                 let wait = deadline.saturating_duration_since(Instant::now());
                 if !wait.is_zero() {
@@ -610,479 +731,513 @@ where
                 }
                 Err(mpsc::RecvTimeoutError::Timeout)
             }
-            (None, true) => break,
-        };
+            (None, true) => Err(mpsc::RecvTimeoutError::Disconnected),
+        }
+    }
 
-        match recv_result {
-            Ok(InMsg::Message(message)) => {
-                // Handle control messages first, then continue with delivered events.
-                let inner = match *message {
-                    HarnessOutputMessage::Configure(msg) => {
-                        match tau_extension::parse_config::<ExtConfig>(&msg.config) {
-                            Ok(cfg) => {
-                                if let Err(message) = cfg.validate() {
-                                    tracing::warn!(target: LOG_TARGET, error = %message, "rejecting config");
-                                    writer.write_message(&HarnessInputMessage::ConfigError(
-                                        ConfigError { message },
-                                    ))?;
-                                    writer.flush()?;
-                                    continue;
-                                }
-                                idle.clear();
-                                idle_all.clear();
-                                tracing::info!(
-                                    target: LOG_TARGET,
-                                    agent_start = cfg.agent_start.len(),
-                                    agent_end = cfg.agent_end.len(),
-                                    agent_idle = cfg.agent_idle.len(),
-                                    agent_idle_all = cfg.agent_idle_all.len(),
-                                    "applied config",
-                                );
-                                config = cfg;
-                            }
-                            Err(message) => {
-                                tracing::warn!(
-                                    target: LOG_TARGET,
-                                    error = %message,
-                                    "rejecting config",
-                                );
-                                writer.write_message(&HarnessInputMessage::ConfigError(
-                                    ConfigError {
-                                        message: message.clone(),
-                                    },
-                                ))?;
-                                writer.flush()?;
-                            }
-                        }
-                        continue;
-                    }
-                    HarnessOutputMessage::Disconnect(_) => {
-                        tracing::info!(target: LOG_TARGET, "disconnect received, exiting");
-                        break;
-                    }
-                    HarnessOutputMessage::Deliver(delivery) => {
-                        // Subscribe-time catch-up re-sends durable facts
-                        // (prompts, responses, tool results) as replay-marked
-                        // frames. Reacting to those would replay sounds and
-                        // idle nudges for turns that already happened, so
-                        // notifications react to live deliveries only.
-                        if delivery.is_replay() {
-                            tracing::trace!(
-                                target: LOG_TARGET,
-                                name = %delivery.event().name(),
-                                "skipping replayed event",
-                            );
-                            continue;
-                        }
-                        delivery.into_event()
-                    }
-                    _ => continue,
-                };
-                tracing::trace!(target: LOG_TARGET, name = %inner.name(), "event received");
-                match &inner {
-                    Event::SessionAgentLoaded(loaded) => {
-                        if !ignored_summary_agents
-                            .values()
-                            .any(|agent_id| agent_id == &loaded.agent_id)
-                        {
-                            session_idle
-                                .load_agent(loaded.session_id.clone(), loaded.agent_id.clone());
-                        }
-                    }
-                    Event::SessionAgentUnloaded(unloaded) => {
-                        if let Some(session_id) =
-                            session_idle.unload_agent(&unloaded.session_id, &unloaded.agent_id)
-                        {
-                            let context = all_idle_context
-                                .get(&unloaded.agent_id)
-                                .cloned()
-                                .unwrap_or_default();
-                            arm_idle_all_hooks(
-                                &mut idle_all,
-                                session_id,
-                                idle_duration,
-                                &config,
-                                unloaded.agent_id.clone(),
-                                context.user_prompt,
-                                context.agent_response,
-                            );
-                        }
-                    }
-                    Event::AgentState(state) => match state.state {
-                        tau_proto::AgentRuntimeState::Running => {
-                            if !ignored_summary_agents
-                                .values()
-                                .any(|agent_id| agent_id == &state.agent_id)
-                            {
-                                session_idle.mark_busy(state.agent_id.clone());
-                                let running_sessions =
-                                    session_idle.sessions_for_agent(&state.agent_id);
-                                idle_all.retain(|pending| {
-                                    pending.session_id.as_ref().is_none_or(|session_id| {
-                                        !running_sessions.contains(session_id)
-                                    })
-                                });
-                            }
-                        }
-                        tau_proto::AgentRuntimeState::Idle => {
-                            for session_id in session_idle.mark_idle(&state.agent_id) {
-                                let context = all_idle_context
-                                    .get(&state.agent_id)
-                                    .cloned()
-                                    .unwrap_or_default();
-                                arm_idle_all_hooks(
-                                    &mut idle_all,
-                                    session_id,
-                                    idle_duration,
-                                    &config,
-                                    state.agent_id.clone(),
-                                    context.user_prompt,
-                                    context.agent_response,
-                                );
-                            }
-                        }
+    fn next_deadline(&self) -> Option<Instant> {
+        next_idle_deadline(&self.idle)
+            .into_iter()
+            .chain(next_idle_deadline(&self.idle_all))
+            .min()
+    }
+
+    fn handle_message(
+        &mut self,
+        message: HarnessOutputMessage,
+        idle_duration: Duration,
+    ) -> Result<LoopControl, Box<dyn Error>> {
+        if matches!(message, HarnessOutputMessage::Disconnect(_)) {
+            tracing::info!(target: LOG_TARGET, "disconnect received, exiting");
+            return Ok(LoopControl::Break);
+        }
+        let Some(inner) = self.handle_non_disconnect_message(message)? else {
+            return Ok(LoopControl::Continue);
+        };
+        tracing::trace!(target: LOG_TARGET, name = %inner.name(), "event received");
+        self.update_all_idle_tracking(&inner, idle_duration);
+        if is_sub_agent_event(&inner) {
+            tracing::trace!(target: LOG_TARGET, name = %inner.name(), "skipping sub-agent event");
+            return Ok(LoopControl::Continue);
+        }
+        self.handle_user_event(inner, idle_duration)?;
+        Ok(LoopControl::Continue)
+    }
+
+    fn handle_non_disconnect_message(
+        &mut self,
+        message: HarnessOutputMessage,
+    ) -> Result<Option<Event>, Box<dyn Error>> {
+        match message {
+            HarnessOutputMessage::Configure(msg) => {
+                self.apply_config(msg.config)?;
+                Ok(None)
+            }
+            HarnessOutputMessage::Deliver(delivery) => {
+                if delivery.is_replay() {
+                    tracing::trace!(target: LOG_TARGET, name = %delivery.event().name(), "skipping replayed event");
+                    Ok(None)
+                } else {
+                    Ok(Some(delivery.into_event()))
+                }
+            }
+            _ => Ok(None),
+        }
+    }
+
+    fn apply_config(&mut self, raw_config: tau_proto::CborValue) -> Result<(), Box<dyn Error>> {
+        match tau_extension::parse_config::<ExtConfig>(&raw_config) {
+            Ok(cfg) => {
+                if let Err(message) = cfg.validate() {
+                    tracing::warn!(target: LOG_TARGET, error = %message, "rejecting config");
+                    self.writer
+                        .write_message(&HarnessInputMessage::ConfigError(ConfigError {
+                            message,
+                        }))?;
+                    self.writer.flush()?;
+                    return Ok(());
+                }
+                self.idle.clear();
+                self.idle_all.clear();
+                tracing::info!(
+                    target: LOG_TARGET,
+                    agent_start = cfg.agent_start.len(),
+                    agent_end = cfg.agent_end.len(),
+                    agent_idle = cfg.agent_idle.len(),
+                    agent_idle_all = cfg.agent_idle_all.len(),
+                    "applied config",
+                );
+                self.config = cfg;
+            }
+            Err(message) => {
+                tracing::warn!(target: LOG_TARGET, error = %message, "rejecting config");
+                self.writer
+                    .write_message(&HarnessInputMessage::ConfigError(ConfigError {
+                        message: message.clone(),
+                    }))?;
+                self.writer.flush()?;
+            }
+        }
+        Ok(())
+    }
+
+    fn update_all_idle_tracking(&mut self, event: &Event, idle_duration: Duration) {
+        match event {
+            Event::SessionAgentLoaded(loaded) => self.track_loaded_agent(loaded),
+            Event::SessionAgentUnloaded(unloaded) => {
+                self.track_unloaded_agent(unloaded, idle_duration);
+            }
+            Event::AgentState(state) => self.track_agent_state(state, idle_duration),
+            Event::StartAgentAccepted(accepted)
+                if pending_idle_summary_query(&self.idle, &self.idle_all, &accepted.query_id) =>
+            {
+                self.ignored_summary_agents
+                    .insert(accepted.query_id.clone(), accepted.agent_id.clone());
+            }
+            Event::ProviderResponseFinished(finished)
+                if finished.originator.is_user() && !finished.stop_reason.requests_tool_calls() =>
+            {
+                self.all_idle_context.insert(
+                    finished.agent_id.clone(),
+                    AllIdleTurnContext {
+                        user_prompt: self.last_user_prompt.clone(),
+                        agent_response: response_text(&finished.output_items),
                     },
-                    Event::StartAgentAccepted(accepted)
-                        if pending_idle_summary_query(&idle, &idle_all, &accepted.query_id) =>
-                    {
-                        ignored_summary_agents
-                            .insert(accepted.query_id.clone(), accepted.agent_id.clone());
-                    }
-                    Event::ProviderResponseFinished(finished)
-                        if finished.originator.is_user()
-                            && !finished.stop_reason.requests_tool_calls() =>
-                    {
-                        all_idle_context.insert(
-                            finished.agent_id.clone(),
-                            AllIdleTurnContext {
-                                user_prompt: last_user_prompt.clone(),
-                                agent_response: response_text(&finished.output_items),
-                            },
-                        );
-                    }
-                    _ => {}
-                }
-                // Sub-agent (`PromptOriginator::Extension`) prompt/response events
-                // share the bus with the user's interactive turn, but the
-                // prompt/end hooks must only react to visible user work. All-idle
-                // busy state above follows harness-owned `agent.state` snapshots
-                // instead of originator-scoped prompt/response events, so this
-                // extension's own idle-summary side conversation cannot clear a
-                // pending idle notification.
-                if is_sub_agent_event(&inner) {
-                    tracing::trace!(
-                        target: LOG_TARGET,
-                        name = %inner.name(),
-                        "skipping sub-agent event",
-                    );
-                    continue;
-                }
-                match inner {
-                    Event::AgentStarted(started) => {
-                        if let Some(display_name) = started
-                            .display_name
-                            .as_deref()
-                            .map(str::trim)
-                            .filter(|name| !name.is_empty())
-                        {
-                            agent_display_names.insert(started.agent_id, display_name.to_owned());
-                        }
-                    }
-                    Event::AgentDisplayNameSet(name) => {
-                        if let Some(display_name) = (!name.display_name.trim().is_empty())
-                            .then(|| name.display_name.trim().to_owned())
-                        {
-                            agent_display_names.insert(name.agent_id, display_name);
-                        }
-                    }
-                    Event::ProviderPromptSubmitted(_submitted) => {
-                        idle.clear();
-                    }
-                    Event::AgentPromptSubmitted(prompt) => {
-                        if let Some(display_name) = prompt
-                            .display_name
-                            .as_deref()
-                            .map(str::trim)
-                            .filter(|name| !name.is_empty())
-                        {
-                            agent_display_names
-                                .insert(prompt.agent_id.clone(), display_name.to_owned());
-                        }
-                        idle.clear();
-                        if prompt.message_class.is_internal() {
-                            tracing::trace!(target: LOG_TARGET, "skipping internal prompt submit");
-                            continue;
-                        }
-                        if final_response_pending_background_tools {
-                            final_response_pending_background_tools = false;
-                            if let Some(prompt_id) = pending_final_response_prompt.take() {
-                                completed_response_prompts.insert(prompt_id);
-                            }
-                            waiting_for_final_response = false;
-                            turn_end_emitted = false;
-                        }
-                        if !waiting_for_final_response {
-                            last_user_prompt = prompt.text.clone();
-                            let agent_name =
-                                display_name_for_agent(&agent_display_names, &prompt.agent_id);
-                            let ctx = template_context(
-                                "agent_start",
-                                &prompt.agent_id,
-                                &agent_name,
-                                &last_user_prompt,
-                                "",
-                                "",
-                            );
-                            emit_hooks(&mut writer, &config.agent_start, &ctx)?;
-                            waiting_for_final_response = true;
-                            turn_end_emitted = false;
-                        }
-                    }
-                    Event::UiPromptDraft(_) => {
-                        // The user is mid-typing — push the idle
-                        // deadline back so the desktop notification
-                        // doesn't fire while they're composing. Only
-                        // applies in `WaitingIdle`; if we've already
-                        // dispatched a side-query summarization
-                        // (`WaitingSummary`), let it complete
-                        // normally so the side conversation isn't
-                        // billed for nothing. TODO: when prompt
-                        // cancellation lands, cancel the in-flight
-                        // side query here too.
-                        let now = Instant::now();
-                        for pending in idle.iter_mut().chain(idle_all.iter_mut()) {
-                            let delay = idle_hook_delay(&config, pending, idle_duration);
-                            if let IdleState::WaitingIdle { deadline } = &mut pending.state {
-                                *deadline = now + delay;
-                            }
-                        }
-                        if !idle.is_empty() || !idle_all.is_empty() {
-                            tracing::trace!(target: LOG_TARGET, "extended idle deadlines on prompt draft");
-                        }
-                    }
-                    Event::ProviderResponseFinished(finished) => {
-                        // The provider emits one `ProviderResponseFinished`
-                        // per LLM call. When `stop_reason` requests tools,
-                        // the harness will run the tools and feed the
-                        // results back as a new prompt — the *turn*
-                        // isn't actually done yet. Only fire the
-                        // end-of-turn sound + idle timer when the
-                        // agent returned a final answer with no
-                        // pending foreground or background tool work.
-                        // (Sub-agent finishes are already filtered out
-                        // at the top of the dispatch loop.)
-                        if finished.stop_reason.requests_tool_calls() {
-                            tracing::trace!(
-                                target: LOG_TARGET,
-                                stop_reason = ?finished.stop_reason,
-                                "skipping mid-turn ProviderResponseFinished",
-                            );
-                            continue;
-                        }
-                        if completed_response_prompts.contains(&finished.agent_prompt_id) {
-                            tracing::trace!(
-                                target: LOG_TARGET,
-                                agent_prompt_id = %finished.agent_prompt_id,
-                                "skipping already-completed response",
-                            );
-                            continue;
-                        }
-                        if turn_end_emitted {
-                            tracing::trace!(target: LOG_TARGET, "skipping already-completed turn");
-                            continue;
-                        }
-                        if active_background_tools.is_empty() {
-                            let agent_id = finished.agent_id.clone();
-                            let agent_name =
-                                display_name_for_agent(&agent_display_names, &agent_id);
-                            let agent_response = response_text(&finished.output_items);
-                            emit_agent_end(
-                                &mut writer,
-                                &mut waiting_for_final_response,
-                                &mut turn_end_emitted,
-                                &mut idle,
-                                idle_duration,
-                                &config,
-                                agent_id,
-                                agent_name,
-                                last_user_prompt.clone(),
-                                agent_response,
-                            )?;
-                            completed_response_prompts.insert(finished.agent_prompt_id);
-                        } else {
-                            final_response_pending_background_tools = true;
-                            pending_final_response_prompt = Some(finished.agent_prompt_id);
-                            pending_final_response_agent = Some(finished.agent_id);
-                            pending_final_response_text = response_text(&finished.output_items);
-                            tracing::debug!(
-                                target: LOG_TARGET,
-                                active_background_tools = active_background_tools.len(),
-                                "deferring end notification until background tools complete",
-                            );
-                        }
-                    }
-                    Event::ToolResult(result) => {
-                        if result.originator.is_user()
-                            && result.kind == tau_proto::ToolResultKind::BackgroundPlaceholder
-                        {
-                            active_background_tools.insert(result.call_id);
-                            tracing::trace!(
-                                target: LOG_TARGET,
-                                active_background_tools = active_background_tools.len(),
-                                "background tool started",
-                            );
-                        }
-                    }
-                    Event::ToolBackgroundResult(result) => {
-                        if result.originator.is_user() {
-                            active_background_tools.remove(&result.call_id);
-                            if maybe_emit_deferred_agent_end(
-                                &mut writer,
-                                &mut waiting_for_final_response,
-                                &mut turn_end_emitted,
-                                &mut final_response_pending_background_tools,
-                                &mut idle,
-                                idle_duration,
-                                &config,
-                                &active_background_tools,
-                                &agent_display_names,
-                                &mut pending_final_response_agent,
-                                &last_user_prompt,
-                                &mut pending_final_response_text,
-                            )? && let Some(prompt_id) = pending_final_response_prompt.take()
-                            {
-                                completed_response_prompts.insert(prompt_id);
-                            }
-                        }
-                    }
-                    Event::ToolBackgroundError(error) => {
-                        if error.originator.is_user() {
-                            active_background_tools.remove(&error.call_id);
-                            if maybe_emit_deferred_agent_end(
-                                &mut writer,
-                                &mut waiting_for_final_response,
-                                &mut turn_end_emitted,
-                                &mut final_response_pending_background_tools,
-                                &mut idle,
-                                idle_duration,
-                                &config,
-                                &active_background_tools,
-                                &agent_display_names,
-                                &mut pending_final_response_agent,
-                                &last_user_prompt,
-                                &mut pending_final_response_text,
-                            )? && let Some(prompt_id) = pending_final_response_prompt.take()
-                            {
-                                completed_response_prompts.insert(prompt_id);
-                            }
-                        }
-                    }
-                    Event::StartAgentResult(result) => {
-                        tracing::debug!(
-                            target: LOG_TARGET,
-                            query_id = %result.query_id,
-                            text_len = result.text.len(),
-                            error = ?result.error,
-                            idle_hooks = idle.len(),
-                            "received StartAgentResult",
-                        );
-                        ignored_summary_agents.remove(&result.query_id);
-                        // Match against the in-flight query id; ignore
-                        // stragglers from cancelled / superseded requests.
-                        let matching = idle
-                            .iter()
-                            .position(|pending| {
-                                idle_summary_query_matches(pending, &result.query_id)
-                            })
-                            .map(|index| (false, index))
-                            .or_else(|| {
-                                idle_all
-                                    .iter()
-                                    .position(|pending| {
-                                        idle_summary_query_matches(pending, &result.query_id)
-                                    })
-                                    .map(|index| (true, index))
-                            });
-                        if let Some((is_all_idle, index)) = matching {
-                            let pending = if is_all_idle {
-                                idle_all.remove(index)
-                            } else {
-                                idle.remove(index)
-                            };
-                            let hook = configured_idle_hook(&config, &pending);
-                            let agent_summary = if result.error.is_some() {
-                                String::new()
-                            } else {
-                                truncate_for_summary_text(result.text.trim())
-                            };
-                            let agent_name =
-                                display_name_for_agent(&agent_display_names, &pending.agent_id);
-                            emit_idle_hook(
-                                &mut writer,
-                                IdleHookEmission {
-                                    hook_name: idle_hook_name(pending.hook_kind),
-                                    hook,
-                                    agent_id: &pending.agent_id,
-                                    agent_name: &agent_name,
-                                    user_prompt: &pending.user_prompt,
-                                    agent_response: &pending.agent_response,
-                                    agent_summary: &agent_summary,
-                                },
-                            )?;
-                            if input_closed && idle.is_empty() && idle_all.is_empty() {
-                                break;
-                            }
-                        }
-                    }
-                    other => tracing::trace!(
-                        target: LOG_TARGET,
-                        name = %other.name(),
-                        "ignoring unhandled event",
-                    ),
-                }
+                );
             }
-            Ok(InMsg::EndOfStream) => {
-                input_closed = true;
-                if idle.is_empty() && idle_all.is_empty() {
-                    break;
-                }
-            }
-            Err(mpsc::RecvTimeoutError::Timeout) => {
-                let now = Instant::now();
-                process_due_idle_hooks(
-                    &mut writer,
-                    &mut idle,
-                    now,
-                    &config,
-                    &agent_display_names,
-                    summary_timeout,
-                    &mut next_query_id,
-                    "idle",
-                )?;
-                process_due_idle_hooks(
-                    &mut writer,
-                    &mut idle_all,
-                    now,
-                    &config,
-                    &agent_display_names,
-                    summary_timeout,
-                    &mut next_query_id,
-                    "all-idle",
-                )?;
-                if input_closed && idle.is_empty() && idle_all.is_empty() {
-                    break;
-                }
-            }
-            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                input_closed = true;
-                if idle.is_empty() && idle_all.is_empty() {
-                    break;
-                }
+            _ => {}
+        }
+    }
+
+    fn track_loaded_agent(&mut self, loaded: &tau_proto::SessionAgentLoaded) {
+        if !self
+            .ignored_summary_agents
+            .values()
+            .any(|agent_id| agent_id == &loaded.agent_id)
+        {
+            self.session_idle
+                .load_agent(loaded.session_id.clone(), loaded.agent_id.clone());
+        }
+    }
+
+    fn track_unloaded_agent(
+        &mut self,
+        unloaded: &tau_proto::SessionAgentUnloaded,
+        idle_duration: Duration,
+    ) {
+        if let Some(session_id) = self
+            .session_idle
+            .unload_agent(&unloaded.session_id, &unloaded.agent_id)
+        {
+            let context = self
+                .all_idle_context
+                .get(&unloaded.agent_id)
+                .cloned()
+                .unwrap_or_default();
+            arm_idle_all_hooks(
+                &mut self.idle_all,
+                session_id,
+                idle_duration,
+                &self.config,
+                unloaded.agent_id.clone(),
+                context.user_prompt,
+                context.agent_response,
+            );
+        }
+    }
+
+    fn track_agent_state(&mut self, state: &tau_proto::AgentStateChanged, idle_duration: Duration) {
+        match state.state {
+            tau_proto::AgentRuntimeState::Running => self.track_running_agent(&state.agent_id),
+            tau_proto::AgentRuntimeState::Idle => {
+                self.track_idle_agent(&state.agent_id, idle_duration)
             }
         }
     }
 
-    Ok(())
+    fn track_running_agent(&mut self, agent_id: &tau_proto::AgentId) {
+        if self
+            .ignored_summary_agents
+            .values()
+            .any(|summary_agent_id| summary_agent_id == agent_id)
+        {
+            return;
+        }
+        self.session_idle.mark_busy(agent_id.clone());
+        let running_sessions = self.session_idle.sessions_for_agent(agent_id);
+        self.idle_all.retain(|pending| {
+            pending
+                .session_id
+                .as_ref()
+                .is_none_or(|session_id| !running_sessions.contains(session_id))
+        });
+    }
+
+    fn track_idle_agent(&mut self, agent_id: &tau_proto::AgentId, idle_duration: Duration) {
+        for session_id in self.session_idle.mark_idle(agent_id) {
+            let context = self
+                .all_idle_context
+                .get(agent_id)
+                .cloned()
+                .unwrap_or_default();
+            arm_idle_all_hooks(
+                &mut self.idle_all,
+                session_id,
+                idle_duration,
+                &self.config,
+                agent_id.clone(),
+                context.user_prompt,
+                context.agent_response,
+            );
+        }
+    }
+
+    fn handle_user_event(
+        &mut self,
+        event: Event,
+        idle_duration: Duration,
+    ) -> Result<(), Box<dyn Error>> {
+        match event {
+            Event::AgentStarted(started) => {
+                self.set_display_name(started.agent_id, started.display_name.as_deref());
+            }
+            Event::AgentDisplayNameSet(name) => {
+                self.set_display_name(name.agent_id, Some(&name.display_name));
+            }
+            Event::ProviderPromptSubmitted(_) => self.idle.clear(),
+            Event::AgentPromptSubmitted(prompt) => self.handle_agent_prompt(prompt)?,
+            Event::UiPromptDraft(_) => self.extend_idle_deadlines(idle_duration),
+            Event::ProviderResponseFinished(finished) => {
+                self.handle_provider_response_finished(finished, idle_duration)?;
+            }
+            Event::ToolResult(result) => self.handle_tool_result(result),
+            Event::ToolBackgroundResult(result) => {
+                self.handle_background_tool_finished(
+                    result.call_id,
+                    result.originator,
+                    idle_duration,
+                )?;
+            }
+            Event::ToolBackgroundError(error) => {
+                self.handle_background_tool_finished(
+                    error.call_id,
+                    error.originator,
+                    idle_duration,
+                )?;
+            }
+            Event::StartAgentResult(result) => self.handle_start_agent_result(result)?,
+            other => {
+                tracing::trace!(target: LOG_TARGET, name = %other.name(), "ignoring unhandled event")
+            }
+        }
+        Ok(())
+    }
+
+    fn set_display_name(&mut self, agent_id: tau_proto::AgentId, display_name: Option<&str>) {
+        if let Some(display_name) = display_name.map(str::trim).filter(|name| !name.is_empty()) {
+            self.agent_display_names
+                .insert(agent_id, display_name.to_owned());
+        }
+    }
+
+    fn handle_agent_prompt(
+        &mut self,
+        prompt: tau_proto::AgentPromptSubmitted,
+    ) -> Result<(), Box<dyn Error>> {
+        self.set_display_name(prompt.agent_id.clone(), prompt.display_name.as_deref());
+        self.idle.clear();
+        if prompt.message_class.is_internal() {
+            tracing::trace!(target: LOG_TARGET, "skipping internal prompt submit");
+            return Ok(());
+        }
+        if self.final_response_pending_background_tools {
+            self.cancel_deferred_final_response();
+        }
+        if !self.waiting_for_final_response {
+            self.last_user_prompt = prompt.text.clone();
+            let agent_name = display_name_for_agent(&self.agent_display_names, &prompt.agent_id);
+            let ctx = template_context(
+                "agent_start",
+                &prompt.agent_id,
+                &agent_name,
+                &self.last_user_prompt,
+                "",
+                "",
+            );
+            emit_hooks(&mut self.writer, &self.config.agent_start, &ctx)?;
+            self.waiting_for_final_response = true;
+            self.turn_end_emitted = false;
+        }
+        Ok(())
+    }
+
+    fn cancel_deferred_final_response(&mut self) {
+        self.final_response_pending_background_tools = false;
+        if let Some(prompt_id) = self.pending_final_response_prompt.take() {
+            self.completed_response_prompts.insert(prompt_id);
+        }
+        self.waiting_for_final_response = false;
+        self.turn_end_emitted = false;
+    }
+
+    fn extend_idle_deadlines(&mut self, idle_duration: Duration) {
+        let now = Instant::now();
+        for pending in self.idle.iter_mut().chain(self.idle_all.iter_mut()) {
+            let delay = idle_hook_delay(&self.config, pending, idle_duration);
+            if let IdleState::WaitingIdle { deadline } = &mut pending.state {
+                *deadline = now + delay;
+            }
+        }
+        if !self.no_pending_idle_hooks() {
+            tracing::trace!(target: LOG_TARGET, "extended idle deadlines on prompt draft");
+        }
+    }
+
+    fn handle_provider_response_finished(
+        &mut self,
+        finished: tau_proto::ProviderResponseFinished,
+        idle_duration: Duration,
+    ) -> Result<(), Box<dyn Error>> {
+        if self.should_skip_finished_response(&finished) {
+            return Ok(());
+        }
+        if self.active_background_tools.is_empty() {
+            self.emit_finished_response(finished, idle_duration)?;
+        } else {
+            self.defer_finished_response(finished);
+        }
+        Ok(())
+    }
+
+    fn should_skip_finished_response(
+        &self,
+        finished: &tau_proto::ProviderResponseFinished,
+    ) -> bool {
+        if finished.stop_reason.requests_tool_calls() {
+            tracing::trace!(target: LOG_TARGET, stop_reason = ?finished.stop_reason, "skipping mid-turn ProviderResponseFinished");
+            return true;
+        }
+        if self
+            .completed_response_prompts
+            .contains(&finished.agent_prompt_id)
+        {
+            tracing::trace!(target: LOG_TARGET, agent_prompt_id = %finished.agent_prompt_id, "skipping already-completed response");
+            return true;
+        }
+        if self.turn_end_emitted {
+            tracing::trace!(target: LOG_TARGET, "skipping already-completed turn");
+            return true;
+        }
+        false
+    }
+
+    fn emit_finished_response(
+        &mut self,
+        finished: tau_proto::ProviderResponseFinished,
+        idle_duration: Duration,
+    ) -> Result<(), Box<dyn Error>> {
+        let agent_id = finished.agent_id.clone();
+        let agent_name = display_name_for_agent(&self.agent_display_names, &agent_id);
+        let agent_response = response_text(&finished.output_items);
+        emit_agent_end(
+            &mut self.writer,
+            &mut self.waiting_for_final_response,
+            &mut self.turn_end_emitted,
+            &mut self.idle,
+            idle_duration,
+            &self.config,
+            agent_id,
+            agent_name,
+            self.last_user_prompt.clone(),
+            agent_response,
+        )?;
+        self.completed_response_prompts
+            .insert(finished.agent_prompt_id);
+        Ok(())
+    }
+
+    fn defer_finished_response(&mut self, finished: tau_proto::ProviderResponseFinished) {
+        self.final_response_pending_background_tools = true;
+        self.pending_final_response_prompt = Some(finished.agent_prompt_id);
+        self.pending_final_response_agent = Some(finished.agent_id);
+        self.pending_final_response_text = response_text(&finished.output_items);
+        tracing::debug!(
+            target: LOG_TARGET,
+            active_background_tools = self.active_background_tools.len(),
+            "deferring end notification until background tools complete",
+        );
+    }
+
+    fn handle_tool_result(&mut self, result: tau_proto::ToolResult) {
+        if result.originator.is_user()
+            && result.kind == tau_proto::ToolResultKind::BackgroundPlaceholder
+        {
+            self.active_background_tools.insert(result.call_id);
+            tracing::trace!(
+                target: LOG_TARGET,
+                active_background_tools = self.active_background_tools.len(),
+                "background tool started",
+            );
+        }
+    }
+
+    fn handle_background_tool_finished(
+        &mut self,
+        call_id: tau_proto::ToolCallId,
+        originator: tau_proto::PromptOriginator,
+        idle_duration: Duration,
+    ) -> Result<(), Box<dyn Error>> {
+        if !originator.is_user() {
+            return Ok(());
+        }
+        self.active_background_tools.remove(&call_id);
+        if maybe_emit_deferred_agent_end(
+            &mut self.writer,
+            &mut self.waiting_for_final_response,
+            &mut self.turn_end_emitted,
+            &mut self.final_response_pending_background_tools,
+            &mut self.idle,
+            idle_duration,
+            &self.config,
+            &self.active_background_tools,
+            &self.agent_display_names,
+            &mut self.pending_final_response_agent,
+            &self.last_user_prompt,
+            &mut self.pending_final_response_text,
+        )? && let Some(prompt_id) = self.pending_final_response_prompt.take()
+        {
+            self.completed_response_prompts.insert(prompt_id);
+        }
+        Ok(())
+    }
+
+    fn handle_start_agent_result(
+        &mut self,
+        result: tau_proto::StartAgentResult,
+    ) -> Result<(), Box<dyn Error>> {
+        tracing::debug!(
+            target: LOG_TARGET,
+            query_id = %result.query_id,
+            text_len = result.text.len(),
+            error = ?result.error,
+            idle_hooks = self.idle.len(),
+            "received StartAgentResult",
+        );
+        self.ignored_summary_agents.remove(&result.query_id);
+        let Some((is_all_idle, index)) = self.matching_summary_hook(&result.query_id) else {
+            return Ok(());
+        };
+        let pending = if is_all_idle {
+            self.idle_all.remove(index)
+        } else {
+            self.idle.remove(index)
+        };
+        let agent_summary = if result.error.is_some() {
+            String::new()
+        } else {
+            truncate_for_summary_text(result.text.trim())
+        };
+        self.emit_summary_result(pending, &agent_summary)
+    }
+
+    fn matching_summary_hook(&self, query_id: &str) -> Option<(bool, usize)> {
+        self.idle
+            .iter()
+            .position(|pending| idle_summary_query_matches(pending, query_id))
+            .map(|index| (false, index))
+            .or_else(|| {
+                self.idle_all
+                    .iter()
+                    .position(|pending| idle_summary_query_matches(pending, query_id))
+                    .map(|index| (true, index))
+            })
+    }
+
+    fn emit_summary_result(
+        &mut self,
+        pending: PendingIdleHook,
+        agent_summary: &str,
+    ) -> Result<(), Box<dyn Error>> {
+        let hook = configured_idle_hook(&self.config, &pending);
+        let agent_name = display_name_for_agent(&self.agent_display_names, &pending.agent_id);
+        emit_idle_hook(
+            &mut self.writer,
+            IdleHookEmission {
+                hook_name: idle_hook_name(pending.hook_kind),
+                hook,
+                agent_id: &pending.agent_id,
+                agent_name: &agent_name,
+                user_prompt: &pending.user_prompt,
+                agent_response: &pending.agent_response,
+                agent_summary,
+            },
+        )
+    }
+
+    fn process_timeout(&mut self, summary_timeout: Duration) -> Result<(), Box<dyn Error>> {
+        let now = Instant::now();
+        process_due_idle_hooks(
+            &mut self.writer,
+            &mut self.idle,
+            now,
+            &self.config,
+            &self.agent_display_names,
+            summary_timeout,
+            &mut self.next_query_id,
+            "idle",
+        )?;
+        process_due_idle_hooks(
+            &mut self.writer,
+            &mut self.idle_all,
+            now,
+            &self.config,
+            &self.agent_display_names,
+            summary_timeout,
+            &mut self.next_query_id,
+            "all-idle",
+        )?;
+        Ok(())
+    }
 }
 
 fn summary_instruction(user_prompt: &str, agent_response: &str) -> String {
