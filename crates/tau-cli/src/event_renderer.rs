@@ -2706,13 +2706,30 @@ impl EventRenderer {
     }
 
     fn learn_agent_metadata(&mut self, event: &Event) {
+        if self.learn_agent_lifecycle_metadata(event) {
+            return;
+        }
+        if self.learn_agent_prompt_metadata(event) {
+            return;
+        }
+        if self.learn_provider_tool_metadata(event) {
+            return;
+        }
+        if self.learn_shell_metadata(event) {
+            return;
+        }
+        self.learn_agent_message_metadata(event);
+    }
+
+    fn learn_agent_lifecycle_metadata(&mut self, event: &Event) -> bool {
         match event {
-            Event::StartAgentRequest(_) => {}
+            Event::StartAgentRequest(_) => true,
             Event::StartAgentAccepted(accepted) => {
                 let agent_id = accepted.agent_id.to_string();
                 self.query_agents
                     .insert(accepted.query_id.clone(), agent_id.clone());
                 self.mark_agent_live(agent_id);
+                true
             }
             Event::AgentStarted(started) => {
                 let agent_id = started.agent_id.to_string();
@@ -2723,6 +2740,7 @@ impl EventRenderer {
                 if let Some(display_name) = started.display_name.as_ref() {
                     self.remember_agent_display_name(&agent_id, display_name);
                 }
+                true
             }
             Event::AgentDisplayNameSet(name) => {
                 let agent_id = name.agent_id.to_string();
@@ -2731,18 +2749,35 @@ impl EventRenderer {
                 if self.current_agent_id.as_deref() == Some(agent_id.as_str()) {
                     self.render_model_status_if_present();
                 }
+                true
             }
             Event::StartAgentResult(result) => {
                 if let Some(agent_id) = self.query_agents.get(&result.query_id).cloned() {
                     self.mark_agent_suspended(&agent_id);
                 }
+                true
             }
             Event::ToolDelegateProgress(progress) => {
                 if let Some(agent_id) = progress.agent_id.as_deref() {
                     self.remember_agent(agent_id.to_owned());
                     self.mark_agent_live(agent_id.to_owned());
                 }
+                true
             }
+            Event::SessionAgentUnloaded(unloaded) => {
+                self.mark_agent_suspended(unloaded.agent_id.as_str());
+                true
+            }
+            Event::HarnessAgentContextUsageChanged(changed) => {
+                self.remember_agent(changed.agent_id.to_string());
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn learn_agent_prompt_metadata(&mut self, event: &Event) -> bool {
+        match event {
             Event::UiPromptSubmitted(prompt) => {
                 let agent_id = prompt.agent_id.to_string();
                 if prompt.originator.is_user() {
@@ -2754,30 +2789,11 @@ impl EventRenderer {
                 {
                     self.query_agents.insert(query_id.clone(), agent_id);
                 }
-            }
-            Event::UiShellCommand(command) => {
-                if let Some(agent_id) = command.target_agent_id.as_deref() {
-                    self.remember_agent(agent_id.to_owned());
-                    self.shell_agents
-                        .insert(command.command_id.to_string(), agent_id.to_owned());
-                }
-            }
-            Event::ShellCommandProgress(progress) => {
-                if let Some(agent_id) = progress.target_agent_id.as_deref() {
-                    self.remember_agent(agent_id.to_owned());
-                    self.shell_agents
-                        .insert(progress.command_id.to_string(), agent_id.to_owned());
-                }
-            }
-            Event::ShellCommandFinished(finished) => {
-                if let Some(agent_id) = finished.target_agent_id.as_deref() {
-                    self.remember_agent(agent_id.to_owned());
-                    self.shell_agents
-                        .insert(finished.command_id.to_string(), agent_id.to_owned());
-                }
+                true
             }
             Event::AgentPromptQueued(queued) => {
                 self.mark_agent_live(queued.agent_id.to_string());
+                true
             }
             Event::AgentPromptSubmitted(prompt) => {
                 let agent_id = prompt.agent_id.to_string();
@@ -2786,6 +2802,7 @@ impl EventRenderer {
                 {
                     self.query_agents.insert(query_id.clone(), agent_id);
                 }
+                true
             }
             Event::AgentCompactionTriggered(triggered) => {
                 let agent_id = triggered.agent_id.to_string();
@@ -2794,13 +2811,30 @@ impl EventRenderer {
                 } else {
                     self.remember_agent(agent_id);
                 }
+                true
             }
             Event::AgentPromptCreated(prompt) => {
                 let agent_id = prompt.agent_id.to_string();
                 self.mark_agent_live(agent_id.clone());
                 self.prompt_agents
                     .insert(prompt.agent_prompt_id.to_string(), agent_id);
+                true
             }
+            Event::AgentPromptTerminated(terminated) => {
+                let agent_id = terminated.agent_id.to_string();
+                if terminated.originator.is_user() {
+                    self.mark_agent_live(agent_id);
+                } else {
+                    self.mark_agent_suspended(&agent_id);
+                }
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn learn_provider_tool_metadata(&mut self, event: &Event) -> bool {
+        match event {
             Event::ProviderResponseFinished(finished) => {
                 let agent_id = finished.agent_id.to_string();
                 let requested_tools = tool_calls_from_output_items(&finished.output_items);
@@ -2819,6 +2853,7 @@ impl EventRenderer {
                     self.tool_agents
                         .insert(call.call_id.to_string(), agent_id.clone());
                 }
+                true
             }
             Event::ToolStarted(started) => {
                 let agent_id = started.agent_id.to_string();
@@ -2826,21 +2861,44 @@ impl EventRenderer {
                 self.tool_agents
                     .entry(started.call_id.to_string())
                     .or_insert(agent_id);
+                true
             }
-            Event::AgentPromptTerminated(terminated) => {
-                let agent_id = terminated.agent_id.to_string();
-                if terminated.originator.is_user() {
-                    self.mark_agent_live(agent_id);
-                } else {
-                    self.mark_agent_suspended(&agent_id);
+            _ => false,
+        }
+    }
+
+    fn learn_shell_metadata(&mut self, event: &Event) -> bool {
+        match event {
+            Event::UiShellCommand(command) => {
+                if let Some(agent_id) = command.target_agent_id.as_deref() {
+                    self.remember_agent(agent_id.to_owned());
+                    self.shell_agents
+                        .insert(command.command_id.to_string(), agent_id.to_owned());
                 }
+                true
             }
-            Event::SessionAgentUnloaded(unloaded) => {
-                self.mark_agent_suspended(unloaded.agent_id.as_str());
+            Event::ShellCommandProgress(progress) => {
+                if let Some(agent_id) = progress.target_agent_id.as_deref() {
+                    self.remember_agent(agent_id.to_owned());
+                    self.shell_agents
+                        .insert(progress.command_id.to_string(), agent_id.to_owned());
+                }
+                true
             }
-            Event::HarnessAgentContextUsageChanged(changed) => {
-                self.remember_agent(changed.agent_id.to_string());
+            Event::ShellCommandFinished(finished) => {
+                if let Some(agent_id) = finished.target_agent_id.as_deref() {
+                    self.remember_agent(agent_id.to_owned());
+                    self.shell_agents
+                        .insert(finished.command_id.to_string(), agent_id.to_owned());
+                }
+                true
             }
+            _ => false,
+        }
+    }
+
+    fn learn_agent_message_metadata(&mut self, event: &Event) {
+        match event {
             Event::AgentMessageSent(message) => {
                 self.remember_agent(message.sender_id.to_string());
                 if let Some(agent_id) = Self::agent_message_sent_recipient_agent_id(message) {
