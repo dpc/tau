@@ -622,157 +622,228 @@ fn seek_sequence(lines: &[String], pattern: &[String], start: usize, eof: bool) 
 }
 
 fn parse_patch(patch: &str) -> Result<Vec<Hunk>, String> {
-    let trimmed = patch.trim();
-    let lines: Vec<&str> = trimmed.lines().collect();
-    if lines.first().copied() != Some("*** Begin Patch") {
-        return Err("invalid patch: missing '*** Begin Patch' header".to_owned());
-    }
-    if lines.last().copied() != Some("*** End Patch") {
-        return Err("invalid patch: missing '*** End Patch' footer".to_owned());
+    PatchParser::new(patch)?.parse()
+}
+
+// Parser section. This manually implements `apply_patch.lark`: begin/end
+// sentinels are validated before parsing starts, and `index` only advances
+// through body lines between the begin header and end footer.
+struct PatchParser<'a> {
+    lines: Vec<&'a str>,
+    index: usize,
+}
+
+impl<'a> PatchParser<'a> {
+    fn new(patch: &'a str) -> Result<Self, String> {
+        let lines: Vec<&str> = patch.trim().lines().collect();
+        if lines.first().copied() != Some("*** Begin Patch") {
+            return Err("invalid patch: missing '*** Begin Patch' header".to_owned());
+        }
+        if lines.last().copied() != Some("*** End Patch") {
+            return Err("invalid patch: missing '*** End Patch' footer".to_owned());
+        }
+
+        Ok(Self { lines, index: 1 })
     }
 
-    let mut index = 1usize;
-    let mut hunks = Vec::new();
-    while index + 1 < lines.len() {
-        let line = lines[index];
+    fn parse(mut self) -> Result<Vec<Hunk>, String> {
+        let mut hunks = Vec::new();
+        while self.has_body_line() {
+            hunks.push(self.parse_hunk()?);
+        }
+
+        if hunks.is_empty() {
+            return Err("invalid patch: no file operations found".to_owned());
+        }
+        Ok(hunks)
+    }
+
+    fn parse_hunk(&mut self) -> Result<Hunk, String> {
+        let line = self.current_line();
         if let Some(path) = line.strip_prefix("*** Add File: ") {
-            index += 1;
-            let mut contents = Vec::new();
-            while index + 1 < lines.len() && !lines[index].starts_with("*** ") {
-                let Some(content) = lines[index].strip_prefix('+') else {
-                    return Err(format!(
-                        "invalid add-file line: {}",
-                        escape_path_text(lines[index])
-                    ));
-                };
-                contents.push(content.to_owned());
-                index += 1;
-            }
-            if contents.is_empty() {
-                return Err(format!(
-                    "Add File hunk for {} must contain at least one line",
-                    escape_path_text(path)
-                ));
-            }
-            hunks.push(Hunk::Add {
-                path: PathBuf::from(path),
-                contents: contents.join("\n") + "\n",
-            });
-            continue;
+            return self.parse_add(path);
         }
-
         if let Some(path) = line.strip_prefix("*** Delete File: ") {
-            hunks.push(Hunk::Delete {
-                path: PathBuf::from(path),
-            });
-            index += 1;
-            continue;
+            return Ok(self.parse_delete(path));
         }
-
         if let Some(path) = line.strip_prefix("*** Update File: ") {
-            index += 1;
-            let mut move_path = None;
-            if index + 1 < lines.len()
-                && let Some(dest) = lines[index].strip_prefix("*** Move to: ")
-            {
-                move_path = Some(PathBuf::from(dest));
-                index += 1;
-            }
-
-            let mut chunks = Vec::new();
-            while index + 1 < lines.len() && !lines[index].starts_with("*** ") {
-                let header = lines[index];
-                let change_context = if header == "@@" {
-                    None
-                } else if let Some(context) = header.strip_prefix("@@ ") {
-                    Some(context.to_owned())
-                } else {
-                    return Err(format!(
-                        "invalid update hunk header: {}",
-                        escape_path_text(header)
-                    ));
-                };
-                index += 1;
-
-                let mut old_lines = Vec::new();
-                let mut new_lines = Vec::new();
-                let mut is_end_of_file = false;
-                while index + 1 < lines.len()
-                    && !lines[index].starts_with("@@")
-                    && !lines[index].starts_with("*** ")
-                {
-                    if lines[index] == "*** End of File" {
-                        is_end_of_file = true;
-                        index += 1;
-                        break;
-                    }
-                    let mut chars = lines[index].chars();
-                    match chars.next() {
-                        None => {
-                            old_lines.push(String::new());
-                            new_lines.push(String::new());
-                        }
-                        Some(' ') => {
-                            let rest = chars.as_str().to_owned();
-                            old_lines.push(rest.clone());
-                            new_lines.push(rest);
-                        }
-                        Some('-') => {
-                            let rest = chars.as_str().to_owned();
-                            old_lines.push(rest);
-                        }
-                        Some('+') => {
-                            let rest = chars.as_str().to_owned();
-                            new_lines.push(rest);
-                        }
-                        _ => {
-                            return Err(format!(
-                                "invalid update hunk line: {}",
-                                escape_path_text(lines[index])
-                            ));
-                        }
-                    }
-                    index += 1;
-                }
-
-                if old_lines.is_empty() && new_lines.is_empty() {
-                    return Err(format!(
-                        "Update File hunk for {} must contain at least one line",
-                        escape_path_text(path)
-                    ));
-                }
-                chunks.push(UpdateChunk {
-                    change_context,
-                    old_lines,
-                    new_lines,
-                    is_end_of_file,
-                });
-            }
-
-            if chunks.is_empty() {
-                return Err(format!(
-                    "Update File hunk for {} must contain at least one chunk",
-                    escape_path_text(path)
-                ));
-            }
-            hunks.push(Hunk::Update {
-                path: PathBuf::from(path),
-                move_path,
-                chunks,
-            });
-            continue;
+            return self.parse_update(path);
         }
 
-        return Err(format!(
+        Err(format!(
             "invalid patch operation: {}",
             escape_path_text(line)
-        ));
+        ))
     }
 
-    if hunks.is_empty() {
-        return Err("invalid patch: no file operations found".to_owned());
+    fn parse_add(&mut self, path: &str) -> Result<Hunk, String> {
+        self.advance();
+        let mut contents = Vec::new();
+        while self.has_body_line() && !self.current_line().starts_with("*** ") {
+            let Some(content) = self.current_line().strip_prefix('+') else {
+                return Err(format!(
+                    "invalid add-file line: {}",
+                    escape_path_text(self.current_line())
+                ));
+            };
+            contents.push(content.to_owned());
+            self.advance();
+        }
+
+        if contents.is_empty() {
+            return Err(format!(
+                "Add File hunk for {} must contain at least one line",
+                escape_path_text(path)
+            ));
+        }
+
+        Ok(Hunk::Add {
+            path: PathBuf::from(path),
+            contents: contents.join("\n") + "\n",
+        })
     }
-    Ok(hunks)
+
+    fn parse_delete(&mut self, path: &str) -> Hunk {
+        self.advance();
+        Hunk::Delete {
+            path: PathBuf::from(path),
+        }
+    }
+
+    fn parse_update(&mut self, path: &str) -> Result<Hunk, String> {
+        self.advance();
+        let move_path = self.parse_move_path();
+        let mut chunks = Vec::new();
+
+        while self.has_body_line() && !self.current_line().starts_with("*** ") {
+            chunks.push(self.parse_update_chunk(path)?);
+        }
+
+        if chunks.is_empty() {
+            return Err(format!(
+                "Update File hunk for {} must contain at least one chunk",
+                escape_path_text(path)
+            ));
+        }
+
+        Ok(Hunk::Update {
+            path: PathBuf::from(path),
+            move_path,
+            chunks,
+        })
+    }
+
+    fn parse_move_path(&mut self) -> Option<PathBuf> {
+        if self.has_body_line()
+            && let Some(dest) = self.current_line().strip_prefix("*** Move to: ")
+        {
+            let move_path = PathBuf::from(dest);
+            self.advance();
+            Some(move_path)
+        } else {
+            None
+        }
+    }
+
+    fn parse_update_chunk(&mut self, path: &str) -> Result<UpdateChunk, String> {
+        let change_context = self.parse_update_header()?;
+        let mut chunk = ParsedUpdateChunk::default();
+
+        while self.has_body_line()
+            && !self.current_line().starts_with("@@")
+            && !self.current_line_is_patch_operation_boundary()
+        {
+            if self.current_line() == "*** End of File" {
+                chunk.is_end_of_file = true;
+                self.advance();
+                break;
+            }
+            self.parse_update_line(&mut chunk)?;
+            self.advance();
+        }
+
+        if chunk.old_lines.is_empty() && chunk.new_lines.is_empty() {
+            return Err(format!(
+                "Update File hunk for {} must contain at least one line",
+                escape_path_text(path)
+            ));
+        }
+
+        Ok(UpdateChunk {
+            change_context,
+            old_lines: chunk.old_lines,
+            new_lines: chunk.new_lines,
+            is_end_of_file: chunk.is_end_of_file,
+        })
+    }
+
+    fn parse_update_header(&mut self) -> Result<Option<String>, String> {
+        let header = self.current_line();
+        let change_context = if header == "@@" {
+            None
+        } else if let Some(context) = header.strip_prefix("@@ ") {
+            Some(context.to_owned())
+        } else {
+            return Err(format!(
+                "invalid update hunk header: {}",
+                escape_path_text(header)
+            ));
+        };
+        self.advance();
+        Ok(change_context)
+    }
+
+    fn parse_update_line(&self, chunk: &mut ParsedUpdateChunk) -> Result<(), String> {
+        let line = self.current_line();
+        let mut chars = line.chars();
+        match chars.next() {
+            None => {
+                chunk.old_lines.push(String::new());
+                chunk.new_lines.push(String::new());
+            }
+            Some(' ') => {
+                let rest = chars.as_str().to_owned();
+                chunk.old_lines.push(rest.clone());
+                chunk.new_lines.push(rest);
+            }
+            Some('-') => {
+                chunk.old_lines.push(chars.as_str().to_owned());
+            }
+            Some('+') => {
+                chunk.new_lines.push(chars.as_str().to_owned());
+            }
+            _ => {
+                return Err(format!(
+                    "invalid update hunk line: {}",
+                    escape_path_text(line)
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn current_line(&self) -> &'a str {
+        self.lines[self.index]
+    }
+
+    fn advance(&mut self) {
+        self.index += 1;
+    }
+
+    fn has_body_line(&self) -> bool {
+        self.index + 1 < self.lines.len()
+    }
+
+    fn current_line_is_patch_operation_boundary(&self) -> bool {
+        self.current_line().starts_with("*** ") && self.current_line() != "*** End of File"
+    }
+}
+
+#[derive(Default)]
+struct ParsedUpdateChunk {
+    old_lines: Vec<String>,
+    new_lines: Vec<String>,
+    is_end_of_file: bool,
 }
 
 #[cfg(test)]

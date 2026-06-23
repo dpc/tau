@@ -7,6 +7,68 @@ fn parse_update_hunk() {
     assert_eq!(hunks.len(), 1);
 }
 
+/// Ensures the parser keeps the Codex add-file format strict: every add-file
+/// payload line must be prefixed with `+` so accidental malformed content
+/// cannot be interpreted as valid file data.
+#[test]
+fn parse_add_file_rejects_unprefixed_content() {
+    let patch = "*** Begin Patch\n*** Add File: hello.txt\nplain\n*** End Patch";
+    let err = parse_patch(patch).expect_err("unprefixed add-file content should fail");
+
+    assert_eq!(err, "invalid add-file line: plain");
+}
+
+/// Ensures `*** Move to` remains tied to update hunks and preserves the
+/// destination path in the parsed hunk, because later application and lock
+/// selection rely on this metadata.
+#[test]
+fn parse_update_hunk_with_move_destination() {
+    let patch = "*** Begin Patch\n*** Update File: old.txt\n*** Move to: new.txt\n@@\n-old\n+new\n*** End Patch";
+    let hunks = parse_patch(patch).expect("move update should parse");
+
+    assert_eq!(
+        hunks,
+        vec![Hunk::Update {
+            path: PathBuf::from("old.txt"),
+            move_path: Some(PathBuf::from("new.txt")),
+            chunks: vec![UpdateChunk {
+                change_context: None,
+                old_lines: vec!["old".to_owned()],
+                new_lines: vec!["new".to_owned()],
+                is_end_of_file: false,
+            }],
+        }]
+    );
+}
+
+/// Ensures the grammar-declared `*** End of File` marker is parsed as chunk
+/// metadata instead of being mistaken for the start of another patch operation.
+#[test]
+fn parse_update_hunk_end_of_file_marker() {
+    let patch = "*** Begin Patch\n*** Update File: file.txt\n@@\n-old\n+new\n*** End of File\n*** End Patch";
+    let hunks = parse_patch(patch).expect("end-of-file update should parse");
+    let [Hunk::Update { chunks, .. }] = hunks.as_slice() else {
+        panic!("expected one update hunk");
+    };
+
+    assert!(chunks[0].is_end_of_file);
+}
+
+/// Ensures delete hunks still parse as single-line operations, preventing the
+/// parser refactor from requiring chunk content for file deletion.
+#[test]
+fn parse_delete_hunk() {
+    let patch = "*** Begin Patch\n*** Delete File: old.txt\n*** End Patch";
+    let hunks = parse_patch(patch).expect("delete should parse");
+
+    assert_eq!(
+        hunks,
+        vec![Hunk::Delete {
+            path: PathBuf::from("old.txt")
+        }]
+    );
+}
+
 #[test]
 fn compute_replacements_with_context() {
     let original = vec!["a".to_owned(), "b".to_owned(), "c".to_owned()];
