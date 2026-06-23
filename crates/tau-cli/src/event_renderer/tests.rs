@@ -1,7 +1,26 @@
+use tau_cli_term_raw::Term;
+
 use super::{AgentActivity, MessageRenderMode, RoleCompletionDetails, role_value_completion};
+
 fn agent_id(value: &str) -> tau_proto::AgentId {
     tau_proto::AgentId::parse(value).expect("valid test agent id")
 }
+
+fn renderer_for_agent_id_tests() -> super::EventRenderer {
+    let (_term, handle, _input) = Term::new_virtual(
+        80,
+        24,
+        "> ",
+        Box::new(std::io::sink()),
+        tau_cli_term::CursorShape::Bar,
+    );
+    super::EventRenderer::new(
+        handle,
+        tau_cli_term::CompletionData::new(),
+        tau_themes::Theme::builtin(),
+    )
+}
+
 fn agent_message(sender_id: &str, recipient: &str, message: &str) -> tau_proto::Event {
     tau_proto::Event::AgentMessageSent(tau_proto::AgentMessageSent {
         message_id: format!("msg-{sender_id}-{recipient}").into(),
@@ -16,6 +35,82 @@ fn agent_message(sender_id: &str, recipient: &str, message: &str) -> tau_proto::
         kind: tau_proto::AgentMessageKind::Message,
         message: message.to_owned(),
     })
+}
+
+/// User-directed agent messages are broadcasts rendered without an owning
+/// agent transcript. This guards the agent-id resolver's explicit `None`
+/// result so the refactored fallback chain does not accidentally route
+/// broadcasts to the current agent.
+#[test]
+fn agent_id_for_event_preserves_user_broadcast_without_current_agent_fallback() {
+    let mut renderer = renderer_for_agent_id_tests();
+    renderer.current_agent_id = Some("current-agent".to_owned());
+
+    let resolved = renderer.agent_id_for_event_for_test(&agent_message(
+        "sender-agent",
+        "user",
+        "visible broadcast",
+    ));
+
+    assert_eq!(resolved, None);
+}
+
+/// Tool events may be attributed from prior metadata or from the event's
+/// embedded agent id. This keeps both paths covered while splitting the
+/// dispatcher into smaller resolver helpers.
+#[test]
+fn agent_id_for_event_resolves_tool_metadata_and_started_fallback() {
+    let mut renderer = renderer_for_agent_id_tests();
+    renderer
+        .tool_agents
+        .insert("known-call".to_owned(), "metadata-agent".to_owned());
+
+    let known_started = tau_proto::Event::ToolStarted(tau_proto::ToolStarted {
+        call_id: "known-call".into(),
+        tool_name: tau_proto::ToolName::new("read"),
+        arguments: tau_proto::CborValue::Null,
+        agent_id: agent_id("started-agent"),
+        originator: tau_proto::PromptOriginator::User,
+    });
+    let unknown_started = tau_proto::Event::ToolStarted(tau_proto::ToolStarted {
+        call_id: "unknown-call".into(),
+        tool_name: tau_proto::ToolName::new("read"),
+        arguments: tau_proto::CborValue::Null,
+        agent_id: agent_id("started-agent"),
+        originator: tau_proto::PromptOriginator::User,
+    });
+
+    assert_eq!(
+        renderer.agent_id_for_event_for_test(&known_started),
+        Some("metadata-agent".to_owned())
+    );
+    assert_eq!(
+        renderer.agent_id_for_event_for_test(&unknown_started),
+        Some("started-agent".to_owned())
+    );
+}
+
+/// Shell progress can omit an explicit target and rely on metadata learned
+/// from the command request. The resolver must still use that map after the
+/// shell-specific branch was extracted out of the large event match.
+#[test]
+fn agent_id_for_event_resolves_shell_progress_from_learned_metadata() {
+    let mut renderer = renderer_for_agent_id_tests();
+    renderer
+        .shell_agents
+        .insert("cmd-1".to_owned(), "shell-agent".to_owned());
+
+    let progress = tau_proto::Event::ShellCommandProgress(tau_proto::ShellCommandProgress {
+        command_id: "cmd-1".into(),
+        stream: tau_proto::ShellStream::Stdout,
+        chunk: "output".to_owned(),
+        target_agent_id: None,
+    });
+
+    assert_eq!(
+        renderer.agent_id_for_event_for_test(&progress),
+        Some("shell-agent".to_owned())
+    );
 }
 
 /// UI I/O status values are compact because they live in the status bar.
