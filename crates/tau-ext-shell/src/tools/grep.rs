@@ -20,137 +20,21 @@ const MAX_GREP_LIMIT: usize = MAX_OUTPUT_LINES;
 const MAX_GREP_CONTEXT: usize = 20;
 
 pub(crate) fn run_grep(arguments: &CborValue) -> Result<ToolOutput, ToolFailure> {
-    let pattern = argument_text(arguments, "pattern")?;
-    let path = optional_argument_text(arguments, "path")?;
-    let glob = optional_argument_text(arguments, "glob")?;
-    let ignore_case = optional_argument_bool(arguments, "ignoreCase")
-        .map_err(ToolFailure::from)?
-        .unwrap_or(false);
-    // Literal matching is the default. Most callers are searching for
-    // an exact string and regex metacharacters in that string (`[`,
-    // `(`, `.`, `?`, `+`, `*`, `|`, `{`, `\`) would otherwise either
-    // fail to parse or silently match something unintended. Regex
-    // users opt in explicitly with `regex: true`.
-    let regex = optional_argument_bool(arguments, "regex")
-        .map_err(ToolFailure::from)?
-        .unwrap_or(false);
-    let context =
-        match optional_argument_int_strict(arguments, "context").map_err(ToolFailure::from)? {
-            Some(value) if value < 0 => return Err(ToolFailure::new("context must be >= 0")),
-            Some(value) => {
-                let context =
-                    usize::try_from(value).map_err(|_| ToolFailure::new("context is too large"))?;
-                if MAX_GREP_CONTEXT < context {
-                    return Err(ToolFailure::new(format!(
-                        "context must be <= {MAX_GREP_CONTEXT}"
-                    )));
-                }
-                Some(context)
-            }
-            None => None,
-        };
-    let limit = match optional_argument_int_strict(arguments, "limit").map_err(ToolFailure::from)? {
-        Some(value) if value < 1 => return Err(ToolFailure::new("limit must be >= 1")),
-        Some(value) => {
-            let limit =
-                usize::try_from(value).map_err(|_| ToolFailure::new("limit is too large"))?;
-            if MAX_GREP_LIMIT < limit {
-                return Err(ToolFailure::new(format!(
-                    "limit must be <= {MAX_GREP_LIMIT}"
-                )));
-            }
-            limit
-        }
-        None => DEFAULT_GREP_LIMIT,
-    };
-
-    let search_path = path.as_deref().unwrap_or(".");
-
-    // Use `--json` for structured output. This replaces the previous
-    // hand-rolled `PATH:LINE:CONTENT` vs `PATH-LINE-CONTENT` line
-    // classifier, which had a known misclassification mode on paths
-    // like `file-12-34.txt`. The JSON envelope cleanly separates
-    // match from context records.
-    //
-    // `--with-filename` is still needed to keep the path field
-    // present when searching a single file, so the rendered output
-    // continues to lead with `path:` even in that case.
-    let mut args: Vec<String> = vec![
-        "--json".to_owned(),
-        "--hidden".to_owned(),
-        "--with-filename".to_owned(),
-        "--max-columns".to_owned(),
-        GREP_MAX_LINE_LENGTH.to_string(),
-        "--max-columns-preview".to_owned(),
-    ];
-    if ignore_case {
-        args.push("--ignore-case".to_owned());
-    }
-    if !regex {
-        args.push("--fixed-strings".to_owned());
-    }
-    if let Some(ref g) = glob {
-        args.push("--glob".to_owned());
-        args.push(g.clone());
-    }
-    if let Some(ctx) = context {
-        args.push(format!("--context={ctx}"));
-    }
-    args.push("--".to_owned());
-    args.push(pattern.clone());
-    args.push(search_path.to_owned());
-
-    let display_args = match glob.as_deref() {
-        Some(g) => format!("{pattern:?} in {search_path} [{g}]"),
-        None => format!("{pattern:?} in {search_path}"),
-    };
+    let options = GrepOptions::parse(arguments)?;
+    let display_args = options.display_args();
     let with_args = |f: ToolFailure| f.with_args(display_args.clone());
 
-    let mut cmd = Command::new("rg");
-    cmd.args(&args)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
-    apply_command_isolation(&mut cmd);
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| with_args(ToolFailure::from(format!("failed to start ripgrep: {e}"))))?;
-
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| with_args(ToolFailure::from("ripgrep stdout pipe missing".to_owned())))?;
-    let stderr = child
-        .stderr
-        .take()
-        .ok_or_else(|| with_args(ToolFailure::from("ripgrep stderr pipe missing".to_owned())))?;
-    let stderr_handle = std::thread::spawn(move || read_limited_bytes(stderr, MAX_OUTPUT_BYTES));
-
-    let GrepStreamResult {
-        result_lines,
-        match_count,
-        lines_truncated,
-        match_limit_reached,
-    } = read_grep_json(stdout, limit);
-
-    // If the limit fired we may have killed reading mid-stream; make
-    // sure the child does not linger.
-    if match_limit_reached {
-        let _ = child.kill();
-    }
-
-    let exit_status = child.wait().map_err(|e| {
-        with_args(ToolFailure::from(format!(
-            "failed to wait for ripgrep: {e}"
-        )))
-    })?;
-    let stderr = stderr_handle.join().unwrap_or_default();
+    let GrepProcessOutput {
+        stream,
+        status,
+        stderr,
+    } = run_ripgrep(&options).map_err(with_args)?;
 
     // rg exit codes: 0=matches found, 1=no matches, 2=error.
     // Exit-2 is overloaded — ripgrep emits regex parse errors, IO
     // errors, and permission denials all under the same code. Classify
     // the stderr into a short, single-line message so the UI doesn't
     // surface a multi-line regex-parser dump in the inline tool block.
-    let status = exit_status.code();
     if status == Some(2) {
         let stderr_raw = String::from_utf8_lossy(&stderr);
         return Err(with_args(ToolFailure::from(
@@ -158,13 +42,217 @@ pub(crate) fn run_grep(arguments: &CborValue) -> Result<ToolOutput, ToolFailure>
         )));
     }
 
+    Ok(render_grep_output(
+        stream,
+        status,
+        display_args,
+        options.limit,
+    ))
+}
+
+/// Parsed model-facing grep arguments after validation and defaults.
+struct GrepOptions {
+    /// Search pattern passed to ripgrep after the `--` separator.
+    pattern: String,
+    /// Optional user-supplied search root; defaults to the current directory.
+    path: Option<String>,
+    /// Optional ripgrep glob filter passed as `--glob`.
+    glob: Option<String>,
+    /// Whether matching should ignore case.
+    ignore_case: bool,
+    /// Whether `pattern` is a regular expression instead of a fixed string.
+    regex: bool,
+    /// Optional number of context lines requested around each match.
+    context: Option<usize>,
+    /// Maximum number of match records to render before stopping ripgrep.
+    limit: usize,
+}
+
+impl GrepOptions {
+    fn parse(arguments: &CborValue) -> Result<Self, ToolFailure> {
+        let pattern = argument_text(arguments, "pattern")?;
+        let path = optional_argument_text(arguments, "path")?;
+        let glob = optional_argument_text(arguments, "glob")?;
+        let ignore_case = optional_bool_argument(arguments, "ignoreCase")?;
+        // Literal matching is the default. Most callers are searching for
+        // an exact string and regex metacharacters in that string (`[`,
+        // `(`, `.`, `?`, `+`, `*`, `|`, `{`, `\`) would otherwise either
+        // fail to parse or silently match something unintended. Regex
+        // users opt in explicitly with `regex: true`.
+        let regex = optional_bool_argument(arguments, "regex")?;
+        let context =
+            optional_bounded_usize_argument(arguments, "context", 0, MAX_GREP_CONTEXT, None)?;
+        let limit = optional_bounded_usize_argument(
+            arguments,
+            "limit",
+            1,
+            MAX_GREP_LIMIT,
+            Some(DEFAULT_GREP_LIMIT),
+        )?
+        .expect("defaulted limit must be present");
+
+        Ok(Self {
+            pattern,
+            path,
+            glob,
+            ignore_case,
+            regex,
+            context,
+            limit,
+        })
+    }
+
+    fn search_path(&self) -> &str {
+        self.path.as_deref().unwrap_or(".")
+    }
+
+    fn display_args(&self) -> String {
+        match self.glob.as_deref() {
+            Some(g) => format!("{:?} in {} [{g}]", self.pattern, self.search_path()),
+            None => format!("{:?} in {}", self.pattern, self.search_path()),
+        }
+    }
+
+    fn ripgrep_args(&self) -> Vec<String> {
+        // Use `--json` for structured output. This replaces the previous
+        // hand-rolled `PATH:LINE:CONTENT` vs `PATH-LINE-CONTENT` line
+        // classifier, which had a known misclassification mode on paths
+        // like `file-12-34.txt`. The JSON envelope cleanly separates
+        // match from context records.
+        //
+        // `--with-filename` is still needed to keep the path field
+        // present when searching a single file, so the rendered output
+        // continues to lead with `path:` even in that case.
+        let mut args: Vec<String> = vec![
+            "--json".to_owned(),
+            "--hidden".to_owned(),
+            "--with-filename".to_owned(),
+            "--max-columns".to_owned(),
+            GREP_MAX_LINE_LENGTH.to_string(),
+            "--max-columns-preview".to_owned(),
+        ];
+        self.push_optional_ripgrep_args(&mut args);
+        args.push("--".to_owned());
+        args.push(self.pattern.clone());
+        args.push(self.search_path().to_owned());
+        args
+    }
+
+    fn push_optional_ripgrep_args(&self, args: &mut Vec<String>) {
+        if self.ignore_case {
+            args.push("--ignore-case".to_owned());
+        }
+        if !self.regex {
+            args.push("--fixed-strings".to_owned());
+        }
+        if let Some(glob) = &self.glob {
+            args.push("--glob".to_owned());
+            args.push(glob.clone());
+        }
+        if let Some(context) = self.context {
+            args.push(format!("--context={context}"));
+        }
+    }
+}
+
+fn optional_bool_argument(arguments: &CborValue, name: &str) -> Result<bool, ToolFailure> {
+    Ok(optional_argument_bool(arguments, name)
+        .map_err(ToolFailure::from)?
+        .unwrap_or(false))
+}
+
+fn optional_bounded_usize_argument(
+    arguments: &CborValue,
+    name: &str,
+    min: usize,
+    max: usize,
+    default: Option<usize>,
+) -> Result<Option<usize>, ToolFailure> {
+    let Some(value) = optional_argument_int_strict(arguments, name).map_err(ToolFailure::from)?
+    else {
+        return Ok(default);
+    };
+    let min_i64 = i64::try_from(min).expect("grep bounds fit in i64");
+    if value < min_i64 {
+        return Err(ToolFailure::new(format!("{name} must be >= {min}")));
+    }
+    let value =
+        usize::try_from(value).map_err(|_| ToolFailure::new(format!("{name} is too large")))?;
+    if max < value {
+        return Err(ToolFailure::new(format!("{name} must be <= {max}")));
+    }
+    Ok(Some(value))
+}
+
+struct GrepProcessOutput {
+    /// Rendered stream records and truncation/limit metadata.
+    stream: GrepStreamResult,
+    /// Process exit status code, or `None` if ripgrep was signal-terminated.
+    status: Option<i32>,
+    /// Bounded stderr bytes captured for exit-code classification.
+    stderr: Vec<u8>,
+}
+
+fn run_ripgrep(options: &GrepOptions) -> Result<GrepProcessOutput, ToolFailure> {
+    let mut cmd = Command::new("rg");
+    cmd.args(options.ripgrep_args())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    apply_command_isolation(&mut cmd);
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| ToolFailure::from(format!("failed to start ripgrep: {e}")))?;
+
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| ToolFailure::from("ripgrep stdout pipe missing".to_owned()))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| ToolFailure::from("ripgrep stderr pipe missing".to_owned()))?;
+    let stderr_handle = std::thread::spawn(move || read_limited_bytes(stderr, MAX_OUTPUT_BYTES));
+
+    let stream = read_grep_json(stdout, options.limit);
+
+    // If the limit fired we may have killed reading mid-stream; make
+    // sure the child does not linger.
+    if stream.match_limit_reached {
+        let _ = child.kill();
+    }
+
+    let exit_status = child
+        .wait()
+        .map_err(|e| ToolFailure::from(format!("failed to wait for ripgrep: {e}")))?;
+    let stderr = stderr_handle.join().unwrap_or_default();
+
+    Ok(GrepProcessOutput {
+        stream,
+        status: exit_status.code(),
+        stderr,
+    })
+}
+
+fn render_grep_output(
+    stream: GrepStreamResult,
+    status: Option<i32>,
+    display_args: String,
+    limit: usize,
+) -> ToolOutput {
+    let GrepStreamResult {
+        result_lines,
+        match_count,
+        lines_truncated,
+        match_limit_reached,
+    } = stream;
+
     if result_lines.is_empty() {
         let mut display = crate::display::ok_display(display_args.clone());
         display.stats.matches = Some(0);
-        return Ok(ToolOutput {
+        return ToolOutput {
             result: grep_result_map(status, 0, "no matches found".to_owned()),
             display,
-        });
+        };
     }
 
     let mut output_text = result_lines.join("\n");
@@ -194,10 +282,10 @@ pub(crate) fn run_grep(arguments: &CborValue) -> Result<ToolOutput, ToolFailure>
     let mut display = crate::display::ok_display(display_args);
     display.stats = text_stats(&output_text);
     display.stats.matches = Some(match_count as u64);
-    Ok(ToolOutput {
+    ToolOutput {
         result: grep_result_map(status, match_count, output_text),
         display,
-    })
+    }
 }
 
 fn limit_reached_notice(limit: usize) -> String {
