@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use tau_proto::{
     CborValue, ClientKind, Disconnect, Event, HarnessInputMessage, HarnessOutputMessage, Hello,
-    PROTOCOL_VERSION, Ready, Subscribe, ToolRegister, ToolStarted,
+    PROTOCOL_VERSION, Ready, Subscribe, ToolRegister, ToolStarted, UnixMicros,
 };
 use tau_supervisor::{
     ExtensionCommand, ReceiveOutcome, StderrPolicy, SupervisedChild, SupervisionError,
@@ -384,6 +384,18 @@ fn supervised_child_exchanges_protocol_events_over_stdio() {
         })
     );
 
+    child
+        .send(&HarnessOutputMessage::deliver_replay(
+            UnixMicros::new(7),
+            Event::ToolStarted(ToolStarted {
+                call_id: "call-replay".into(),
+                tool_name: tau_proto::ToolName::new("echo"),
+                arguments: CborValue::Text("replayed".to_owned()),
+                agent_id: tau_proto::AgentId::parse("agent-1").expect("agent id"),
+                originator: tau_proto::PromptOriginator::User,
+            }),
+        ))
+        .expect("replayed tool should be sent");
     child
         .send(&HarnessOutputMessage::deliver(Event::ToolStarted(
             ToolStarted {
