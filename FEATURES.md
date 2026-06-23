@@ -445,8 +445,10 @@ heavily stripped `body_preview` with HTML removed, links replaced by `LINK`, and
 a tiny ASCII character set, while `full` reads return simplified body text
 wrapped in `<external_unstrusted_message>`. `/email in deny <id> [id...]`
 persists exact read denials as `none` access, but explicit `email_request_access`
-calls can ask again. `/email in approve`, `/email in deny`, and `/email out
-approve` accept multiple ids. Agent access and mutation activity is appended as
+calls can ask again. `/email out deny <id> [id...]` persists rejected outgoing
+draft approvals as terminal denied ids that cannot later be approved or sent.
+`/email in approve`, `/email in deny`, `/email out approve`, and `/email out
+deny` accept multiple ids. Agent access and mutation activity is appended as
 JSONL and can be reviewed with `/email log last [number]`.
 Gmail accounts can use Google-only OAuth2/XOAUTH2 with the broad
 `https://mail.google.com/` scope, authorized by `/email auth google start

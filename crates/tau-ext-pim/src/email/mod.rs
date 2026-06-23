@@ -1448,6 +1448,11 @@ impl StateStore {
         self.load_outgoing_approval("approved", id)
     }
 
+    /// Load one denied outgoing send approval by id.
+    pub fn denied_outgoing_by_id(&self, id: &str) -> Result<OutgoingApproval, String> {
+        self.load_outgoing_approval("denied", id)
+    }
+
     fn append_email_log(&self, entry: &EmailLogEntry) -> Result<(), String> {
         let path = self.email_log_path();
         let mut bytes = serde_json::to_vec(entry).map_err(|error| error.to_string())?;
@@ -1710,6 +1715,11 @@ impl StateStore {
         self.approve("outgoing", id)
     }
 
+    /// Mark an outgoing approval ID as denied by moving/writing it to denied.
+    pub fn deny_outgoing(&self, id: &str) -> Result<(), String> {
+        self.deny("outgoing", id)
+    }
+
     fn outgoing_pending_exists(&self, id: &str) -> Result<bool, String> {
         self.file_exists(&self.approval_path("outgoing", "pending", id)?)
     }
@@ -1718,7 +1728,16 @@ impl StateStore {
         self.file_exists(&self.approval_path("outgoing", "sending", id)?)
     }
 
+    fn outgoing_denied_exists(&self, id: &str) -> Result<bool, String> {
+        self.file_exists(&self.approval_path("outgoing", "denied", id)?)
+    }
+
     fn claim_outgoing(&self, id: &str) -> Result<OutgoingApproval, String> {
+        if self.outgoing_denied_exists(id)? {
+            return Err(format!(
+                "Outgoing email {id} is denied; refusing to approve or send it."
+            ));
+        }
         let approval = self.pending_outgoing_by_id(id)?;
         let mut sending = approval.clone();
         sending.status = "sending".to_owned();
@@ -4216,6 +4235,9 @@ impl<B: EmailBackend> Engine<B> {
             "email.out.list" => require_no_args(argv).and_then(|()| self.action_out_list()),
             "email.out.open" => require_one_arg(argv).and_then(|id| self.action_out_open(id)),
             "email.out.approve" => self.action_out_approve_args(argv),
+            "email.out.deny" => {
+                require_approval_ids(argv).and_then(|ids| self.action_out_deny_many(&ids))
+            }
             "email.out.whitelist" => {
                 require_one_arg(argv).and_then(|pattern| self.action_out_whitelist(pattern))
             }
@@ -4359,8 +4381,18 @@ impl<B: EmailBackend> Engine<B> {
         Ok(lines.join("\n"))
     }
 
+    fn approvable_pending_outgoing(&self) -> Result<Vec<OutgoingApproval>, String> {
+        let mut approvals = Vec::new();
+        for approval in self.state.list_pending_outgoing()? {
+            if !self.state.outgoing_denied_exists(&approval.id)? {
+                approvals.push(approval);
+            }
+        }
+        Ok(approvals)
+    }
+
     fn action_out_list(&self) -> Result<String, String> {
-        let approvals = self.state.list_pending_outgoing()?;
+        let approvals = self.approvable_pending_outgoing()?;
         if approvals.is_empty() {
             return Ok("No pending outgoing email approvals.".to_owned());
         }
@@ -4390,6 +4422,14 @@ impl<B: EmailBackend> Engine<B> {
 
     fn action_out_open(&self, id: &str) -> Result<String, String> {
         validate_approval_id(id)?;
+        if self.state.outgoing_denied_exists(id)? {
+            let approval = self.state.denied_outgoing_by_id(id)?;
+            return Ok(format!(
+                "Outgoing approval {id} is denied. subject={} to={}",
+                safe_display_line(&approval.subject),
+                safe_display_join(&approval.to, ",")
+            ));
+        }
         let approval = self.state.pending_outgoing_by_id(id)?;
         Ok(format!(
             "Outgoing approval {id}\nstatus: {}\naccount: {}\nfrom: {}\nto: {}\ncc: {}\nbcc: {}\nsubject: {}\nreply_to: {}\nin_reply_to: {}\nblocked: {}\nreason: {}\n\n{}",
@@ -4411,8 +4451,7 @@ impl<B: EmailBackend> Engine<B> {
     fn action_out_approve_args(&mut self, argv: &[String]) -> Result<String, String> {
         if require_all_arg(argv)? {
             let ids = self
-                .state
-                .list_pending_outgoing()?
+                .approvable_pending_outgoing()?
                 .into_iter()
                 .map(|approval| approval.id)
                 .collect::<Vec<_>>();
@@ -4452,6 +4491,11 @@ impl<B: EmailBackend> Engine<B> {
     }
 
     fn action_out_approve(&mut self, id: &str) -> Result<String, String> {
+        if self.state.outgoing_denied_exists(id)? {
+            return Err(format!(
+                "Outgoing email {id} is denied; refusing to approve or send it."
+            ));
+        }
         if self.state.outgoing_pending_exists(id)? {
             let pending = self.state.pending_outgoing_by_id(id)?;
             self.validate_outgoing_approval_for_send(&pending)?;
@@ -4488,6 +4532,67 @@ impl<B: EmailBackend> Engine<B> {
             safe_display_line(&approval.subject),
             safe_display_join(&approval.to, ",")
         ))
+    }
+
+    fn action_out_deny_many(&mut self, ids: &[String]) -> Result<String, String> {
+        if ids.len() == 1 {
+            return self.action_out_deny(&ids[0]);
+        }
+
+        let mut lines = vec![format!("Denying {} outgoing email(s):", ids.len())];
+        let mut errors = Vec::new();
+        for id in ids {
+            match self.action_out_deny(id) {
+                Ok(message) => lines.push(message),
+                Err(error) => {
+                    lines.push(format!(
+                        "Failed outgoing email {id}: {}",
+                        safe_display_line(&error)
+                    ));
+                    errors.push(id.clone());
+                }
+            }
+        }
+        let output = lines.join("\n");
+        if errors.is_empty() {
+            Ok(output)
+        } else {
+            Err(output)
+        }
+    }
+
+    fn action_out_deny(&mut self, id: &str) -> Result<String, String> {
+        match self.state.pending_outgoing_by_id(id) {
+            Ok(approval) => {
+                self.state.deny_outgoing(id)?;
+                Ok(format!(
+                    "Denied outgoing email {id}. subject={} to={}",
+                    safe_display_line(&approval.subject),
+                    safe_display_join(&approval.to, ",")
+                ))
+            }
+            Err(pending_error) => {
+                if self.state.outgoing_denied_exists(id)? {
+                    let approval = self.state.denied_outgoing_by_id(id)?;
+                    return Ok(format!(
+                        "Outgoing email {id} is already denied. subject={} to={}",
+                        safe_display_line(&approval.subject),
+                        safe_display_join(&approval.to, ",")
+                    ));
+                }
+                if self.state.approved_outgoing_by_id(id).is_ok() {
+                    return Err(format!(
+                        "Outgoing email {id} is already approved/sent; refusing to deny it."
+                    ));
+                }
+                if self.state.outgoing_sending_exists(id)? {
+                    return Err(format!(
+                        "Outgoing email {id} is already being sent or needs manual recovery."
+                    ));
+                }
+                Err(pending_error)
+            }
+        }
     }
 
     fn action_out_whitelist(&self, pattern: &str) -> Result<String, String> {
@@ -5456,7 +5561,7 @@ pub fn email_action_schema() -> ActionSchema {
                         leaf(
                             "open",
                             "email.out.open",
-                            "Inspect an outgoing draft",
+                            "Inspect a pending outgoing draft",
                             vec![id_arg()],
                         ),
                         leaf(
@@ -5464,6 +5569,12 @@ pub fn email_action_schema() -> ActionSchema {
                             "email.out.approve",
                             "Approve one or more outgoing drafts",
                             vec![approve_ids_arg()],
+                        ),
+                        leaf(
+                            "deny",
+                            "email.out.deny",
+                            "Deny one or more outgoing drafts",
+                            vec![ids_arg()],
                         ),
                         leaf(
                             "whitelist",

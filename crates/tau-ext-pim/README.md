@@ -95,7 +95,7 @@ If authentication headers are truncated during the metadata fetch, the extension
 
 Outgoing `from` cannot be spoofed. It must match the configured account identity. Unsafe or oversized recipients, subjects, bodies, and threading headers are rejected instead of being silently truncated.
 
-Queued outgoing approvals persist the full draft for user review. Bcc recipients are hidden from model-facing status output, but visible to the user in `/email out open <id>` before approval. Approved drafts enter a `sending` state and are revalidated against the current account and policy before SMTP delivery to reduce duplicate sends and stale approval abuse.
+Queued outgoing approvals persist the full draft for user review. Bcc recipients are hidden from model-facing status output, but visible to the user in `/email out open <id>` before approval. Approved drafts enter a `sending` state and are revalidated against the current account and policy before SMTP delivery to reduce duplicate sends and stale approval abuse. Denied drafts move out of the pending queue and the denied approval id cannot later be approved or sent.
 
 ### Approval state and allowlists
 
@@ -329,8 +329,9 @@ The extension publishes `/email` actions for review:
 - `/email in deny <id> [id...]` — deny exact incoming reads; future `email_read` calls report `access=none`, while explicit `email_request_access` calls can ask again.
 - `/email in whitelist <pattern>` — persist an incoming allow pattern, if state policy extensions are enabled.
 - `/email out list` — list pending outgoing drafts.
-- `/email out open <id>` — inspect an outgoing draft, including Bcc.
+- `/email out open <id>` — inspect a pending outgoing draft, including Bcc; denied ids return sanitized status only.
 - `/email out approve <id> [id...]` — send the approved draft(s).
+- `/email out deny <id> [id...]` — reject outgoing draft approval(s); denied ids cannot later be approved or sent.
 - `/email out whitelist <pattern>` — persist an outgoing recipient allow pattern, if state policy extensions are enabled.
 
 The extension also publishes `/calendar` actions:

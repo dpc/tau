@@ -120,7 +120,7 @@ Recommended defaults:
 - keep `email.policy.incoming_auth.allow_dmarc_only: false` unless the user explicitly accepts the weaker policy
 - keep `incoming_allow`, `outgoing_allow`, and `folders.allow` narrow
 
-Incoming email body reads are fail-closed. If policy does not allow full access, the model should use `email_request_access`, then wait for `/email in open <id>` and `/email in approve <id>`. Outgoing `email_send` calls that violate recipient policy queue under `/email out` actions.
+Incoming email body reads are fail-closed. If policy does not allow full access, the model should use `email_request_access`, then wait for `/email in open <id>` and `/email in approve <id>`. Outgoing `email_send` calls that violate recipient policy queue under `/email out` actions; users can approve them with `/email out approve <id> [id...]` or reject them with `/email out deny <id> [id...]`.
 
 
 ## Troubleshooting

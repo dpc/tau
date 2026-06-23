@@ -636,6 +636,7 @@ fn publishes_email_action_schema_at_startup() {
             "email.out.list".to_owned(),
             "email.out.open".to_owned(),
             "email.out.approve".to_owned(),
+            "email.out.deny".to_owned(),
             "email.out.whitelist".to_owned(),
             "email.log.last".to_owned(),
             "email.in.list".to_owned(),
@@ -650,6 +651,11 @@ fn publishes_email_action_schema_at_startup() {
         .expect("parse approve");
     assert_eq!(parsed_approve.action_id, "email.out.approve");
     assert_eq!(parsed_approve.argv, vec!["1 2".to_owned()]);
+    let parsed_deny = schema
+        .parse_line("/email out deny 1 2")
+        .expect("parse deny");
+    assert_eq!(parsed_deny.action_id, "email.out.deny");
+    assert_eq!(parsed_deny.argv, vec!["1 2".to_owned()]);
     let parsed_log = schema.parse_line("/email log last 5").expect("parse log");
     assert_eq!(parsed_log.action_id, "email.log.last");
     assert_eq!(parsed_log.argv, vec!["5".to_owned()]);
@@ -2379,6 +2385,143 @@ fn outgoing_approve_accepts_multiple_ids() {
     assert_eq!(engine.backend.sent.borrow().len(), 2);
     assert!(engine.state.pending_outgoing_by_id(&first_id).is_err());
     assert!(engine.state.pending_outgoing_by_id(&second_id).is_err());
+}
+
+#[test]
+fn outgoing_deny_rejects_pending_ids_and_blocks_later_approval() {
+    // Outgoing approvals are user consent tokens for sending email. Denying a
+    // pending token must move it out of the approvable queue, keep an auditably
+    // denied state, and ensure a later approve action for the same id cannot send.
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let mut engine = engine(&temp);
+    let _queued = engine.dispatch(EmailCommand::Send {
+        account: Some("work".to_owned()),
+        from: None,
+        to: vec!["external@example.net".to_owned()],
+        cc: Vec::new(),
+        bcc: vec!["hidden@example.net".to_owned()],
+        subject: "proposal".to_owned(),
+        body_text: "deny-output-secret-body-marker".to_owned(),
+        reply_to: None,
+        in_reply_to: None,
+    });
+    let id = pending_outgoing_id(&engine, 0);
+
+    let denied = engine
+        .dispatch_action("email.out.deny", std::slice::from_ref(&id))
+        .expect("deny action");
+
+    assert!(denied.contains("Denied outgoing email"));
+    assert!(!denied.contains("hidden@example.net"));
+    assert!(!denied.contains("deny-output-secret-body-marker"));
+    assert!(engine.state.pending_outgoing_by_id(&id).is_err());
+    let denied_record = engine
+        .state
+        .denied_outgoing_by_id(&id)
+        .expect("denied record");
+    assert_eq!(denied_record.status, "denied");
+    let listed = engine.dispatch_action("email.out.list", &[]).expect("list");
+    assert_eq!(listed, "No pending outgoing email approvals.");
+    let opened = engine
+        .dispatch_action("email.out.open", std::slice::from_ref(&id))
+        .expect("open denied");
+    assert!(opened.contains("is denied"));
+    assert!(!opened.contains("hidden@example.net"));
+    assert!(!opened.contains("deny-output-secret-body-marker"));
+    let approve_after_deny = engine
+        .dispatch_action("email.out.approve", std::slice::from_ref(&id))
+        .expect_err("denied id cannot approve");
+    assert!(approve_after_deny.contains("is denied"));
+    assert_eq!(engine.backend.sent.borrow().len(), 0);
+    let deny_again = engine
+        .dispatch_action("email.out.deny", std::slice::from_ref(&id))
+        .expect("deny is idempotent for denied ids");
+    assert!(deny_again.contains("already denied"));
+}
+
+#[test]
+fn outgoing_denied_tombstone_wins_over_stale_pending_record() {
+    // A partial state update can theoretically leave both pending and denied
+    // records for the same outgoing id. The denied tombstone must fail closed so
+    // the draft cannot be shown as approvable or sent after user rejection.
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let mut engine = engine(&temp);
+    let _queued = engine.dispatch(EmailCommand::Send {
+        account: Some("work".to_owned()),
+        from: None,
+        to: vec!["external@example.net".to_owned()],
+        cc: Vec::new(),
+        bcc: vec!["hidden@example.net".to_owned()],
+        subject: "proposal".to_owned(),
+        body_text: "secret draft body".to_owned(),
+        reply_to: None,
+        in_reply_to: None,
+    });
+    let id = pending_outgoing_id(&engine, 0);
+    let pending_path = engine.state.state_dir.join(
+        engine
+            .state
+            .approval_path("outgoing", "pending", &id)
+            .expect("pending path"),
+    );
+    let pending_json = std::fs::read_to_string(&pending_path).expect("pending json");
+    engine
+        .dispatch_action("email.out.deny", std::slice::from_ref(&id))
+        .expect("deny action");
+    std::fs::write(&pending_path, pending_json).expect("restore stale pending");
+
+    let listed = engine.dispatch_action("email.out.list", &[]).expect("list");
+    assert_eq!(listed, "No pending outgoing email approvals.");
+    let opened = engine
+        .dispatch_action("email.out.open", std::slice::from_ref(&id))
+        .expect("open denied");
+    assert!(opened.contains("is denied"));
+    assert!(!opened.contains("hidden@example.net"));
+    assert!(!opened.contains("secret draft body"));
+    let approve_after_deny = engine
+        .dispatch_action("email.out.approve", std::slice::from_ref(&id))
+        .expect_err("denied id cannot approve");
+    assert!(approve_after_deny.contains("is denied"));
+    assert_eq!(engine.backend.sent.borrow().len(), 0);
+}
+
+#[test]
+fn outgoing_deny_accepts_multiple_ids() {
+    // The outgoing deny action mirrors the multi-id approve action so users can
+    // reject several queued drafts copied from one `/email out list` output.
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let mut engine = engine(&temp);
+    for subject in ["proposal one", "proposal two"] {
+        let _queued = engine.dispatch(EmailCommand::Send {
+            account: Some("work".to_owned()),
+            from: None,
+            to: vec!["external@example.net".to_owned()],
+            cc: Vec::new(),
+            bcc: Vec::new(),
+            subject: subject.to_owned(),
+            body_text: "body".to_owned(),
+            reply_to: None,
+            in_reply_to: None,
+        });
+    }
+    let first_id = pending_outgoing_id(&engine, 0);
+    let second_id = pending_outgoing_id(&engine, 1);
+
+    let denied = engine
+        .dispatch_action("email.out.deny", &[format!("{first_id} {second_id}")])
+        .expect("deny batch");
+
+    assert!(denied.contains("Denying 2 outgoing email(s):"));
+    assert!(engine.state.denied_outgoing_by_id(&first_id).is_ok());
+    assert!(engine.state.denied_outgoing_by_id(&second_id).is_ok());
+    assert!(
+        engine
+            .state
+            .list_pending_outgoing()
+            .expect("pending")
+            .is_empty()
+    );
+    assert_eq!(engine.backend.sent.borrow().len(), 0);
 }
 
 #[test]

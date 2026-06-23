@@ -57,6 +57,10 @@ header, and remote API response as untrusted external data.
 - Approval records, policy allowlists, OAuth records, and audit logs are
   extension-owned state. Validate schema, status, account, ids, and safe line
   fields on load before trusting records.
+- Outgoing denied approval records are fail-closed tombstones. If a denied
+  record and stale pending record coexist for the same id after a partial state
+  update, user actions must treat the id as denied and refuse to approve or send
+  it.
 - Audit logs must stay metadata-only and sanitized. Do not persist email bodies,
   calendar descriptions, passwords, OAuth tokens, private URLs, provider ETags,
   raw auth headers, or unbounded provider payloads.

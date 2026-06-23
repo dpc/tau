@@ -30,9 +30,12 @@ own typed state helpers on top of it and must keep path components safe and
 account-scoped.
 
 Email state includes approval queues, message-send logs, Google OAuth refresh
-tokens, and pending Google installed-app PKCE authorization records. Calendar
-state includes calendar approval queues, cached provider metadata such as ETags
-where needed, Google OAuth refresh tokens, and pending Google
+tokens, and pending Google installed-app PKCE authorization records. Outgoing
+approval denials are terminal tombstones under `approvals/outgoing/denied`;
+runtime approval paths must treat a denied id as higher priority than stale
+pending state if both records ever coexist after partial persistence failure.
+Calendar state includes calendar approval queues, cached provider metadata such
+as ETags where needed, Google OAuth refresh tokens, and pending Google
 device-authorization records.
 
 Provider credentials, refresh tokens, access tokens, device codes, PKCE

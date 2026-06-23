@@ -169,7 +169,7 @@ Advice:
 - Avoid broad patterns for domains where many people can send mail.
 - Remember incoming allow only controls read exposure; outgoing allow controls delivery without approval.
 - `reply_to` is also checked for outgoing sends.
-- Bcc is checked for policy and visible in `/email out open`, but hidden from model-facing send status.
+- Bcc is checked for policy and visible to the user while a draft is pending via `/email out open <id>`, but hidden from model-facing send status and denied status output.
 
 
 ## Approval workflow
@@ -195,7 +195,8 @@ Outgoing sends:
 
 - `email_send` sends immediately only when every `to`, `cc`, `bcc`, and `reply_to` address is allowed.
 - Otherwise it queues the full draft and returns `approval_required`.
-- Use `/email out list`, `/email out open <id>`, and `/email out approve <id> [id...]` to review and send.
+- Use `/email out list`, `/email out open <id>`, `/email out approve <id> [id...]`, and `/email out deny <id> [id...]` to review, send, or reject.
+- Denied outgoing approval ids leave the pending queue and cannot later be approved or sent.
 - If `email_send` returns `approval_required`, the agent should not call `email_send` again for the same draft.
 
 Audit log:
