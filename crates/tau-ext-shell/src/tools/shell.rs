@@ -888,331 +888,467 @@ fn append_guaranteed_output_truncated_marker(output: &mut String) {
     output.push_str(USER_OUTPUT_TRUNCATED_MARKER);
 }
 
-/// Wait for a child process with a timeout, preserving bounded tail output.
-///
-/// On Unix the shell tool must not wait for stdout/stderr EOF: background or
-/// detached descendants can inherit those pipe write ends long after the
-/// foreground shell exits or is killed. The main thread therefore polls
-/// nonblocking pipes and an internal child-exit wake pipe together, then
-/// returns after foreground exit or timeout with only a brief nonblocking
-/// drain.
 #[cfg(unix)]
-fn wait_with_timeout(
-    mut child: std::process::Child,
-    timeout: std::time::Duration,
-    cancel_rx: Option<mpsc::Receiver<()>>,
-) -> WaitResult {
-    use std::io::Read;
-    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, Ordering};
+const SHELL_WAIT_READ_CHUNK_BYTES: usize = 8192;
+#[cfg(unix)]
+const SHELL_WAIT_DRAIN_AFTER_DONE: std::time::Duration = std::time::Duration::from_millis(50);
+
+#[cfg(unix)]
+fn shell_wait_set_nonblocking(fd: std::os::fd::RawFd) {
+    #[allow(unsafe_code)]
+    unsafe {
+        let flags = libc::fcntl(fd, libc::F_GETFL);
+        if 0 <= flags {
+            let _ = libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
+        }
+    }
+}
+
+#[cfg(unix)]
+fn shell_wait_read_available<R: std::io::Read>(
+    pipe: &mut Option<R>,
+    stream: OutputStream,
+    capture: &mut CapturedOutput,
+) {
+    let Some(pipe_ref) = pipe.as_mut() else {
+        return;
+    };
+
+    let mut close_pipe = false;
+    let mut buf = [0u8; SHELL_WAIT_READ_CHUNK_BYTES];
+    loop {
+        match pipe_ref.read(&mut buf) {
+            Ok(0) => {
+                close_pipe = true;
+                break;
+            }
+            Ok(n) => capture.push_bytes(stream, &buf[..n]),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+            Err(_) => {
+                close_pipe = true;
+                break;
+            }
+        }
+    }
+    if close_pipe {
+        *pipe = None;
+    }
+}
+
+#[cfg(unix)]
+fn shell_wait_collect_status(
+    status_rx: &mpsc::Receiver<Option<std::process::ExitStatus>>,
+    status: &mut Option<std::process::ExitStatus>,
+) -> bool {
     use std::sync::mpsc::TryRecvError;
 
-    const READ_CHUNK_BYTES: usize = 8192;
-    const DRAIN_AFTER_DONE: std::time::Duration = std::time::Duration::from_millis(50);
-
-    fn set_nonblocking(fd: RawFd) {
-        #[allow(unsafe_code)]
-        unsafe {
-            let flags = libc::fcntl(fd, libc::F_GETFL);
-            if 0 <= flags {
-                let _ = libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
-            }
-        }
+    if status.is_some() {
+        return true;
     }
-
-    fn read_available<R: Read>(
-        pipe: &mut Option<R>,
-        stream: OutputStream,
-        capture: &mut CapturedOutput,
-    ) {
-        let Some(pipe_ref) = pipe.as_mut() else {
-            return;
-        };
-
-        let mut close_pipe = false;
-        let mut buf = [0u8; READ_CHUNK_BYTES];
-        loop {
-            match pipe_ref.read(&mut buf) {
-                Ok(0) => {
-                    close_pipe = true;
-                    break;
-                }
-                Ok(n) => capture.push_bytes(stream, &buf[..n]),
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
-                Err(_) => {
-                    close_pipe = true;
-                    break;
-                }
-            }
+    match status_rx.try_recv() {
+        Ok(received) => {
+            *status = received;
+            true
         }
-        if close_pipe {
-            *pipe = None;
-        }
+        Err(TryRecvError::Empty) => false,
+        Err(TryRecvError::Disconnected) => true,
     }
+}
 
-    fn collect_status(
-        status_rx: &mpsc::Receiver<Option<std::process::ExitStatus>>,
-        status: &mut Option<std::process::ExitStatus>,
-    ) -> bool {
-        if status.is_some() {
-            return true;
-        }
-        match status_rx.try_recv() {
-            Ok(received) => {
-                *status = received;
-                true
-            }
-            Err(TryRecvError::Empty) => false,
-            Err(TryRecvError::Disconnected) => true,
-        }
+#[cfg(unix)]
+fn shell_wait_poll_timeout_ms(deadline: std::time::Instant) -> i32 {
+    let now = std::time::Instant::now();
+    if deadline <= now {
+        return 0;
     }
+    let remaining = deadline - now;
+    i32::try_from(remaining.as_millis()).unwrap_or(i32::MAX)
+}
 
-    fn poll_timeout_ms(deadline: std::time::Instant) -> i32 {
-        let now = std::time::Instant::now();
-        if deadline <= now {
-            return 0;
-        }
-        let remaining = deadline - now;
-        i32::try_from(remaining.as_millis()).unwrap_or(i32::MAX)
-    }
+#[cfg(unix)]
+fn shell_wait_dup_owned_fd(fd: &std::os::fd::OwnedFd) -> Option<std::os::fd::OwnedFd> {
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 
-    fn drain_wake_fd(wake_read: &OwnedFd) {
-        let mut buf = [0u8; 16];
-        loop {
-            #[allow(unsafe_code)]
-            let n = unsafe {
-                libc::read(
-                    wake_read.as_raw_fd(),
-                    buf.as_mut_ptr().cast::<libc::c_void>(),
-                    buf.len(),
-                )
-            };
-            if 0 < n {
-                continue;
-            }
-            break;
-        }
-    }
-
-    let pid = child.id();
-    debug!(
-        pid,
-        timeout_ms = timeout.as_millis(),
-        cancel_enabled = cancel_rx.is_some(),
-        "waiting for shell child"
-    );
-    let mut stdout_pipe = child.stdout.take();
-    let mut stderr_pipe = child.stderr.take();
-    if let Some(pipe) = stdout_pipe.as_ref() {
-        set_nonblocking(pipe.as_raw_fd());
-    }
-    if let Some(pipe) = stderr_pipe.as_ref() {
-        set_nonblocking(pipe.as_raw_fd());
-    }
-
-    let mut wake_fds = [0; 2];
     #[allow(unsafe_code)]
-    let wake_pipe_ok = unsafe { libc::pipe(wake_fds.as_mut_ptr()) == 0 };
-    let (wake_read, wake_write) = if wake_pipe_ok {
-        #[allow(unsafe_code)]
-        unsafe {
-            (
-                Some(OwnedFd::from_raw_fd(wake_fds[0])),
-                Some(OwnedFd::from_raw_fd(wake_fds[1])),
-            )
-        }
-    } else {
-        (None, None)
-    };
-    if let Some(wake_read) = wake_read.as_ref() {
-        set_nonblocking(wake_read.as_raw_fd());
+    let duplicated = unsafe { libc::dup(fd.as_raw_fd()) };
+    if duplicated < 0 {
+        return None;
     }
-    let cancel_wake_write = wake_write.as_ref().and_then(|wake_write| {
-        #[allow(unsafe_code)]
-        let fd = unsafe { libc::dup(wake_write.as_raw_fd()) };
-        if 0 <= fd {
-            #[allow(unsafe_code)]
-            unsafe {
-                Some(OwnedFd::from_raw_fd(fd))
-            }
-        } else {
-            None
-        }
-    });
-    let waiter_wake_read = wake_read.as_ref().and_then(|wake_read| {
-        #[allow(unsafe_code)]
-        let fd = unsafe { libc::dup(wake_read.as_raw_fd()) };
-        if 0 <= fd {
-            #[allow(unsafe_code)]
-            unsafe {
-                Some(OwnedFd::from_raw_fd(fd))
-            }
-        } else {
-            None
-        }
-    });
-
-    let cancelled_by_request = Arc::new(AtomicBool::new(false));
-    if let Some(cancel_rx) = cancel_rx {
-        let cancelled_by_request = Arc::clone(&cancelled_by_request);
-        std::thread::spawn(move || {
-            if cancel_rx.recv().is_ok() {
-                debug!(pid, "shell cancellation signal received");
-                cancelled_by_request.store(true, Ordering::SeqCst);
-                if let Some(cancel_wake_write) = cancel_wake_write {
-                    trace!(pid, "waking shell wait loop after cancellation");
-                    let byte = [1u8];
-                    #[allow(unsafe_code)]
-                    unsafe {
-                        let _ = libc::write(
-                            cancel_wake_write.as_raw_fd(),
-                            byte.as_ptr().cast::<libc::c_void>(),
-                            byte.len(),
-                        );
-                    }
-                }
-            }
-        });
+    #[allow(unsafe_code)]
+    unsafe {
+        Some(OwnedFd::from_raw_fd(duplicated))
     }
+}
 
-    let (status_tx, status_rx) = mpsc::channel::<Option<std::process::ExitStatus>>();
-    let _waiter = std::thread::spawn(move || {
-        let _wake_read_guard = waiter_wake_read;
-        let status = child.wait().ok();
-        debug!(pid, status = ?status, "shell child waiter finished");
-        let _ = status_tx.send(status);
-        if let Some(wake_write) = wake_write {
-            let byte = [1u8];
-            #[allow(unsafe_code)]
-            unsafe {
-                let _ = libc::write(
-                    wake_write.as_raw_fd(),
-                    byte.as_ptr().cast::<libc::c_void>(),
-                    byte.len(),
-                );
-            }
-        }
-    });
+#[cfg(unix)]
+fn shell_wait_write_wake_byte(fd: &std::os::fd::OwnedFd) {
+    use std::os::fd::AsRawFd;
 
-    let mut output = CapturedOutput::default();
-    let mut status = None;
-    let mut timed_out = false;
-    let mut cancelled = false;
-    let deadline = std::time::Instant::now() + timeout;
+    let byte = [1u8];
+    #[allow(unsafe_code)]
+    unsafe {
+        let _ = libc::write(
+            fd.as_raw_fd(),
+            byte.as_ptr().cast::<libc::c_void>(),
+            byte.len(),
+        );
+    }
+}
 
+#[cfg(unix)]
+fn shell_wait_drain_wake_fd(wake_read: &std::os::fd::OwnedFd) {
+    use std::os::fd::AsRawFd;
+
+    let mut buf = [0u8; 16];
     loop {
-        read_available(&mut stdout_pipe, OutputStream::Stdout, &mut output);
-        read_available(&mut stderr_pipe, OutputStream::Stderr, &mut output);
-        if collect_status(&status_rx, &mut status) {
-            debug!(pid, status = ?status, "shell wait loop observed child status");
-            break;
+        #[allow(unsafe_code)]
+        let n = unsafe {
+            libc::read(
+                wake_read.as_raw_fd(),
+                buf.as_mut_ptr().cast::<libc::c_void>(),
+                buf.len(),
+            )
+        };
+        if 0 < n {
+            continue;
         }
-        if cancelled_by_request.load(Ordering::SeqCst) {
-            cancelled = true;
-            debug!(
-                pid,
-                "shell wait loop observed cancellation; killing process group"
-            );
-            kill_process_group_by_pid(pid);
-            break;
+        break;
+    }
+}
+
+#[cfg(unix)]
+fn shell_wait_poll_fds_until(fds: &mut [libc::pollfd], deadline: std::time::Instant) {
+    #[allow(unsafe_code)]
+    unsafe {
+        let _ = libc::poll(
+            fds.as_mut_ptr(),
+            fds.len() as libc::nfds_t,
+            shell_wait_poll_timeout_ms(deadline),
+        );
+    }
+}
+
+#[cfg(unix)]
+struct ShellWaitWakePipe {
+    /// Read side observed by the foreground polling loop.
+    read: std::os::fd::OwnedFd,
+    /// Write side used by the child waiter thread.
+    write: std::os::fd::OwnedFd,
+}
+
+#[cfg(unix)]
+impl ShellWaitWakePipe {
+    fn open() -> Option<Self> {
+        use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+
+        let mut wake_fds = [0; 2];
+        #[allow(unsafe_code)]
+        let wake_pipe_ok = unsafe { libc::pipe(wake_fds.as_mut_ptr()) == 0 };
+        if !wake_pipe_ok {
+            return None;
         }
 
-        let now = std::time::Instant::now();
-        if deadline <= now {
-            timed_out = true;
-            debug!(pid, "shell wait loop timed out; killing process group");
-            kill_process_group_by_pid(pid);
-            break;
-        }
+        #[allow(unsafe_code)]
+        let (read, write) = unsafe {
+            (
+                OwnedFd::from_raw_fd(wake_fds[0]),
+                OwnedFd::from_raw_fd(wake_fds[1]),
+            )
+        };
+        shell_wait_set_nonblocking(read.as_raw_fd());
+        Some(Self { read, write })
+    }
+}
 
-        let mut poll_fds = Vec::new();
+#[cfg(unix)]
+enum ShellWaitPoll {
+    Continue,
+    Finished,
+    Cancelled,
+    TimedOut,
+}
+
+#[cfg(unix)]
+struct ShellWaitState {
+    /// Child process id used as process-group id for termination.
+    pid: u32,
+    /// Nonblocking stdout pipe owned by the foreground wait loop.
+    stdout_pipe: Option<std::process::ChildStdout>,
+    /// Nonblocking stderr pipe owned by the foreground wait loop.
+    stderr_pipe: Option<std::process::ChildStderr>,
+    /// Wake fd signalled when the child exits or cancellation arrives.
+    wake_read: Option<std::os::fd::OwnedFd>,
+    /// Receiver for the child waiter thread's exit status.
+    status_rx: mpsc::Receiver<Option<std::process::ExitStatus>>,
+    /// Cross-thread cancellation flag set by the cancellation waiter.
+    cancelled_by_request: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+#[cfg(unix)]
+impl ShellWaitState {
+    fn start(mut child: std::process::Child, cancel_rx: Option<mpsc::Receiver<()>>) -> Self {
+        use std::os::fd::AsRawFd;
+        use std::sync::Arc;
+        use std::sync::atomic::AtomicBool;
+
+        let pid = child.id();
+        debug!(
+            pid,
+            cancel_enabled = cancel_rx.is_some(),
+            "starting shell wait state"
+        );
+
+        let stdout_pipe = child.stdout.take();
+        let stderr_pipe = child.stderr.take();
         if let Some(pipe) = stdout_pipe.as_ref() {
-            poll_fds.push(libc::pollfd {
-                fd: pipe.as_raw_fd(),
-                events: libc::POLLIN | libc::POLLHUP | libc::POLLERR,
-                revents: 0,
-            });
+            shell_wait_set_nonblocking(pipe.as_raw_fd());
         }
         if let Some(pipe) = stderr_pipe.as_ref() {
+            shell_wait_set_nonblocking(pipe.as_raw_fd());
+        }
+
+        let wake_pipe = ShellWaitWakePipe::open();
+        let cancel_wake_write = wake_pipe
+            .as_ref()
+            .and_then(|wake_pipe| shell_wait_dup_owned_fd(&wake_pipe.write));
+        let waiter_wake_read = wake_pipe
+            .as_ref()
+            .and_then(|wake_pipe| shell_wait_dup_owned_fd(&wake_pipe.read));
+        let cancelled_by_request = Arc::new(AtomicBool::new(false));
+        spawn_shell_cancel_waiter(
+            pid,
+            cancel_rx,
+            Arc::clone(&cancelled_by_request),
+            cancel_wake_write,
+        );
+
+        let (wake_read, wake_write) = wake_pipe
+            .map(|wake_pipe| (Some(wake_pipe.read), Some(wake_pipe.write)))
+            .unwrap_or((None, None));
+        let status_rx = spawn_shell_child_waiter(pid, child, wake_write, waiter_wake_read);
+        Self {
+            pid,
+            stdout_pipe,
+            stderr_pipe,
+            wake_read,
+            status_rx,
+            cancelled_by_request,
+        }
+    }
+
+    fn wait(mut self, timeout: std::time::Duration) -> WaitResult {
+        debug!(
+            pid = self.pid,
+            timeout_ms = timeout.as_millis(),
+            "waiting for shell child"
+        );
+        let mut output = CapturedOutput::default();
+        let mut status = None;
+        let mut timed_out = false;
+        let mut cancelled = false;
+        let deadline = std::time::Instant::now() + timeout;
+
+        loop {
+            match self.poll_until_terminal(&mut output, &mut status, deadline) {
+                ShellWaitPoll::Continue => {}
+                ShellWaitPoll::Finished => break,
+                ShellWaitPoll::Cancelled => {
+                    cancelled = true;
+                    break;
+                }
+                ShellWaitPoll::TimedOut => {
+                    timed_out = true;
+                    break;
+                }
+            }
+        }
+
+        self.drain_after_terminal(&mut output, &mut status);
+        output.finish();
+        debug!(pid = self.pid, status = ?status, timed_out, cancelled, "shell wait completed");
+        wait_result_from_parts(status, timed_out, cancelled, output)
+    }
+
+    fn poll_until_terminal(
+        &mut self,
+        output: &mut CapturedOutput,
+        status: &mut Option<std::process::ExitStatus>,
+        deadline: std::time::Instant,
+    ) -> ShellWaitPoll {
+        use std::sync::atomic::Ordering;
+
+        self.read_available_output(output);
+        if shell_wait_collect_status(&self.status_rx, status) {
+            debug!(pid = self.pid, status = ?status, "shell wait loop observed child status");
+            return ShellWaitPoll::Finished;
+        }
+        if self.cancelled_by_request.load(Ordering::SeqCst) {
+            debug!(
+                pid = self.pid,
+                "shell wait loop observed cancellation; killing process group"
+            );
+            kill_process_group_by_pid(self.pid);
+            return ShellWaitPoll::Cancelled;
+        }
+
+        let now = std::time::Instant::now();
+        if deadline <= now {
+            debug!(
+                pid = self.pid,
+                "shell wait loop timed out; killing process group"
+            );
+            kill_process_group_by_pid(self.pid);
+            return ShellWaitPoll::TimedOut;
+        }
+
+        self.wait_for_io_or_wake(deadline, now);
+        ShellWaitPoll::Continue
+    }
+
+    fn drain_after_terminal(
+        &mut self,
+        output: &mut CapturedOutput,
+        status: &mut Option<std::process::ExitStatus>,
+    ) {
+        let drain_deadline = std::time::Instant::now() + SHELL_WAIT_DRAIN_AFTER_DONE;
+        loop {
+            self.read_available_output(output);
+            let _ = shell_wait_collect_status(&self.status_rx, status);
+            if self.stdout_pipe.is_none() && self.stderr_pipe.is_none() {
+                trace!(pid = self.pid, "shell output drain completed");
+                break;
+            }
+            if drain_deadline <= std::time::Instant::now() {
+                trace!(pid = self.pid, "shell output drain deadline reached");
+                break;
+            }
+
+            let mut poll_fds = self.output_poll_fds();
+            if poll_fds.is_empty() {
+                break;
+            }
+            shell_wait_poll_fds_until(&mut poll_fds, drain_deadline);
+        }
+    }
+
+    fn read_available_output(&mut self, output: &mut CapturedOutput) {
+        shell_wait_read_available(&mut self.stdout_pipe, OutputStream::Stdout, output);
+        shell_wait_read_available(&mut self.stderr_pipe, OutputStream::Stderr, output);
+    }
+
+    fn wait_for_io_or_wake(&self, deadline: std::time::Instant, now: std::time::Instant) {
+        let mut poll_fds = self.output_and_wake_poll_fds();
+        if poll_fds.is_empty() {
+            let sleep_for = (deadline - now).min(std::time::Duration::from_millis(25));
+            std::thread::sleep(sleep_for);
+            return;
+        }
+
+        shell_wait_poll_fds_until(&mut poll_fds, deadline);
+        if let Some(wake_read) = self.wake_read.as_ref() {
+            shell_wait_drain_wake_fd(wake_read);
+        }
+    }
+
+    fn output_poll_fds(&self) -> Vec<libc::pollfd> {
+        use std::os::fd::AsRawFd;
+
+        let mut poll_fds = Vec::new();
+        if let Some(pipe) = self.stdout_pipe.as_ref() {
             poll_fds.push(libc::pollfd {
                 fd: pipe.as_raw_fd(),
                 events: libc::POLLIN | libc::POLLHUP | libc::POLLERR,
                 revents: 0,
             });
         }
-        if let Some(wake_read) = wake_read.as_ref() {
+        if let Some(pipe) = self.stderr_pipe.as_ref() {
+            poll_fds.push(libc::pollfd {
+                fd: pipe.as_raw_fd(),
+                events: libc::POLLIN | libc::POLLHUP | libc::POLLERR,
+                revents: 0,
+            });
+        }
+        poll_fds
+    }
+
+    fn output_and_wake_poll_fds(&self) -> Vec<libc::pollfd> {
+        use std::os::fd::AsRawFd;
+
+        let mut poll_fds = self.output_poll_fds();
+        if let Some(wake_read) = self.wake_read.as_ref() {
             poll_fds.push(libc::pollfd {
                 fd: wake_read.as_raw_fd(),
                 events: libc::POLLIN | libc::POLLHUP | libc::POLLERR,
                 revents: 0,
             });
         }
-
-        if poll_fds.is_empty() {
-            let sleep_for = (deadline - now).min(std::time::Duration::from_millis(25));
-            std::thread::sleep(sleep_for);
-            continue;
-        }
-
-        #[allow(unsafe_code)]
-        unsafe {
-            let _ = libc::poll(
-                poll_fds.as_mut_ptr(),
-                poll_fds.len() as libc::nfds_t,
-                poll_timeout_ms(deadline),
-            );
-        }
-        if let Some(wake_read) = wake_read.as_ref() {
-            drain_wake_fd(wake_read);
-        }
+        poll_fds
     }
+}
 
-    let drain_deadline = std::time::Instant::now() + DRAIN_AFTER_DONE;
-    loop {
-        read_available(&mut stdout_pipe, OutputStream::Stdout, &mut output);
-        read_available(&mut stderr_pipe, OutputStream::Stderr, &mut output);
-        let _ = collect_status(&status_rx, &mut status);
-        if stdout_pipe.is_none() && stderr_pipe.is_none() {
-            trace!(pid, "shell output drain completed");
-            break;
-        }
-        if drain_deadline <= std::time::Instant::now() {
-            trace!(pid, "shell output drain deadline reached");
-            break;
-        }
+#[cfg(unix)]
+fn spawn_shell_cancel_waiter(
+    pid: u32,
+    cancel_rx: Option<mpsc::Receiver<()>>,
+    cancelled_by_request: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    cancel_wake_write: Option<std::os::fd::OwnedFd>,
+) {
+    use std::sync::Arc;
+    use std::sync::atomic::Ordering;
 
-        let mut poll_fds = Vec::new();
-        if let Some(pipe) = stdout_pipe.as_ref() {
-            poll_fds.push(libc::pollfd {
-                fd: pipe.as_raw_fd(),
-                events: libc::POLLIN | libc::POLLHUP | libc::POLLERR,
-                revents: 0,
-            });
+    let Some(cancel_rx) = cancel_rx else {
+        return;
+    };
+    let cancelled_by_request = Arc::clone(&cancelled_by_request);
+    std::thread::spawn(move || {
+        if cancel_rx.recv().is_ok() {
+            debug!(pid, "shell cancellation signal received");
+            cancelled_by_request.store(true, Ordering::SeqCst);
+            if let Some(cancel_wake_write) = cancel_wake_write {
+                trace!(pid, "waking shell wait loop after cancellation");
+                shell_wait_write_wake_byte(&cancel_wake_write);
+            }
         }
-        if let Some(pipe) = stderr_pipe.as_ref() {
-            poll_fds.push(libc::pollfd {
-                fd: pipe.as_raw_fd(),
-                events: libc::POLLIN | libc::POLLHUP | libc::POLLERR,
-                revents: 0,
-            });
-        }
-        if poll_fds.is_empty() {
-            break;
-        }
-        #[allow(unsafe_code)]
-        unsafe {
-            let _ = libc::poll(
-                poll_fds.as_mut_ptr(),
-                poll_fds.len() as libc::nfds_t,
-                poll_timeout_ms(drain_deadline),
-            );
-        }
-    }
+    });
+}
 
-    output.finish();
-    debug!(pid, status = ?status, timed_out, cancelled, "shell wait completed");
-    wait_result_from_parts(status, timed_out, cancelled, output)
+#[cfg(unix)]
+fn spawn_shell_child_waiter(
+    pid: u32,
+    mut child: std::process::Child,
+    wake_write: Option<std::os::fd::OwnedFd>,
+    waiter_wake_read: Option<std::os::fd::OwnedFd>,
+) -> mpsc::Receiver<Option<std::process::ExitStatus>> {
+    let (status_tx, status_rx) = mpsc::channel::<Option<std::process::ExitStatus>>();
+    let _waiter = std::thread::spawn(move || {
+        // Keep a duplicate read end alive until the waiter publishes status and
+        // writes the final wake byte. Otherwise a foreground loop that returns
+        // early after timeout/cancellation could drop the last reader first,
+        // turning this best-effort wake into an avoidable no-reader write.
+        let _wake_read_guard = waiter_wake_read;
+        let status = child.wait().ok();
+        debug!(pid, status = ?status, "shell child waiter finished");
+        let _ = status_tx.send(status);
+        if let Some(wake_write) = wake_write {
+            shell_wait_write_wake_byte(&wake_write);
+        }
+    });
+    status_rx
+}
+
+#[cfg(unix)]
+fn wait_with_timeout(
+    child: std::process::Child,
+    timeout: std::time::Duration,
+    cancel_rx: Option<mpsc::Receiver<()>>,
+) -> WaitResult {
+    // On Unix the shell tool must not wait for stdout/stderr EOF: background
+    // or detached descendants can inherit those pipe write ends long after the
+    // foreground shell exits or is killed. The wait state therefore polls
+    // nonblocking pipes and an internal child-exit wake pipe together, then
+    // returns after foreground exit or timeout with only a brief nonblocking
+    // drain.
+    ShellWaitState::start(child, cancel_rx).wait(timeout)
 }
 
 /// Wait for a child process with a timeout, preserving output even when

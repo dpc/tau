@@ -21,6 +21,18 @@ For shell execution, cover both directory-lock-disabled display (`mode == ""`)
 and directory-lock-enabled inferred modes (`ro` / `rw`).
 
 
+## Shell process lifecycle coverage
+
+Shell execution tests should cover foreground exit, timeout, cancellation,
+signal termination, bounded output capture, and output truncation metadata.
+Unix-specific process-group behavior should include regression tests for
+background or detached descendants that keep stdout/stderr pipes open after the
+foreground shell exits or is killed; the shell tool must return after foreground
+completion, timeout, or cancellation rather than waiting for pipe EOF. Tests that
+depend on Unix-only helpers such as `setsid` should be `#[cfg(unix)]` and may
+skip at runtime when the host lacks the required command.
+
+
 ## Directory-lock coverage
 
 Directory-lock tests should cover manual lock lifecycle, automatic lock
