@@ -593,6 +593,117 @@ pub(crate) struct PendingTool {
     pub(crate) tool_type: ToolType,
 }
 
+#[derive(Default)]
+struct NormalizedFinishedToolCalls {
+    /// Tool-call validation failures keyed by the normalized call id.
+    invalid_errors: HashMap<ToolCallId, String>,
+    /// Provider calls paired with their foreground/background support policy.
+    calls: Vec<NormalizedFinishedToolCall>,
+}
+
+struct NormalizedFinishedToolCall {
+    /// Normalized provider tool call.
+    call: AgentToolCall,
+    /// Foreground/background support policy for this call.
+    background_support: BackgroundSupport,
+}
+
+struct FinishedToolCallNormalization {
+    /// Prompt that produced the tool calls being normalized.
+    agent_prompt_id: AgentPromptId,
+    /// Stop reason reported on the provider response.
+    stop_reason: ProviderStopReason,
+    /// Call ids already seen within this provider response.
+    seen_tool_call_ids: HashSet<ToolCallId>,
+    /// Call ids unavailable because prior or synthetic calls own them.
+    reserved_tool_call_ids: HashSet<ToolCallId>,
+    /// Validation failures keyed by normalized call id.
+    invalid_errors: HashMap<ToolCallId, String>,
+    /// Whether this side conversation is not tool-backed.
+    is_non_tool_ext_query: bool,
+    /// Whether tool calls appeared with a non-tool stop reason.
+    tool_calls_with_non_tool_stop: bool,
+}
+
+struct FinishedSideConversation<'a> {
+    /// Response whose side-conversation originator is being processed.
+    response: &'a ProviderResponseFinished,
+    /// Whether this response requested tool calls after stop reconciliation.
+    requested_tool_calls: bool,
+    /// Whether the response belongs to a non-tool extension query.
+    is_non_tool_ext_query: bool,
+    /// Assistant text extracted before publication.
+    assistant_text: Option<&'a str>,
+    /// Normalized tool-call count for result error text.
+    tool_call_count: usize,
+}
+
+impl FinishedToolCallNormalization {
+    fn new(
+        response: &ProviderResponseFinished,
+        reserved_tool_call_ids: HashSet<ToolCallId>,
+        is_non_tool_ext_query: bool,
+        tool_calls_with_non_tool_stop: bool,
+    ) -> Self {
+        Self {
+            agent_prompt_id: response.agent_prompt_id.clone(),
+            stop_reason: response.stop_reason,
+            seen_tool_call_ids: HashSet::new(),
+            reserved_tool_call_ids,
+            invalid_errors: HashMap::new(),
+            is_non_tool_ext_query,
+            tool_calls_with_non_tool_stop,
+        }
+    }
+
+    fn normalize_call_id(&mut self, index: usize, call: &mut AgentToolCall) {
+        if let Some(message) = self.validate_and_reserve_finished_tool_call_id(call) {
+            call.id = unique_synthetic_tool_call_id(
+                &mut self.reserved_tool_call_ids,
+                &self.agent_prompt_id,
+                index,
+            );
+            self.seen_tool_call_ids.insert(call.id.clone());
+            self.invalid_errors.insert(call.id.clone(), message);
+        }
+    }
+
+    fn validate_and_reserve_finished_tool_call_id(
+        &mut self,
+        call: &AgentToolCall,
+    ) -> Option<String> {
+        if call.id.as_str().is_empty() {
+            Some(format!(
+                "provider emitted tool call `{}` with an empty call_id; refusing to execute it",
+                call.name
+            ))
+        } else if !self.seen_tool_call_ids.insert(call.id.clone()) {
+            Some(format!(
+                "provider emitted duplicate tool call_id `{}` for tool `{}`; refusing to execute the duplicate",
+                call.id, call.name
+            ))
+        } else if self.reserved_tool_call_ids.contains(&call.id) {
+            Some(format!(
+                "provider reused prior tool call_id `{}` for tool `{}`; refusing to execute it",
+                call.id, call.name
+            ))
+        } else if self.is_non_tool_ext_query {
+            Some(format!(
+                "non-tool extension query attempted to call tool `{}`; refusing to execute it",
+                call.name
+            ))
+        } else if self.tool_calls_with_non_tool_stop {
+            Some(format!(
+                "provider emitted tool call `{}` with stop_reason {:?}; refusing to execute it",
+                call.name, self.stop_reason
+            ))
+        } else {
+            self.reserved_tool_call_ids.insert(call.id.clone());
+            None
+        }
+    }
+}
+
 fn tags_match_any(
     tags: &[tau_proto::ToolTag],
     patterns: &[tau_config::settings::ToolTagPattern],
@@ -10272,17 +10383,8 @@ impl Harness {
         source: Option<&str>,
         mut response: ProviderResponseFinished,
     ) -> Result<(), HarnessError> {
-        if response.stop_reason == ProviderStopReason::RepetitionDetected
-            && !response.output_items.is_empty()
-        {
-            self.emit_info(&format!(
-                "provider response {} used repetition_detected with output items; clearing malformed output",
-                response.agent_prompt_id
-            ));
-            response.output_items.clear();
-        }
+        self.clear_malformed_repetition_output(&mut response);
         let mut tool_calls = tool_calls_from_output_items(&response.output_items);
-        let mut requested_tool_calls = response_requests_tool_calls(&response);
         let assistant_text = assistant_text_from_output_items(&response.output_items);
         let input_tokens = response
             .usage
@@ -10296,14 +10398,10 @@ impl Harness {
             .usage
             .as_ref()
             .map(|usage| usage.response_received_tokens);
-        if self.canceled_prompts.remove(&response.agent_prompt_id) {
-            self.prompt_agents.remove(response.agent_prompt_id.as_str());
-            self.pending_provider_prompts
-                .remove(&response.agent_prompt_id);
-            self.prompt_models.remove(&response.agent_prompt_id);
-            self.clear_prompt_tool_snapshot(&response.agent_prompt_id);
+        if self.discard_finished_response_if_canceled(&response.agent_prompt_id) {
             return Ok(());
         }
+
         let response_cid = self.agent_id_for_prompt(&response.agent_prompt_id);
         let response_contains_compaction = response
             .output_items
@@ -10312,65 +10410,196 @@ impl Harness {
         let compaction_original_input_tokens = response_contains_compaction
             .then(|| self.compaction_original_input_tokens_for_prompt(&response.agent_prompt_id))
             .flatten();
+        self.update_finished_response_context_usage(
+            response_cid.as_ref(),
+            &response.agent_prompt_id,
+            input_tokens,
+            cached_tokens,
+        );
+
+        let Some(cid) = response_cid else {
+            self.emit_duplicate_finished_response_notice(&response.agent_prompt_id);
+            return Ok(());
+        };
+        self.assign_finished_response_agent_id(&cid, &mut response);
+        if self.discard_finished_response_if_stale(&cid, &response) {
+            return Ok(());
+        }
+
+        self.attach_finished_response_usage(
+            &mut response,
+            input_tokens,
+            cached_tokens,
+            output_tokens,
+        );
+        if response_contains_compaction {
+            self.attach_finished_response_compaction_usage(
+                &mut response,
+                input_tokens,
+                compaction_original_input_tokens,
+            );
+        }
+
+        let (requested_tool_calls, tool_calls_with_non_tool_stop) =
+            self.reconcile_finished_response_tool_call_stop(&response, &tool_calls);
+        let is_non_tool_ext_query = self.is_non_tool_extension_query(&cid);
+        let mut normalized_tool_calls = NormalizedFinishedToolCalls::default();
+        if requested_tool_calls {
+            normalized_tool_calls = self.normalize_finished_response_tool_calls(
+                &mut response,
+                &mut tool_calls,
+                is_non_tool_ext_query,
+                tool_calls_with_non_tool_stop,
+            );
+        }
+
+        self.publish_finished_response_for_agent(&cid, source, &response);
+        if self.handle_finished_response_side_conversation(
+            &cid,
+            FinishedSideConversation {
+                response: &response,
+                requested_tool_calls,
+                is_non_tool_ext_query,
+                assistant_text: assistant_text.as_deref(),
+                tool_call_count: tool_calls.len(),
+            },
+            &mut normalized_tool_calls,
+        ) {
+            return Ok(());
+        }
+
+        if requested_tool_calls {
+            self.dispatch_finished_response_tool_calls(&cid, normalized_tool_calls)?;
+        } else {
+            self.complete_finished_response_without_tool_calls(
+                &cid,
+                &response,
+                assistant_text.as_deref(),
+            );
+        }
+
+        Ok(())
+    }
+
+    fn clear_malformed_repetition_output(&mut self, response: &mut ProviderResponseFinished) {
+        if response.stop_reason == ProviderStopReason::RepetitionDetected
+            && !response.output_items.is_empty()
+        {
+            self.emit_info(&format!(
+                "provider response {} used repetition_detected with output items; clearing malformed output",
+                response.agent_prompt_id
+            ));
+            response.output_items.clear();
+        }
+    }
+
+    fn discard_finished_response_if_canceled(&mut self, agent_prompt_id: &AgentPromptId) -> bool {
+        if self.canceled_prompts.remove(agent_prompt_id) {
+            self.discard_finished_response_prompt_tracking(agent_prompt_id);
+            return true;
+        }
+        false
+    }
+
+    fn discard_finished_response_prompt_tracking(&mut self, agent_prompt_id: &AgentPromptId) {
+        self.prompt_agents.remove(agent_prompt_id.as_str());
+        self.pending_provider_prompts.remove(agent_prompt_id);
+        self.prompt_models.remove(agent_prompt_id);
+        self.clear_prompt_tool_snapshot(agent_prompt_id);
+    }
+
+    fn clear_finished_response_prompt_route(&mut self, agent_prompt_id: &AgentPromptId) {
+        self.prompt_agents.remove(agent_prompt_id.as_str());
+        self.pending_provider_prompts.remove(agent_prompt_id);
+    }
+
+    fn update_finished_response_context_usage(
+        &mut self,
+        response_cid: Option<&AgentId>,
+        agent_prompt_id: &AgentPromptId,
+        input_tokens: Option<u64>,
+        cached_tokens: Option<u64>,
+    ) {
         // Per-conversation usage: separate from the global tracker
         // because side agents shouldn't clobber the user's
         // status bar, but the harness still needs their context %
         // to surface via `DelegateProgress`.
-        if let Some(cid) = response_cid.as_ref() {
-            let usage_model = self.prompt_models.get(&response.agent_prompt_id).cloned();
+        if let Some(cid) = response_cid {
+            let usage_model = self.prompt_models.get(agent_prompt_id).cloned();
             self.update_agent_context_usage(cid, usage_model.as_ref(), input_tokens, cached_tokens);
             self.emit_delegate_progress(cid);
         }
+    }
+
+    fn emit_duplicate_finished_response_notice(&mut self, agent_prompt_id: &AgentPromptId) {
         // Dedupe: under at-least-once delivery the agent may resend a
         // finished-response after a reconnect. The first delivery
         // removed the entry from `prompt_agents`; later ones
         // must be ignored rather than falling back to another
         // session route, which would silently misroute the duplicate.
-        let Some(cid) = response_cid else {
-            self.emit_info(&format!(
-                "discarding duplicate agent response for agent_prompt_id={}",
-                response.agent_prompt_id
-            ));
-            return Ok(());
-        };
+        self.emit_info(&format!(
+            "discarding duplicate agent response for agent_prompt_id={agent_prompt_id}"
+        ));
+    }
+
+    fn assign_finished_response_agent_id(
+        &self,
+        cid: &AgentId,
+        response: &mut ProviderResponseFinished,
+    ) {
         response.agent_id = crate::parse_agent_id(
-            self.target_agent_id_for_agent(&cid)
+            self.target_agent_id_for_agent(cid)
                 .expect("agent has durable id"),
         );
+    }
 
-        let stale_behind_newer_prompt = self.agents.get(&cid).is_some_and(|conv| {
+    fn discard_finished_response_if_stale(
+        &mut self,
+        cid: &AgentId,
+        response: &ProviderResponseFinished,
+    ) -> bool {
+        if !self.is_finished_response_stale(cid, &response.agent_prompt_id) {
+            return false;
+        }
+        if let Some((session_id, originator)) = self
+            .agents
+            .get(cid)
+            .map(|conv| (conv.session_id.clone(), conv.originator.clone()))
+        {
+            self.publish_prompt_terminated(
+                session_id,
+                response.agent_prompt_id.clone(),
+                AgentPromptTerminationReason::Stale,
+                originator,
+            );
+        }
+        self.emit_info(&format!(
+            "discarding stale agent response for agent_prompt_id={}",
+            response.agent_prompt_id
+        ));
+        self.discard_finished_response_prompt_tracking(&response.agent_prompt_id);
+        true
+    }
+
+    fn is_finished_response_stale(&self, cid: &AgentId, agent_prompt_id: &AgentPromptId) -> bool {
+        self.agents.get(cid).is_some_and(|conv| {
             conv.last_prompt_id
                 .as_ref()
-                .is_some_and(|last| last != &response.agent_prompt_id)
+                .is_some_and(|last| last != agent_prompt_id)
                 || conv
                     .in_flight_prompt
                     .as_ref()
-                    .is_some_and(|in_flight| in_flight != &response.agent_prompt_id)
-        });
-        if stale_behind_newer_prompt {
-            if let Some((session_id, originator)) = self
-                .agents
-                .get(&cid)
-                .map(|conv| (conv.session_id.clone(), conv.originator.clone()))
-            {
-                self.publish_prompt_terminated(
-                    session_id,
-                    response.agent_prompt_id.clone(),
-                    AgentPromptTerminationReason::Stale,
-                    originator,
-                );
-            }
-            self.emit_info(&format!(
-                "discarding stale agent response for agent_prompt_id={}",
-                response.agent_prompt_id
-            ));
-            self.prompt_agents.remove(response.agent_prompt_id.as_str());
-            self.pending_provider_prompts
-                .remove(&response.agent_prompt_id);
-            self.prompt_models.remove(&response.agent_prompt_id);
-            self.clear_prompt_tool_snapshot(&response.agent_prompt_id);
-            return Ok(());
-        }
+                    .is_some_and(|in_flight| in_flight != agent_prompt_id)
+        })
+    }
+
+    fn attach_finished_response_usage(
+        &mut self,
+        response: &mut ProviderResponseFinished,
+        input_tokens: Option<u64>,
+        cached_tokens: Option<u64>,
+        output_tokens: Option<u64>,
+    ) {
         // Save the model that ran this turn before the
         // `prompt_models` entry is consumed below — we'll need it
         // again to anchor the stateful-chain state, and re-reading
@@ -10395,22 +10624,36 @@ impl Harness {
                 stats: self.current_session_state.token_usage.clone(),
             });
         }
-        if response_contains_compaction {
-            response.compaction_original_input_tokens = input_tokens
-                .or(response.compaction_original_input_tokens)
-                .or(compaction_original_input_tokens);
-            response.compaction_compacted_input_tokens = response
-                .usage
-                .as_ref()
-                .and_then(|usage| {
-                    (0 < usage.response_received_tokens).then_some(usage.response_received_tokens)
-                })
-                .or_else(|| {
-                    latest_compaction_replay_window(&response.output_items)
-                        .and_then(estimate_compacted_input_tokens)
-                })
-                .or(response.compaction_compacted_input_tokens);
-        }
+    }
+
+    fn attach_finished_response_compaction_usage(
+        &self,
+        response: &mut ProviderResponseFinished,
+        input_tokens: Option<u64>,
+        compaction_original_input_tokens: Option<u64>,
+    ) {
+        response.compaction_original_input_tokens = input_tokens
+            .or(response.compaction_original_input_tokens)
+            .or(compaction_original_input_tokens);
+        response.compaction_compacted_input_tokens = response
+            .usage
+            .as_ref()
+            .and_then(|usage| {
+                (0 < usage.response_received_tokens).then_some(usage.response_received_tokens)
+            })
+            .or_else(|| {
+                latest_compaction_replay_window(&response.output_items)
+                    .and_then(estimate_compacted_input_tokens)
+            })
+            .or(response.compaction_compacted_input_tokens);
+    }
+
+    fn reconcile_finished_response_tool_call_stop(
+        &mut self,
+        response: &ProviderResponseFinished,
+        tool_calls: &[AgentToolCall],
+    ) -> (bool, bool) {
+        let mut requested_tool_calls = response_requests_tool_calls(response);
         if requested_tool_calls && tool_calls.is_empty() {
             self.emit_info(&format!(
                 "agent response {} reported tool calls but contained none; treating it as end_turn",
@@ -10422,92 +10665,100 @@ impl Harness {
         if tool_calls_with_non_tool_stop {
             requested_tool_calls = true;
         }
-        let is_non_tool_ext_query = self.agents.get(&cid).is_some_and(|conv| {
+        (requested_tool_calls, tool_calls_with_non_tool_stop)
+    }
+
+    fn is_non_tool_extension_query(&self, cid: &AgentId) -> bool {
+        self.agents.get(cid).is_some_and(|conv| {
             matches!(
                 conv.originator,
                 tau_proto::PromptOriginator::Extension { .. }
             ) && conv.parent_tool_call_id.is_none()
-        });
+        })
+    }
 
-        let mut invalid_tool_call_errors: HashMap<ToolCallId, String> = HashMap::new();
-        let mut normalized_calls: Vec<(AgentToolCall, BackgroundSupport)> = Vec::new();
-        if requested_tool_calls {
-            let mut seen_tool_call_ids = HashSet::new();
-            let mut reserved_tool_call_ids = self.known_tool_call_ids();
-            normalized_calls = tool_calls
-                .iter()
-                .enumerate()
-                .map(|(index, call)| {
-                    let mut call = call.clone();
-                    let invalid_message = if call.id.as_str().is_empty() {
-                        Some(format!(
-                            "provider emitted tool call `{}` with an empty call_id; refusing to execute it",
-                            call.name
-                        ))
-                    } else if !seen_tool_call_ids.insert(call.id.clone()) {
-                        Some(format!(
-                            "provider emitted duplicate tool call_id `{}` for tool `{}`; refusing to execute the duplicate",
-                            call.id, call.name
-                        ))
-                    } else if reserved_tool_call_ids.contains(&call.id) {
-                        Some(format!(
-                            "provider reused prior tool call_id `{}` for tool `{}`; refusing to execute it",
-                            call.id, call.name
-                        ))
-                    } else if is_non_tool_ext_query {
-                        Some(format!(
-                            "non-tool extension query attempted to call tool `{}`; refusing to execute it",
-                            call.name
-                        ))
-                    } else if tool_calls_with_non_tool_stop {
-                        Some(format!(
-                            "provider emitted tool call `{}` with stop_reason {:?}; refusing to execute it",
-                            call.name, response.stop_reason
-                        ))
-                    } else {
-                        reserved_tool_call_ids.insert(call.id.clone());
-                        None
-                    };
-                    if let Some(message) = invalid_message {
-                        call.id = unique_synthetic_tool_call_id(
-                            &mut reserved_tool_call_ids,
-                            &response.agent_prompt_id,
-                            index,
-                        );
-                        seen_tool_call_ids.insert(call.id.clone());
-                        invalid_tool_call_errors.insert(call.id.clone(), message);
-                    }
-                    self.prompt_tool_call_prompts
-                        .insert(call.id.clone(), response.agent_prompt_id.clone());
-                    let background_support = self.resolve_tool_background_support(call.name.as_str());
-                    (call, background_support)
-                })
-                .collect();
-            let mut normalized_calls_iter = normalized_calls.iter();
-            response.output_items = response
-                .output_items
-                .into_iter()
-                .map(|item| match item {
-                    ContextItem::ToolCall(_) => {
-                        let (call, _) = normalized_calls_iter
-                            .next()
-                            .expect("tool-call normalization count should match output items");
-                        ContextItem::ToolCall(ToolCallItem {
-                            call_id: call.id.clone(),
-                            name: call.name.clone(),
-                            tool_type: call.tool_type,
-                            arguments: call.arguments.clone(),
-                        })
-                    }
-                    item => item,
-                })
-                .collect();
-            tool_calls = normalized_calls
-                .iter()
-                .map(|(call, _)| call.clone())
-                .collect();
+    fn normalize_finished_response_tool_calls(
+        &mut self,
+        response: &mut ProviderResponseFinished,
+        tool_calls: &mut Vec<AgentToolCall>,
+        is_non_tool_ext_query: bool,
+        tool_calls_with_non_tool_stop: bool,
+    ) -> NormalizedFinishedToolCalls {
+        let mut normalization = FinishedToolCallNormalization::new(
+            response,
+            self.known_tool_call_ids(),
+            is_non_tool_ext_query,
+            tool_calls_with_non_tool_stop,
+        );
+        let calls = tool_calls
+            .iter()
+            .enumerate()
+            .map(|(index, call)| {
+                self.normalize_finished_response_tool_call(
+                    response,
+                    index,
+                    call,
+                    &mut normalization,
+                )
+            })
+            .collect::<Vec<_>>();
+        Self::rewrite_finished_response_tool_call_items(response, &calls);
+        *tool_calls = calls.iter().map(|entry| entry.call.clone()).collect();
+        NormalizedFinishedToolCalls {
+            invalid_errors: normalization.invalid_errors,
+            calls,
         }
+    }
 
+    fn normalize_finished_response_tool_call(
+        &mut self,
+        response: &ProviderResponseFinished,
+        index: usize,
+        call: &AgentToolCall,
+        normalization: &mut FinishedToolCallNormalization,
+    ) -> NormalizedFinishedToolCall {
+        let mut call = call.clone();
+        normalization.normalize_call_id(index, &mut call);
+        self.prompt_tool_call_prompts
+            .insert(call.id.clone(), response.agent_prompt_id.clone());
+        let background_support = self.resolve_tool_background_support(call.name.as_str());
+        NormalizedFinishedToolCall {
+            call,
+            background_support,
+        }
+    }
+
+    fn rewrite_finished_response_tool_call_items(
+        response: &mut ProviderResponseFinished,
+        normalized_calls: &[NormalizedFinishedToolCall],
+    ) {
+        let mut normalized_calls_iter = normalized_calls.iter();
+        response.output_items = response
+            .output_items
+            .drain(..)
+            .map(|item| match item {
+                ContextItem::ToolCall(_) => {
+                    let entry = normalized_calls_iter
+                        .next()
+                        .expect("tool-call normalization count should match output items");
+                    ContextItem::ToolCall(ToolCallItem {
+                        call_id: entry.call.id.clone(),
+                        name: entry.call.name.clone(),
+                        tool_type: entry.call.tool_type,
+                        arguments: entry.call.arguments.clone(),
+                    })
+                }
+                item => item,
+            })
+            .collect();
+    }
+
+    fn publish_finished_response_for_agent(
+        &mut self,
+        cid: &AgentId,
+        source: Option<&str>,
+        response: &ProviderResponseFinished,
+    ) {
         // Publish via the owning agent's branch — when text is
         // present the AgentTree fold appends an assistant response as a
         // child of `tree.head`, so an unsnapped publish would land on
@@ -10515,227 +10766,276 @@ impl Harness {
         // a sibling side conv's teardown touched another branch).
         // `publish_for_agent` snaps and updates `c.head`.
         self.publish_for_agent_from(
-            &cid,
+            cid,
             source,
             Event::ProviderResponseFinished(response.clone()),
         );
-        self.prompt_agents.remove(response.agent_prompt_id.as_str());
-        self.pending_provider_prompts
-            .remove(&response.agent_prompt_id);
-        if let Some(conv) = self.agents.get_mut(&cid) {
+        self.clear_finished_response_prompt_route(&response.agent_prompt_id);
+        if let Some(conv) = self.agents.get_mut(cid) {
             conv.in_flight_prompt = None;
         }
+    }
 
-        // Side-conversation handling: if this prompt originated from
-        // an extension via StartAgentRequest, route the final text back
-        // to the requesting extension as StartAgentResult and
-        // tear down the side agent. The harness routes tool
-        // calls per-agent, so scheduler-selected calls for this side
-        // agent have already been emitted into the bus and will
-        // complete normally even after teardown.
-        if let tau_proto::PromptOriginator::Extension {
-            ref name,
-            ref query_id,
-        } = response.originator
+    fn handle_finished_response_side_conversation(
+        &mut self,
+        cid: &AgentId,
+        side: FinishedSideConversation<'_>,
+        normalized_tool_calls: &mut NormalizedFinishedToolCalls,
+    ) -> bool {
+        let Some((name, query_id)) = Self::finished_response_side_originator(
+            &side.response.originator,
+            side.requested_tool_calls,
+            side.is_non_tool_ext_query,
+        ) else {
+            return false;
+        };
+
+        if !side.requested_tool_calls {
+            self.clear_prompt_tool_snapshot(&side.response.agent_prompt_id);
+        }
+        if side.requested_tool_calls {
+            self.reject_finished_side_conversation_tool_calls(cid, normalized_tool_calls);
+        }
+        if self.has_pending_message_received_prompt(cid) {
+            self.fold_pending_prompts_as_steered(cid);
+            self.dispatch_prompt_after_publish_idle(cid);
+            return true;
+        }
+
+        let error = Self::finished_side_conversation_error(
+            side.response,
+            side.is_non_tool_ext_query,
+            side.requested_tool_calls,
+            side.assistant_text,
+            side.tool_call_count,
+        );
+        let result = tau_proto::StartAgentResult {
+            query_id: query_id.clone(),
+            text: side.assistant_text.unwrap_or_default().to_owned(),
+            error,
+        };
+        self.deliver_finished_side_conversation_result(cid, &name, &query_id, result);
+        self.complete_finished_side_conversation(cid);
+        true
+    }
+
+    fn finished_response_side_originator(
+        originator: &PromptOriginator,
+        requested_tool_calls: bool,
+        is_non_tool_ext_query: bool,
+    ) -> Option<(ExtensionName, String)> {
+        if let tau_proto::PromptOriginator::Extension { name, query_id } = originator
             && (!requested_tool_calls || is_non_tool_ext_query)
         {
-            if !requested_tool_calls {
-                self.clear_prompt_tool_snapshot(&response.agent_prompt_id);
-            }
-            if requested_tool_calls {
-                let remaining_calls: Vec<ToolCallId> = normalized_calls
-                    .iter()
-                    .map(|(call, _)| call.id.clone())
-                    .collect();
-                for (call, _) in &normalized_calls {
-                    self.pending_tools.insert(
-                        call.id.clone(),
-                        PendingTool {
-                            name: call.name.clone(),
-                            internal_name: call.name.clone(),
-                            tool_type: call.tool_type,
-                        },
-                    );
-                }
-                self.set_agent_turn_state(&cid, AgentTurnState::ToolsRunning { remaining_calls });
-                for (call, _) in &normalized_calls {
-                    let message = invalid_tool_call_errors
-                        .remove(&call.id)
-                        .unwrap_or_else(|| {
-                            format!("refusing to execute tool call `{}`", call.name)
-                        });
-                    self.reject_agent_tool_call_before_dispatch_without_followup(
-                        &cid,
-                        call,
-                        call.name.clone(),
-                        message,
-                    );
-                }
-                self.set_agent_turn_state(&cid, AgentTurnState::Idle);
-            }
-            if self.has_pending_message_received_prompt(&cid) {
-                self.fold_pending_prompts_as_steered(&cid);
-                self.dispatch_prompt_after_publish_idle(&cid);
-                return Ok(());
-            }
+            return Some((name.clone(), query_id.clone()));
+        }
+        None
+    }
 
-            let source = self
-                .agents
-                .get(&cid)
-                .and_then(|c| c.source_connection.clone());
-            let error = if is_non_tool_ext_query && requested_tool_calls {
-                Some(format!(
-                    "non-tool extension query attempted to call {} tool(s); refusing to execute",
-                    tool_calls.len()
-                ))
-            } else if assistant_text.as_deref().unwrap_or_default().is_empty()
-                && matches!(
-                    response.stop_reason,
-                    ProviderStopReason::Error | ProviderStopReason::RepetitionDetected
-                )
-            {
-                response.error.clone()
+    fn reject_finished_side_conversation_tool_calls(
+        &mut self,
+        cid: &AgentId,
+        normalized_tool_calls: &mut NormalizedFinishedToolCalls,
+    ) {
+        let remaining_calls: Vec<ToolCallId> = normalized_tool_calls
+            .calls
+            .iter()
+            .map(|entry| entry.call.id.clone())
+            .collect();
+        self.register_finished_response_pending_tools(&normalized_tool_calls.calls);
+        self.set_agent_turn_state(cid, AgentTurnState::ToolsRunning { remaining_calls });
+        for entry in &normalized_tool_calls.calls {
+            let message = normalized_tool_calls
+                .invalid_errors
+                .remove(&entry.call.id)
+                .unwrap_or_else(|| format!("refusing to execute tool call `{}`", entry.call.name));
+            self.reject_agent_tool_call_before_dispatch_without_followup(
+                cid,
+                &entry.call,
+                entry.call.name.clone(),
+                message,
+            );
+        }
+        self.set_agent_turn_state(cid, AgentTurnState::Idle);
+    }
+
+    fn finished_side_conversation_error(
+        response: &ProviderResponseFinished,
+        is_non_tool_ext_query: bool,
+        requested_tool_calls: bool,
+        assistant_text: Option<&str>,
+        tool_call_count: usize,
+    ) -> Option<String> {
+        if is_non_tool_ext_query && requested_tool_calls {
+            Some(format!(
+                "non-tool extension query attempted to call {tool_call_count} tool(s); refusing to execute"
+            ))
+        } else if assistant_text.unwrap_or_default().is_empty()
+            && matches!(
+                response.stop_reason,
+                ProviderStopReason::Error | ProviderStopReason::RepetitionDetected
+            )
+        {
+            response.error.clone()
+        } else {
+            None
+        }
+    }
+
+    fn deliver_finished_side_conversation_result(
+        &mut self,
+        cid: &AgentId,
+        name: &ExtensionName,
+        query_id: &str,
+        result: tau_proto::StartAgentResult,
+    ) {
+        let source = self
+            .agents
+            .get(cid)
+            .and_then(|c| c.source_connection.clone());
+        if let Some(source) = source {
+            if source.as_str() == HARNESS_CONNECTION_ID {
+                self.publish_event(Some(HARNESS_CONNECTION_ID), Event::StartAgentResult(result));
             } else {
-                None
-            };
-            let result = tau_proto::StartAgentResult {
-                query_id: query_id.clone(),
-                text: assistant_text.clone().unwrap_or_default(),
-                error,
-            };
-            if let Some(source) = source {
-                if source.as_str() == HARNESS_CONNECTION_ID {
-                    self.publish_event(
-                        Some(HARNESS_CONNECTION_ID),
-                        Event::StartAgentResult(result),
-                    );
-                } else {
-                    let _ = self.bus.send_to(
-                        source.as_str(),
-                        None,
-                        HarnessOutputMessage::deliver(Event::StartAgentResult(result)),
-                    );
-                }
-            } else {
-                // Should never happen — `source_connection` is set in
-                // `handle_start_agent_request` when the conversation is
-                // spawned. Surface it via `harness.notice` rather than
-                // silently dropping so a future regression is visible.
-                self.emit_harness_failure(&format!(
-                    "start-agent-request result for `{}` (extension `{}`) had no source connection — \
-                         dropping",
-                    query_id, name
-                ));
+                let _ = self.bus.send_to(
+                    source.as_str(),
+                    None,
+                    HarnessOutputMessage::deliver(Event::StartAgentResult(result)),
+                );
             }
-            let completed_agent_id = self.agents.get(&cid).and_then(|conv| conv.agent_id.clone());
-            let keep_tool_backed_conversation = self
-                .agents
-                .get(&cid)
-                .is_some_and(|conv| conv.parent_tool_call_id.is_some());
-            let should_auto_suspend_delegate = keep_tool_backed_conversation
-                && completed_agent_id.as_deref().is_some_and(|agent_id| {
-                    self.agent_states.get(agent_id).copied() == Some(AgentState::ActiveDelegated)
-                });
-            // Release before removing or detaching the side agent so
-            // queued descendants can still resolve their parent agent
-            // while starting. Active descendants keep their own copied state.
-            self.set_agent_turn_state(&cid, AgentTurnState::Idle);
-            self.release_start_agent_request(&cid);
-            if keep_tool_backed_conversation {
-                if should_auto_suspend_delegate
-                    && let Some(agent_id) = completed_agent_id.as_deref()
-                {
-                    self.set_agent_state(agent_id, AgentState::Suspended);
-                }
-                self.detach_completed_tool_backed_start_agent(&cid);
-            } else {
-                self.transfer_background_completion_target_before_teardown(&cid);
-                self.remove_agent(&cid);
+        } else {
+            // Should never happen — `source_connection` is set in
+            // `handle_start_agent_request` when the conversation is
+            // spawned. Surface it via `harness.notice` rather than
+            // silently dropping so a future regression is visible.
+            self.emit_harness_failure(&format!(
+                "start-agent-request result for `{}` (extension `{}`) had no source connection — \
+                     dropping",
+                query_id, name
+            ));
+        }
+    }
+
+    fn complete_finished_side_conversation(&mut self, cid: &AgentId) {
+        let completed_agent_id = self.agents.get(cid).and_then(|conv| conv.agent_id.clone());
+        let keep_tool_backed_conversation = self
+            .agents
+            .get(cid)
+            .is_some_and(|conv| conv.parent_tool_call_id.is_some());
+        let should_auto_suspend_delegate = keep_tool_backed_conversation
+            && completed_agent_id.as_deref().is_some_and(|agent_id| {
+                self.agent_states.get(agent_id).copied() == Some(AgentState::ActiveDelegated)
+            });
+        // Release before removing or detaching the side agent so
+        // queued descendants can still resolve their parent agent
+        // while starting. Active descendants keep their own copied state.
+        self.set_agent_turn_state(cid, AgentTurnState::Idle);
+        self.release_start_agent_request(cid);
+        if keep_tool_backed_conversation {
+            if should_auto_suspend_delegate && let Some(agent_id) = completed_agent_id.as_deref() {
+                self.set_agent_state(agent_id, AgentState::Suspended);
             }
-            self.try_advance_queue();
+            self.detach_completed_tool_backed_start_agent(cid);
+        } else {
+            self.transfer_background_completion_target_before_teardown(cid);
+            self.remove_agent(cid);
+        }
+        self.try_advance_queue();
+    }
+
+    fn dispatch_finished_response_tool_calls(
+        &mut self,
+        cid: &AgentId,
+        mut normalized_tool_calls: NormalizedFinishedToolCalls,
+    ) -> Result<(), HarnessError> {
+        // Tool calls to execute — agent stays busy. After all
+        // tools complete, maybe_complete_agent_turn drains any
+        // prompts queued via `pending_prompts` (publishing one
+        // `AgentPromptSteered` each, which folds them as
+        // `UserMessage` entries onto this agent's branch)
+        // and sends a new prompt with the results plus those
+        // steering messages.
+        // Malformed provider call ids were normalized before the assistant
+        // response was published. Keep them in the turn as synthetic
+        // rejected calls so the next model prompt sees a matched
+        // tool-call/tool-error pair instead of the harness returning an
+        // event-loop error or overwriting duplicate map entries.
+        let remaining_calls: Vec<ToolCallId> = normalized_tool_calls
+            .calls
+            .iter()
+            .map(|entry| entry.call.id.clone())
+            .collect();
+        self.register_finished_response_pending_tools(&normalized_tool_calls.calls);
+        self.set_agent_turn_state(cid, AgentTurnState::ToolsRunning { remaining_calls });
+        if self
+            .agents
+            .get(cid)
+            .is_some_and(|conv| conv.pending_cancel.is_some())
+        {
+            self.apply_pending_cancel_for_agent(cid);
             return Ok(());
         }
-
-        if requested_tool_calls {
-            // Tool calls to execute — agent stays busy. After all
-            // tools complete, maybe_complete_agent_turn drains any
-            // prompts queued via `pending_prompts` (publishing one
-            // `AgentPromptSteered` each, which folds them as
-            // `UserMessage` entries onto this agent's branch)
-            // and sends a new prompt with the results plus those
-            // steering messages.
-            // Malformed provider call ids were normalized before the assistant
-            // response was published. Keep them in the turn as synthetic
-            // rejected calls so the next model prompt sees a matched
-            // tool-call/tool-error pair instead of the harness returning an
-            // event-loop error or overwriting duplicate map entries.
-            let remaining_calls: Vec<ToolCallId> = normalized_calls
-                .iter()
-                .map(|(call, _)| call.id.clone())
-                .collect();
-            for (call, _) in &normalized_calls {
-                self.pending_tools.insert(
-                    call.id.clone(),
-                    PendingTool {
-                        name: call.name.clone(),
-                        internal_name: call.name.clone(),
-                        tool_type: call.tool_type,
-                    },
-                );
-            }
-            self.set_agent_turn_state(&cid, AgentTurnState::ToolsRunning { remaining_calls });
-            if self
-                .agents
-                .get(&cid)
-                .is_some_and(|conv| conv.pending_cancel.is_some())
-            {
-                self.apply_pending_cancel_for_agent(&cid);
-                return Ok(());
-            }
-            // Queue well-formed tool calls and turn malformed calls into
-            // model-visible errors. The turn machine preserves provider order
-            // for calls that are safe to dispatch.
-            for (call, background_support) in normalized_calls {
-                if let Some(message) = invalid_tool_call_errors.remove(&call.id) {
-                    self.reject_agent_tool_call_before_dispatch(
-                        &cid,
-                        &call,
-                        call.name.clone(),
-                        message,
-                    );
-                } else {
-                    self.tool_turn.push(cid.clone(), call, background_support);
-                }
-            }
-            self.drain_pending_tool_invocations()?;
-        } else {
-            self.clear_prompt_tool_snapshot(&response.agent_prompt_id);
-            if response.stop_reason == ProviderStopReason::RepetitionDetected {
-                self.handle_loop_guard_trigger(
-                    &cid,
-                    "provider-repetition-detected".to_owned(),
-                    "provider detected a tight exact stream repetition".to_owned(),
-                );
+        // Queue well-formed tool calls and turn malformed calls into
+        // model-visible errors. The turn machine preserves provider order
+        // for calls that are safe to dispatch.
+        for entry in normalized_tool_calls.calls {
+            let call = entry.call;
+            if let Some(message) = normalized_tool_calls.invalid_errors.remove(&call.id) {
+                self.reject_agent_tool_call_before_dispatch(cid, &call, call.name.clone(), message);
             } else {
-                self.record_assistant_loop_signature(&cid, assistant_text.as_deref());
+                self.tool_turn
+                    .push(cid.clone(), call, entry.background_support);
             }
-            self.set_agent_turn_state(&cid, AgentTurnState::Idle);
-            if self.agents.get(&cid).is_some_and(|conv| {
-                conv.pending_prompts
-                    .iter()
-                    .any(PendingPrompt::is_loop_guard)
-            }) {
-                self.fold_pending_prompts_as_steered(&cid);
-                self.dispatch_prompt_after_publish_idle(&cid);
-                return Ok(());
-            }
-            // No tool calls — this agent's turn is done. Drain
-            // any queued prompts (on this or other agents) that
-            // are now eligible to dispatch.
-            self.try_advance_queue();
         }
+        self.drain_pending_tool_invocations()
+    }
 
-        Ok(())
+    fn register_finished_response_pending_tools(
+        &mut self,
+        normalized_calls: &[NormalizedFinishedToolCall],
+    ) {
+        for entry in normalized_calls {
+            self.pending_tools.insert(
+                entry.call.id.clone(),
+                PendingTool {
+                    name: entry.call.name.clone(),
+                    internal_name: entry.call.name.clone(),
+                    tool_type: entry.call.tool_type,
+                },
+            );
+        }
+    }
+
+    fn complete_finished_response_without_tool_calls(
+        &mut self,
+        cid: &AgentId,
+        response: &ProviderResponseFinished,
+        assistant_text: Option<&str>,
+    ) {
+        self.clear_prompt_tool_snapshot(&response.agent_prompt_id);
+        if response.stop_reason == ProviderStopReason::RepetitionDetected {
+            self.handle_loop_guard_trigger(
+                cid,
+                "provider-repetition-detected".to_owned(),
+                "provider detected a tight exact stream repetition".to_owned(),
+            );
+        } else {
+            self.record_assistant_loop_signature(cid, assistant_text);
+        }
+        self.set_agent_turn_state(cid, AgentTurnState::Idle);
+        if self.agents.get(cid).is_some_and(|conv| {
+            conv.pending_prompts
+                .iter()
+                .any(PendingPrompt::is_loop_guard)
+        }) {
+            self.fold_pending_prompts_as_steered(cid);
+            self.dispatch_prompt_after_publish_idle(cid);
+            return;
+        }
+        // No tool calls — this agent's turn is done. Drain
+        // any queued prompts (on this or other agents) that
+        // are now eligible to dispatch.
+        self.try_advance_queue();
     }
 
     fn known_tool_call_ids(&self) -> HashSet<ToolCallId> {
