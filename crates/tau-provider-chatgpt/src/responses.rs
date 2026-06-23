@@ -482,263 +482,425 @@ pub fn apply_event(
 ) -> Result<bool, LlmError> {
     let event_type = event["type"].as_str().unwrap_or("");
 
-    match event_type {
-        "response.output_text.delta" => {
-            if let Some(delta) = event["delta"].as_str() {
-                let output_index = event["output_index"].as_u64().unwrap_or(0) as usize;
-                state.check_message_delta(output_index, delta)?;
-                state.append_message_delta_at(output_index, delta);
-                on_update(state);
-            }
-        }
-        "response.output_text.done" => {
-            if let Some(text) = event["text"].as_str() {
-                let output_index = event["output_index"].as_u64().unwrap_or(0) as usize;
-                state.check_message_snapshot(output_index, text)?;
-                state.set_message_text_at(output_index, text);
-                on_update(state);
-            }
-        }
-        "response.reasoning_summary_text.delta" => {
-            if let Some(delta) = event["delta"].as_str() {
-                let output_index = event["output_index"].as_u64().unwrap_or(0) as usize;
-                state.check_reasoning_delta(output_index, delta)?;
-                state.append_reasoning_summary_delta_at(output_index, delta);
-                on_update(state);
-            }
-        }
-        "response.reasoning_summary_part.added" => {
-            // Each summary part is a separate paragraph. Insert a
-            // blank line between parts so consecutive paragraphs
-            // are visually separated.
-            let output_index = event["output_index"].as_u64().unwrap_or(0) as usize;
-            state.start_reasoning_summary_part_at(output_index);
-        }
-        "response.function_call_arguments.delta" => {
-            let output_index = event["output_index"].as_u64().unwrap_or(0) as usize;
-            if let Some(delta) = event["delta"].as_str() {
-                state.check_function_arguments_delta(output_index, delta)?;
-                state
-                    .tool_call_at_mut(output_index, tau_proto::ToolType::Function)
-                    .arguments_json
-                    .push_str(delta);
-                on_update(state);
-            }
-        }
-        "response.function_call_arguments.done" => {
-            let output_index = event["output_index"].as_u64().unwrap_or(0) as usize;
-            if let Some(arguments) = event["arguments"].as_str() {
-                state.check_function_arguments_snapshot(output_index, arguments)?;
-                state
-                    .tool_call_at_mut(output_index, tau_proto::ToolType::Function)
-                    .arguments_json = arguments.to_owned();
-                on_update(state);
-            }
-        }
-        "response.custom_tool_call_input.delta" => {
-            let output_index = event["output_index"].as_u64().unwrap_or(0) as usize;
-            if let Some(delta) = event["delta"].as_str() {
-                state.check_custom_tool_input_delta(output_index, delta)?;
-                state
-                    .tool_call_at_mut(output_index, tau_proto::ToolType::Custom)
-                    .arguments_json
-                    .push_str(delta);
-                on_update(state);
-            }
-        }
-        "response.custom_tool_call_input.done" => {
-            let output_index = event["output_index"].as_u64().unwrap_or(0) as usize;
-            if let Some(input) = event["input"].as_str() {
-                state.check_custom_tool_input_snapshot(output_index, input)?;
-                state
-                    .tool_call_at_mut(output_index, tau_proto::ToolType::Custom)
-                    .arguments_json = input.to_owned();
-                on_update(state);
-            }
-        }
-        "response.output_item.added" | "response.output_item.done" => {
-            if let Some(item) = event.get("item") {
-                let mut changed = false;
-                let tool_type = match item["type"].as_str() {
-                    Some("function_call") => Some(tau_proto::ToolType::Function),
-                    Some("custom_tool_call") => Some(tau_proto::ToolType::Custom),
-                    _ => None,
-                };
-                let output_index = event["output_index"].as_u64().unwrap_or(0) as usize;
-                if let Some(tool_type) = tool_type {
-                    if event_type == "response.output_item.done" {
-                        let final_input = match tool_type {
-                            tau_proto::ToolType::Function => item["arguments"].as_str(),
-                            tau_proto::ToolType::Custom => item["input"].as_str(),
-                        };
-                        if let Some(final_input) = final_input {
-                            match tool_type {
-                                tau_proto::ToolType::Function => state
-                                    .check_function_arguments_snapshot(output_index, final_input)?,
-                                tau_proto::ToolType::Custom => state
-                                    .check_custom_tool_input_snapshot(output_index, final_input)?,
-                            }
-                        }
-                    }
-                    let call = state.tool_call_at_mut(output_index, tool_type);
-                    if let Some(id) = item["call_id"].as_str() {
-                        call.id = id.to_owned();
-                        changed = true;
-                    }
-                    if let Some(name) = item["name"].as_str() {
-                        call.name = name.to_owned();
-                        changed = true;
-                    }
-                    if call.arguments_json.is_empty() {
-                        let final_input = match tool_type {
-                            tau_proto::ToolType::Function => item["arguments"].as_str(),
-                            tau_proto::ToolType::Custom => item["input"].as_str(),
-                        };
-                        if let Some(final_input) = final_input {
-                            call.arguments_json = final_input.to_owned();
-                            changed = true;
-                        }
-                    }
-                }
-                if item["type"].as_str() == Some("message") {
-                    state.set_message_phase_at(output_index, parse_phase_from_item(item));
-                    changed = true;
-                    if event_type == "response.output_item.done"
-                        && let Some(text) = message_text_from_output_item(item)
-                    {
-                        state.check_message_snapshot(output_index, &text)?;
-                        let previous_text = state.text.clone();
-                        state.set_message_text_at(output_index, &text);
-                        changed |= state.text != previous_text;
-                    }
-                }
-                // Capture reasoning items only on `output_item.done`,
-                // not on `added` — the `added` event arrives before
-                // any summary parts/encrypted content stream in, so
-                // its payload is just a stub. `done` carries the full
-                // item (id + encrypted_content + summary) the harness
-                // needs to replay verbatim on the next turn.
-                //
-                // The whole item is stashed as opaque JSON so a future
-                // wire-format change (extra fields, schema rev) round-
-                // trips without code changes — same Pi-style blob the
-                // harness re-emits on full-transcript replay.
-                //
-                // An item without `encrypted_content` is unreplayable:
-                // the server stores reasoning only for `store: true`
-                // requests, and Codex forces `store: false`, so a bare
-                // `rs_…` id in a later turn's `input[]` triggers
-                // `Item with id 'rs_…' not found` and an 8-attempt
-                // retry loop. Skip those — losing reasoning continuity
-                // on this turn is better than poisoning the chain.
-                if event_type == "response.output_item.done"
-                    && item["type"].as_str() == Some("reasoning")
-                    && item["encrypted_content"].is_string()
-                {
-                    state.set_reasoning_item_json_at(output_index, &item.to_string());
-                    changed = true;
-                }
-                if item["type"].as_str() == Some("compaction") {
-                    if event_type == "response.output_item.added" {
-                        state.start_compaction_item_at(output_index);
-                        changed = true;
-                    } else if event_type == "response.output_item.done" {
-                        state.set_compaction_item_json_at(output_index, &item.to_string());
-                        changed = true;
-                    }
-                }
-                if changed {
-                    on_update(state);
-                }
-            }
-        }
-        "response.completed" | "response.done" => {
-            state.provider_terminal_event = Some(event.clone());
-            if state.input_tokens.is_none() {
-                state.input_tokens = event
-                    .get("response")
-                    .and_then(|response| response["usage"]["input_tokens"].as_u64())
-                    .or_else(|| event["usage"]["input_tokens"].as_u64());
-            }
-            if state.cached_tokens.is_none() {
-                state.cached_tokens = event
-                    .get("response")
-                    .and_then(|response| {
-                        response["usage"]["input_tokens_details"]["cached_tokens"].as_u64()
-                    })
-                    .or_else(|| event["usage"]["input_tokens_details"]["cached_tokens"].as_u64());
-            }
-            if state.output_tokens.is_none() {
-                state.output_tokens = event
-                    .get("response")
-                    .and_then(|response| response["usage"]["output_tokens"].as_u64())
-                    .or_else(|| event["usage"]["output_tokens"].as_u64());
-            }
-            if state.response_id.is_none() {
-                state.response_id = event
-                    .get("response")
-                    .and_then(|response| response["id"].as_str())
-                    .or_else(|| event["id"].as_str())
-                    .map(str::to_owned);
-            }
-            return Ok(true);
-        }
-        "response.incomplete" => {
-            let reason = event
-                .get("response")
-                .and_then(|r| r["incomplete_details"]["reason"].as_str())
-                .unwrap_or("unknown reason");
-            return Err(LlmError::HttpStatus(
-                0,
-                format!("response incomplete: {reason}"),
-            ));
-        }
-        "response.failed" => {
-            let detail = event
-                .get("response")
-                .and_then(|r| {
-                    r["error"]["message"]
-                        .as_str()
-                        .or_else(|| r["error"]["code"].as_str())
-                })
-                .unwrap_or("unknown error");
-            return Err(LlmError::HttpStatus(
-                0,
-                format!("response failed: {detail}"),
-            ));
-        }
-        "error" => {
-            let detail = event["error"]["message"]
-                .as_str()
-                .or_else(|| event["message"].as_str())
-                .unwrap_or("unknown error");
-            // Preserve the error code alongside the message so the
-            // retry classifier can distinguish a transient transport
-            // hiccup from an account-level cap (usage limit, rate
-            // limit, quota) — the latter must not be retried.
-            //
-            // The OpenAI Responses streaming `error` event uses
-            // `code` at the top level (e.g. `code:
-            // "rate_limit_exceeded"`); some Codex variants nest an
-            // `error.code` or older-style `error.type`. We check
-            // all three so an upstream wording drift on one path
-            // doesn't silently re-enable the futile retry loop on
-            // an account cap. The `(type=...)` suffix is a stable
-            // substring contract matched by `LlmError::retry_after`
-            // and `pool::is_recoverable_ws_error`.
-            let error_code = event["error"]["code"]
-                .as_str()
-                .or_else(|| event["code"].as_str())
-                .or_else(|| event["error"]["type"].as_str());
-            let body = match error_code {
-                Some(code) => format!("stream error: {detail} (type={code})"),
-                None => format!("stream error: {detail}"),
-            };
-            return Err(LlmError::HttpStatus(0, body));
-        }
-        _ => {}
+    let stream_update_applied = apply_stream_update_event(state, event, event_type, on_update)?;
+    if stream_update_applied {
+        return Ok(false);
     }
-    Ok(false)
+
+    match event_type {
+        "response.completed" | "response.done" => {
+            apply_terminal_event(state, event);
+            Ok(true)
+        }
+        "response.incomplete" => Err(response_incomplete_error(event)),
+        "response.failed" => Err(response_failed_error(event)),
+        "error" => Err(stream_error_event(event)),
+        _ => Ok(false),
+    }
+}
+
+fn apply_stream_update_event(
+    state: &mut StreamState,
+    event: &serde_json::Value,
+    event_type: &str,
+    on_update: &mut impl FnMut(&StreamState),
+) -> Result<bool, LlmError> {
+    match event_type {
+        "response.output_text.delta" => apply_output_text_delta_event(state, event, on_update)?,
+        "response.output_text.done" => apply_output_text_done_event(state, event, on_update)?,
+        "response.reasoning_summary_text.delta" => {
+            apply_reasoning_summary_delta_event(state, event, on_update)?;
+        }
+        "response.reasoning_summary_part.added" => apply_reasoning_summary_part_added(state, event),
+        "response.function_call_arguments.delta" => {
+            apply_tool_delta_event(state, event, tau_proto::ToolType::Function, on_update)?;
+        }
+        "response.function_call_arguments.done" => apply_tool_done_event(
+            state,
+            event,
+            tau_proto::ToolType::Function,
+            ToolInputField::Arguments,
+            on_update,
+        )?,
+        "response.custom_tool_call_input.delta" => {
+            apply_tool_delta_event(state, event, tau_proto::ToolType::Custom, on_update)?;
+        }
+        "response.custom_tool_call_input.done" => apply_tool_done_event(
+            state,
+            event,
+            tau_proto::ToolType::Custom,
+            ToolInputField::Input,
+            on_update,
+        )?,
+        "response.output_item.added" => {
+            apply_output_item_event(state, event, OutputItemEventKind::Added, on_update)?;
+        }
+        "response.output_item.done" => {
+            apply_output_item_event(state, event, OutputItemEventKind::Done, on_update)?;
+        }
+        _ => return Ok(false),
+    }
+    Ok(true)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum OutputItemEventKind {
+    Added,
+    Done,
+}
+
+impl OutputItemEventKind {
+    fn is_done(self) -> bool {
+        matches!(self, Self::Done)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ToolInputField {
+    Arguments,
+    Input,
+}
+
+fn event_output_index(event: &serde_json::Value) -> usize {
+    event["output_index"].as_u64().unwrap_or(0) as usize
+}
+
+fn apply_output_text_delta_event(
+    state: &mut StreamState,
+    event: &serde_json::Value,
+    on_update: &mut impl FnMut(&StreamState),
+) -> Result<(), LlmError> {
+    let Some(delta) = event["delta"].as_str() else {
+        return Ok(());
+    };
+    let output_index = event_output_index(event);
+    state.check_message_delta(output_index, delta)?;
+    state.append_message_delta_at(output_index, delta);
+    on_update(state);
+    Ok(())
+}
+
+fn apply_output_text_done_event(
+    state: &mut StreamState,
+    event: &serde_json::Value,
+    on_update: &mut impl FnMut(&StreamState),
+) -> Result<(), LlmError> {
+    let Some(text) = event["text"].as_str() else {
+        return Ok(());
+    };
+    let output_index = event_output_index(event);
+    state.check_message_snapshot(output_index, text)?;
+    state.set_message_text_at(output_index, text);
+    on_update(state);
+    Ok(())
+}
+
+fn apply_reasoning_summary_delta_event(
+    state: &mut StreamState,
+    event: &serde_json::Value,
+    on_update: &mut impl FnMut(&StreamState),
+) -> Result<(), LlmError> {
+    let Some(delta) = event["delta"].as_str() else {
+        return Ok(());
+    };
+    let output_index = event_output_index(event);
+    state.check_reasoning_delta(output_index, delta)?;
+    state.append_reasoning_summary_delta_at(output_index, delta);
+    on_update(state);
+    Ok(())
+}
+
+fn apply_reasoning_summary_part_added(state: &mut StreamState, event: &serde_json::Value) {
+    // Each summary part is a separate paragraph. Insert a blank line between
+    // parts so consecutive paragraphs are visually separated.
+    let output_index = event_output_index(event);
+    state.start_reasoning_summary_part_at(output_index);
+}
+
+fn apply_tool_delta_event(
+    state: &mut StreamState,
+    event: &serde_json::Value,
+    tool_type: tau_proto::ToolType,
+    on_update: &mut impl FnMut(&StreamState),
+) -> Result<(), LlmError> {
+    let Some(delta) = event["delta"].as_str() else {
+        return Ok(());
+    };
+    let output_index = event_output_index(event);
+    check_tool_delta(state, output_index, tool_type, delta)?;
+    state
+        .tool_call_at_mut(output_index, tool_type)
+        .arguments_json
+        .push_str(delta);
+    on_update(state);
+    Ok(())
+}
+
+fn apply_tool_done_event(
+    state: &mut StreamState,
+    event: &serde_json::Value,
+    tool_type: tau_proto::ToolType,
+    input_field: ToolInputField,
+    on_update: &mut impl FnMut(&StreamState),
+) -> Result<(), LlmError> {
+    let Some(input) = tool_input_from_event(event, input_field) else {
+        return Ok(());
+    };
+    let output_index = event_output_index(event);
+    check_tool_snapshot(state, output_index, tool_type, input)?;
+    state
+        .tool_call_at_mut(output_index, tool_type)
+        .arguments_json = input.to_owned();
+    on_update(state);
+    Ok(())
+}
+
+fn tool_input_from_event(event: &serde_json::Value, input_field: ToolInputField) -> Option<&str> {
+    match input_field {
+        ToolInputField::Arguments => event["arguments"].as_str(),
+        ToolInputField::Input => event["input"].as_str(),
+    }
+}
+
+fn check_tool_delta(
+    state: &mut StreamState,
+    output_index: usize,
+    tool_type: tau_proto::ToolType,
+    delta: &str,
+) -> Result<(), LlmError> {
+    match tool_type {
+        tau_proto::ToolType::Function => state.check_function_arguments_delta(output_index, delta),
+        tau_proto::ToolType::Custom => state.check_custom_tool_input_delta(output_index, delta),
+    }
+}
+
+fn check_tool_snapshot(
+    state: &mut StreamState,
+    output_index: usize,
+    tool_type: tau_proto::ToolType,
+    input: &str,
+) -> Result<(), LlmError> {
+    match tool_type {
+        tau_proto::ToolType::Function => {
+            state.check_function_arguments_snapshot(output_index, input)
+        }
+        tau_proto::ToolType::Custom => state.check_custom_tool_input_snapshot(output_index, input),
+    }
+}
+
+fn apply_output_item_event(
+    state: &mut StreamState,
+    event: &serde_json::Value,
+    kind: OutputItemEventKind,
+    on_update: &mut impl FnMut(&StreamState),
+) -> Result<(), LlmError> {
+    let Some(item) = event.get("item") else {
+        return Ok(());
+    };
+    let output_index = event_output_index(event);
+    let mut changed = apply_output_item_tool(state, item, output_index, kind)?;
+    changed |= apply_output_item_message(state, item, output_index, kind)?;
+    changed |= apply_output_item_reasoning(state, item, output_index, kind);
+    changed |= apply_output_item_compaction(state, item, output_index, kind);
+    if changed {
+        on_update(state);
+    }
+    Ok(())
+}
+
+fn apply_output_item_tool(
+    state: &mut StreamState,
+    item: &serde_json::Value,
+    output_index: usize,
+    kind: OutputItemEventKind,
+) -> Result<bool, LlmError> {
+    let Some(tool_type) = tool_type_from_output_item(item) else {
+        return Ok(false);
+    };
+    if kind.is_done()
+        && let Some(final_input) = final_tool_input(item, tool_type)
+    {
+        check_tool_snapshot(state, output_index, tool_type, final_input)?;
+    }
+    let call = state.tool_call_at_mut(output_index, tool_type);
+    let mut changed = false;
+    if let Some(id) = item["call_id"].as_str() {
+        call.id = id.to_owned();
+        changed = true;
+    }
+    if let Some(name) = item["name"].as_str() {
+        call.name = name.to_owned();
+        changed = true;
+    }
+    if call.arguments_json.is_empty()
+        && let Some(final_input) = final_tool_input(item, tool_type)
+    {
+        call.arguments_json = final_input.to_owned();
+        changed = true;
+    }
+    Ok(changed)
+}
+
+fn tool_type_from_output_item(item: &serde_json::Value) -> Option<tau_proto::ToolType> {
+    match item["type"].as_str() {
+        Some("function_call") => Some(tau_proto::ToolType::Function),
+        Some("custom_tool_call") => Some(tau_proto::ToolType::Custom),
+        _ => None,
+    }
+}
+
+fn final_tool_input(item: &serde_json::Value, tool_type: tau_proto::ToolType) -> Option<&str> {
+    match tool_type {
+        tau_proto::ToolType::Function => item["arguments"].as_str(),
+        tau_proto::ToolType::Custom => item["input"].as_str(),
+    }
+}
+
+fn apply_output_item_message(
+    state: &mut StreamState,
+    item: &serde_json::Value,
+    output_index: usize,
+    kind: OutputItemEventKind,
+) -> Result<bool, LlmError> {
+    if item["type"].as_str() != Some("message") {
+        return Ok(false);
+    }
+    state.set_message_phase_at(output_index, parse_phase_from_item(item));
+    if kind.is_done()
+        && let Some(text) = message_text_from_output_item(item)
+    {
+        state.check_message_snapshot(output_index, &text)?;
+        state.set_message_text_at(output_index, &text);
+    }
+    Ok(true)
+}
+
+fn apply_output_item_reasoning(
+    state: &mut StreamState,
+    item: &serde_json::Value,
+    output_index: usize,
+    kind: OutputItemEventKind,
+) -> bool {
+    // Capture reasoning items only on `output_item.done`, not on `added` — the
+    // `added` event arrives before any summary parts/encrypted content stream in,
+    // so its payload is just a stub. `done` carries the full item (id +
+    // encrypted_content + summary) the harness needs to replay verbatim on the
+    // next turn.
+    //
+    // The whole item is stashed as opaque JSON so a future wire-format change
+    // (extra fields, schema rev) round-trips without code changes — same
+    // Pi-style blob the harness re-emits on full-transcript replay.
+    //
+    // An item without `encrypted_content` is unreplayable: the server stores
+    // reasoning only for `store: true` requests, and Codex forces `store: false`,
+    // so a bare `rs_…` id in a later turn's `input[]` triggers `Item with id
+    // 'rs_…' not found` and an 8-attempt retry loop. Skip those — losing
+    // reasoning continuity on this turn is better than poisoning the chain.
+    if kind.is_done()
+        && item["type"].as_str() == Some("reasoning")
+        && item["encrypted_content"].is_string()
+    {
+        state.set_reasoning_item_json_at(output_index, &item.to_string());
+        return true;
+    }
+    false
+}
+
+fn apply_output_item_compaction(
+    state: &mut StreamState,
+    item: &serde_json::Value,
+    output_index: usize,
+    kind: OutputItemEventKind,
+) -> bool {
+    if item["type"].as_str() != Some("compaction") {
+        return false;
+    }
+    match kind {
+        OutputItemEventKind::Added => state.start_compaction_item_at(output_index),
+        OutputItemEventKind::Done => {
+            state.set_compaction_item_json_at(output_index, &item.to_string())
+        }
+    }
+    true
+}
+
+fn apply_terminal_event(state: &mut StreamState, event: &serde_json::Value) {
+    state.provider_terminal_event = Some(event.clone());
+    if state.input_tokens.is_none() {
+        state.input_tokens = terminal_usage_u64(event, "input_tokens");
+    }
+    if state.cached_tokens.is_none() {
+        state.cached_tokens = event
+            .get("response")
+            .and_then(|response| {
+                response["usage"]["input_tokens_details"]["cached_tokens"].as_u64()
+            })
+            .or_else(|| event["usage"]["input_tokens_details"]["cached_tokens"].as_u64());
+    }
+    if state.output_tokens.is_none() {
+        state.output_tokens = terminal_usage_u64(event, "output_tokens");
+    }
+    if state.response_id.is_none() {
+        state.response_id = event
+            .get("response")
+            .and_then(|response| response["id"].as_str())
+            .or_else(|| event["id"].as_str())
+            .map(str::to_owned);
+    }
+}
+
+fn terminal_usage_u64(event: &serde_json::Value, name: &str) -> Option<u64> {
+    event
+        .get("response")
+        .and_then(|response| response["usage"][name].as_u64())
+        .or_else(|| event["usage"][name].as_u64())
+}
+
+fn response_incomplete_error(event: &serde_json::Value) -> LlmError {
+    let reason = event
+        .get("response")
+        .and_then(|r| r["incomplete_details"]["reason"].as_str())
+        .unwrap_or("unknown reason");
+    LlmError::HttpStatus(0, format!("response incomplete: {reason}"))
+}
+
+fn response_failed_error(event: &serde_json::Value) -> LlmError {
+    let detail = event
+        .get("response")
+        .and_then(|r| {
+            r["error"]["message"]
+                .as_str()
+                .or_else(|| r["error"]["code"].as_str())
+        })
+        .unwrap_or("unknown error");
+    LlmError::HttpStatus(0, format!("response failed: {detail}"))
+}
+
+fn stream_error_event(event: &serde_json::Value) -> LlmError {
+    let detail = event["error"]["message"]
+        .as_str()
+        .or_else(|| event["message"].as_str())
+        .unwrap_or("unknown error");
+    // Preserve the error code alongside the message so the retry classifier can
+    // distinguish a transient transport hiccup from an account-level cap (usage
+    // limit, rate limit, quota) — the latter must not be retried.
+    //
+    // The OpenAI Responses streaming `error` event uses `code` at the top level
+    // (e.g. `code: "rate_limit_exceeded"`); some Codex variants nest an
+    // `error.code` or older-style `error.type`. We check all three so an
+    // upstream wording drift on one path doesn't silently re-enable the futile
+    // retry loop on an account cap. The `(type=...)` suffix is a stable substring
+    // contract matched by `LlmError::retry_after` and
+    // `pool::is_recoverable_ws_error`.
+    let error_code = event["error"]["code"]
+        .as_str()
+        .or_else(|| event["code"].as_str())
+        .or_else(|| event["error"]["type"].as_str());
+    let body = match error_code {
+        Some(code) => format!("stream error: {detail} (type={code})"),
+        None => format!("stream error: {detail}"),
+    };
+    LlmError::HttpStatus(0, body)
 }
 
 // ---------------------------------------------------------------------------
