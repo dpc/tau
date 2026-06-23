@@ -209,7 +209,10 @@ the agent requests calls, and the harness orchestrates dispatch.
 - **`tool.background_result`** / **`tool.background_error`** *(harness)* —
   Logical notification that a backgrounded tool later completed for real.
   The earlier synthetic placeholder is provider-facing only and is not
-  emitted as `tool.result`.
+  emitted as `tool.result`. Once a call has emitted a background placeholder,
+  harness-forced cancellation or teardown also completes it through
+  `tool.background_error` (and wait background-completion state), not through a
+  second transcript-terminal `tool.cancelled`.
 - **`tool.progress`** *(extension)* — In-flight progress update with an
   optional message, current/total counters, and/or complete display state.
   Providers should usually emit an initial `tool.progress` immediately after
@@ -217,8 +220,10 @@ the agent requests calls, and the harness orchestrates dispatch.
   pending line with provider-owned formatting.
 - **`tool.cancel_request`** *(harness)* — The harness asks an extension to cancel an
   in-flight call.
-- **`tool.cancelled`** *(extension)* — The extension acknowledges that a
-  call has been cancelled. Operational only; transient.
+- **`tool.cancelled`** *(extension/harness)* — A non-backgrounded call was
+  cancelled and its foreground transcript tool round is terminal. Operational
+  only; transient. Backgrounded calls that already emitted a placeholder must
+  use `tool.background_error` for cancellation instead.
 - **`tool.delegate_progress`** *(harness)* — Live snapshot of a sub-agent
   spawned by the `agent_start` tool: task name, resolved delegate role,
   tools-in-flight, total, context tokens, percent. Transient; the UI

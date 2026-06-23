@@ -223,8 +223,13 @@ Rules:
 - if cancellation happens before a valid assistant response is committed, the
   transcript stays at the previous stable node
 - if cancellation happens after assistant tool calls are committed, unresolved
-  calls are completed with terminal cancelled results before the branch can
-  continue
+  non-backgrounded calls are completed with terminal cancelled results before
+  the branch can continue
+- if a call already emitted a background placeholder, that placeholder is the
+  foreground transcript terminal. Later harness cancellation or teardown emits a
+  cancel request and records the cancellation through `tool.background_error`
+  / wait background-completion state, never through a second `tool.cancelled`
+  terminal for the same call id
 
 On resume after an interrupted tool round, unresolved tool calls should be
 treated as cancelled rather than resumed silently.

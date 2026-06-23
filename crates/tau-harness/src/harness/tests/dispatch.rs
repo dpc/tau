@@ -3712,6 +3712,79 @@ fn cancel_publishes_tool_cancel_request() {
     h.shutdown().expect("shutdown");
 }
 
+/// Regression: harness-authored turn cancellation must not publish a second
+/// transcript-terminal `ToolCancelled` after a background placeholder has
+/// already closed the foreground tool round. Backgrounded calls are completed
+/// through the durable background channel instead.
+#[test]
+fn cancel_remaining_backgrounded_extension_call_publishes_background_error_only() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    h.selected_model = Some("test/model".into());
+
+    let _tool_events = connect_test_tool(&mut h, "conn-cancel-bg");
+    h.registry.register(
+        "conn-cancel-bg",
+        instant_background_test_tool_spec("cancel_bg_tool"),
+    );
+
+    let cid = ensure_test_user_agent(&mut h);
+    let spid: AgentPromptId = "sp-cancel-bg-tool".into();
+    seed_agent_thinking(&mut h, &cid, spid.as_str());
+    let target_agent_id = h.agents[&cid].agent_id.clone().expect("agent id");
+    h.prompt_agents.insert(spid.clone(), cid.clone());
+    h.handle_provider_response_finished(ProviderResponseFinished {
+        agent_prompt_id: spid,
+        agent_id: crate::parse_agent_id(&target_agent_id),
+        output_items: vec![ContextItem::ToolCall(ToolCallItem {
+            call_id: "cancel-bg-call".into(),
+            name: ToolName::new("cancel_bg_tool"),
+            tool_type: tau_proto::ToolType::Function,
+            arguments: CborValue::Map(Vec::new()),
+        })],
+        stop_reason: tau_proto::ProviderStopReason::ToolCalls,
+        error: None,
+        usage: None,
+        originator: tau_proto::PromptOriginator::User,
+        compaction_original_input_tokens: None,
+        compaction_compacted_input_tokens: None,
+        backend: None,
+        provider_response_id: None,
+        ws_pool_delta: None,
+    })
+    .expect("tool call routed");
+
+    let call_id: ToolCallId = "cancel-bg-call".into();
+    assert_eq!(background_placeholder_count(&h, call_id.as_str()), 1);
+    assert!(h.tool_turn.is_backgrounded(&call_id));
+
+    h.cancel_remaining_tool_calls(&cid, vec![call_id.clone()], "test cancel");
+
+    assert!(event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::ToolCancelRequest(request) if request.target_call_id == call_id
+    )));
+    assert!(!event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::ToolCancelled(cancelled) if cancelled.call_id == call_id
+    )));
+    assert!(event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::ToolBackgroundError(error)
+            if error.call_id == call_id && error.message == "Tool call canceled"
+    )));
+    assert!(!event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::HarnessNotice(notice) if notice.kind == tau_proto::notice_kind::HARNESS_FAILURE
+    )));
+    assert!(!h.tool_turn.is_backgrounded(&call_id));
+    assert!(!h.pending_tool_providers.contains_key(&call_id));
+    assert!(!h.tool_agents.contains_key(&call_id));
+
+    h.shutdown().expect("shutdown");
+}
+
 /// Cancelling a turn while `wait` is blocked must remove the waiter entry. A
 /// later wait for the same target should report the cancelled/consumed target,
 /// not a stale "existing wait" from the aborted wait call.
@@ -8489,6 +8562,20 @@ fn canceled_side_conversation_drops_inner_background_completion() {
         .expect("cancel delegate");
     assert!(!h.agents.contains_key(&side_cid));
     assert!(!h.tool_agents.contains_key("slow-call-cancel"));
+    assert!(event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::ToolBackgroundError(error)
+            if error.call_id.as_str() == "slow-call-cancel"
+                && error.message == "Tool call canceled"
+    )));
+    assert!(!event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::ToolCancelled(cancelled) if cancelled.call_id.as_str() == "slow-call-cancel"
+    )));
+    assert!(
+        !h.background_completion_targets
+            .contains_key("slow-call-cancel")
+    );
 
     h.handle_extension_event_inner(
         "conn-slow",

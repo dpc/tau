@@ -1746,6 +1746,21 @@ fn instance_id_factory() -> impl FnMut() -> tau_proto::ExtensionInstanceId {
 enum BackgroundCompletionPromptMode {
     QueueAndAdvance,
     QueueOnly,
+    // Cancellation/teardown after a background placeholder still needs a
+    // durable background error and wait completion, but must not prompt the
+    // model about work from a canceled/removed branch.
+    DoNotQueue,
+}
+
+struct CancelTarget {
+    call_id: ToolCallId,
+    tool_name: ToolName,
+    tool_type: ToolType,
+    // True when the foreground tool round was already closed by a background
+    // placeholder. Such calls receive a cancel request but must never receive
+    // a transcript-terminal `ToolCancelled`; cancellation is reported through
+    // `ToolBackgroundError` instead.
+    backgrounded: bool,
 }
 
 struct HarnessBaseParts {
@@ -5975,47 +5990,99 @@ impl Harness {
     ) {
         let remaining: std::collections::HashSet<ToolCallId> =
             remaining_calls.iter().cloned().collect();
-        let mut to_cancel = self.tool_turn.cancel_queued_for(cid, &remaining);
+        let mut to_cancel: Vec<CancelTarget> = self
+            .tool_turn
+            .cancel_queued_for(cid, &remaining)
+            .into_iter()
+            .map(|(call_id, tool_name, tool_type)| CancelTarget {
+                call_id,
+                tool_name,
+                tool_type,
+                backgrounded: false,
+            })
+            .collect();
         for call_id in remaining_calls {
-            if to_cancel
-                .iter()
-                .any(|(queued_id, _, _)| queued_id == &call_id)
-            {
+            if to_cancel.iter().any(|target| target.call_id == call_id) {
                 continue;
             }
             let Some(tool) = self.pending_tools.get(&call_id).cloned() else {
                 continue;
             };
-            to_cancel.push((call_id, tool.name, tool.tool_type));
+            let backgrounded = self.tool_turn.is_backgrounded(&call_id);
+            to_cancel.push(CancelTarget {
+                call_id,
+                tool_name: tool.name,
+                tool_type: tool.tool_type,
+                backgrounded,
+            });
         }
 
         let cancelled_call_ids: std::collections::HashSet<ToolCallId> = to_cancel
             .iter()
-            .map(|(call_id, _, _)| call_id.clone())
+            .map(|target| target.call_id.clone())
             .collect();
         self.record_wait_tool_cancelled(&cancelled_call_ids);
 
-        for (call_id, tool_name, tool_type) in to_cancel {
+        for target in to_cancel {
             self.publish_event(
                 Some(HARNESS_CONNECTION_ID),
                 Event::ToolCancelRequest(tau_proto::ToolCancelRequest {
-                    target_call_id: call_id.clone(),
+                    target_call_id: target.call_id.clone(),
                 }),
             );
+            if target.backgrounded {
+                // A background placeholder is already the foreground terminal
+                // result. After broadcasting cancellation, synthesize a
+                // background error only if no synchronous handler completed the
+                // call while processing the request.
+                self.finish_backgrounded_tool_cancelled_by_harness(target);
+                continue;
+            }
+            if !self.pending_tools.contains_key(&target.call_id) {
+                continue;
+            }
             self.publish_for_agent(
                 cid,
                 Event::ToolCancelled(ToolCancelled {
-                    call_id: call_id.clone(),
-                    tool_name,
-                    tool_type,
+                    call_id: target.call_id.clone(),
+                    tool_name: target.tool_name,
+                    tool_type: target.tool_type,
                 }),
             );
-            self.tool_turn.mark_complete(&call_id);
-            self.clear_tool_call_tracking(call_id.as_str());
+            self.tool_turn.mark_complete(&target.call_id);
+            self.clear_tool_call_tracking(target.call_id.as_str());
         }
         if let Some(conv) = self.agents.get_mut(cid) {
             conv.tools_in_flight = 0;
         }
+    }
+
+    fn finish_backgrounded_tool_cancelled_by_harness(&mut self, target: CancelTarget) {
+        if !self.tool_turn.is_backgrounded(&target.call_id) {
+            return;
+        }
+        if !self.tool_agents.contains_key(&target.call_id) {
+            return;
+        }
+        // Complete the actual-running background call without queuing a
+        // model-visible completion prompt. `handle_background_tool_error_inner`
+        // still records wait/background completion state, decrements in-flight
+        // progress, publishes the durable `ToolBackgroundError`, and clears
+        // call tracking so late extension terminals are ignored.
+        let error = ToolError {
+            call_id: target.call_id,
+            tool_name: target.tool_name,
+            tool_type: target.tool_type,
+            message: "Tool call canceled".to_owned(),
+            details: None,
+            display: None,
+            originator: PromptOriginator::User,
+        };
+        self.handle_background_tool_error_inner(
+            Some(HARNESS_CONNECTION_ID),
+            error,
+            BackgroundCompletionPromptMode::DoNotQueue,
+        );
     }
 
     pub(crate) fn is_running_tool_call(&self, target_call_id: &ToolCallId) -> bool {
@@ -11379,6 +11446,7 @@ impl Harness {
                     .insert(call_id.clone(), cid.clone());
                 self.queue_background_completion_prompt_without_advancing(&cid, &call_id);
             }
+            BackgroundCompletionPromptMode::DoNotQueue => {}
         }
         self.clear_tool_call_tracking(call_id.as_str());
     }
