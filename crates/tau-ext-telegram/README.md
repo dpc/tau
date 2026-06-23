@@ -22,8 +22,9 @@ extensions:
 ```
 
 `allowed_user_ids` is mandatory and must not be empty. `chat_id` is optional for
-private chats because `/start` can link the chat at runtime. Group/supergroup
-chats are refused unless their `chat_id` is explicitly configured.
+private chats because `/start` can link one private chat at runtime.
+Group/supergroup chats are refused unless their `chat_id` is explicitly
+configured.
 
 ## Usage
 
@@ -46,6 +47,14 @@ Agents should reply to Telegram-originated prompts with `telegram_send`. The
 model cannot choose a destination chat; `telegram_send` uses only the configured
 or linked chat.
 
+The bridge has a single active chat. When `chat_id` is configured, only that
+chat can route messages and all replies go there. Without `chat_id`, send
+`/start` from one allowlisted private chat before sending any prompt-routing
+text or command; other chats cannot replace that link until the extension
+restarts or is reconfigured.
+When reconfiguration changes or removes the active chat, agents must call
+`telegram_register` again before they can send Telegram replies.
+
 The `telegram_register` and `telegram_send` tools are opt-in for each Tau role.
 Enable them in the role configuration with `enable_tools` before asking that role
 to use the Telegram bridge. Role policy can also target the `telegram` tool group
@@ -54,7 +63,7 @@ or the `telegram:register` and `telegram:send` tool tags.
 ## Limitations
 
 The MVP is text-only. Attachments are acknowledged as unsupported. Registrations,
-selected agents, learned chat id, and Telegram update offsets are in memory only.
-On lazy startup the extension drains Telegram's existing backlog without routing
-it; after restart, Telegram may still redeliver newer updates that were not
-acknowledged before shutdown.
+selected agents, learned chat link, and Telegram update offsets are in memory
+only. On lazy startup the extension drains Telegram's existing backlog without
+routing it; after restart, Telegram may still redeliver newer updates that were
+not acknowledged before shutdown.

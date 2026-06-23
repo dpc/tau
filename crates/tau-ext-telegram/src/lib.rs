@@ -55,8 +55,8 @@ where
 }
 
 /// Small Bot API surface used by the extension and faked by unit tests.
-pub trait TelegramClient: Send + Sync + 'static {
-    /// Long-poll text message updates from Telegram.
+trait TelegramClient: Send + Sync + 'static {
+    /// Fetch message updates from Telegram using the configured poll timeout.
     fn get_updates(
         &self,
         cfg: &RuntimeConfig,
@@ -69,7 +69,7 @@ pub trait TelegramClient: Send + Sync + 'static {
 
 /// Validated runtime configuration, including resolved secret values.
 #[derive(Clone)]
-pub struct RuntimeConfig {
+struct RuntimeConfig {
     /// Resolved bot token. Never log this value.
     bot_token: String,
     /// Telegram user ids allowed to interact with this bridge.
@@ -137,26 +137,35 @@ impl ExtConfig {
 
 /// A Telegram update containing a message, if present.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct TgUpdate {
+struct TgUpdate {
     /// Telegram update id used for offset advancement.
-    pub update_id: i64,
-    /// Text message payload; non-message updates are ignored by the client.
-    pub message: Option<TgMessage>,
+    update_id: i64,
+    /// Text message payload, or `None` for updates kept only to advance offset.
+    message: Option<TgMessage>,
 }
 
 /// Telegram text message details consumed by routing logic.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct TgMessage {
+struct TgMessage {
     /// Chat id the message arrived in.
-    pub chat_id: i64,
+    chat_id: i64,
     /// Telegram chat type such as `private`, `group`, or `supergroup`.
-    pub chat_type: Option<String>,
+    chat_type: Option<String>,
     /// Sending user id.
-    pub user_id: i64,
+    user_id: i64,
     /// Human-readable sender label when available.
-    pub from_name: Option<String>,
+    from_name: Option<String>,
     /// Optional text. Attachments without captions have no text.
-    pub text: Option<String>,
+    text: Option<String>,
+}
+
+/// Private chat learned through `/start` when no fixed `chat_id` is configured.
+#[derive(Clone, Copy)]
+struct LinkedChat {
+    /// Telegram private chat id used as the reply destination.
+    chat_id: i64,
+    /// Allowlisted Telegram user id that established this chat link.
+    user_id: i64,
 }
 
 #[derive(Default)]
@@ -165,7 +174,7 @@ struct State {
     registered_agents: HashSet<AgentId>,
     agent_labels: HashMap<AgentId, String>,
     selected_agent_by_chat: HashMap<i64, AgentId>,
-    learned_chat_id: Option<i64>,
+    learned_chat: Option<LinkedChat>,
     poller_started: bool,
     poller_drained_initial_backlog: bool,
     next_update_offset: Option<i64>,
@@ -190,10 +199,26 @@ impl Extension {
 
     fn apply_config(&self, cfg: RuntimeConfig, _state_dir: Option<std::path::PathBuf>) {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        state.config = Some(cfg);
-        if state.learned_chat_id.is_none() {
-            state.learned_chat_id = state.config.as_ref().and_then(|cfg| cfg.configured_chat_id);
+        let old_active_chat = state
+            .config
+            .as_ref()
+            .and_then(|cfg| cfg.configured_chat_id)
+            .or_else(|| state.learned_chat.map(|chat| chat.chat_id));
+        let learned_chat_is_stale = cfg.configured_chat_id.is_some()
+            || state
+                .learned_chat
+                .is_some_and(|chat| !cfg.allowed_user_ids.contains(&chat.user_id));
+        if learned_chat_is_stale {
+            state.learned_chat = None;
         }
+        let new_active_chat = cfg
+            .configured_chat_id
+            .or_else(|| state.learned_chat.map(|chat| chat.chat_id));
+        if old_active_chat != new_active_chat {
+            state.registered_agents.clear();
+            state.selected_agent_by_chat.clear();
+        }
+        state.config = Some(cfg);
     }
 
     fn dispatch_tool(&self, invoke: ToolStarted) {
@@ -219,6 +244,9 @@ impl Extension {
     }
 
     fn handle_register(&self, invoke: ToolStarted) -> Event {
+        if let Err(message) = validate_object_fields(&invoke.arguments, &["enabled"]) {
+            return tool_error(invoke, message);
+        }
         let enabled = match cbor_bool_field(&invoke.arguments, "enabled") {
             Ok(enabled) => enabled,
             Err(message) => return tool_error(invoke, message),
@@ -266,6 +294,9 @@ impl Extension {
     }
 
     fn handle_send(&self, invoke: ToolStarted) -> Event {
+        if let Err(message) = validate_object_fields(&invoke.arguments, &["message"]) {
+            return tool_error(invoke, message);
+        }
         let message = match cbor_string_field(&invoke.arguments, "message") {
             Ok(message) => message,
             Err(message) => return tool_error(invoke, message),
@@ -284,7 +315,10 @@ impl Extension {
             let Some(cfg) = state.config.clone() else {
                 return tool_error(invoke, "telegram extension is not configured".to_owned());
             };
-            let Some(chat_id) = state.learned_chat_id.or(cfg.configured_chat_id) else {
+            let Some(chat_id) = cfg
+                .configured_chat_id
+                .or_else(|| state.learned_chat.map(|chat| chat.chat_id))
+            else {
                 return tool_error(
                     invoke,
                     "telegram chat is not linked; send /start to the bot or configure chat_id"
@@ -316,12 +350,33 @@ impl Extension {
             tracing::warn!(target: LOG_TARGET, user_id = message.user_id, "ignoring Telegram message from unallowed user");
             return;
         }
-        let is_explicit_chat = cfg.configured_chat_id == Some(message.chat_id);
         let is_private_chat = message
             .chat_type
             .as_deref()
             .is_none_or(|kind| kind == "private");
-        if !is_private_chat && !is_explicit_chat {
+        let active_chat = {
+            let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            cfg.configured_chat_id
+                .or_else(|| state.learned_chat.map(|chat| chat.chat_id))
+        };
+        if let Some(configured_chat_id) = cfg.configured_chat_id {
+            if message.chat_id != configured_chat_id {
+                let _ = self.client.send_message(
+                    &cfg,
+                    message.chat_id,
+                    "This Tau bridge is configured for a different Telegram chat.",
+                );
+                return;
+            }
+        } else if active_chat.is_some_and(|chat_id| chat_id != message.chat_id) {
+            let _ = self.client.send_message(
+                &cfg,
+                message.chat_id,
+                "This Tau bridge is already linked to a different Telegram chat.",
+            );
+            return;
+        }
+        if !is_private_chat && cfg.configured_chat_id != Some(message.chat_id) {
             let _ = self.client.send_message(
                 &cfg,
                 message.chat_id,
@@ -343,61 +398,101 @@ impl Extension {
             );
             return;
         };
-        if text.as_str().starts_with("/start") {
-            {
-                let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let (command, rest) = parse_command(&text);
+        if cfg.configured_chat_id.is_none()
+            && active_chat.is_none()
+            && !matches!(command, Some("/start"))
+        {
+            let _ = self.client.send_message(
+                &cfg,
+                message.chat_id,
+                "Send /start to link this private chat before routing messages to Tau.",
+            );
+            return;
+        }
+        match command {
+            Some("/start") => {
                 if cfg.configured_chat_id.is_none() {
-                    state.learned_chat_id = Some(message.chat_id);
-                }
-            }
-            let _ = self.client.send_message(&cfg, message.chat_id, help_text());
-            return;
-        }
-        if text.as_str().starts_with("/agents") {
-            let reply = {
-                let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-                agents_text(&state)
-            };
-            let _ = self.client.send_message(&cfg, message.chat_id, &reply);
-            return;
-        }
-        if let Some(rest) = text.as_str().strip_prefix("/select ") {
-            let reply = {
-                let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-                match resolve_agent(&state, rest.trim()) {
-                    Ok(agent_id) => {
-                        state
-                            .selected_agent_by_chat
-                            .insert(message.chat_id, agent_id.clone());
-                        format!("Selected {}", agent_designator(&state, &agent_id))
+                    if !is_private_chat {
+                        let _ = self.client.send_message(
+                            &cfg,
+                            message.chat_id,
+                            "Group chats require an explicit configured chat_id.",
+                        );
+                        return;
                     }
-                    Err(reply) => reply,
+                    let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+                    state.learned_chat = Some(LinkedChat {
+                        chat_id: message.chat_id,
+                        user_id: message.user_id,
+                    });
                 }
-            };
-            let _ = self.client.send_message(&cfg, message.chat_id, &reply);
-            return;
-        }
-        if let Some(rest) = text.as_str().strip_prefix("/to ") {
-            let (target, body) = split_first(rest);
-            if target.is_empty() || body.trim().is_empty() {
+                let _ = self.client.send_message(&cfg, message.chat_id, help_text());
+                return;
+            }
+            Some("/agents") => {
+                let reply = {
+                    let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+                    agents_text(&state)
+                };
+                let _ = self.client.send_message(&cfg, message.chat_id, &reply);
+                return;
+            }
+            Some("/select") => {
+                if rest.trim().is_empty() {
+                    let _ = self.client.send_message(
+                        &cfg,
+                        message.chat_id,
+                        "Usage: /select <agent-id-or-prefix>",
+                    );
+                    return;
+                }
+                let reply = {
+                    let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+                    match resolve_agent(&state, rest.trim()) {
+                        Ok(agent_id) => {
+                            state
+                                .selected_agent_by_chat
+                                .insert(message.chat_id, agent_id.clone());
+                            format!("Selected {}", agent_designator(&state, &agent_id))
+                        }
+                        Err(reply) => reply,
+                    }
+                };
+                let _ = self.client.send_message(&cfg, message.chat_id, &reply);
+                return;
+            }
+            Some("/to") => {
+                let (target, body) = split_first(rest);
+                if target.is_empty() || body.trim().is_empty() {
+                    let _ = self.client.send_message(
+                        &cfg,
+                        message.chat_id,
+                        "Usage: /to <agent-id-or-prefix> <message>",
+                    );
+                    return;
+                }
+                let target = {
+                    let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+                    resolve_agent(&state, target)
+                };
+                match target {
+                    Ok(agent_id) => self.route_text(message, agent_id, body.trim()),
+                    Err(reply) => {
+                        let _ = self.client.send_message(&cfg, message.chat_id, &reply);
+                    }
+                }
+                return;
+            }
+            Some(_) => {
                 let _ = self.client.send_message(
                     &cfg,
                     message.chat_id,
-                    "Usage: /to <agent-id-or-prefix> <message>",
+                    "Unknown Telegram command. Supported commands: /start, /agents, /select, /to.",
                 );
                 return;
             }
-            let target = {
-                let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-                resolve_agent(&state, target)
-            };
-            match target {
-                Ok(agent_id) => self.route_text(message, agent_id, body.trim()),
-                Err(reply) => {
-                    let _ = self.client.send_message(&cfg, message.chat_id, &reply);
-                }
-            }
-            return;
+            None => {}
         }
         let target = {
             let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -498,19 +593,21 @@ fn poll_loop(
                 if shutdown.load(Ordering::Relaxed) {
                     return;
                 }
-                let should_drain = {
+                let draining = {
                     let mut state = ext.state.lock().unwrap_or_else(|e| e.into_inner());
-                    if state.poller_drained_initial_backlog {
-                        false
-                    } else {
-                        state.poller_drained_initial_backlog = true;
+                    if !state.poller_drained_initial_backlog {
                         if let Some(max_update_id) = updates.iter().map(|u| u.update_id).max() {
                             state.next_update_offset = Some(max_update_id + 1);
                         }
+                        if updates.is_empty() {
+                            state.poller_drained_initial_backlog = true;
+                        }
                         true
+                    } else {
+                        false
                     }
                 };
-                if should_drain {
+                if draining {
                     continue;
                 }
                 if updates.is_empty() {
@@ -566,14 +663,27 @@ where
 
     let (tx, rx) = mpsc::channel::<HarnessInputMessage>();
     let ext = Extension::new(client, tx.clone());
+    let writer_shutdown = Arc::new(AtomicBool::new(false));
+    let writer_shutdown_thread = Arc::clone(&writer_shutdown);
     let writer_handle = std::thread::spawn(move || -> Result<(), Box<dyn Error + Send>> {
-        for msg in rx {
-            writer
-                .write_message(&msg)
-                .map_err(|e| -> Box<dyn Error + Send> { Box::new(e) })?;
-            writer
-                .flush()
-                .map_err(|e| -> Box<dyn Error + Send> { Box::new(e) })?;
+        loop {
+            match rx.recv_timeout(Duration::from_millis(50)) {
+                Ok(msg) => {
+                    writer
+                        .write_message(&msg)
+                        .map_err(|e| -> Box<dyn Error + Send> { Box::new(e) })?;
+                    writer
+                        .flush()
+                        .map_err(|e| -> Box<dyn Error + Send> { Box::new(e) })?;
+                }
+                Err(mpsc::RecvTimeoutError::Timeout)
+                    if writer_shutdown_thread.load(Ordering::Relaxed) =>
+                {
+                    break;
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            }
         }
         Ok(())
     });
@@ -632,12 +742,14 @@ where
             }
             HarnessOutputMessage::Disconnect(_) => {
                 ext.shutdown.store(true, Ordering::Relaxed);
+                writer_shutdown.store(true, Ordering::Relaxed);
                 break;
             }
             _ => {}
         }
     }
     ext.shutdown.store(true, Ordering::Relaxed);
+    writer_shutdown.store(true, Ordering::Relaxed);
     drop(ext);
     drop(tx);
     writer_handle
@@ -740,6 +852,21 @@ fn cbor_bool_field(arguments: &CborValue, field: &str) -> Result<bool, String> {
     Err(format!("missing required argument `{field}`"))
 }
 
+fn validate_object_fields(arguments: &CborValue, allowed_fields: &[&str]) -> Result<(), String> {
+    let CborValue::Map(entries) = arguments else {
+        return Err("arguments must be an object".to_owned());
+    };
+    for (key, _) in entries {
+        let CborValue::Text(name) = key else {
+            return Err("argument field names must be strings".to_owned());
+        };
+        if !allowed_fields.contains(&name.as_str()) {
+            return Err(format!("unknown argument `{name}`"));
+        }
+    }
+    Ok(())
+}
+
 fn cbor_string_field(arguments: &CborValue, field: &str) -> Result<String, String> {
     let CborValue::Map(entries) = arguments else {
         return Err("arguments must be an object".to_owned());
@@ -840,6 +967,15 @@ fn split_first(s: &str) -> (&str, &str) {
         Some((first, rest)) => (first, rest),
         None => (s.trim(), ""),
     }
+}
+
+fn parse_command(text: &str) -> (Option<&str>, &str) {
+    if !text.starts_with('/') {
+        return (None, "");
+    }
+    let (token, rest) = split_first(text);
+    let command = token.split_once('@').map_or(token, |(command, _)| command);
+    (Some(command), rest)
 }
 
 fn help_text() -> &'static str {
@@ -955,6 +1091,11 @@ fn redact_token(text: &str, token: &str) -> String {
 
 fn decode_update(value: &serde_json::Value) -> Option<TgUpdate> {
     let update_id = value.get("update_id")?.as_i64()?;
+    let message = decode_message(value);
+    Some(TgUpdate { update_id, message })
+}
+
+fn decode_message(value: &serde_json::Value) -> Option<TgMessage> {
     let msg = value.get("message")?;
     let chat = msg.get("chat")?;
     let chat_id = chat.get("id")?.as_i64()?;
@@ -973,15 +1114,12 @@ fn decode_update(value: &serde_json::Value) -> Option<TgUpdate> {
         .get("text")
         .and_then(|value| value.as_str())
         .map(str::to_owned);
-    Some(TgUpdate {
-        update_id,
-        message: Some(TgMessage {
-            chat_id,
-            chat_type,
-            user_id,
-            from_name,
-            text,
-        }),
+    Some(TgMessage {
+        chat_id,
+        chat_type,
+        user_id,
+        from_name,
+        text,
     })
 }
 

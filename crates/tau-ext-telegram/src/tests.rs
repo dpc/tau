@@ -55,6 +55,23 @@ impl TelegramClient for FakeClient {
     }
 }
 
+struct SlowPollClient;
+
+impl TelegramClient for SlowPollClient {
+    fn get_updates(
+        &self,
+        _cfg: &RuntimeConfig,
+        _offset: Option<i64>,
+    ) -> Result<Vec<TgUpdate>, String> {
+        std::thread::sleep(Duration::from_secs(2));
+        Ok(Vec::new())
+    }
+
+    fn send_message(&self, _cfg: &RuntimeConfig, _chat_id: i64, _text: &str) -> Result<(), String> {
+        Ok(())
+    }
+}
+
 fn cfg() -> RuntimeConfig {
     RuntimeConfig {
         bot_token: "token".to_owned(),
@@ -352,6 +369,35 @@ fn agents_list_omits_empty_or_duplicate_display_names() {
     );
 }
 
+/// Unknown or malformed slash commands must get command feedback instead of
+/// being routed as ordinary prompts across the external-input boundary.
+#[test]
+fn malformed_slash_commands_are_not_routed_as_prompts() {
+    let (ext, rx, client) = extension();
+    ext.state
+        .lock()
+        .expect("lock")
+        .registered_agents
+        .insert(agent_id("agent-1"));
+    for (update_id, text) in [(1, "/startx"), (2, "/select"), (3, "/to")] {
+        ext.process_update(TgUpdate {
+            update_id,
+            message: Some(TgMessage {
+                chat_id: 123,
+                chat_type: None,
+                user_id: 123,
+                from_name: None,
+                text: Some(text.to_owned()),
+            }),
+        });
+    }
+    assert!(rx.try_recv().is_err());
+    let sent = client.sent.lock().expect("lock");
+    assert!(sent[0].1.contains("Unknown"));
+    assert!(sent[1].1.contains("Usage: /select"));
+    assert!(sent[2].1.contains("Usage: /to"));
+}
+
 /// `/select` stores a chat-local target so later plain text can be routed even
 /// while multiple agents are registered.
 #[test]
@@ -391,10 +437,10 @@ fn select_then_plain_text_routes_to_selected_agent() {
     assert_eq!(req.agent_id, agent_id("agent-2"));
 }
 
-/// The model can pass only `message`; even if extra arguments appear, outgoing
-/// delivery must use the configured/linked chat id and an agent-id-only prefix.
+/// Runtime argument validation must match the schema so a model cannot rely on
+/// ignored extra fields that may later gain meaning.
 #[test]
-fn telegram_send_uses_configured_chat_not_argument_chat_id() {
+fn telegram_send_rejects_unknown_chat_id_argument() {
     let (ext, rx, client) = extension();
     {
         let mut state = ext.state.lock().expect("lock");
@@ -415,10 +461,15 @@ fn telegram_send_uses_configured_chat_not_argument_chat_id() {
     ]);
     ext.dispatch_tool(tool(SEND_TOOL_NAME, "agent-1", args));
     let _progress = rx.recv().expect("progress");
-    let _result = rx.recv().expect("result");
-    let sent = client.sent.lock().expect("lock");
-    assert_eq!(sent[0].0, 123);
-    assert_eq!(sent[0].1, "[agent-1] hello");
+    let msg = rx.recv().expect("result");
+    let HarnessInputMessage::Emit(emit) = msg else {
+        panic!("emit")
+    };
+    let Event::ToolError(error) = *emit.event else {
+        panic!("tool error")
+    };
+    assert!(error.message.contains("unknown argument"));
+    assert!(client.sent.lock().expect("lock").is_empty());
 }
 
 /// Group chats are refused unless the user explicitly configured that chat id;
@@ -429,7 +480,7 @@ fn unconfigured_group_chat_is_refused() {
     {
         let mut state = ext.state.lock().expect("lock");
         state.config.as_mut().expect("config").configured_chat_id = None;
-        state.learned_chat_id = None;
+        state.learned_chat = None;
         state.registered_agents.insert(agent_id("agent-1"));
     }
     ext.process_update(TgUpdate {
@@ -474,6 +525,173 @@ fn configured_group_chat_can_route() {
         panic!("emit")
     };
     assert!(matches!(*emit.event, Event::ExtPromptSubmitRequest(_)));
+}
+
+/// When a fixed chat is configured, allowlisted messages from any other private
+/// chat must not route into Tau because replies would go to the configured
+/// chat.
+#[test]
+fn configured_chat_rejects_other_private_chat() {
+    let (ext, rx, client) = extension();
+    ext.state
+        .lock()
+        .expect("lock")
+        .registered_agents
+        .insert(agent_id("agent-1"));
+    ext.process_update(TgUpdate {
+        update_id: 1,
+        message: Some(TgMessage {
+            chat_id: 456,
+            chat_type: Some("private".to_owned()),
+            user_id: 123,
+            from_name: None,
+            text: Some("hello".to_owned()),
+        }),
+    });
+    assert!(rx.try_recv().is_err());
+    assert!(
+        client.sent.lock().expect("lock")[0]
+            .1
+            .contains("different Telegram chat")
+    );
+}
+
+/// Without a configured chat, ordinary text must wait for an explicit `/start`
+/// link so the extension has a single active reply destination.
+#[test]
+fn unconfigured_private_text_before_start_does_not_route() {
+    let (ext, rx, client) = extension();
+    {
+        let mut state = ext.state.lock().expect("lock");
+        state.config.as_mut().expect("config").configured_chat_id = None;
+        state.registered_agents.insert(agent_id("agent-1"));
+    }
+    ext.process_update(TgUpdate {
+        update_id: 1,
+        message: Some(TgMessage {
+            chat_id: 123,
+            chat_type: Some("private".to_owned()),
+            user_id: 123,
+            from_name: None,
+            text: Some("hello".to_owned()),
+        }),
+    });
+    assert!(rx.try_recv().is_err());
+    assert!(client.sent.lock().expect("lock")[0].1.contains("/start"));
+}
+
+/// Direct `/to` routing must also wait for a linked chat; otherwise a prompt
+/// submitted before `/start` could later receive replies in a different chat.
+#[test]
+fn unconfigured_to_before_start_does_not_route() {
+    let (ext, rx, client) = extension();
+    {
+        let mut state = ext.state.lock().expect("lock");
+        state.config.as_mut().expect("config").configured_chat_id = None;
+        state.registered_agents.insert(agent_id("agent-1"));
+    }
+    ext.process_update(TgUpdate {
+        update_id: 1,
+        message: Some(TgMessage {
+            chat_id: 123,
+            chat_type: Some("private".to_owned()),
+            user_id: 123,
+            from_name: None,
+            text: Some("/to agent-1 hello".to_owned()),
+        }),
+    });
+    assert!(rx.try_recv().is_err());
+    assert!(client.sent.lock().expect("lock")[0].1.contains("/start"));
+}
+
+/// A learned private chat is exclusive; another allowlisted private chat cannot
+/// redirect future `telegram_send` output or route prompts through the bridge.
+#[test]
+fn linked_chat_rejects_other_private_chat() {
+    let (ext, rx, client) = extension();
+    {
+        let mut state = ext.state.lock().expect("lock");
+        state.config.as_mut().expect("config").configured_chat_id = None;
+        state
+            .config
+            .as_mut()
+            .expect("config")
+            .allowed_user_ids
+            .insert(456);
+        state.registered_agents.insert(agent_id("agent-1"));
+    }
+    ext.process_update(TgUpdate {
+        update_id: 1,
+        message: Some(TgMessage {
+            chat_id: 123,
+            chat_type: Some("private".to_owned()),
+            user_id: 123,
+            from_name: None,
+            text: Some("/start".to_owned()),
+        }),
+    });
+    ext.process_update(TgUpdate {
+        update_id: 2,
+        message: Some(TgMessage {
+            chat_id: 456,
+            chat_type: Some("private".to_owned()),
+            user_id: 456,
+            from_name: None,
+            text: Some("/start".to_owned()),
+        }),
+    });
+    ext.dispatch_tool(tool(SEND_TOOL_NAME, "agent-1", message_args("reply")));
+    let _progress = rx.recv().expect("progress");
+    let _result = rx.recv().expect("result");
+
+    let sent = client.sent.lock().expect("lock");
+    assert_eq!(sent[0].0, 123);
+    assert_eq!(sent[1].0, 456);
+    assert_eq!(sent[2], (123, "[agent-1] reply".to_owned()));
+}
+
+/// Applying a new fixed chat invalidates registrations so replies for prompts
+/// from the old active chat fail closed until agents explicitly re-register.
+#[test]
+fn reconfigured_chat_id_requires_reregistration_before_send() {
+    let (ext, rx, client) = extension();
+    {
+        let mut state = ext.state.lock().expect("lock");
+        state.config.as_mut().expect("config").configured_chat_id = None;
+        state.registered_agents.insert(agent_id("agent-1"));
+    }
+    ext.process_update(TgUpdate {
+        update_id: 1,
+        message: Some(TgMessage {
+            chat_id: 123,
+            chat_type: Some("private".to_owned()),
+            user_id: 123,
+            from_name: None,
+            text: Some("/start".to_owned()),
+        }),
+    });
+    let mut new_cfg = cfg();
+    new_cfg.configured_chat_id = Some(456);
+    ext.apply_config(new_cfg, None);
+    ext.dispatch_tool(tool(SEND_TOOL_NAME, "agent-1", message_args("reply")));
+    let _progress = rx.recv().expect("progress");
+    let msg = rx.recv().expect("result");
+    let HarnessInputMessage::Emit(emit) = msg else {
+        panic!("emit")
+    };
+    let Event::ToolError(error) = *emit.event else {
+        panic!("tool error")
+    };
+
+    assert!(error.message.contains("telegram_register"));
+    assert!(
+        !client
+            .sent
+            .lock()
+            .expect("lock")
+            .iter()
+            .any(|sent| sent.0 == 456)
+    );
 }
 
 /// Allowlist checks run before group handling, so an unallowed group user
@@ -522,6 +740,70 @@ fn initial_poller_drops_stale_backlog() {
     let _result = rx.recv().expect("result");
     std::thread::sleep(Duration::from_millis(100));
     assert!(rx.try_recv().is_err());
+}
+
+/// Initial backlog draining must continue until Telegram returns an empty
+/// batch; otherwise older messages split across batches could leak as fresh
+/// prompts.
+#[test]
+fn initial_poller_drops_multiple_stale_batches_until_empty() {
+    let (tx, rx) = mpsc::channel();
+    let client = FakeClient::with_updates(vec![
+        vec![TgUpdate {
+            update_id: 10,
+            message: Some(TgMessage {
+                chat_id: 123,
+                chat_type: Some("private".to_owned()),
+                user_id: 123,
+                from_name: None,
+                text: Some("old one".to_owned()),
+            }),
+        }],
+        vec![TgUpdate {
+            update_id: 11,
+            message: Some(TgMessage {
+                chat_id: 123,
+                chat_type: Some("private".to_owned()),
+                user_id: 123,
+                from_name: None,
+                text: Some("old two".to_owned()),
+            }),
+        }],
+        Vec::new(),
+        vec![TgUpdate {
+            update_id: 12,
+            message: Some(TgMessage {
+                chat_id: 123,
+                chat_type: Some("private".to_owned()),
+                user_id: 123,
+                from_name: Some("alice".to_owned()),
+                text: Some("fresh".to_owned()),
+            }),
+        }],
+    ]);
+    let ext = Extension::new(client, tx);
+    ext.apply_config(cfg(), None);
+    ext.dispatch_tool(tool(REGISTER_TOOL_NAME, "agent-1", bool_args(true)));
+    let _progress = rx.recv().expect("progress");
+    let _result = rx.recv().expect("result");
+
+    let HarnessInputMessage::Emit(emit) = rx.recv().expect("fresh prompt") else {
+        panic!("emit")
+    };
+    let Event::ExtPromptSubmitRequest(req) = *emit.event else {
+        panic!("prompt request")
+    };
+    assert_eq!(req.text, "[telegram from alice] fresh");
+}
+
+/// Telegram updates without a usable message still carry update ids and must be
+/// represented so the poller can advance past them to later valid messages.
+#[test]
+fn decode_update_preserves_non_message_update_id() {
+    let update = decode_update(&serde_json::json!({ "update_id": 42 }))
+        .expect("update id should be preserved");
+    assert_eq!(update.update_id, 42);
+    assert_eq!(update.message, None);
 }
 
 /// HTTP transport errors must not include Telegram Bot API URLs because those
@@ -574,6 +856,51 @@ fn run_exits_after_register_then_disconnect() {
     writer.flush().expect("flush");
 
     run_with_client(std::io::Cursor::new(input), Vec::new(), FakeClient::new()).expect("run");
+}
+
+/// Disconnect handling must not wait for an in-flight long poll to release its
+/// channel sender before the extension process can exit.
+#[test]
+fn run_exits_promptly_when_disconnect_races_long_poll() {
+    let mut input = Vec::new();
+    let mut writer = tau_proto::HarnessOutputWriter::new(&mut input);
+    let mut secrets = BTreeMap::new();
+    secrets.insert("bot".to_owned(), tau_proto::SecretValue::new("token"));
+    writer
+        .write_message(&HarnessOutputMessage::Configure(tau_proto::Configure {
+            instance_name: None,
+            config: tau_proto::json_to_cbor(&serde_json::json!({
+                "bot_token_secret": "bot",
+                "allowed_user_ids": [123],
+                "chat_id": 123,
+                "poll_timeout_seconds": 1,
+            })),
+            state_dir: None,
+            secrets,
+        }))
+        .expect("config");
+    writer
+        .write_message(&HarnessOutputMessage::deliver(Event::ToolStarted(tool(
+            REGISTER_TOOL_NAME,
+            "agent-1",
+            bool_args(true),
+        ))))
+        .expect("tool");
+    writer
+        .write_message(&HarnessOutputMessage::Disconnect(tau_proto::Disconnect {
+            reason: None,
+        }))
+        .expect("disconnect");
+    writer.flush().expect("flush");
+
+    let start = std::time::Instant::now();
+    run_with_client(
+        std::io::Cursor::new(input),
+        Vec::new(),
+        Arc::new(SlowPollClient),
+    )
+    .expect("run");
+    assert!(start.elapsed() < Duration::from_secs(1));
 }
 
 /// Initial backlog drain must be a non-long-poll request. Otherwise a fresh
