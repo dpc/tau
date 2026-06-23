@@ -15,11 +15,10 @@ use std::time::{Duration, Instant};
 
 use tau_proto::{
     ActionError, ActionInvoke, ActionOutput, ActionResult, AgentContextKey, AgentContextValue,
-    CborValue, ConfigError, Event, ExtAgentContextPublish, ExtPromptFragmentPublish,
-    ExtensionContextReady, HarnessInputMessage, HarnessOutputMessage, PeerInputReader,
-    PeerOutputWriter, PromptContent, PromptFragment, PromptPriority, SessionAgentLoaded,
-    SessionStarted, ToolCancelled, ToolExample, ToolExampleSelector, ToolResult, ToolResultKind,
-    ToolSpec, ToolTag,
+    CborValue, Event, ExtAgentContextPublish, ExtPromptFragmentPublish, ExtensionContextReady,
+    HarnessInputMessage, PeerInputReader, PeerOutputWriter, PromptContent, PromptFragment,
+    PromptPriority, SessionAgentLoaded, SessionStarted, ToolCancelled, ToolExample,
+    ToolExampleSelector, ToolResult, ToolResultKind, ToolSpec, ToolTag,
 };
 use tracing::{debug, trace};
 
@@ -31,6 +30,7 @@ mod diff;
 mod dir_lock;
 mod display;
 mod isolation;
+mod runtime;
 mod scheduler;
 mod tools;
 mod truncate;
@@ -42,6 +42,7 @@ use crate::agents::{ancestor_dirs, discover_session_agents_files};
 use crate::config::{ExtConfig, ShellConfig};
 use crate::cwd_state::CwdState;
 use crate::dir_lock::{DIR_LOCK_TOOL_NAME, DirLockManager};
+use crate::runtime::ShellRuntime;
 use crate::scheduler::{WorkMeta, WorkPriority, WorkScheduler};
 #[cfg(any(test, feature = "echo-agent"))]
 use crate::tools::ECHO_TOOL_NAME;
@@ -91,14 +92,7 @@ where
     run_impl(reader, writer)
 }
 
-fn run_impl<R, W>(reader: R, writer: W) -> Result<(), Box<dyn Error>>
-where
-    R: Read,
-    W: Write + Send + 'static,
-{
-    let mut reader = PeerInputReader::new(BufReader::new(reader));
-    let mut writer = PeerOutputWriter::new(BufWriter::new(writer));
-
+fn registered_tool_specs(dir_lock_enabled: bool) -> Vec<ToolSpec> {
     #[cfg(any(test, feature = "echo-agent"))]
     let echo_tool = Some(ToolSpec {
         name: tau_proto::ToolName::new(ECHO_TOOL_NAME),
@@ -114,458 +108,488 @@ where
     });
     #[cfg(not(any(test, feature = "echo-agent")))]
     let echo_tool: Option<ToolSpec> = None;
-    let mut config = ExtConfig::default();
-    let tools = echo_tool.into_iter().chain([
-        ToolSpec {
-            name: tau_proto::ToolName::new(READ_TOOL_NAME),
-            model_visible_name: None,
-            description: Some(
-                "Reads a file. Defaults to reading the whole file in one call — \
-                 output is capped at 2000 lines / 50 KB. Truncated output keeps \
-                 the first 1000 and last 1000 lines separated by a literal `...` line. \
-                 Files over 10 MiB are rejected by an input safety cap before output truncation. \
-                 Prefer one full read. Pass inclusive `start_line`/`end_line` only to \
-                 fetch one specific known slice, or `ranges` for up to 100 slices; \
-                 range chunks are separated by one empty line and may overlap, but large overlapping \
-                 multi-range expansions can be rejected before rendering to keep memory bounded. `start_line` past EOF errors, \
-                 while `end_line` past EOF returns available lines. Returned content lines are prefixed \
-                 by their 1-based line number and a space; \
-                 CRLF, CR, and missing final line endings are marked after the number, e.g. \
-                 `2(crlf)`, `3(cr)`, or `4(no_nl)`. Invalid UTF-8 is shown with \
-                 Unicode replacement characters and an `invalid-utf8` line flag. Lines that would exceed \
-                 the 50 KB output budget are marker-only, e.g. `1(truncated)`. Truncated results include `truncated: true`, `total_lines`, \
-                 and `total_bytes`; `valid_utf8: false` is included only when applicable."
-                    .to_owned(),
-            ),
-            tool_type: tau_proto::ToolType::Function,
-            parameters: Some(serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "path": {
-                        "type": "string",
-                        "description": "Path to the file"
-                    },
-                    "start_line": {
-                        "type": "integer",
-                        "minimum": 1,
-                        "description": "Optional, 1-based inclusive. Omit to start at line 1 (the default)."
-                    },
-                    "end_line": {
-                        "type": "integer",
-                        "minimum": 1,
-                        "description": "Optional, 1-based inclusive. Omit to read to end of file (the default and preferred mode). Set this only to continue past a previous truncation, or to fetch a known specific slice of a large file — do NOT pre-slice an ordinary file you haven't already established is large."
-                    },
-                    "ranges": {
-                        "type": "array",
-                        "description": "Optional list of inclusive line ranges to read. Cannot be combined with top-level start_line or end_line. Each chunk is separated by one empty line in the output, and overlapping ranges are returned redundantly. Requests whose overlapping ranges would expand into too much rendered content are rejected before rendering.",
-                        "minItems": 1,
-                        "maxItems": 100,
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "start_line": {
-                                    "type": "integer",
-                                    "minimum": 1,
-                                    "description": "1-based inclusive start line to read."
-                                },
-                                "end_line": {
-                                    "type": "integer",
-                                    "minimum": 1,
-                                    "description": "1-based inclusive end line to read."
-                                }
+    let mut tools = Vec::new();
+    if let Some(echo_tool) = echo_tool {
+        tools.push(echo_tool);
+    }
+    let read_tool = ToolSpec {
+        name: tau_proto::ToolName::new(READ_TOOL_NAME),
+        model_visible_name: None,
+        description: Some(
+            "Reads a file. Defaults to reading the whole file in one call — \
+             output is capped at 2000 lines / 50 KB. Truncated output keeps \
+             the first 1000 and last 1000 lines separated by a literal `...` line. \
+             Files over 10 MiB are rejected by an input safety cap before output truncation. \
+             Prefer one full read. Pass inclusive `start_line`/`end_line` only to \
+             fetch one specific known slice, or `ranges` for up to 100 slices; \
+             range chunks are separated by one empty line and may overlap, but large overlapping \
+             multi-range expansions can be rejected before rendering to keep memory bounded. `start_line` past EOF errors, \
+             while `end_line` past EOF returns available lines. Returned content lines are prefixed \
+             by their 1-based line number and a space; \
+             CRLF, CR, and missing final line endings are marked after the number, e.g. \
+             `2(crlf)`, `3(cr)`, or `4(no_nl)`. Invalid UTF-8 is shown with \
+             Unicode replacement characters and an `invalid-utf8` line flag. Lines that would exceed \
+             the 50 KB output budget are marker-only, e.g. `1(truncated)`. Truncated results include `truncated: true`, `total_lines`, \
+             and `total_bytes`; `valid_utf8: false` is included only when applicable."
+                .to_owned(),
+        ),
+        tool_type: tau_proto::ToolType::Function,
+        parameters: Some(serde_json::json!({
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Path to the file"
+                },
+                "start_line": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Optional, 1-based inclusive. Omit to start at line 1 (the default)."
+                },
+                "end_line": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Optional, 1-based inclusive. Omit to read to end of file (the default and preferred mode). Set this only to continue past a previous truncation, or to fetch a known specific slice of a large file — do NOT pre-slice an ordinary file you haven't already established is large."
+                },
+                "ranges": {
+                    "type": "array",
+                    "description": "Optional list of inclusive line ranges to read. Cannot be combined with top-level start_line or end_line. Each chunk is separated by one empty line in the output, and overlapping ranges are returned redundantly. Requests whose overlapping ranges would expand into too much rendered content are rejected before rendering.",
+                    "minItems": 1,
+                    "maxItems": 100,
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "start_line": {
+                                "type": "integer",
+                                "minimum": 1,
+                                "description": "1-based inclusive start line to read."
                             },
-                            "required": ["start_line", "end_line"],
-                            "additionalProperties": false
-                        }
+                            "end_line": {
+                                "type": "integer",
+                                "minimum": 1,
+                                "description": "1-based inclusive end line to read."
+                            }
+                        },
+                        "required": ["start_line", "end_line"],
+                        "additionalProperties": false
                     }
+                }
+            },
+            "required": ["path"],
+            "additionalProperties": false
+        })),
+        format: None,
+        tags: tool_tags(&["shell:read"]),
+        enabled_by_default: true,
+        background_support: None,
+        examples: vec![ToolExample {
+            id: "read-file".to_owned(),
+            title: Some("Read a file".to_owned()),
+            arguments: CborValue::Map(vec![example_field("path", example_text("src/main.rs"))]),
+            note: Some("Use only the path field for a full-file read.".to_owned()),
+            subcommand: None,
+        }],
+    };
+    let edit_tool = ToolSpec {
+        name: tau_proto::ToolName::new(EDIT_TOOL_NAME),
+        model_visible_name: None,
+        description: Some(
+            "Edit a file using line-oriented replacements. Each edit fully replaces \
+             the 1-based half-open `start_line`..`end_line_exclusive` range \
+             with `newText`. `start_line` is included and `end_line_exclusive` \
+             is excluded. Empty insertion ranges use \
+             `start_line == end_line_exclusive`; for example, `1..<1` inserts \
+             at the start of the file and `total_lines + 1 ..< total_lines + 1` \
+             appends at EOF. All ranges use the original file numbering as if \
+             applied simultaneously. Non-empty replacements are kept as whole \
+             lines. Ranges must be non-overlapping. Missing files are treated as \
+             empty and missing parent directories are created. Per-edit `context_line` \
+             must exactly match the original line immediately before `start_line`; \
+             use an empty context_line when `start_line` is 1. EOF appends use \
+             the original last line as context when the file is non-empty."
+                .to_owned(),
+        ),
+        tool_type: tau_proto::ToolType::Function,
+        parameters: Some(serde_json::json!({
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Path to the file"
                 },
-                "required": ["path"],
-                "additionalProperties": false
-            })),
-            format: None,
-            tags: tool_tags(&["shell:read"]),
-            enabled_by_default: true,
-            background_support: None,
-            examples: vec![ToolExample {
-                id: "read-file".to_owned(),
-                title: Some("Read a file".to_owned()),
-                arguments: CborValue::Map(vec![example_field("path", example_text("src/main.rs"))]),
-                note: Some("Use only the path field for a full-file read.".to_owned()),
-                subcommand: None,
-            }],
-        },
-        ToolSpec {
-            name: tau_proto::ToolName::new(EDIT_TOOL_NAME),
-            model_visible_name: None,
-            description: Some(
-                "Edit a file using line-oriented replacements. Each edit fully replaces \
-                 the 1-based half-open `start_line`..`end_line_exclusive` range \
-                 with `newText`. `start_line` is included and `end_line_exclusive` \
-                 is excluded. Empty insertion ranges use \
-                 `start_line == end_line_exclusive`; for example, `1..<1` inserts \
-                 at the start of the file and `total_lines + 1 ..< total_lines + 1` \
-                 appends at EOF. All ranges use the original file numbering as if \
-                 applied simultaneously. Non-empty replacements are kept as whole \
-                 lines. Ranges must be non-overlapping. Missing files are treated as \
-                 empty and missing parent directories are created. Per-edit `context_line` \
-                 must exactly match the original line immediately before `start_line`; \
-                 use an empty context_line when `start_line` is 1. EOF appends use \
-                 the original last line as context when the file is non-empty."
-                    .to_owned(),
-            ),
-            tool_type: tau_proto::ToolType::Function,
-            parameters: Some(serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "path": {
-                        "type": "string",
-                        "description": "Path to the file"
-                    },
-                    "edits": {
-                        "type": "array",
-                        "description": "One or more line ranges to replace in the original file",
-                        "minItems": 1,
-                        "maxItems": 100,
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "start_line": {
-                                    "type": "integer",
-                                    "minimum": 1,
-                                    "description": "1-based included start line or insertion slot. Use 1 for the start of the file. To append at EOF, use total_lines + 1. Use together with end_line_exclusive."
-                                },
-                                "end_line_exclusive": {
-                                    "type": "integer",
-                                    "minimum": 1,
-                                    "description": "1-based excluded end line or insertion slot. Empty insertion ranges have end_line_exclusive == start_line. To replace read output lines A through B, use start_line A and end_line_exclusive B + 1. Use together with start_line."
-                                },
-                                "newText": {
-                                    "type": "string",
-                                    "description": "Replacement text. Non-empty replacements stay whole-line."
-                                },
-                                "context_line": {
-                                    "type": "string",
-                                    "description": "Exact expected content of the original line immediately before start_line, including spaces and tabs. Use an empty context_line when start_line is 1. Appends at EOF use the original last line as context when the file is non-empty. If it does not match, the edit fails and returns current line-numbered context around the expected context line."
-                                }
+                "edits": {
+                    "type": "array",
+                    "description": "One or more line ranges to replace in the original file",
+                    "minItems": 1,
+                    "maxItems": 100,
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "start_line": {
+                                "type": "integer",
+                                "minimum": 1,
+                                "description": "1-based included start line or insertion slot. Use 1 for the start of the file. To append at EOF, use total_lines + 1. Use together with end_line_exclusive."
                             },
-                            "required": ["start_line", "end_line_exclusive", "newText", "context_line"],
-                            "additionalProperties": false
-                        }
+                            "end_line_exclusive": {
+                                "type": "integer",
+                                "minimum": 1,
+                                "description": "1-based excluded end line or insertion slot. Empty insertion ranges have end_line_exclusive == start_line. To replace read output lines A through B, use start_line A and end_line_exclusive B + 1. Use together with start_line."
+                            },
+                            "newText": {
+                                "type": "string",
+                                "description": "Replacement text. Non-empty replacements stay whole-line."
+                            },
+                            "context_line": {
+                                "type": "string",
+                                "description": "Exact expected content of the original line immediately before start_line, including spaces and tabs. Use an empty context_line when start_line is 1. Appends at EOF use the original last line as context when the file is non-empty. If it does not match, the edit fails and returns current line-numbered context around the expected context line."
+                            }
+                        },
+                        "required": ["start_line", "end_line_exclusive", "newText", "context_line"],
+                        "additionalProperties": false
                     }
+                }
+            },
+            "required": ["path", "edits"],
+            "additionalProperties": false
+        })),
+        format: None,
+        tags: tool_tags(&["shell:edit", "shell:edit:line", "shell:mutates-files"]),
+        enabled_by_default: true,
+        background_support: None,
+        examples: vec![ToolExample {
+            id: "replace-lines".to_owned(),
+            title: Some("Replace one line".to_owned()),
+            arguments: CborValue::Map(vec![
+                example_field("path", example_text("src/main.rs")),
+                (
+                    CborValue::Text("edits".to_owned()),
+                    CborValue::Array(vec![CborValue::Map(vec![
+                        example_field("start_line", example_int(10)),
+                        example_field("end_line_exclusive", example_int(11)),
+                        example_field("newText", example_text("replacement line")),
+                        example_field("context_line", example_text("line before replacement")),
+                    ])]),
+                ),
+            ]),
+            note: Some("end_line_exclusive is one past the last line replaced.".to_owned()),
+            subcommand: None,
+        }],
+    };
+    let apply_patch_tool = ToolSpec {
+        name: tau_proto::ToolName::new(APPLY_PATCH_TOOL_NAME),
+        model_visible_name: None,
+        description: Some("Use the `apply_patch` tool to edit files.".to_owned()),
+        tool_type: tau_proto::ToolType::Custom,
+        parameters: None,
+        format: Some(tau_proto::ToolFormat::Text),
+        tags: tool_tags(&[
+            "shell:edit",
+            "shell:edit:apply_patch",
+            "shell:mutates-files",
+        ]),
+        enabled_by_default: false,
+        background_support: None,
+        examples: Vec::new(),
+    };
+    let dir_lock_tool = dir_lock_tool_spec(dir_lock_enabled);
+    let grep_tool = ToolSpec {
+        name: tau_proto::ToolName::new(GREP_TOOL_NAME),
+        model_visible_name: None,
+        description: Some(
+            "Search file contents for a pattern using ripgrep. Patterns are literal by default; \
+             regex metacharacters like `|` require `regex: true`. Returns matching lines \
+             with file paths and line numbers. Respects .gitignore. Output is truncated at \
+             `limit` matches or 50KB. Long lines are truncated to 500 chars."
+                .to_owned(),
+        ),
+        tool_type: tau_proto::ToolType::Function,
+        parameters: Some(serde_json::json!({
+            "type": "object",
+            "properties": {
+                "pattern": {
+                    "type": "string",
+                    "description": "Search pattern. Treated as a literal string by default. Set `regex: true` to interpret as a regex."
                 },
-                "required": ["path", "edits"],
-                "additionalProperties": false
-            })),
-            format: None,
-            tags: tool_tags(&["shell:edit", "shell:edit:line", "shell:mutates-files"]),
-            enabled_by_default: true,
-            background_support: None,
-            examples: vec![ToolExample {
-                id: "replace-lines".to_owned(),
-                title: Some("Replace one line".to_owned()),
-                arguments: CborValue::Map(vec![
-                    example_field("path", example_text("src/main.rs")),
-                    (
-                        CborValue::Text("edits".to_owned()),
-                        CborValue::Array(vec![CborValue::Map(vec![
-                            example_field("start_line", example_int(10)),
-                            example_field("end_line_exclusive", example_int(11)),
-                            example_field("newText", example_text("replacement line")),
-                            example_field("context_line", example_text("line before replacement")),
-                        ])]),
-                    ),
-                ]),
-                note: Some("end_line_exclusive is one past the last line replaced.".to_owned()),
-                subcommand: None,
-            }],
-        },
-        ToolSpec {
-            name: tau_proto::ToolName::new(APPLY_PATCH_TOOL_NAME),
-            model_visible_name: None,
-            description: Some(
-                "Use the `apply_patch` tool to edit files."
-                    .to_owned(),
-            ),
-            tool_type: tau_proto::ToolType::Custom,
-            parameters: None,
-            format: Some(tau_proto::ToolFormat::Text),
-            tags: tool_tags(&["shell:edit", "shell:edit:apply_patch", "shell:mutates-files"]),
-            enabled_by_default: false,
-            background_support: None,
-            examples: Vec::new(),
-        },
-        dir_lock_tool_spec(config.dir_lock.enable),
-        ToolSpec {
-            name: tau_proto::ToolName::new(GREP_TOOL_NAME),
-            model_visible_name: None,
-            description: Some(
-                "Search file contents for a pattern using ripgrep. Patterns are literal by default; \
-                 regex metacharacters like `|` require `regex: true`. Returns matching lines \
-                 with file paths and line numbers. Respects .gitignore. Output is truncated at \
-                 `limit` matches or 50KB. Long lines are truncated to 500 chars."
-                    .to_owned(),
-            ),
-            tool_type: tau_proto::ToolType::Function,
-            parameters: Some(serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "pattern": {
-                        "type": "string",
-                        "description": "Search pattern. Treated as a literal string by default. Set `regex: true` to interpret as a regex."
-                    },
-                    "path": {
-                        "type": "string",
-                        "description": "Directory or file to search (default: current directory)"
-                    },
-                    "glob": {
-                        "type": "string",
-                        "description": "Filter files by glob pattern, e.g. '*.ts' or '**/*.rs'"
-                    },
-                    "ignoreCase": {
-                        "type": "boolean",
-                        "description": "Case-insensitive search (default: false)"
-                    },
-                    "regex": {
-                        "type": "boolean",
-                        "description": "Interpret `pattern` as a regex instead of a literal string (default: false)"
-                    },
-                    "context": {
-                        "type": "integer",
-                        "description": "Number of lines to show before and after each match (default: 0, max: 20)"
-                    },
-                    "limit": {
-                        "type": "integer",
-                        "description": "Maximum number of matches to return (default: 100, max: 2000)"
-                    }
+                "path": {
+                    "type": "string",
+                    "description": "Directory or file to search (default: current directory)"
                 },
-                "required": ["pattern"],
-                "additionalProperties": false
-            })),
-            format: None,
-            tags: tool_tags(&["shell:read", "shell:search"]),
-            enabled_by_default: true,
-            background_support: None,
-            examples: vec![ToolExample {
-                id: "search-literal".to_owned(),
-                title: Some("Search literal text".to_owned()),
-                arguments: CborValue::Map(vec![
-                    example_field("pattern", example_text("TODO")),
-                    example_field("path", example_text("src")),
-                    example_field("glob", example_text("**/*.rs")),
-                ]),
-                note: Some("Set regex=true only when pattern is a regular expression.".to_owned()),
-                subcommand: None,
-            }],
-        },
-        ToolSpec {
-            name: tau_proto::ToolName::new(FIND_TOOL_NAME),
-            model_visible_name: None,
-            description: Some(
-                "Search for files by glob pattern. Returns only file paths (directories are \
-                 never included, even with '**/*') relative to the search directory. Respects \
-                 .gitignore. Output is truncated at `limit` results or 50KB. Use the ls tool \
-                 if you want to see directory entries."
-                    .to_owned(),
-            ),
-            tool_type: tau_proto::ToolType::Function,
-            parameters: Some(serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "pattern": {
-                        "type": "string",
-                        "description": "Glob pattern matched against file paths relative to `path`. `**` matches any number of intermediate directories, including zero — so `**/*.rs` finds both top-level `a.rs` and nested `src/a.rs`. Directories are not returned, even with `**/*`."
-                    },
-                    "path": {
-                        "type": "string",
-                        "description": "Directory to search (default: current directory)"
-                    },
-                    "limit": {
-                        "type": "integer",
-                        "description": "Maximum number of results to return (default: 1000, max: 2000)"
-                    }
+                "glob": {
+                    "type": "string",
+                    "description": "Filter files by glob pattern, e.g. '*.ts' or '**/*.rs'"
                 },
-                "required": ["pattern"],
-                "additionalProperties": false
-            })),
-            format: None,
-            tags: tool_tags(&["shell:read", "shell:search"]),
-            enabled_by_default: true,
-            background_support: None,
-            examples: vec![ToolExample {
-                id: "find-rust-files".to_owned(),
-                title: Some("Find files by glob".to_owned()),
-                arguments: CborValue::Map(vec![
-                    example_field("pattern", example_text("**/*.rs")),
-                    example_field("path", example_text("crates")),
-                ]),
-                note: None,
-                subcommand: None,
-            }],
-        },
-        ToolSpec {
-            name: tau_proto::ToolName::new(LS_TOOL_NAME),
-            model_visible_name: None,
-            description: Some(
-                "List directory contents. Returns entries sorted alphabetically, with '/' suffix \
-                 for directories. Includes dotfiles. Output lines are prefixed with 1-based \
-                 entry numbers plus flags such as `escaped`, `invalid-utf8`, or `truncated`; \
-                 output is capped at `limit` entries, 2000 lines, or 50KB with standard truncation headers. \
-                 When `limit_reached` is true, entries are a bounded filesystem-order sample sorted \
-                 for display, not a complete alphabetic prefix."
-                    .to_owned(),
-            ),
-            tool_type: tau_proto::ToolType::Function,
-            parameters: Some(serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "path": {
-                        "type": "string",
-                        "description": "Directory to list (default: current directory)"
-                    },
-                    "limit": {
-                        "type": "integer",
-                        "minimum": 1,
-                        "description": "Maximum number of entries to return (default: 500, max: 2001)"
-                    }
+                "ignoreCase": {
+                    "type": "boolean",
+                    "description": "Case-insensitive search (default: false)"
                 },
-                "additionalProperties": false
-            })),
-            format: None,
-            tags: tool_tags(&["shell:read", "shell:list"]),
-            enabled_by_default: true,
-            background_support: None,
-            examples: vec![ToolExample {
-                id: "list-directory".to_owned(),
-                title: Some("List a directory".to_owned()),
-                arguments: CborValue::Map(vec![example_field("path", example_text("src"))]),
-                note: None,
-                subcommand: None,
-            }],
-        },
-        ToolSpec {
-            name: tau_proto::ToolName::new(CD_TOOL_NAME),
-            model_visible_name: None,
-            description: Some("Change the remembered working directory for this shell extension instance.".to_owned()),
-            tool_type: tau_proto::ToolType::Function,
-            parameters: Some(serde_json::json!({
-                "type": "object",
-                "properties": { "path": { "type": "string", "description": "Directory to switch to" } },
-                "required": ["path"],
-                "additionalProperties": false
-            })),
-            format: None,
-            tags: tool_tags(&["shell:cd"]),
-            enabled_by_default: true,
-            background_support: None,
-            examples: vec![ToolExample {
-                id: "change-directory".to_owned(),
-                title: Some("Change directory".to_owned()),
-                arguments: CborValue::Map(vec![example_field("path", example_text("crates/tau"))]),
-                note: None,
-                subcommand: None,
-            }],
-        },
-        ToolSpec {
-            name: tau_proto::ToolName::new(SHELL_TOOL_NAME),
-            model_visible_name: None,
-            description: Some(
-                "Execute a shell command via `sh -c`. When directory locking is enabled, commands \
-                 are inferred read-write only while the agent holds a matching `dir_lock`; otherwise \
-                 they are read-only. When directory locking is disabled, shell commands run read-write. \
-                 Non-zero exits and timeouts are returned as structured command results with output details. \
-                 Output is capped at 2000 lines / \
-                 50 KB; truncated output keeps the first 1000 and last 1000 lines \
-                 separated by a literal `...` line. Output lines are prefixed with `out ` \
-                 for stdout or `err ` for stderr; missing trailing newlines are marked, e.g. \
-                 `out(no_nl)`; CRLF and CR line endings are marked as `out(crlf)` \
-                 or `out(cr)`. Invalid UTF-8 is shown with Unicode replacement characters and \
-                 an `invalid-utf8` line flag. Lines that would exceed the 50 KB output budget \
-                 are marker-only, e.g. `err(truncated)`. Truncated results include `truncated: true`, `total_lines`, and `total_bytes`. \
-                 Commands taking longer than 5 seconds include duration metadata. Prefer dedicated \
-                 tools like `read`, `grep`, and `find` when they fit."
-                    .to_owned(),
-            ),
-            tool_type: tau_proto::ToolType::Function,
-            parameters: Some(serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "command": {
-                        "type": "string",
-                        "description": "The shell command to execute"
-                    },
-                    "timeout": {
-                        "type": "integer",
-                        "minimum": 0,
-                        "description": "Timeout in seconds. The command is killed if it exceeds this. Default: 120"
-                    },
-                    "cwd": {
-                        "type": "string",
-                        "description": "Optional working directory for the command"
-                    }
+                "regex": {
+                    "type": "boolean",
+                    "description": "Interpret `pattern` as a regex instead of a literal string (default: false)"
                 },
-                "required": ["command"],
-                "additionalProperties": false
-            })),
-            format: None,
-            tags: tool_tags(&["shell:exec", "shell:exec:generic"]),
-            enabled_by_default: true,
-            background_support: None,
-            examples: vec![ToolExample {
-                id: "run-command".to_owned(),
-                title: Some("Run a command".to_owned()),
-                arguments: CborValue::Map(vec![
-                    example_field("command", example_text("cargo test -p tau-core")),
-                    example_field("timeout", example_int(120)),
-                ]),
-                note: Some("For file edits, prefer apply_patch when available.".to_owned()),
-                subcommand: None,
-            }],
-        },
-        ToolSpec {
-            name: tau_proto::ToolName::new(GPT_SHELL_TOOL_NAME),
-            model_visible_name: Some(tau_proto::ToolName::new("shell_command")),
-            description: Some(
-                "Run a shell command. Output is capped at 2000 lines / 50 KB; \
-                 Output lines are prefixed with `out ` for stdout or `err ` for stderr; missing \
-                 trailing newlines are marked with `(no_nl)`. For file changes, prefer apply_patch."
-                    .to_owned(),
-            ),
-            tool_type: tau_proto::ToolType::Function,
-            parameters: Some(serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "command": {
-                        "type": "string",
-                        "description": "The shell command to execute"
-                    },
-                    "timeout": {
-                        "type": "integer",
-                        "description": "Timeout in seconds. The command is killed if it exceeds this. Default: 120"
-                    },
-                    "cwd": {
-                        "type": "string",
-                        "description": "Optional working directory for the command"
-                    }
+                "context": {
+                    "type": "integer",
+                    "description": "Number of lines to show before and after each match (default: 0, max: 20)"
                 },
-                "required": ["command"],
-                "additionalProperties": false
-            })),
-            format: None,
-            tags: tool_tags(&["shell:exec", "shell:exec:shell_command"]),
-            enabled_by_default: false,
-            background_support: None,
-            examples: vec![ToolExample {
-                id: "run-command".to_owned(),
-                title: Some("Run a command".to_owned()),
-                arguments: CborValue::Map(vec![
-                    example_field("command", example_text("cargo test -p tau-core")),
-                    example_field("timeout", example_int(120)),
-                ]),
-                note: Some("For file edits, prefer apply_patch when available.".to_owned()),
-                subcommand: None,
-            }],
-        },
-    ]);
+                "limit": {
+                    "type": "integer",
+                    "description": "Maximum number of matches to return (default: 100, max: 2000)"
+                }
+            },
+            "required": ["pattern"],
+            "additionalProperties": false
+        })),
+        format: None,
+        tags: tool_tags(&["shell:read", "shell:search"]),
+        enabled_by_default: true,
+        background_support: None,
+        examples: vec![ToolExample {
+            id: "search-literal".to_owned(),
+            title: Some("Search literal text".to_owned()),
+            arguments: CborValue::Map(vec![
+                example_field("pattern", example_text("TODO")),
+                example_field("path", example_text("src")),
+                example_field("glob", example_text("**/*.rs")),
+            ]),
+            note: Some("Set regex=true only when pattern is a regular expression.".to_owned()),
+            subcommand: None,
+        }],
+    };
+    let find_tool = ToolSpec {
+        name: tau_proto::ToolName::new(FIND_TOOL_NAME),
+        model_visible_name: None,
+        description: Some(
+            "Search for files by glob pattern. Returns only file paths (directories are \
+             never included, even with '**/*') relative to the search directory. Respects \
+             .gitignore. Output is truncated at `limit` results or 50KB. Use the ls tool \
+             if you want to see directory entries."
+                .to_owned(),
+        ),
+        tool_type: tau_proto::ToolType::Function,
+        parameters: Some(serde_json::json!({
+            "type": "object",
+            "properties": {
+                "pattern": {
+                    "type": "string",
+                    "description": "Glob pattern matched against file paths relative to `path`. `**` matches any number of intermediate directories, including zero — so `**/*.rs` finds both top-level `a.rs` and nested `src/a.rs`. Directories are not returned, even with `**/*`."
+                },
+                "path": {
+                    "type": "string",
+                    "description": "Directory to search (default: current directory)"
+                },
+                "limit": {
+                    "type": "integer",
+                    "description": "Maximum number of results to return (default: 1000, max: 2000)"
+                }
+            },
+            "required": ["pattern"],
+            "additionalProperties": false
+        })),
+        format: None,
+        tags: tool_tags(&["shell:read", "shell:search"]),
+        enabled_by_default: true,
+        background_support: None,
+        examples: vec![ToolExample {
+            id: "find-rust-files".to_owned(),
+            title: Some("Find files by glob".to_owned()),
+            arguments: CborValue::Map(vec![
+                example_field("pattern", example_text("**/*.rs")),
+                example_field("path", example_text("crates")),
+            ]),
+            note: None,
+            subcommand: None,
+        }],
+    };
+    let ls_tool = ToolSpec {
+        name: tau_proto::ToolName::new(LS_TOOL_NAME),
+        model_visible_name: None,
+        description: Some(
+            "List directory contents. Returns entries sorted alphabetically, with '/' suffix \
+             for directories. Includes dotfiles. Output lines are prefixed with 1-based \
+             entry numbers plus flags such as `escaped`, `invalid-utf8`, or `truncated`; \
+             output is capped at `limit` entries, 2000 lines, or 50KB with standard truncation headers. \
+             When `limit_reached` is true, entries are a bounded filesystem-order sample sorted \
+             for display, not a complete alphabetic prefix."
+                .to_owned(),
+        ),
+        tool_type: tau_proto::ToolType::Function,
+        parameters: Some(serde_json::json!({
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Directory to list (default: current directory)"
+                },
+                "limit": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "Maximum number of entries to return (default: 500, max: 2001)"
+                }
+            },
+            "additionalProperties": false
+        })),
+        format: None,
+        tags: tool_tags(&["shell:read", "shell:list"]),
+        enabled_by_default: true,
+        background_support: None,
+        examples: vec![ToolExample {
+            id: "list-directory".to_owned(),
+            title: Some("List a directory".to_owned()),
+            arguments: CborValue::Map(vec![example_field("path", example_text("src"))]),
+            note: None,
+            subcommand: None,
+        }],
+    };
+    let cd_tool = ToolSpec {
+        name: tau_proto::ToolName::new(CD_TOOL_NAME),
+        model_visible_name: None,
+        description: Some(
+            "Change the remembered working directory for this shell extension instance.".to_owned(),
+        ),
+        tool_type: tau_proto::ToolType::Function,
+        parameters: Some(serde_json::json!({
+            "type": "object",
+            "properties": { "path": { "type": "string", "description": "Directory to switch to" } },
+            "required": ["path"],
+            "additionalProperties": false
+        })),
+        format: None,
+        tags: tool_tags(&["shell:cd"]),
+        enabled_by_default: true,
+        background_support: None,
+        examples: vec![ToolExample {
+            id: "change-directory".to_owned(),
+            title: Some("Change directory".to_owned()),
+            arguments: CborValue::Map(vec![example_field("path", example_text("crates/tau"))]),
+            note: None,
+            subcommand: None,
+        }],
+    };
+    let shell_tool = ToolSpec {
+        name: tau_proto::ToolName::new(SHELL_TOOL_NAME),
+        model_visible_name: None,
+        description: Some(
+            "Execute a shell command via `sh -c`. When directory locking is enabled, commands \
+             are inferred read-write only while the agent holds a matching `dir_lock`; otherwise \
+             they are read-only. When directory locking is disabled, shell commands run read-write. \
+             Non-zero exits and timeouts are returned as structured command results with output details. \
+             Output is capped at 2000 lines / \
+             50 KB; truncated output keeps the first 1000 and last 1000 lines \
+             separated by a literal `...` line. Output lines are prefixed with `out ` \
+             for stdout or `err ` for stderr; missing trailing newlines are marked, e.g. \
+             `out(no_nl)`; CRLF and CR line endings are marked as `out(crlf)` \
+             or `out(cr)`. Invalid UTF-8 is shown with Unicode replacement characters and \
+             an `invalid-utf8` line flag. Lines that would exceed the 50 KB output budget \
+             are marker-only, e.g. `err(truncated)`. Truncated results include `truncated: true`, `total_lines`, and `total_bytes`. \
+             Commands taking longer than 5 seconds include duration metadata. Prefer dedicated \
+             tools like `read`, `grep`, and `find` when they fit."
+                .to_owned(),
+        ),
+        tool_type: tau_proto::ToolType::Function,
+        parameters: Some(serde_json::json!({
+            "type": "object",
+            "properties": {
+                "command": {
+                    "type": "string",
+                    "description": "The shell command to execute"
+                },
+                "timeout": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Timeout in seconds. The command is killed if it exceeds this. Default: 120"
+                },
+                "cwd": {
+                    "type": "string",
+                    "description": "Optional working directory for the command"
+                }
+            },
+            "required": ["command"],
+            "additionalProperties": false
+        })),
+        format: None,
+        tags: tool_tags(&["shell:exec", "shell:exec:generic"]),
+        enabled_by_default: true,
+        background_support: None,
+        examples: vec![ToolExample {
+            id: "run-command".to_owned(),
+            title: Some("Run a command".to_owned()),
+            arguments: CborValue::Map(vec![
+                example_field("command", example_text("cargo test -p tau-core")),
+                example_field("timeout", example_int(120)),
+            ]),
+            note: Some("For file edits, prefer apply_patch when available.".to_owned()),
+            subcommand: None,
+        }],
+    };
+    let gpt_shell_tool = ToolSpec {
+        name: tau_proto::ToolName::new(GPT_SHELL_TOOL_NAME),
+        model_visible_name: Some(tau_proto::ToolName::new("shell_command")),
+        description: Some(
+            "Run a shell command. Output is capped at 2000 lines / 50 KB; \
+             Output lines are prefixed with `out ` for stdout or `err ` for stderr; missing \
+             trailing newlines are marked with `(no_nl)`. For file changes, prefer apply_patch."
+                .to_owned(),
+        ),
+        tool_type: tau_proto::ToolType::Function,
+        parameters: Some(serde_json::json!({
+            "type": "object",
+            "properties": {
+                "command": {
+                    "type": "string",
+                    "description": "The shell command to execute"
+                },
+                "timeout": {
+                    "type": "integer",
+                    "description": "Timeout in seconds. The command is killed if it exceeds this. Default: 120"
+                },
+                "cwd": {
+                    "type": "string",
+                    "description": "Optional working directory for the command"
+                }
+            },
+            "required": ["command"],
+            "additionalProperties": false
+        })),
+        format: None,
+        tags: tool_tags(&["shell:exec", "shell:exec:shell_command"]),
+        enabled_by_default: false,
+        background_support: None,
+        examples: vec![ToolExample {
+            id: "run-command".to_owned(),
+            title: Some("Run a command".to_owned()),
+            arguments: CborValue::Map(vec![
+                example_field("command", example_text("cargo test -p tau-core")),
+                example_field("timeout", example_int(120)),
+            ]),
+            note: Some("For file edits, prefer apply_patch when available.".to_owned()),
+            subcommand: None,
+        }],
+    };
+    let builtin_tools = [
+        read_tool,
+        edit_tool,
+        apply_patch_tool,
+        dir_lock_tool,
+        grep_tool,
+        find_tool,
+        ls_tool,
+        cd_tool,
+        shell_tool,
+        gpt_shell_tool,
+    ];
+    tools.extend(builtin_tools);
+    tools
+}
+
+fn run_impl<R, W>(reader: R, writer: W) -> Result<(), Box<dyn Error>>
+where
+    R: Read,
+    W: Write + Send + 'static,
+{
+    let mut reader = PeerInputReader::new(BufReader::new(reader));
+    let mut writer = PeerOutputWriter::new(BufWriter::new(writer));
+
+    let initial_config = ExtConfig::default();
+    let tools = registered_tool_specs(initial_config.dir_lock.enable);
 
     // No past events requested: the shell starts from fresh live state.
     // Replaying old invokes/commands would repeat work; old session starts
@@ -615,13 +639,7 @@ where
     // Response channel: worker threads send protocol messages here; writer
     // thread drains them onto the wire.
     let (tx, rx) = mpsc::channel::<HarnessInputMessage>();
-    let scheduler = WorkScheduler::new(tx.clone(), Default::default());
-    let running_shells = Arc::new(Mutex::new(
-        HashMap::<tau_proto::ToolCallId, mpsc::Sender<()>>::new(),
-    ));
-    let lock_manager = DirLockManager::default();
-    let cwd_state = CwdState::new();
-    let mut start_agent_owners = HashMap::<String, tau_proto::AgentId>::new();
+    let mut runtime = ShellRuntime::new(tx.clone(), initial_config);
 
     // Writer thread: drains response messages and writes them to the wire.
     let writer_handle = std::thread::spawn(move || -> Result<(), Box<dyn Error + Send>> {
@@ -636,355 +654,19 @@ where
         Ok(())
     });
 
-    // Reader loop: dispatch each owned tool invocation to a worker thread.
-    // ToolStarted is a subscribed committed delivery, so it carries an ack
-    // sequence that must be acknowledged after processing like other subscribed
-    // events.
-    let mut runtime_started = false;
-    let mut reader_error: Option<Box<dyn Error>> = None;
-    loop {
-        let message = match reader.read_message() {
-            Ok(Some(message)) => message,
-            Ok(None) => break,
-            Err(error) => {
-                reader_error = Some(Box::new(error));
-                break;
-            }
-        };
-        macro_rules! send_or_terminate {
-            ($message:expr) => {
-                if let Err(error) = tx.send($message) {
-                    reader_error = Some(Box::new(std::io::Error::new(
-                        std::io::ErrorKind::BrokenPipe,
-                        format!("response channel closed: {error}"),
-                    )));
-                    break;
-                }
-            };
-        }
-        match message {
-            HarnessOutputMessage::Configure(msg) => {
-                match tau_extension::parse_config::<ExtConfig>(&msg.config) {
-                    Ok(mut cfg) => {
-                        if cfg.working_directory.is_none() {
-                            cfg.working_directory = config.working_directory.clone();
-                        }
-                        if let Some(instance_name) = msg.instance_name.as_ref() {
-                            cwd_state.set_instance_name(instance_name.as_str().to_owned());
-                        }
-                        if let Err(message) =
-                            apply_working_directory(&config, &cfg, runtime_started)
-                        {
-                            send_or_terminate!(HarnessInputMessage::ConfigError(ConfigError {
-                                message
-                            }));
-                            continue;
-                        }
-                        let dir_lock_was_enabled = config.dir_lock.enable;
-                        let dir_lock_changed = dir_lock_was_enabled != cfg.dir_lock.enable;
-                        let dir_lock_disabling = dir_lock_was_enabled && !cfg.dir_lock.enable;
-                        config = cfg;
-                        if dir_lock_disabling {
-                            let _ = lock_manager.disable();
-                        }
-                        if dir_lock_changed {
-                            send_or_terminate!(HarnessInputMessage::emit(Event::ToolRegister(
-                                tau_proto::ToolRegister {
-                                    tool: dir_lock_tool_spec(config.dir_lock.enable),
-                                    tool_group: Some(tau_proto::ToolGroup {
-                                        name: tau_proto::ToolGroupName::new("shell"),
-                                        prompt_fragment: None,
-                                    }),
-                                    prompt_fragment: None,
-                                },
-                            )));
-                        }
-                    }
-                    Err(message) => {
-                        send_or_terminate!(HarnessInputMessage::ConfigError(ConfigError {
-                            message
-                        }));
-                    }
-                }
-            }
-            HarnessOutputMessage::Deliver(delivery) => {
-                runtime_started = true;
-                // Replay-marked frames re-send historical facts to late
-                // subscribers. Execution triggers are skipped on replay so
-                // history does not re-run side effects; metadata-bearing facts
-                // are folded so cwd state is restored before live readiness.
-                let is_replay = delivery.is_replay();
-                match delivery.into_event() {
-                    Event::AgentStarted(started) => {
-                        apply_started_cwd_metadata(started, &tx, &cwd_state, is_replay);
-                    }
-                    Event::ToolStarted(invoke) => {
-                        if is_replay {
-                            continue;
-                        }
-                        if !is_shell_tool(invoke.tool_name.as_str()) {
-                            continue;
-                        }
-                        if let Err(error) = schedule_tool_started(
-                            invoke,
-                            &scheduler,
-                            &tx,
-                            config.clone(),
-                            lock_manager.clone(),
-                            Arc::clone(&running_shells),
-                            cwd_state.clone(),
-                        ) {
-                            let (invoke, failure) = *error;
-                            send_tool_failure(invoke, failure, &tx);
-                        }
-                    }
-                    Event::SessionStarted(started) => {
-                        if is_replay {
-                            continue;
-                        }
-                        dispatch_session_started(started, &tx);
-                    }
-                    Event::SessionAgentLoaded(loaded) => {
-                        if is_replay {
-                            continue;
-                        }
-                        dispatch_session_agent_loaded(loaded, &tx, &cwd_state);
-                    }
-                    Event::SessionAgentUnloaded(unloaded) => {
-                        if is_replay {
-                            continue;
-                        }
-                        lock_manager.release_agent(&unloaded.agent_id);
-                        scheduler.cancel_agent(&unloaded.agent_id);
-                        cwd_state.unset(&unloaded.agent_id);
-                        cwd_state.take_pending_ready(&unloaded.agent_id);
-                        cwd_state.take_pending_notice(&unloaded.agent_id);
-                        cwd_state.take_pending_cd_result(&unloaded.agent_id);
-                        start_agent_owners.retain(|_, agent_id| agent_id != &unloaded.agent_id);
-                    }
-                    Event::AgentMetadataSet(set) => {
-                        if set.key == cwd_state.key()
-                            && let CborValue::Text(path) = set.value
-                        {
-                            let cwd = PathBuf::from(path);
-                            let agent_id = set.agent_id;
-                            cwd_state.set(agent_id.clone(), cwd.clone());
-                            if is_replay {
-                                continue;
-                            }
-                            let _ = tx.send(HarnessInputMessage::emit(cwd_context_event(
-                                agent_id.clone(),
-                                &cwd,
-                            )));
-                            if cwd_state.take_pending_notice(&agent_id).is_some() {
-                                let _ = tx.send(HarnessInputMessage::emit(cwd_notice_event(
-                                    agent_id.clone(),
-                                    &cwd,
-                                )));
-                            }
-                            if let Some(pending_cd) =
-                                cwd_state.take_committed_pending_cd_result(&agent_id, &cwd)
-                            {
-                                if pending_cd.matched_request {
-                                    let output = crate::tools::cd::output(cwd.as_path());
-                                    let event = Event::ToolResult(ToolResult {
-                                        call_id: pending_cd.invoke.call_id,
-                                        tool_name: pending_cd.invoke.tool_name,
-                                        tool_type: tau_proto::ToolType::Function,
-                                        result: output.result,
-                                        kind: ToolResultKind::Final,
-                                        display: Some(output.display),
-                                        originator: pending_cd.invoke.originator,
-                                    });
-                                    let _ = tx.send(HarnessInputMessage::emit(
-                                        with_lock_wait_duration(
-                                            event,
-                                            pending_cd.lock_wait_duration_seconds,
-                                        ),
-                                    ));
-                                } else {
-                                    let event = Event::ToolError(tau_proto::ToolError {
-                                        call_id: pending_cd.invoke.call_id,
-                                        tool_name: pending_cd.invoke.tool_name,
-                                        tool_type: tau_proto::ToolType::Function,
-                                        message: format!(
-                                            "committed cwd metadata did not match requested cwd; cwd changed to {}",
-                                            cwd.display()
-                                        ),
-                                        details: None,
-                                        display: None,
-                                        originator: pending_cd.invoke.originator,
-                                    });
-                                    let _ = tx.send(HarnessInputMessage::emit(
-                                        with_lock_wait_duration(
-                                            event,
-                                            pending_cd.lock_wait_duration_seconds,
-                                        ),
-                                    ));
-                                }
-                            }
-                            if let Some(session_id) = cwd_state.take_pending_ready(&agent_id) {
-                                let _ = tx.send(HarnessInputMessage::emit(
-                                    Event::ExtensionContextReady(ExtensionContextReady {
-                                        session_id,
-                                        agent_id,
-                                    }),
-                                ));
-                            }
-                        } else if set.key == cwd_state.key() {
-                            if is_replay {
-                                continue;
-                            }
-                            let agent_id = set.agent_id;
-                            let cwd = cwd_state.get_or_default(&agent_id);
-                            let _ = tx.send(HarnessInputMessage::emit(cwd_context_event(
-                                agent_id.clone(),
-                                &cwd,
-                            )));
-                            cwd_state.take_pending_notice(&agent_id);
-                            if let Some(pending_cd) = cwd_state.take_pending_cd_result(&agent_id) {
-                                let event = Event::ToolError(tau_proto::ToolError {
-                                    call_id: pending_cd.invoke.call_id,
-                                    tool_name: pending_cd.invoke.tool_name,
-                                    tool_type: tau_proto::ToolType::Function,
-                                    message:
-                                        "committed cwd metadata value is not text; cwd unchanged"
-                                            .to_owned(),
-                                    details: None,
-                                    display: None,
-                                    originator: pending_cd.invoke.originator,
-                                });
-                                let _ =
-                                    tx.send(HarnessInputMessage::emit(with_lock_wait_duration(
-                                        event,
-                                        pending_cd.lock_wait_duration_seconds,
-                                    )));
-                            }
-                            if let Some(session_id) = cwd_state.take_pending_ready(&agent_id) {
-                                let _ = tx.send(HarnessInputMessage::emit(
-                                    Event::ExtensionContextReady(ExtensionContextReady {
-                                        session_id,
-                                        agent_id,
-                                    }),
-                                ));
-                            }
-                        }
-                    }
-                    Event::AgentMetadataUnset(unset) => {
-                        if unset.key == cwd_state.key() {
-                            cwd_state.unset(&unset.agent_id);
-                            if is_replay {
-                                continue;
-                            }
-                            let cwd = cwd_state.get_or_default(&unset.agent_id);
-                            let _ = tx.send(HarnessInputMessage::emit(cwd_context_event(
-                                unset.agent_id.clone(),
-                                &cwd,
-                            )));
-                            cwd_state.take_pending_notice(&unset.agent_id);
-                            if let Some(pending_cd) =
-                                cwd_state.take_pending_cd_result(&unset.agent_id)
-                            {
-                                let event = Event::ToolError(tau_proto::ToolError {
-                                    call_id: pending_cd.invoke.call_id,
-                                    tool_name: pending_cd.invoke.tool_name,
-                                    tool_type: tau_proto::ToolType::Function,
-                                    message: "committed cwd metadata was unset; cwd reverted to the process default"
-                                        .to_owned(),
-                                    details: None,
-                                    display: None,
-                                    originator: pending_cd.invoke.originator,
-                                });
-                                let _ =
-                                    tx.send(HarnessInputMessage::emit(with_lock_wait_duration(
-                                        event,
-                                        pending_cd.lock_wait_duration_seconds,
-                                    )));
-                            }
-                            if let Some(session_id) = cwd_state.take_pending_ready(&unset.agent_id)
-                            {
-                                let _ = tx.send(HarnessInputMessage::emit(
-                                    Event::ExtensionContextReady(ExtensionContextReady {
-                                        session_id,
-                                        agent_id: unset.agent_id,
-                                    }),
-                                ));
-                            }
-                        }
-                    }
-                    Event::SessionShutdown(_) => {
-                        lock_manager.shutdown();
-                        scheduler.cancel_all_queued();
-                        start_agent_owners.clear();
-                    }
-                    Event::StartAgentAccepted(accepted) => {
-                        start_agent_owners.insert(accepted.query_id, accepted.agent_id);
-                    }
-                    Event::StartAgentResult(result) => {
-                        if let Some(agent_id) = start_agent_owners.remove(&result.query_id) {
-                            lock_manager.release_agent(&agent_id);
-                            scheduler.cancel_agent(&agent_id);
-                        }
-                    }
-                    Event::ActionInvoke(invoke) => {
-                        send_or_terminate!(HarnessInputMessage::emit(dispatch_action_invoke(
-                            invoke,
-                            &lock_manager,
-                        )));
-                    }
-                    Event::ToolCancelRequest(request) => {
-                        if scheduler.cancel_queued_call(&request.target_call_id) {
-                            debug!(call_id = %request.target_call_id, "cancellation requested for queued shell work");
-                            continue;
-                        }
-                        let cancel_tx = running_shells
-                            .lock()
-                            .expect("running shell registry lock poisoned")
-                            .get(&request.target_call_id)
-                            .cloned();
-                        if let Some(cancel_tx) = cancel_tx {
-                            debug!(call_id = %request.target_call_id, "shell cancellation requested for running call");
-                            if cancel_tx.send(()).is_err() {
-                                debug!(call_id = %request.target_call_id, "shell cancellation receiver already gone");
-                            }
-                        } else if lock_manager.cancel_waiting_call(&request.target_call_id) {
-                            debug!(call_id = %request.target_call_id, "cancellation requested for waiting dir-lock call");
-                        } else {
-                            debug!(call_id = %request.target_call_id, "shell cancellation requested for unknown call");
-                        }
-                    }
-                    Event::UiShellCommand(cmd) => {
-                        if let Err(error) =
-                            schedule_ui_shell_command(cmd, &scheduler, &tx, config.shell.clone())
-                        {
-                            let (cmd, message) = *error;
-                            send_ui_shell_saturated_failure(cmd, message, &tx);
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            HarnessOutputMessage::Disconnect(_) => break,
-            _ => {}
-        }
-    }
+    let reader_result = runtime.run_reader_loop(&mut reader);
 
     // EOF/disconnect may arrive without a committed SessionShutdown event. Wake
     // lock waiters before dropping the scheduler, because scheduler drop joins
     // workers and active worker jobs may be blocked inside DirLockManager.
-    lock_manager.shutdown();
-    scheduler.cancel_all_queued();
-    drop(scheduler);
-    // Drop the sender so the writer thread exits.
+    runtime.shutdown();
+    drop(runtime);
     drop(tx);
     writer_handle
         .join()
         .map_err(|_| "writer thread panicked")?
         .map_err(|e| -> Box<dyn Error> { e })?;
-    if let Some(error) = reader_error {
-        return Err(error);
-    }
-    Ok(())
+    reader_result
 }
 
 fn apply_working_directory(
