@@ -233,6 +233,36 @@ fn incoming_unallowed_user_is_not_routed() {
     assert!(rx.try_recv().is_err());
 }
 
+/// Attachments without text or captions must be acknowledged as unsupported
+/// instead of being silently dropped, so allowlisted Telegram users know no Tau
+/// prompt was routed.
+#[test]
+fn textless_allowed_message_gets_unsupported_reply() {
+    let (ext, rx, client) = extension();
+    ext.state
+        .lock()
+        .expect("lock")
+        .registered_agents
+        .insert(agent_id("agent-1"));
+
+    ext.process_update(TgUpdate {
+        update_id: 1,
+        message: Some(TgMessage {
+            chat_id: 123,
+            chat_type: None,
+            user_id: 123,
+            from_name: None,
+            text: None,
+        }),
+    });
+
+    assert!(rx.try_recv().is_err());
+    assert_eq!(
+        client.sent.lock().expect("lock")[0].1,
+        "Only text messages are supported by this Tau bridge."
+    );
+}
+
 /// With exactly one registered agent, plain Telegram text is submitted through
 /// the harness-owned prompt request path with a source prefix.
 #[test]

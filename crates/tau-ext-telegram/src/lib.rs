@@ -338,196 +338,273 @@ impl Extension {
         let Some(message) = update.message else {
             return;
         };
-        let (cfg, allowed) = {
-            let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-            let Some(cfg) = state.config.clone() else {
-                return;
-            };
-            let allowed = cfg.allowed_user_ids.contains(&message.user_id);
-            (cfg, allowed)
+        let Some(cfg) = self.config_for_allowed_message(&message) else {
+            return;
         };
-        if !allowed {
-            tracing::warn!(target: LOG_TARGET, user_id = message.user_id, "ignoring Telegram message from unallowed user");
+        let is_private_chat = is_private_message_chat(&message);
+        let active_chat = self.active_chat(&cfg);
+        if self.rejects_inactive_chat(&cfg, &message, active_chat, is_private_chat) {
             return;
         }
-        let is_private_chat = message
-            .chat_type
-            .as_deref()
-            .is_none_or(|kind| kind == "private");
-        let active_chat = {
-            let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-            cfg.configured_chat_id
-                .or_else(|| state.learned_chat.map(|chat| chat.chat_id))
-        };
-        if let Some(configured_chat_id) = cfg.configured_chat_id {
-            if message.chat_id != configured_chat_id {
-                let _ = self.client.send_message(
-                    &cfg,
-                    message.chat_id,
-                    "This Tau bridge is configured for a different Telegram chat.",
-                );
-                return;
-            }
-        } else if active_chat.is_some_and(|chat_id| chat_id != message.chat_id) {
-            let _ = self.client.send_message(
-                &cfg,
-                message.chat_id,
-                "This Tau bridge is already linked to a different Telegram chat.",
-            );
-            return;
-        }
-        if !is_private_chat && cfg.configured_chat_id != Some(message.chat_id) {
-            let _ = self.client.send_message(
-                &cfg,
-                message.chat_id,
-                "Group chats are only supported when this chat_id is explicitly configured.",
-            );
-            return;
-        }
-        let Some(text) = message
-            .text
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(str::to_owned)
-        else {
-            let _ = self.client.send_message(
-                &cfg,
-                message.chat_id,
-                "Only text messages are supported by this Tau bridge.",
-            );
+        let Some(text) = self.trimmed_message_text(&cfg, &message) else {
             return;
         };
         let (command, rest) = parse_command(&text);
-        if cfg.configured_chat_id.is_none()
-            && active_chat.is_none()
-            && !matches!(command, Some("/start"))
-        {
-            let _ = self.client.send_message(
-                &cfg,
-                message.chat_id,
-                "Send /start to link this private chat before routing messages to Tau.",
-            );
+        if self.rejects_unlinked_command(&cfg, &message, active_chat, command) {
             return;
         }
+        if self.handle_command(&cfg, &message, is_private_chat, command, rest) {
+            return;
+        }
+
+        self.route_plain_text(&cfg, &message, &text);
+    }
+
+    fn config_for_allowed_message(&self, message: &TgMessage) -> Option<RuntimeConfig> {
+        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let cfg = state.config.clone()?;
+        if cfg.allowed_user_ids.contains(&message.user_id) {
+            Some(cfg)
+        } else {
+            tracing::warn!(target: LOG_TARGET, user_id = message.user_id, "ignoring Telegram message from unallowed user");
+            None
+        }
+    }
+
+    fn active_chat(&self, cfg: &RuntimeConfig) -> Option<i64> {
+        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        cfg.configured_chat_id
+            .or_else(|| state.learned_chat.map(|chat| chat.chat_id))
+    }
+
+    fn rejects_inactive_chat(
+        &self,
+        cfg: &RuntimeConfig,
+        message: &TgMessage,
+        active_chat: Option<i64>,
+        is_private_chat: bool,
+    ) -> bool {
+        if let Some(configured_chat_id) = cfg.configured_chat_id {
+            if message.chat_id != configured_chat_id {
+                self.reply(
+                    cfg,
+                    message.chat_id,
+                    "This Tau bridge is configured for a different Telegram chat.",
+                );
+                return true;
+            }
+        } else if active_chat.is_some_and(|chat_id| chat_id != message.chat_id) {
+            self.reply(
+                cfg,
+                message.chat_id,
+                "This Tau bridge is already linked to a different Telegram chat.",
+            );
+            return true;
+        }
+
+        if !is_private_chat && cfg.configured_chat_id != Some(message.chat_id) {
+            self.reply(
+                cfg,
+                message.chat_id,
+                "Group chats are only supported when this chat_id is explicitly configured.",
+            );
+            return true;
+        }
+        false
+    }
+
+    fn trimmed_message_text(&self, cfg: &RuntimeConfig, message: &TgMessage) -> Option<String> {
+        let text = message.text.as_deref().unwrap_or_default().trim();
+        if text.is_empty() {
+            self.reply(
+                cfg,
+                message.chat_id,
+                "Only text messages are supported by this Tau bridge.",
+            );
+            None
+        } else {
+            Some(text.to_owned())
+        }
+    }
+
+    fn rejects_unlinked_command(
+        &self,
+        cfg: &RuntimeConfig,
+        message: &TgMessage,
+        active_chat: Option<i64>,
+        command: Option<&str>,
+    ) -> bool {
+        if cfg.configured_chat_id.is_some()
+            || active_chat.is_some()
+            || matches!(command, Some("/start"))
+        {
+            return false;
+        }
+
+        self.reply(
+            cfg,
+            message.chat_id,
+            "Send /start to link this private chat before routing messages to Tau.",
+        );
+        true
+    }
+
+    fn handle_command(
+        &self,
+        cfg: &RuntimeConfig,
+        message: &TgMessage,
+        is_private_chat: bool,
+        command: Option<&str>,
+        rest: &str,
+    ) -> bool {
         match command {
             Some("/start") => {
-                if cfg.configured_chat_id.is_none() {
-                    if !is_private_chat {
-                        let _ = self.client.send_message(
-                            &cfg,
-                            message.chat_id,
-                            "Group chats require an explicit configured chat_id.",
-                        );
-                        return;
-                    }
-                    let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-                    state.learned_chat = Some(LinkedChat {
-                        chat_id: message.chat_id,
-                        user_id: message.user_id,
-                    });
-                }
-                let _ = self.client.send_message(&cfg, message.chat_id, help_text());
-                return;
+                self.handle_start_command(cfg, message, is_private_chat);
+                true
             }
             Some("/agents") => {
-                let reply = {
-                    let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-                    agents_text(&state)
-                };
-                let _ = self.client.send_message(&cfg, message.chat_id, &reply);
-                return;
+                self.handle_agents_command(cfg, message.chat_id);
+                true
             }
             Some("/select") => {
-                if rest.trim().is_empty() {
-                    let _ = self.client.send_message(
-                        &cfg,
-                        message.chat_id,
-                        "Usage: /select <agent-id-or-prefix>",
-                    );
-                    return;
-                }
-                let reply = {
-                    let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-                    match resolve_agent(&state, rest.trim()) {
-                        Ok(agent_id) => {
-                            state
-                                .selected_agent_by_chat
-                                .insert(message.chat_id, agent_id.clone());
-                            format!("Selected {}", agent_designator(&state, &agent_id))
-                        }
-                        Err(reply) => reply,
-                    }
-                };
-                let _ = self.client.send_message(&cfg, message.chat_id, &reply);
-                return;
+                self.handle_select_command(cfg, message.chat_id, rest);
+                true
             }
             Some("/to") => {
-                let (target, body) = split_first(rest);
-                if target.is_empty() || body.trim().is_empty() {
-                    let _ = self.client.send_message(
-                        &cfg,
-                        message.chat_id,
-                        "Usage: /to <agent-id-or-prefix> <message>",
-                    );
-                    return;
-                }
-                let target = {
-                    let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-                    resolve_agent(&state, target)
-                };
-                match target {
-                    Ok(agent_id) => self.route_text(message, agent_id, body.trim()),
-                    Err(reply) => {
-                        let _ = self.client.send_message(&cfg, message.chat_id, &reply);
-                    }
-                }
-                return;
+                self.handle_to_command(cfg, message, rest);
+                true
             }
             Some(_) => {
-                let _ = self.client.send_message(
-                    &cfg,
+                self.reply(
+                    cfg,
                     message.chat_id,
                     "Unknown Telegram command. Supported commands: /start, /agents, /select, /to.",
                 );
+                true
+            }
+            None => false,
+        }
+    }
+
+    fn handle_start_command(
+        &self,
+        cfg: &RuntimeConfig,
+        message: &TgMessage,
+        is_private_chat: bool,
+    ) {
+        if cfg.configured_chat_id.is_none() {
+            if !is_private_chat {
+                self.reply(
+                    cfg,
+                    message.chat_id,
+                    "Group chats require an explicit configured chat_id.",
+                );
                 return;
             }
-            None => {}
+            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            state.learned_chat = Some(LinkedChat {
+                chat_id: message.chat_id,
+                user_id: message.user_id,
+            });
         }
-        let target = {
+        self.reply(cfg, message.chat_id, help_text());
+    }
+
+    fn handle_agents_command(&self, cfg: &RuntimeConfig, chat_id: i64) {
+        let reply = {
             let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some(agent_id) = state.selected_agent_by_chat.get(&message.chat_id)
-                && state.registered_agents.contains(agent_id)
-            {
-                Ok(agent_id.clone())
-            } else if state.registered_agents.len() == 1 {
-                Ok(state
-                    .registered_agents
-                    .iter()
-                    .next()
-                    .expect("one agent")
-                    .clone())
-            } else if state.registered_agents.is_empty() {
-                Err("No Tau agents are registered. Ask an agent to call telegram_register(enabled: true).".to_owned())
-            } else {
-                Err(
-                    "Multiple Tau agents are registered. Use /agents then /select <agent-id-or-prefix>."
-                        .to_owned(),
-                )
+            agents_text(&state)
+        };
+        self.reply(cfg, chat_id, &reply);
+    }
+
+    fn handle_select_command(&self, cfg: &RuntimeConfig, chat_id: i64, rest: &str) {
+        if rest.trim().is_empty() {
+            self.reply(cfg, chat_id, "Usage: /select <agent-id-or-prefix>");
+            return;
+        }
+
+        let reply = {
+            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            match resolve_agent(&state, rest.trim()) {
+                Ok(agent_id) => {
+                    state
+                        .selected_agent_by_chat
+                        .insert(chat_id, agent_id.clone());
+                    format!("Selected {}", agent_designator(&state, &agent_id))
+                }
+                Err(reply) => reply,
             }
         };
-        match target {
-            Ok(agent_id) => self.route_text(message, agent_id, &text),
+        self.reply(cfg, chat_id, &reply);
+    }
+
+    fn handle_to_command(&self, cfg: &RuntimeConfig, message: &TgMessage, rest: &str) {
+        let (target, body) = split_first(rest);
+        if target.is_empty() || body.trim().is_empty() {
+            self.reply(
+                cfg,
+                message.chat_id,
+                "Usage: /to <agent-id-or-prefix> <message>",
+            );
+            return;
+        }
+
+        match self.resolve_registered_agent(target) {
+            Ok(agent_id) => self.route_text(message, agent_id, body.trim()),
             Err(reply) => {
-                let _ = self.client.send_message(&cfg, message.chat_id, &reply);
+                self.reply(cfg, message.chat_id, &reply);
             }
         }
     }
 
-    fn route_text(&self, message: TgMessage, agent_id: AgentId, text: &str) {
+    fn route_plain_text(&self, cfg: &RuntimeConfig, message: &TgMessage, text: &str) {
+        match self.plain_text_target(message.chat_id) {
+            Ok(agent_id) => self.route_text(message, agent_id, text),
+            Err(reply) => {
+                self.reply(cfg, message.chat_id, &reply);
+            }
+        }
+    }
+
+    fn plain_text_target(&self, chat_id: i64) -> Result<AgentId, String> {
+        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(agent_id) = state.selected_agent_by_chat.get(&chat_id)
+            && state.registered_agents.contains(agent_id)
+        {
+            Ok(agent_id.clone())
+        } else if state.registered_agents.len() == 1 {
+            Ok(state
+                .registered_agents
+                .iter()
+                .next()
+                .expect("one agent")
+                .clone())
+        } else if state.registered_agents.is_empty() {
+            Err("No Tau agents are registered. Ask an agent to call telegram_register(enabled: true).".to_owned())
+        } else {
+            Err(
+                "Multiple Tau agents are registered. Use /agents then /select <agent-id-or-prefix>."
+                    .to_owned(),
+            )
+        }
+    }
+
+    fn resolve_registered_agent(&self, target: &str) -> Result<AgentId, String> {
+        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        resolve_agent(&state, target)
+    }
+
+    fn reply(&self, cfg: &RuntimeConfig, chat_id: i64, text: &str) {
+        let _ = self.client.send_message(cfg, chat_id, text);
+    }
+
+    fn route_text(&self, message: &TgMessage, agent_id: AgentId, text: &str) {
         let source = message
             .from_name
+            .as_deref()
             .filter(|name| !name.trim().is_empty())
+            .map(str::to_owned)
             .unwrap_or_else(|| message.user_id.to_string());
         let prompt = format!("[telegram from {source}] {text}");
         let _ = self
@@ -540,6 +617,13 @@ impl Extension {
                 },
             )));
     }
+}
+
+fn is_private_message_chat(message: &TgMessage) -> bool {
+    message
+        .chat_type
+        .as_deref()
+        .is_none_or(|kind| kind == "private")
 }
 
 fn sleep_interruptibly(shutdown: &AtomicBool, total: Duration) {
