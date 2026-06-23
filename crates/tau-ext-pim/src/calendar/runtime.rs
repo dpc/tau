@@ -1003,94 +1003,99 @@ impl Engine {
         let (account, calendar) = self.resolve_calendar_arg(args.calendar.as_deref())?;
         let calendar = calendar.as_str();
         self.ensure_calendar_allowed(account, calendar)?;
-        if !matches!(
-            &account.backend,
-            Some(ValidatedBackendConfig::Google { .. })
-        ) {
-            return Err(format!(
-                "calendar account `{}` backend `{}` does not support calendar writes",
-                account.id,
-                account.backend_kind()
-            ));
-        }
+        ensure_google_write_backend(account)?;
+        self.build_calendar_change(command, &args, account, calendar)
+    }
+
+    fn build_calendar_change(
+        &self,
+        command: CalendarCommand,
+        args: &ChangeArgs,
+        account: &ValidatedAccount,
+        calendar: &str,
+    ) -> Result<CalendarChangeApproval, String> {
         let mut change =
             CalendarChangeApproval::pending(command_name(command), &account.id, calendar);
         match command {
             CalendarCommand::CreateEvent => {
-                change.title = Some(required_text(args.title.as_deref(), "title")?);
-                let (start, end) = create_event_time_pair(
-                    args.start.as_deref(),
-                    args.end.as_deref(),
-                    account.timezone.as_deref(),
-                )?;
-                change.start = Some(start);
-                change.end = Some(end);
-                change.description = optional_description(args.description.as_deref())?;
-                change.location = optional_line(args.location.as_deref(), "location", true)?;
-                change.attendees = optional_attendees(
-                    args.attendees.as_deref(),
-                    self.config.policy.write.max_attendees,
-                )?;
+                self.fill_create_event_change(&mut change, args, account)?
             }
             CalendarCommand::UpdateEvent => {
-                change.event_id = Some(required_text(args.event_id.as_deref(), "event_id")?);
-                change.etag = Some(self.cached_etag_for_change(&change)?);
-                change.title = optional_line(args.title.as_deref(), "title", false)?;
-                change.description = optional_description(args.description.as_deref())?;
-                change.location = optional_line(args.location.as_deref(), "location", true)?;
-                match (args.start.as_deref(), args.end.as_deref()) {
-                    (Some(_), Some(_)) => {
-                        let (start, end) = required_time_pair(
-                            args.start.as_deref(),
-                            args.end.as_deref(),
-                            account.timezone.as_deref(),
-                        )?;
-                        change.start = Some(start);
-                        change.end = Some(end);
-                    }
-                    (Some(_), None) => {
-                        let (start, end) = create_event_time_pair(
-                            args.start.as_deref(),
-                            None,
-                            account.timezone.as_deref(),
-                        )?;
-                        change.start = Some(start);
-                        change.end = Some(end);
-                    }
-                    (None, None) => {}
-                    (None, Some(_)) => {
-                        return Err(
-                            "end without start is ambiguous; pass start too, or omit both"
-                                .to_owned(),
-                        );
-                    }
-                }
-                change.attendees = optional_attendees(
-                    args.attendees.as_deref(),
-                    self.config.policy.write.max_attendees,
-                )?;
-                if !change_has_update_payload(&change) {
-                    return Err("update_event requires at least one field to update".to_owned());
-                }
-                if args.response.is_some() {
-                    return Err("response is only valid for respond_invite".to_owned());
-                }
+                self.fill_update_event_change(&mut change, args, account)?
             }
-            CalendarCommand::DeleteEvent => {
-                change.event_id = Some(required_text(args.event_id.as_deref(), "event_id")?);
-                change.etag = Some(self.cached_etag_for_change(&change)?);
-            }
-            CalendarCommand::RespondInvite => {
-                change.event_id = Some(required_text(args.event_id.as_deref(), "event_id")?);
-                change.etag = Some(self.cached_etag_for_change(&change)?);
-                change.response = Some(required_response(args.response.as_deref())?);
-            }
+            CalendarCommand::DeleteEvent => self.fill_delete_event_change(&mut change, args)?,
+            CalendarCommand::RespondInvite => self.fill_respond_invite_change(&mut change, args)?,
             CalendarCommand::ListCalendars
             | CalendarCommand::ListEvents
             | CalendarCommand::ReadEvent
             | CalendarCommand::FreeBusy => unreachable!("read commands are not calendar changes"),
         }
         Ok(change)
+    }
+
+    fn fill_create_event_change(
+        &self,
+        change: &mut CalendarChangeApproval,
+        args: &ChangeArgs,
+        account: &ValidatedAccount,
+    ) -> Result<(), String> {
+        change.title = Some(required_text(args.title.as_deref(), "title")?);
+        let (start, end) = create_event_time_pair(
+            args.start.as_deref(),
+            args.end.as_deref(),
+            account.timezone.as_deref(),
+        )?;
+        change.start = Some(start);
+        change.end = Some(end);
+        change.description = optional_description(args.description.as_deref())?;
+        change.location = optional_line(args.location.as_deref(), "location", true)?;
+        change.attendees = optional_attendees(
+            args.attendees.as_deref(),
+            self.config.policy.write.max_attendees,
+        )?;
+        Ok(())
+    }
+
+    fn fill_update_event_change(
+        &self,
+        change: &mut CalendarChangeApproval,
+        args: &ChangeArgs,
+        account: &ValidatedAccount,
+    ) -> Result<(), String> {
+        change.event_id = Some(required_text(args.event_id.as_deref(), "event_id")?);
+        change.etag = Some(self.cached_etag_for_change(change)?);
+        change.title = optional_line(args.title.as_deref(), "title", false)?;
+        change.description = optional_description(args.description.as_deref())?;
+        change.location = optional_line(args.location.as_deref(), "location", true)?;
+        fill_update_time_change(change, args, account.timezone.as_deref())?;
+        change.attendees = optional_attendees(
+            args.attendees.as_deref(),
+            self.config.policy.write.max_attendees,
+        )?;
+        ensure_update_change_has_payload(change)?;
+        ensure_response_only_for_invites(args)?;
+        Ok(())
+    }
+
+    fn fill_delete_event_change(
+        &self,
+        change: &mut CalendarChangeApproval,
+        args: &ChangeArgs,
+    ) -> Result<(), String> {
+        change.event_id = Some(required_text(args.event_id.as_deref(), "event_id")?);
+        change.etag = Some(self.cached_etag_for_change(change)?);
+        Ok(())
+    }
+
+    fn fill_respond_invite_change(
+        &self,
+        change: &mut CalendarChangeApproval,
+        args: &ChangeArgs,
+    ) -> Result<(), String> {
+        change.event_id = Some(required_text(args.event_id.as_deref(), "event_id")?);
+        change.etag = Some(self.cached_etag_for_change(change)?);
+        change.response = Some(required_response(args.response.as_deref())?);
+        Ok(())
     }
 
     fn remember_event_etag(
@@ -1968,6 +1973,46 @@ fn required_response(value: Option<&str>) -> Result<String, String> {
     Ok(response.to_owned())
 }
 
+fn ensure_google_write_backend(account: &ValidatedAccount) -> Result<(), String> {
+    if matches!(
+        &account.backend,
+        Some(ValidatedBackendConfig::Google { .. })
+    ) {
+        return Ok(());
+    }
+    Err(format!(
+        "calendar account `{}` backend `{}` does not support calendar writes",
+        account.id,
+        account.backend_kind()
+    ))
+}
+
+fn fill_update_time_change(
+    change: &mut CalendarChangeApproval,
+    args: &ChangeArgs,
+    timezone: Option<&str>,
+) -> Result<(), String> {
+    match (args.start.as_deref(), args.end.as_deref()) {
+        (Some(_), Some(_)) => {
+            let (start, end) =
+                required_time_pair(args.start.as_deref(), args.end.as_deref(), timezone)?;
+            change.start = Some(start);
+            change.end = Some(end);
+            Ok(())
+        }
+        (Some(_), None) => {
+            let (start, end) = create_event_time_pair(args.start.as_deref(), None, timezone)?;
+            change.start = Some(start);
+            change.end = Some(end);
+            Ok(())
+        }
+        (None, None) => Ok(()),
+        (None, Some(_)) => {
+            Err("end without start is ambiguous; pass start too, or omit both".to_owned())
+        }
+    }
+}
+
 fn change_has_update_payload(change: &CalendarChangeApproval) -> bool {
     change.title.is_some()
         || change.description.is_some()
@@ -1975,6 +2020,20 @@ fn change_has_update_payload(change: &CalendarChangeApproval) -> bool {
         || change.start.is_some()
         || change.end.is_some()
         || change.attendees.is_some()
+}
+
+fn ensure_update_change_has_payload(change: &CalendarChangeApproval) -> Result<(), String> {
+    if change_has_update_payload(change) {
+        return Ok(());
+    }
+    Err("update_event requires at least one field to update".to_owned())
+}
+
+fn ensure_response_only_for_invites(args: &ChangeArgs) -> Result<(), String> {
+    if args.response.is_none() {
+        return Ok(());
+    }
+    Err("response is only valid for respond_invite".to_owned())
 }
 
 fn validate_change_shape(change: &CalendarChangeApproval) -> Result<(), String> {

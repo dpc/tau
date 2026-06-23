@@ -824,6 +824,69 @@ fn google_create_event_queues_pending_change_with_default_end() {
     assert!(open.contains("end: 2026-05-28T13:00:00Z"), "{open}");
 }
 
+/// Updating an event with only `start` should preserve the create-event default
+/// duration behavior while still requiring the cached Google ETag precondition.
+#[test]
+fn google_update_event_builds_default_end_with_cached_etag() {
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let engine = google_test_engine(temp.path());
+    engine.etags.borrow_mut().insert(
+        EventEtagKey {
+            account: "google".to_owned(),
+            calendar: "primary".to_owned(),
+            event_id: "evt1".to_owned(),
+        },
+        "etag-1".to_owned(),
+    );
+
+    let change = engine
+        .build_change(
+            CalendarCommand::UpdateEvent,
+            ChangeArgs {
+                calendar: Some("google/primary".to_owned()),
+                event_id: Some("evt1".to_owned()),
+                start: Some("2026-05-28T12:00:00Z".to_owned()),
+                ..empty_change_args()
+            },
+        )
+        .expect("update change");
+
+    assert_eq!(change.etag.as_deref(), Some("etag-1"));
+    assert_eq!(change.start.as_deref(), Some("2026-05-28T12:00:00Z"));
+    assert_eq!(change.end.as_deref(), Some("2026-05-28T13:00:00Z"));
+}
+
+/// Update requests must not accept invite responses. This keeps the command
+/// split explicit after moving build-change validation into command helpers.
+#[test]
+fn update_event_rejects_invite_response_argument() {
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let engine = google_test_engine(temp.path());
+    engine.etags.borrow_mut().insert(
+        EventEtagKey {
+            account: "google".to_owned(),
+            calendar: "primary".to_owned(),
+            event_id: "evt1".to_owned(),
+        },
+        "etag-1".to_owned(),
+    );
+
+    let err = engine
+        .build_change(
+            CalendarCommand::UpdateEvent,
+            ChangeArgs {
+                calendar: Some("google/primary".to_owned()),
+                event_id: Some("evt1".to_owned()),
+                title: Some("Team Sync".to_owned()),
+                response: Some("accepted".to_owned()),
+                ..empty_change_args()
+            },
+        )
+        .expect_err("response must be invite-only");
+
+    assert_eq!(err, "response is only valid for respond_invite");
+}
+
 #[test]
 fn google_reads_without_stored_auth_report_auth_error() {
     // Accounts that opt into action-owned OAuth should fail before any
@@ -1412,6 +1475,51 @@ fn test_engine(root: &std::path::Path) -> Engine {
         ics_feed: IcsFeedBackend::new(BTreeMap::new()),
         etags: RefCell::new(BTreeMap::new()),
         last_events: RefCell::new(BTreeMap::new()),
+    }
+}
+
+fn google_test_engine(root: &std::path::Path) -> Engine {
+    let cfg = CalendarExtensionConfig {
+        enable: true,
+        accounts: vec![CalendarAccountConfig {
+            id: "google".to_owned(),
+            enable: true,
+            backend: Some(CalendarBackendConfig::Google {
+                client_id_secret: "client".to_owned(),
+                client_secret_secret: None,
+                refresh_token_secret: Some("refresh".to_owned()),
+                api_base: None,
+            }),
+            calendars: CalendarSelectionConfig {
+                default: Some("primary".to_owned()),
+                allow: vec!["primary".to_owned()],
+            },
+            timezone: Some("UTC".to_owned()),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    Engine {
+        config: cfg.validate().expect("valid config"),
+        state: StateStore::open(root.join("state")).expect("state"),
+        google: GoogleBackend::new(BTreeMap::new()),
+        ics_feed: IcsFeedBackend::new(BTreeMap::new()),
+        etags: RefCell::new(BTreeMap::new()),
+        last_events: RefCell::new(BTreeMap::new()),
+    }
+}
+
+fn empty_change_args() -> ChangeArgs {
+    ChangeArgs {
+        calendar: None,
+        event_id: None,
+        title: None,
+        description: None,
+        location: None,
+        start: None,
+        end: None,
+        attendees: None,
+        response: None,
     }
 }
 
