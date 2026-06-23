@@ -1200,6 +1200,63 @@ fn home_clears_sticky_column() {
     assert_eq!(handle.get_cursor(), 11);
 }
 
+/// Home, End, Ctrl-A, and Ctrl-E reset vertical sticky-column state even when
+/// the cursor is already at the requested boundary; this preserves the raw key
+/// path's historical unconditional `write_cursor` side effect.
+#[test]
+fn boundary_cursor_keys_clear_sticky_column_even_when_cursor_does_not_move() {
+    let buf = SharedBuffer::new();
+    let (term, handle, _input_tx) =
+        Term::new_virtual(80, 24, "> ", Box::new(buf), CursorShape::Bar);
+
+    for key in [
+        KeyEvent::new(KeyCode::Home, KeyModifiers::NONE),
+        KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL),
+    ] {
+        handle.set_buffer("abcdef".to_owned(), 0);
+        handle.lock().sticky_col = Some(6);
+        assert!(
+            term.handle_key(key).expect("home/control-a key").is_none(),
+            "boundary-start key should not emit an event"
+        );
+        assert_eq!(handle.get_cursor(), 0);
+        assert_eq!(handle.lock().sticky_col, None);
+    }
+
+    for key in [
+        KeyEvent::new(KeyCode::End, KeyModifiers::NONE),
+        KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL),
+    ] {
+        handle.set_buffer("abcdef".to_owned(), 6);
+        handle.lock().sticky_col = Some(6);
+        assert!(
+            term.handle_key(key).expect("end/control-e key").is_none(),
+            "boundary-end key should not emit an event"
+        );
+        assert_eq!(handle.get_cursor(), 6);
+        assert_eq!(handle.lock().sticky_col, None);
+    }
+}
+
+/// Ctrl-U should keep emitting `BufferChanged` and refreshing prompt state even
+/// at cursor zero; higher-level redraw/completion code historically relied on
+/// that raw-key event rather than treating the boundary press as a no-op.
+#[test]
+fn ctrl_u_at_cursor_zero_still_emits_buffer_changed() {
+    let buf = SharedBuffer::new();
+    let (term, handle, _input_tx) =
+        Term::new_virtual(80, 24, "> ", Box::new(buf), CursorShape::Bar);
+
+    handle.set_buffer("abcdef".to_owned(), 0);
+    let event = term
+        .handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL))
+        .expect("ctrl-u key");
+
+    assert!(matches!(event, Some(Event::BufferChanged)));
+    assert_eq!(handle.get_buffer(), "abcdef");
+    assert_eq!(handle.get_cursor(), 0);
+}
+
 /// Ctrl-Up bypasses in-buffer vertical motion and jumps to history while
 /// preserving the current visual column.
 #[test]

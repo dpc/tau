@@ -2105,6 +2105,178 @@ impl Term {
         Event::Line(line)
     }
 
+    fn handle_enter_key(&self, ctrl: bool, shift: bool, alt: bool) -> Event {
+        if shift || alt {
+            // Shift+Enter / Alt+Enter keep their explicit newline affordance.
+            // This also keeps newline working when a user binds plain Enter to
+            // an action.
+            // Shift+Enter only reaches us when the terminal stack emits CSI-u
+            // format (e.g. `\e[13;2u`): native kitty protocol, fixterms, or
+            // tmux 3.5+ with `extended-keys-format csi-u`. Crossterm does NOT
+            // parse the xterm modifyOtherKeys CSI-27 form (`\e[27;2;13~`), so
+            // tmux configured with `extended-keys-format xterm` will swallow it.
+            // Alt+Enter is the universal fallback because every terminal sends
+            // `\e\r` for it regardless of protocol negotiation.
+            return self.insert_newline();
+        }
+
+        if ctrl {
+            self.submit_or_accept_completion()
+        } else {
+            self.insert_newline()
+        }
+    }
+
+    fn write_cursor_start_raw(&self) {
+        let mut st = self.handle.lock();
+        st.write_cursor(0);
+    }
+
+    fn write_cursor_end_raw(&self) {
+        let mut st = self.handle.lock();
+        let len = st.buffer.len();
+        st.write_cursor(len);
+    }
+
+    fn kill_to_start_raw_event(&self) -> Event {
+        {
+            let mut st = self.handle.lock();
+            st.record_undo();
+            let cursor = st.cursor;
+            st.buffer.drain(..cursor);
+            st.write_cursor(0);
+            st.sync_buffer_to_history_nav();
+        }
+        self.refresh_completion();
+        Event::BufferChanged
+    }
+
+    // Keep Ctrl-C's raw fallback local instead of delegating to
+    // `clear_or_cancel_prompt`: this path historically cleared a non-empty
+    // prompt without refreshing completions, and callers may observe that exact
+    // event/refresh boundary.
+    fn handle_ctrl_c_key(&self) -> Event {
+        let mut st = self.handle.lock();
+        if st.buffer.is_empty() {
+            if st.ctrl_c_cancel_armed {
+                st.ctrl_c_cancel_armed = false;
+                return Event::CancelPrompt;
+            }
+            st.ctrl_c_cancel_armed = true;
+            return Event::Notice(
+                "Press Ctrl-C again to cancel the current response; use Ctrl-D to exit".to_owned(),
+            );
+        }
+        st.ctrl_c_cancel_armed = false;
+        st.record_undo();
+        st.buffer.clear();
+        st.history_nav = None;
+        st.completion = None;
+        st.write_cursor(0);
+        Event::BufferChanged
+    }
+
+    fn handle_control_char_key(&self, ch: char) -> io::Result<Option<Event>> {
+        match ch {
+            'd' => {
+                let is_empty = self
+                    .state
+                    .lock()
+                    .expect("term state mutex poisoned")
+                    .buffer
+                    .is_empty();
+                Ok(is_empty.then_some(Event::Eof))
+            }
+            'c' => Ok(Some(self.handle_ctrl_c_key())),
+            'u' => Ok(Some(self.kill_to_start_raw_event())),
+            'w' => Ok(self.kill_word_left().then_some(Event::BufferChanged)),
+            'a' => {
+                self.write_cursor_start_raw();
+                Ok(None)
+            }
+            'e' => {
+                self.write_cursor_end_raw();
+                Ok(None)
+            }
+            'o' | 'g' => Ok(Some(Event::ExternalEditor)),
+            'j' => self.step_history_event(1),
+            'k' => self.step_history_event(-1),
+            _ => Ok(None),
+        }
+    }
+
+    fn insert_char_event(&self, ch: char) -> Event {
+        {
+            let mut st = self.handle.lock();
+            st.record_undo();
+            let cursor = st.cursor;
+            st.buffer.insert(cursor, ch);
+            st.write_cursor(cursor + ch.len_utf8());
+            st.sync_buffer_to_history_nav();
+        }
+        self.refresh_completion();
+        Event::BufferChanged
+    }
+
+    fn handle_plain_edit_key(&self, code: KeyCode) -> Option<Event> {
+        match code {
+            KeyCode::Backspace => self.delete_backward().then_some(Event::BufferChanged),
+            KeyCode::Delete => self.delete_forward().then_some(Event::BufferChanged),
+            _ => None,
+        }
+    }
+
+    fn handle_plain_cursor_key(&self, code: KeyCode) {
+        match code {
+            KeyCode::Left => {
+                self.move_cursor_left();
+            }
+            KeyCode::Right => {
+                self.move_cursor_right();
+            }
+            KeyCode::Home => {
+                self.write_cursor_start_raw();
+            }
+            KeyCode::End => {
+                self.write_cursor_end_raw();
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_vertical_key(&self, code: KeyCode, ctrl: bool) -> io::Result<Option<Event>> {
+        match (code, ctrl) {
+            (KeyCode::Up, true) => self.step_history_event(-1),
+            (KeyCode::Down, true) => self.step_history_event(1),
+            (KeyCode::Up, false) => Ok(self.cycle_or_move_up()),
+            (KeyCode::Down, false) => Ok(self.cycle_or_move_down()),
+            _ => Ok(None),
+        }
+    }
+
+    fn handle_unbound_key(
+        &self,
+        key: KeyEvent,
+        ctrl: bool,
+        shift: bool,
+        alt: bool,
+    ) -> io::Result<Option<Event>> {
+        match key.code {
+            KeyCode::Enter => Ok(Some(self.handle_enter_key(ctrl, shift, alt))),
+            KeyCode::Char(ch) if ctrl => self.handle_control_char_key(ch),
+            KeyCode::Char(ch) => Ok(Some(self.insert_char_event(ch))),
+            KeyCode::Backspace | KeyCode::Delete => Ok(self.handle_plain_edit_key(key.code)),
+            KeyCode::Left | KeyCode::Right | KeyCode::Home | KeyCode::End => {
+                self.handle_plain_cursor_key(key.code);
+                Ok(None)
+            }
+            KeyCode::Up | KeyCode::Down => self.handle_vertical_key(key.code, ctrl),
+            KeyCode::BackTab => Ok(Some(Event::BackTab)),
+            KeyCode::Esc => Ok(Some(Event::Escape)),
+            _ => Ok(None),
+        }
+    }
+
     fn handle_key(&self, key: KeyEvent) -> io::Result<Option<Event>> {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let shift = key.modifiers.contains(KeyModifiers::SHIFT);
@@ -2140,303 +2312,7 @@ impl Term {
             return Ok(Some(Event::Binding(action)));
         }
 
-        match key.code {
-            KeyCode::Enter if shift || alt => {
-                // Shift+Enter / Alt+Enter keep their explicit
-                // newline affordance. This also keeps newline working
-                // when a user binds plain Enter to an action.
-                // Shift+Enter only reaches us when the terminal stack
-                // emits CSI-u format (e.g. `\e[13;2u`): native kitty
-                // protocol, fixterms, or tmux 3.5+ with
-                // `extended-keys-format csi-u`. Crossterm does NOT
-                // parse the xterm modifyOtherKeys CSI-27 form
-                // (`\e[27;2;13~`), so tmux configured with
-                // `extended-keys-format xterm` will swallow it.
-                // Alt+Enter is the universal fallback because every
-                // terminal sends `\e\r` for it regardless of protocol
-                // negotiation.
-                return Ok(Some(self.insert_newline()));
-            }
-            KeyCode::Enter if ctrl => {
-                if let Some(action) = self.binding_action(&binding) {
-                    return Ok(Some(Event::Binding(action)));
-                }
-                return Ok(Some(self.submit_or_accept_completion()));
-            }
-            KeyCode::Enter => {
-                if let Some(action) = self.binding_action(&binding) {
-                    return Ok(Some(Event::Binding(action)));
-                }
-                return Ok(Some(self.insert_newline()));
-            }
-
-            KeyCode::Char('d') if ctrl => {
-                let is_empty = self
-                    .state
-                    .lock()
-                    .expect("term state mutex poisoned")
-                    .buffer
-                    .is_empty();
-                if is_empty {
-                    return Ok(Some(Event::Eof));
-                }
-            }
-
-            KeyCode::Char('c') if ctrl => {
-                let mut st = self.handle.lock();
-                if st.buffer.is_empty() {
-                    if st.ctrl_c_cancel_armed {
-                        st.ctrl_c_cancel_armed = false;
-                        return Ok(Some(Event::CancelPrompt));
-                    }
-                    st.ctrl_c_cancel_armed = true;
-                    return Ok(Some(Event::Notice(
-                        "Press Ctrl-C again to cancel the current response; use Ctrl-D to exit"
-                            .to_owned(),
-                    )));
-                }
-                st.ctrl_c_cancel_armed = false;
-                st.record_undo();
-                st.buffer.clear();
-                st.history_nav = None;
-                st.completion = None;
-                st.write_cursor(0);
-                drop(st);
-                return Ok(Some(Event::BufferChanged));
-            }
-
-            KeyCode::Char('u') if ctrl => {
-                {
-                    let mut st = self.handle.lock();
-                    st.record_undo();
-                    let cursor = st.cursor;
-                    st.buffer.drain(..cursor);
-                    st.write_cursor(0);
-                    st.sync_buffer_to_history_nav();
-                }
-                self.refresh_completion();
-                return Ok(Some(Event::BufferChanged));
-            }
-
-            KeyCode::Char('w') if ctrl => {
-                let changed = {
-                    let mut st = self.handle.lock();
-                    if st.cursor > 0 {
-                        let new_end = word_left_boundary(&st.buffer, st.cursor);
-                        st.record_undo();
-                        let cursor = st.cursor;
-                        st.buffer.drain(new_end..cursor);
-                        st.write_cursor(new_end);
-                        st.sync_buffer_to_history_nav();
-                        true
-                    } else {
-                        false
-                    }
-                };
-                if changed {
-                    self.refresh_completion();
-                    return Ok(Some(Event::BufferChanged));
-                }
-            }
-
-            KeyCode::Char('a') if ctrl => {
-                let mut st = self.handle.lock();
-                st.write_cursor(0);
-            }
-
-            KeyCode::Char('e') if ctrl => {
-                let mut st = self.handle.lock();
-                let len = st.buffer.len();
-                st.write_cursor(len);
-            }
-
-            KeyCode::Tab => {
-                {
-                    let mut st = self.handle.lock();
-                    if st.cycle_completion(1) {
-                        return Ok(Some(Event::BufferChanged));
-                    }
-                }
-                if let Some(action) = binding.as_ref().and_then(|key| self.bindings.get(key)) {
-                    return Ok(Some(Event::Binding(action.clone())));
-                }
-            }
-
-            _ if binding
-                .as_ref()
-                .and_then(|key| self.bindings.get(key))
-                .is_some() =>
-            {
-                let key = binding.expect("checked above");
-                let action = self.bindings.get(&key).expect("checked above").clone();
-                tracing::trace!(
-                    target: "tau_cli_term_raw::input",
-                    ?key,
-                    action,
-                    "matched configured binding"
-                );
-                return Ok(Some(Event::Binding(action)));
-            }
-
-            KeyCode::Char(ch) if ctrl => {
-                if matches!(ch, 'o' | 'g') {
-                    return Ok(Some(Event::ExternalEditor));
-                }
-                match ch {
-                    'j' => return self.step_history_event(1),
-                    'k' => return self.step_history_event(-1),
-                    _ => {}
-                }
-            }
-
-            KeyCode::Char(ch) => {
-                {
-                    let mut st = self.handle.lock();
-                    st.record_undo();
-                    let cursor = st.cursor;
-                    st.buffer.insert(cursor, ch);
-                    st.write_cursor(cursor + ch.len_utf8());
-                    st.sync_buffer_to_history_nav();
-                }
-                self.refresh_completion();
-                return Ok(Some(Event::BufferChanged));
-            }
-
-            KeyCode::Backspace => {
-                let changed = {
-                    let mut st = self.handle.lock();
-                    if st.cursor > 0 {
-                        st.record_undo();
-                        let prev = prev_char_boundary(&st.buffer, st.cursor);
-                        let cursor = st.cursor;
-                        st.buffer.drain(prev..cursor);
-                        st.write_cursor(prev);
-                        st.sync_buffer_to_history_nav();
-                        true
-                    } else {
-                        false
-                    }
-                };
-                if changed {
-                    self.refresh_completion();
-                    return Ok(Some(Event::BufferChanged));
-                }
-            }
-
-            KeyCode::Delete => {
-                let changed = {
-                    let mut st = self.handle.lock();
-                    if st.cursor < st.buffer.len() {
-                        st.record_undo();
-                        let cursor = st.cursor;
-                        let next = next_char_boundary(&st.buffer, cursor);
-                        st.buffer.drain(cursor..next);
-                        // Buffer changed but cursor stays put. Re-write
-                        // the cursor at the same offset to invalidate
-                        // sticky col through the same code path as any
-                        // other non-vertical edit.
-                        st.write_cursor(cursor);
-                        st.sync_buffer_to_history_nav();
-                        true
-                    } else {
-                        false
-                    }
-                };
-                if changed {
-                    self.refresh_completion();
-                    return Ok(Some(Event::BufferChanged));
-                }
-            }
-
-            KeyCode::Left => {
-                let mut st = self.handle.lock();
-                if st.cursor > 0 {
-                    let prev = prev_char_boundary(&st.buffer, st.cursor);
-                    st.write_cursor(prev);
-                }
-            }
-
-            KeyCode::Right => {
-                let mut st = self.handle.lock();
-                if st.cursor < st.buffer.len() {
-                    let next = next_char_boundary(&st.buffer, st.cursor);
-                    st.write_cursor(next);
-                }
-            }
-
-            KeyCode::Up if ctrl => return self.step_history_event(-1),
-
-            KeyCode::Up => {
-                let mut st = self.handle.lock();
-                // Priority: completion menu, then in-buffer cursor
-                // motion, then history navigation. Only one of these
-                // can apply per press — no fallthrough/undo dance.
-                if st.cycle_completion(-1) {
-                    return Ok(Some(Event::BufferChanged));
-                }
-                let target_col = st.vertical_target_col();
-                if let Some(new_cursor) = move_cursor_vertical(&st, -1, target_col) {
-                    st.write_cursor_keep_sticky(new_cursor);
-                    return Ok(Some(Event::BufferChanged));
-                }
-                if st.step_history(-1) {
-                    return Ok(Some(Event::BufferChanged));
-                }
-            }
-
-            KeyCode::Down if ctrl => return self.step_history_event(1),
-
-            KeyCode::Down => {
-                let mut st = self.handle.lock();
-                if st.cycle_completion(1) {
-                    return Ok(Some(Event::BufferChanged));
-                }
-                let target_col = st.vertical_target_col();
-                if let Some(new_cursor) = move_cursor_vertical(&st, 1, target_col) {
-                    st.write_cursor_keep_sticky(new_cursor);
-                    return Ok(Some(Event::BufferChanged));
-                }
-                if st.step_history(1) {
-                    return Ok(Some(Event::BufferChanged));
-                }
-            }
-
-            KeyCode::Home => {
-                let mut st = self.handle.lock();
-                st.write_cursor(0);
-            }
-
-            KeyCode::End => {
-                let mut st = self.handle.lock();
-                let len = st.buffer.len();
-                st.write_cursor(len);
-            }
-
-            KeyCode::BackTab => {
-                {
-                    let mut st = self.handle.lock();
-                    if st.cycle_completion(-1) {
-                        return Ok(Some(Event::BufferChanged));
-                    }
-                }
-                if let Some(action) = binding.as_ref().and_then(|key| self.bindings.get(key)) {
-                    return Ok(Some(Event::Binding(action.clone())));
-                }
-                return Ok(Some(Event::BackTab));
-            }
-
-            KeyCode::Esc => {
-                let mut st = self.handle.lock();
-                if st.dismiss_completion() {
-                    return Ok(Some(Event::BufferChanged));
-                }
-                return Ok(Some(Event::Escape));
-            }
-
-            _ => {}
-        }
-
-        Ok(None)
+        self.handle_unbound_key(key, ctrl, shift, alt)
     }
 }
 
