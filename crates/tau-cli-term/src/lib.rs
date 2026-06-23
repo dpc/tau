@@ -656,6 +656,33 @@ enum PromptShellResult {
     RawEvent(RawEvent),
 }
 
+#[derive(Clone, Copy)]
+enum PromptShellExternalKind {
+    Insert,
+    Edit,
+    HistorySearch,
+}
+
+struct PromptShellExternalAction {
+    kind: PromptShellExternalKind,
+    shell: PromptShellCommand,
+}
+
+enum PromptShellDispatch {
+    Immediate(PromptShellResult),
+    External(PromptShellExternalAction),
+}
+
+struct PromptHistoryPicker {
+    rows: String,
+    prompt_dir: tempfile::TempDir,
+}
+
+enum PromptShellCommandOutput {
+    Edited,
+    Captured(Vec<u8>),
+}
+
 enum PromptActionOutcome {
     BufferChanged,
     Continue,
@@ -695,6 +722,49 @@ impl PromptShellAction {
     }
 }
 
+fn prompt_shell_dispatch(
+    action: PromptShellAction,
+    term: &tau_cli_term_raw::Term,
+) -> PromptShellDispatch {
+    match action {
+        PromptShellAction::PromptNext => {
+            PromptShellDispatch::Immediate(PromptShellResult::History(1))
+        }
+        PromptShellAction::PromptPrevious => {
+            PromptShellDispatch::Immediate(PromptShellResult::History(-1))
+        }
+        PromptShellAction::PromptUndo => PromptShellDispatch::Immediate(PromptShellResult::Undo),
+        PromptShellAction::PromptRedo => PromptShellDispatch::Immediate(PromptShellResult::Redo),
+        PromptShellAction::Action(action) => {
+            PromptShellDispatch::Immediate(PromptShellResult::Action(action))
+        }
+        PromptShellAction::SubmitPrompt => PromptShellDispatch::Immediate(
+            PromptShellResult::RawEvent(term.trigger_submit_or_accept_completion()),
+        ),
+        PromptShellAction::InsertNewline => PromptShellDispatch::Immediate(
+            PromptShellResult::RawEvent(term.trigger_insert_newline()),
+        ),
+        PromptShellAction::Insert(shell) => {
+            PromptShellDispatch::External(PromptShellExternalAction {
+                kind: PromptShellExternalKind::Insert,
+                shell,
+            })
+        }
+        PromptShellAction::Edit(shell) => {
+            PromptShellDispatch::External(PromptShellExternalAction {
+                kind: PromptShellExternalKind::Edit,
+                shell,
+            })
+        }
+        PromptShellAction::HistorySearch(shell) => {
+            PromptShellDispatch::External(PromptShellExternalAction {
+                kind: PromptShellExternalKind::HistorySearch,
+                shell,
+            })
+        }
+    }
+}
+
 fn run_prompt_shell_action(
     term: &tau_cli_term_raw::Term,
     handle: &TermHandle,
@@ -703,27 +773,9 @@ fn run_prompt_shell_action(
     prompt_history: &[String],
     action: PromptShellAction,
 ) -> Result<Option<PromptShellResult>, String> {
-    let shell = match &action {
-        PromptShellAction::PromptNext => return Ok(Some(PromptShellResult::History(1))),
-        PromptShellAction::PromptPrevious => return Ok(Some(PromptShellResult::History(-1))),
-        PromptShellAction::PromptUndo => return Ok(Some(PromptShellResult::Undo)),
-        PromptShellAction::PromptRedo => return Ok(Some(PromptShellResult::Redo)),
-        PromptShellAction::Action(action) => {
-            return Ok(Some(PromptShellResult::Action(action.clone())));
-        }
-        PromptShellAction::SubmitPrompt => {
-            return Ok(Some(PromptShellResult::RawEvent(
-                term.trigger_submit_or_accept_completion(),
-            )));
-        }
-        PromptShellAction::InsertNewline => {
-            return Ok(Some(PromptShellResult::RawEvent(
-                term.trigger_insert_newline(),
-            )));
-        }
-        PromptShellAction::Insert(shell)
-        | PromptShellAction::Edit(shell)
-        | PromptShellAction::HistorySearch(shell) => shell,
+    let external_action = match prompt_shell_dispatch(action, term) {
+        PromptShellDispatch::Immediate(result) => return Ok(Some(result)),
+        PromptShellDispatch::External(external_action) => external_action,
     };
     let current = trim_prompt_newlines(&handle.get_buffer()).to_owned();
     let cursor = handle.get_cursor();
@@ -732,34 +784,21 @@ fn run_prompt_shell_action(
         .suffix(".tau.md")
         .tempfile()
         .map_err(|e| format!("could not create tempfile: {e}"))?;
-    let file_text = match &action {
-        PromptShellAction::Edit(_) => append_prompt_trailer(&current, &editor_context),
-        PromptShellAction::Insert(_) | PromptShellAction::HistorySearch(_) => current.clone(),
-        PromptShellAction::Action(_)
-        | PromptShellAction::PromptNext
-        | PromptShellAction::PromptPrevious
-        | PromptShellAction::PromptUndo
-        | PromptShellAction::PromptRedo
-        | PromptShellAction::SubmitPrompt
-        | PromptShellAction::InsertNewline => unreachable!(),
-    };
+    let file_text = prompt_shell_file_text(external_action.kind, &current, &editor_context);
     std::fs::write(tmp.path(), file_text.as_bytes())
         .map_err(|e| format!("could not write tempfile: {e}"))?;
 
-    let history_picker = match &action {
-        PromptShellAction::HistorySearch(_) => {
-            let rows = prompt_history_search_rows(prompt_history);
-            if rows.is_empty() {
-                return Ok(None);
+    let history_picker = match external_action.kind {
+        PromptShellExternalKind::HistorySearch => {
+            match prepare_history_picker(term, prompt_history)? {
+                Some(history_picker) => Some(history_picker),
+                None => return Ok(None),
             }
-            let prompt_dir = prompt_history_preview_dir(prompt_history)?;
-            term.record_prompt_undo();
-            Some((rows, prompt_dir))
         }
-        _ => None,
+        PromptShellExternalKind::Insert | PromptShellExternalKind::Edit => None,
     };
 
-    let command = shell.command.as_str();
+    let command = external_action.shell.command.as_str();
     tracing::trace!(
         target: "tau_cli::input",
         command,
@@ -784,94 +823,33 @@ fn run_prompt_shell_action(
     }
     let _guard = ResumeGuard(term);
 
-    let mut command_builder = std::process::Command::new("sh");
-    command_builder
-        .arg("-c")
-        .arg(command)
-        .env("TAU_PROMPT_PATH", tmp.path())
-        .env("TAU_PROMPT_COLUMN", (cursor + 1).to_string())
-        .env("TAU_PROMPT_ROW", "1")
-        .env("TAU_EDITOR", external_editor.unwrap_or(""));
-    if let Some((_, prompt_dir)) = &history_picker {
-        command_builder.env("TAU_PROMPT_HISTORY_DIR", prompt_dir.path());
-    }
-    match action {
-        PromptShellAction::Edit(_) => {
-            command_builder
-                .stdin(std::process::Stdio::inherit())
-                .stdout(std::process::Stdio::inherit())
-                .stderr(std::process::Stdio::inherit());
-            let status = run_with_inherited_stdio(
-                &mut command_builder,
-                PROMPT_COMMAND_TIMEOUT,
-                ProcessOwnership::ForegroundProcessGroup,
-            )?
-            .status;
-            if !status.success() {
-                return Ok(None);
-            }
+    let mut command_builder = prompt_shell_command_builder(
+        command,
+        tmp.path(),
+        cursor,
+        external_editor,
+        history_picker.as_ref(),
+    );
+    let Some(output) = run_external_prompt_shell_command(
+        &mut command_builder,
+        external_action.kind,
+        history_picker.as_ref(),
+    )?
+    else {
+        return Ok(None);
+    };
+    match output {
+        PromptShellCommandOutput::Captured(stdout) => {
+            return prompt_shell_captured_result(
+                external_action.kind,
+                external_action.shell.trim,
+                stdout,
+                prompt_history,
+            );
         }
-        PromptShellAction::Insert(_) | PromptShellAction::HistorySearch(_) => {
-            command_builder.stdin(if history_picker.is_some() {
-                std::process::Stdio::piped()
-            } else {
-                std::process::Stdio::null()
-            });
-            command_builder
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::null());
-            let stdin_input = history_picker.as_ref().map(|(input, _)| input.as_bytes());
-            let output = run_with_bounded_stdout(
-                &mut command_builder,
-                stdin_input,
-                PROMPT_COMMAND_OUTPUT_LIMIT_BYTES,
-                PROMPT_COMMAND_TIMEOUT,
-                ProcessOwnership::ForegroundProcessGroup,
-            )?;
-            if !output.status.success() {
-                return Ok(None);
-            }
-            return match action {
-                PromptShellAction::Insert(_) => {
-                    let text = String::from_utf8(output.stdout)
-                        .map_err(|e| format!("command output was not utf-8: {e}"))?;
-                    let text = if shell.trim {
-                        text.trim().to_owned()
-                    } else {
-                        text
-                    };
-                    Ok(Some(PromptShellResult::Insert(text)))
-                }
-                PromptShellAction::HistorySearch(_) => {
-                    let selected = String::from_utf8(output.stdout)
-                        .map_err(|e| format!("command output was not utf-8: {e}"))?;
-                    let selected = if shell.trim {
-                        selected.trim().to_owned()
-                    } else {
-                        selected
-                    };
-                    let selected_index = selected.split('\t').next().unwrap_or("").trim();
-                    if selected_index.is_empty() {
-                        return Ok(None);
-                    }
-                    let index = selected_index
-                        .parse::<usize>()
-                        .map_err(|e| format!("history selection was not an index: {e}"))?;
-                    let text = prompt_history
-                        .get(index)
-                        .ok_or_else(|| format!("history selection index {index} is out of range"))?
-                        .clone();
-                    Ok(Some(PromptShellResult::ReplacePreservingUndo(text)))
-                }
-                _ => unreachable!(),
-            };
-        }
-        _ => unreachable!(),
+        PromptShellCommandOutput::Edited => {}
     }
 
-    let PromptShellAction::Edit(_) = action else {
-        unreachable!();
-    };
     let new_text =
         std::fs::read_to_string(tmp.path()).map_err(|e| format!("could not read tempfile: {e}"))?;
     editor_context
@@ -881,6 +859,148 @@ fn run_prompt_shell_action(
     let new_text = strip_prompt_trailer(&new_text);
     let new_text = trim_prompt_newlines(new_text).to_owned();
     Ok(Some(PromptShellResult::Replace(new_text)))
+}
+
+fn prompt_shell_file_text(
+    kind: PromptShellExternalKind,
+    current: &str,
+    editor_context: &Arc<Mutex<EditorContext>>,
+) -> String {
+    match kind {
+        PromptShellExternalKind::Edit => append_prompt_trailer(current, editor_context),
+        PromptShellExternalKind::Insert | PromptShellExternalKind::HistorySearch => {
+            current.to_owned()
+        }
+    }
+}
+
+fn prepare_history_picker(
+    term: &tau_cli_term_raw::Term,
+    prompt_history: &[String],
+) -> Result<Option<PromptHistoryPicker>, String> {
+    let rows = prompt_history_search_rows(prompt_history);
+    if rows.is_empty() {
+        return Ok(None);
+    }
+    let prompt_dir = prompt_history_preview_dir(prompt_history)?;
+    term.record_prompt_undo();
+    Ok(Some(PromptHistoryPicker { rows, prompt_dir }))
+}
+
+fn prompt_shell_command_builder(
+    command: &str,
+    prompt_path: &std::path::Path,
+    cursor: usize,
+    external_editor: Option<&str>,
+    history_picker: Option<&PromptHistoryPicker>,
+) -> std::process::Command {
+    let mut command_builder = std::process::Command::new("sh");
+    command_builder
+        .arg("-c")
+        .arg(command)
+        .env("TAU_PROMPT_PATH", prompt_path)
+        .env("TAU_PROMPT_COLUMN", (cursor + 1).to_string())
+        .env("TAU_PROMPT_ROW", "1")
+        .env("TAU_EDITOR", external_editor.unwrap_or(""));
+    if let Some(history_picker) = history_picker {
+        command_builder.env("TAU_PROMPT_HISTORY_DIR", history_picker.prompt_dir.path());
+    }
+    command_builder
+}
+
+fn run_external_prompt_shell_command(
+    command_builder: &mut std::process::Command,
+    kind: PromptShellExternalKind,
+    history_picker: Option<&PromptHistoryPicker>,
+) -> Result<Option<PromptShellCommandOutput>, String> {
+    match kind {
+        PromptShellExternalKind::Edit => run_prompt_edit_command(command_builder),
+        PromptShellExternalKind::Insert | PromptShellExternalKind::HistorySearch => {
+            run_prompt_capture_command(command_builder, history_picker)
+        }
+    }
+}
+
+fn run_prompt_edit_command(
+    command_builder: &mut std::process::Command,
+) -> Result<Option<PromptShellCommandOutput>, String> {
+    command_builder
+        .stdin(std::process::Stdio::inherit())
+        .stdout(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::inherit());
+    let status = run_with_inherited_stdio(
+        command_builder,
+        PROMPT_COMMAND_TIMEOUT,
+        ProcessOwnership::ForegroundProcessGroup,
+    )?
+    .status;
+    Ok(status.success().then_some(PromptShellCommandOutput::Edited))
+}
+
+fn run_prompt_capture_command(
+    command_builder: &mut std::process::Command,
+    history_picker: Option<&PromptHistoryPicker>,
+) -> Result<Option<PromptShellCommandOutput>, String> {
+    command_builder.stdin(if history_picker.is_some() {
+        std::process::Stdio::piped()
+    } else {
+        std::process::Stdio::null()
+    });
+    command_builder
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null());
+    let stdin_input = history_picker.map(|history_picker| history_picker.rows.as_bytes());
+    let output = run_with_bounded_stdout(
+        command_builder,
+        stdin_input,
+        PROMPT_COMMAND_OUTPUT_LIMIT_BYTES,
+        PROMPT_COMMAND_TIMEOUT,
+        ProcessOwnership::ForegroundProcessGroup,
+    )?;
+    Ok(output
+        .status
+        .success()
+        .then_some(PromptShellCommandOutput::Captured(output.stdout)))
+}
+
+fn prompt_shell_captured_result(
+    kind: PromptShellExternalKind,
+    trim: bool,
+    stdout: Vec<u8>,
+    prompt_history: &[String],
+) -> Result<Option<PromptShellResult>, String> {
+    let text =
+        String::from_utf8(stdout).map_err(|e| format!("command output was not utf-8: {e}"))?;
+    let text = trim_prompt_shell_output(text, trim);
+    match kind {
+        PromptShellExternalKind::Insert => Ok(Some(PromptShellResult::Insert(text))),
+        PromptShellExternalKind::HistorySearch => {
+            selected_prompt_history_result(text, prompt_history)
+        }
+        PromptShellExternalKind::Edit => unreachable!(),
+    }
+}
+
+fn trim_prompt_shell_output(text: String, trim: bool) -> String {
+    if trim { text.trim().to_owned() } else { text }
+}
+
+fn selected_prompt_history_result(
+    selected: String,
+    prompt_history: &[String],
+) -> Result<Option<PromptShellResult>, String> {
+    let selected_index = selected.split('\t').next().unwrap_or("").trim();
+    if selected_index.is_empty() {
+        return Ok(None);
+    }
+    let index = selected_index
+        .parse::<usize>()
+        .map_err(|e| format!("history selection was not an index: {e}"))?;
+    let text = prompt_history
+        .get(index)
+        .ok_or_else(|| format!("history selection index {index} is out of range"))?
+        .clone();
+    Ok(Some(PromptShellResult::ReplacePreservingUndo(text)))
 }
 
 fn prompt_history_search_rows(prompt_history: &[String]) -> String {

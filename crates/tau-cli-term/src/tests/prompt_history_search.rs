@@ -79,6 +79,39 @@ fn search_rows_truncate_single_token_summary_at_cap() {
     assert!(summary.ends_with('…'));
 }
 
+/// Preserves the empty-history behavior expected by Ctrl-R: when there are no
+/// selectable history entries, Tau must not launch the user-configured picker
+/// command because that command may have side effects or wait for input.
+#[test]
+fn empty_history_search_returns_none_without_spawning_picker() {
+    let (term, handle, _input_tx) = tau_cli_term_raw::Term::new_virtual(
+        80,
+        24,
+        "> ",
+        Box::new(std::io::sink()),
+        crate::CursorShape::Bar,
+    );
+    let temp_dir = tempfile::tempdir().expect("marker tempdir");
+    let marker = temp_dir.path().join("spawned");
+    let action = PromptShellAction::HistorySearch(PromptShellCommand {
+        command: format!("printf spawned > '{}'", marker.display()),
+        trim: true,
+    });
+
+    let result = run_prompt_shell_action(
+        &term,
+        &handle,
+        Arc::new(Mutex::new(EditorContext::default())),
+        None,
+        &[],
+        action,
+    )
+    .expect("empty history search action");
+
+    assert!(result.is_none());
+    assert!(!marker.exists(), "history picker command was spawned");
+}
+
 #[test]
 fn selected_history_prompt_replaces_buffer_and_can_be_undone() {
     // Ctrl-R must record the draft before launching the picker, expose
