@@ -292,6 +292,40 @@ fn model_selection_with_selected_agent_emits_targeted_update() {
     assert_eq!(pending.take_model(), None);
 }
 
+/// Exercises the selected-agent `/name` command route: it must resolve the
+/// current agent, keep the display name as a rest string, and emit the same
+/// display-name event shape as the explicit `/agent name` path.
+#[test]
+fn name_alias_with_selected_agent_emits_display_name_update() {
+    let request = name_alias_request("/name Current worker", Some("worker-1".to_owned()), |id| {
+        id == "worker-1"
+    })
+    .expect("selected agent request");
+
+    let event = request.event("session-1");
+
+    let Event::UiSetAgentDisplayName(update) = event else {
+        panic!("expected display name event");
+    };
+    assert_eq!(update.session_id.as_str(), "session-1");
+    assert_eq!(update.agent_id.as_str(), "worker-1");
+    assert_eq!(update.display_name, "Current worker");
+}
+
+/// Covers the no-current-agent `/name` validation branch so users get a local
+/// notice with both available recovery paths instead of a silently dropped or
+/// misrouted prompt.
+#[test]
+fn name_alias_without_selected_agent_reports_fallbacks() {
+    let error = name_alias_request("/name Current worker", None, |_| true)
+        .expect_err("missing selected agent should be rejected");
+
+    assert_eq!(
+        error,
+        "/name requires a selected agent; use /agent switch <agent_id> or /agent name <agent_id> <display_name>"
+    );
+}
+
 /// `/ephemeral` is a local staging command for the next new agent, so the
 /// generic slash fallback must not submit it to the harness as prompt text.
 #[test]

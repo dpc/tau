@@ -583,6 +583,8 @@ Type `/` for menu autocompletion. The built-in set:
 | `/agent switch <id>` | Switch this UI to a known loaded-agent transcript (`none` clears selection) |
 | `/agent suspend [id]` | Hide a loaded agent from this UI's active choices until resumed |
 | `/agent resume <id>` | Return a hidden loaded agent to this UI's active choices |
+| `/agent name <id> <display name>` | Set a loaded agent's display name |
+| `/name <display name>` | Set this UI's currently selected agent display name |
 | `/suspend` / `/resume` | Suspend or resume this UI's currently selected agent |
 | `/model <provider>/<model>` | Switch selected agent model                         |
 | `/role <role> ...`  | Switch, create, edit, or delete an agent role        |
@@ -600,9 +602,9 @@ A session is an agent-membership container backed by a durable membership log.
 Starting a new session resets harness/UI session state; prompts create/load
 agents whose transcripts are stored under `<state_dir>/agents/<agent_id>/`. The
 "current agent" selection is local to each attached UI: `/agent new`, `/agent
-switch`, `/agent suspend`, `/agent resume`, `/suspend`, and `/resume` do not
-synchronize selection or
-hidden-agent preferences to other UIs.
+switch`, `/agent suspend`, `/agent resume`, `/agent name`, `/name`, `/suspend`,
+and `/resume` do not synchronize selection or hidden-agent preferences to other
+UIs.
 
 `/agent switch` completion lists active agents so suspended transcripts stay out
 of normal prompt-routing choices. If you explicitly type a known suspended agent

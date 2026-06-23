@@ -663,6 +663,7 @@ fn local_slash_commands_are_identified_for_history_rendering() {
     assert!(is_local_slash_command("/agent resume worker-1"));
     assert!(is_local_slash_command("/agent new"));
     assert!(is_local_slash_command("/new"));
+    assert!(is_local_slash_command("/name Current worker"));
     assert!(is_local_slash_command("/suspend"));
     assert!(is_local_slash_command("/resume"));
     assert!(is_local_slash_command("/new now"));

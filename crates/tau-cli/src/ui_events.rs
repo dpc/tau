@@ -63,6 +63,18 @@ pub(crate) fn agent_model_select(
     })
 }
 
+pub(crate) fn set_agent_display_name(
+    session_id: &str,
+    agent_id: tau_proto::AgentId,
+    display_name: impl Into<String>,
+) -> Event {
+    Event::UiSetAgentDisplayName(tau_proto::UiSetAgentDisplayName {
+        session_id: session_id.into(),
+        agent_id,
+        display_name: display_name.into(),
+    })
+}
+
 pub(crate) fn role_update(role: impl Into<String>, action: UiRoleUpdateAction) -> Event {
     Event::UiRoleUpdate(tau_proto::UiRoleUpdate {
         role: role.into(),

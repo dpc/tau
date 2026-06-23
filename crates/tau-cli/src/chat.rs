@@ -16,8 +16,7 @@ use tau_config::settings::CliBindingAction;
 use tau_harness::SessionLaunchStatus;
 use tau_proto::{
     CborValue, Disconnect, Event, HarnessInputMessage, HarnessOutputMessage, PeerInputReader,
-    PeerOutputWriter, UiFocusChanged, UiPromptDraft, UiPromptSubmitted, UiSetAgentDisplayName,
-    UnixMicros,
+    PeerOutputWriter, UiFocusChanged, UiPromptDraft, UiPromptSubmitted, UnixMicros,
 };
 
 use crate::action_commands::ActionCommandState;
@@ -607,6 +606,7 @@ const BUILTIN_SLASH_COMMANDS: &[(&str, &str)] = &[
     ),
     ("/agent", "Manage visible/suspended agent transcripts"),
     ("/new", "Alias for /agent new"),
+    ("/name", "Alias for /agent name on the selected agent"),
     (
         "/ephemeral",
         "Stage the next /new agent as memory-only (/ephemeral on|off)",
@@ -1651,6 +1651,46 @@ fn tree_command_event(
     Ok(None)
 }
 
+#[derive(Debug, Eq, PartialEq)]
+struct AgentDisplayNameRequest {
+    agent_id: tau_proto::AgentId,
+    display_name: String,
+}
+
+impl AgentDisplayNameRequest {
+    fn event(&self, session_id: &str) -> Event {
+        crate::ui_events::set_agent_display_name(
+            session_id,
+            self.agent_id.clone(),
+            self.display_name.clone(),
+        )
+    }
+}
+
+fn name_alias_request(
+    text: &str,
+    selected_agent_id: Option<String>,
+    agent_is_known: impl FnOnce(&str) -> bool,
+) -> Result<AgentDisplayNameRequest, String> {
+    let display_name = text.strip_prefix("/name").unwrap_or("").trim();
+    if display_name.is_empty() {
+        return Err("/name <display_name>".to_owned());
+    }
+    let Some(agent_id) = selected_agent_id else {
+        return Err(
+            "/name requires a selected agent; use /agent switch <agent_id> or /agent name <agent_id> <display_name>"
+                .to_owned(),
+        );
+    };
+    if !agent_is_known(&agent_id) {
+        return Err(format!("unknown agent: {agent_id}"));
+    }
+    Ok(AgentDisplayNameRequest {
+        agent_id: tau_proto::AgentId::parse(&agent_id).expect("known agent id is valid"),
+        display_name: display_name.to_owned(),
+    })
+}
+
 fn prompt_line_targets_ephemeral_agent_state(
     text: &str,
     selected_agent_is_ephemeral: bool,
@@ -2060,6 +2100,10 @@ impl<'a> TerminalInputSession<'a> {
             self.handle_new_alias(text);
             return true;
         }
+        if text == "/name" || text.starts_with("/name ") {
+            self.handle_name_alias(text);
+            return true;
+        }
         if text == "/suspend" || text.starts_with("/suspend ") {
             self.handle_suspend_alias(text);
             return true;
@@ -2195,14 +2239,28 @@ impl<'a> TerminalInputSession<'a> {
                 .system_info(&format!("unknown agent: {agent_id}"));
             return;
         }
-        let event = Event::UiSetAgentDisplayName(UiSetAgentDisplayName {
-            session_id: self.session_id.as_str().into(),
+        self.send_agent_display_name_request(AgentDisplayNameRequest {
             agent_id: tau_proto::AgentId::parse(agent_id).expect("known agent id is valid"),
             display_name: display_name.to_owned(),
         });
+    }
+
+    fn handle_name_alias(&self, text: &str) {
+        match name_alias_request(text, self.selected_agent_id(), |agent_id| {
+            self.agent_is_known(agent_id)
+        }) {
+            Ok(request) => self.send_agent_display_name_request(request),
+            Err(message) => self.output.system_info(&message),
+        }
+    }
+
+    fn send_agent_display_name_request(&self, request: AgentDisplayNameRequest) {
+        let event = request.event(self.session_id);
         if send_event(self.writer, &event).is_ok() {
             self.output.system_info(&format!(
-                "requested agent {agent_id} display name set to: {display_name}"
+                "requested agent {} display name set to: {}",
+                request.agent_id.as_str(),
+                request.display_name
             ));
         }
     }
@@ -3076,6 +3134,7 @@ pub(crate) fn is_local_slash_command(text: &str) -> bool {
             | "/provider-auth"
             | "/agent"
             | "/new"
+            | "/name"
             | "/ephemeral"
             | "/suspend"
             | "/resume"

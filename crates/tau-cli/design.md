@@ -75,12 +75,12 @@ Harness/UI notices are filtered in the terminal UI, not at the harness emission 
 Status: unconfirmed
 
 The terminal input loop has multiple slash-command owners. CLI-owned commands
-such as `/quit`, `/session`, `/agent`, `/role`, `/model`, `/set`, and `/theme`
-are handled locally. Dynamic extension actions are parsed against the current
-published action schema and dispatched as `ActionInvoke` events. Harness-owned
-prompt commands, currently `/skill <name> ...` and `/skill:<name> ...`, are
-completed and echoed by the CLI but must still be submitted as prompts so the
-harness can resolve skills and inject their content.
+such as `/quit`, `/session`, `/agent`, `/name`, `/role`, `/model`, `/set`, and
+`/theme` are handled locally. Dynamic extension actions are parsed against the
+current published action schema and dispatched as `ActionInvoke` events.
+Harness-owned prompt commands, currently `/skill <name> ...` and
+`/skill:<name> ...`, are completed and echoed by the CLI but must still be
+submitted as prompts so the harness can resolve skills and inject their content.
 
 Until action schemas can mark sensitive arguments, the CLI has one narrow
 action-specific redaction exception: `/email auth google finish ...` is redacted
@@ -100,6 +100,11 @@ suspended agents out of ordinary switch suggestions. An explicitly typed known
 suspended agent id is still accepted so the UI can view that transcript; prompt
 submission remains blocked while the selected agent is suspended until `/agent
 resume` or `/resume` marks it active again.
+
+`/name <display name>` is the selected-agent shortcut for `/agent name
+<agent_id> <display name>`. It emits the same display-name update as `/agent
+name` after resolving the currently selected agent, matching current-agent
+shortcuts such as `/suspend` and `/resume`.
 
 Only after those owners decline a line may the CLI treat an unrecognized leading
 slash token as an unknown-action notice. That fallback is intentionally limited
