@@ -12,10 +12,10 @@ use rand::Rng;
 #[cfg(test)]
 use rand::{SeedableRng, rngs::StdRng};
 use tau_proto::{
-    AgentPromptSubmitted, ConfigError, Emit, Event, EventSelector, HarnessInputMessage,
-    HarnessNotice, HarnessOutputMessage, InterceptAction, InterceptReply, InterceptionPriority,
-    NoticeLevel, PeerInputReader, PeerOutputWriter, ToolError, ToolResult, ToolResultKind,
-    ToolSpec,
+    AgentPromptSubmitted, ConfigError, Emit, Event, EventDelivery, EventSelector,
+    HarnessInputMessage, HarnessNotice, HarnessOutputMessage, InterceptAction, InterceptReply,
+    InterceptionPriority, NoticeLevel, PeerInputReader, PeerOutputWriter, ToolError, ToolResult,
+    ToolResultKind, ToolSpec,
 };
 
 /// Tool name registered by this fixture extension for restart-supervision
@@ -41,6 +41,14 @@ enum RestartMode {
 struct ExtConfig {
     /// Test-only deterministic behavior for `restart_test_dummy`.
     restart_mode: Option<RestartMode>,
+}
+
+/// Control signal returned by handlers that can terminate the extension loop.
+enum RunLoopAction {
+    /// Keep reading harness messages.
+    Continue,
+    /// Stop reading harness messages and return successfully.
+    Stop,
 }
 
 /// Returns a copy of `text` with every case-insensitive "tao" word
@@ -117,6 +125,26 @@ where
     let mut reader = PeerInputReader::new(BufReader::new(reader));
     let mut writer = PeerOutputWriter::new(BufWriter::new(writer));
 
+    write_startup_handshake(&mut writer)?;
+
+    let mut restart_mode = RestartMode::Random;
+
+    while let Some(message) = reader.read_message()? {
+        match handle_harness_message(message, &mut writer, rng, &mut restart_mode)? {
+            RunLoopAction::Continue => {}
+            RunLoopAction::Stop => break,
+        }
+    }
+
+    Ok(())
+}
+
+fn write_startup_handshake<W>(
+    writer: &mut PeerOutputWriter<BufWriter<W>>,
+) -> Result<(), Box<dyn Error>>
+where
+    W: Write,
+{
     // Subscribe only to fresh live invoke-start events. Extension
     // subscriptions can receive replayed durable catch-up, but `tool.started`
     // is a runtime-only event, so old invokes are not replayed.
@@ -153,89 +181,156 @@ where
             None,
         )
         .ready_message("test dummy tools ready")
-        .run(&mut writer)?;
-
-    let mut restart_mode = RestartMode::Random;
-
-    while let Some(message) = reader.read_message()? {
-        match message {
-            HarnessOutputMessage::InterceptRequest(req) => {
-                let mutated = match req.event.as_ref() {
-                    Event::AgentPromptSubmitted(prompt) => {
-                        correct_tao_to_tau(&prompt.text).map(|fixed| {
-                            Event::AgentPromptSubmitted(AgentPromptSubmitted {
-                                text: fixed,
-                                ..prompt.clone()
-                            })
-                        })
-                    }
-                    _ => None,
-                };
-                if mutated.is_some() {
-                    writer.write_message(&HarnessInputMessage::Emit(Emit {
-                        event: Box::new(Event::HarnessNotice(HarnessNotice::new(
-                            tau_proto::notice_kind::EXTENSION_NOTICE,
-                            "did you mean \"Tau\"? — corrected for you",
-                            NoticeLevel::Info,
-                        ))),
-                        transient: true,
-                    }))?;
-                }
-                let action = match mutated {
-                    Some(event) => InterceptAction::Pass(Some(Box::new(event))),
-                    None => InterceptAction::Pass(None),
-                };
-                writer.write_message(&HarnessInputMessage::InterceptReply(InterceptReply {
-                    action,
-                }))?;
-                writer.flush()?;
-            }
-            HarnessOutputMessage::Configure(msg) => {
-                match tau_extension::parse_config::<ExtConfig>(&msg.config) {
-                    Ok(config) => restart_mode = config.restart_mode.unwrap_or_default(),
-                    Err(message) => {
-                        writer.write_message(&HarnessInputMessage::ConfigError(ConfigError {
-                            message,
-                        }))?;
-                        writer.flush()?;
-                    }
-                }
-            }
-            HarnessOutputMessage::Deliver(delivery) => {
-                // Tool invocations are execution triggers; replay-marked
-                // frames re-send history and must not re-run them.
-                if delivery.is_replay() {
-                    continue;
-                }
-                if let Event::ToolStarted(invoke) = delivery.into_event()
-                    && invoke.tool_name == RESTART_TEST_DUMMY_TOOL_NAME
-                {
-                    match restart_mode {
-                        RestartMode::Random if rng.gen_bool(0.5) => {
-                            writer.flush()?;
-                            return Ok(());
-                        }
-                        RestartMode::Random | RestartMode::Error => {
-                            writer.write_message(&restart_error(invoke))?;
-                            writer.flush()?;
-                        }
-                        RestartMode::Success => {
-                            writer.write_message(&restart_success(invoke))?;
-                            writer.flush()?;
-                        }
-                        RestartMode::Exit => {
-                            writer.flush()?;
-                            return Ok(());
-                        }
-                    }
-                }
-            }
-            HarnessOutputMessage::Disconnect(_) => break,
-            _ => {}
-        }
-    }
+        .run(writer)?;
 
     Ok(())
+}
+
+fn handle_harness_message<W, T>(
+    message: HarnessOutputMessage,
+    writer: &mut PeerOutputWriter<BufWriter<W>>,
+    rng: &mut T,
+    restart_mode: &mut RestartMode,
+) -> Result<RunLoopAction, Box<dyn Error>>
+where
+    W: Write,
+    T: Rng + ?Sized,
+{
+    match message {
+        HarnessOutputMessage::InterceptRequest(req) => {
+            handle_intercept_request(req, writer)?;
+            Ok(RunLoopAction::Continue)
+        }
+        HarnessOutputMessage::Configure(msg) => {
+            handle_configure(msg, writer, restart_mode)?;
+            Ok(RunLoopAction::Continue)
+        }
+        HarnessOutputMessage::Deliver(delivery) => {
+            handle_delivery(delivery, writer, rng, *restart_mode)
+        }
+        HarnessOutputMessage::Disconnect(_) => Ok(RunLoopAction::Stop),
+        _ => Ok(RunLoopAction::Continue),
+    }
+}
+
+fn handle_intercept_request<W>(
+    req: tau_proto::InterceptRequest,
+    writer: &mut PeerOutputWriter<BufWriter<W>>,
+) -> Result<(), Box<dyn Error>>
+where
+    W: Write,
+{
+    let replacement = intercepted_prompt_replacement(req.event.as_ref());
+    let action = match replacement {
+        Some(event) => {
+            writer.write_message(&correction_notice())?;
+            InterceptAction::Pass(Some(Box::new(event)))
+        }
+        None => InterceptAction::Pass(None),
+    };
+    writer.write_message(&HarnessInputMessage::InterceptReply(InterceptReply {
+        action,
+    }))?;
+    writer.flush()?;
+    Ok(())
+}
+
+fn intercepted_prompt_replacement(event: &Event) -> Option<Event> {
+    match event {
+        Event::AgentPromptSubmitted(prompt) => correct_tao_to_tau(&prompt.text).map(|fixed| {
+            Event::AgentPromptSubmitted(AgentPromptSubmitted {
+                text: fixed,
+                ..prompt.clone()
+            })
+        }),
+        _ => None,
+    }
+}
+
+fn correction_notice() -> HarnessInputMessage {
+    HarnessInputMessage::Emit(Emit {
+        event: Box::new(Event::HarnessNotice(HarnessNotice::new(
+            tau_proto::notice_kind::EXTENSION_NOTICE,
+            "did you mean \"Tau\"? — corrected for you",
+            NoticeLevel::Info,
+        ))),
+        transient: true,
+    })
+}
+
+fn handle_configure<W>(
+    msg: tau_proto::Configure,
+    writer: &mut PeerOutputWriter<BufWriter<W>>,
+    restart_mode: &mut RestartMode,
+) -> Result<(), Box<dyn Error>>
+where
+    W: Write,
+{
+    match tau_extension::parse_config::<ExtConfig>(&msg.config) {
+        Ok(config) => *restart_mode = config.restart_mode.unwrap_or_default(),
+        Err(message) => {
+            writer.write_message(&HarnessInputMessage::ConfigError(ConfigError { message }))?;
+            writer.flush()?;
+        }
+    }
+    Ok(())
+}
+
+fn handle_delivery<W, T>(
+    delivery: EventDelivery,
+    writer: &mut PeerOutputWriter<BufWriter<W>>,
+    rng: &mut T,
+    restart_mode: RestartMode,
+) -> Result<RunLoopAction, Box<dyn Error>>
+where
+    W: Write,
+    T: Rng + ?Sized,
+{
+    // Tool invocations are execution triggers; replay-marked frames re-send
+    // history and must not re-run them.
+    if delivery.is_replay() {
+        return Ok(RunLoopAction::Continue);
+    }
+    let Event::ToolStarted(invoke) = delivery.into_event() else {
+        return Ok(RunLoopAction::Continue);
+    };
+    if invoke.tool_name != RESTART_TEST_DUMMY_TOOL_NAME {
+        return Ok(RunLoopAction::Continue);
+    }
+
+    handle_restart_invocation(invoke, writer, rng, restart_mode)
+}
+
+fn handle_restart_invocation<W, T>(
+    invoke: tau_proto::ToolStarted,
+    writer: &mut PeerOutputWriter<BufWriter<W>>,
+    rng: &mut T,
+    restart_mode: RestartMode,
+) -> Result<RunLoopAction, Box<dyn Error>>
+where
+    W: Write,
+    T: Rng + ?Sized,
+{
+    match restart_mode {
+        RestartMode::Random if rng.gen_bool(0.5) => {
+            writer.flush()?;
+            Ok(RunLoopAction::Stop)
+        }
+        RestartMode::Exit => {
+            writer.flush()?;
+            Ok(RunLoopAction::Stop)
+        }
+        RestartMode::Random | RestartMode::Error => {
+            writer.write_message(&restart_error(invoke))?;
+            writer.flush()?;
+            Ok(RunLoopAction::Continue)
+        }
+        RestartMode::Success => {
+            writer.write_message(&restart_success(invoke))?;
+            writer.flush()?;
+            Ok(RunLoopAction::Continue)
+        }
+    }
 }
 
 fn restart_success(invoke: tau_proto::ToolStarted) -> HarnessInputMessage {
