@@ -16,7 +16,10 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
-use tau_proto::{ContentPart, ContextItem, ContextRole, ToolResponseHeader, ToolResultStatus};
+use tau_proto::{
+    ContentPart, ContextItem, ContextRole, MessageItem, ToolCallItem, ToolResponseHeader,
+    ToolResultItem, ToolResultStatus,
+};
 
 use crate::common::{LlmError, PromptPayload, StreamState, cbor_to_json, effort_wire};
 
@@ -1329,141 +1332,13 @@ fn convert_context_item(
 ) {
     match item {
         ContextItem::Message(msg) if msg.role == ContextRole::User => {
-            // Collect text blocks into one user message, emit tool results separately.
-            let mut text_items: Vec<serde_json::Value> = Vec::new();
-            for block in &msg.content {
-                match block {
-                    ContentPart::Text { text } => {
-                        text_items.push(serde_json::json!({
-                            "type": "input_text",
-                            "text": text,
-                        }));
-                    }
-                }
-            }
-            if !text_items.is_empty() {
-                out.push(serde_json::json!({
-                    "role": "user",
-                    "content": text_items,
-                }));
-            }
+            convert_user_message(msg, out);
         }
         ContextItem::Message(msg) if msg.role == ContextRole::Assistant => {
-            // Emit tool calls as individual function_call items,
-            // text as a message item.
-            //
-            // `phase` (when the backend supports it): stamp every
-            // assistant `message` item we replay. The stored
-            // `msg.phase` is preferred; turns from before this
-            // field existed (or from non-Codex paths) get the
-            // doc-recommended `final_answer` default — the OpenAI
-            // deployment checklist explicitly calls this out as the
-            // fallback for missing phase on history.
-            let phase_wire: Option<&'static str> = if supports_phase {
-                Some(
-                    msg.phase
-                        .unwrap_or(tau_proto::MessagePhase::FinalAnswer)
-                        .as_openai_wire(),
-                )
-            } else {
-                None
-            };
-            let mut text_parts = Vec::new();
-            for block in &msg.content {
-                match block {
-                    ContentPart::Text { text } => {
-                        text_parts.push(text.clone());
-                    }
-                }
-            }
-            if !text_parts.is_empty() {
-                let mut item = serde_json::json!({
-                    "type": "message",
-                    "role": "assistant",
-                    "content": [{
-                        "type": "output_text",
-                        "text": text_parts.join("\n"),
-                        "annotations": [],
-                    }],
-                });
-                if let Some(phase) = phase_wire {
-                    item["phase"] = serde_json::Value::String(phase.to_owned());
-                }
-                out.push(item);
-            }
+            convert_assistant_message(msg, supports_phase, out);
         }
-        ContextItem::ToolCall(call) => {
-            let id_str = call.call_id.as_str();
-            match call.tool_type {
-                tau_proto::ToolType::Function => {
-                    let args_json = cbor_to_json(&call.arguments);
-                    let fc_id = if id_str.starts_with("fc_") {
-                        id_str.to_owned()
-                    } else {
-                        format!("fc_{id_str}")
-                    };
-                    out.push(serde_json::json!({
-                        "type": "function_call",
-                        "id": fc_id,
-                        "call_id": id_str,
-                        "name": encode_tool_name(call.name.as_str()),
-                        "arguments": serde_json::to_string(&args_json).unwrap_or_default(),
-                    }));
-                }
-                tau_proto::ToolType::Custom => {
-                    let custom_id = if id_str.starts_with("ctc_") {
-                        id_str.to_owned()
-                    } else {
-                        format!("ctc_{id_str}")
-                    };
-                    let input = match &call.arguments {
-                        tau_proto::CborValue::Text(text) => text.clone(),
-                        other => serde_json::to_string(&cbor_to_json(other)).unwrap_or_default(),
-                    };
-                    out.push(serde_json::json!({
-                        "type": "custom_tool_call",
-                        "id": custom_id,
-                        "call_id": id_str,
-                        "name": encode_tool_name(call.name.as_str()),
-                        "input": input,
-                    }));
-                }
-            }
-        }
-        ContextItem::ToolResult(result) => {
-            let output = match &result.status {
-                ToolResultStatus::Success => result.output.render(),
-                ToolResultStatus::Error { message } => {
-                    let mut response = result.output.clone();
-                    response.headers.insert(
-                        0,
-                        ToolResponseHeader {
-                            key: "error".to_owned(),
-                            value: message.clone(),
-                        },
-                    );
-                    response.render()
-                }
-                ToolResultStatus::Cancelled { reason } => tau_proto::ToolResponse {
-                    raw: tau_proto::CborValue::Null,
-                    headers: vec![ToolResponseHeader {
-                        key: "cancelled".to_owned(),
-                        value: reason.clone(),
-                    }],
-                    body: String::new(),
-                }
-                .render(),
-            };
-            let output_type = match result.tool_type {
-                tau_proto::ToolType::Function => "function_call_output",
-                tau_proto::ToolType::Custom => "custom_tool_call_output",
-            };
-            out.push(serde_json::json!({
-                "type": output_type,
-                "call_id": result.call_id,
-                "output": output,
-            }));
-        }
+        ContextItem::ToolCall(call) => convert_tool_call_item(call, out),
+        ContextItem::ToolResult(result) => convert_tool_result_item(result, out),
         ContextItem::ReasoningText(_) => {}
         ContextItem::Reasoning(item) => {
             out.push(cbor_to_json(&item.0));
@@ -1478,6 +1353,158 @@ fn convert_context_item(
         }
         ContextItem::Message(_) => {}
     }
+}
+
+fn convert_user_message(msg: &MessageItem, out: &mut Vec<serde_json::Value>) {
+    // Collect text blocks into one user message, emit tool results separately.
+    let text_items: Vec<serde_json::Value> = msg
+        .content
+        .iter()
+        .map(|block| match block {
+            ContentPart::Text { text } => serde_json::json!({
+                "type": "input_text",
+                "text": text,
+            }),
+        })
+        .collect();
+    if !text_items.is_empty() {
+        out.push(serde_json::json!({
+            "role": "user",
+            "content": text_items,
+        }));
+    }
+}
+
+fn convert_assistant_message(
+    msg: &MessageItem,
+    supports_phase: bool,
+    out: &mut Vec<serde_json::Value>,
+) {
+    let text_parts: Vec<&str> = msg
+        .content
+        .iter()
+        .map(|block| match block {
+            ContentPart::Text { text } => text.as_str(),
+        })
+        .collect();
+    if text_parts.is_empty() {
+        return;
+    }
+
+    let mut item = serde_json::json!({
+        "type": "message",
+        "role": "assistant",
+        "content": [{
+            "type": "output_text",
+            "text": text_parts.join("\n"),
+            "annotations": [],
+        }],
+    });
+    if let Some(phase) = assistant_message_phase_wire(msg, supports_phase) {
+        item["phase"] = serde_json::Value::String(phase.to_owned());
+    }
+    out.push(item);
+}
+
+fn assistant_message_phase_wire(msg: &MessageItem, supports_phase: bool) -> Option<&'static str> {
+    // `phase` (when the backend supports it): stamp every assistant `message`
+    // item we replay. The stored `msg.phase` is preferred; turns from before
+    // this field existed (or from non-Codex paths) get the doc-recommended
+    // `final_answer` default — the OpenAI deployment checklist explicitly
+    // calls this out as the fallback for missing phase on history.
+    supports_phase.then(|| {
+        msg.phase
+            .unwrap_or(tau_proto::MessagePhase::FinalAnswer)
+            .as_openai_wire()
+    })
+}
+
+fn convert_tool_call_item(call: &ToolCallItem, out: &mut Vec<serde_json::Value>) {
+    match call.tool_type {
+        tau_proto::ToolType::Function => out.push(convert_function_call_item(call)),
+        tau_proto::ToolType::Custom => out.push(convert_custom_tool_call_item(call)),
+    }
+}
+
+fn convert_function_call_item(call: &ToolCallItem) -> serde_json::Value {
+    let id_str = call.call_id.as_str();
+    let fc_id = prefixed_provider_item_id(id_str, "fc_");
+    let args_json = cbor_to_json(&call.arguments);
+    serde_json::json!({
+        "type": "function_call",
+        "id": fc_id,
+        "call_id": id_str,
+        "name": encode_tool_name(call.name.as_str()),
+        "arguments": serde_json::to_string(&args_json).unwrap_or_default(),
+    })
+}
+
+fn convert_custom_tool_call_item(call: &ToolCallItem) -> serde_json::Value {
+    let id_str = call.call_id.as_str();
+    let custom_id = prefixed_provider_item_id(id_str, "ctc_");
+    let input = match &call.arguments {
+        tau_proto::CborValue::Text(text) => text.clone(),
+        other => serde_json::to_string(&cbor_to_json(other)).unwrap_or_default(),
+    };
+    serde_json::json!({
+        "type": "custom_tool_call",
+        "id": custom_id,
+        "call_id": id_str,
+        "name": encode_tool_name(call.name.as_str()),
+        "input": input,
+    })
+}
+
+fn prefixed_provider_item_id(id: &str, prefix: &str) -> String {
+    if id.starts_with(prefix) {
+        id.to_owned()
+    } else {
+        format!("{prefix}{id}")
+    }
+}
+
+fn convert_tool_result_item(result: &ToolResultItem, out: &mut Vec<serde_json::Value>) {
+    let output_type = match result.tool_type {
+        tau_proto::ToolType::Function => "function_call_output",
+        tau_proto::ToolType::Custom => "custom_tool_call_output",
+    };
+    out.push(serde_json::json!({
+        "type": output_type,
+        "call_id": result.call_id,
+        "output": convert_tool_result_output(result),
+    }));
+}
+
+fn convert_tool_result_output(result: &ToolResultItem) -> String {
+    match &result.status {
+        ToolResultStatus::Success => result.output.render(),
+        ToolResultStatus::Error { message } => render_error_tool_result(&result.output, message),
+        ToolResultStatus::Cancelled { reason } => render_cancelled_tool_result(reason),
+    }
+}
+
+fn render_error_tool_result(output: &tau_proto::ToolResponse, message: &str) -> String {
+    let mut response = output.clone();
+    response.headers.insert(
+        0,
+        ToolResponseHeader {
+            key: "error".to_owned(),
+            value: message.to_owned(),
+        },
+    );
+    response.render()
+}
+
+fn render_cancelled_tool_result(reason: &str) -> String {
+    tau_proto::ToolResponse {
+        raw: tau_proto::CborValue::Null,
+        headers: vec![ToolResponseHeader {
+            key: "cancelled".to_owned(),
+            value: reason.to_owned(),
+        }],
+        body: String::new(),
+    }
+    .render()
 }
 
 fn duration_micros_u64(duration: Duration) -> u64 {

@@ -323,6 +323,7 @@ fn build_request_full_replay_serializes_restored_tool_error_before_next_user_mes
         "restored full replay must keep the repaired tool round balanced"
     );
     assert_eq!(input[0]["type"], "function_call");
+    assert_eq!(input[0]["id"], "fc_call-restored");
     assert_eq!(input[0]["call_id"], "call-restored");
     assert_eq!(input[1]["type"], "function_call_output");
     assert_eq!(input[1]["call_id"], "call-restored");
@@ -1173,11 +1174,96 @@ fn build_request_emits_custom_tool_definition_and_round_trips_custom_tool_output
 
     let input = body["input"].as_array().expect("input");
     assert_eq!(input[0]["type"], "custom_tool_call");
+    assert_eq!(input[0]["id"], "ctc_call-patch");
     assert_eq!(input[0]["call_id"], "call-patch");
     assert_eq!(input[0]["input"], "*** Begin Patch\n*** End Patch");
     assert_eq!(input[1]["type"], "custom_tool_call_output");
     assert_eq!(input[1]["call_id"], "call-patch");
     assert_eq!(input[1]["output"], "ok");
+}
+
+/// Provider item ids are separate from Tau call ids and must be prefixed for
+/// the Responses API, but replay can contain ids already captured from that
+/// API. Pin both cases so request conversion does not double-prefix history
+/// or accidentally send unprefixed local ids.
+#[test]
+fn build_request_preserves_existing_provider_tool_call_id_prefixes() {
+    let config = chain_test_config();
+    let messages = vec![
+        assistant_tool_call(
+            "fc_existing",
+            "shell",
+            tau_proto::ToolType::Function,
+            tau_proto::CborValue::Null,
+        ),
+        assistant_tool_call(
+            "ctc_existing",
+            "apply_patch",
+            tau_proto::ToolType::Custom,
+            tau_proto::CborValue::Text("patch".into()),
+        ),
+    ];
+    let request = PromptPayload {
+        system_prompt: "sys",
+        context: context(&messages),
+        tools: &[],
+        params: tau_proto::ModelParams::default(),
+        tool_choice: tau_proto::ToolChoice::Auto,
+        compaction: None,
+        originator: &tau_proto::PromptOriginator::User,
+        session_id: &tau_proto::SessionId::new("test-session"),
+        agent_id: &tau_proto::AgentId::parse("test-agent").expect("agent id"),
+        share_user_cache_key: false,
+        debug_provider_requests: false,
+    };
+
+    let body = serde_json::to_value(build_request(&config, &request, None)).expect("serialize");
+    let input = body["input"].as_array().expect("input");
+    assert_eq!(input[0]["type"], "function_call");
+    assert_eq!(input[0]["id"], "fc_existing");
+    assert_eq!(input[0]["call_id"], "fc_existing");
+    assert_ne!(input[0]["id"], "fc_fc_existing");
+    assert_eq!(input[1]["type"], "custom_tool_call");
+    assert_eq!(input[1]["id"], "ctc_existing");
+    assert_eq!(input[1]["call_id"], "ctc_existing");
+    assert_ne!(input[1]["id"], "ctc_ctc_existing");
+}
+
+/// Cancelled tool results are replayed as provider output items rather than
+/// dropped. The rendered cancellation header is the only durable explanation
+/// the model sees on replay, so keep its wire type, call id, and text shape
+/// pinned across conversion refactors.
+#[test]
+fn build_request_replays_cancelled_tool_result_with_header() {
+    let config = chain_test_config();
+    let messages = vec![ContextItem::ToolResult(ToolResultItem {
+        call_id: "call-cancelled".into(),
+        tool_type: tau_proto::ToolType::Function,
+        status: ToolResultStatus::Cancelled {
+            reason: "user interrupted".to_owned(),
+        },
+        output: tau_proto::ToolResponse::from_cbor(&tau_proto::CborValue::Null),
+    })];
+    let request = PromptPayload {
+        system_prompt: "sys",
+        context: context(&messages),
+        tools: &[],
+        params: tau_proto::ModelParams::default(),
+        tool_choice: tau_proto::ToolChoice::Auto,
+        compaction: None,
+        originator: &tau_proto::PromptOriginator::User,
+        session_id: &tau_proto::SessionId::new("test-session"),
+        agent_id: &tau_proto::AgentId::parse("test-agent").expect("agent id"),
+        share_user_cache_key: false,
+        debug_provider_requests: false,
+    };
+
+    let body = serde_json::to_value(build_request(&config, &request, None)).expect("serialize");
+    let input = body["input"].as_array().expect("input");
+    assert_eq!(input.len(), 1);
+    assert_eq!(input[0]["type"], "function_call_output");
+    assert_eq!(input[0]["call_id"], "call-cancelled");
+    assert_eq!(input[0]["output"], "cancelled: user interrupted\n\n");
 }
 
 #[test]
