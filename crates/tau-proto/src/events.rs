@@ -3464,6 +3464,43 @@ impl Event {
     /// Returns the dotted event name carried by this envelope.
     #[must_use]
     pub fn name(&self) -> EventName {
+        if let Self::ExtensionEvent(event) = self {
+            return event.name().clone();
+        }
+        if let Some(name) = self.tool_event_name() {
+            return name;
+        }
+        if let Some(name) = self.action_event_name() {
+            return name;
+        }
+        if let Some(name) = self.extension_and_delegation_event_name() {
+            return name;
+        }
+        if let Some(name) = self.provider_capability_event_name() {
+            return name;
+        }
+        if let Some(name) = self.harness_event_name() {
+            return name;
+        }
+        if let Some(name) = self.ui_event_name() {
+            return name;
+        }
+        if let Some(name) = self.terminal_and_shell_event_name() {
+            return name;
+        }
+        if let Some(name) = self.agent_event_name() {
+            return name;
+        }
+        if let Some(name) = self.session_event_name() {
+            return name;
+        }
+        if let Some(name) = self.provider_execution_event_name() {
+            return name;
+        }
+        unreachable!("all Event variants must map to an EventName")
+    }
+
+    fn tool_event_name(&self) -> Option<EventName> {
         match self {
             Self::ToolRegister(_) => EventName::TOOL_REGISTER,
             Self::ToolUnregister(_) => EventName::TOOL_UNREGISTER,
@@ -3478,10 +3515,24 @@ impl Event {
             Self::ToolCancelRequest(_) => EventName::TOOL_CANCEL_REQUEST,
             Self::ToolCancelled(_) => EventName::TOOL_CANCELLED,
             Self::ToolDelegateProgress(_) => EventName::TOOL_DELEGATE_PROGRESS,
+            _ => return None,
+        }
+        .into()
+    }
+
+    fn action_event_name(&self) -> Option<EventName> {
+        match self {
             Self::ActionSchemaPublished(_) => EventName::ACTION_SCHEMA_PUBLISHED,
             Self::ActionInvoke(_) => EventName::ACTION_INVOKE,
             Self::ActionResult(_) => EventName::ACTION_RESULT,
             Self::ActionError(_) => EventName::ACTION_ERROR,
+            _ => return None,
+        }
+        .into()
+    }
+
+    fn extension_and_delegation_event_name(&self) -> Option<EventName> {
+        match self {
             Self::ExtensionStarting(_) => EventName::EXTENSION_STARTING,
             Self::ExtensionReady(_) => EventName::EXTENSION_READY,
             Self::ExtensionExited(_) => EventName::EXTENSION_EXITED,
@@ -3500,10 +3551,23 @@ impl Event {
             Self::StartAgentResult(_) => EventName::AGENT_START_RESULT,
             Self::AgentMessageSent(_) => EventName::AGENT_MESSAGE_SENT,
             Self::AgentMessageReceived(_) => EventName::AGENT_MESSAGE_RECEIVED,
-            Self::ExtensionEvent(event) => event.name().clone(),
+            _ => return None,
+        }
+        .into()
+    }
+
+    fn provider_capability_event_name(&self) -> Option<EventName> {
+        match self {
             Self::ProviderModelsUpdated(_) => EventName::PROVIDER_MODELS_UPDATED,
             Self::ProviderToolResult(_) => EventName::PROVIDER_TOOL_RESULT,
             Self::ProviderToolError(_) => EventName::PROVIDER_TOOL_ERROR,
+            _ => return None,
+        }
+        .into()
+    }
+
+    fn harness_event_name(&self) -> Option<EventName> {
+        match self {
             Self::HarnessNotice(_) => EventName::HARNESS_NOTICE,
             Self::HarnessSessionDir(_) => EventName::HARNESS_SESSION_DIR,
             Self::HarnessUiDir(_) => EventName::HARNESS_UI_DIR,
@@ -3520,6 +3584,13 @@ impl Event {
             Self::HarnessThinkingSummariesAvailable(_) => {
                 EventName::HARNESS_THINKING_SUMMARIES_AVAILABLE
             }
+            _ => return None,
+        }
+        .into()
+    }
+
+    fn ui_event_name(&self) -> Option<EventName> {
+        match self {
             Self::UiPromptSubmitted(_) => EventName::UI_PROMPT_SUBMITTED,
             Self::UiPromptDraft(_) => EventName::UI_PROMPT_DRAFT,
             Self::UiFocusChanged(_) => EventName::UI_FOCUS_CHANGED,
@@ -3536,33 +3607,63 @@ impl Event {
             Self::UiCancelPrompt(_) => EventName::UI_CANCEL_PROMPT,
             Self::UiRecallQueuedPrompt(_) => EventName::UI_RECALL_QUEUED_PROMPT,
             Self::UiSetAgentDisplayName(_) => EventName::UI_SET_AGENT_DISPLAY_NAME,
+            _ => return None,
+        }
+        .into()
+    }
+
+    fn terminal_and_shell_event_name(&self) -> Option<EventName> {
+        match self {
             Self::Osc1337SetUserVar(_) => EventName::TERM_OSC1337_SET_USER_VAR,
             Self::TermBell(_) => EventName::TERM_BELL,
             Self::ShellCommandProgress(_) => EventName::SHELL_COMMAND_PROGRESS,
             Self::ShellCommandFinished(_) => EventName::SHELL_COMMAND_FINISHED,
+            _ => return None,
+        }
+        .into()
+    }
+
+    fn agent_event_name(&self) -> Option<EventName> {
+        match self {
             Self::AgentPromptSubmitted(_) => EventName::AGENT_PROMPT_SUBMITTED,
             Self::AgentPromptQueued(_) => EventName::AGENT_PROMPT_QUEUED,
             Self::AgentPromptRecalled(_) => EventName::AGENT_PROMPT_RECALLED,
             Self::AgentPromptSteered(_) => EventName::AGENT_PROMPT_STEERED,
             Self::AgentCompactionTriggered(_) => EventName::AGENT_COMPACTION_TRIGGERED,
-            Self::AgentStarted(_) => EventName::AGENT_STARTED,
-            Self::AgentDisplayNameSet(_) => EventName::AGENT_DISPLAY_NAME_SET,
-            Self::AgentMetadataSet(_) => EventName::AGENT_METADATA_SET,
-            Self::AgentMetadataUnset(_) => EventName::AGENT_METADATA_UNSET,
-            Self::SessionStarted(_) => EventName::SESSION_STARTED,
-            Self::SessionShutdown(_) => EventName::SESSION_SHUTDOWN,
-            Self::SessionAgentLoaded(_) => EventName::SESSION_AGENT_LOADED,
-            Self::SessionAgentUnloaded(_) => EventName::SESSION_AGENT_UNLOADED,
             Self::AgentPromptCreated(_) => EventName::AGENT_PROMPT_CREATED,
             Self::AgentPromptTerminated(_) => EventName::AGENT_PROMPT_TERMINATED,
             Self::AgentPromptPrewarmRequested(_) => EventName::AGENT_PROMPT_PREWARM_REQUESTED,
             Self::AgentUserMessageInjected(_) => EventName::AGENT_USER_MESSAGE_INJECTED,
             Self::AgentHeadMoved(_) => EventName::AGENT_HEAD_MOVED,
+            Self::AgentStarted(_) => EventName::AGENT_STARTED,
+            Self::AgentDisplayNameSet(_) => EventName::AGENT_DISPLAY_NAME_SET,
+            Self::AgentMetadataSet(_) => EventName::AGENT_METADATA_SET,
+            Self::AgentMetadataUnset(_) => EventName::AGENT_METADATA_UNSET,
+            _ => return None,
+        }
+        .into()
+    }
+
+    fn session_event_name(&self) -> Option<EventName> {
+        match self {
+            Self::SessionStarted(_) => EventName::SESSION_STARTED,
+            Self::SessionShutdown(_) => EventName::SESSION_SHUTDOWN,
+            Self::SessionAgentLoaded(_) => EventName::SESSION_AGENT_LOADED,
+            Self::SessionAgentUnloaded(_) => EventName::SESSION_AGENT_UNLOADED,
+            _ => return None,
+        }
+        .into()
+    }
+
+    fn provider_execution_event_name(&self) -> Option<EventName> {
+        match self {
             Self::ProviderPromptSubmitted(_) => EventName::PROVIDER_PROMPT_SUBMITTED,
             Self::ProviderResponseUpdated(_) => EventName::PROVIDER_RESPONSE_UPDATED,
             Self::ProviderResponseFinished(_) => EventName::PROVIDER_RESPONSE_FINISHED,
             Self::ProviderCacheMissDiagnostic(_) => EventName::PROVIDER_CACHE_MISS_DIAGNOSTIC,
+            _ => return None,
         }
+        .into()
     }
 
     /// Returns true for protocol events that are runtime-only by default when
