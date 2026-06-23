@@ -404,7 +404,7 @@ fn full_render_resize_to_larger_bottom_aligns_without_rubber() {
     };
 
     let plan = TerminalModel::bottom_aligned_plan(&layout, 10);
-    model.reset_to_plan(layout, plan.viewport_start, plan.rubber_height);
+    model.reset_to_layout(&layout, plan.viewport_start, plan.rubber_height);
 
     assert_eq!(plan.rubber_height, 0);
     assert_eq!(plan.viewport_start, 1);

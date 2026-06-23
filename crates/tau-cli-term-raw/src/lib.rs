@@ -2762,7 +2762,7 @@ impl TerminalModel {
             .extend_from_slice(&tail.sources[..tail.active_height]);
     }
 
-    fn reset_to_plan(&mut self, layout: LayoutAll, viewport_start: usize, rubber_height: usize) {
+    fn reset_to_layout(&mut self, layout: &LayoutAll, viewport_start: usize, rubber_height: usize) {
         self.viewport_start = viewport_start;
         self.rubber_height = rubber_height;
         self.history_generation = layout.history_generation;
@@ -3042,6 +3042,32 @@ enum RenderFrame {
     },
 }
 
+struct RedrawPass {
+    width: usize,
+    height: usize,
+    size_changed: bool,
+    force_full: bool,
+    sync_gen: u64,
+    pending_raw: Vec<String>,
+    redraw_history_size: usize,
+    frame: RenderFrame,
+}
+
+struct FullRenderMark {
+    reason: &'static str,
+    prev_visible_start: usize,
+    visible_start: usize,
+    height: usize,
+    changed_line: Option<usize>,
+    previous_source: Option<LineSource>,
+}
+
+struct FullRenderMarkInput {
+    reason: &'static str,
+    changed_line: Option<usize>,
+    previous_source: Option<LineSource>,
+}
+
 fn redraw_loop(
     state: Arc<Mutex<SharedState>>,
     notify_rx: tau_blocking_notify_channel::Receiver,
@@ -3060,298 +3086,445 @@ fn redraw_loop(
     let mut terminal_model = TerminalModel::default();
 
     loop {
-        // Check shutdown before blocking on the channel.
-        {
-            let st = state.lock().expect("term state mutex poisoned");
-            if st.shutdown {
-                // Final render + move cursor below all content.
-                let layout = layout_all(&st);
-                let height = st.height.max(1);
-                let plan = terminal_model.plan_view(&layout, height);
-                let visible = plan.visible_lines(height);
-                let cursor_in_visible = plan.cursor_in_visible(height);
-                drop(st);
-
-                screen.set_width(prev_width);
-                let _ = screen.update(&mut writer, visible, (cursor_in_visible, layout.cursor_col));
-                let below = plan.render_lines.len().saturating_sub(plan.cursor_row + 1);
-                for _ in 0..=below {
-                    let _ = writer.queue(crossterm::style::Print("\r\n"));
-                }
-                let _ = writer.flush();
-                {
-                    let mut st = state.lock().expect("term state mutex poisoned");
-                    st.sync_completed = st.sync_requested;
-                }
-                sync_condvar.notify_all();
-                break;
-            }
+        if render_shutdown_if_requested(
+            &state,
+            &mut writer,
+            &mut screen,
+            &terminal_model,
+            prev_width,
+            sync_condvar,
+        ) {
+            break;
         }
 
-        // If a sync was requested but not yet completed, skip
-        // blocking on recv and render immediately. Otherwise block
-        // until the next notification arrives.
-        {
-            let st = state.lock().expect("term state mutex poisoned");
-            if st.sync_completed >= st.sync_requested {
-                drop(st);
-                if notify_rx.recv().is_err() {
-                    break;
-                }
-            }
+        if !wait_for_redraw_or_sync(&state, &notify_rx) {
+            break;
         }
 
-        let mut st = state.lock().expect("term state mutex poisoned");
-        if st.redraw_suppression != 0 {
-            st.sync_completed = st.sync_requested;
-            sync_condvar.notify_all();
-            continue;
-        }
-        if st.external_paused {
-            st.sync_completed = st.sync_requested;
-            sync_condvar.notify_all();
-            continue;
-        }
-        let width = st.width;
-        let height = st.height.max(1);
-        let size_changed = prev_width != width || prev_height != height;
-        // Take-and-clear so the flag is one-shot.
-        let force_full = std::mem::take(&mut st.invalidate_screen);
-        // Capture the sync generation we're rendering against.
-        // We must not advance sync_completed beyond this value,
-        // because a later bump to sync_requested may have arrived
-        // with state changes we haven't read yet.
-        let sync_gen = st.sync_requested;
-        let pending_raw = std::mem::take(&mut st.pending_raw);
-        let redraw_history_size = st.redraw_history_size;
-
-        history_cache.refresh(&st);
-        let tail = layout_tail(&st, history_cache.lines.len());
-        let log_height = history_cache.lines.len() + tail.active_height;
-        let fixed_height = tail.fixed_height();
-        let metrics =
-            terminal_model.plan_metrics(log_height, fixed_height, tail.cursor_row, height);
-        let can_fast = !size_changed
-            && !force_full
-            && terminal_model.history_cache_matches(&history_cache)
-            && metrics.viewport_start == terminal_model.viewport_start
-            && metrics.viewport_start <= history_cache.lines.len();
-        let frame = if can_fast {
-            RenderFrame::Fast { tail, metrics }
-        } else {
-            RenderFrame::Full {
-                layout: layout_all_from_cached_history(&history_cache, tail),
-            }
+        let pass = match prepare_redraw_pass(
+            &state,
+            &mut history_cache,
+            &terminal_model,
+            prev_width,
+            prev_height,
+            sync_condvar,
+        ) {
+            Some(pass) => pass,
+            None => continue,
         };
-        drop(st);
-
-        // Pending escape sequences: emit before the frame so they
-        // sit outside any synchronized-update bracket the renderer
-        // installs. SetUserVar and similar OSC sequences don't
-        // affect visible state, so ordering relative to the frame
-        // doesn't matter for correctness — putting them first just
-        // avoids any chance of interleaving with a deferred frame.
-        for seq in &pending_raw {
-            let _ = writer.write_all(seq.as_bytes());
-        }
-        if force_full {
-            // The terminal was clobbered by an external program
-            // (\$EDITOR returned). Wipe Screen's cached idea of what's
-            // on the terminal so `full_render` redraws from scratch.
-            screen.invalidate();
-        }
-
-        match frame {
-            RenderFrame::Fast { tail, metrics } => {
-                screen.set_width(width);
-                let visible = visible_lines_from_parts(&history_cache.lines, &tail, &metrics);
-                let cursor_in_visible = metrics.cursor_row.saturating_sub(metrics.viewport_start);
-                if let Err(e) =
-                    screen.update(&mut writer, &visible, (cursor_in_visible, tail.cursor_col))
-                {
-                    tracing::error!(target: "tau_cli_term_raw::redraw", error = %e, "update error");
-                }
-                terminal_model.apply_fast_plan(&history_cache, &tail, &metrics);
-            }
-            RenderFrame::Full { layout } => {
-                if size_changed || force_full {
-                    // Path 2: Full render (resize, or post-external-program).
-                    let reason = if size_changed {
-                        "size_changed"
-                    } else {
-                        "force_full"
-                    };
-                    let plan = TerminalModel::full_redraw_plan(&layout, height);
-                    let visible_start = plan.viewport_start;
-                    mark_full_render(
-                        &state,
-                        &layout,
-                        FullRenderMark {
-                            reason,
-                            prev_visible_start: terminal_model.viewport_start,
-                            visible_start,
-                            height,
-                            changed_line: None,
-                            previous_source: None,
-                        },
-                    );
-                    if let Err(e) = full_render(
-                        &mut writer,
-                        &mut screen,
-                        &layout,
-                        &plan,
-                        width,
-                        height,
-                        redraw_history_size,
-                    ) {
-                        tracing::error!(target: "tau_cli_term_raw::redraw", error = %e, "full render error");
-                    }
-                    let viewport_start = full_render_effective_viewport_start(
-                        &layout,
-                        &plan,
-                        height,
-                        redraw_history_size,
-                    );
-                    terminal_model.reset_to_plan(layout, viewport_start, plan.rubber_height);
-                } else {
-                    screen.set_width(width);
-
-                    let hidden_prefix_changed = terminal_model.hidden_prefix_changed(&layout);
-                    let incremental_plan = terminal_model.plan_view(&layout, height);
-                    let incremental_visible_start = incremental_plan.viewport_start;
-                    let plan;
-                    let used_full_render;
-
-                    if incremental_visible_start < terminal_model.viewport_start {
-                        // The desired viewport moved upward to keep the input cursor
-                        // visible. Rows that should re-enter the screen may currently
-                        // exist only in terminal scrollback, which cannot be pulled
-                        // back incrementally. Since we are repainting from scratch,
-                        // discard any rubber and paint the new viewport directly.
-                        plan = TerminalModel::full_redraw_plan(&layout, height);
-                        let visible_start = plan.viewport_start;
-                        mark_full_render(
-                            &state,
-                            &layout,
-                            FullRenderMark {
-                                reason: "viewport_moved_up",
-                                prev_visible_start: terminal_model.viewport_start,
-                                visible_start,
-                                height,
-                                changed_line: None,
-                                previous_source: None,
-                            },
-                        );
-                        if let Err(e) = full_render(
-                            &mut writer,
-                            &mut screen,
-                            &layout,
-                            &plan,
-                            width,
-                            height,
-                            redraw_history_size,
-                        ) {
-                            tracing::error!(target: "tau_cli_term_raw::redraw", error = %e, "full render error");
-                        }
-                        used_full_render = true;
-                    } else if hidden_prefix_changed {
-                        // The terminal scrollback may contain rows whose logical
-                        // content changed. Clear it instead of trying to patch it
-                        // incrementally. Since we are repainting from scratch, discard
-                        // any rubber and paint the new viewport directly.
-                        plan = TerminalModel::full_redraw_plan(&layout, height);
-                        let visible_start = plan.viewport_start;
-                        let changed_line = terminal_model.changed_hidden_line(&layout);
-                        let previous_source = changed_line
-                            .and_then(|idx| terminal_model.known_sources.get(idx))
-                            .cloned();
-                        mark_full_render(
-                            &state,
-                            &layout,
-                            FullRenderMark {
-                                reason: "hidden_prefix_changed",
-                                prev_visible_start: terminal_model.viewport_start,
-                                visible_start,
-                                height,
-                                changed_line,
-                                previous_source,
-                            },
-                        );
-                        if let Err(e) = full_render(
-                            &mut writer,
-                            &mut screen,
-                            &layout,
-                            &plan,
-                            width,
-                            height,
-                            redraw_history_size,
-                        ) {
-                            tracing::error!(target: "tau_cli_term_raw::redraw", error = %e, "full render error");
-                        }
-                        used_full_render = true;
-                    } else if terminal_model.viewport_start < incremental_visible_start {
-                        plan = incremental_plan;
-                        used_full_render = false;
-                        // Content pushed log rows off the top. Use the scrolling
-                        // renderer (Pi-style). Rubber is part of the virtual tail, so
-                        // it shrinks before any extra log row enters scrollback.
-                        if let Err(e) = screen.render_scrolling(
-                            &mut writer,
-                            &plan.render_lines,
-                            terminal_model.viewport_start,
-                            height,
-                            (plan.cursor_row, layout.cursor_col),
-                        ) {
-                            tracing::error!(target: "tau_cli_term_raw::redraw", error = %e, "scroll render error");
-                        }
-                    } else {
-                        plan = incremental_plan;
-                        used_full_render = false;
-                        // No new scrollback rows — normal differential update. This
-                        // includes visible shrinkage: rubber grows instead of moving
-                        // the viewport upward.
-                        let visible = plan.visible_lines(height);
-                        let cursor_in_visible = plan.cursor_in_visible(height);
-                        if let Err(e) = screen.update(
-                            &mut writer,
-                            visible,
-                            (cursor_in_visible, layout.cursor_col),
-                        ) {
-                            tracing::error!(target: "tau_cli_term_raw::redraw", error = %e, "update error");
-                        }
-                    }
-                    let viewport_start = if used_full_render {
-                        full_render_effective_viewport_start(
-                            &layout,
-                            &plan,
-                            height,
-                            redraw_history_size,
-                        )
-                    } else {
-                        plan.viewport_start
-                    };
-                    terminal_model.reset_to_plan(layout, viewport_start, plan.rubber_height);
-                }
-            }
-        }
+        render_redraw_pass(
+            &state,
+            &mut writer,
+            &mut screen,
+            &history_cache,
+            &mut terminal_model,
+            &pass,
+        );
 
         if let Err(e) = writer.flush() {
             tracing::error!(target: "tau_cli_term_raw::redraw", error = %e, "render flush error");
         }
 
-        prev_width = width;
-        prev_height = height;
+        prev_width = pass.width;
+        prev_height = pass.height;
 
-        // Advance sync_completed to the generation we captured
-        // before rendering.  Using max() is defensive — renders
-        // are sequential so sync_gen is monotonically increasing,
-        // but max() makes the invariant explicit.
-        {
-            let mut st = state.lock().expect("term state mutex poisoned");
-            st.sync_completed = st.sync_completed.max(sync_gen);
-        }
-        sync_condvar.notify_all();
+        complete_redraw_sync(&state, pass.sync_gen, sync_condvar);
     }
+}
+
+fn render_shutdown_if_requested(
+    state: &Arc<Mutex<SharedState>>,
+    writer: &mut BufWriter<Box<dyn Write + Send>>,
+    screen: &mut Screen,
+    terminal_model: &TerminalModel,
+    prev_width: usize,
+    sync_condvar: &std::sync::Condvar,
+) -> bool {
+    let st = state.lock().expect("term state mutex poisoned");
+    if !st.shutdown {
+        return false;
+    }
+
+    // Final render + move cursor below all content.
+    let layout = layout_all(&st);
+    let height = st.height.max(1);
+    let plan = terminal_model.plan_view(&layout, height);
+    let visible = plan.visible_lines(height);
+    let cursor_in_visible = plan.cursor_in_visible(height);
+    drop(st);
+
+    screen.set_width(prev_width);
+    let _ = screen.update(writer, visible, (cursor_in_visible, layout.cursor_col));
+    let below = plan.render_lines.len().saturating_sub(plan.cursor_row + 1);
+    for _ in 0..=below {
+        let _ = writer.queue(crossterm::style::Print("\r\n"));
+    }
+    let _ = writer.flush();
+    {
+        let mut st = state.lock().expect("term state mutex poisoned");
+        st.sync_completed = st.sync_requested;
+    }
+    sync_condvar.notify_all();
+    true
+}
+
+fn wait_for_redraw_or_sync(
+    state: &Arc<Mutex<SharedState>>,
+    notify_rx: &tau_blocking_notify_channel::Receiver,
+) -> bool {
+    // If a sync was requested but not yet completed, skip blocking on recv and
+    // render immediately. Otherwise block until the next notification arrives.
+    let st = state.lock().expect("term state mutex poisoned");
+    if st.sync_completed < st.sync_requested {
+        return true;
+    }
+    drop(st);
+    notify_rx.recv().is_ok()
+}
+
+fn prepare_redraw_pass(
+    state: &Arc<Mutex<SharedState>>,
+    history_cache: &mut HistoryLayoutCache,
+    terminal_model: &TerminalModel,
+    prev_width: usize,
+    prev_height: usize,
+    sync_condvar: &std::sync::Condvar,
+) -> Option<RedrawPass> {
+    let mut st = state.lock().expect("term state mutex poisoned");
+    if st.redraw_suppression != 0 || st.external_paused {
+        st.sync_completed = st.sync_requested;
+        sync_condvar.notify_all();
+        return None;
+    }
+    let width = st.width;
+    let height = st.height.max(1);
+    let size_changed = prev_width != width || prev_height != height;
+    // Take-and-clear so the flag is one-shot.
+    let force_full = std::mem::take(&mut st.invalidate_screen);
+    // Capture the sync generation we're rendering against. We must not advance
+    // sync_completed beyond this value, because a later bump to sync_requested
+    // may have arrived with state changes we haven't read yet.
+    let sync_gen = st.sync_requested;
+    let pending_raw = std::mem::take(&mut st.pending_raw);
+    let redraw_history_size = st.redraw_history_size;
+
+    history_cache.refresh(&st);
+    let tail = layout_tail(&st, history_cache.lines.len());
+    let log_height = history_cache.lines.len() + tail.active_height;
+    let fixed_height = tail.fixed_height();
+    let metrics = terminal_model.plan_metrics(log_height, fixed_height, tail.cursor_row, height);
+    let can_fast = !size_changed
+        && !force_full
+        && terminal_model.history_cache_matches(history_cache)
+        && metrics.viewport_start == terminal_model.viewport_start
+        && metrics.viewport_start <= history_cache.lines.len();
+    let frame = if can_fast {
+        RenderFrame::Fast { tail, metrics }
+    } else {
+        RenderFrame::Full {
+            layout: layout_all_from_cached_history(history_cache, tail),
+        }
+    };
+    Some(RedrawPass {
+        width,
+        height,
+        size_changed,
+        force_full,
+        sync_gen,
+        pending_raw,
+        redraw_history_size,
+        frame,
+    })
+}
+
+fn render_redraw_pass(
+    state: &Arc<Mutex<SharedState>>,
+    writer: &mut BufWriter<Box<dyn Write + Send>>,
+    screen: &mut Screen,
+    history_cache: &HistoryLayoutCache,
+    terminal_model: &mut TerminalModel,
+    pass: &RedrawPass,
+) {
+    // Pending escape sequences: emit before the frame so they sit outside any
+    // synchronized-update bracket the renderer installs. SetUserVar and similar
+    // OSC sequences don't affect visible state, so ordering relative to the
+    // frame doesn't matter for correctness — putting them first just avoids any
+    // chance of interleaving with a deferred frame.
+    for seq in &pass.pending_raw {
+        let _ = writer.write_all(seq.as_bytes());
+    }
+    if pass.force_full {
+        // The terminal was clobbered by an external program ($EDITOR returned).
+        // Wipe Screen's cached idea of what's on the terminal so `full_render`
+        // redraws from scratch.
+        screen.invalidate();
+    }
+
+    match &pass.frame {
+        RenderFrame::Fast { tail, metrics } => {
+            render_fast_frame(
+                writer,
+                screen,
+                history_cache,
+                terminal_model,
+                pass.width,
+                tail,
+                metrics,
+            );
+        }
+        RenderFrame::Full { layout } => {
+            render_full_frame(state, writer, screen, terminal_model, pass, layout);
+        }
+    }
+}
+
+fn render_fast_frame(
+    writer: &mut BufWriter<Box<dyn Write + Send>>,
+    screen: &mut Screen,
+    history_cache: &HistoryLayoutCache,
+    terminal_model: &mut TerminalModel,
+    width: usize,
+    tail: &TailLayout,
+    metrics: &PlanMetrics,
+) {
+    screen.set_width(width);
+    let visible = visible_lines_from_parts(&history_cache.lines, tail, metrics);
+    let cursor_in_visible = metrics.cursor_row.saturating_sub(metrics.viewport_start);
+    if let Err(e) = screen.update(writer, &visible, (cursor_in_visible, tail.cursor_col)) {
+        tracing::error!(target: "tau_cli_term_raw::redraw", error = %e, "update error");
+    }
+    terminal_model.apply_fast_plan(history_cache, tail, metrics);
+}
+
+fn render_full_frame(
+    state: &Arc<Mutex<SharedState>>,
+    writer: &mut BufWriter<Box<dyn Write + Send>>,
+    screen: &mut Screen,
+    terminal_model: &mut TerminalModel,
+    pass: &RedrawPass,
+    layout: &LayoutAll,
+) {
+    if pass.size_changed || pass.force_full {
+        let reason = if pass.size_changed {
+            "size_changed"
+        } else {
+            "force_full"
+        };
+        render_marked_full_frame(
+            state,
+            writer,
+            screen,
+            terminal_model,
+            pass,
+            layout,
+            FullRenderMarkInput {
+                reason,
+                changed_line: None,
+                previous_source: None,
+            },
+        );
+        return;
+    }
+
+    render_incremental_or_scroll_frame(state, writer, screen, terminal_model, pass, layout);
+}
+
+fn render_incremental_or_scroll_frame(
+    state: &Arc<Mutex<SharedState>>,
+    writer: &mut BufWriter<Box<dyn Write + Send>>,
+    screen: &mut Screen,
+    terminal_model: &mut TerminalModel,
+    pass: &RedrawPass,
+    layout: &LayoutAll,
+) {
+    screen.set_width(pass.width);
+
+    let hidden_prefix_changed = terminal_model.hidden_prefix_changed(layout);
+    let incremental_plan = terminal_model.plan_view(layout, pass.height);
+    let incremental_visible_start = incremental_plan.viewport_start;
+
+    if incremental_visible_start < terminal_model.viewport_start {
+        render_viewport_moved_up_frame(state, writer, screen, terminal_model, pass, layout);
+    } else if hidden_prefix_changed {
+        render_hidden_prefix_changed_frame(state, writer, screen, terminal_model, pass, layout);
+    } else if terminal_model.viewport_start < incremental_visible_start {
+        render_scrolling_frame(
+            writer,
+            screen,
+            terminal_model,
+            pass,
+            layout,
+            incremental_plan,
+        );
+    } else {
+        render_diff_frame(
+            writer,
+            screen,
+            terminal_model,
+            pass,
+            layout,
+            incremental_plan,
+        );
+    }
+}
+
+fn render_marked_full_frame(
+    state: &Arc<Mutex<SharedState>>,
+    writer: &mut BufWriter<Box<dyn Write + Send>>,
+    screen: &mut Screen,
+    terminal_model: &mut TerminalModel,
+    pass: &RedrawPass,
+    layout: &LayoutAll,
+    mark_input: FullRenderMarkInput,
+) {
+    let plan = TerminalModel::full_redraw_plan(layout, pass.height);
+    let mark = FullRenderMark {
+        reason: mark_input.reason,
+        prev_visible_start: terminal_model.viewport_start,
+        visible_start: plan.viewport_start,
+        height: pass.height,
+        changed_line: mark_input.changed_line,
+        previous_source: mark_input.previous_source,
+    };
+    mark_full_render(state, layout, mark);
+    if let Err(e) = full_render(
+        writer,
+        screen,
+        layout,
+        &plan,
+        pass.width,
+        pass.height,
+        pass.redraw_history_size,
+    ) {
+        tracing::error!(target: "tau_cli_term_raw::redraw", error = %e, "full render error");
+    }
+    reset_model_after_rendered_full_frame(terminal_model, pass, layout, plan);
+}
+
+fn render_viewport_moved_up_frame(
+    state: &Arc<Mutex<SharedState>>,
+    writer: &mut BufWriter<Box<dyn Write + Send>>,
+    screen: &mut Screen,
+    terminal_model: &mut TerminalModel,
+    pass: &RedrawPass,
+    layout: &LayoutAll,
+) {
+    // The desired viewport moved upward to keep the input cursor visible. Rows
+    // that should re-enter the screen may currently exist only in terminal
+    // scrollback, which cannot be pulled back incrementally. Since we are
+    // repainting from scratch, discard any rubber and paint the new viewport
+    // directly.
+    render_marked_full_frame(
+        state,
+        writer,
+        screen,
+        terminal_model,
+        pass,
+        layout,
+        FullRenderMarkInput {
+            reason: "viewport_moved_up",
+            changed_line: None,
+            previous_source: None,
+        },
+    );
+}
+
+fn render_hidden_prefix_changed_frame(
+    state: &Arc<Mutex<SharedState>>,
+    writer: &mut BufWriter<Box<dyn Write + Send>>,
+    screen: &mut Screen,
+    terminal_model: &mut TerminalModel,
+    pass: &RedrawPass,
+    layout: &LayoutAll,
+) {
+    // The terminal scrollback may contain rows whose logical content changed.
+    // Clear it instead of trying to patch it incrementally. Since we are
+    // repainting from scratch, discard any rubber and paint the new viewport
+    // directly.
+    let changed_line = terminal_model.changed_hidden_line(layout);
+    let previous_source = changed_line
+        .and_then(|idx| terminal_model.known_sources.get(idx))
+        .cloned();
+    render_marked_full_frame(
+        state,
+        writer,
+        screen,
+        terminal_model,
+        pass,
+        layout,
+        FullRenderMarkInput {
+            reason: "hidden_prefix_changed",
+            changed_line,
+            previous_source,
+        },
+    );
+}
+
+fn render_scrolling_frame(
+    writer: &mut BufWriter<Box<dyn Write + Send>>,
+    screen: &mut Screen,
+    terminal_model: &mut TerminalModel,
+    pass: &RedrawPass,
+    layout: &LayoutAll,
+    plan: ViewPlan,
+) {
+    // Content pushed log rows off the top. Use the scrolling renderer
+    // (Pi-style). Rubber is part of the virtual tail, so it shrinks before any
+    // extra log row enters scrollback.
+    if let Err(e) = screen.render_scrolling(
+        writer,
+        &plan.render_lines,
+        terminal_model.viewport_start,
+        pass.height,
+        (plan.cursor_row, layout.cursor_col),
+    ) {
+        tracing::error!(target: "tau_cli_term_raw::redraw", error = %e, "scroll render error");
+    }
+    terminal_model.reset_to_layout(layout, plan.viewport_start, plan.rubber_height);
+}
+
+fn render_diff_frame(
+    writer: &mut BufWriter<Box<dyn Write + Send>>,
+    screen: &mut Screen,
+    terminal_model: &mut TerminalModel,
+    pass: &RedrawPass,
+    layout: &LayoutAll,
+    plan: ViewPlan,
+) {
+    // No new scrollback rows — normal differential update. This includes visible
+    // shrinkage: rubber grows instead of moving the viewport upward.
+    let visible = plan.visible_lines(pass.height);
+    let cursor_in_visible = plan.cursor_in_visible(pass.height);
+    if let Err(e) = screen.update(writer, visible, (cursor_in_visible, layout.cursor_col)) {
+        tracing::error!(target: "tau_cli_term_raw::redraw", error = %e, "update error");
+    }
+    terminal_model.reset_to_layout(layout, plan.viewport_start, plan.rubber_height);
+}
+
+fn reset_model_after_rendered_full_frame(
+    terminal_model: &mut TerminalModel,
+    pass: &RedrawPass,
+    layout: &LayoutAll,
+    plan: ViewPlan,
+) {
+    let viewport_start =
+        full_render_effective_viewport_start(layout, &plan, pass.height, pass.redraw_history_size);
+    terminal_model.reset_to_layout(layout, viewport_start, plan.rubber_height);
+}
+
+fn complete_redraw_sync(
+    state: &Arc<Mutex<SharedState>>,
+    sync_gen: u64,
+    sync_condvar: &std::sync::Condvar,
+) {
+    // Advance sync_completed to the generation we captured before rendering.
+    // Using max() is defensive — renders are sequential so sync_gen is
+    // monotonically increasing, but max() makes the invariant explicit.
+    {
+        let mut st = state.lock().expect("term state mutex poisoned");
+        st.sync_completed = st.sync_completed.max(sync_gen);
+    }
+    sync_condvar.notify_all();
 }
 
 fn changed_line_in_range(
@@ -3362,15 +3535,6 @@ fn changed_line_in_range(
     range
         .into_iter()
         .find(|idx| prev_all_lines.get(*idx) != all_lines.get(*idx))
-}
-
-struct FullRenderMark {
-    reason: &'static str,
-    prev_visible_start: usize,
-    visible_start: usize,
-    height: usize,
-    changed_line: Option<usize>,
-    previous_source: Option<LineSource>,
 }
 
 fn mark_full_render(state: &Arc<Mutex<SharedState>>, layout: &LayoutAll, mark: FullRenderMark) {
