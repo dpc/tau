@@ -32,6 +32,8 @@
 ## Design docs
 
 - `README.md` — project overview, install, configuration, and contact info
+- `design.md` — project-wide major design decisions; MUST read before changing
+  project-wide policy, CI gates, or cross-cutting behavior
 - `FEATURES.md` — major feature tour; update after editing any new major features
 - `SECURITY.md` — project-wide security/reliability context and trust boundaries;
   MUST read before changing or reviewing runtime behavior, persistence,
