@@ -4474,6 +4474,59 @@ impl Harness {
             return Ok(());
         }
 
+        let Some(event) = self.handle_extension_action_event(source_id, event) else {
+            return Ok(());
+        };
+        let Some(event) = self.handle_extension_tool_lifecycle_event(source_id, event)? else {
+            return Ok(());
+        };
+        let Some(event) = self.handle_extension_tool_terminal_event(source_id, event) else {
+            return Ok(());
+        };
+        let Some(event) = self.handle_extension_shell_event(source_id, event) else {
+            return Ok(());
+        };
+        let Some(event) = self.handle_extension_capability_event(source_id, event)? else {
+            return Ok(());
+        };
+        let Some(event) = self.handle_extension_agent_event(source_id, event)? else {
+            return Ok(());
+        };
+        let Some(event) = self.handle_extension_provider_prompt_event(source_id, event)? else {
+            return Ok(());
+        };
+        self.handle_extension_fallback_event(source_id, event, transient_override);
+        Ok(())
+    }
+
+    fn handle_extension_action_event(&mut self, source_id: &str, event: Event) -> Option<Event> {
+        match event {
+            Event::ActionSchemaPublished(published) => {
+                if self.should_stage_extension_capabilities(source_id) {
+                    self.stage_action_schema(source_id, published.schema);
+                } else {
+                    self.publish_action_schema(source_id, published.schema);
+                }
+                None
+            }
+            Event::ActionResult(result) => {
+                self.handle_action_result(source_id, result);
+                None
+            }
+            Event::ActionError(error) => {
+                self.handle_action_error(source_id, error);
+                None
+            }
+            Event::ActionInvoke(_) => None,
+            other => Some(other),
+        }
+    }
+
+    fn handle_extension_tool_lifecycle_event(
+        &mut self,
+        source_id: &str,
+        event: Event,
+    ) -> Result<Option<Event>, HarnessError> {
         match event {
             Event::ToolRegister(registration) => {
                 if self.should_stage_extension_capabilities(source_id) {
@@ -4481,201 +4534,176 @@ impl Harness {
                 } else {
                     self.register_extension_tool(source_id, registration);
                 }
+                Ok(None)
             }
-            Event::ActionSchemaPublished(published) => {
-                if self.should_stage_extension_capabilities(source_id) {
-                    self.stage_action_schema(source_id, published.schema);
-                } else {
-                    self.publish_action_schema(source_id, published.schema);
-                }
-            }
-            Event::ActionResult(result) => {
-                self.handle_action_result(source_id, result);
-            }
-            Event::ActionError(error) => {
-                self.handle_action_error(source_id, error);
-            }
-            Event::ActionInvoke(_) => {}
             Event::ToolUnregister(unregister) => {
-                self.remove_staged_tool_registration(source_id, &unregister.tool_name);
-                if self.should_stage_extension_capabilities(source_id) {
-                    return Ok(());
-                }
-                let visible_name = self
-                    .registry
-                    .providers_for(unregister.tool_name.as_str())
-                    .into_iter()
-                    .find(|provider| provider.connection_id.as_str() == source_id)
-                    .map(|provider| self.tool_model_visible_name(&provider.tool).clone())
-                    .unwrap_or_else(|| unregister.tool_name.clone());
-                let removed = self
-                    .registry
-                    .unregister(source_id, unregister.tool_name.as_str());
-                if removed
-                    && self
-                        .registry
-                        .providers_for(unregister.tool_name.as_str())
-                        .is_empty()
-                {
-                    self.mark_tool_unavailable_for_notice(
-                        unregister.tool_name.clone(),
-                        visible_name,
-                    );
-                }
-                self.publish_event(Some(source_id), Event::ToolUnregister(unregister));
+                self.handle_extension_tool_unregister(source_id, unregister);
+                Ok(None)
             }
             Event::ToolRequest(request) => {
-                if let Some(message) = self.extension_tool_request_rejection(&request) {
-                    self.reject_extension_tool_request(message);
-                    return Ok(());
-                }
-                // Track extension-originated runtime metadata before
-                // publishing so terminal events can be attributed and enriched.
-                self.track_extension_tool_request_metadata(&request);
-                // Publish with the owning agent when known so live observers
-                // and runtime delivery see the same agent attribution used for
-                // later terminal tool facts. `ToolRequest` itself remains a
-                // runtime routing intent, not an agent-transcript fold.
-                let owning_cid = self.tool_agents.get(&request.call_id).cloned();
-                if let Some(cid) = owning_cid.as_ref()
-                    && !self.pending_tools.contains_key(&request.call_id)
-                {
-                    self.pending_tools.insert(
-                        request.call_id.clone(),
-                        PendingTool {
-                            name: request.tool_name.clone(),
-                            internal_name: request.tool_name.clone(),
-                            tool_type: request.tool_type,
-                        },
-                    );
-                    self.bump_tools_started_for(cid);
-                }
-                let event = Event::ToolRequest(request.clone());
-                match owning_cid.as_ref() {
-                    Some(cid) => self.publish_event_for_agent(cid, Some(source_id), event),
-                    None => self.publish_event(Some(source_id), event),
-                }
-                // `ToolRequest` is the runtime pre-routing intent.
-                // `route_tool_request` resolves it. On success we publish
-                // `ToolStarted`; subscribed tool extensions see that event and
-                // the owner starts work. On
-                // failure we publish `ToolRejected` and the terminal
-                // `ToolError` for model-facing completion.
-                match self.registry.route_tool_request(request.clone()) {
-                    Ok(route) => {
-                        let started = route.invoke;
-                        let event = Event::ToolStarted(started.clone());
-                        match owning_cid.as_ref() {
-                            Some(cid) => self.publish_for_agent_from(cid, Some(source_id), event),
-                            None => self.publish_event(Some(source_id), event),
-                        }
-                        match route.target {
-                            ToolRouteTarget::Internal => {}
-                            ToolRouteTarget::Extension(provider_connection_id) => {
-                                self.ensure_tool_started_subscription(&provider_connection_id);
-                                self.pending_tool_providers
-                                    .insert(request.call_id.clone(), provider_connection_id);
-                            }
-                        }
-                    }
-                    Err(ToolRouteError::NoProvider { tool_name }) => {
-                        let call_id = request.call_id.to_string();
-                        let owning_cid = self.tool_agents.get(&request.call_id).cloned();
-                        let message = unavailable_tool_error_message(&tool_name);
-                        let rejected = ToolRejected {
-                            call_id: request.call_id.clone(),
-                            tool_name: tool_name.clone(),
-                            tool_type: request.tool_type,
-                            message: message.clone(),
-                            originator: request.originator.clone(),
-                        };
-                        let event = Event::ToolRejected(rejected);
-                        match owning_cid.as_ref() {
-                            Some(cid) => self.publish_for_agent_from(cid, Some(source_id), event),
-                            None => self.publish_event(Some(source_id), event),
-                        }
-                        let error = ToolError {
-                            call_id: request.call_id,
-                            tool_name: tool_name.clone(),
-                            tool_type: request.tool_type,
-                            message,
-                            details: None,
-                            originator: tau_proto::PromptOriginator::User,
-
-                            display: None,
-                        };
-                        self.publish_terminal_tool_error(owning_cid.as_ref(), None, error);
-                        self.clear_tool_call_tracking(&call_id);
-                    }
-                    Err(error) => return Err(HarnessError::ToolRoute(error)),
-                }
-            }
-            Event::ToolResult(mut result) => {
-                if !self.validate_tool_event_source(&result.call_id, source_id) {
-                    return Ok(());
-                }
-                if self.tool_turn.is_backgrounded(&result.call_id) {
-                    self.handle_background_tool_result(source_id, result);
-                } else if let Some(cid) = self.tool_agents.get(&result.call_id).cloned() {
-                    let call_id = result.call_id.to_string();
-                    if let Some(tool) = self.pending_tools.get(&result.call_id) {
-                        result.tool_name = tool.name.clone();
-                        result.tool_type = tool.tool_type;
-                    }
-                    // Collapse byte-identical large results into a
-                    // pointer back to the first call_id that produced
-                    // this content on this agent's branch. See
-                    // `crate::dedup` for the design.
-                    self.dedup_tool_result(&cid, &mut result);
-                    // Snap to the owning agent's head before
-                    // folding the result. Without this, a sibling side
-                    // conv that just touched the parent agent
-                    // (during its teardown) leaves `tree.head` on the
-                    // *parent* branch — folding the result there
-                    // misplaces it and produces orphan ToolUse blocks
-                    // when the parent conv is later re-prompted.
-                    self.publish_terminal_tool_result(Some(&cid), Some(source_id), result);
-                    self.on_tool_call_complete(&call_id);
-                    self.clear_tool_call_tracking(&call_id);
-                } else {
-                    self.emit_info(&format!(
-                        "discarding duplicate tool result for call_id={}",
-                        result.call_id
-                    ));
-                }
-            }
-            Event::ToolError(mut error) => {
-                if !self.validate_tool_event_source(&error.call_id, source_id) {
-                    return Ok(());
-                }
-                if self.tool_turn.is_backgrounded(&error.call_id) {
-                    self.handle_background_tool_error(Some(source_id), error);
-                } else if let Some(cid) = self.tool_agents.get(&error.call_id).cloned() {
-                    let call_id = error.call_id.to_string();
-                    if let Some(tool) = self.pending_tools.get(&error.call_id) {
-                        error.tool_name = tool.name.clone();
-                        error.tool_type = tool.tool_type;
-                    }
-                    self.dedup_tool_error(&cid, &mut error);
-                    self.publish_terminal_tool_error(Some(&cid), Some(source_id), error);
-                    self.on_tool_call_complete(&call_id);
-                    self.clear_tool_call_tracking(&call_id);
-                } else {
-                    self.emit_info(&format!(
-                        "discarding duplicate tool error for call_id={}",
-                        error.call_id
-                    ));
-                }
+                self.handle_extension_tool_request(source_id, request)?;
+                Ok(None)
             }
             Event::ToolProgress(progress) => {
-                if !self.tool_agents.contains_key(&progress.call_id)
-                    || !self.validate_tool_event_source(&progress.call_id, source_id)
+                if self.tool_agents.contains_key(&progress.call_id)
+                    && self.validate_tool_event_source(&progress.call_id, source_id)
+                    && !self.tool_turn.is_backgrounded(&progress.call_id)
                 {
-                    return Ok(());
-                }
-                if !self.tool_turn.is_backgrounded(&progress.call_id) {
                     self.publish_event(Some(source_id), Event::ToolProgress(progress));
                 }
+                Ok(None)
+            }
+            other => Ok(Some(other)),
+        }
+    }
+
+    fn handle_extension_tool_unregister(
+        &mut self,
+        source_id: &str,
+        unregister: tau_proto::ToolUnregister,
+    ) {
+        self.remove_staged_tool_registration(source_id, &unregister.tool_name);
+        if self.should_stage_extension_capabilities(source_id) {
+            return;
+        }
+        let visible_name = self
+            .registry
+            .providers_for(unregister.tool_name.as_str())
+            .into_iter()
+            .find(|provider| provider.connection_id.as_str() == source_id)
+            .map(|provider| self.tool_model_visible_name(&provider.tool).clone())
+            .unwrap_or_else(|| unregister.tool_name.clone());
+        let removed = self
+            .registry
+            .unregister(source_id, unregister.tool_name.as_str());
+        if removed
+            && self
+                .registry
+                .providers_for(unregister.tool_name.as_str())
+                .is_empty()
+        {
+            self.mark_tool_unavailable_for_notice(unregister.tool_name.clone(), visible_name);
+        }
+        self.publish_event(Some(source_id), Event::ToolUnregister(unregister));
+    }
+
+    fn handle_extension_tool_request(
+        &mut self,
+        source_id: &str,
+        request: ToolRequest,
+    ) -> Result<(), HarnessError> {
+        if let Some(message) = self.extension_tool_request_rejection(&request) {
+            self.reject_extension_tool_request(message);
+            return Ok(());
+        }
+        // Track extension-originated runtime metadata before publishing so
+        // terminal events can be attributed and enriched.
+        self.track_extension_tool_request_metadata(&request);
+        // Publish with the owning agent when known so live observers and runtime
+        // delivery see the same agent attribution used for later terminal tool
+        // facts. `ToolRequest` itself remains a runtime routing intent, not an
+        // agent-transcript fold.
+        let owning_cid = self.tool_agents.get(&request.call_id).cloned();
+        if let Some(cid) = owning_cid.as_ref()
+            && !self.pending_tools.contains_key(&request.call_id)
+        {
+            self.pending_tools.insert(
+                request.call_id.clone(),
+                PendingTool {
+                    name: request.tool_name.clone(),
+                    internal_name: request.tool_name.clone(),
+                    tool_type: request.tool_type,
+                },
+            );
+            self.bump_tools_started_for(cid);
+        }
+        let event = Event::ToolRequest(request.clone());
+        match owning_cid.as_ref() {
+            Some(cid) => self.publish_event_for_agent(cid, Some(source_id), event),
+            None => self.publish_event(Some(source_id), event),
+        }
+        // `ToolRequest` is the runtime pre-routing intent. `route_tool_request`
+        // resolves it. On success we publish `ToolStarted`; subscribed tool
+        // extensions see that event and the owner starts work. On failure we
+        // publish `ToolRejected` and the terminal `ToolError` for model-facing
+        // completion.
+        match self.registry.route_tool_request(request.clone()) {
+            Ok(route) => {
+                let started = route.invoke;
+                let event = Event::ToolStarted(started.clone());
+                match owning_cid.as_ref() {
+                    Some(cid) => self.publish_for_agent_from(cid, Some(source_id), event),
+                    None => self.publish_event(Some(source_id), event),
+                }
+                match route.target {
+                    ToolRouteTarget::Internal => {}
+                    ToolRouteTarget::Extension(provider_connection_id) => {
+                        self.ensure_tool_started_subscription(&provider_connection_id);
+                        self.pending_tool_providers
+                            .insert(request.call_id.clone(), provider_connection_id);
+                    }
+                }
+            }
+            Err(ToolRouteError::NoProvider { tool_name }) => {
+                self.reject_unroutable_extension_tool_request(source_id, request, tool_name);
+            }
+            Err(error) => return Err(HarnessError::ToolRoute(error)),
+        }
+        Ok(())
+    }
+
+    fn reject_unroutable_extension_tool_request(
+        &mut self,
+        source_id: &str,
+        request: ToolRequest,
+        tool_name: ToolName,
+    ) {
+        let call_id = request.call_id.to_string();
+        let owning_cid = self.tool_agents.get(&request.call_id).cloned();
+        let message = unavailable_tool_error_message(&tool_name);
+        let rejected = ToolRejected {
+            call_id: request.call_id.clone(),
+            tool_name: tool_name.clone(),
+            tool_type: request.tool_type,
+            message: message.clone(),
+            originator: request.originator.clone(),
+        };
+        let event = Event::ToolRejected(rejected);
+        match owning_cid.as_ref() {
+            Some(cid) => self.publish_for_agent_from(cid, Some(source_id), event),
+            None => self.publish_event(Some(source_id), event),
+        }
+        let error = ToolError {
+            call_id: request.call_id,
+            tool_name: tool_name.clone(),
+            tool_type: request.tool_type,
+            message,
+            details: None,
+            originator: tau_proto::PromptOriginator::User,
+
+            display: None,
+        };
+        self.publish_terminal_tool_error(owning_cid.as_ref(), None, error);
+        self.clear_tool_call_tracking(&call_id);
+    }
+
+    fn handle_extension_tool_terminal_event(
+        &mut self,
+        source_id: &str,
+        event: Event,
+    ) -> Option<Event> {
+        match event {
+            Event::ToolResult(result) => {
+                self.handle_extension_tool_result(source_id, result);
+                None
+            }
+            Event::ToolError(error) => {
+                self.handle_extension_tool_error(source_id, error);
+                None
+            }
+            Event::ToolCancelled(cancelled) => {
+                self.handle_extension_tool_cancelled(source_id, cancelled);
+                None
             }
             // Keep this peer-authored event rejection in sync with
             // `is_peer_forbidden_harness_fact` and the immutable/must-pass
@@ -4688,42 +4716,100 @@ impl Harness {
             | Event::SessionAgentUnloaded(_)
             | Event::AgentStarted(_)
             | Event::AgentMessageSent(_)
-            | Event::AgentMessageReceived(_) => {
-                return Ok(());
-            }
-            Event::ToolCancelled(mut cancelled) => {
-                if !self.validate_tool_event_source(&cancelled.call_id, source_id) {
-                    return Ok(());
-                }
-                if self.tool_turn.is_backgrounded(&cancelled.call_id) {
-                    self.handle_background_tool_cancelled(source_id, cancelled);
-                } else if let Some(cid) = self.tool_agents.get(&cancelled.call_id).cloned() {
-                    let call_id = cancelled.call_id.to_string();
-                    if let Some(tool) = self.pending_tools.get(&cancelled.call_id) {
-                        cancelled.tool_name = tool.name.clone();
-                        cancelled.tool_type = tool.tool_type;
-                    }
-                    self.publish_for_agent_from(
-                        &cid,
-                        Some(source_id),
-                        Event::ToolCancelled(cancelled),
-                    );
-                    self.on_tool_call_complete(&call_id);
-                    self.clear_tool_call_tracking(&call_id);
-                }
-            }
+            | Event::AgentMessageReceived(_) => None,
             Event::ToolBackgroundResult(_) | Event::ToolBackgroundError(_)
                 if source_id != HARNESS_CONNECTION_ID =>
             {
-                return Ok(());
+                None
             }
+            other => Some(other),
+        }
+    }
+
+    fn handle_extension_tool_result(&mut self, source_id: &str, mut result: ToolResult) {
+        if !self.validate_tool_event_source(&result.call_id, source_id) {
+            return;
+        }
+        if self.tool_turn.is_backgrounded(&result.call_id) {
+            self.handle_background_tool_result(source_id, result);
+        } else if let Some(cid) = self.tool_agents.get(&result.call_id).cloned() {
+            let call_id = result.call_id.to_string();
+            if let Some(tool) = self.pending_tools.get(&result.call_id) {
+                result.tool_name = tool.name.clone();
+                result.tool_type = tool.tool_type;
+            }
+            // Collapse byte-identical large results into a pointer back to the
+            // first call_id that produced this content on this agent's branch.
+            // See `crate::dedup` for the design.
+            self.dedup_tool_result(&cid, &mut result);
+            // Snap to the owning agent's head before folding the result. Without
+            // this, a sibling side conv that just touched the parent agent
+            // (during its teardown) leaves `tree.head` on the *parent* branch —
+            // folding the result there misplaces it and produces orphan ToolUse
+            // blocks when the parent conv is later re-prompted.
+            self.publish_terminal_tool_result(Some(&cid), Some(source_id), result);
+            self.on_tool_call_complete(&call_id);
+            self.clear_tool_call_tracking(&call_id);
+        } else {
+            self.emit_info(&format!(
+                "discarding duplicate tool result for call_id={}",
+                result.call_id
+            ));
+        }
+    }
+
+    fn handle_extension_tool_error(&mut self, source_id: &str, mut error: ToolError) {
+        if !self.validate_tool_event_source(&error.call_id, source_id) {
+            return;
+        }
+        if self.tool_turn.is_backgrounded(&error.call_id) {
+            self.handle_background_tool_error(Some(source_id), error);
+        } else if let Some(cid) = self.tool_agents.get(&error.call_id).cloned() {
+            let call_id = error.call_id.to_string();
+            if let Some(tool) = self.pending_tools.get(&error.call_id) {
+                error.tool_name = tool.name.clone();
+                error.tool_type = tool.tool_type;
+            }
+            self.dedup_tool_error(&cid, &mut error);
+            self.publish_terminal_tool_error(Some(&cid), Some(source_id), error);
+            self.on_tool_call_complete(&call_id);
+            self.clear_tool_call_tracking(&call_id);
+        } else {
+            self.emit_info(&format!(
+                "discarding duplicate tool error for call_id={}",
+                error.call_id
+            ));
+        }
+    }
+
+    fn handle_extension_tool_cancelled(&mut self, source_id: &str, mut cancelled: ToolCancelled) {
+        if !self.validate_tool_event_source(&cancelled.call_id, source_id) {
+            return;
+        }
+        if self.tool_turn.is_backgrounded(&cancelled.call_id) {
+            self.handle_background_tool_cancelled(source_id, cancelled);
+        } else if let Some(cid) = self.tool_agents.get(&cancelled.call_id).cloned() {
+            let call_id = cancelled.call_id.to_string();
+            if let Some(tool) = self.pending_tools.get(&cancelled.call_id) {
+                cancelled.tool_name = tool.name.clone();
+                cancelled.tool_type = tool.tool_type;
+            }
+            self.publish_for_agent_from(&cid, Some(source_id), Event::ToolCancelled(cancelled));
+            self.on_tool_call_complete(&call_id);
+            self.clear_tool_call_tracking(&call_id);
+        }
+    }
+
+    fn handle_extension_shell_event(&mut self, source_id: &str, event: Event) -> Option<Event> {
+        match event {
             Event::ShellCommandProgress(progress) => {
                 // Pass-through: the UI renders chunks as they arrive.
                 self.publish_event(Some(source_id), Event::ShellCommandProgress(progress));
+                None
             }
             Event::ShellCommandFinished(finished) => {
-                // Publish first so the UI finalizes its render block
-                // regardless of whether we inject into history.
+                // Publish first so the UI finalizes its render block regardless
+                // of whether we inject into history.
                 self.publish_event(
                     Some(source_id),
                     Event::ShellCommandFinished(finished.clone()),
@@ -4731,13 +4817,25 @@ impl Harness {
                 if finished.include_in_context {
                     self.inject_user_shell_output(&finished);
                 }
+                None
             }
+            other => Some(other),
+        }
+    }
+
+    fn handle_extension_capability_event(
+        &mut self,
+        source_id: &str,
+        event: Event,
+    ) -> Result<Option<Event>, HarnessError> {
+        match event {
             Event::ExtSkillAvailable(skill) => {
                 if self.should_stage_extension_capabilities(source_id) {
                     self.stage_extension_skill_available(source_id, skill);
                 } else {
                     self.publish_extension_skill_available(source_id, skill);
                 }
+                Ok(None)
             }
             Event::ExtAgentsMdAvailable(agents) => {
                 if self.should_stage_extension_capabilities(source_id) {
@@ -4745,6 +4843,7 @@ impl Harness {
                 } else {
                     self.publish_agents_md_available(source_id, agents);
                 }
+                Ok(None)
             }
             Event::ProviderModelsUpdated(updated) => {
                 if self.should_stage_extension_capabilities(source_id) {
@@ -4752,6 +4851,7 @@ impl Harness {
                 } else {
                     self.publish_provider_models_update(source_id, updated);
                 }
+                Ok(None)
             }
             Event::ExtensionContextProviderRegister(_) => {
                 if self.should_stage_extension_capabilities(source_id) {
@@ -4759,6 +4859,7 @@ impl Harness {
                 } else {
                     self.register_agent_context_provider(source_id);
                 }
+                Ok(None)
             }
             Event::ExtensionContextReady(ready) => {
                 if self.should_stage_extension_capabilities(source_id) {
@@ -4766,6 +4867,7 @@ impl Harness {
                 } else {
                     self.publish_extension_context_ready(source_id, ready)?;
                 }
+                Ok(None)
             }
             Event::ExtAgentContextPublish(publish) => {
                 if self.should_stage_extension_capabilities(source_id) {
@@ -4773,6 +4875,7 @@ impl Harness {
                 } else {
                     self.publish_agent_context_publish(source_id, publish);
                 }
+                Ok(None)
             }
             Event::ExtPromptFragmentPublish(publish) => {
                 if self.should_stage_extension_capabilities(source_id) {
@@ -4780,9 +4883,21 @@ impl Harness {
                 } else {
                     self.publish_extension_prompt_fragment(source_id, publish);
                 }
+                Ok(None)
             }
+            other => Ok(Some(other)),
+        }
+    }
+
+    fn handle_extension_agent_event(
+        &mut self,
+        source_id: &str,
+        event: Event,
+    ) -> Result<Option<Event>, HarnessError> {
+        match event {
             Event::ExtPromptSubmitRequest(request) => {
                 self.handle_extension_prompt_submit_request(request)?;
+                Ok(None)
             }
             Event::AgentMetadataSet(set) => {
                 if self.validate_agent_metadata_set(&set).is_ok() {
@@ -4794,6 +4909,7 @@ impl Harness {
                         None,
                     );
                 }
+                Ok(None)
             }
             Event::AgentMetadataUnset(unset) => {
                 if self.validate_agent_metadata_unset(&unset).is_ok() {
@@ -4805,6 +4921,7 @@ impl Harness {
                         None,
                     );
                 }
+                Ok(None)
             }
             Event::StartAgentRequest(query) => {
                 if self.should_stage_extension_capabilities(source_id) {
@@ -4812,7 +4929,18 @@ impl Harness {
                 } else {
                     self.handle_start_agent_request(source_id, query)?;
                 }
+                Ok(None)
             }
+            other => Ok(Some(other)),
+        }
+    }
+
+    fn handle_extension_provider_prompt_event(
+        &mut self,
+        source_id: &str,
+        event: Event,
+    ) -> Result<Option<Event>, HarnessError> {
+        match event {
             Event::ProviderPromptSubmitted(submitted) => {
                 if !self.canceled_prompts.contains(&submitted.agent_prompt_id)
                     && self.provider_prompt_owner_matches(
@@ -4823,6 +4951,7 @@ impl Harness {
                 {
                     self.publish_event(Some(source_id), Event::ProviderPromptSubmitted(submitted));
                 }
+                Ok(None)
             }
             Event::ProviderResponseUpdated(mut updated) => {
                 if !self.canceled_prompts.contains(&updated.agent_prompt_id)
@@ -4838,6 +4967,7 @@ impl Harness {
                     self.enrich_provider_response_updated_compaction(&mut updated);
                     self.publish_event(Some(source_id), Event::ProviderResponseUpdated(updated));
                 }
+                Ok(None)
             }
             Event::ProviderResponseFinished(response) => {
                 if self.provider_prompt_owner_matches(
@@ -4847,6 +4977,7 @@ impl Harness {
                 ) {
                     self.handle_provider_response_finished_from(Some(source_id), response)?;
                 }
+                Ok(None)
             }
             Event::ProviderCacheMissDiagnostic(diagnostic) => {
                 if self.provider_prompt_owner_matches(
@@ -4859,28 +4990,35 @@ impl Harness {
                         Event::ProviderCacheMissDiagnostic(diagnostic),
                     );
                 }
+                Ok(None)
             }
-            other => {
-                if !Self::is_extension_fallback_emit_allowed(&other) {
-                    return Ok(());
-                }
-                let mut event = other;
-                if let Event::HarnessNotice(notice) = &mut event {
-                    notice.kind = tau_proto::notice_kind::EXTENSION_NOTICE.to_owned();
-                    notice.always_show = false;
-                    if notice.level == tau_proto::NoticeLevel::Critical {
-                        notice.level = tau_proto::NoticeLevel::Warning;
-                    }
-                }
-                let transient = transient_override.unwrap_or_else(|| event.defaults_to_transient());
-                if self.should_stage_extension_capabilities(source_id) {
-                    self.stage_extension_publish(source_id, event, transient);
-                } else {
-                    self.enqueue_publish(Some(source_id), event, transient, false, None);
-                }
+            other => Ok(Some(other)),
+        }
+    }
+
+    fn handle_extension_fallback_event(
+        &mut self,
+        source_id: &str,
+        event: Event,
+        transient_override: Option<bool>,
+    ) {
+        if !Self::is_extension_fallback_emit_allowed(&event) {
+            return;
+        }
+        let mut event = event;
+        if let Event::HarnessNotice(notice) = &mut event {
+            notice.kind = tau_proto::notice_kind::EXTENSION_NOTICE.to_owned();
+            notice.always_show = false;
+            if notice.level == tau_proto::NoticeLevel::Critical {
+                notice.level = tau_proto::NoticeLevel::Warning;
             }
         }
-        Ok(())
+        let transient = transient_override.unwrap_or_else(|| event.defaults_to_transient());
+        if self.should_stage_extension_capabilities(source_id) {
+            self.stage_extension_publish(source_id, event, transient);
+        } else {
+            self.enqueue_publish(Some(source_id), event, transient, false, None);
+        }
     }
 
     fn handle_client_message(
