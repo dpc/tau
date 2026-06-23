@@ -49,7 +49,8 @@ Generate the baseline through Nix. The LCOV paths in this setup are `/build/sour
 
 - `--fail-regression` fails only existing functions whose CRAP score increased; new high-CRAP functions are reported but do not fail by that flag alone, so `.#ci.crapAbsolute` also runs `--fail-above`.
 - `--min` filters the current entries before baseline comparison. This is why the regression gate is a severe-regression gate, not a full-repo no-regression gate.
-- cargo-crap v0.2.0 baseline matching keys on `(file, function)` and ignores line numbers. Without `--min 1000`, Tau currently gets false regressions for duplicate same-file function names like multiple `From` impls.
+- cargo-crap v0.3.0 excludes root-level `tests/**`, `benches/**`, and `examples/**` by default. This is intentional for Tau's production-code CRAP gates; pass `--no-default-excludes` only for one-off investigation where test/bench/example code must be included.
+- cargo-crap v0.3.0 baseline matching includes line numbers, so the old v0.2.0 duplicate same-file function-name false regressions are fixed. The `--min 1000` regression gate remains intentional to keep CI focused on severe regressions.
 
 ## Refactoring flagged code
 

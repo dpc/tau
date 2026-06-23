@@ -289,9 +289,7 @@
               cargoArtifacts = workspaceCcov;
               buildPhaseCargoCommand = ''
                 test -s ${testsCcov}/lcov.info
-                # Keep this gate focused on severe CRAP-score regressions. A
-                # no-min baseline run is noisy because cargo-crap v0.2.0 matches
-                # duplicate same-file function names without using line numbers.
+                # Keep this gate focused on severe CRAP-score regressions.
                 ${cargoCrap}/bin/cargo-crap \
                   --workspace \
                   --lcov ${testsCcov}/lcov.info \

@@ -6,13 +6,13 @@
 
 rustPlatform.buildRustPackage rec {
   pname = "cargo-crap";
-  version = "0.2.0";
+  version = "0.3.0";
 
   src = fetchFromGitHub {
     owner = "minikin";
     repo = "cargo-crap";
     tag = "v${version}";
-    hash = "sha256-LsHsh59VQsTEMok6Gn+z+OsOIKr9X5i1R7OWL0qvbDw=";
+    hash = "sha256-iPs123ClJXH1AH7NH6fDPglN8iMjmIS5FzZhrOs/ODw=";
   };
 
   # Use the GitHub tag so upstream's full test fixtures are available. Keep the
