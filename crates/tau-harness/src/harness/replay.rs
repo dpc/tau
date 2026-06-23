@@ -167,9 +167,12 @@ impl Harness {
     /// configured extensions can subscribe after the live startup notice but
     /// before the session is marked initialized. For fresh sessions the durable
     /// history pass is a no-op (no agents loaded yet), but harness
-    /// current-state catch-up is still needed.
+    /// current-state catch-up is still needed for non-UI peers. UI clients that
+    /// are present during startup have already seen the live startup snapshots;
+    /// replaying those current-state notices again would duplicate the visible
+    /// `harness.session_dir` and `extension.ready` status block.
     pub(crate) fn catch_up_subscribers_after_session_init(&mut self) {
-        let subscribers: Vec<(String, Vec<EventSelector>)> = self
+        let subscribers: Vec<(String, tau_proto::ClientKind, Vec<EventSelector>)> = self
             .bus
             .connections()
             .into_iter()
@@ -178,12 +181,14 @@ impl Harness {
                 if selectors.is_empty() {
                     return None;
                 }
-                Some((meta.id.to_string(), selectors.to_vec()))
+                Some((meta.id.to_string(), meta.kind, selectors.to_vec()))
             })
             .collect();
-        for (client_id, selectors) in subscribers {
+        for (client_id, kind, selectors) in subscribers {
             self.replay_session_history(&client_id, &selectors);
-            self.replay_harness_notice(&client_id, &selectors);
+            if kind != tau_proto::ClientKind::Ui {
+                self.replay_harness_notice(&client_id, &selectors);
+            }
         }
     }
 

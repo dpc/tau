@@ -1376,6 +1376,72 @@ fn session_init_catchup_replays_current_session_dir_to_early_subscribers() {
     h.shutdown().expect("shutdown");
 }
 
+/// Ensures the session-init catch-up path does not replay startup status
+/// snapshots to an already-attached UI. The initial terminal UI subscribes
+/// before startup publishes `harness.session_dir` and `extension.ready`, so
+/// replaying the same current-state snapshot at init completion visibly
+/// duplicates the startup status block.
+#[test]
+fn session_init_catchup_does_not_duplicate_ui_startup_status_snapshots() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = quiet_provider_harness(&sp).expect("start");
+    let events = connect_test_client(&mut h, "startup-ui", tau_proto::ClientKind::Ui);
+    let selectors = vec![
+        tau_proto::EventSelector::Exact(tau_proto::EventName::HARNESS_SESSION_DIR),
+        tau_proto::EventSelector::Exact(tau_proto::EventName::EXTENSION_READY),
+    ];
+    h.initialized_sessions
+        .remove(&tau_proto::SessionId::new("s1"));
+
+    h.handle_client_message(
+        "startup-ui",
+        TestMessage::Subscribe(Subscribe {
+            selectors: selectors.clone(),
+        })
+        .into_input_message(),
+    )
+    .expect("subscribe during init");
+    assert!(
+        events.lock().expect("events").is_empty(),
+        "subscribe-time catch-up is skipped while session initialization is incomplete"
+    );
+
+    h.replay_harness_notice("startup-ui", &selectors);
+    h.catch_up_subscribers_after_session_init();
+
+    let events = events.lock().expect("events");
+    let session_dir_count = events
+        .iter()
+        .filter(|frame| {
+            matches!(
+                peel_inner_event(&frame.frame),
+                Some(Event::HarnessSessionDir(_))
+            )
+        })
+        .count();
+    let extension_ready_count = events
+        .iter()
+        .filter(|frame| {
+            matches!(
+                peel_inner_event(&frame.frame),
+                Some(Event::ExtensionReady(_))
+            )
+        })
+        .count();
+    assert_eq!(
+        session_dir_count, 1,
+        "startup UI should see one session-dir status, not live plus catch-up duplicates"
+    );
+    assert_eq!(
+        extension_ready_count, 1,
+        "startup UI should see one extension-ready status, not live plus catch-up duplicates"
+    );
+    drop(events);
+
+    h.shutdown().expect("shutdown");
+}
+
 #[test]
 fn agents_context_ready_staged_until_ready_and_queue_waits() {
     // AGENTS.md discovery and the matching context-ready acknowledgement are
