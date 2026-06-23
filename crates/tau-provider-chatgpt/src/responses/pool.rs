@@ -321,6 +321,34 @@ enum TryCheckout {
     Busy,
 }
 
+enum VcrTurnSetup {
+    Replayed(Box<crate::common::StreamState>),
+    Live {
+        record_config: Option<tau_vcr::VcrConfig>,
+    },
+}
+
+enum CachedSharedTurn {
+    Completed(Box<crate::common::StreamState>),
+    // The cached socket was already removed from the pool and the `PoolKey`
+    // reservation is still held. The caller must immediately run the fresh
+    // retry for the same key so no competing same-key worker can open a second
+    // chain socket between the recoverable failure and replacement release.
+    RetryFresh,
+}
+
+struct SharedTurnContext<'a, 'request> {
+    // Owns the reserved key for the duration of one cached or fresh attempt.
+    // After `RetryFresh`, constructing the fresh context with the same key keeps
+    // the original reservation alive until `run_fresh` releases or abandons it.
+    pool: &'a SharedWsPool,
+    key: PoolKey,
+    config: &'a ResponsesConfig,
+    agent_prompt_id: &'a str,
+    request: &'a crate::common::PromptPayload<'request>,
+    record_config: Option<&'a tau_vcr::VcrConfig>,
+}
+
 /// WS dispatch failed in a way the caller can classify.
 #[derive(Debug)]
 pub enum WsTurnError {
@@ -365,6 +393,38 @@ fn store_ws_vcr_recording(
         .put(&key, &cassette)
         .map_err(LlmError::Vcr)
 }
+
+fn prepare_vcr_turn(
+    config: &ResponsesConfig,
+    agent_prompt_id: &str,
+    request: &crate::common::PromptPayload<'_>,
+    on_update: &mut impl FnMut(&crate::common::StreamState),
+) -> Result<VcrTurnSetup, WsTurnError> {
+    let vcr_config = super::load_vcr_config().map_err(WsTurnError::Other)?;
+    let Some(vcr_config) = vcr_config else {
+        return Ok(VcrTurnSetup::Live {
+            record_config: None,
+        });
+    };
+
+    if let Some(state) =
+        super::ws::run_vcr_replay_turn(&vcr_config, config, agent_prompt_id, request, on_update)
+            .map_err(WsTurnError::Other)?
+    {
+        return Ok(VcrTurnSetup::Replayed(Box::new(state)));
+    }
+
+    Ok(VcrTurnSetup::Live {
+        record_config: (vcr_config.mode == tau_vcr::VcrMode::RecordIfMissing).then_some(vcr_config),
+    })
+}
+
+fn recording_stream(
+    record_config: Option<&tau_vcr::VcrConfig>,
+) -> Option<super::ProviderRawEventStream> {
+    record_config.map(|_| super::ProviderRawEventStream::default())
+}
+
 /// Test-only convenience wrapper that wires `checkout` → `WsConn::run_turn` →
 /// `release` together with reopen-on-miss semantics without the production
 /// mutex wrapper.
@@ -505,62 +565,76 @@ pub fn run_turn_through_shared_pool(
     should_abort: &mut impl FnMut() -> bool,
     on_update: &mut impl FnMut(&crate::common::StreamState),
 ) -> Result<crate::common::StreamState, WsTurnError> {
-    let vcr_config = super::load_vcr_config().map_err(WsTurnError::Other)?;
-    let vcr_record_config = if let Some(vcr_config) = vcr_config.as_ref() {
-        if let Some(state) =
-            super::ws::run_vcr_replay_turn(vcr_config, config, agent_prompt_id, request, on_update)
-                .map_err(WsTurnError::Other)?
-        {
-            return Ok(state);
-        }
-        (vcr_config.mode == tau_vcr::VcrMode::RecordIfMissing).then(|| vcr_config.clone())
-    } else {
-        None
+    let record_config = match prepare_vcr_turn(config, agent_prompt_id, request, on_update)? {
+        VcrTurnSetup::Replayed(state) => return Ok(*state),
+        VcrTurnSetup::Live { record_config } => record_config,
     };
 
     let session_id = request.session_id.as_str();
     let key = PoolKey::for_request(config, request);
 
-    if let Some(mut conn) = pool.checkout_until(&key, &config.api_key, should_abort)? {
-        if should_abort() {
-            pool.release(key, conn)?;
-            return Err(WsTurnError::Canceled);
-        }
-        let mut recording_stream = vcr_record_config
-            .as_ref()
-            .map(|_| super::ProviderRawEventStream::default());
-        match conn.run_turn(
+    if let Some(conn) = pool.checkout_until(&key, &config.api_key, should_abort)? {
+        let turn_context = SharedTurnContext {
+            pool,
+            key: key.clone(),
             config,
             agent_prompt_id,
             request,
-            recording_stream.as_mut(),
+            record_config: record_config.as_ref(),
+        };
+        match turn_context.run_cached(conn, session_id, should_abort, on_update)? {
+            CachedSharedTurn::Completed(state) => return Ok(*state),
+            CachedSharedTurn::RetryFresh => {}
+        }
+    }
+
+    SharedTurnContext {
+        pool,
+        key,
+        config,
+        agent_prompt_id,
+        request,
+        record_config: record_config.as_ref(),
+    }
+    .run_fresh(should_abort, on_update)
+}
+
+impl<'a, 'request> SharedTurnContext<'a, 'request> {
+    fn run_cached(
+        self,
+        mut conn: WsConn,
+        session_id: &str,
+        should_abort: &mut impl FnMut() -> bool,
+        on_update: &mut impl FnMut(&crate::common::StreamState),
+    ) -> Result<CachedSharedTurn, WsTurnError> {
+        if should_abort() {
+            self.pool.release(self.key, conn)?;
+            return Err(WsTurnError::Canceled);
+        }
+
+        let mut stream = recording_stream(self.record_config);
+        match conn.run_turn(
+            self.config,
+            self.agent_prompt_id,
+            self.request,
+            stream.as_mut(),
             should_abort,
             on_update,
         ) {
-            Ok(turn) => {
-                let state = turn.state;
-                let request_body = turn.request_body;
-                pool.release(key, conn)?;
-                store_ws_vcr_recording(
-                    vcr_record_config.as_ref(),
-                    request,
-                    agent_prompt_id,
-                    request_body,
-                    recording_stream,
-                )
-                .map_err(WsTurnError::Other)?;
-                return Ok(state);
-            }
+            Ok(turn) => self
+                .release_and_store_recording(conn, turn, stream)
+                .map(Box::new)
+                .map(CachedSharedTurn::Completed),
             // Recording intentionally does not silently reconnect: a retry can
             // change the WS request shape (warm `previous_response_id` vs.
             // fresh full replay), which makes cassette matching ambiguous.
-            Err(other) if vcr_record_config.is_some() => {
+            Err(other) if self.record_config.is_some() => {
                 drop(conn);
-                pool.abandon(&key)?;
-                return Err(WsTurnError::Other(other));
+                self.pool.abandon(&self.key)?;
+                Err(WsTurnError::Other(other))
             }
             Err(err) if is_recoverable_ws_error(&err) => {
-                let silent_reconnects = pool.bump_silent_reconnects()?;
+                let silent_reconnects = self.pool.bump_silent_reconnects()?;
                 tracing::info!(
                     target: crate::LOG_TARGET,
                     session_id,
@@ -569,64 +643,77 @@ pub fn run_turn_through_shared_pool(
                     "Codex WS connection lost mid-turn",
                 );
                 drop(conn);
+                Ok(CachedSharedTurn::RetryFresh)
             }
             Err(other) => {
                 drop(conn);
-                pool.abandon(&key)?;
-                return Err(WsTurnError::Other(other));
+                self.pool.abandon(&self.key)?;
+                Err(WsTurnError::Other(other))
             }
         }
     }
 
-    if should_abort() {
-        pool.abandon(&key)?;
-        return Err(WsTurnError::Canceled);
-    }
-    let mut conn = match WsConn::connect(config, &key.thread_id) {
-        Ok(conn) => conn,
-        Err(error) => {
-            pool.abandon(&key)?;
-            return Err(WsTurnError::Other(error));
+    fn run_fresh(
+        self,
+        should_abort: &mut impl FnMut() -> bool,
+        on_update: &mut impl FnMut(&crate::common::StreamState),
+    ) -> Result<crate::common::StreamState, WsTurnError> {
+        if should_abort() {
+            self.pool.abandon(&self.key)?;
+            return Err(WsTurnError::Canceled);
         }
-    };
-    if should_abort() {
-        drop(conn);
-        pool.abandon(&key)?;
-        return Err(WsTurnError::Canceled);
-    }
-    pool.record_fresh_open()?;
-    let mut recording_stream = vcr_record_config
-        .as_ref()
-        .map(|_| super::ProviderRawEventStream::default());
-    match conn.run_turn(
-        config,
-        agent_prompt_id,
-        request,
-        recording_stream.as_mut(),
-        should_abort,
-        on_update,
-    ) {
-        Ok(turn) => {
-            let state = turn.state;
-            let request_body = turn.request_body;
-            pool.release(key, conn)?;
-            store_ws_vcr_recording(
-                vcr_record_config.as_ref(),
-                request,
-                agent_prompt_id,
-                request_body,
-                recording_stream,
-            )
-            .map_err(WsTurnError::Other)?;
-            Ok(state)
-        }
-        Err(err) => {
+        let mut conn = match WsConn::connect(self.config, &self.key.thread_id) {
+            Ok(conn) => conn,
+            Err(error) => {
+                self.pool.abandon(&self.key)?;
+                return Err(WsTurnError::Other(error));
+            }
+        };
+        if should_abort() {
             drop(conn);
-            pool.abandon(&key)?;
-            Err(WsTurnError::Other(err))
+            self.pool.abandon(&self.key)?;
+            return Err(WsTurnError::Canceled);
         }
+        self.pool.record_fresh_open()?;
+        let mut stream = recording_stream(self.record_config);
+        match conn.run_turn(
+            self.config,
+            self.agent_prompt_id,
+            self.request,
+            stream.as_mut(),
+            should_abort,
+            on_update,
+        ) {
+            Ok(turn) => self.release_and_store_recording(conn, turn, stream),
+            Err(err) => {
+                drop(conn);
+                self.pool.abandon(&self.key)?;
+                Err(WsTurnError::Other(err))
+            }
+        }
+    }
+
+    fn release_and_store_recording(
+        self,
+        conn: WsConn,
+        turn: super::ws::WsTurnResult,
+        recording_stream: Option<super::ProviderRawEventStream>,
+    ) -> Result<crate::common::StreamState, WsTurnError> {
+        let state = turn.state;
+        let request_body = turn.request_body;
+        self.pool.release(self.key, conn)?;
+        store_ws_vcr_recording(
+            self.record_config,
+            self.request,
+            self.agent_prompt_id,
+            request_body,
+            recording_stream,
+        )
+        .map_err(WsTurnError::Other)?;
+        Ok(state)
     }
 }
+
 /// Send a best-effort non-generating prewarm over the same pooled WS
 /// connection a later real turn for this prompt-cache thread will use. Unlike
 /// real turns, a failed cached socket is simply dropped and retried

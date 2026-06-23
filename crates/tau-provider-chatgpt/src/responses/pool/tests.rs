@@ -763,6 +763,98 @@ fn mid_stream_close_with_chain_rebuilds_ws_warmth() {
     );
 }
 
+/// Shared-pool reconnect must keep the same key reserved while a recoverable
+/// cached-socket failure is replayed on a fresh socket. Otherwise a racing
+/// same-key worker could open a competing chain between the failed cached turn
+/// and the replacement release.
+#[test]
+fn shared_pool_mid_stream_close_keeps_reservation_through_fresh_retry() {
+    let (addr, server) = spawn_fake_codex_server();
+    server.lock().expect("server lock").fault = Some(MidStreamCloseFault {
+        on_conn_index: 0,
+        after_turn: 1,
+    });
+    let config = make_config(&format!("http://{addr}/backend-api"), Some("acc"));
+    let pool = SharedWsPool::new();
+    let mut on_update = |_: &crate::common::StreamState| {};
+
+    let session_id = tau_proto::SessionId::new("session-shared-die");
+    let agent_id = tau_proto::AgentId::parse("test-agent").expect("agent id");
+    let originator = tau_proto::PromptOriginator::User;
+    let req1 = PromptPayload {
+        system_prompt: "sys",
+        context: context(&[]),
+        tools: &[],
+        params: tau_proto::ModelParams::default(),
+        tool_choice: tau_proto::ToolChoice::default(),
+        compaction: None,
+        originator: &originator,
+        session_id: &session_id,
+        agent_id: &agent_id,
+        share_user_cache_key: false,
+        debug_provider_requests: false,
+    };
+    let state1 = run_turn_through_shared_pool(
+        &pool,
+        &config,
+        "sp-shared-1",
+        &req1,
+        &mut || false,
+        &mut on_update,
+    )
+    .expect("first shared turn ok");
+    let prev_id = state1.response_id.expect("first turn yielded response_id");
+
+    let req2 = PromptPayload {
+        system_prompt: "sys",
+        context: context_after_response(&prev_id, Vec::new(), vec![user_msg("second turn")]),
+        tools: &[],
+        params: tau_proto::ModelParams::default(),
+        tool_choice: tau_proto::ToolChoice::default(),
+        compaction: None,
+        originator: &originator,
+        session_id: &session_id,
+        agent_id: &agent_id,
+        share_user_cache_key: false,
+        debug_provider_requests: false,
+    };
+    run_turn_through_shared_pool(
+        &pool,
+        &config,
+        "sp-shared-2",
+        &req2,
+        &mut || false,
+        &mut on_update,
+    )
+    .expect("shared chained reconnect should rebuild WS warmth");
+
+    let s = server.lock().expect("server lock");
+    assert_eq!(
+        s.upgrade_count, 2,
+        "shared reconnect should open exactly one replacement socket"
+    );
+    assert_eq!(
+        s.requests.len(),
+        3,
+        "expected cached failure plus fresh replay"
+    );
+    assert!(
+        s.requests[1].get("previous_response_id").is_some(),
+        "cached warm turn should carry the chain id before the socket dies"
+    );
+    assert!(
+        s.requests[2].get("previous_response_id").is_none(),
+        "fresh shared retry must strip the stale chain id"
+    );
+    drop(s);
+
+    let stats = pool.stats().expect("pool stats");
+    assert_eq!(
+        stats.silent_reconnects, 1,
+        "shared pool should count the cached recoverable reconnect"
+    );
+}
+
 /// Every error shape `WsConn::run_turn` can emit must be
 /// classified recoverable so the silent-reconnect path catches
 /// it. The old narrow allow-list (`"ws closed"` /
