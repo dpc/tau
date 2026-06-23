@@ -1,5 +1,6 @@
 use std::io::{BufReader, Cursor};
-use std::sync::{Condvar, Mutex};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use tau_proto::{
@@ -47,10 +48,22 @@ fn live_event(recorded_at: u64, event: Event) -> HarnessOutputMessage {
     HarnessOutputMessage::deliver_live(tau_proto::UnixMicros::new(recorded_at), event)
 }
 
+fn replay_event(recorded_at: u64, event: Event) -> HarnessOutputMessage {
+    HarnessOutputMessage::deliver_replay(tau_proto::UnixMicros::new(recorded_at), event)
+}
+
 fn input_event(message: &HarnessInputMessage) -> Option<&Event> {
     match message {
         HarnessInputMessage::Emit(emit) => Some(emit.event.as_ref()),
         _ => None,
+    }
+}
+
+fn session_dir(status: tau_proto::SessionDirStatus) -> tau_proto::HarnessSessionDir {
+    tau_proto::HarnessSessionDir {
+        session_id: "session-1".into(),
+        path: std::path::PathBuf::from("/tmp/tau-test-session-1"),
+        status,
     }
 }
 
@@ -302,6 +315,93 @@ fn prompt_workers_start_concurrently() {
         .filter(|frame| matches!(input_event(frame), Some(Event::ProviderResponseFinished(_))))
         .count();
     assert_eq!(finished_count, 2);
+}
+
+/// Replayed prompt creation is historical state and must not repeat provider
+/// side effects after the extension subscribes to live events.
+#[test]
+fn replayed_prompt_creation_does_not_start_executor_or_emit_prompt_events() {
+    let input = encode_frames(&[
+        replay_event(10, Event::AgentPromptCreated(prompt())),
+        HarnessOutputMessage::Disconnect(tau_proto::Disconnect {
+            reason: Some("done".to_owned()),
+        }),
+    ]);
+    let executor_calls = Arc::new(AtomicUsize::new(0));
+    let executor_calls_for_worker = executor_calls.clone();
+    let executor: PromptExecutor = Arc::new(move |_| {
+        executor_calls_for_worker.fetch_add(1, Ordering::SeqCst);
+    });
+
+    let profiles = profiles_with_chatgpt_auth(chatgpt_auth());
+    let prompt_profiles = profiles.clone();
+    let mut output = Vec::new();
+    run_inner_with_prompt_executor(
+        Cursor::new(input),
+        &mut output,
+        profiles,
+        move || prompt_profiles.clone(),
+        1,
+        executor,
+    )
+    .expect("run provider extension");
+
+    assert_eq!(executor_calls.load(Ordering::SeqCst), 0);
+    let frames = decode_frames(&output);
+    assert!(
+        frames.iter().all(|frame| {
+            !matches!(
+                input_event(frame),
+                Some(
+                    Event::ProviderPromptSubmitted(_)
+                        | Event::ProviderResponseUpdated(_)
+                        | Event::ProviderResponseFinished(_)
+                )
+            )
+        }),
+        "replayed prompt must not emit provider prompt effects: {frames:?}"
+    );
+}
+
+/// Replayed session-directory facts are current-state catch-up and must still
+/// control whether later live prompts may write provider diagnostics.
+#[test]
+fn replayed_session_dir_controls_live_prompt_debug_policy() {
+    for (status, expected_debug) in [
+        (tau_proto::SessionDirStatus::New, true),
+        (tau_proto::SessionDirStatus::Ephemeral, false),
+    ] {
+        let input = encode_frames(&[
+            replay_event(10, Event::HarnessSessionDir(session_dir(status))),
+            live_event(11, Event::AgentPromptCreated(prompt())),
+        ]);
+        let observed_debug = Arc::new(Mutex::new(None));
+        let observed_debug_for_worker = observed_debug.clone();
+        let executor: PromptExecutor = Arc::new(move |execution| {
+            *observed_debug_for_worker
+                .lock()
+                .expect("observed debug lock") = Some(execution.job.debug_provider_requests);
+        });
+
+        let profiles = profiles_with_chatgpt_auth(chatgpt_auth());
+        let prompt_profiles = profiles.clone();
+        let mut output = Vec::new();
+        run_inner_with_prompt_executor(
+            Cursor::new(input),
+            &mut output,
+            profiles,
+            move || prompt_profiles.clone(),
+            1,
+            executor,
+        )
+        .expect("run provider extension");
+
+        assert_eq!(
+            *observed_debug.lock().expect("observed debug lock"),
+            Some(expected_debug),
+            "session status should map to debug policy"
+        );
+    }
 }
 
 #[test]

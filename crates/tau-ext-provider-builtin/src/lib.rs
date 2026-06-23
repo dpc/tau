@@ -16,9 +16,9 @@ use backon::BackoffBuilder;
 use dialoguer::Input;
 use serde::{Deserialize, Serialize};
 use tau_proto::{
-    ClientKind, ContextItem, Event, EventName, HarnessInputMessage, HarnessOutputMessage, ModelId,
-    ModelName, PeerInputReader, PeerOutputWriter, ProviderBackend, ProviderBackendKind,
-    ProviderBackendTransport, ProviderCacheMissDiagnostic, ProviderModelInfo,
+    ClientKind, ContextItem, Event, EventDelivery, EventName, HarnessInputMessage,
+    HarnessOutputMessage, ModelId, ModelName, PeerInputReader, PeerOutputWriter, ProviderBackend,
+    ProviderBackendKind, ProviderBackendTransport, ProviderCacheMissDiagnostic, ProviderModelInfo,
     ProviderModelsUpdated, ProviderName, ProviderPromptSubmitted, ProviderResponseFinished,
     ProviderResponseStatusUpdate, ProviderResponseUpdated, ProviderStopReason,
 };
@@ -483,7 +483,7 @@ fn run_inner_with_prompt_executor<R, W, F>(
     reader: R,
     writer: W,
     startup_profiles: BuiltinProviderProfiles,
-    mut load_prompt_profiles: F,
+    load_prompt_profiles: F,
     prompt_concurrency_limit: usize,
     prompt_executor: PromptExecutor,
 ) -> Result<(), Box<dyn Error>>
@@ -492,6 +492,31 @@ where
     W: Write,
     F: FnMut() -> BuiltinProviderProfiles,
 {
+    let writer = handshake_provider(writer, &startup_profiles)?;
+    let frame_rx = spawn_reader_pump(reader);
+    let (worker_tx, worker_rx) = mpsc::channel::<WorkerMessage>();
+    ProviderRuntime {
+        writer,
+        load_prompt_profiles,
+        prompt_concurrency_limit,
+        prompt_executor,
+        frame_rx,
+        worker_tx,
+        worker_rx,
+        chatgpt_runtime: Arc::new(ChatGptRuntime::new()),
+        cancellation: Arc::new(CancellationState::default()),
+        prompt_queue: VecDeque::new(),
+        session_debug_allowed: BTreeMap::new(),
+        active_prompts: 0,
+        input_closed: false,
+    }
+    .run()
+}
+
+fn handshake_provider<W: Write>(
+    writer: W,
+    startup_profiles: &BuiltinProviderProfiles,
+) -> Result<BufWriter<W>, Box<dyn Error>> {
     let mut handshake_writer = PeerOutputWriter::new(BufWriter::new(writer));
 
     // No past events requested: provider work starts from fresh live state.
@@ -504,12 +529,14 @@ where
             EventName::UI_CANCEL_PROMPT,
         ])
         .announce_event(Event::ProviderModelsUpdated(ProviderModelsUpdated {
-            models: models_for_profiles(&startup_profiles),
+            models: models_for_profiles(startup_profiles),
         }))
         .ready_message("builtin provider ready")
         .run(&mut handshake_writer)?;
-    let mut writer = handshake_writer.into_inner();
+    Ok(handshake_writer.into_inner())
+}
 
+fn spawn_reader_pump<R: Read + Send + 'static>(reader: R) -> Receiver<HarnessOutputMessage> {
     let (frame_tx, frame_rx) = mpsc::channel::<HarnessOutputMessage>();
     thread::spawn(move || {
         let mut reader = PeerInputReader::new(BufReader::new(reader));
@@ -528,146 +555,255 @@ where
             }
         }
     });
+    frame_rx
+}
 
-    let (worker_tx, worker_rx) = mpsc::channel::<WorkerMessage>();
-    let mut deferred: VecDeque<HarnessOutputMessage> = VecDeque::new();
-    let chatgpt_runtime = Arc::new(ChatGptRuntime::new());
-    let cancellation = Arc::new(CancellationState::default());
-    let mut prompt_queue: VecDeque<PromptJob> = VecDeque::new();
-    let mut session_debug_allowed = BTreeMap::<tau_proto::SessionId, bool>::new();
-    let prompt_worker_context = PromptWorkerContext {
-        worker_tx: &worker_tx,
-        prompt_executor: &prompt_executor,
-        cancellation: &cancellation,
-        chatgpt_runtime: &chatgpt_runtime,
-    };
-    let mut active_prompts = 0_usize;
-    let mut input_closed = false;
+/// Live provider event loop state after the Tau extension handshake completes.
+struct ProviderRuntime<W: Write, F> {
+    /// Framed protocol writer back to the harness.
+    writer: BufWriter<W>,
+    /// Reloads provider profiles for prompt-time auth/model resolution.
+    load_prompt_profiles: F,
+    /// Maximum number of prompt workers that may run at once.
+    prompt_concurrency_limit: usize,
+    /// Starts provider backend execution for one prompt job.
+    prompt_executor: PromptExecutor,
+    /// Frames read by the background input pump.
+    frame_rx: Receiver<HarnessOutputMessage>,
+    /// Sender used by prompt workers to return frames and completion notices.
+    worker_tx: Sender<WorkerMessage>,
+    /// Receiver used by the runtime loop to drain worker output.
+    worker_rx: Receiver<WorkerMessage>,
+    /// Shared ChatGPT backend runtime for prewarm and prompt execution.
+    chatgpt_runtime: Arc<ChatGptRuntime>,
+    /// Cooperative cancellation state shared with prompt workers.
+    cancellation: Arc<CancellationState>,
+    /// Prompt jobs accepted while all worker slots were occupied.
+    prompt_queue: VecDeque<PromptJob>,
+    /// Per-session decision on whether provider debug captures may be written.
+    session_debug_allowed: BTreeMap<tau_proto::SessionId, bool>,
+    /// Number of prompt workers currently running.
+    active_prompts: usize,
+    /// True after the harness input stream disconnects or reaches EOF.
+    input_closed: bool,
+}
 
-    loop {
-        drain_worker_messages(&worker_rx, &mut writer, &mut active_prompts)?;
-        start_queued_prompts(
-            &mut prompt_queue,
-            &mut active_prompts,
-            prompt_concurrency_limit,
-            &prompt_worker_context,
-            &mut writer,
-        )?;
-
-        if input_closed && active_prompts == 0 && prompt_queue.is_empty() {
-            return Ok(());
-        }
-
-        let frame = match deferred.pop_front() {
-            Some(frame) => Some(frame),
-            None if input_closed => None,
-            None if active_prompts == 0 && prompt_queue.is_empty() => match frame_rx.recv() {
-                Ok(frame) => Some(frame),
-                Err(_) => {
-                    input_closed = true;
-                    None
-                }
-            },
-            None => match frame_rx.recv_timeout(Duration::from_millis(10)) {
-                Ok(frame) => Some(frame),
-                Err(RecvTimeoutError::Timeout) => None,
-                Err(RecvTimeoutError::Disconnected) => {
-                    input_closed = true;
-                    None
-                }
-            },
-        };
-        let Some(frame) = frame else {
-            continue;
-        };
-
-        let event = match frame {
-            HarnessOutputMessage::Deliver(delivery) => {
-                let is_replay = delivery.is_replay();
-                let event = delivery.into_event();
-                // Prompt execution is an effect; replay-marked frames re-send
-                // history and must never start a provider call. Harness session
-                // directory announcements are current-state facts, so replay
-                // catch-up is allowed to update the diagnostics policy.
-                if is_replay && !matches!(event, Event::HarnessSessionDir(_)) {
-                    None
-                } else {
-                    Some(event)
-                }
-            }
-            HarnessOutputMessage::Disconnect(_) => {
-                cancellation.shutdown();
+impl<W, F> ProviderRuntime<W, F>
+where
+    W: Write,
+    F: FnMut() -> BuiltinProviderProfiles,
+{
+    fn run(&mut self) -> Result<(), Box<dyn Error>> {
+        loop {
+            self.drain_workers_and_start_prompts()?;
+            if self.is_finished() {
                 return Ok(());
             }
-            _ => None,
-        };
-        match event {
-            Some(Event::HarnessSessionDir(session_dir)) => {
-                session_debug_allowed.insert(
-                    session_dir.session_id,
-                    !matches!(session_dir.status, tau_proto::SessionDirStatus::Ephemeral),
-                );
+            let Some(frame) = self.next_frame() else {
+                continue;
+            };
+            if self.handle_frame(frame)? == RunDecision::Stop {
+                return Ok(());
             }
-            Some(Event::AgentPromptPrewarmRequested(prewarm)) => {
-                let mut profiles = load_prompt_profiles();
-                handle_prewarm(
-                    &prewarm,
-                    &mut profiles,
-                    &chatgpt_runtime,
-                    &session_debug_allowed,
-                );
-            }
-            Some(Event::AgentPromptCreated(prompt)) => {
-                let agent_prompt_id = prompt.agent_prompt_id.clone();
-                let prompt = materialize_prompt(&prompt);
-
-                if cancellation.take_canceled(&agent_prompt_id) {
-                    let mut frame_writer = PeerOutputWriter::new(&mut writer);
-                    finish_canceled(&agent_prompt_id, &prompt, &mut frame_writer)?;
-                    continue;
-                }
-
-                trace_prompt_like("provider prompt", &prompt, &agent_prompt_id);
-
-                let mut profiles = load_prompt_profiles();
-                match resolve_prompt_backend(&prompt.model, &mut profiles) {
-                    Some(backend) => {
-                        let job = PromptJob {
-                            agent_prompt_id,
-                            debug_provider_requests: debug_provider_requests_for(
-                                &prompt.session_id,
-                                &session_debug_allowed,
-                            ),
-                            prompt,
-                            backend,
-                        };
-                        if active_prompts < prompt_concurrency_limit {
-                            start_prompt_job(job, &mut active_prompts, &prompt_worker_context);
-                        } else {
-                            prompt_queue.push_back(job);
-                        }
-                    }
-                    None => {
-                        let mut frame_writer = PeerOutputWriter::new(&mut writer);
-                        write_prompt_submitted(
-                            &agent_prompt_id,
-                            &prompt.originator,
-                            &mut frame_writer,
-                        )?;
-                        finish_missing_backend(&prompt, &agent_prompt_id, &mut frame_writer)?;
-                    }
-                }
-            }
-            Some(Event::UiCancelPrompt(cancel)) => match cancel.agent_prompt_id {
-                Some(apid) => {
-                    cancellation.cancel(apid.clone());
-                    finish_queued_canceled(&apid, &mut prompt_queue, &mut writer)?;
-                }
-                None => cancellation.cancel_retry_sleeps(),
-            },
-            _ => {}
         }
     }
+
+    fn drain_workers_and_start_prompts(&mut self) -> Result<(), Box<dyn Error>> {
+        drain_worker_messages(&self.worker_rx, &mut self.writer, &mut self.active_prompts)?;
+        let prompt_worker_context = PromptWorkerContext {
+            worker_tx: &self.worker_tx,
+            prompt_executor: &self.prompt_executor,
+            cancellation: &self.cancellation,
+            chatgpt_runtime: &self.chatgpt_runtime,
+        };
+        start_queued_prompts(
+            &mut self.prompt_queue,
+            &mut self.active_prompts,
+            self.prompt_concurrency_limit,
+            &prompt_worker_context,
+            &mut self.writer,
+        )
+    }
+
+    fn is_finished(&self) -> bool {
+        self.input_closed && self.active_prompts == 0 && self.prompt_queue.is_empty()
+    }
+
+    fn next_frame(&mut self) -> Option<HarnessOutputMessage> {
+        if self.input_closed {
+            return None;
+        }
+        if self.active_prompts == 0 && self.prompt_queue.is_empty() {
+            self.recv_blocking()
+        } else {
+            self.recv_while_workers_run()
+        }
+    }
+
+    fn recv_blocking(&mut self) -> Option<HarnessOutputMessage> {
+        match self.frame_rx.recv() {
+            Ok(frame) => Some(frame),
+            Err(_) => {
+                self.input_closed = true;
+                None
+            }
+        }
+    }
+
+    fn recv_while_workers_run(&mut self) -> Option<HarnessOutputMessage> {
+        match self.frame_rx.recv_timeout(Duration::from_millis(10)) {
+            Ok(frame) => Some(frame),
+            Err(RecvTimeoutError::Timeout) => None,
+            Err(RecvTimeoutError::Disconnected) => {
+                self.input_closed = true;
+                None
+            }
+        }
+    }
+
+    fn handle_frame(&mut self, frame: HarnessOutputMessage) -> Result<RunDecision, Box<dyn Error>> {
+        match frame {
+            HarnessOutputMessage::Deliver(delivery) => {
+                self.process_delivery(delivery)?;
+                Ok(RunDecision::Continue)
+            }
+            HarnessOutputMessage::Disconnect(_) => {
+                self.cancellation.shutdown();
+                Ok(RunDecision::Stop)
+            }
+            _ => Ok(RunDecision::Continue),
+        }
+    }
+
+    fn process_delivery(&mut self, delivery: EventDelivery) -> Result<(), Box<dyn Error>> {
+        let is_replay = delivery.is_replay();
+        let event = delivery.into_event();
+        // Prompt execution is an effect; replay-marked frames re-send history
+        // and must never start a provider call. Harness session directory
+        // announcements are current-state facts, so replay catch-up is allowed
+        // to update the diagnostics policy.
+        if is_replay && !matches!(event, Event::HarnessSessionDir(_)) {
+            return Ok(());
+        }
+        self.handle_event(event)?;
+        Ok(())
+    }
+
+    fn handle_event(&mut self, event: Event) -> Result<(), Box<dyn Error>> {
+        match event {
+            Event::HarnessSessionDir(session_dir) => self.record_session_debug_policy(session_dir),
+            Event::AgentPromptPrewarmRequested(prewarm) => self.prewarm_backend(prewarm),
+            Event::AgentPromptCreated(prompt) => self.handle_prompt_created(prompt)?,
+            Event::UiCancelPrompt(cancel) => self.handle_cancel_prompt(cancel)?,
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn record_session_debug_policy(&mut self, session_dir: tau_proto::HarnessSessionDir) {
+        self.session_debug_allowed.insert(
+            session_dir.session_id,
+            !matches!(session_dir.status, tau_proto::SessionDirStatus::Ephemeral),
+        );
+    }
+
+    fn prewarm_backend(&mut self, prewarm: tau_proto::AgentPromptPrewarmRequested) {
+        let mut profiles = (self.load_prompt_profiles)();
+        handle_prewarm(
+            &prewarm,
+            &mut profiles,
+            &self.chatgpt_runtime,
+            &self.session_debug_allowed,
+        );
+    }
+
+    fn handle_prompt_created(
+        &mut self,
+        prompt: tau_proto::AgentPromptCreated,
+    ) -> Result<(), Box<dyn Error>> {
+        let agent_prompt_id = prompt.agent_prompt_id.clone();
+        let prompt = materialize_prompt(&prompt);
+        if self.cancellation.take_canceled(&agent_prompt_id) {
+            return self.finish_canceled_prompt(&agent_prompt_id, &prompt);
+        }
+        trace_prompt_like("provider prompt", &prompt, &agent_prompt_id);
+        self.start_or_reject_prompt(agent_prompt_id, prompt)
+    }
+
+    fn finish_canceled_prompt(
+        &mut self,
+        agent_prompt_id: &tau_proto::AgentPromptId,
+        prompt: &tau_proto::AgentPromptCreated,
+    ) -> Result<(), Box<dyn Error>> {
+        let mut frame_writer = PeerOutputWriter::new(&mut self.writer);
+        finish_canceled(agent_prompt_id, prompt, &mut frame_writer)
+    }
+
+    fn start_or_reject_prompt(
+        &mut self,
+        agent_prompt_id: tau_proto::AgentPromptId,
+        prompt: tau_proto::AgentPromptCreated,
+    ) -> Result<(), Box<dyn Error>> {
+        let mut profiles = (self.load_prompt_profiles)();
+        let Some(backend) = resolve_prompt_backend(&prompt.model, &mut profiles) else {
+            return self.finish_prompt_with_missing_backend(&prompt, &agent_prompt_id);
+        };
+        self.enqueue_or_start_prompt(PromptJob {
+            agent_prompt_id,
+            debug_provider_requests: debug_provider_requests_for(
+                &prompt.session_id,
+                &self.session_debug_allowed,
+            ),
+            prompt,
+            backend,
+        });
+        Ok(())
+    }
+
+    fn finish_prompt_with_missing_backend(
+        &mut self,
+        prompt: &tau_proto::AgentPromptCreated,
+        agent_prompt_id: &tau_proto::AgentPromptId,
+    ) -> Result<(), Box<dyn Error>> {
+        let mut frame_writer = PeerOutputWriter::new(&mut self.writer);
+        write_prompt_submitted(agent_prompt_id, &prompt.originator, &mut frame_writer)?;
+        finish_missing_backend(prompt, agent_prompt_id, &mut frame_writer)
+    }
+
+    fn enqueue_or_start_prompt(&mut self, job: PromptJob) {
+        if self.active_prompts >= self.prompt_concurrency_limit {
+            self.prompt_queue.push_back(job);
+            return;
+        }
+        let prompt_worker_context = PromptWorkerContext {
+            worker_tx: &self.worker_tx,
+            prompt_executor: &self.prompt_executor,
+            cancellation: &self.cancellation,
+            chatgpt_runtime: &self.chatgpt_runtime,
+        };
+        start_prompt_job(job, &mut self.active_prompts, &prompt_worker_context);
+    }
+
+    fn handle_cancel_prompt(
+        &mut self,
+        cancel: tau_proto::UiCancelPrompt,
+    ) -> Result<(), Box<dyn Error>> {
+        let Some(apid) = cancel.agent_prompt_id else {
+            self.cancellation.cancel_retry_sleeps();
+            return Ok(());
+        };
+        self.cancellation.cancel(apid.clone());
+        finish_queued_canceled(&apid, &mut self.prompt_queue, &mut self.writer)
+    }
+}
+
+/// Control-flow result for handling one harness frame.
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum RunDecision {
+    /// Continue processing frames and worker output.
+    Continue,
+    /// Stop the provider runtime cleanly.
+    Stop,
 }
 
 type PromptExecutor = Arc<dyn Fn(PromptExecution) + Send + Sync + 'static>;
