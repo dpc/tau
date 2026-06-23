@@ -25,8 +25,10 @@
   delivery; the readable slugs are only hints and are not the routing authority.
   If two generated room names ever collide in one process, registration fails
   closed instead of overwriting the existing room route.
-- Text is treated as untrusted external input and is prefixed with XMPP source
-  context before being submitted to Tau.
+- Text is treated as untrusted external input and is prefixed with XMPP
+  message/channel/source context before being submitted to Tau. The
+  model-visible prefix intentionally omits generated room labels, session ids,
+  and agent ids.
 - Tau sends unavailable presence for MUC rooms on unregister and session
   shutdown where the worker is still connected. After a successful MUC join,
   invite/fallback notices are best-effort, happen after `xmpp_register` success,

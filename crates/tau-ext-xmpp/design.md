@@ -62,7 +62,7 @@ Tau-side authorization still fails closed unless an inbound MUC occupant has a c
 
 Status: unconfirmed
 
-The MVP sends ordinary XMPP text protected by TLS certificate validation. It does not implement OMEMO or any other E2EE, so XMPP servers and room occupants can read message content. Incoming text is prefixed with XMPP source context and is submitted only via `extension.prompt_submit_request`.
+The MVP sends ordinary XMPP text protected by TLS certificate validation. It does not implement OMEMO or any other E2EE, so XMPP servers and room occupants can read message content. Incoming text is prefixed with XMPP message/channel/source context and is submitted only via `extension.prompt_submit_request`; the model-visible prefix does not include generated room labels, session ids, or agent ids.
 
 ## Unit-first testing strategy
 
@@ -71,7 +71,7 @@ Status: unconfirmed
 See `testing.md` for the current fast unit-test expectations and a live Prosody
 smoke-test checklist.
 
-Unit tests with fake or state-only XMPP surfaces cover config validation, opt-in tool metadata, send-before-register rejection, registration state, bounded register/send readiness waits and timeout propagation, disconnect readiness/cache invalidation, multiple MUC agents in one Tau session, stable session/agent room identity, long-session-id/long-agent-id and case-folding non-collapse, generated-room active/pending collision rejection, MUC self-presence status 201 detection, MUC join error surfacing, exact room/nick join correlation, MUC mediated invite payloads, MUC leave presence construction, MUC real-JID allowlist routing, hidden-real-JID fail-closed behavior, explicit membership-trust behavior, own-message suppression, stale occupant cache invalidation, delayed/history drops, message-size drops, unknown tool-argument rejection, direct full-JID exact-to routing, and reconnect state updates. Live Prosody testing is documented as a manual smoke test.
+Unit tests with fake or state-only XMPP surfaces cover config validation, opt-in tool metadata, send-before-register rejection, registration state, bounded register/send readiness waits and timeout propagation, disconnect readiness/cache invalidation, multiple MUC agents in one Tau session, stable session/agent room identity, long-session-id/long-agent-id and case-folding non-collapse, generated-room active/pending collision rejection, MUC self-presence status 201 detection, MUC join error surfacing, exact room/nick join correlation, MUC mediated invite payloads, MUC leave presence construction, MUC real-JID allowlist routing, hidden-real-JID fail-closed behavior, explicit membership-trust behavior, model-visible MUC/direct prompt prefixes, prompt-label sanitization, own-message suppression, stale occupant cache invalidation, delayed/history drops, message-size drops, unknown tool-argument rejection, direct full-JID exact-to routing, and reconnect state updates. Live Prosody testing is documented as a manual smoke test.
 
 ## Registration timeout rollback
 

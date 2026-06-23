@@ -3,8 +3,9 @@
 Use `cargo test -p tau-ext-xmpp` for the crate's fast regression suite. The
 unit tests cover configuration validation, tool schemas, registration/send
 gating, bounded readiness waits, room-name derivation, MUC join confirmation,
-history suppression, real-JID allowlist enforcement, direct-resource routing,
-and shutdown handling.
+history suppression, real-JID allowlist enforcement, model-visible prompt prefix
+privacy, prompt-label sanitization, direct-resource routing, and shutdown
+handling.
 
 For a live Prosody smoke test, use a private test account and MUC component:
 
@@ -18,7 +19,7 @@ For a live Prosody smoke test, use a private test account and MUC component:
 4. Confirm the human client receives the mediated invite or the direct fallback
    notice, joins the room, and replies in the room.
 5. Confirm Tau receives the reply as an external prompt annotated with XMPP
-   room/source context.
+   room message/source context, without exposing the generated room label.
 6. Call `xmpp_send` and confirm the response appears in the same room.
 7. Restart the XMPP connection and confirm registered MUC rooms rejoin, while
    delayed room history is not converted into fresh prompts.

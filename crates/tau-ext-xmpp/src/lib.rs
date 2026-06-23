@@ -1555,12 +1555,7 @@ impl WorkerState {
             tracing::warn!(target: LOG_TARGET, room = %room, sender = %real_jid, "dropping muc message from non-allowlisted real jid");
             return;
         }
-        let room_label = display_room_label(&agent_id);
-        let source = display_muc_source(real.as_ref(), &from);
-        self.route(
-            agent_id,
-            format!("[xmpp room {room_label} from {source}] {body}"),
-        );
+        self.route(agent_id, format_room_prompt(real.as_ref(), &from, &body));
     }
 
     /// Process inbound direct chat fallback.
@@ -1595,7 +1590,10 @@ impl WorkerState {
         }
         self.route(
             agents[0].clone(),
-            format!("[xmpp direct from {}] {body}", from.to_bare()),
+            format!(
+                "[xmpp direct message from {}]: {body}",
+                prompt_label(from.to_bare())
+            ),
         );
     }
 
@@ -1626,20 +1624,45 @@ impl WorkerState {
     }
 }
 
-/// Return a concise stable room label for user-visible inbound prompt context.
-fn display_room_label(agent_id: &AgentId) -> String {
-    agent_id.as_ref().to_owned()
+/// Format an inbound MUC prompt with channel and best-available source context.
+///
+/// Call only after MUC authorization has accepted either a verified real JID or
+/// `trust_muc_membership`. Without `real`, the occupant resource is only a weak
+/// room-local display label, not proof of sender identity.
+fn format_room_prompt(real: Option<&Jid>, occupant: &Jid, body: &str) -> String {
+    if let Some(source) = display_muc_source(real, occupant) {
+        format!("[xmpp room message from {source}]: {body}")
+    } else {
+        format!("[xmpp room message]: {body}")
+    }
 }
 
 /// Return a concise sender label for user-visible inbound MUC prompt context.
-fn display_muc_source(real: Option<&Jid>, occupant: &Jid) -> String {
+fn display_muc_source(real: Option<&Jid>, occupant: &Jid) -> Option<String> {
     if let Some(real) = real {
-        return real.to_bare().to_string();
+        return Some(prompt_label(real.to_bare()));
     }
     occupant
         .resource()
-        .map(|resource| format!("occupant {}", resource.as_str()))
-        .unwrap_or_else(|| occupant.to_string())
+        .map(|resource| format!("occupant {}", prompt_label(resource.as_str())))
+}
+
+/// Return a single-line prompt label that cannot close the prefix bracket.
+fn prompt_label(label: impl std::fmt::Display) -> String {
+    label
+        .to_string()
+        .chars()
+        .map(|ch| {
+            if ch.is_control() || matches!(ch, '[' | ']') {
+                ' '
+            } else {
+                ch
+            }
+        })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 #[derive(Clone)]
@@ -2077,7 +2100,7 @@ fn send_tool_spec() -> ToolSpec {
     ToolSpec {
         name: tau_proto::ToolName::new(SEND_TOOL_NAME),
         model_visible_name: Some(tau_proto::ToolName::new(SEND_TOOL_NAME)),
-        description: Some("Send a text reply to this agent's registered XMPP conversation. There is no destination argument; use xmpp_register first.".to_owned()),
+        description: Some("Send a text reply to this agent's registered XMPP room or direct conversation. There is no destination argument; use xmpp_register first. Replies to room-message prompts are visible to room occupants.".to_owned()),
         tool_type: tau_proto::ToolType::Function,
         parameters: Some(serde_json::json!({
             "type": "object",

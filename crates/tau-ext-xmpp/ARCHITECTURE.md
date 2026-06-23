@@ -57,4 +57,16 @@ work must be interrupted or bounded so the worker can prioritize unavailable MUC
 leave presence under the remaining cleanup budget.
 
 Incoming XMPP text is emitted as `extension.prompt_submit_request`. The harness
-validates the target loaded agent and owns the durable prompt fact.
+validates the target loaded agent and owns the durable prompt fact. The
+model-visible text uses a compact transport/channel prefix that must not expose
+generated room labels, room JIDs, Tau session ids, or Tau agent ids:
+
+- `[xmpp room message from <bare-jid>]: <body>` for MUC messages with verified
+  real-JID proof.
+- `[xmpp room message from occupant <sanitized-nick>]: <body>` for explicitly
+  trusted hidden-real-JID MUC membership.
+- `[xmpp room message]: <body>` when no source label is shown.
+- `[xmpp direct message from <bare-jid>]: <body>` for direct-resource fallback.
+
+Occupant labels are only weak room-local display hints and are sanitized so they
+cannot close or spoof the bracketed prefix.
