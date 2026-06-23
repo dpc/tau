@@ -2594,7 +2594,8 @@ impl EventRenderer {
             if matches!(
                 event,
                 Event::AgentMessageSent(_) | Event::AgentMessageReceived(_)
-            ) {
+            ) && self.agent_message_visible_on_empty_screen(event, &target_agent_id)
+            {
                 self.handle_recorded_at_for_visible_agent(event, recorded_at);
                 self.update_agent_in_progress();
                 return;
@@ -2658,6 +2659,12 @@ impl EventRenderer {
         });
         self.displayed_agent_id = Some(visible_agent_id);
         self.update_agent_in_progress();
+    }
+
+    fn agent_message_visible_on_empty_screen(&self, event: &Event, target_agent_id: &str) -> bool {
+        Self::is_user_broadcast_agent_message(event)
+            || !self.awaiting_new_agent_selection
+            || !self.agents_ui_state.contains_key(target_agent_id)
     }
 
     fn event_selects_agent_from_empty(&self, event: &Event, target_agent_id: &str) -> bool {

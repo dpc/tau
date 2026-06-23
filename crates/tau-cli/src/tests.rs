@@ -2455,6 +2455,59 @@ fn queued_prompt_from_old_agent_does_not_steal_no_agent_selection() {
 }
 
 #[test]
+fn old_agent_message_does_not_leak_into_new_agent_screen() {
+    // Regression: `/new` leaves the old agent running while the terminal shows
+    // an empty new-agent creation screen. Agent-to-agent messages emitted by the
+    // old agent during that window must update the old hidden transcript instead
+    // of making a message block suddenly appear in the empty screen while the
+    // user is typing the first prompt for the new agent.
+    let (_term, handle, vt) = setup(80, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        cli_test_theme(),
+    );
+    renderer.handle(&Event::SessionStarted(tau_proto::SessionStarted {
+        session_id: "s1".into(),
+        reason: tau_proto::SessionStartReason::Initial,
+    }));
+    renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
+        session_id: "s1".into(),
+        text: "old agent prompt".to_owned(),
+        agent_id: agent_id("old-agent"),
+        message_class: tau_proto::PromptMessageClass::User,
+        originator: tau_proto::PromptOriginator::User,
+        ctx_id: None,
+    }));
+    sync(&handle);
+    assert!(vt.screen_contains(80, "old agent prompt"));
+
+    renderer.clear_selected_agent();
+    sync(&handle);
+    assert!(!vt.screen_contains(80, "old agent prompt"));
+
+    renderer.handle(&agent_message(
+        "old-agent",
+        "other-agent",
+        "hidden old-agent message",
+    ));
+    sync(&handle);
+    assert!(!vt.screen_contains(80, "Message from old-agent to other-agent"));
+    assert!(!vt.screen_contains(80, "hidden old-agent message"));
+    assert_eq!(
+        *renderer
+            .current_agent_state()
+            .lock()
+            .expect("current agent"),
+        None
+    );
+
+    renderer.switch_agent("old-agent".to_owned());
+    sync(&handle);
+    assert!(vt.screen_contains(80, "hidden old-agent message"));
+}
+
+#[test]
 fn queued_prompt_selects_agent_from_empty_state() {
     // Regression: replay can start with an already-queued user prompt. The UI
     // should treat that prompt as selecting the live agent, otherwise the next
