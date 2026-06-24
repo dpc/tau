@@ -35,6 +35,50 @@ use tau_term_screen::{
 };
 use unicode_segmentation::UnicodeSegmentation;
 
+type NamedActionHandler = fn(&Term) -> Option<Event>;
+
+// Shared source of truth for raw named actions. Keep this table in sync with
+// built-in keybindings and any user-facing binding documentation when adding or
+// removing actions.
+const NAMED_ACTIONS: &[(&str, NamedActionHandler)] = &[
+    ("accept-completion", Term::accept_completion_event),
+    ("backtab", Term::backtab_action),
+    ("clear-prompt", Term::clear_prompt_action),
+    (
+        "clear-or-cancel-prompt",
+        Term::clear_or_cancel_prompt_action,
+    ),
+    ("cursor-down", Term::cycle_or_move_down),
+    ("cursor-end", Term::move_cursor_end_action),
+    ("cursor-left", Term::move_cursor_left_action),
+    ("cursor-right", Term::move_cursor_right_action),
+    ("cursor-start", Term::move_cursor_start_action),
+    ("cursor-up", Term::cycle_or_move_up),
+    ("delete-backward", Term::delete_backward_action),
+    ("delete-forward", Term::delete_forward_action),
+    ("dismiss-completion", Term::dismiss_completion_event),
+    ("escape", Term::escape_action),
+    ("kill-to-start", Term::kill_to_start_action),
+    ("kill-word-left", Term::kill_word_left_action),
+    ("move-down", Term::move_cursor_down_action),
+    ("move-up", Term::move_cursor_up_action),
+    ("prompt-eof", Term::prompt_eof_action),
+    (
+        "select-completion-next",
+        Term::select_completion_next_action,
+    ),
+    (
+        "select-completion-previous",
+        Term::select_completion_previous_action,
+    ),
+];
+
+fn named_action_handler(action: &str) -> Option<NamedActionHandler> {
+    NAMED_ACTIONS
+        .iter()
+        .find_map(|(name, handler)| (*name == action).then_some(*handler))
+}
+
 /// Cursor shape requested for the prompt while Tau owns raw mode.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CursorShape {
@@ -2012,30 +2056,7 @@ impl Term {
 
     /// Returns true when `action` is handled by [`Self::trigger_named_action`].
     pub fn is_named_action(action: &str) -> bool {
-        matches!(
-            action,
-            "accept-completion"
-                | "backtab"
-                | "clear-prompt"
-                | "clear-or-cancel-prompt"
-                | "cursor-down"
-                | "cursor-end"
-                | "cursor-left"
-                | "cursor-right"
-                | "cursor-start"
-                | "cursor-up"
-                | "delete-backward"
-                | "delete-forward"
-                | "dismiss-completion"
-                | "escape"
-                | "kill-to-start"
-                | "kill-word-left"
-                | "move-down"
-                | "move-up"
-                | "prompt-eof"
-                | "select-completion-next"
-                | "select-completion-previous"
-        )
+        named_action_handler(action).is_some()
     }
 
     /// Runs one named raw prompt action, returning the event it produced.
@@ -2043,33 +2064,76 @@ impl Term {
     /// These action names make built-in editing and prompt UI behaviors
     /// available to the configurable binding layer.
     pub fn trigger_named_action(&self, action: &str) -> Option<Event> {
-        match action {
-            "accept-completion" => self.accept_completion_event(),
-            "backtab" => Some(Event::BackTab),
-            "clear-prompt" => self.clear_prompt().then_some(Event::BufferChanged),
-            "clear-or-cancel-prompt" => Some(self.clear_or_cancel_prompt()),
-            "cursor-down" => self.cycle_or_move_down(),
-            "cursor-end" => self.move_cursor_end().then_some(Event::BufferChanged),
-            "cursor-left" => self.move_cursor_left().then_some(Event::BufferChanged),
-            "cursor-right" => self.move_cursor_right().then_some(Event::BufferChanged),
-            "cursor-start" => self.move_cursor_start().then_some(Event::BufferChanged),
-            "cursor-up" => self.cycle_or_move_up(),
-            "delete-backward" => self.delete_backward().then_some(Event::BufferChanged),
-            "delete-forward" => self.delete_forward().then_some(Event::BufferChanged),
-            "dismiss-completion" => self.dismiss_completion_event(),
-            "escape" => Some(Event::Escape),
-            "kill-to-start" => self.kill_to_start().then_some(Event::BufferChanged),
-            "kill-word-left" => self.kill_word_left().then_some(Event::BufferChanged),
-            "move-down" => self.move_cursor_vertical_event(1),
-            "move-up" => self.move_cursor_vertical_event(-1),
-            "prompt-eof" => {
-                let is_empty = self.handle.lock().buffer.is_empty();
-                is_empty.then_some(Event::Eof)
-            }
-            "select-completion-next" => self.cycle_completion_event(1),
-            "select-completion-previous" => self.cycle_completion_event(-1),
-            _ => None,
-        }
+        named_action_handler(action).and_then(|handler| handler(self))
+    }
+
+    fn backtab_action(&self) -> Option<Event> {
+        Some(Event::BackTab)
+    }
+
+    fn clear_prompt_action(&self) -> Option<Event> {
+        self.clear_prompt().then_some(Event::BufferChanged)
+    }
+
+    fn clear_or_cancel_prompt_action(&self) -> Option<Event> {
+        Some(self.clear_or_cancel_prompt())
+    }
+
+    fn move_cursor_end_action(&self) -> Option<Event> {
+        self.move_cursor_end().then_some(Event::BufferChanged)
+    }
+
+    fn move_cursor_left_action(&self) -> Option<Event> {
+        self.move_cursor_left().then_some(Event::BufferChanged)
+    }
+
+    fn move_cursor_right_action(&self) -> Option<Event> {
+        self.move_cursor_right().then_some(Event::BufferChanged)
+    }
+
+    fn move_cursor_start_action(&self) -> Option<Event> {
+        self.move_cursor_start().then_some(Event::BufferChanged)
+    }
+
+    fn delete_backward_action(&self) -> Option<Event> {
+        self.delete_backward().then_some(Event::BufferChanged)
+    }
+
+    fn delete_forward_action(&self) -> Option<Event> {
+        self.delete_forward().then_some(Event::BufferChanged)
+    }
+
+    fn escape_action(&self) -> Option<Event> {
+        Some(Event::Escape)
+    }
+
+    fn kill_to_start_action(&self) -> Option<Event> {
+        self.kill_to_start().then_some(Event::BufferChanged)
+    }
+
+    fn kill_word_left_action(&self) -> Option<Event> {
+        self.kill_word_left().then_some(Event::BufferChanged)
+    }
+
+    fn move_cursor_down_action(&self) -> Option<Event> {
+        self.move_cursor_vertical_event(1)
+    }
+
+    fn move_cursor_up_action(&self) -> Option<Event> {
+        self.move_cursor_vertical_event(-1)
+    }
+
+    fn prompt_eof_action(&self) -> Option<Event> {
+        let is_empty = self.handle.lock().buffer.is_empty();
+        is_empty.then_some(Event::Eof)
+    }
+
+    fn select_completion_next_action(&self) -> Option<Event> {
+        self.cycle_completion_event(1)
+    }
+
+    fn select_completion_previous_action(&self) -> Option<Event> {
+        self.cycle_completion_event(-1)
     }
 
     fn insert_newline(&self) -> Event {
