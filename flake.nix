@@ -66,6 +66,7 @@
         };
 
         buildPaths = [
+          ".cargo-crap.toml"
           "Cargo.toml"
           "Cargo.lock"
           ".config/nextest.toml"
@@ -273,6 +274,7 @@
                 ${cargoCrap}/bin/cargo-crap \
                   --workspace \
                   --lcov ${testsCcov}/lcov.info \
+                  --threshold 30 \
                   --top 100 \
                   --min 50 \
                   --format markdown \
@@ -316,7 +318,6 @@
                 ${cargoCrap}/bin/cargo-crap \
                   --workspace \
                   --lcov ${testsCcov}/lcov.info \
-                  --threshold 500 \
                   --min 100 \
                   --format github \
                   --fail-above

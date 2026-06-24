@@ -21,3 +21,13 @@ The active Nix absolute gate remains at CRAP 500 while existing historical
 offenders above CRAP 100 are being worked down. Once those offenders are below
 CRAP 100, the intended next threshold is CRAP 100; that lowering should happen
 by refactoring the offenders, not by adding new exceptions.
+
+Tau keeps shared cargo-crap defaults in the repository-root `.cargo-crap.toml`
+so local developer runs and Nix CI use the same non-CI-specific policy values.
+Nix cargo-crap derivations should pass only run-specific inputs and per-job
+overrides that differ from the shared defaults, such as workspace selection,
+LCOV path, baseline path, min/top cutoffs, output/format, fail mode, and
+intentionally different report/regression thresholds. The filtered Nix source
+must include `.cargo-crap.toml` so config changes invalidate cargo-crap CI
+outputs. Do not put CI-only LCOV/baseline paths or allowlist exceptions in the
+shared config.

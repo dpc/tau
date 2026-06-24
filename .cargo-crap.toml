@@ -1,0 +1,10 @@
+# Shared cargo-crap defaults for local runs and CI gates.
+#
+# CI still supplies derivation-specific workspace selection, LCOV, baseline,
+# output, format, and per-gate cutoffs via CLI arguments where those differ
+# between jobs. CLI arguments take precedence over this file.
+default-excludes = ["benches/**", "examples/**", "tests/**"]
+epsilon = 0.01
+missing = "pessimistic"
+sort = "crap"
+threshold = 500
