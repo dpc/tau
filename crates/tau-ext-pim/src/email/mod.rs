@@ -2488,6 +2488,28 @@ pub struct OutgoingMessage {
     pub in_reply_to: Option<String>,
 }
 
+/// Raw arguments supplied to the outgoing send command before validation.
+struct SendArgs {
+    /// Requested account id, or `None` to use the configured send account.
+    account: Option<String>,
+    /// Requested From value, or `None` to use the account identity.
+    from: Option<String>,
+    /// To recipients.
+    to: Vec<String>,
+    /// CC recipients.
+    cc: Vec<String>,
+    /// BCC recipients.
+    bcc: Vec<String>,
+    /// Subject header value.
+    subject: String,
+    /// Plain text body.
+    body_text: String,
+    /// Optional Reply-To recipient-like header.
+    reply_to: Option<String>,
+    /// Optional In-Reply-To message identifier.
+    in_reply_to: Option<String>,
+}
+
 /// Persisted outgoing approval record.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct OutgoingApproval {
@@ -4088,88 +4110,9 @@ impl<B: EmailBackend> Engine<B> {
         reply_to: Option<String>,
         in_reply_to: Option<String>,
     ) -> CborValue {
-        let account_id = match self.resolve_send_account_id(account, from.as_deref()) {
-            Some(id) => id,
-            None => return error_envelope(Some("send"), "account_not_found", "account not found"),
-        };
-        let account_cfg = match self.account("send", &account_id) {
-            Ok(a) => a,
-            Err(e) => return e,
-        };
-        if !account_cfg.smtp_configured() {
-            return error_envelope(
-                Some("send"),
-                "smtp_error",
-                "account has no SMTP configuration",
-            );
-        }
-        if let Some(from) = from.as_deref()
-            && from.trim() != account_cfg.from_identity
-            && (from.contains(['<', '>'])
-                || normalize_address(from).as_deref() != Some(account_cfg.from_normalized.as_str()))
-        {
-            return error_envelope(
-                Some("send"),
-                "policy_denied",
-                "from identity does not match configured account",
-            );
-        }
-        let from_identity = account_cfg.from_identity.clone();
-        let recipient_count = to
-            .len()
-            .saturating_add(cc.len())
-            .saturating_add(bcc.len())
-            .saturating_add(usize::from(reply_to.is_some()));
-        if MAX_RECIPIENTS < recipient_count {
-            return error_envelope(Some("send"), "invalid_input", "too many recipients");
-        }
-        let mut invalid = Vec::new();
-        for r in to
-            .iter()
-            .chain(cc.iter())
-            .chain(bcc.iter())
-            .chain(reply_to.iter())
-        {
-            if normalize_address(r).is_none()
-                || MAX_ADDRESS_CHARS < r.chars().count()
-                || !is_safe_persisted_line(r, MAX_ADDRESS_CHARS)
-            {
-                invalid.push(r.clone());
-            }
-        }
-        if !invalid.is_empty() {
-            return error_envelope(
-                Some("send"),
-                "invalid_input",
-                "recipient address is invalid",
-            );
-        }
-        if MAX_HEADER_VALUE_CHARS < subject.chars().count()
-            || !is_safe_persisted_line(&subject, MAX_HEADER_VALUE_CHARS)
-        {
-            return error_envelope(
-                Some("send"),
-                "invalid_input",
-                "subject is too large or contains unsafe characters",
-            );
-        }
-        if READ_BODY_MAX_BYTES < body_text.len() || READ_BODY_MAX_LINES < body_text.lines().count()
-        {
-            return error_envelope(Some("send"), "invalid_input", "body_text is too large");
-        }
-        if let Some(value) = &in_reply_to
-            && (MAX_HEADER_VALUE_CHARS < value.chars().count()
-                || !is_safe_persisted_line(value, MAX_HEADER_VALUE_CHARS))
-        {
-            return error_envelope(
-                Some("send"),
-                "invalid_input",
-                "in_reply_to is too large or contains unsafe characters",
-            );
-        }
-        let message = OutgoingMessage {
-            account: account_id.clone(),
-            from: from_identity,
+        let message = match self.outgoing_message_from_send_args(SendArgs {
+            account,
+            from,
             to,
             cc,
             bcc,
@@ -4177,24 +4120,75 @@ impl<B: EmailBackend> Engine<B> {
             body_text,
             reply_to,
             in_reply_to,
+        }) {
+            Ok(message) => message,
+            Err(error) => return error,
         };
-        let blocked = self.blocked_recipients(&message);
-        if blocked.is_empty() {
-            return match self.backend.send_message(&message) {
-                Ok(_id) => ok_envelope("send", "sent", cbor_map(vec![])),
-                Err(message) => backend_error_envelope(Some("send"), "smtp_error", &message),
+        self.send_outgoing_message(&message)
+    }
+
+    fn outgoing_message_from_send_args(
+        &self,
+        args: SendArgs,
+    ) -> Result<OutgoingMessage, CborValue> {
+        let account_id =
+            match self.resolve_send_account_id(args.account.clone(), args.from.as_deref()) {
+                Some(id) => id,
+                None => {
+                    return Err(error_envelope(
+                        Some("send"),
+                        "account_not_found",
+                        "account not found",
+                    ));
+                }
             };
+        let account_cfg = self.account("send", &account_id)?;
+        if !account_cfg.smtp_configured() {
+            return Err(error_envelope(
+                Some("send"),
+                "smtp_error",
+                "account has no SMTP configuration",
+            ));
         }
-        if self.state.outgoing_approved_exact(&message) {
-            return ok_envelope(
-                "send",
-                "already_sent",
-                cbor_map(vec![(
-                    "message",
-                    CborValue::Text("Message already sent.".to_owned()),
-                )]),
-            );
+        validate_send_from(args.from.as_deref(), account_cfg)?;
+        let from_identity = account_cfg.from_identity.clone();
+        validate_send_inputs(&args)?;
+        Ok(OutgoingMessage {
+            account: account_id,
+            from: from_identity,
+            to: args.to,
+            cc: args.cc,
+            bcc: args.bcc,
+            subject: args.subject,
+            body_text: args.body_text,
+            reply_to: args.reply_to,
+            in_reply_to: args.in_reply_to,
+        })
+    }
+
+    fn send_outgoing_message(&mut self, message: &OutgoingMessage) -> CborValue {
+        let blocked = self.blocked_recipients(message);
+        if blocked.is_empty() {
+            return self.send_allowed_outgoing_message(message);
         }
+        if self.state.outgoing_approved_exact(message) {
+            return already_sent_outgoing_envelope();
+        }
+        self.queue_outgoing_approval(message, blocked)
+    }
+
+    fn send_allowed_outgoing_message(&mut self, message: &OutgoingMessage) -> CborValue {
+        match self.backend.send_message(message) {
+            Ok(_id) => ok_envelope("send", "sent", cbor_map(vec![])),
+            Err(message) => backend_error_envelope(Some("send"), "smtp_error", &message),
+        }
+    }
+
+    fn queue_outgoing_approval(
+        &self,
+        message: &OutgoingMessage,
+        blocked: Vec<String>,
+    ) -> CborValue {
         let approval = OutgoingApproval {
             schema: 1,
             id: String::new(),
@@ -4209,7 +4203,7 @@ impl<B: EmailBackend> Engine<B> {
             body_text: message.body_text.clone(),
             reply_to: message.reply_to.clone(),
             in_reply_to: message.in_reply_to.clone(),
-            blocked_recipients: blocked.clone(),
+            blocked_recipients: blocked,
             reason: "recipient_not_whitelisted".to_owned(),
             sent_message_id: None,
         };
@@ -4937,6 +4931,125 @@ impl<B: EmailBackend> Engine<B> {
         }
         Ok(())
     }
+}
+
+fn validate_send_from(from: Option<&str>, account_cfg: &ValidatedAccount) -> Result<(), CborValue> {
+    let Some(from) = from else {
+        return Ok(());
+    };
+    if from.trim() == account_cfg.from_identity {
+        return Ok(());
+    }
+    if !from.contains(['<', '>'])
+        && normalize_address(from).as_deref() == Some(account_cfg.from_normalized.as_str())
+    {
+        return Ok(());
+    }
+    Err(error_envelope(
+        Some("send"),
+        "policy_denied",
+        "from identity does not match configured account",
+    ))
+}
+
+fn validate_send_inputs(args: &SendArgs) -> Result<(), CborValue> {
+    validate_send_recipient_count(args)?;
+    validate_send_recipients(args)?;
+    validate_send_subject(&args.subject)?;
+    validate_send_body(&args.body_text)?;
+    validate_send_in_reply_to(args.in_reply_to.as_deref())
+}
+
+fn validate_send_recipient_count(args: &SendArgs) -> Result<(), CborValue> {
+    let recipient_count = args
+        .to
+        .len()
+        .saturating_add(args.cc.len())
+        .saturating_add(args.bcc.len())
+        .saturating_add(usize::from(args.reply_to.is_some()));
+    if MAX_RECIPIENTS < recipient_count {
+        return Err(error_envelope(
+            Some("send"),
+            "invalid_input",
+            "too many recipients",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_send_recipients(args: &SendArgs) -> Result<(), CborValue> {
+    let invalid = args
+        .to
+        .iter()
+        .chain(args.cc.iter())
+        .chain(args.bcc.iter())
+        .chain(args.reply_to.iter())
+        .any(|recipient| !is_valid_send_recipient(recipient));
+    if invalid {
+        return Err(error_envelope(
+            Some("send"),
+            "invalid_input",
+            "recipient address is invalid",
+        ));
+    }
+    Ok(())
+}
+
+fn is_valid_send_recipient(recipient: &str) -> bool {
+    normalize_address(recipient).is_some()
+        && recipient.chars().count() <= MAX_ADDRESS_CHARS
+        && is_safe_persisted_line(recipient, MAX_ADDRESS_CHARS)
+}
+
+fn validate_send_subject(subject: &str) -> Result<(), CborValue> {
+    if subject.chars().count() <= MAX_HEADER_VALUE_CHARS
+        && is_safe_persisted_line(subject, MAX_HEADER_VALUE_CHARS)
+    {
+        return Ok(());
+    }
+    Err(error_envelope(
+        Some("send"),
+        "invalid_input",
+        "subject is too large or contains unsafe characters",
+    ))
+}
+
+fn validate_send_body(body_text: &str) -> Result<(), CborValue> {
+    if body_text.len() <= READ_BODY_MAX_BYTES && body_text.lines().count() <= READ_BODY_MAX_LINES {
+        return Ok(());
+    }
+    Err(error_envelope(
+        Some("send"),
+        "invalid_input",
+        "body_text is too large",
+    ))
+}
+
+fn validate_send_in_reply_to(value: Option<&str>) -> Result<(), CborValue> {
+    let Some(value) = value else {
+        return Ok(());
+    };
+    if value.chars().count() <= MAX_HEADER_VALUE_CHARS
+        && is_safe_persisted_line(value, MAX_HEADER_VALUE_CHARS)
+    {
+        return Ok(());
+    }
+    Err(error_envelope(
+        Some("send"),
+        "invalid_input",
+        "in_reply_to is too large or contains unsafe characters",
+    ))
+}
+
+fn already_sent_outgoing_envelope() -> CborValue {
+    ok_envelope(
+        "send",
+        "already_sent",
+        cbor_map(vec![(
+            "message",
+            CborValue::Text("Message already sent.".to_owned()),
+        )]),
+    )
 }
 
 fn require_no_args(argv: &[String]) -> Result<(), String> {
