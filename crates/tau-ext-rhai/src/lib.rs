@@ -15,7 +15,7 @@ use std::fs;
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::PathBuf;
 use std::rc::Rc;
-use std::sync::mpsc;
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::{Duration, Instant};
 
 use rhai::{Array, Dynamic, Engine, EvalAltResult, FnPtr, ImmutableString, Map, Scope};
@@ -171,6 +171,7 @@ struct ShellCompletion {
 }
 
 type HostStateRef = Rc<RefCell<HostState>>;
+type ThreadError = Box<dyn Error + Send>;
 
 struct ScriptRuntime {
     engine: Engine,
@@ -216,67 +217,101 @@ where
     };
 
     let (tx, rx) = mpsc::channel::<HarnessInputMessage>();
-    let writer_handle = std::thread::spawn(move || -> Result<(), Box<dyn Error + Send>> {
+    let writer_handle = spawn_writer_thread(writer, rx);
+
+    let (runtime_tx, runtime_rx) = mpsc::channel::<RuntimeInput>();
+    let reader_handle = spawn_reader_thread(reader, runtime_tx.clone());
+
+    let runtime = load_initial_runtime(&configure, &tx, runtime_tx.clone())?;
+    drive_runtime_loop(runtime, runtime_rx, &tx);
+
+    drop(runtime_tx);
+    drop(tx);
+    join_thread(reader_handle, "reader")?;
+    join_thread(writer_handle, "writer")?;
+    Ok(())
+}
+
+fn spawn_writer_thread<W>(
+    mut writer: PeerOutputWriter<BufWriter<W>>,
+    rx: Receiver<HarnessInputMessage>,
+) -> std::thread::JoinHandle<Result<(), ThreadError>>
+where
+    W: Write + Send + 'static,
+{
+    std::thread::spawn(move || -> Result<(), ThreadError> {
         for message in rx {
             writer
                 .write_message(&message)
-                .map_err(|e| -> Box<dyn Error + Send> { Box::new(e) })?;
-            writer
-                .flush()
-                .map_err(|e| -> Box<dyn Error + Send> { Box::new(e) })?;
+                .map_err(|e| -> ThreadError { Box::new(e) })?;
+            writer.flush().map_err(|e| -> ThreadError { Box::new(e) })?;
         }
         Ok(())
-    });
+    })
+}
 
-    let (runtime_tx, runtime_rx) = mpsc::channel::<RuntimeInput>();
-    let reader_runtime_tx = runtime_tx.clone();
-    let reader_handle = std::thread::spawn(move || -> Result<(), Box<dyn Error + Send>> {
+fn spawn_reader_thread<R>(
+    mut reader: PeerInputReader<BufReader<R>>,
+    runtime_tx: Sender<RuntimeInput>,
+) -> std::thread::JoinHandle<Result<(), ThreadError>>
+where
+    R: Read + Send + 'static,
+{
+    std::thread::spawn(move || -> Result<(), ThreadError> {
         while let Some(message) = reader
             .read_message()
-            .map_err(|e| -> Box<dyn Error + Send> { Box::new(e) })?
+            .map_err(|e| -> ThreadError { Box::new(e) })?
         {
             let disconnected = matches!(message, HarnessOutputMessage::Disconnect(_));
-            if reader_runtime_tx
-                .send(RuntimeInput::Harness(message))
-                .is_err()
-            {
+            if runtime_tx.send(RuntimeInput::Harness(message)).is_err() {
                 return Ok(());
             }
             if disconnected {
                 return Ok(());
             }
         }
-        let _ = reader_runtime_tx.send(RuntimeInput::ReaderClosed);
+        let _ = runtime_tx.send(RuntimeInput::ReaderClosed);
         Ok(())
-    });
+    })
+}
 
-    let mut runtime = match load_runtime(&configure, tx.clone(), runtime_tx.clone()) {
+fn load_initial_runtime(
+    configure: &Configure,
+    tx: &Sender<HarnessInputMessage>,
+    runtime_tx: Sender<RuntimeInput>,
+) -> Result<Option<ScriptRuntime>, Box<dyn Error>> {
+    match load_runtime(configure, tx.clone(), runtime_tx) {
         Ok((mut runtime, init, config_json)) => {
-            send_init_messages(&tx, &runtime, init)?;
-            runtime.start(config_json, &tx);
-            Some(runtime)
+            send_init_messages(tx, &runtime, init)?;
+            runtime.start(config_json, tx);
+            Ok(Some(runtime))
         }
         Err(message) => {
             tracing::warn!(target: LOG_TARGET, error = %message, "rhai disabled");
-            send_config_error_ready(&tx, message)?;
-            None
+            send_config_error_ready(tx, message)?;
+            Ok(None)
         }
-    };
+    }
+}
 
+fn drive_runtime_loop(
+    mut runtime: Option<ScriptRuntime>,
+    runtime_rx: Receiver<RuntimeInput>,
+    tx: &Sender<HarnessInputMessage>,
+) {
     let mut reader_closed = false;
-
     while let Ok(input) = runtime_rx.recv() {
         match input {
             RuntimeInput::Harness(HarnessOutputMessage::Deliver(delivery)) => {
                 let (event, replay, recorded_at) = delivery.into_parts();
                 if let Some(runtime) = runtime.as_mut() {
-                    runtime.on_delivered_event(event, replay, recorded_at, &tx);
+                    runtime.on_delivered_event(event, replay, recorded_at, tx);
                 }
             }
             RuntimeInput::Harness(HarnessOutputMessage::InterceptRequest(req)) => {
                 let action = runtime
                     .as_mut()
-                    .map(|runtime| runtime.on_intercept(*req.event, req.transient, &tx))
+                    .map(|runtime| runtime.on_intercept(*req.event, req.transient, tx))
                     .unwrap_or_else(|| InterceptAction::Pass(None));
                 let _ = tx.send(HarnessInputMessage::InterceptReply(InterceptReply {
                     action,
@@ -301,7 +336,7 @@ where
             RuntimeInput::Harness(_) => {}
             RuntimeInput::ShellComplete(completion) => {
                 if let Some(runtime) = runtime.as_mut() {
-                    runtime.on_shell_complete(completion, &tx);
+                    runtime.on_shell_complete(completion, tx);
                     if reader_closed && !runtime.has_pending_shell_jobs() {
                         break;
                     }
@@ -309,17 +344,15 @@ where
             }
         }
     }
+}
 
-    drop(runtime);
-    drop(runtime_tx);
-    drop(tx);
-    reader_handle
+fn join_thread(
+    handle: std::thread::JoinHandle<Result<(), ThreadError>>,
+    name: &str,
+) -> Result<(), Box<dyn Error>> {
+    handle
         .join()
-        .map_err(|e| -> Box<dyn Error> { format!("reader thread panicked: {e:?}").into() })?
-        .map_err(|e| -> Box<dyn Error> { e })?;
-    writer_handle
-        .join()
-        .map_err(|e| -> Box<dyn Error> { format!("writer thread panicked: {e:?}").into() })?
+        .map_err(|e| -> Box<dyn Error> { format!("{name} thread panicked: {e:?}").into() })?
         .map_err(|e| -> Box<dyn Error> { e })?;
     Ok(())
 }
