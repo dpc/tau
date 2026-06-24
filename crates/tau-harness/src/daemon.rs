@@ -519,57 +519,74 @@ pub fn send_daemon_message_with_trace(
     session_id: &str,
     message: &str,
 ) -> Result<InteractionOutcome, HarnessError> {
-    fn parse_agent_prompt_index(agent_prompt_id: &str) -> Option<u64> {
-        agent_prompt_id
-            .strip_prefix("ap-")?
-            .rsplit_once('-')?
-            .1
-            .parse()
-            .ok()
-    }
-
-    let mut peer = SocketPeer::connect(socket_path)?;
-    peer.send(&HarnessInputMessage::Hello(Hello {
-        protocol_version: PROTOCOL_VERSION,
-        client_name: "tau-cli".into(),
-        client_kind: ClientKind::Ui,
-    }))?;
-    peer.send(&HarnessInputMessage::Subscribe(Subscribe {
-        selectors: vec![
-            EventSelector::Prefix("agent.".to_owned()),
-            EventSelector::Prefix("provider.".to_owned()),
-            EventSelector::Prefix("session.".to_owned()),
-            EventSelector::Prefix("tool.".to_owned()),
-            EventSelector::Prefix("shell.".to_owned()),
-            EventSelector::Prefix("extension.".to_owned()),
-            EventSelector::Prefix("harness.".to_owned()),
-        ],
-    }))?;
     let ctx_id = next_ctx_id();
-    peer.send(&HarnessInputMessage::emit(Event::UiCreateAgent(
-        UiCreateAgent {
-            parent_agent: None,
-            session_id: session_id.into(),
-            role: "senior-engineer".to_owned(),
-            model_override: None,
-            metadata: vec![tau_proto::AgentInitialMetadata {
-                key: tau_proto::AgentMetadataKey::new("ext_core-shell_cwd"),
-                value: tau_proto::CborValue::Text(
-                    std::env::current_dir()
-                        .unwrap_or_else(|_| PathBuf::from("."))
-                        .display()
-                        .to_string(),
-                ),
-                inheritable: true,
-            }],
-            initial_prompt: Some(message.to_owned()),
-            message_class: tau_proto::PromptMessageClass::User,
-            originator: tau_proto::PromptOriginator::User,
-            ctx_id: Some(ctx_id.clone()),
-            ephemeral: false,
-        },
-    )))?;
+    let mut peer = connect_daemon_message_peer(socket_path)?;
+    send_daemon_message_prompt(&mut peer, session_id, message, &ctx_id)?;
+    wait_for_daemon_trace_outcome(peer, ctx_id)
+}
 
+fn connect_daemon_message_peer(
+    socket_path: impl Into<PathBuf>,
+) -> Result<SocketPeer, HarnessError> {
+    let mut peer = connect_daemon_helper(socket_path, "tau-cli")?;
+    peer.send(&HarnessInputMessage::Subscribe(Subscribe {
+        selectors: daemon_message_event_selectors(),
+    }))?;
+    Ok(peer)
+}
+
+fn daemon_message_event_selectors() -> Vec<EventSelector> {
+    vec![
+        EventSelector::Prefix("agent.".to_owned()),
+        EventSelector::Prefix("provider.".to_owned()),
+        EventSelector::Prefix("session.".to_owned()),
+        EventSelector::Prefix("tool.".to_owned()),
+        EventSelector::Prefix("shell.".to_owned()),
+        EventSelector::Prefix("extension.".to_owned()),
+        EventSelector::Prefix("harness.".to_owned()),
+    ]
+}
+
+fn send_daemon_message_prompt(
+    peer: &mut SocketPeer,
+    session_id: &str,
+    message: &str,
+    ctx_id: &str,
+) -> Result<(), HarnessError> {
+    peer.send(&HarnessInputMessage::emit(Event::UiCreateAgent(
+        daemon_message_create_agent(session_id, message, ctx_id),
+    )))?;
+    Ok(())
+}
+
+fn daemon_message_create_agent(session_id: &str, message: &str, ctx_id: &str) -> UiCreateAgent {
+    UiCreateAgent {
+        parent_agent: None,
+        session_id: session_id.into(),
+        role: "senior-engineer".to_owned(),
+        model_override: None,
+        metadata: vec![tau_proto::AgentInitialMetadata {
+            key: tau_proto::AgentMetadataKey::new("ext_core-shell_cwd"),
+            value: tau_proto::CborValue::Text(
+                std::env::current_dir()
+                    .unwrap_or_else(|_| PathBuf::from("."))
+                    .display()
+                    .to_string(),
+            ),
+            inheritable: true,
+        }],
+        initial_prompt: Some(message.to_owned()),
+        message_class: tau_proto::PromptMessageClass::User,
+        originator: tau_proto::PromptOriginator::User,
+        ctx_id: Some(ctx_id.to_owned()),
+        ephemeral: false,
+    }
+}
+
+fn wait_for_daemon_trace_outcome(
+    mut peer: SocketPeer,
+    ctx_id: String,
+) -> Result<InteractionOutcome, HarnessError> {
     let started_at = Instant::now();
     let mut lifecycle_messages = Vec::new();
     let mut progress_messages = Vec::new();
@@ -578,6 +595,7 @@ pub fn send_daemon_message_with_trace(
     // spid counter where `our_spid_counter <= terminal_counter` (equal when no tool
     // calls, higher when tool-result follow-ups bump the counter).
     let mut our_spid_counter: Option<u64> = None;
+
     loop {
         if SEND_DAEMON_MESSAGE_TIMEOUT <= started_at.elapsed() {
             return Err(HarnessError::ResponseTimeout);
@@ -586,53 +604,104 @@ pub fn send_daemon_message_with_trace(
             &mut peer,
             SEND_DAEMON_MESSAGE_TIMEOUT.saturating_sub(started_at.elapsed()),
         )? {
-            match message {
-                HarnessOutputMessage::Deliver(delivery) => match delivery.into_event() {
-                    Event::ToolProgress(p) => progress_messages.push(format_tool_progress(&p)),
-                    Event::ShellCommandProgress(_) => {
-                        progress_messages.push("shell: running shell command".to_owned())
-                    }
-                    Event::HarnessNotice(info) => lifecycle_messages.push(info.message),
-                    event @ (Event::ExtensionStarting(_)
-                    | Event::ExtensionReady(_)
-                    | Event::ExtensionExited(_)
-                    | Event::ExtensionRestarting(_)) => {
-                        lifecycle_messages.push(format_extension_event(&event));
-                    }
-                    Event::AgentPromptCreated(prompt)
-                        if prompt.ctx_id.as_deref() == Some(ctx_id.as_str()) =>
-                    {
-                        our_spid_counter =
-                            parse_agent_prompt_index(prompt.agent_prompt_id.as_ref());
-                    }
-                    Event::ProviderResponseFinished(finished)
-                        if tool_calls_from_output_items(&finished.output_items).is_empty()
-                            && our_spid_counter.is_some_and(|ours| {
-                                parse_agent_prompt_index(finished.agent_prompt_id.as_ref())
-                                    .is_some_and(|c| ours <= c)
-                            }) =>
-                    {
-                        peer.send(&HarnessInputMessage::Disconnect(Disconnect {
-                            reason: Some("done".to_owned()),
-                        }))?;
-                        return Ok(InteractionOutcome {
-                            lifecycle_messages,
-                            progress_messages,
-                            response: assistant_text_from_output_items(&finished.output_items)
-                                .unwrap_or_default(),
-                        });
-                    }
-                    _ => {}
-                },
-                HarnessOutputMessage::Disconnect(d) => {
-                    return Err(HarnessError::Participant(
-                        d.reason.unwrap_or_else(|| "daemon disconnected".to_owned()),
-                    ));
-                }
-                _ => {}
+            let state = DaemonTraceState {
+                ctx_id: &ctx_id,
+                lifecycle_messages: &mut lifecycle_messages,
+                progress_messages: &mut progress_messages,
+                our_spid_counter: &mut our_spid_counter,
+            };
+            if let Some(outcome) = handle_daemon_trace_message(&mut peer, message, state)? {
+                return Ok(outcome);
             }
         }
     }
+}
+
+struct DaemonTraceState<'a> {
+    /// Correlation id attached to the submitted prompt.
+    ctx_id: &'a str,
+    /// Lifecycle/status messages collected for the caller.
+    lifecycle_messages: &'a mut Vec<String>,
+    /// Tool and shell progress messages collected for the caller.
+    progress_messages: &'a mut Vec<String>,
+    /// Parsed prompt counter for the submitted prompt.
+    our_spid_counter: &'a mut Option<u64>,
+}
+
+fn handle_daemon_trace_message(
+    peer: &mut SocketPeer,
+    message: HarnessOutputMessage,
+    state: DaemonTraceState<'_>,
+) -> Result<Option<InteractionOutcome>, HarnessError> {
+    match message {
+        HarnessOutputMessage::Deliver(delivery) => {
+            handle_daemon_trace_event(peer, delivery.into_event(), state)
+        }
+        HarnessOutputMessage::Disconnect(d) => Err(HarnessError::Participant(
+            d.reason.unwrap_or_else(|| "daemon disconnected".to_owned()),
+        )),
+        _ => Ok(None),
+    }
+}
+
+fn handle_daemon_trace_event(
+    peer: &mut SocketPeer,
+    event: Event,
+    state: DaemonTraceState<'_>,
+) -> Result<Option<InteractionOutcome>, HarnessError> {
+    match event {
+        Event::ToolProgress(p) => state.progress_messages.push(format_tool_progress(&p)),
+        Event::ShellCommandProgress(_) => state
+            .progress_messages
+            .push("shell: running shell command".to_owned()),
+        Event::HarnessNotice(info) => state.lifecycle_messages.push(info.message),
+        event @ (Event::ExtensionStarting(_)
+        | Event::ExtensionReady(_)
+        | Event::ExtensionExited(_)
+        | Event::ExtensionRestarting(_)) => {
+            state
+                .lifecycle_messages
+                .push(format_extension_event(&event));
+        }
+        Event::AgentPromptCreated(prompt) if prompt.ctx_id.as_deref() == Some(state.ctx_id) => {
+            *state.our_spid_counter = parse_agent_prompt_index(prompt.agent_prompt_id.as_ref());
+        }
+        Event::ProviderResponseFinished(finished)
+            if daemon_trace_finished_belongs_to_prompt(&finished, *state.our_spid_counter) =>
+        {
+            peer.send(&HarnessInputMessage::Disconnect(Disconnect {
+                reason: Some("done".to_owned()),
+            }))?;
+            return Ok(Some(InteractionOutcome {
+                lifecycle_messages: std::mem::take(state.lifecycle_messages),
+                progress_messages: std::mem::take(state.progress_messages),
+                response: assistant_text_from_output_items(&finished.output_items)
+                    .unwrap_or_default(),
+            }));
+        }
+        _ => {}
+    }
+
+    Ok(None)
+}
+
+fn daemon_trace_finished_belongs_to_prompt(
+    finished: &tau_proto::ProviderResponseFinished,
+    our_spid_counter: Option<u64>,
+) -> bool {
+    tool_calls_from_output_items(&finished.output_items).is_empty()
+        && our_spid_counter.is_some_and(|ours| {
+            parse_agent_prompt_index(finished.agent_prompt_id.as_ref()).is_some_and(|c| ours <= c)
+        })
+}
+
+fn parse_agent_prompt_index(agent_prompt_id: &str) -> Option<u64> {
+    agent_prompt_id
+        .strip_prefix("ap-")?
+        .rsplit_once('-')?
+        .1
+        .parse()
+        .ok()
 }
 
 /// Generates a unique correlation id for one daemon-helper submission.
