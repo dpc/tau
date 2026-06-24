@@ -2127,6 +2127,17 @@ fn validate_outgoing_approval(
     expected_status: &str,
     expected_id: Option<&str>,
 ) -> Result<(), String> {
+    validate_outgoing_approval_identity(approval, expected_status, expected_id)?;
+    validate_outgoing_approval_metadata(approval)?;
+    validate_outgoing_optional_fields(approval)?;
+    validate_outgoing_recipient_lists(approval)
+}
+
+fn validate_outgoing_approval_identity(
+    approval: &OutgoingApproval,
+    expected_status: &str,
+    expected_id: Option<&str>,
+) -> Result<(), String> {
     if approval.schema != 1 {
         return Err(format!("approval `{}` has unsupported schema", approval.id));
     }
@@ -2150,21 +2161,35 @@ fn validate_outgoing_approval(
             approval.id
         ));
     }
-    if approval.account.trim().is_empty()
+    Ok(())
+}
+
+fn validate_outgoing_approval_metadata(approval: &OutgoingApproval) -> Result<(), String> {
+    if outgoing_approval_has_unsafe_metadata(approval) {
+        return Err(format!(
+            "approval `{}` contains unsafe metadata",
+            approval.id
+        ));
+    }
+    Ok(())
+}
+
+fn outgoing_approval_has_unsafe_metadata(approval: &OutgoingApproval) -> bool {
+    approval.account.trim().is_empty()
         || approval.from.trim().is_empty()
         || approval.to.is_empty()
         || !is_safe_persisted_line(&approval.account, MAX_HEADER_VALUE_CHARS)
         || !is_safe_persisted_line(&approval.from, MAX_HEADER_VALUE_CHARS)
         || !is_safe_persisted_line(&approval.subject, MAX_HEADER_VALUE_CHARS)
         || !is_safe_persisted_line(&approval.reason, MAX_HEADER_VALUE_CHARS)
-        || READ_BODY_MAX_BYTES < approval.body_text.len()
-        || READ_BODY_MAX_LINES < approval.body_text.lines().count()
-    {
-        return Err(format!(
-            "approval `{}` contains unsafe metadata",
-            approval.id
-        ));
-    }
+        || !outgoing_body_within_persisted_limits(&approval.body_text)
+}
+
+fn outgoing_body_within_persisted_limits(body_text: &str) -> bool {
+    body_text.len() <= READ_BODY_MAX_BYTES && body_text.lines().count() <= READ_BODY_MAX_LINES
+}
+
+fn validate_outgoing_optional_fields(approval: &OutgoingApproval) -> Result<(), String> {
     validate_optional_persisted_line(approval.reply_to.as_ref(), "reply_to", MAX_ADDRESS_CHARS)?;
     validate_optional_persisted_line(
         approval.in_reply_to.as_ref(),
@@ -2176,6 +2201,10 @@ fn validate_outgoing_approval(
         "sent_message_id",
         MAX_HEADER_VALUE_CHARS,
     )?;
+    Ok(())
+}
+
+fn validate_outgoing_recipient_lists(approval: &OutgoingApproval) -> Result<(), String> {
     validate_recipient_values(&approval.to)?;
     validate_recipient_values(&approval.cc)?;
     validate_recipient_values(&approval.bcc)?;
