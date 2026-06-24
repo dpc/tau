@@ -9,6 +9,17 @@ fn is_reset_value(value: &str) -> bool {
     value == "reset"
 }
 
+fn parse_resettable<T>(value: &str) -> Result<Option<T>, String>
+where
+    T: std::str::FromStr,
+    T::Err: std::fmt::Display,
+{
+    if is_reset_value(value) {
+        return Ok(None);
+    }
+    value.parse::<T>().map(Some).map_err(|err| err.to_string())
+}
+
 pub(crate) fn parse_tree_navigation_target(
     arg: &str,
 ) -> Result<tau_proto::UiTreeNavigationTarget, ()> {
@@ -57,7 +68,7 @@ pub(crate) fn parse_tool_list_update(
         .map(Some)
 }
 
-fn parse_disable_tool_list_update(value: &str) -> Result<Vec<tau_proto::ToolName>, String> {
+fn parse_tool_override_list_update(value: &str) -> Result<Vec<tau_proto::ToolName>, String> {
     Ok(parse_tool_list_update(value)?.unwrap_or_default())
 }
 
@@ -89,76 +100,88 @@ fn parse_compaction_threshold_update(value: &str) -> Result<Option<u64>, String>
     Ok(Some(threshold))
 }
 
+fn parse_model_action(value: &str) -> Result<tau_proto::UiRoleUpdateAction, String> {
+    Ok(tau_proto::UiRoleUpdateAction::SetModel {
+        model: parse_resettable(value)?,
+    })
+}
+
+fn parse_effort_action(value: &str) -> Result<tau_proto::UiRoleUpdateAction, String> {
+    Ok(tau_proto::UiRoleUpdateAction::SetEffort {
+        effort: parse_resettable(value)?,
+    })
+}
+
+fn parse_verbosity_action(value: &str) -> Result<tau_proto::UiRoleUpdateAction, String> {
+    Ok(tau_proto::UiRoleUpdateAction::SetVerbosity {
+        verbosity: parse_resettable(value)?,
+    })
+}
+
+fn parse_thinking_summary_action(value: &str) -> Result<tau_proto::UiRoleUpdateAction, String> {
+    Ok(tau_proto::UiRoleUpdateAction::SetThinkingSummary {
+        thinking_summary: parse_resettable(value)?,
+    })
+}
+
+fn parse_service_tier_action(value: &str) -> Result<tau_proto::UiRoleUpdateAction, String> {
+    Ok(tau_proto::UiRoleUpdateAction::SetServiceTier {
+        service_tier: parse_service_tier_update(value)?,
+    })
+}
+
+fn parse_compaction_threshold_action(value: &str) -> Result<tau_proto::UiRoleUpdateAction, String> {
+    Ok(tau_proto::UiRoleUpdateAction::SetCompactionThreshold {
+        compaction_threshold: parse_compaction_threshold_update(value)?,
+    })
+}
+
+fn parse_tools_action(value: &str) -> Result<tau_proto::UiRoleUpdateAction, String> {
+    Ok(tau_proto::UiRoleUpdateAction::SetTools {
+        tools: parse_tool_list_update(value)?,
+    })
+}
+
+fn parse_enable_tool_groups_action(value: &str) -> Result<tau_proto::UiRoleUpdateAction, String> {
+    Ok(tau_proto::UiRoleUpdateAction::SetEnableToolGroups {
+        enable_tool_groups: parse_tool_group_list_update(value)?,
+    })
+}
+
+fn parse_disable_tool_groups_action(value: &str) -> Result<tau_proto::UiRoleUpdateAction, String> {
+    Ok(tau_proto::UiRoleUpdateAction::SetDisableToolGroups {
+        disable_tool_groups: parse_tool_group_list_update(value)?,
+    })
+}
+
+fn parse_enable_tools_action(value: &str) -> Result<tau_proto::UiRoleUpdateAction, String> {
+    Ok(tau_proto::UiRoleUpdateAction::SetEnableTools {
+        enable_tools: parse_tool_override_list_update(value)?,
+    })
+}
+
+fn parse_disable_tools_action(value: &str) -> Result<tau_proto::UiRoleUpdateAction, String> {
+    Ok(tau_proto::UiRoleUpdateAction::SetDisableTools {
+        disable_tools: parse_tool_override_list_update(value)?,
+    })
+}
+
 pub(crate) fn parse_role_setting_update(
     setting: &str,
     value: &str,
 ) -> Result<tau_proto::UiRoleUpdateAction, String> {
     match setting {
-        "model" => Ok(tau_proto::UiRoleUpdateAction::SetModel {
-            model: if is_reset_value(value) {
-                None
-            } else {
-                Some(
-                    value
-                        .parse::<tau_proto::ModelId>()
-                        .map_err(|err| err.to_string())?,
-                )
-            },
-        }),
-        "effort" => Ok(tau_proto::UiRoleUpdateAction::SetEffort {
-            effort: if is_reset_value(value) {
-                None
-            } else {
-                Some(
-                    value
-                        .parse::<tau_proto::Effort>()
-                        .map_err(|err| err.to_string())?,
-                )
-            },
-        }),
-        "verbosity" => Ok(tau_proto::UiRoleUpdateAction::SetVerbosity {
-            verbosity: if is_reset_value(value) {
-                None
-            } else {
-                Some(
-                    value
-                        .parse::<tau_proto::Verbosity>()
-                        .map_err(|err| err.to_string())?,
-                )
-            },
-        }),
-        "thinking-summary" => Ok(tau_proto::UiRoleUpdateAction::SetThinkingSummary {
-            thinking_summary: if is_reset_value(value) {
-                None
-            } else {
-                Some(
-                    value
-                        .parse::<tau_proto::ThinkingSummary>()
-                        .map_err(|err| err.to_string())?,
-                )
-            },
-        }),
-        "service-tier" => Ok(tau_proto::UiRoleUpdateAction::SetServiceTier {
-            service_tier: parse_service_tier_update(value)?,
-        }),
-        "compaction-threshold" => Ok(tau_proto::UiRoleUpdateAction::SetCompactionThreshold {
-            compaction_threshold: parse_compaction_threshold_update(value)?,
-        }),
-        "tools" => Ok(tau_proto::UiRoleUpdateAction::SetTools {
-            tools: parse_tool_list_update(value)?,
-        }),
-        "enable-tool-groups" => Ok(tau_proto::UiRoleUpdateAction::SetEnableToolGroups {
-            enable_tool_groups: parse_tool_group_list_update(value)?,
-        }),
-        "disable-tool-groups" => Ok(tau_proto::UiRoleUpdateAction::SetDisableToolGroups {
-            disable_tool_groups: parse_tool_group_list_update(value)?,
-        }),
-        "enable-tools" => Ok(tau_proto::UiRoleUpdateAction::SetEnableTools {
-            enable_tools: parse_disable_tool_list_update(value)?,
-        }),
-        "disable-tools" => Ok(tau_proto::UiRoleUpdateAction::SetDisableTools {
-            disable_tools: parse_disable_tool_list_update(value)?,
-        }),
+        "model" => parse_model_action(value),
+        "effort" => parse_effort_action(value),
+        "verbosity" => parse_verbosity_action(value),
+        "thinking-summary" => parse_thinking_summary_action(value),
+        "service-tier" => parse_service_tier_action(value),
+        "compaction-threshold" => parse_compaction_threshold_action(value),
+        "tools" => parse_tools_action(value),
+        "enable-tool-groups" => parse_enable_tool_groups_action(value),
+        "disable-tool-groups" => parse_disable_tool_groups_action(value),
+        "enable-tools" => parse_enable_tools_action(value),
+        "disable-tools" => parse_disable_tools_action(value),
         _ => Err("unknown setting".to_owned()),
     }
 }

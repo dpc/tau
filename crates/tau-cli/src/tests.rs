@@ -2602,60 +2602,146 @@ fn stale_draft_snapshot_is_dropped_after_submit_epoch_bump() {
 fn role_setting_updates_are_typed_and_reset_aware() {
     use super::ui_commands::parse_role_setting_update;
 
-    assert_eq!(
-        parse_role_setting_update("effort", "off").expect("effort off"),
-        UiRoleUpdateAction::SetEffort {
-            effort: Some(Effort::Off),
-        }
-    );
-    assert_eq!(
-        parse_role_setting_update("effort", "reset").expect("effort reset"),
-        UiRoleUpdateAction::SetEffort { effort: None }
-    );
-    assert_eq!(
-        parse_role_setting_update("thinking-summary", "off").expect("summary off"),
-        UiRoleUpdateAction::SetThinkingSummary {
-            thinking_summary: Some(ThinkingSummary::Off),
-        }
-    );
+    let tool_names = || {
+        vec![
+            tau_proto::ToolName::new("web_search"),
+            tau_proto::ToolName::new("grep"),
+        ]
+    };
+    let tool_group_names = || {
+        vec![
+            tau_proto::ToolGroupName::new("web"),
+            tau_proto::ToolGroupName::new("shell"),
+        ]
+    };
+
+    for (setting, value, expected) in [
+        (
+            "model",
+            "openai/gpt-4o",
+            UiRoleUpdateAction::SetModel {
+                model: Some("openai/gpt-4o".parse().expect("valid model id")),
+            },
+        ),
+        (
+            "effort",
+            "off",
+            UiRoleUpdateAction::SetEffort {
+                effort: Some(Effort::Off),
+            },
+        ),
+        (
+            "effort",
+            "reset",
+            UiRoleUpdateAction::SetEffort { effort: None },
+        ),
+        (
+            "verbosity",
+            "high",
+            UiRoleUpdateAction::SetVerbosity {
+                verbosity: Some(Verbosity::High),
+            },
+        ),
+        (
+            "thinking-summary",
+            "off",
+            UiRoleUpdateAction::SetThinkingSummary {
+                thinking_summary: Some(ThinkingSummary::Off),
+            },
+        ),
+        (
+            "service-tier",
+            "fast",
+            UiRoleUpdateAction::SetServiceTier {
+                service_tier: Some(ServiceTier::Fast),
+            },
+        ),
+        (
+            "service-tier",
+            "reset",
+            UiRoleUpdateAction::SetServiceTier { service_tier: None },
+        ),
+        (
+            "compaction-threshold",
+            "85000",
+            UiRoleUpdateAction::SetCompactionThreshold {
+                compaction_threshold: Some(85000),
+            },
+        ),
+        (
+            "compaction-threshold",
+            "reset",
+            UiRoleUpdateAction::SetCompactionThreshold {
+                compaction_threshold: None,
+            },
+        ),
+        (
+            "tools",
+            "web_search,grep",
+            UiRoleUpdateAction::SetTools {
+                tools: Some(tool_names()),
+            },
+        ),
+        (
+            "tools",
+            "reset",
+            UiRoleUpdateAction::SetTools { tools: None },
+        ),
+        (
+            "enable-tool-groups",
+            "web,shell",
+            UiRoleUpdateAction::SetEnableToolGroups {
+                enable_tool_groups: tool_group_names(),
+            },
+        ),
+        (
+            "disable-tool-groups",
+            "web,shell",
+            UiRoleUpdateAction::SetDisableToolGroups {
+                disable_tool_groups: tool_group_names(),
+            },
+        ),
+        (
+            "enable-tools",
+            "web_search,grep",
+            UiRoleUpdateAction::SetEnableTools {
+                enable_tools: tool_names(),
+            },
+        ),
+        (
+            "enable-tools",
+            "reset",
+            UiRoleUpdateAction::SetEnableTools {
+                enable_tools: Vec::new(),
+            },
+        ),
+        (
+            "disable-tools",
+            "web_search,grep",
+            UiRoleUpdateAction::SetDisableTools {
+                disable_tools: tool_names(),
+            },
+        ),
+        (
+            "disable-tools",
+            "reset",
+            UiRoleUpdateAction::SetDisableTools {
+                disable_tools: Vec::new(),
+            },
+        ),
+    ] {
+        assert_eq!(
+            parse_role_setting_update(setting, value).expect("role setting parses"),
+            expected,
+            "{setting} {value}"
+        );
+    }
+
     assert!(parse_role_setting_update("service-tier", "off").is_err());
-    assert_eq!(
-        parse_role_setting_update("service-tier", "reset").expect("tier reset"),
-        UiRoleUpdateAction::SetServiceTier { service_tier: None }
-    );
-    assert_eq!(
-        parse_role_setting_update("service-tier", "fast").expect("tier fast"),
-        UiRoleUpdateAction::SetServiceTier {
-            service_tier: Some(ServiceTier::Fast),
-        }
-    );
-    assert_eq!(
-        parse_role_setting_update("compaction-threshold", "85000").expect("threshold 85000"),
-        UiRoleUpdateAction::SetCompactionThreshold {
-            compaction_threshold: Some(85000),
-        }
-    );
-    assert_eq!(
-        parse_role_setting_update("compaction-threshold", "reset").expect("threshold reset"),
-        UiRoleUpdateAction::SetCompactionThreshold {
-            compaction_threshold: None,
-        }
-    );
     assert!(parse_role_setting_update("compaction-threshold", "999").is_err());
     assert_eq!(
-        parse_role_setting_update("enable-tools", "web_search,grep").expect("enable tools"),
-        UiRoleUpdateAction::SetEnableTools {
-            enable_tools: vec![
-                tau_proto::ToolName::new("web_search"),
-                tau_proto::ToolName::new("grep"),
-            ],
-        }
-    );
-    assert_eq!(
-        parse_role_setting_update("enable-tools", "reset").expect("reset enable tools"),
-        UiRoleUpdateAction::SetEnableTools {
-            enable_tools: Vec::new(),
-        }
+        parse_role_setting_update("unknown", "value").expect_err("unknown setting"),
+        "unknown setting"
     );
 }
 
