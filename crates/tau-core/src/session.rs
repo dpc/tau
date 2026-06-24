@@ -621,33 +621,23 @@ impl AgentTree {
     /// to it after a non-folding event would steal whichever other
     /// conversation's node the cursor last visited.
     pub fn apply_event_at(&mut self, parent: AgentEventParent, event: &Event) -> Option<NodeId> {
+        self.count_materialized_prompt(event);
+        if self.apply_side_state_event(event) {
+            return None;
+        }
+        self.apply_transcript_event(parent.resolve(self.head), event)
+    }
+
+    fn count_materialized_prompt(&mut self, event: &Event) {
         if matches!(event, Event::AgentPromptCreated(_)) {
             self.materialized_prompt_count += 1;
         }
-        let parent = parent.resolve(self.head);
+    }
+
+    fn apply_side_state_event(&mut self, event: &Event) -> bool {
         match event {
-            Event::AgentStarted(started) => {
-                if let Some(display_name) = normalize_display_name(started.display_name.as_deref())
-                {
-                    self.display_name = Some(display_name);
-                }
-                for item in &started.metadata {
-                    self.metadata.insert(
-                        item.key.clone(),
-                        AgentMetadataEntry {
-                            value: item.value.clone(),
-                            inheritable: item.inheritable,
-                        },
-                    );
-                }
-                None
-            }
-            Event::AgentDisplayNameSet(name) => {
-                if let Some(display_name) = normalize_display_name(Some(&name.display_name)) {
-                    self.display_name = Some(display_name);
-                }
-                None
-            }
+            Event::AgentStarted(started) => self.apply_agent_started(started),
+            Event::AgentDisplayNameSet(name) => self.update_display_name(&name.display_name),
             Event::AgentMetadataSet(set) => {
                 self.metadata.insert(
                     set.key.clone(),
@@ -656,54 +646,60 @@ impl AgentTree {
                         inheritable: set.inheritable,
                     },
                 );
-                None
             }
             Event::AgentMetadataUnset(unset) => {
                 self.metadata.remove(&unset.key);
-                None
             }
-            Event::AgentPromptSubmitted(prompt) => Some(self.append_node_at(
-                parent,
-                AgentEntry::UserInput {
-                    items: vec![ContextItem::Message(MessageItem {
-                        role: ContextRole::User,
-                        content: vec![ContentPart::Text {
-                            text: prompt.text.clone(),
-                        }],
-                        phase: None,
-                    })],
+            Event::AgentHeadMoved(moved) => self.apply_head_moved(moved),
+            Event::ToolRequest(_)
+            | Event::ToolStarted(_)
+            | Event::ToolRejected(_)
+            | Event::ToolResult(_)
+            | Event::ToolError(_) => {}
+            _ => return false,
+        }
+        true
+    }
+
+    fn apply_agent_started(&mut self, started: &tau_proto::AgentStarted) {
+        if let Some(display_name) = started.display_name.as_deref() {
+            self.update_display_name(display_name);
+        }
+        for item in &started.metadata {
+            self.metadata.insert(
+                item.key.clone(),
+                AgentMetadataEntry {
+                    value: item.value.clone(),
+                    inheritable: item.inheritable,
                 },
-            )),
-            Event::AgentUserMessageInjected(injected) => Some(self.append_node_at(
-                parent,
-                AgentEntry::UserInput {
-                    items: vec![ContextItem::Message(MessageItem {
-                        role: ContextRole::User,
-                        content: vec![ContentPart::Text {
-                            text: injected.text.clone(),
-                        }],
-                        phase: None,
-                    })],
-                },
-            )),
-            Event::AgentPromptSteered(steered) => Some(self.append_node_at(
-                parent,
-                AgentEntry::UserInput {
-                    items: vec![ContextItem::Message(MessageItem {
-                        role: ContextRole::User,
-                        content: vec![ContentPart::Text {
-                            text: steered.text.clone(),
-                        }],
-                        phase: None,
-                    })],
-                },
-            )),
-            Event::AgentCompactionTriggered(_) => Some(self.append_node_at(
-                parent,
-                AgentEntry::UserInput {
-                    items: vec![ContextItem::CompactionTrigger],
-                },
-            )),
+            );
+        }
+    }
+
+    fn update_display_name(&mut self, display_name: &str) {
+        if let Some(display_name) = normalize_display_name(Some(display_name)) {
+            self.display_name = Some(display_name);
+        }
+    }
+
+    fn apply_head_moved(&mut self, moved: &AgentHeadMoved) {
+        if moved.agent_id == self.agent_id && self.validate_head_moved(moved).is_ok() {
+            self.head = moved.head.as_option();
+        }
+    }
+
+    fn apply_transcript_event(&mut self, parent: Option<NodeId>, event: &Event) -> Option<NodeId> {
+        match event {
+            Event::AgentPromptSubmitted(prompt) => {
+                Some(self.append_user_text_input(parent, prompt.text.clone()))
+            }
+            Event::AgentUserMessageInjected(injected) => {
+                Some(self.append_user_text_input(parent, injected.text.clone()))
+            }
+            Event::AgentPromptSteered(steered) => {
+                Some(self.append_user_text_input(parent, steered.text.clone()))
+            }
+            Event::AgentCompactionTriggered(_) => Some(self.append_compaction_trigger(parent)),
             Event::AgentMessageSent(message) => self
                 .agent_message_entry_from_sent(message)
                 .map(|entry| self.append_node_at(parent, entry)),
@@ -711,87 +707,132 @@ impl AgentTree {
                 .agent_message_entry_from_received(message)
                 .map(|entry| self.append_node_at(parent, entry)),
             Event::ProviderResponseFinished(response) => {
-                let node_id = self.append_node_at(
-                    parent,
-                    AgentEntry::AssistantResponse {
-                        provider_response_id: response.provider_response_id.clone(),
-                        backend: response.backend.clone(),
-                        output_items: response.output_items.clone(),
-                        usage: response.usage.clone(),
-                    },
-                );
-                let mut call_order = Vec::new();
-                let mut seen = HashSet::new();
-                for item in &response.output_items {
-                    if let ContextItem::ToolCall(call) = item {
-                        assert!(
-                            seen.insert(call.call_id.clone()),
-                            "duplicate tool call id in agent response: {}",
-                            call.call_id
-                        );
-                        assert!(
-                            !self.tool_call_rounds.contains_key(&call.call_id),
-                            "tool call id reused while a round is open: {}",
-                            call.call_id
-                        );
-                        call_order.push(call.call_id.clone());
-                    }
-                }
-                if !call_order.is_empty() {
-                    for call_id in &call_order {
-                        self.tool_call_rounds.insert(call_id.clone(), node_id);
-                    }
-                    self.pending_tool_rounds.insert(
-                        node_id,
-                        PendingToolRound {
-                            assistant_node_id: node_id,
-                            call_order,
-                            terminal_results: HashMap::new(),
-                        },
-                    );
-                }
-                Some(node_id)
+                Some(self.apply_provider_response_finished(parent, response))
             }
-            Event::ToolRequest(_)
-            | Event::ToolStarted(_)
-            | Event::ToolRejected(_)
-            | Event::ToolResult(_)
-            | Event::ToolError(_) => None,
-            Event::ProviderToolResult(result) => self.record_terminal_tool_result(ToolResultItem {
-                call_id: result.call_id.clone(),
-                tool_type: result.tool_type,
-                status: ToolResultStatus::Success,
-                output: tau_proto::ToolResponse::from_cbor(&result.result),
-            }),
-            Event::ProviderToolError(error) => self.record_terminal_tool_result(ToolResultItem {
-                call_id: error.call_id.clone(),
-                tool_type: error.tool_type,
-                status: ToolResultStatus::Error {
-                    message: error.message.clone(),
-                },
-                output: tau_proto::ToolResponse::from_cbor(
-                    error
-                        .details
-                        .as_ref()
-                        .unwrap_or(&tau_proto::CborValue::Null),
-                ),
-            }),
-            Event::ToolCancelled(cancelled) => self.record_terminal_tool_result(ToolResultItem {
-                call_id: cancelled.call_id.clone(),
-                tool_type: cancelled.tool_type,
-                status: ToolResultStatus::Cancelled {
-                    reason: "cancelled".to_owned(),
-                },
-                output: tau_proto::ToolResponse::from_cbor(&tau_proto::CborValue::Null),
-            }),
-            Event::AgentHeadMoved(moved) => {
-                if moved.agent_id == self.agent_id && self.validate_head_moved(moved).is_ok() {
-                    self.head = moved.head.as_option();
-                }
-                None
-            }
+            Event::ProviderToolResult(result) => self.record_provider_tool_result(result),
+            Event::ProviderToolError(error) => self.record_provider_tool_error(error),
+            Event::ToolCancelled(cancelled) => self.record_cancelled_tool_result(cancelled),
             _ => None,
         }
+    }
+
+    fn append_user_text_input(&mut self, parent: Option<NodeId>, text: String) -> NodeId {
+        self.append_node_at(
+            parent,
+            AgentEntry::UserInput {
+                items: vec![ContextItem::Message(MessageItem {
+                    role: ContextRole::User,
+                    content: vec![ContentPart::Text { text }],
+                    phase: None,
+                })],
+            },
+        )
+    }
+
+    fn append_compaction_trigger(&mut self, parent: Option<NodeId>) -> NodeId {
+        self.append_node_at(
+            parent,
+            AgentEntry::UserInput {
+                items: vec![ContextItem::CompactionTrigger],
+            },
+        )
+    }
+
+    fn apply_provider_response_finished(
+        &mut self,
+        parent: Option<NodeId>,
+        response: &tau_proto::ProviderResponseFinished,
+    ) -> NodeId {
+        let node_id = self.append_node_at(
+            parent,
+            AgentEntry::AssistantResponse {
+                provider_response_id: response.provider_response_id.clone(),
+                backend: response.backend.clone(),
+                output_items: response.output_items.clone(),
+                usage: response.usage.clone(),
+            },
+        );
+        let call_order = self.provider_response_tool_call_order(&response.output_items);
+        self.open_pending_tool_round(node_id, call_order);
+        node_id
+    }
+
+    fn provider_response_tool_call_order(&self, output_items: &[ContextItem]) -> Vec<ToolCallId> {
+        let mut call_order = Vec::new();
+        let mut seen = HashSet::new();
+        for item in output_items {
+            let ContextItem::ToolCall(call) = item else {
+                continue;
+            };
+            assert!(
+                seen.insert(call.call_id.clone()),
+                "duplicate tool call id in agent response: {}",
+                call.call_id
+            );
+            assert!(
+                !self.tool_call_rounds.contains_key(&call.call_id),
+                "tool call id reused while a round is open: {}",
+                call.call_id
+            );
+            call_order.push(call.call_id.clone());
+        }
+        call_order
+    }
+
+    fn open_pending_tool_round(&mut self, node_id: NodeId, call_order: Vec<ToolCallId>) {
+        if call_order.is_empty() {
+            return;
+        }
+        for call_id in &call_order {
+            self.tool_call_rounds.insert(call_id.clone(), node_id);
+        }
+        self.pending_tool_rounds.insert(
+            node_id,
+            PendingToolRound {
+                assistant_node_id: node_id,
+                call_order,
+                terminal_results: HashMap::new(),
+            },
+        );
+    }
+
+    fn record_provider_tool_result(&mut self, result: &tau_proto::ToolResult) -> Option<NodeId> {
+        self.record_terminal_tool_result(ToolResultItem {
+            call_id: result.call_id.clone(),
+            tool_type: result.tool_type,
+            status: ToolResultStatus::Success,
+            output: tau_proto::ToolResponse::from_cbor(&result.result),
+        })
+    }
+
+    fn record_provider_tool_error(&mut self, error: &tau_proto::ToolError) -> Option<NodeId> {
+        self.record_terminal_tool_result(ToolResultItem {
+            call_id: error.call_id.clone(),
+            tool_type: error.tool_type,
+            status: ToolResultStatus::Error {
+                message: error.message.clone(),
+            },
+            output: tau_proto::ToolResponse::from_cbor(
+                error
+                    .details
+                    .as_ref()
+                    .unwrap_or(&tau_proto::CborValue::Null),
+            ),
+        })
+    }
+
+    fn record_cancelled_tool_result(
+        &mut self,
+        cancelled: &tau_proto::ToolCancelled,
+    ) -> Option<NodeId> {
+        self.record_terminal_tool_result(ToolResultItem {
+            call_id: cancelled.call_id.clone(),
+            tool_type: cancelled.tool_type,
+            status: ToolResultStatus::Cancelled {
+                reason: "cancelled".to_owned(),
+            },
+            output: tau_proto::ToolResponse::from_cbor(&tau_proto::CborValue::Null),
+        })
     }
 
     fn agent_message_entry_from_sent(&self, message: &AgentMessageSent) -> Option<AgentEntry> {
