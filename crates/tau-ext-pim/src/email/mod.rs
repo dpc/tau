@@ -52,10 +52,10 @@ const MAX_GOOGLE_AUTH_FIELD_CHARS: usize = 4096;
 
 use tau_proto::{
     ACTION_SCHEMA_VERSION, ActionArg, ActionArgKind, ActionChoice, ActionCommand, ActionError,
-    ActionInvoke, ActionOutput, ActionResult, ActionSchema, CborValue, ConfigError, Event,
-    HarnessInputMessage, HarnessOutputMessage, PeerInputReader, PeerOutputWriter, PromptFragment,
-    PromptPriority, ToolError, ToolExample, ToolExampleSelector, ToolProgress, ToolResult,
-    ToolSpec, ToolStarted, ToolUseState, ToolUseStats, ToolUseStatus,
+    ActionInvoke, ActionOutput, ActionResult, ActionSchema, CborValue, ConfigError, Configure,
+    Event, EventDelivery, HarnessInputMessage, HarnessOutputMessage, PeerInputReader,
+    PeerOutputWriter, PromptFragment, PromptPriority, ToolError, ToolExample, ToolExampleSelector,
+    ToolProgress, ToolResult, ToolSpec, ToolStarted, ToolUseState, ToolUseStats, ToolUseStatus,
 };
 
 /// `tracing` target for events emitted from this extension.
@@ -95,6 +95,20 @@ where
     let mut writer = PeerOutputWriter::new(BufWriter::new(writer));
     let mut runtime = RuntimeState::default();
 
+    write_startup_handshake(&mut writer)?;
+
+    while let Some(message) = reader.read_message()? {
+        if handle_runtime_message(message, &mut runtime, &mut writer)? {
+            break;
+        }
+    }
+
+    Ok(())
+}
+
+fn write_startup_handshake<W: Write>(
+    writer: &mut PeerOutputWriter<BufWriter<W>>,
+) -> Result<(), Box<dyn Error>> {
     let handshake = tau_extension::Handshake::tool("tau-ext-pim").subscribe([
         tau_proto::EventName::TOOL_STARTED,
         tau_proto::EventName::ACTION_INVOKE,
@@ -108,55 +122,103 @@ where
     handshake
         .publish_actions(email_action_schema())
         .ready_message("email extension ready")
-        .run(&mut writer)?;
+        .run(writer)?;
+    Ok(())
+}
 
-    while let Some(message) = reader.read_message()? {
-        match message {
-            HarnessOutputMessage::Configure(configure) => {
-                let storage = match configure.state_dir.clone() {
-                    Some(state_dir) => Rc::new(FsStorage::new(state_dir)) as SharedStorage,
-                    None => {
-                        writer.write_message(&HarnessInputMessage::ConfigError(ConfigError {
-                            message: "email extension requires Configure.state_dir".to_owned(),
-                        }))?;
-                        writer.flush()?;
-                        continue;
-                    }
-                };
-                if let Err(message) = runtime.configure(configure, storage) {
-                    writer.write_message(&HarnessInputMessage::ConfigError(ConfigError {
-                        message,
-                    }))?;
-                    writer.flush()?;
-                }
-            }
-            HarnessOutputMessage::Deliver(delivery) => {
-                // Tool/action invocations are execution triggers; replay-marked
-                // frames re-send history and must not re-run them.
-                if delivery.is_replay() {
-                    continue;
-                }
-                match delivery.into_event() {
-                    Event::ToolStarted(invoke) if is_tool_name(invoke.tool_name.as_str()) => {
-                        writer
-                            .write_message(&HarnessInputMessage::emit(initial_progress(&invoke)))?;
-                        let event = runtime.dispatch(invoke);
-                        writer.write_message(&HarnessInputMessage::emit(event))?;
-                        writer.flush()?;
-                    }
-                    Event::ActionInvoke(invoke) => {
-                        let event = runtime.dispatch_action(invoke);
-                        writer.write_message(&HarnessInputMessage::emit(event))?;
-                        writer.flush()?;
-                    }
-                    _ => {}
-                }
-            }
-            HarnessOutputMessage::Disconnect(_) => break,
-            _ => {}
+fn handle_runtime_message<W: Write>(
+    message: HarnessOutputMessage,
+    runtime: &mut RuntimeState,
+    writer: &mut PeerOutputWriter<BufWriter<W>>,
+) -> Result<bool, Box<dyn Error>> {
+    match message {
+        HarnessOutputMessage::Configure(configure) => {
+            handle_configure(configure, runtime, writer)?;
+            Ok(false)
         }
+        HarnessOutputMessage::Deliver(delivery) => {
+            handle_delivery(delivery, runtime, writer)?;
+            Ok(false)
+        }
+        HarnessOutputMessage::Disconnect(_) => Ok(true),
+        _ => Ok(false),
+    }
+}
+
+fn handle_configure<W: Write>(
+    configure: Configure,
+    runtime: &mut RuntimeState,
+    writer: &mut PeerOutputWriter<BufWriter<W>>,
+) -> Result<(), Box<dyn Error>> {
+    let Some(state_dir) = configure.state_dir.clone() else {
+        write_config_error(
+            writer,
+            "email extension requires Configure.state_dir".to_owned(),
+        )?;
+        return Ok(());
+    };
+
+    let storage = Rc::new(FsStorage::new(state_dir)) as SharedStorage;
+    if let Err(message) = runtime.configure(configure, storage) {
+        write_config_error(writer, message)?;
     }
 
+    Ok(())
+}
+
+fn write_config_error<W: Write>(
+    writer: &mut PeerOutputWriter<BufWriter<W>>,
+    message: String,
+) -> Result<(), Box<dyn Error>> {
+    writer.write_message(&HarnessInputMessage::ConfigError(ConfigError { message }))?;
+    writer.flush()?;
+    Ok(())
+}
+
+fn handle_delivery<W: Write>(
+    delivery: EventDelivery,
+    runtime: &mut RuntimeState,
+    writer: &mut PeerOutputWriter<BufWriter<W>>,
+) -> Result<(), Box<dyn Error>> {
+    // Tool/action invocations are execution triggers; replay-marked frames
+    // re-send history and must not re-run them.
+    if delivery.is_replay() {
+        return Ok(());
+    }
+
+    match delivery.into_event() {
+        Event::ToolStarted(invoke) if is_tool_name(invoke.tool_name.as_str()) => {
+            handle_tool_started(invoke, runtime, writer)?;
+        }
+        Event::ActionInvoke(invoke) => {
+            handle_action_invoke(invoke, runtime, writer)?;
+        }
+        _ => {}
+    }
+
+    Ok(())
+}
+
+fn handle_tool_started<W: Write>(
+    invoke: ToolStarted,
+    runtime: &mut RuntimeState,
+    writer: &mut PeerOutputWriter<BufWriter<W>>,
+) -> Result<(), Box<dyn Error>> {
+    writer.write_message(&HarnessInputMessage::emit(initial_progress(&invoke)))?;
+    let event = runtime.dispatch(invoke);
+    writer.write_message(&HarnessInputMessage::emit(event))?;
+    writer.flush()?;
+    Ok(())
+}
+
+fn handle_action_invoke<W: Write>(
+    invoke: ActionInvoke,
+    runtime: &mut RuntimeState,
+    writer: &mut PeerOutputWriter<BufWriter<W>>,
+) -> Result<(), Box<dyn Error>> {
+    let event = runtime.dispatch_action(invoke);
+    writer.write_message(&HarnessInputMessage::emit(event))?;
+    writer.flush()?;
     Ok(())
 }
 
