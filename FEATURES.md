@@ -359,11 +359,14 @@ tool for testing. The shell command and any wrapper prefix are configurable:
       },
     },
     // Advisory directory update locks are disabled by default; set true to opt in.
+    // See `docs/shell-locking.md` for detailed semantics and caveats.
     // When enabled, shell commands are inferred read-write only while the agent
     // holds a matching manual lock. Otherwise they are inferred read-only.
+    // `backend` defaults to "memory"; use "filesystem" plus an optional
+    // private `state_dir` to coordinate locks across Tau/ext-shell processes.
     // `enforce_ro_bind` defaults true and attempts a read-only bind mount for
     // inferred read-only shell calls.
-    dir_lock: { enable: false, enforce_ro_bind: true },
+    dir_lock: { enable: false, backend: "memory", enforce_ro_bind: true },
   },
 },
 ```

@@ -1,21 +1,36 @@
 //! Directory update lock manager for shell-owned mutating tools.
 //!
-//! The lock is advisory and lives inside `tau-ext-shell`: reads never wait,
-//! while shell/file update tools coordinate on canonical absolute directory
-//! paths. Manual `dir_lock update` calls reserve a subtree for their owning
-//! agent, and automatic writer locks serialize concrete mutating operations.
+//! The lock is advisory and owned by `tau-ext-shell`: reads never wait, while
+//! shell/file update tools coordinate on canonical absolute directory paths.
+//! Manual `dir_lock update` calls reserve a subtree for their owning agent, and
+//! automatic writer locks serialize concrete mutating operations.
+//!
+//! Two storage backends are available. The default memory backend keeps the
+//! historical process-local `LockState` protected by a mutex and condition
+//! variable. The opt-in filesystem backend persists equivalent state in a
+//! versioned JSON registry protected by `fs2` file locks, and each ext-shell
+//! process holds a separate instance lease file so peers can reap records after
+//! crashes. Filesystem owner identity is `{instance_id, agent_id}` internally
+//! so equal visible agent ids from different ext-shell instances do not get
+//! same-owner reentry, while user-facing diagnostics and `owner_agent_id`
+//! recovery continue to use `AgentId`.
+
+mod fs;
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
+use serde::{Deserialize, Serialize};
 use tau_proto::{
     AgentId, CborValue, Event, HarnessInputMessage, ToolCallId, ToolCancelled, ToolError,
     ToolProgress, ToolResult, ToolResultKind, ToolStarted, ToolType, ToolUseState, ToolUseStatus,
 };
 
+use self::fs::{FsAutoAcquireRequest, FsLockBackend, StateDirSource, default_fs_state_dir};
 use crate::argument::{argument_text, optional_argument_text};
+use crate::config::{DirLockBackendConfig, DirLockConfig};
 use crate::display::{ToolFailure, ok_display};
 use crate::tools::{APPLY_PATCH_TOOL_NAME, EDIT_TOOL_NAME, GPT_SHELL_TOOL_NAME, SHELL_TOOL_NAME};
 
@@ -119,6 +134,7 @@ pub(crate) struct DirLockManager {
 struct DirLockInner {
     state: Mutex<LockState>,
     changed: Condvar,
+    fs_backend: Mutex<Option<FsLockBackend>>,
 }
 
 #[derive(Debug, Default)]
@@ -164,7 +180,7 @@ struct Waiter {
     kind: WaitKind,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 enum WaitKind {
     Manual,
     Automatic,
@@ -185,21 +201,109 @@ pub(crate) enum ManualLockAcquireError {
     Abandoned(AbandonedLock),
 }
 
+#[derive(Clone, Debug)]
+struct UnlockOwner {
+    agent_id: AgentId,
+    scope: UnlockOwnerScope,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum UnlockOwnerScope {
+    CurrentInstance,
+    AnyInstanceWithAgentId,
+}
+
 /// RAII guard for an automatic writer lock. Dropping it releases the active
 /// lock and wakes the next FIFO waiter.
 #[derive(Debug)]
 pub(crate) struct AutoDirLockGuard {
     manager: DirLockManager,
-    id: u64,
+    token: AutoLockToken,
+}
+
+#[derive(Debug)]
+enum AutoLockToken {
+    Memory(u64),
+    Filesystem { backend: FsLockBackend, id: u64 },
 }
 
 impl Drop for AutoDirLockGuard {
     fn drop(&mut self) {
-        self.manager.release_auto(self.id);
+        self.manager.release_auto(&self.token);
     }
 }
 
 impl DirLockManager {
+    /// Reconfigure the directory-lock storage backend.
+    pub(crate) fn configure(&self, config: &DirLockConfig) -> Result<(), String> {
+        match config.backend {
+            DirLockBackendConfig::Memory => {
+                let removed_backend = self
+                    .inner
+                    .fs_backend
+                    .lock()
+                    .expect("dir lock backend poisoned")
+                    .take();
+                if let Some(backend) = removed_backend {
+                    let _ = backend.shutdown();
+                    self.inner.changed.notify_all();
+                }
+                Ok(())
+            }
+            DirLockBackendConfig::Filesystem => {
+                let requested = config
+                    .state_dir
+                    .clone()
+                    .map(Ok)
+                    .unwrap_or_else(default_fs_state_dir)?;
+                let current_matches = self
+                    .inner
+                    .fs_backend
+                    .lock()
+                    .expect("dir lock backend poisoned")
+                    .as_ref()
+                    .is_some_and(|backend| backend.state_dir == requested);
+                if current_matches {
+                    return Ok(());
+                }
+                let new_backend = FsLockBackend::initialize(
+                    &requested,
+                    if config.state_dir.is_some() {
+                        StateDirSource::Configured
+                    } else {
+                        StateDirSource::Default
+                    },
+                )?;
+                let old_backend = self
+                    .inner
+                    .fs_backend
+                    .lock()
+                    .expect("dir lock backend poisoned")
+                    .replace(new_backend);
+                self.clear_memory_locks_and_waiters();
+                if let Some(old_backend) = old_backend {
+                    let _ = old_backend.shutdown();
+                }
+                self.inner.changed.notify_all();
+                let backend = self
+                    .inner
+                    .fs_backend
+                    .lock()
+                    .expect("dir lock backend poisoned");
+                debug_assert!(backend.as_ref().is_some_and(|b| b.state_dir == requested));
+                Ok(())
+            }
+        }
+    }
+
+    fn fs_backend(&self) -> Option<FsLockBackend> {
+        self.inner
+            .fs_backend
+            .lock()
+            .expect("dir lock backend poisoned")
+            .clone()
+    }
+
     /// Acquire an automatic update lock for one mutating tool invocation.
     pub(crate) fn acquire_auto<F>(
         &self,
@@ -264,6 +368,19 @@ impl DirLockManager {
     where
         F: FnOnce(),
     {
+        if let Some(backend) = self.fs_backend() {
+            return backend.acquire_auto(
+                FsAutoAcquireRequest {
+                    manager: self,
+                    call_id,
+                    agent_id: owner,
+                    dirs,
+                    require_manual_cover,
+                },
+                on_wait,
+                policy,
+            );
+        }
         let dirs = normalize_lock_dirs(dirs);
         let mut on_wait = Some(on_wait);
         let mut state = self.inner.state.lock().expect("dir lock state poisoned");
@@ -279,7 +396,7 @@ impl DirLockManager {
             let id = state.add_auto(owner, dirs);
             return Ok(AutoDirLockGuard {
                 manager: self.clone(),
-                id,
+                token: AutoLockToken::Memory(id),
             });
         }
 
@@ -306,7 +423,7 @@ impl DirLockManager {
                     let id = state.add_auto(queued.owner, queued.dirs);
                     return Ok(AutoDirLockGuard {
                         manager: self.clone(),
-                        id,
+                        token: AutoLockToken::Memory(id),
                     });
                 }
                 let now = Instant::now();
@@ -364,6 +481,9 @@ impl DirLockManager {
     where
         F: FnOnce(),
     {
+        if let Some(backend) = self.fs_backend() {
+            return backend.acquire_manual(self, call_id, owner, dir, on_wait, policy);
+        }
         let dirs = vec![dir];
         let mut on_wait = Some(on_wait);
         let mut state = self.inner.state.lock().expect("dir lock state poisoned");
@@ -434,6 +554,22 @@ impl DirLockManager {
 
     /// Release one exact manual lock held by `owner` for `dir`.
     pub(crate) fn unlock_manual(&self, owner: &AgentId, dir: &Path) -> Result<(), String> {
+        self.unlock_manual_with_scope(owner, dir, UnlockOwnerScope::CurrentInstance)
+    }
+
+    fn unlock_manual_with_scope(
+        &self,
+        owner: &AgentId,
+        dir: &Path,
+        scope: UnlockOwnerScope,
+    ) -> Result<(), String> {
+        if let Some(backend) = self.fs_backend() {
+            let result = backend.unlock_manual(owner, dir, scope);
+            if result.is_ok() {
+                self.inner.changed.notify_all();
+            }
+            return result;
+        }
         let mut state = self.inner.state.lock().expect("dir lock state poisoned");
         let Some(pos) = state
             .manual
@@ -450,8 +586,27 @@ impl DirLockManager {
         Ok(())
     }
 
+    fn clear_memory_locks_and_waiters(&self) -> (usize, usize) {
+        let mut state = self.inner.state.lock().expect("dir lock state poisoned");
+        let removed = state.manual.len();
+        let cancelled = state.waiters.len();
+        state.manual.clear();
+        state.waiters.clear();
+        if 0 < removed + cancelled {
+            self.inner.changed.notify_all();
+        }
+        (removed, cancelled)
+    }
+
     /// Cancel a queued lock waiter for `call_id`, if one exists.
     pub(crate) fn cancel_waiting_call(&self, call_id: &ToolCallId) -> bool {
+        if let Some(backend) = self.fs_backend() {
+            let removed = backend.cancel_waiting_call(call_id);
+            if removed {
+                self.inner.changed.notify_all();
+            }
+            return removed;
+        }
         let mut state = self.inner.state.lock().expect("dir lock state poisoned");
         let before = state.waiters.len();
         state.waiters.retain(|waiter| &waiter.call_id != call_id);
@@ -468,6 +623,13 @@ impl DirLockManager {
     /// mistaken manual locks. Automatic locks held by running tools are not
     /// touched.
     pub(crate) fn force_unlock_overlapping(&self, dir: &Path) -> Vec<ForceUnlockedLock> {
+        if let Some(backend) = self.fs_backend() {
+            let removed = backend.force_unlock_overlapping(dir);
+            if !removed.is_empty() {
+                self.inner.changed.notify_all();
+            }
+            return removed;
+        }
         let mut state = self.inner.state.lock().expect("dir lock state poisoned");
         let mut removed = Vec::new();
         state.manual.retain(|lock| {
@@ -488,6 +650,13 @@ impl DirLockManager {
 
     /// Release all manual locks owned by an unloaded agent.
     pub(crate) fn release_agent(&self, owner: &AgentId) -> usize {
+        if let Some(backend) = self.fs_backend() {
+            let removed = backend.release_agent(owner);
+            if 0 < removed {
+                self.inner.changed.notify_all();
+            }
+            return removed;
+        }
         let mut state = self.inner.state.lock().expect("dir lock state poisoned");
         let before_manual = state.manual.len();
         let before_waiters = state.waiters.len();
@@ -508,6 +677,11 @@ impl DirLockManager {
     /// `acquire_auto`/`acquire_manual`; clearing waiters wakes those jobs so
     /// scheduler shutdown can join worker threads deterministically.
     pub(crate) fn shutdown(&self) -> (usize, usize) {
+        if let Some(backend) = self.fs_backend() {
+            let result = backend.shutdown();
+            self.inner.changed.notify_all();
+            return result;
+        }
         let mut state = self.inner.state.lock().expect("dir lock state poisoned");
         let removed = state.manual.len();
         let cancelled = state.waiters.len();
@@ -522,6 +696,11 @@ impl DirLockManager {
     /// Disable directory locking by releasing manual locks and cancelling
     /// queued waiters.
     pub(crate) fn disable(&self) -> (usize, usize) {
+        if let Some(backend) = self.fs_backend() {
+            let result = backend.shutdown();
+            self.inner.changed.notify_all();
+            return result;
+        }
         let mut state = self.inner.state.lock().expect("dir lock state poisoned");
         let removed_manual = state.manual.len();
         let cancelled_waiters = state.waiters.len();
@@ -533,12 +712,20 @@ impl DirLockManager {
         (removed_manual, cancelled_waiters)
     }
 
-    fn release_auto(&self, id: u64) {
+    fn release_auto(&self, token: &AutoLockToken) {
+        if let AutoLockToken::Filesystem { backend, id } = token {
+            backend.release_auto(*id);
+            self.inner.changed.notify_all();
+            return;
+        }
+        let AutoLockToken::Memory(id) = token else {
+            return;
+        };
         let mut state = self.inner.state.lock().expect("dir lock state poisoned");
         let before = state.automatic.len();
-        state.automatic.retain(|lock| lock.id != id);
+        state.automatic.retain(|lock| lock.id != *id);
         if state.automatic.len() != before {
-            state.mark_auto_released(id, Instant::now());
+            state.mark_auto_released(*id, Instant::now());
             self.inner.changed.notify_all();
         }
     }
@@ -825,7 +1012,15 @@ fn dispatch_dir_lock_unlock(
         }
     };
 
-    match manager.unlock_manual(&owner, &request.dir) {
+    let unlock_result = match owner.scope {
+        UnlockOwnerScope::CurrentInstance => manager.unlock_manual(&owner.agent_id, &request.dir),
+        UnlockOwnerScope::AnyInstanceWithAgentId => manager.unlock_manual_with_scope(
+            &owner.agent_id,
+            &request.dir,
+            UnlockOwnerScope::AnyInstanceWithAgentId,
+        ),
+    };
+    match unlock_result {
         Ok(()) => send_dir_lock_unlock_result(&invoke, tx, &request),
         Err(message) => send_event(
             tx,
@@ -839,7 +1034,7 @@ fn dispatch_dir_lock_unlock(
     }
 }
 
-fn dir_lock_unlock_owner(invoke: &ToolStarted, dir: &Path) -> Result<AgentId, Box<Event>> {
+fn dir_lock_unlock_owner(invoke: &ToolStarted, dir: &Path) -> Result<UnlockOwner, Box<Event>> {
     let owner_arg =
         optional_argument_text(&invoke.arguments, "owner_agent_id").map_err(|message| {
             Box::new(tool_error_with_args(
@@ -851,15 +1046,24 @@ fn dir_lock_unlock_owner(invoke: &ToolStarted, dir: &Path) -> Result<AgentId, Bo
         })?;
 
     match owner_arg.as_deref() {
-        Some(owner) => owner.parse::<AgentId>().map_err(|error| {
-            Box::new(tool_error_with_args(
-                invoke,
-                format!("invalid owner_agent_id `{owner}`: {error}"),
-                Some(invoke.arguments.clone()),
-                Some(dir_lock_display_args("unlock", dir)),
-            ))
+        Some(owner) => owner
+            .parse::<AgentId>()
+            .map_err(|error| {
+                Box::new(tool_error_with_args(
+                    invoke,
+                    format!("invalid owner_agent_id `{owner}`: {error}"),
+                    Some(invoke.arguments.clone()),
+                    Some(dir_lock_display_args("unlock", dir)),
+                ))
+            })
+            .map(|agent_id| UnlockOwner {
+                agent_id,
+                scope: UnlockOwnerScope::AnyInstanceWithAgentId,
+            }),
+        None => Ok(UnlockOwner {
+            agent_id: invoke.agent_id.clone(),
+            scope: UnlockOwnerScope::CurrentInstance,
         }),
-        None => Ok(invoke.agent_id.clone()),
     }
 }
 

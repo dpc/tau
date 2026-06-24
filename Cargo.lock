@@ -3327,6 +3327,7 @@ dependencies = [
  "base64",
  "ciborium",
  "dirs",
+ "fs2",
  "globset",
  "ignore",
  "libc",

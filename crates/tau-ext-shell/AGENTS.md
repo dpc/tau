@@ -9,3 +9,5 @@ After major changes to this extension's features, tool behavior, UI payloads, co
 Cwd metadata, remembered-cwd path resolution, and event sequencing rules are documented in `ARCHITECTURE.md`; read and update it when touching those paths.
 
 Protocol/UI/locking test strategy is documented in `design.md`; read and update it when changing tool schemas, display state, directory-lock scheduling, or shell execution modes.
+
+Crate-local security and reliability notes are documented in `SECURITY.md`; read and update it when changing shell execution, filesystem mutation, or directory-lock behavior.

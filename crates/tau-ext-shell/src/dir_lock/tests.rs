@@ -1,3 +1,4 @@
+use super::fs::{registry_generation, registry_waiter_count};
 use super::*;
 
 fn path(value: &str) -> PathBuf {
@@ -574,4 +575,361 @@ fn wait_until(mut predicate: impl FnMut() -> bool) {
         assert!(start.elapsed() < std::time::Duration::from_secs(2));
         std::thread::sleep(std::time::Duration::from_millis(5));
     }
+}
+
+fn filesystem_lock_config(state_dir: &Path) -> DirLockConfig {
+    DirLockConfig {
+        enable: true,
+        backend: DirLockBackendConfig::Filesystem,
+        state_dir: Some(state_dir.to_path_buf()),
+        enforce_ro_bind: true,
+    }
+}
+
+fn filesystem_lock_manager(state_dir: &Path) -> DirLockManager {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(state_dir, std::fs::Permissions::from_mode(0o700))
+            .expect("private state dir permissions");
+    }
+    let manager = DirLockManager::default();
+    manager
+        .configure(&filesystem_lock_config(state_dir))
+        .expect("filesystem dir_lock backend");
+    manager
+}
+
+/// Ensures the filesystem backend coordinates path-ancestor conflicts between
+/// distinct `DirLockManager` instances, preventing separate ext-shell processes
+/// from mutating the same subtree concurrently.
+#[test]
+fn filesystem_backend_blocks_conflicting_cross_instance_lock_until_unlock() {
+    let tempdir = tempfile::TempDir::new().expect("tempdir");
+    let manager_a = filesystem_lock_manager(tempdir.path());
+    let manager_b = filesystem_lock_manager(tempdir.path());
+
+    manager_a
+        .acquire_manual(
+            "manual-a".into(),
+            agent_id("agent-a"),
+            path("/repo/a"),
+            || {},
+        )
+        .expect("manual lock a");
+
+    let waiter = std::thread::spawn({
+        let manager_b = manager_b.clone();
+        move || {
+            manager_b.acquire_manual("manual-b".into(), agent_id("agent-b"), path("/repo"), || {})
+        }
+    });
+    std::thread::sleep(Duration::from_millis(150));
+    assert!(!waiter.is_finished(), "cross-instance waiter must block");
+
+    manager_a
+        .unlock_manual(&agent_id("agent-a"), Path::new("/repo/a"))
+        .expect("unlock a");
+    waiter.join().expect("waiter").expect("waiter acquired");
+}
+
+/// Ensures non-overlapping sibling paths remain independent even when lock
+/// state is persisted through the shared filesystem registry.
+#[test]
+fn filesystem_backend_allows_sibling_locks_cross_instance() {
+    let tempdir = tempfile::TempDir::new().expect("tempdir");
+    let manager_a = filesystem_lock_manager(tempdir.path());
+    let manager_b = filesystem_lock_manager(tempdir.path());
+
+    manager_a
+        .acquire_manual(
+            "manual-a".into(),
+            agent_id("agent-a"),
+            path("/repo/a"),
+            || {},
+        )
+        .expect("manual lock a");
+    manager_b
+        .acquire_manual(
+            "manual-b".into(),
+            agent_id("agent-b"),
+            path("/repo/b"),
+            || panic!("sibling path should not wait"),
+        )
+        .expect("manual lock b");
+}
+
+/// Ensures cancellation removes this instance's persisted waiter so future
+/// instances do not remain FIFO-blocked behind a dead queue entry.
+#[test]
+fn filesystem_backend_cancellation_removes_registry_waiter() {
+    let tempdir = tempfile::TempDir::new().expect("tempdir");
+    let manager_a = filesystem_lock_manager(tempdir.path());
+    let manager_b = filesystem_lock_manager(tempdir.path());
+
+    manager_a
+        .acquire_manual("manual-a".into(), agent_id("agent-a"), path("/repo"), || {})
+        .expect("manual lock a");
+    let waiter = std::thread::spawn({
+        let manager_b = manager_b.clone();
+        move || {
+            manager_b.acquire_manual("manual-b".into(), agent_id("agent-b"), path("/repo"), || {})
+        }
+    });
+    wait_until(|| manager_b.cancel_waiting_call(&"manual-b".into()));
+    assert!(matches!(
+        waiter.join().expect("waiter"),
+        Err(ManualLockAcquireError::Cancelled)
+    ));
+    manager_a
+        .unlock_manual(&agent_id("agent-a"), Path::new("/repo"))
+        .expect("unlock a");
+    manager_b
+        .acquire_manual(
+            "manual-c".into(),
+            agent_id("agent-c"),
+            path("/repo"),
+            || panic!("cancelled waiter should be gone"),
+        )
+        .expect("manual lock c");
+}
+
+/// Ensures a new filesystem backend instance reaps registry records whose
+/// owning instance lease lock has been released by process/manager shutdown.
+#[test]
+fn filesystem_backend_reaps_dead_instance_locks() {
+    let tempdir = tempfile::TempDir::new().expect("tempdir");
+    {
+        let manager_a = filesystem_lock_manager(tempdir.path());
+        manager_a
+            .acquire_manual("manual-a".into(), agent_id("agent-a"), path("/repo"), || {})
+            .expect("manual lock a");
+        // Drop without shutdown to simulate an ext-shell process disappearing;
+        // the instance lease is released and the registry entry should be
+        // reaped.
+    }
+    let manager_b = filesystem_lock_manager(tempdir.path());
+    manager_b
+        .acquire_manual(
+            "manual-b".into(),
+            agent_id("agent-b"),
+            path("/repo"),
+            || panic!("dead instance should be reaped before waiting"),
+        )
+        .expect("manual lock b");
+}
+
+/// Ensures force-unlock removes overlapping manual locks from the shared
+/// registry so blocked work in another ext-shell instance can proceed.
+#[test]
+fn filesystem_backend_force_unlock_propagates_across_instances() {
+    let tempdir = tempfile::TempDir::new().expect("tempdir");
+    let manager_a = filesystem_lock_manager(tempdir.path());
+    let manager_b = filesystem_lock_manager(tempdir.path());
+    manager_a
+        .acquire_manual(
+            "manual-a".into(),
+            agent_id("agent-a"),
+            path("/repo/a"),
+            || {},
+        )
+        .expect("manual lock a");
+
+    let removed = manager_b.force_unlock_overlapping(Path::new("/repo"));
+    assert_eq!(removed.len(), 1);
+    assert_eq!(removed[0].owner, agent_id("agent-a"));
+    assert_eq!(removed[0].dir, path("/repo/a"));
+    manager_b
+        .acquire_manual(
+            "manual-b".into(),
+            agent_id("agent-b"),
+            path("/repo"),
+            || panic!("force-unlocked registry should not block"),
+        )
+        .expect("manual lock b");
+}
+
+/// Ensures explicitly configured filesystem state directories fail closed when
+/// they are not private, which prevents silent downgrade to process-local locks
+/// or use of a shared world-readable registry.
+#[cfg(unix)]
+#[test]
+fn filesystem_backend_rejects_insecure_configured_state_dir() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tempdir = tempfile::TempDir::new().expect("tempdir");
+    std::fs::set_permissions(tempdir.path(), std::fs::Permissions::from_mode(0o755))
+        .expect("chmod tempdir");
+    let manager = DirLockManager::default();
+    let error = manager
+        .configure(&filesystem_lock_config(tempdir.path()))
+        .expect_err("insecure state dir should be rejected");
+    assert!(error.contains("must be private"));
+}
+
+fn filesystem_registry_generation(state_dir: &Path) -> u64 {
+    registry_generation(state_dir).expect("read registry")
+}
+
+/// Ensures the `owner_agent_id` recovery path uses the user-visible agent id to
+/// release an exact manual lock held by another filesystem-backend instance.
+#[test]
+fn filesystem_backend_unlock_owner_agent_id_releases_cross_instance_lock() {
+    let tempdir = tempfile::TempDir::new().expect("tempdir");
+    let manager_a = filesystem_lock_manager(tempdir.path());
+    let manager_b = filesystem_lock_manager(tempdir.path());
+    manager_a
+        .acquire_manual("manual-a".into(), agent_id("agent-a"), path("/repo"), || {})
+        .expect("manual lock a");
+
+    manager_b
+        .unlock_manual_with_scope(
+            &agent_id("agent-a"),
+            Path::new("/repo"),
+            UnlockOwnerScope::AnyInstanceWithAgentId,
+        )
+        .expect("cross-instance owner_agent_id unlock");
+    manager_b
+        .acquire_manual(
+            "manual-b".into(),
+            agent_id("agent-b"),
+            path("/repo"),
+            || panic!("owner_agent_id unlock should remove blocker"),
+        )
+        .expect("manual lock b");
+}
+
+/// Ensures equal agent-id text in different ext-shell instances does not grant
+/// same-owner automatic reentry or duplicate-manual treatment across instances.
+#[test]
+fn filesystem_backend_same_text_agent_ids_are_distinct_owners() {
+    let tempdir = tempfile::TempDir::new().expect("tempdir");
+    let manager_a = filesystem_lock_manager(tempdir.path());
+    let manager_b = filesystem_lock_manager(tempdir.path());
+    manager_a
+        .acquire_manual("manual-a".into(), agent_id("agent-a"), path("/repo"), || {})
+        .expect("manual lock a");
+
+    let waiter = std::thread::spawn({
+        let manager_b = manager_b.clone();
+        move || {
+            manager_b.acquire_auto(
+                "auto-b".into(),
+                agent_id("agent-a"),
+                vec![path("/repo")],
+                || {},
+            )
+        }
+    });
+    std::thread::sleep(Duration::from_millis(150));
+    assert!(
+        !waiter.is_finished(),
+        "same visible agent id in another instance must not reenter"
+    );
+    manager_a
+        .unlock_manual(&agent_id("agent-a"), Path::new("/repo"))
+        .expect("unlock a");
+    let guard = waiter.join().expect("waiter").expect("auto acquired");
+    drop(guard);
+}
+
+/// Ensures a failed filesystem backend reconfiguration reports an error without
+/// clearing the active memory backend's lock state.
+#[cfg(unix)]
+#[test]
+fn failed_filesystem_reconfigure_preserves_existing_memory_locks() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let manager = DirLockManager::default();
+    manager
+        .acquire_manual("manual-a".into(), agent_id("agent-a"), path("/repo"), || {})
+        .expect("memory manual lock");
+    let tempdir = tempfile::TempDir::new().expect("tempdir");
+    std::fs::set_permissions(tempdir.path(), std::fs::Permissions::from_mode(0o755))
+        .expect("chmod tempdir");
+
+    assert!(
+        manager
+            .configure(&filesystem_lock_config(tempdir.path()))
+            .is_err()
+    );
+    let waiter = std::thread::spawn({
+        let manager = manager.clone();
+        move || manager.acquire_manual("manual-b".into(), agent_id("agent-b"), path("/repo"), || {})
+    });
+    std::thread::sleep(Duration::from_millis(100));
+    assert!(
+        !waiter.is_finished(),
+        "old memory lock must survive failed reconfigure"
+    );
+    manager
+        .unlock_manual(&agent_id("agent-a"), Path::new("/repo"))
+        .expect("unlock old memory lock");
+    waiter.join().expect("waiter").expect("manual b acquired");
+}
+
+/// Ensures automatic guards retain the original filesystem lease and release
+/// handle after backend disable/reconfiguration, so other instances remain
+/// blocked until the running mutating tool drops its guard.
+#[test]
+fn filesystem_auto_guard_survives_backend_disable_until_drop() {
+    let tempdir = tempfile::TempDir::new().expect("tempdir");
+    let manager_a = filesystem_lock_manager(tempdir.path());
+    let manager_b = filesystem_lock_manager(tempdir.path());
+    let guard = manager_a
+        .acquire_auto(
+            "auto-a".into(),
+            agent_id("agent-a"),
+            vec![path("/repo")],
+            || {},
+        )
+        .expect("auto lock a");
+    manager_a
+        .configure(&DirLockConfig::default())
+        .expect("disable filesystem backend");
+
+    let waiter = std::thread::spawn({
+        let manager_b = manager_b.clone();
+        move || {
+            manager_b.acquire_manual("manual-b".into(), agent_id("agent-b"), path("/repo"), || {})
+        }
+    });
+    std::thread::sleep(Duration::from_millis(150));
+    assert!(
+        !waiter.is_finished(),
+        "original automatic lease should block until guard drops"
+    );
+    drop(guard);
+    waiter.join().expect("waiter").expect("manual b acquired");
+}
+
+/// Ensures waiter polling is read-only after the initial enqueue and does not
+/// bump the registry generation on every timed poll.
+#[test]
+fn filesystem_wait_polling_does_not_bump_registry_generation() {
+    let tempdir = tempfile::TempDir::new().expect("tempdir");
+    let manager_a = filesystem_lock_manager(tempdir.path());
+    let manager_b = filesystem_lock_manager(tempdir.path());
+    manager_a
+        .acquire_manual("manual-a".into(), agent_id("agent-a"), path("/repo"), || {})
+        .expect("manual lock a");
+    let waiter = std::thread::spawn({
+        let manager_b = manager_b.clone();
+        move || {
+            manager_b.acquire_manual("manual-b".into(), agent_id("agent-b"), path("/repo"), || {})
+        }
+    });
+    wait_until(|| registry_waiter_count(tempdir.path()).expect("registry") == 1);
+    let generation_after_enqueue = filesystem_registry_generation(tempdir.path());
+    std::thread::sleep(Duration::from_millis(175));
+    assert_eq!(
+        filesystem_registry_generation(tempdir.path()),
+        generation_after_enqueue,
+        "polling without changes must not rewrite/bump registry"
+    );
+    manager_b.cancel_waiting_call(&"manual-b".into());
+    assert!(matches!(
+        waiter.join().expect("waiter"),
+        Err(ManualLockAcquireError::Cancelled)
+    ));
 }

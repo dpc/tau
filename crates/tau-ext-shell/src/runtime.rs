@@ -86,6 +86,9 @@ impl ShellRuntime {
         if let Err(message) = apply_working_directory(&self.config, &cfg, self.runtime_started) {
             return self.send(HarnessInputMessage::ConfigError(ConfigError { message }));
         }
+        if let Err(message) = self.lock_manager.configure(&cfg.dir_lock) {
+            return self.send(HarnessInputMessage::ConfigError(ConfigError { message }));
+        }
 
         let dir_lock_was_enabled = self.config.dir_lock.enable;
         let dir_lock_changed = dir_lock_was_enabled != cfg.dir_lock.enable;

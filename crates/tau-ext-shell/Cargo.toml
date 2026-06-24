@@ -25,6 +25,7 @@ echo-agent = []
 base64.workspace = true
 ciborium.workspace = true
 dirs.workspace = true
+fs2.workspace = true
 globset.workspace = true
 ignore.workspace = true
 libc.workspace = true

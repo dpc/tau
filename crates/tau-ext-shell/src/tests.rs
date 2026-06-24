@@ -4912,6 +4912,54 @@ fn shell_extension_rejects_invalid_config() {
     writer.flush().expect("flush");
 }
 
+#[cfg(unix)]
+#[test]
+fn shell_extension_reports_config_error_for_insecure_dir_lock_state_dir() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tempdir = tempfile::TempDir::new().expect("tempdir");
+    std::fs::set_permissions(tempdir.path(), std::fs::Permissions::from_mode(0o755))
+        .expect("chmod tempdir");
+    let (mut reader, mut writer) = spawn_extension();
+    drain_startup(&mut reader);
+
+    writer
+        .write_frame(&HarnessOutputMessage::Configure(tau_proto::Configure {
+            instance_name: None,
+            config: CborValue::Map(vec![(
+                CborValue::Text("dir_lock".to_owned()),
+                CborValue::Map(vec![
+                    (CborValue::Text("enable".to_owned()), CborValue::Bool(true)),
+                    (
+                        CborValue::Text("backend".to_owned()),
+                        CborValue::Text("filesystem".to_owned()),
+                    ),
+                    (
+                        CborValue::Text("state_dir".to_owned()),
+                        CborValue::Text(tempdir.path().display().to_string()),
+                    ),
+                ]),
+            )]),
+            state_dir: None,
+            secrets: std::collections::BTreeMap::new(),
+        }))
+        .expect("configure");
+    writer.flush().expect("flush");
+
+    let error = loop {
+        let message = reader.read_message().expect("read").expect("message");
+        if let HarnessInputMessage::ConfigError(error) = message {
+            break error;
+        }
+    };
+    assert!(error.message.contains("must be private"));
+
+    writer
+        .write_frame(&disconnect_frame(None))
+        .expect("disconnect");
+    writer.flush().expect("flush");
+}
+
 #[test]
 fn shell_enforce_ro_bind_defaults_true_under_dir_lock_config() {
     // The directory-lock mechanism is opt-in, but enforced read-only bind mounts

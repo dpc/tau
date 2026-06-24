@@ -24,6 +24,12 @@ pub(crate) struct DirLockConfig {
     /// ext-shell tools participate in directory update locking. Disabled by
     /// default; set to true to opt in.
     pub(crate) enable: bool,
+    /// Backend used to store directory lock state.
+    pub(crate) backend: DirLockBackendConfig,
+    /// Optional filesystem backend state directory. When omitted, ext-shell
+    /// uses a private directory below `$XDG_RUNTIME_DIR` or a verified
+    /// private temp fallback.
+    pub(crate) state_dir: Option<PathBuf>,
     /// Enforce inferred read-only shell mode by bind-mounting the tool working
     /// directory read-only inside the child namespace when supported by the
     /// tool.
@@ -34,10 +40,22 @@ pub(crate) struct DirLockConfig {
     pub(crate) enforce_ro_bind: bool,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum DirLockBackendConfig {
+    /// Process-local lock state, preserving the historical behavior.
+    #[default]
+    Memory,
+    /// Host/user-local shared registry coordinated with filesystem locks.
+    Filesystem,
+}
+
 impl Default for DirLockConfig {
     fn default() -> Self {
         Self {
             enable: false,
+            backend: DirLockBackendConfig::Memory,
+            state_dir: None,
             enforce_ro_bind: true,
         }
     }
@@ -170,5 +188,30 @@ mod tests {
             .expect("wait shell");
         assert!(output.status.success());
         assert_eq!(String::from_utf8_lossy(&output.stdout), "");
+    }
+
+    /// Ensures directory-lock backend config keeps memory as the default while
+    /// accepting the opt-in filesystem backend and state directory.
+    #[test]
+    fn dir_lock_backend_config_defaults_memory_and_parses_filesystem() {
+        assert_eq!(
+            ExtConfig::default().dir_lock.backend,
+            DirLockBackendConfig::Memory
+        );
+
+        let config: ExtConfig = serde_json::from_value(serde_json::json!({
+            "dir_lock": {
+                "enable": true,
+                "backend": "filesystem",
+                "state_dir": "/tmp/tau-dir-locks"
+            }
+        }))
+        .expect("parse dir_lock backend config");
+
+        assert_eq!(config.dir_lock.backend, DirLockBackendConfig::Filesystem);
+        assert_eq!(
+            config.dir_lock.state_dir,
+            Some(PathBuf::from("/tmp/tau-dir-locks"))
+        );
     }
 }

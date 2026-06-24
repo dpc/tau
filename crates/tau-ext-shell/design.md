@@ -41,6 +41,16 @@ reentry. Shell read-write inference must be tested through the dispatch path and
 through `DirLockManager` so stale or missing manual coverage cannot run as
 read-write.
 
+When adding or changing directory-lock backends, keep backend-parity coverage for
+path ancestry conflicts, FIFO behavior, duplicate manual locks, same-owner
+automatic reentry, `acquire_auto_if_manual_covers` fallback, cancellation
+cleanup, release/shutdown/disable cleanup, abandoned diagnostics, and
+force-unlock behavior. Filesystem-backend tests should also cover cross-instance
+owner identity, instance-lease reaping, state-dir validation failures, backend
+reconfiguration preserving the previous backend on failure, automatic guards
+surviving backend disable/reconfiguration until drop, and read-only polling that
+does not rewrite the registry.
+
 
 ## Scheduler coverage
 

@@ -8,6 +8,11 @@ This note documents the move of filesystem update coordination out of `agent_sta
 - `tau-ext-shell` owns directory update locking with an optional `dir_lock` tool.
 - The tool name is `dir_lock`; Tau tool names do not allow hyphens.
 - `dir_lock` is registered disabled by default. Setting ext-shell config `dir_lock.enable = true` enables the handler and opts mutating ext-shell tools into locking.
+- `dir_lock.backend` defaults to `"memory"`, preserving historical process-local
+  coordination. Setting `dir_lock.backend = "filesystem"` stores lock state in a
+  per-user registry under `dir_lock.state_dir`, `$XDG_RUNTIME_DIR/tau/ext-shell-dir-locks`,
+  or a verified private temp fallback so multiple Tau/ext-shell process instances
+  on the same host and user account coordinate with each other.
 - `agent_start` sub-agents are independent agents. A parent agent lock does not automatically cover a delegate.
 - The harness no longer enforces tool or start-agent update/exclusive scheduling, and the protocol no longer carries scheduling metadata for tool specs, delegate progress, or start-agent requests.
 
@@ -65,6 +70,10 @@ Blocked ext-shell tool calls emit `ToolProgress` with a live `ToolDisplay` updat
 ## Caveats
 
 - Shell locking is advisory. An inferred read-write shell command can mutate paths outside its `cwd` using absolute paths or command-specific flags. Inferred read-only is not a hard sandbox unless native read-only bind isolation is active and effective.
+- Filesystem-backend locks are released when the owning ext-shell process exits.
+  If a spawned shell descendant deliberately detaches and keeps mutating files
+  after ext-shell exits, another Tau instance may proceed while that detached
+  process is still running.
 - `edit` creates to missing parents are safe but less precise because the exact final parent does not exist yet.
 - Same-owner reentry can keep other agents waiting for as long as the owner keeps a manual lock. That is intentional manual-lock behavior, not starvation inside the FIFO queue.
 - Out-of-tree non-shell tools no longer get harness update/exclusive serialization. They need their own coordination if they mutate shared state.
