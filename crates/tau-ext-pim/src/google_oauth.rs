@@ -486,6 +486,46 @@ pub(crate) fn parse_installed_app_redirect_url(
     let stored = validate_loopback_redirect_uri(stored_redirect_uri)?;
     let parsed =
         Url::parse(pasted_url).map_err(|_| "Google redirect URL was not a valid URL".to_owned())?;
+    validate_installed_app_redirect_target(&parsed, &stored)?;
+
+    let query = parse_installed_app_redirect_query(&parsed)?;
+    let state = query
+        .state
+        .ok_or_else(|| "Google redirect URL was missing state".to_owned())?;
+    if state != expected_state {
+        return Err("Google redirect URL state did not match pending authorization".to_owned());
+    }
+    if let Some(error) = query.provider_error {
+        let message = match error.as_str() {
+            "access_denied" => "Google authorization was denied".to_owned(),
+            _ => format!(
+                "Google authorization failed: {}",
+                sanitize_error_text(&error)
+            ),
+        };
+        return Err(message);
+    }
+    let code = query
+        .code
+        .ok_or_else(|| "Google redirect URL was missing authorization code".to_owned())?;
+    if !is_safe_oauth_parameter(&code) {
+        return Err("Google redirect URL authorization code was invalid".to_owned());
+    }
+    Ok(GoogleInstalledAppRedirect { code })
+}
+
+#[derive(Default)]
+struct InstalledAppRedirectQuery {
+    /// State parameter supplied by Google and matched against pending auth
+    /// state.
+    state: Option<String>,
+    /// One-time authorization code supplied by Google after user consent.
+    code: Option<String>,
+    /// Provider error code supplied by Google when user consent failed.
+    provider_error: Option<String>,
+}
+
+fn validate_installed_app_redirect_target(parsed: &Url, stored: &Url) -> Result<(), String> {
     if parsed.scheme() != "http" || parsed.host_str() != Some("127.0.0.1") {
         return Err(
             "Google redirect URL must use the stored 127.0.0.1 loopback address".to_owned(),
@@ -497,41 +537,44 @@ pub(crate) fn parse_installed_app_redirect_url(
     {
         return Err("Google redirect URL did not match the stored loopback redirect".to_owned());
     }
+    Ok(())
+}
 
-    let mut state = None;
-    let mut code = None;
-    let mut provider_error = None;
+fn parse_installed_app_redirect_query(parsed: &Url) -> Result<InstalledAppRedirectQuery, String> {
+    let mut query = InstalledAppRedirectQuery::default();
     for (key, value) in parsed.query_pairs() {
         match key.as_ref() {
-            "state" if state.is_none() => state = Some(value.into_owned()),
-            "state" => return Err("Google redirect URL contained duplicate state".to_owned()),
-            "code" if code.is_none() => code = Some(value.into_owned()),
-            "code" => return Err("Google redirect URL contained duplicate code".to_owned()),
-            "error" if provider_error.is_none() => provider_error = Some(value.into_owned()),
-            "error" => return Err("Google redirect URL contained duplicate error".to_owned()),
+            "state" => set_unique_redirect_query_value(
+                &mut query.state,
+                value.into_owned(),
+                "Google redirect URL contained duplicate state",
+            )?,
+            "code" => set_unique_redirect_query_value(
+                &mut query.code,
+                value.into_owned(),
+                "Google redirect URL contained duplicate code",
+            )?,
+            "error" => set_unique_redirect_query_value(
+                &mut query.provider_error,
+                value.into_owned(),
+                "Google redirect URL contained duplicate error",
+            )?,
             _ => {}
         }
     }
-    let state = state.ok_or_else(|| "Google redirect URL was missing state".to_owned())?;
-    if state != expected_state {
-        return Err("Google redirect URL state did not match pending authorization".to_owned());
+    Ok(query)
+}
+
+fn set_unique_redirect_query_value(
+    target: &mut Option<String>,
+    value: String,
+    duplicate_error: &str,
+) -> Result<(), String> {
+    if target.is_some() {
+        return Err(duplicate_error.to_owned());
     }
-    if let Some(error) = provider_error {
-        let message = match error.as_str() {
-            "access_denied" => "Google authorization was denied".to_owned(),
-            _ => format!(
-                "Google authorization failed: {}",
-                sanitize_error_text(&error)
-            ),
-        };
-        return Err(message);
-    }
-    let code =
-        code.ok_or_else(|| "Google redirect URL was missing authorization code".to_owned())?;
-    if !is_safe_oauth_parameter(&code) {
-        return Err("Google redirect URL authorization code was invalid".to_owned());
-    }
-    Ok(GoogleInstalledAppRedirect { code })
+    *target = Some(value);
+    Ok(())
 }
 
 /// Validate a stored loopback redirect URI and return its parsed URL.
@@ -983,6 +1026,41 @@ mod tests {
         let err = validate_loopback_redirect_uri("http://127.0.0.1:54321/callback")
             .expect_err("stored non-root redirect rejected");
         assert!(err.contains("127.0.0.1"));
+    }
+
+    /// Ensures redirect query validation rejects duplicate or unsafe sensitive
+    /// parameters without echoing authorization codes or state-like values.
+    #[test]
+    fn installed_app_redirect_rejects_duplicate_and_unsafe_query_parameters() {
+        for (url, expected_error, reason) in [
+            (
+                "http://127.0.0.1:54321/?state=expected&state=expected&code=secret-code",
+                "Google redirect URL contained duplicate state",
+                "duplicate state",
+            ),
+            (
+                "http://127.0.0.1:54321/?state=expected&code=secret-code&code=other-secret",
+                "Google redirect URL contained duplicate code",
+                "duplicate code",
+            ),
+            (
+                "http://127.0.0.1:54321/?state=expected&error=access_denied&error=invalid_request",
+                "Google redirect URL contained duplicate error",
+                "duplicate error",
+            ),
+            (
+                "http://127.0.0.1:54321/?state=expected&code=secret%0Acode",
+                "Google redirect URL authorization code was invalid",
+                "unsafe code",
+            ),
+        ] {
+            let err = parse_installed_app_redirect_url(url, "http://127.0.0.1:54321/", "expected")
+                .expect_err(reason);
+            assert_eq!(err, expected_error, "{reason}");
+            assert!(!err.contains("secret"), "{reason}: {err}");
+            assert!(!err.contains("expected"), "{reason}: {err}");
+            assert!(!err.contains("invalid_request"), "{reason}: {err}");
+        }
     }
 
     /// Ensures user-denied Google redirects produce a short actionable error
