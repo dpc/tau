@@ -11,6 +11,23 @@ Built-in theme tests should be limited to parsing and intentional invariants of
 those built-ins, such as the conservative default theme staying within its
 allowed safe foreground colors and avoiding background colors.
 
+## Terminal screen renderer boundaries
+
+Terminal screen renderer tests should protect observable terminal behavior at
+the boundaries where the in-memory screen model meets terminal scrolling. Prefer
+focused `tau-term-screen` unit tests backed by `vt100::Parser` or the local
+pending-wrap test model so assertions cover visible rows, scrollback order,
+cursor position, exact-width pending-wrap transitions, shrink clearing, and
+styled-cell output rather than only inspecting emitted escape bytes.
+
+When refactoring renderer internals, keep the behavior-preserving contract
+explicit: changed-range detection uses absolute content line indices, rows above
+the previous viewport are treated as existing scrollback, missing new rows still
+matter when old on-screen rows disappeared, and downward movement must continue
+to scroll naturally at the bottom edge. Add regression tests for any newly found
+terminal edge case instead of relaxing cargo-crap thresholds or accepting
+snapshot-only coverage.
+
 ## Manual Tau terminal E2E checks
 
 Use `tau dev tmux` for agent-controlled manual checks of the real terminal UI

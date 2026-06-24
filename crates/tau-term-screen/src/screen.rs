@@ -86,6 +86,15 @@ pub struct Screen {
     width: usize,
 }
 
+struct ChangedLineRange {
+    /// First changed line, as an absolute index into the full scrolling
+    /// content.
+    first_line: usize,
+    /// Last changed line, inclusive. This may be past `all_lines.len()` when
+    /// old on-screen rows disappeared and must be cleared.
+    last_line: usize,
+}
+
 impl Screen {
     pub fn new(width: usize) -> Self {
         Self {
@@ -256,99 +265,35 @@ impl Screen {
         let total = all_lines.len();
         let new_viewport_top = total.saturating_sub(height);
 
-        // Find first and last changed line across the part of the content that
-        // is, or was, physically represented on the terminal. Lines above the
-        // previous viewport are already in scrollback; treating them as changed
-        // would force us to rewrite the top visible rows just before they drop
-        // into scrollback.
-        //
-        // Keep missing lines distinct from present-but-empty lines: appending
-        // an empty physical row still needs to scroll the viewport.
-        let max_idx = total.max(prev_viewport_top + self.lines.len());
-        let mut first_changed: Option<usize> = None;
-        let mut last_changed: Option<usize> = None;
-        for i in prev_viewport_top..max_idx {
-            let old = if i >= prev_viewport_top {
-                self.lines.get(i - prev_viewport_top).map(|l| l.as_slice())
-            } else {
-                None
-            };
-            let new = all_lines.get(i).map(|l| l.as_slice());
-            if old != new {
-                if first_changed.is_none() {
-                    first_changed = Some(i);
-                }
-                last_changed = Some(i);
-            }
-        }
-
-        let Some(first) = first_changed else {
-            // Nothing changed — just reposition cursor.
+        let Some(changed_range) = self.scrolling_changed_range(all_lines, prev_viewport_top) else {
             let cursor_screen = desired_cursor.0.saturating_sub(new_viewport_top);
             self.move_to(w, cursor_screen, desired_cursor.1)?;
             return Ok(());
         };
-        let last = last_changed.unwrap_or(first);
 
         // Clamp first to the previous viewport — we can't render
         // above it (those rows aren't on the physical terminal).
-        let render_start = first.max(prev_viewport_top);
-
-        // Track the viewport top as it shifts during scrolling.
+        let render_start = changed_range.first_line.max(prev_viewport_top);
         let mut viewport_top = prev_viewport_top;
-        let viewport_bottom = || viewport_top + height - 1;
-
-        // Move cursor to render_start's screen row. If it's past
-        // the viewport bottom, scroll first.
-        if render_start > viewport_bottom() {
-            let to_bottom = (height - 1).saturating_sub(self.cursor_row);
-            for _ in 0..to_bottom {
-                self.move_down_one(w)?;
-            }
-            let scroll = render_start - viewport_bottom();
-            for _ in 0..scroll {
-                self.move_down_one(w)?;
-            }
-            viewport_top += scroll;
-            self.cursor_row = height - 1;
-        }
-        let start_screen_row = render_start - viewport_top;
-        self.move_to(w, start_screen_row, 0)?;
-
-        // Render changed lines. Downward movement scrolls naturally
-        // when the cursor is at the bottom.
-        for i in render_start..=last {
-            if i > render_start {
-                self.move_down_one(w)?;
-                let screen_row = self.cursor_row + 1;
-                if screen_row >= height {
-                    // Moving down scrolled the terminal.
-                    viewport_top += 1;
-                    self.cursor_row = height - 1;
-                } else {
-                    self.cursor_row = screen_row;
-                }
-            }
-            // Clear the line and write new content.
-            w.queue(terminal::Clear(ClearType::UntilNewLine))?;
-            if let Some(line) = all_lines.get(i) {
-                emit_styled_cells(w, line)?;
-            }
-            self.cursor_col = all_lines.get(i).map(|l| cols(l)).unwrap_or(0);
-        }
+        self.scroll_to_render_start(w, render_start, &mut viewport_top, height)?;
+        self.render_changed_scrolling_lines(
+            w,
+            all_lines,
+            render_start,
+            changed_range.last_line,
+            &mut viewport_top,
+            height,
+        )?;
 
         // Clear any leftover lines below if content shrunk.
-        let rendered_up_to = last + 1;
         let old_end = prev_viewport_top + self.lines.len();
-        if rendered_up_to < old_end {
-            for _ in rendered_up_to..old_end.min(viewport_top + height) {
-                self.move_down_one(w)?;
-                w.queue(terminal::Clear(ClearType::UntilNewLine))?;
-                if self.cursor_row + 1 < height {
-                    self.cursor_row += 1;
-                }
-            }
-        }
+        self.clear_shrunk_scrolling_lines(
+            w,
+            changed_range.last_line + 1,
+            old_end,
+            viewport_top,
+            height,
+        )?;
 
         // Position cursor.
         let cursor_screen = desired_cursor.0.saturating_sub(new_viewport_top);
@@ -358,6 +303,137 @@ impl Screen {
         self.cursor_row = cursor_screen;
         self.cursor_col = desired_cursor.1;
 
+        Ok(())
+    }
+
+    fn scrolling_changed_range(
+        &self,
+        all_lines: &[Vec<Cell>],
+        prev_viewport_top: usize,
+    ) -> Option<ChangedLineRange> {
+        // Find first and last changed line across the part of the content that
+        // is, or was, physically represented on the terminal. Lines above the
+        // previous viewport are already in scrollback; treating them as changed
+        // would force us to rewrite the top visible rows just before they drop
+        // into scrollback.
+        //
+        // Keep missing lines distinct from present-but-empty lines: appending
+        // an empty physical row still needs to scroll the viewport.
+        let max_idx = all_lines.len().max(prev_viewport_top + self.lines.len());
+        let mut changed_range: Option<ChangedLineRange> = None;
+        for line_idx in prev_viewport_top..max_idx {
+            let old = self
+                .lines
+                .get(line_idx - prev_viewport_top)
+                .map(|line| line.as_slice());
+            let new = all_lines.get(line_idx).map(|line| line.as_slice());
+            if old != new {
+                changed_range = Some(match changed_range {
+                    Some(range) => ChangedLineRange {
+                        first_line: range.first_line,
+                        last_line: line_idx,
+                    },
+                    None => ChangedLineRange {
+                        first_line: line_idx,
+                        last_line: line_idx,
+                    },
+                });
+            }
+        }
+        changed_range
+    }
+
+    fn scroll_to_render_start(
+        &mut self,
+        w: &mut impl Write,
+        render_start: usize,
+        viewport_top: &mut usize,
+        height: usize,
+    ) -> io::Result<()> {
+        // Mutates both the tracked viewport and cursor row via natural terminal
+        // scrolling before addressing `render_start` within the new viewport.
+        let viewport_bottom = *viewport_top + height - 1;
+        if render_start > viewport_bottom {
+            let to_bottom = (height - 1).saturating_sub(self.cursor_row);
+            self.move_down_rows(w, to_bottom)?;
+            let scroll = render_start - viewport_bottom;
+            self.move_down_rows(w, scroll)?;
+            *viewport_top += scroll;
+            self.cursor_row = height - 1;
+        }
+        let start_screen_row = render_start - *viewport_top;
+        self.move_to(w, start_screen_row, 0)
+    }
+
+    fn render_changed_scrolling_lines(
+        &mut self,
+        w: &mut impl Write,
+        all_lines: &[Vec<Cell>],
+        render_start: usize,
+        render_last_line: usize,
+        viewport_top: &mut usize,
+        height: usize,
+    ) -> io::Result<()> {
+        // `render_last_line` is inclusive. Missing rows are deliberate: they
+        // represent old content that disappeared and should be cleared.
+        for line_idx in render_start..=render_last_line {
+            if render_start < line_idx {
+                self.advance_scrolling_render_row(w, viewport_top, height)?;
+            }
+            w.queue(terminal::Clear(ClearType::UntilNewLine))?;
+            if let Some(line) = all_lines.get(line_idx) {
+                emit_styled_cells(w, line)?;
+            }
+            self.cursor_col = all_lines.get(line_idx).map(|line| cols(line)).unwrap_or(0);
+        }
+        Ok(())
+    }
+
+    fn clear_shrunk_scrolling_lines(
+        &mut self,
+        w: &mut impl Write,
+        rendered_up_to: usize,
+        old_end: usize,
+        viewport_top: usize,
+        height: usize,
+    ) -> io::Result<()> {
+        // Called immediately after rendering through `rendered_up_to - 1`; any
+        // remaining old rows still inside the current viewport must be cleared.
+        if old_end <= rendered_up_to {
+            return Ok(());
+        }
+        for _ in rendered_up_to..old_end.min(viewport_top + height) {
+            self.move_down_one(w)?;
+            w.queue(terminal::Clear(ClearType::UntilNewLine))?;
+            if self.cursor_row + 1 < height {
+                self.cursor_row += 1;
+            }
+        }
+        Ok(())
+    }
+
+    fn advance_scrolling_render_row(
+        &mut self,
+        w: &mut impl Write,
+        viewport_top: &mut usize,
+        height: usize,
+    ) -> io::Result<()> {
+        self.move_down_one(w)?;
+        let screen_row = self.cursor_row + 1;
+        if screen_row >= height {
+            // Moving down scrolled the terminal.
+            *viewport_top += 1;
+            self.cursor_row = height - 1;
+        } else {
+            self.cursor_row = screen_row;
+        }
+        Ok(())
+    }
+
+    fn move_down_rows(&mut self, w: &mut impl Write, rows: usize) -> io::Result<()> {
+        for _ in 0..rows {
+            self.move_down_one(w)?;
+        }
         Ok(())
     }
 
