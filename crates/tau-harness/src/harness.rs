@@ -130,6 +130,17 @@ pub(crate) fn background_completion_prompt(call_id: &ToolCallId) -> String {
     )
 }
 
+/// Result of waiting for the next runtime-loop event.
+enum RuntimeEventWait {
+    /// A harness event is ready to be logged and dispatched.
+    Event(HarnessEvent),
+    /// A background-tool deadline elapsed and was processed; the loop should
+    /// poll again.
+    BackgroundDeadlineElapsed,
+    /// All senders for the harness event channel have disconnected.
+    Disconnected,
+}
+
 const RESTORE_NOTICE_BODY_PREFIX: &str = "Previous session was interrupted and restored.";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -3709,85 +3720,151 @@ impl Harness {
         }
         let mut ever_attached = !self.client_writers.is_empty();
         loop {
-            if max_clients.is_some_and(|max| served_clients >= max) {
+            if Self::should_stop_run_loop(
+                max_clients,
+                served_clients,
+                exit_on_disconnect,
+                ever_attached,
+                self.client_writers.is_empty(),
+            ) {
                 break;
             }
-            // `exit_on_disconnect`: once at least one UI has been
-            // attached, exiting the moment the last one leaves lets
-            // `tau` behave like a normal foreground command.
-            // Before any UI attaches we wait — otherwise a slightly
-            // late first connect would race us into immediate exit.
-            if exit_on_disconnect && ever_attached && self.client_writers.is_empty() {
-                break;
-            }
-            self.process_background_deadlines();
-            let harness_evt = if let Some(deadline) = self.tool_turn.next_background_deadline() {
-                let timeout = deadline.saturating_duration_since(Instant::now());
-                match self.rx.recv_timeout(timeout) {
-                    Ok(event) => event,
-                    Err(mpsc::RecvTimeoutError::Timeout) => {
-                        self.process_background_deadlines();
-                        continue;
-                    }
-                    Err(mpsc::RecvTimeoutError::Disconnected) => break,
-                }
-            } else {
-                let Ok(event) = self.rx.recv() else {
-                    break;
-                };
-                event
+            let harness_evt = match self.next_runtime_event() {
+                RuntimeEventWait::Event(event) => event,
+                RuntimeEventWait::BackgroundDeadlineElapsed => continue,
+                RuntimeEventWait::Disconnected => break,
             };
             self.log_event(&harness_evt);
-            match harness_evt {
-                HarnessEvent::FromConnection {
-                    connection_id,
-                    message,
-                } => {
-                    let origin = self
-                        .bus
-                        .connection(&connection_id)
-                        .map(|m| m.origin.clone());
-                    match origin {
-                        Some(ConnectionOrigin::Socket) => {
-                            // `/detach` → stay alive even after this UI leaves;
-                            // a later `tau --attach` can pick up right here.
-                            if matches!(
-                                message.as_ref(),
-                                HarnessInputMessage::Emit(emit)
-                                    if matches!(emit.event.as_ref(), Event::UiDetachRequest(_))
-                            ) {
-                                exit_on_disconnect = false;
-                            }
-                            let keep = self.handle_client_message(&connection_id, *message)?;
-                            if !keep {
-                                self.handle_disconnect(&connection_id);
-                                served_clients += 1;
-                            }
-                        }
-                        Some(_) => self.handle_extension_message(&connection_id, *message)?,
-                        None => {}
-                    }
+            self.handle_runtime_event(
+                harness_evt,
+                &mut served_clients,
+                &mut exit_on_disconnect,
+                &mut ever_attached,
+            )?;
+        }
+        Ok(())
+    }
+
+    fn should_stop_run_loop(
+        max_clients: Option<usize>,
+        served_clients: usize,
+        exit_on_disconnect: bool,
+        ever_attached: bool,
+        no_clients_attached: bool,
+    ) -> bool {
+        if max_clients.is_some_and(|max| served_clients >= max) {
+            return true;
+        }
+        // `exit_on_disconnect`: once at least one UI has been attached, exiting
+        // the moment the last one leaves lets `tau` behave like a normal
+        // foreground command. Before any UI attaches we wait — otherwise a
+        // slightly late first connect would race us into immediate exit.
+        exit_on_disconnect && ever_attached && no_clients_attached
+    }
+
+    fn next_runtime_event(&mut self) -> RuntimeEventWait {
+        self.process_background_deadlines();
+        if let Some(deadline) = self.tool_turn.next_background_deadline() {
+            let timeout = deadline.saturating_duration_since(Instant::now());
+            match self.rx.recv_timeout(timeout) {
+                Ok(event) => RuntimeEventWait::Event(event),
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    self.process_background_deadlines();
+                    RuntimeEventWait::BackgroundDeadlineElapsed
                 }
-                HarnessEvent::Disconnected { connection_id } => {
-                    let was_provider = self.is_provider_extension(&connection_id);
-                    let was_socket = self
-                        .bus
-                        .connection(&connection_id)
-                        .is_some_and(|m| m.origin == ConnectionOrigin::Socket);
-                    self.handle_disconnect(&connection_id);
-                    if was_socket {
-                        served_clients += 1;
-                    }
-                    if was_provider {
-                        return Err(provider_disconnected_error());
-                    }
-                }
-                HarnessEvent::NewClient(stream) => {
-                    self.accept_client(stream)?;
-                    ever_attached = true;
-                }
-                HarnessEvent::Command(command) => self.handle_harness_command(command)?,
+                Err(mpsc::RecvTimeoutError::Disconnected) => RuntimeEventWait::Disconnected,
             }
+        } else {
+            self.rx
+                .recv()
+                .map(RuntimeEventWait::Event)
+                .unwrap_or(RuntimeEventWait::Disconnected)
+        }
+    }
+
+    fn handle_runtime_event(
+        &mut self,
+        harness_evt: HarnessEvent,
+        served_clients: &mut usize,
+        exit_on_disconnect: &mut bool,
+        ever_attached: &mut bool,
+    ) -> Result<(), HarnessError> {
+        match harness_evt {
+            HarnessEvent::FromConnection {
+                connection_id,
+                message,
+            } => self.handle_runtime_connection_message(
+                connection_id,
+                message,
+                served_clients,
+                exit_on_disconnect,
+            )?,
+            HarnessEvent::Disconnected { connection_id } => {
+                self.handle_runtime_disconnect(connection_id, served_clients)?;
+            }
+            HarnessEvent::NewClient(stream) => {
+                self.accept_client(stream)?;
+                *ever_attached = true;
+            }
+            HarnessEvent::Command(command) => self.handle_harness_command(command)?,
+        }
+        Ok(())
+    }
+
+    fn handle_runtime_connection_message(
+        &mut self,
+        connection_id: ConnectionId,
+        message: Box<HarnessInputMessage>,
+        served_clients: &mut usize,
+        exit_on_disconnect: &mut bool,
+    ) -> Result<(), HarnessError> {
+        let origin = self
+            .bus
+            .connection(&connection_id)
+            .map(|m| m.origin.clone());
+        match origin {
+            Some(ConnectionOrigin::Socket) => {
+                // `/detach` → stay alive even after this UI leaves; a later
+                // `tau --attach` can pick up right here.
+                if Self::is_ui_detach_request(&message) {
+                    *exit_on_disconnect = false;
+                }
+                let keep = self.handle_client_message(&connection_id, *message)?;
+                if !keep {
+                    self.handle_disconnect(&connection_id);
+                    *served_clients += 1;
+                }
+            }
+            Some(_) => self.handle_extension_message(&connection_id, *message)?,
+            None => {}
+        }
+        Ok(())
+    }
+
+    fn is_ui_detach_request(message: &HarnessInputMessage) -> bool {
+        matches!(
+            message,
+            HarnessInputMessage::Emit(emit)
+                if matches!(emit.event.as_ref(), Event::UiDetachRequest(_))
+        )
+    }
+
+    fn handle_runtime_disconnect(
+        &mut self,
+        connection_id: ConnectionId,
+        served_clients: &mut usize,
+    ) -> Result<(), HarnessError> {
+        let was_provider = self.is_provider_extension(&connection_id);
+        let was_socket = self
+            .bus
+            .connection(&connection_id)
+            .is_some_and(|m| m.origin == ConnectionOrigin::Socket);
+        self.handle_disconnect(&connection_id);
+        if was_socket {
+            *served_clients += 1;
+        }
+        if was_provider {
+            return Err(provider_disconnected_error());
         }
         Ok(())
     }
