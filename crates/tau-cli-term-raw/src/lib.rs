@@ -811,6 +811,13 @@ pub struct OutputSnapshot {
     below: Vec<BlockId>,
 }
 
+impl OutputSnapshot {
+    /// Returns the ordered block ids currently present in the suggestions zone.
+    pub fn suggestion_ids(&self) -> &[BlockId] {
+        &self.suggestions
+    }
+}
+
 /// A cloneable handle for mutating prompt zones from any thread.
 ///
 /// Setters update the shared state but do **not** trigger a redraw.

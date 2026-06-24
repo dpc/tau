@@ -43,6 +43,7 @@ const PROMPT_HISTORY_SEARCH_MAX_ROWS: usize = 200;
 const PROMPT_HISTORY_SUMMARY_MAX_CHARS: usize = 240;
 const PROMPT_HISTORY_PREVIEW_MAX_BYTES: usize = 64 * 1024;
 const PROMPT_HISTORY_PREVIEW_TOTAL_BYTES: usize = 1024 * 1024;
+const COMPLETION_MENU_BLOCK_ID: BlockId = BlockId(u64::MAX);
 /// High-level events surfaced to the caller.
 pub enum Event {
     /// The user submitted a line (pressed Enter by default, Ctrl-Enter,
@@ -371,7 +372,8 @@ impl HighTerm {
                 let id = match self.menu_block_id {
                     Some(id) => id,
                     None => {
-                        let id = self.handle.new_block("completion-menu", "");
+                        let id = COMPLETION_MENU_BLOCK_ID;
+                        self.handle.set_block(id, "");
                         self.handle.push_suggestions(id);
                         self.menu_block_id = Some(id);
                         id

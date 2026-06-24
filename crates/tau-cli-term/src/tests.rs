@@ -92,6 +92,36 @@ fn submit_typed(term: &mut HighTerm, input_tx: &std::sync::mpsc::Sender<TestRawE
     ));
 }
 
+/// Ensures every rendered completion menu uses the same suggestion block id, so
+/// reopening or refreshing a menu replaces any stale menu rows left behind by a
+/// missed high-level cleanup path instead of appending another visible block.
+#[test]
+fn completion_menu_rendering_reuses_fixed_suggestion_block_id() {
+    let (mut term, handle, input_tx) = new_test_term(vec![
+        SlashCommand::new("/model", "Switch model"),
+        SlashCommand::new("/quit", "Exit"),
+    ]);
+
+    send_key(&input_tx, KeyCode::Char('/'));
+    assert!(matches!(
+        term.get_next_event().expect("open completion"),
+        Event::BufferChanged
+    ));
+
+    let snapshot = handle.output_snapshot();
+    assert_eq!(snapshot.suggestion_ids(), &[COMPLETION_MENU_BLOCK_ID]);
+
+    term.menu_block_id = None;
+    send_key(&input_tx, KeyCode::Char('m'));
+    assert!(matches!(
+        term.get_next_event().expect("refresh completion"),
+        Event::BufferChanged
+    ));
+
+    let snapshot = handle.output_snapshot();
+    assert_eq!(snapshot.suggestion_ids(), &[COMPLETION_MENU_BLOCK_ID]);
+}
+
 #[test]
 fn dynamic_slash_commands_are_in_root_completion_menu() {
     let data = CompletionData::new();
