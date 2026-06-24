@@ -1108,79 +1108,122 @@ fn apply_event(
     if let Some(usage) = event.get("usage") {
         capture_usage(state, usage);
     }
-    if let Some(error) = event.get("error")
-        && let Some(message) = error.get("message").and_then(|m| m.as_str())
-    {
-        let mut text = String::new();
-        if !state.text.is_empty() {
-            text.push_str("\n\n");
-        }
-        text.push_str(&format!("[OpenRouter Stream Error: {message}]"));
-        state.append_assistant_text_delta(&text)?;
-        state.stop_reason = ProviderStopReason::Error;
+    if apply_stream_error(state, event)? {
         on_update(state);
         return Ok(());
     }
-    let Some(choice) = event["choices"]
-        .as_array()
-        .and_then(|choices| choices.first())
-    else {
+    let Some(choice) = first_stream_choice(event) else {
         return Ok(());
     };
     let delta = &choice["delta"];
+    if apply_text_delta(state, delta)? {
+        on_update(state);
+    }
+    if apply_tool_call_deltas(state, delta)? {
+        on_update(state);
+    }
+    apply_finish_reason(state, choice);
+    Ok(())
+}
+
+fn apply_stream_error(
+    state: &mut StreamState,
+    event: &serde_json::Value,
+) -> Result<bool, LlmError> {
+    let Some(error) = event.get("error") else {
+        return Ok(false);
+    };
+    let Some(message) = error.get("message").and_then(|m| m.as_str()) else {
+        return Ok(false);
+    };
+    let mut text = String::new();
+    if !state.text.is_empty() {
+        text.push_str("\n\n");
+    }
+    text.push_str(&format!("[OpenRouter Stream Error: {message}]"));
+    state.append_assistant_text_delta(&text)?;
+    state.stop_reason = ProviderStopReason::Error;
+    Ok(true)
+}
+
+fn first_stream_choice(event: &serde_json::Value) -> Option<&serde_json::Value> {
+    event["choices"]
+        .as_array()
+        .and_then(|choices| choices.first())
+}
+
+fn apply_text_delta(state: &mut StreamState, delta: &serde_json::Value) -> Result<bool, LlmError> {
     let mut changed = false;
     for key in ["reasoning_content", "reasoning", "thinking"] {
-        if let Some(reasoning) = delta[key].as_str()
-            && !reasoning.is_empty()
-        {
+        if let Some(reasoning) = non_empty_str(&delta[key]) {
             state.append_reasoning_delta(reasoning)?;
             changed = true;
         }
     }
-    if let Some(content) = delta["content"].as_str()
-        && !content.is_empty()
-    {
+    if let Some(content) = non_empty_str(&delta["content"]) {
         changed |= append_content_delta(state, content)?;
     }
-    if changed {
-        on_update(state);
+    Ok(changed)
+}
+
+fn apply_tool_call_deltas(
+    state: &mut StreamState,
+    delta: &serde_json::Value,
+) -> Result<bool, LlmError> {
+    let Some(tool_calls) = delta["tool_calls"].as_array() else {
+        return Ok(false);
+    };
+    let mut changed = false;
+    for tool_call in tool_calls {
+        changed |= apply_tool_call_delta(state, tool_call)?;
     }
-    if let Some(tool_calls) = delta["tool_calls"].as_array() {
-        let mut changed_tools = false;
-        for tool_call in tool_calls {
-            let index = tool_call["index"].as_u64().unwrap_or(0) as usize;
-            let function = &tool_call["function"];
-            {
-                let entry = state.tool_call_at_mut(index);
-                if let Some(id) = tool_call["id"].as_str()
-                    && !id.is_empty()
-                {
-                    entry.id = id.to_owned();
-                    changed_tools = true;
-                }
-                if let Some(name) = function["name"].as_str()
-                    && !name.is_empty()
-                {
-                    entry.name = name.to_owned();
-                    changed_tools = true;
-                }
-            }
-            if let Some(arguments) = function["arguments"].as_str() {
-                state.append_tool_arguments_delta(index, arguments)?;
-                changed_tools = true;
-            }
-        }
-        if changed_tools {
-            on_update(state);
-        }
+    Ok(changed)
+}
+
+fn apply_tool_call_delta(
+    state: &mut StreamState,
+    tool_call: &serde_json::Value,
+) -> Result<bool, LlmError> {
+    let index = tool_call["index"].as_u64().unwrap_or(0) as usize;
+    let function = &tool_call["function"];
+    let mut changed = update_tool_call_metadata(state, index, tool_call, function);
+    if let Some(arguments) = function["arguments"].as_str() {
+        state.append_tool_arguments_delta(index, arguments)?;
+        changed = true;
     }
+    Ok(changed)
+}
+
+fn update_tool_call_metadata(
+    state: &mut StreamState,
+    index: usize,
+    tool_call: &serde_json::Value,
+    function: &serde_json::Value,
+) -> bool {
+    let entry = state.tool_call_at_mut(index);
+    let mut changed = false;
+    if let Some(id) = non_empty_str(&tool_call["id"]) {
+        entry.id = id.to_owned();
+        changed = true;
+    }
+    if let Some(name) = non_empty_str(&function["name"]) {
+        entry.name = name.to_owned();
+        changed = true;
+    }
+    changed
+}
+
+fn non_empty_str(value: &serde_json::Value) -> Option<&str> {
+    value.as_str().filter(|value| !value.is_empty())
+}
+
+fn apply_finish_reason(state: &mut StreamState, choice: &serde_json::Value) {
     match choice["finish_reason"].as_str() {
         Some("tool_calls") => state.stop_reason = ProviderStopReason::ToolCalls,
         Some("stop") => state.stop_reason = ProviderStopReason::EndTurn,
         Some("length") => state.stop_reason = ProviderStopReason::Length,
         _ => {}
     }
-    Ok(())
 }
 
 fn append_content_delta(state: &mut StreamState, content: &str) -> Result<bool, LlmError> {
