@@ -15,45 +15,106 @@ pub(crate) const DEFAULT_FIND_LIMIT: usize = 1000;
 const MAX_FIND_LIMIT: usize = MAX_OUTPUT_LINES;
 
 pub(crate) fn run_find(arguments: &CborValue) -> Result<ToolOutput, ToolFailure> {
+    let request = parse_find_request(arguments)?;
+    let search = prepare_find_search(&request)?;
+    let matches = collect_find_matches(&search)?;
+
+    Ok(render_find_output(request, matches))
+}
+
+/// Parsed and validated user request for the find tool.
+struct FindRequest {
+    /// Glob pattern used to match paths relative to the search root.
+    pattern: String,
+    /// Directory path supplied by the caller, defaulting to the current path.
+    path: String,
+    /// Maximum number of matches returned to the caller.
+    limit: usize,
+    /// Short argument summary rendered in UI state for successes and failures.
+    display_args: String,
+}
+
+/// Prepared filesystem search parameters for the find tool.
+struct FindSearch {
+    /// Root directory walked by the ignore-aware iterator.
+    path: PathBuf,
+    /// Compiled glob matcher applied to paths relative to `path`.
+    glob: GlobSet,
+    /// Number of matching paths to collect, including the sentinel past
+    /// `limit`.
+    collection_cap: usize,
+    /// Short argument summary rendered in UI state for failures.
+    display_args: String,
+}
+
+fn parse_find_request(arguments: &CborValue) -> Result<FindRequest, ToolFailure> {
     let pattern = argument_text(arguments, "pattern").map_err(ToolFailure::from)?;
     let path = optional_argument_text(arguments, "path")
         .map_err(ToolFailure::from)?
         .unwrap_or_else(|| ".".to_owned());
-    let limit = match optional_argument_int_strict(arguments, "limit").map_err(ToolFailure::from)? {
-        Some(value) if value < 1 => return Err(ToolFailure::new("limit must be >= 1")),
-        Some(value) => {
-            let limit =
-                usize::try_from(value).map_err(|_| ToolFailure::new("limit is too large"))?;
-            if MAX_FIND_LIMIT < limit {
-                return Err(ToolFailure::new(format!(
-                    "limit must be <= {MAX_FIND_LIMIT}"
-                )));
-            }
-            limit
-        }
-        None => DEFAULT_FIND_LIMIT,
-    };
-    let search_path = PathBuf::from(&path);
-    let display_args = format!("{pattern} in {}", search_path.display());
-    let with_args = |f: ToolFailure| f.with_args(display_args.clone());
+    let limit = parse_find_limit(arguments)?;
+    let display_args = format!("{pattern} in {}", PathBuf::from(&path).display());
 
-    let metadata = fs::metadata(&search_path).map_err(|e| {
-        with_args(ToolFailure::from(format!(
-            "failed to access {}: {e}",
-            search_path.display()
-        )))
+    Ok(FindRequest {
+        pattern,
+        path,
+        limit,
+        display_args,
+    })
+}
+
+fn parse_find_limit(arguments: &CborValue) -> Result<usize, ToolFailure> {
+    let Some(value) =
+        optional_argument_int_strict(arguments, "limit").map_err(ToolFailure::from)?
+    else {
+        return Ok(DEFAULT_FIND_LIMIT);
+    };
+
+    if value < 1 {
+        return Err(ToolFailure::new("limit must be >= 1"));
+    }
+    let limit = usize::try_from(value).map_err(|_| ToolFailure::new("limit is too large"))?;
+    if MAX_FIND_LIMIT < limit {
+        return Err(ToolFailure::new(format!(
+            "limit must be <= {MAX_FIND_LIMIT}"
+        )));
+    }
+    Ok(limit)
+}
+
+fn prepare_find_search(request: &FindRequest) -> Result<FindSearch, ToolFailure> {
+    let path = PathBuf::from(&request.path);
+    let metadata = fs::metadata(&path).map_err(|e| {
+        find_failure_with_args(
+            &request.display_args,
+            format!("failed to access {}: {e}", path.display()),
+        )
     })?;
     if !metadata.is_dir() {
-        return Err(with_args(ToolFailure::from(format!(
-            "not a directory: {}",
-            search_path.display()
-        ))));
+        return Err(find_failure_with_args(
+            &request.display_args,
+            format!("not a directory: {}", path.display()),
+        ));
     }
 
-    let glob = compile_find_glob(&pattern).map_err(|e| with_args(ToolFailure::from(e)))?;
+    let glob = compile_find_glob(&request.pattern)
+        .map_err(|e| ToolFailure::from(e).with_args(request.display_args.clone()))?;
+
+    Ok(FindSearch {
+        path,
+        glob,
+        collection_cap: request.limit.saturating_add(1),
+        display_args: request.display_args.clone(),
+    })
+}
+
+fn find_failure_with_args(args: &str, message: impl Into<String>) -> ToolFailure {
+    ToolFailure::new(message).with_args(args.to_owned())
+}
+
+fn collect_find_matches(search: &FindSearch) -> Result<Vec<String>, ToolFailure> {
     let mut matches = Vec::new();
-    let collection_cap = limit.saturating_add(1);
-    for entry in WalkBuilder::new(&search_path)
+    for entry in WalkBuilder::new(&search.path)
         .hidden(false)
         .parents(true)
         .ignore(true)
@@ -63,10 +124,10 @@ pub(crate) fn run_find(arguments: &CborValue) -> Result<ToolOutput, ToolFailure>
         .build()
     {
         let entry = entry.map_err(|e| {
-            with_args(ToolFailure::from(format!(
-                "failed to walk {}: {e}",
-                search_path.display()
-            )))
+            find_failure_with_args(
+                &search.display_args,
+                format!("failed to walk {}: {e}", search.path.display()),
+            )
         })?;
         let file_type = match entry.file_type() {
             Some(file_type) => file_type,
@@ -76,22 +137,26 @@ pub(crate) fn run_find(arguments: &CborValue) -> Result<ToolOutput, ToolFailure>
             continue;
         }
 
-        let Ok(relative_path) = entry.path().strip_prefix(&search_path) else {
+        let Ok(relative_path) = entry.path().strip_prefix(&search.path) else {
             continue;
         };
-        if glob.is_match(relative_path) {
+        if search.glob.is_match(relative_path) {
             matches.push(path_to_slash(relative_path));
-            if collection_cap <= matches.len() {
+            if search.collection_cap <= matches.len() {
                 break;
             }
         }
     }
     matches.sort_by_key(|entry| entry.to_lowercase());
 
+    Ok(matches)
+}
+
+fn render_find_output(request: FindRequest, matches: Vec<String>) -> ToolOutput {
     if matches.is_empty() {
-        let mut display = crate::display::ok_display(display_args.clone());
+        let mut display = crate::display::ok_display(request.display_args);
         display.stats.matches = Some(0);
-        return Ok(ToolOutput {
+        return ToolOutput {
             result: CborValue::Map(vec![
                 (
                     CborValue::Text("matches".to_owned()),
@@ -103,11 +168,11 @@ pub(crate) fn run_find(arguments: &CborValue) -> Result<ToolOutput, ToolFailure>
                 ),
             ]),
             display,
-        });
+        };
     }
 
     let observed_matches = matches.len();
-    let displayed: Vec<String> = matches.into_iter().take(limit).collect();
+    let displayed: Vec<String> = matches.into_iter().take(request.limit).collect();
     let limit_reached = observed_matches > displayed.len();
     let mut output_text = displayed.join("\n");
     let truncated = truncate_line_oriented(&output_text);
@@ -117,7 +182,7 @@ pub(crate) fn run_find(arguments: &CborValue) -> Result<ToolOutput, ToolFailure>
 
     let mut notices = Vec::new();
     if limit_reached {
-        notices.push(limit_reached_notice(limit));
+        notices.push(limit_reached_notice(request.limit));
     }
     if truncated.was_truncated {
         notices.push("50KB/2000 line output limit reached.".to_owned());
@@ -125,7 +190,7 @@ pub(crate) fn run_find(arguments: &CborValue) -> Result<ToolOutput, ToolFailure>
 
     output_text = append_notices_within_cap(output_text, &notices);
 
-    let mut display = crate::display::ok_display(display_args);
+    let mut display = crate::display::ok_display(request.display_args);
     display.stats = text_stats(&output_text);
     let mut result_entries = vec![
         (
@@ -143,10 +208,10 @@ pub(crate) fn run_find(arguments: &CborValue) -> Result<ToolOutput, ToolFailure>
             CborValue::Bool(true),
         ));
     }
-    Ok(ToolOutput {
+    ToolOutput {
         result: CborValue::Map(result_entries),
         display,
-    })
+    }
 }
 
 fn limit_reached_notice(limit: usize) -> String {
@@ -285,8 +350,8 @@ mod tests {
         assert_eq!(err.message, "limit must be >= 1");
     }
 
-    /// Ensures find stops after collecting one match past the requested limit,
-    /// bounding memory/traversal work while still adding the user-visible limit
+    /// Ensures find reports only the requested number of matches while still
+    /// detecting the sentinel match needed to add the user-visible limit
     /// notice.
     #[test]
     fn find_limit_bounds_collected_matches() {
