@@ -40,6 +40,24 @@ impl std::fmt::Display for AgentEventValidationError {
 
 impl std::error::Error for AgentEventValidationError {}
 
+fn validate_optional_display_name(
+    display_name: &Option<String>,
+) -> Result<(), AgentEventValidationError> {
+    if let Some(name) = display_name {
+        validate_display_name(name)?;
+    }
+    Ok(())
+}
+
+fn validate_display_name(display_name: &str) -> Result<(), AgentEventValidationError> {
+    if display_name.trim().is_empty() {
+        return Err(AgentEventValidationError::new(
+            "agent display name must not be empty",
+        ));
+    }
+    Ok(())
+}
+
 /// Monotonic sequence number in one persisted agent event log.
 ///
 /// This sequence is relative only to one agent's `events.cbor` stream: the
@@ -884,82 +902,129 @@ impl AgentTree {
     /// Validate an event against the current transcript fold state before
     /// appending it to the durable log.
     pub fn validate_event(&self, event: &Event) -> Result<(), AgentEventValidationError> {
+        if let Some(result) = self.validate_agent_state_event(event) {
+            return result;
+        }
+        if let Some(result) = self.validate_agent_message_event(event) {
+            return result;
+        }
+        if let Some(result) = self.validate_agent_fold_event(event) {
+            return result;
+        }
+        if let Some(result) = self.validate_tool_completion_event(event) {
+            return result;
+        }
+        if Self::is_agent_id_mismatch_event(event) {
+            return Err(AgentEventValidationError::new(
+                "agent event agent_id did not match target agent",
+            ));
+        }
+        Err(AgentEventValidationError::new(
+            "agent store only persists agent transcript events",
+        ))
+    }
+
+    fn validate_agent_state_event(
+        &self,
+        event: &Event,
+    ) -> Option<Result<(), AgentEventValidationError>> {
         match event {
             Event::AgentStarted(started) if started.agent_id == self.agent_id => {
-                if started
-                    .display_name
-                    .as_deref()
-                    .is_some_and(|name| name.trim().is_empty())
-                {
-                    Err(AgentEventValidationError::new(
-                        "agent display name must not be empty",
-                    ))
-                } else {
-                    Ok(())
-                }
+                Some(validate_optional_display_name(&started.display_name))
             }
             Event::AgentDisplayNameSet(name) if name.agent_id == self.agent_id => {
-                if name.display_name.trim().is_empty() {
-                    Err(AgentEventValidationError::new(
-                        "agent display name must not be empty",
-                    ))
-                } else {
-                    Ok(())
-                }
+                Some(validate_display_name(&name.display_name))
             }
-            Event::AgentMetadataSet(set) if set.agent_id == self.agent_id => Ok(()),
-            Event::AgentMetadataUnset(unset) if unset.agent_id == self.agent_id => Ok(()),
-            Event::AgentPromptSubmitted(prompt) if prompt.agent_id == self.agent_id => Ok(()),
-            Event::AgentUserMessageInjected(injected) if injected.agent_id == self.agent_id => {
-                Ok(())
-            }
-            Event::AgentPromptSteered(steered) if steered.agent_id == self.agent_id => Ok(()),
-            Event::AgentCompactionTriggered(triggered) if triggered.agent_id == self.agent_id => {
-                Ok(())
-            }
+            Event::AgentMetadataSet(set) if set.agent_id == self.agent_id => Some(Ok(())),
+            Event::AgentMetadataUnset(unset) if unset.agent_id == self.agent_id => Some(Ok(())),
+            _ => None,
+        }
+    }
+
+    fn validate_agent_message_event(
+        &self,
+        event: &Event,
+    ) -> Option<Result<(), AgentEventValidationError>> {
+        match event {
             Event::AgentMessageSent(message)
                 if self.agent_message_entry_from_sent(message).is_some() =>
             {
-                Ok(())
+                Some(Ok(()))
             }
             Event::AgentMessageReceived(message)
                 if self.agent_message_entry_from_received(message).is_some() =>
             {
-                Ok(())
+                Some(Ok(()))
+            }
+            _ => None,
+        }
+    }
+
+    fn validate_agent_fold_event(
+        &self,
+        event: &Event,
+    ) -> Option<Result<(), AgentEventValidationError>> {
+        match event {
+            Event::AgentPromptSubmitted(prompt) if prompt.agent_id == self.agent_id => Some(Ok(())),
+            Event::AgentUserMessageInjected(injected) if injected.agent_id == self.agent_id => {
+                Some(Ok(()))
+            }
+            Event::AgentPromptSteered(steered) if steered.agent_id == self.agent_id => Some(Ok(())),
+            Event::AgentCompactionTriggered(triggered) if triggered.agent_id == self.agent_id => {
+                Some(Ok(()))
             }
             Event::AgentHeadMoved(moved) if moved.agent_id == self.agent_id => {
-                self.validate_head_moved(moved)
+                Some(self.validate_head_moved(moved))
             }
             Event::ProviderResponseFinished(response) if response.agent_id == self.agent_id => {
-                self.validate_provider_response(response)
+                Some(self.validate_provider_response(response))
             }
+            _ => None,
+        }
+    }
+
+    fn validate_tool_completion_event(
+        &self,
+        event: &Event,
+    ) -> Option<Result<(), AgentEventValidationError>> {
+        match event {
             Event::ProviderToolResult(result) => {
-                self.validate_terminal_tool_result(&result.call_id)
+                Some(self.validate_terminal_tool_result(&result.call_id))
             }
             Event::ProviderToolError(error) | Event::ToolError(error) => {
-                self.validate_terminal_tool_result(&error.call_id)
+                Some(self.validate_terminal_tool_result(&error.call_id))
             }
             Event::ToolCancelled(cancelled) => {
-                self.validate_terminal_tool_result(&cancelled.call_id)
+                Some(self.validate_terminal_tool_result(&cancelled.call_id))
             }
-            Event::ToolBackgroundResult(result) => self.validate_known_tool_call(&result.call_id),
-            Event::ToolBackgroundError(error) => self.validate_known_tool_call(&error.call_id),
-            Event::AgentStarted(_)
-            | Event::AgentDisplayNameSet(_)
-            | Event::AgentPromptSubmitted(_)
-            | Event::AgentUserMessageInjected(_)
-            | Event::AgentPromptSteered(_)
-            | Event::AgentCompactionTriggered(_)
-            | Event::AgentMessageSent(_)
-            | Event::AgentMessageReceived(_)
-            | Event::AgentHeadMoved(_)
-            | Event::ProviderResponseFinished(_) => Err(AgentEventValidationError::new(
-                "agent event agent_id did not match target agent",
-            )),
-            _ => Err(AgentEventValidationError::new(
-                "agent store only persists agent transcript events",
-            )),
+            Event::ToolBackgroundResult(result) => {
+                Some(self.validate_known_tool_call(&result.call_id))
+            }
+            Event::ToolBackgroundError(error) => {
+                Some(self.validate_known_tool_call(&error.call_id))
+            }
+            _ => None,
         }
+    }
+
+    fn is_agent_id_mismatch_event(event: &Event) -> bool {
+        // Keep this list aligned with the historical mismatch diagnostics.
+        // Agent metadata events are intentionally excluded: metadata for a
+        // different agent still falls through to the generic non-transcript
+        // rejection instead of the agent-id mismatch diagnostic.
+        matches!(
+            event,
+            Event::AgentStarted(_)
+                | Event::AgentDisplayNameSet(_)
+                | Event::AgentPromptSubmitted(_)
+                | Event::AgentUserMessageInjected(_)
+                | Event::AgentPromptSteered(_)
+                | Event::AgentCompactionTriggered(_)
+                | Event::AgentMessageSent(_)
+                | Event::AgentMessageReceived(_)
+                | Event::AgentHeadMoved(_)
+                | Event::ProviderResponseFinished(_)
+        )
     }
 
     fn validate_provider_response(

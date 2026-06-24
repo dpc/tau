@@ -4,6 +4,27 @@ fn agent_id() -> AgentId {
     AgentId::parse("agent-metadata-test").expect("valid test agent id")
 }
 
+fn other_agent_id() -> AgentId {
+    AgentId::parse("other-agent").expect("valid test agent id")
+}
+
+fn prompt_event(agent_id: AgentId) -> Event {
+    Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+        agent_id,
+        text: "hello".to_owned(),
+        message_class: tau_proto::PromptMessageClass::User,
+        originator: PromptOriginator::User,
+        display_name: None,
+        ctx_id: None,
+    })
+}
+
+fn validation_error(tree: &AgentTree, event: Event) -> String {
+    tree.validate_event(&event)
+        .expect_err("event should be rejected")
+        .to_string()
+}
+
 /// Ensures metadata set/unset facts fold into side state without creating
 /// transcript nodes, preventing extension state from polluting prompts.
 #[test]
@@ -145,5 +166,90 @@ fn provider_tool_round_waits_for_all_terminal_results() {
     assert!(
         tree.unresolved_foreground_tool_calls_from(Some(tool_results_node_id))
             .is_empty()
+    );
+}
+
+/// Ensures the validation refactor preserves the distinct diagnostic for
+/// agent-scoped transcript events that target a different agent.
+#[test]
+fn validate_event_rejects_mismatched_transcript_agent_id() {
+    let tree = AgentTree::from_events(agent_id(), &[]);
+
+    assert_eq!(
+        validation_error(&tree, prompt_event(other_agent_id())),
+        "agent event agent_id did not match target agent"
+    );
+}
+
+/// Ensures non-agent-transcript events keep the generic durable-store
+/// diagnostic rather than being accepted by validation dispatch fallbacks.
+#[test]
+fn validate_event_rejects_non_agent_transcript_event() {
+    let tree = AgentTree::from_events(agent_id(), &[]);
+
+    assert_eq!(
+        validation_error(
+            &tree,
+            Event::HarnessNotice(tau_proto::HarnessNotice::new(
+                "test",
+                "not an agent transcript event",
+                tau_proto::NoticeLevel::Info,
+            )),
+        ),
+        "agent store only persists agent transcript events"
+    );
+}
+
+/// Ensures mismatched metadata preserves its historical generic diagnostic,
+/// preventing later cleanup from accidentally treating it like transcript
+/// agent-id mismatches.
+#[test]
+fn validate_event_rejects_mismatched_metadata_with_generic_diagnostic() {
+    let tree = AgentTree::from_events(agent_id(), &[]);
+
+    assert_eq!(
+        validation_error(
+            &tree,
+            Event::AgentMetadataSet(tau_proto::AgentMetadataSet {
+                agent_id: other_agent_id(),
+                key: tau_proto::AgentMetadataKey::new("ext_core-shell_cwd"),
+                value: tau_proto::CborValue::Text("/tmp".to_owned()),
+                inheritable: true,
+            }),
+        ),
+        "agent store only persists agent transcript events"
+    );
+}
+
+/// Ensures both creation-time and update-time blank display names keep the
+/// same rejection, because UIs rely on non-empty labels or id fallbacks.
+#[test]
+fn validate_event_rejects_blank_display_names() {
+    let agent_id = agent_id();
+    let tree = AgentTree::from_events(agent_id.clone(), &[]);
+
+    assert_eq!(
+        validation_error(
+            &tree,
+            Event::AgentStarted(tau_proto::AgentStarted {
+                agent_id: agent_id.clone(),
+                parent_agent: None,
+                role: "senior-engineer".to_owned(),
+                display_name: Some("   ".to_owned()),
+                metadata: Vec::new(),
+                ephemeral: false,
+            }),
+        ),
+        "agent display name must not be empty"
+    );
+    assert_eq!(
+        validation_error(
+            &tree,
+            Event::AgentDisplayNameSet(tau_proto::AgentDisplayNameSet {
+                agent_id,
+                display_name: "\t".to_owned(),
+            }),
+        ),
+        "agent display name must not be empty"
     );
 }
