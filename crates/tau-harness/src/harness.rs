@@ -3432,87 +3432,84 @@ impl Harness {
     }
 
     fn event_targets_ephemeral_agent(&self, event: &Event) -> bool {
+        self.agent_creation_event_targets_ephemeral_agent(event)
+            || self.agent_addressed_event_targets_ephemeral_agent(event)
+            || self.tool_event_targets_ephemeral_agent(event)
+            || self.agent_scoped_event_targets_ephemeral_agent(event)
+    }
+
+    fn agent_creation_event_targets_ephemeral_agent(&self, event: &Event) -> bool {
         match event {
             Event::UiCreateAgent(req) => {
-                return req.ephemeral
-                    || req
-                        .parent_agent
-                        .as_ref()
-                        .is_some_and(|agent_id| self.agent_is_ephemeral(agent_id));
-            }
-            Event::UiPromptSubmitted(prompt) => {
-                return self.agent_is_ephemeral(&prompt.agent_id);
+                req.ephemeral || self.agent_id_is_ephemeral(&req.parent_agent)
             }
             Event::StartAgentRequest(request) => {
-                return request
-                    .parent_agent
-                    .as_ref()
-                    .is_some_and(|agent_id| self.agent_is_ephemeral(agent_id))
+                self.agent_id_is_ephemeral(&request.parent_agent)
                     || request
                         .tool_call_id
                         .as_ref()
-                        .and_then(|call_id| self.tool_agents.get(call_id))
-                        .and_then(|cid| self.agents.get(cid))
-                        .is_some_and(|agent| agent.persistence.is_ephemeral());
+                        .is_some_and(|call_id| self.tool_call_targets_ephemeral_agent(call_id))
             }
-            Event::UiShellCommand(command) => {
-                return command
-                    .target_agent_id
-                    .as_ref()
-                    .is_some_and(|agent_id| self.agent_is_ephemeral(agent_id));
-            }
-            Event::ShellCommandProgress(progress) => {
-                return progress
-                    .target_agent_id
-                    .as_ref()
-                    .is_some_and(|agent_id| self.agent_is_ephemeral(agent_id));
-            }
-            Event::ShellCommandFinished(finished) => {
-                return finished
-                    .target_agent_id
-                    .as_ref()
-                    .is_some_and(|agent_id| self.agent_is_ephemeral(agent_id));
-            }
-            Event::AgentPromptCreated(prompt) => return self.agent_is_ephemeral(&prompt.agent_id),
-            Event::AgentPromptQueued(prompt) => return self.agent_is_ephemeral(&prompt.agent_id),
-            Event::AgentPromptRecalled(prompt) => return self.agent_is_ephemeral(&prompt.agent_id),
-            Event::AgentPromptTerminated(prompt) => {
-                return self.agent_is_ephemeral(&prompt.agent_id);
-            }
-            Event::AgentPromptPrewarmRequested(prompt) => {
-                return self.agent_is_ephemeral(&prompt.agent_id);
-            }
-            Event::ExtPromptSubmitRequest(request) => {
-                return self.agent_is_ephemeral(&request.agent_id);
-            }
-            Event::ProviderResponseUpdated(updated) => {
-                return self.agent_is_ephemeral(&updated.agent_id);
-            }
-            Event::ToolRequest(request) => return self.agent_is_ephemeral(&request.agent_id),
-            Event::ToolStarted(started) => return self.agent_is_ephemeral(&started.agent_id),
+            _ => false,
+        }
+    }
+
+    fn agent_addressed_event_targets_ephemeral_agent(&self, event: &Event) -> bool {
+        Self::agent_addressed_event_agent_id(event)
+            .is_some_and(|agent_id| self.agent_is_ephemeral(agent_id))
+    }
+
+    fn agent_addressed_event_agent_id(event: &Event) -> Option<&tau_proto::AgentId> {
+        match event {
+            Event::UiPromptSubmitted(prompt) => Some(&prompt.agent_id),
+            Event::UiShellCommand(command) => command.target_agent_id.as_ref(),
+            Event::ShellCommandProgress(progress) => progress.target_agent_id.as_ref(),
+            Event::ShellCommandFinished(finished) => finished.target_agent_id.as_ref(),
+            Event::AgentPromptCreated(prompt) => Some(&prompt.agent_id),
+            Event::AgentPromptQueued(prompt) => Some(&prompt.agent_id),
+            Event::AgentPromptRecalled(prompt) => Some(&prompt.agent_id),
+            Event::AgentPromptTerminated(prompt) => Some(&prompt.agent_id),
+            Event::AgentPromptPrewarmRequested(prompt) => Some(&prompt.agent_id),
+            Event::ExtPromptSubmitRequest(request) => Some(&request.agent_id),
+            Event::ProviderResponseUpdated(updated) => Some(&updated.agent_id),
+            Event::ToolRequest(request) => Some(&request.agent_id),
+            Event::ToolStarted(started) => Some(&started.agent_id),
+            _ => None,
+        }
+    }
+
+    fn tool_event_targets_ephemeral_agent(&self, event: &Event) -> bool {
+        match event {
             Event::ToolRejected(rejected) => {
-                return self.tool_call_targets_ephemeral_agent(&rejected.call_id);
+                self.tool_call_targets_ephemeral_agent(&rejected.call_id)
             }
-            Event::ToolResult(result) => {
-                return self.tool_call_targets_ephemeral_agent(&result.call_id);
-            }
+            Event::ToolResult(result) => self.tool_call_targets_ephemeral_agent(&result.call_id),
             Event::ToolProgress(progress) => {
-                return self.tool_call_targets_ephemeral_agent(&progress.call_id);
+                self.tool_call_targets_ephemeral_agent(&progress.call_id)
             }
             Event::ToolCancelRequest(cancel) => {
-                return self.tool_call_targets_ephemeral_agent(&cancel.target_call_id);
+                self.tool_call_targets_ephemeral_agent(&cancel.target_call_id)
             }
             Event::ToolCancelled(cancelled) => {
-                return self.tool_call_targets_ephemeral_agent(&cancelled.call_id);
+                self.tool_call_targets_ephemeral_agent(&cancelled.call_id)
             }
             Event::ToolDelegateProgress(progress) => {
-                return self.tool_call_targets_ephemeral_agent(&progress.call_id);
+                self.tool_call_targets_ephemeral_agent(&progress.call_id)
             }
-            _ => {}
+            _ => false,
         }
+    }
+
+    fn agent_scoped_event_targets_ephemeral_agent(&self, event: &Event) -> bool {
         self.agent_id_for_event(event)
             .or_else(|| self.agent_scoped_agent_id_for_event(event, None))
             .is_some_and(|agent_id| self.agent_is_ephemeral(&agent_id))
+    }
+
+    fn agent_id_is_ephemeral(&self, agent_id: &Option<tau_proto::AgentId>) -> bool {
+        agent_id
+            .as_ref()
+            .is_some_and(|agent_id| self.agent_is_ephemeral(agent_id))
     }
 
     fn tool_call_targets_ephemeral_agent(&self, call_id: &tau_proto::ToolCallId) -> bool {
