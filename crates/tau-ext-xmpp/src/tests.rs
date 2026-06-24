@@ -221,6 +221,15 @@ fn secrets() -> BTreeMap<String, tau_proto::SecretValue> {
     secrets
 }
 
+fn empty_password_secrets() -> BTreeMap<String, tau_proto::SecretValue> {
+    let mut secrets = BTreeMap::new();
+    secrets.insert(
+        "xmpp_password".to_owned(),
+        tau_proto::SecretValue::new("   "),
+    );
+    secrets
+}
+
 fn shutdown_flag() -> Arc<AtomicBool> {
     Arc::new(AtomicBool::new(false))
 }
@@ -276,8 +285,8 @@ fn xmpp_tool_examples_are_schema_valid() {
     }
 }
 
-/// Config validation fails closed when credentials, allowlist, default
-/// recipient, or MUC service information is absent or unsafe.
+/// Config validation fails closed when credentials, allowlist, routing, default
+/// recipient, MUC service, or message-size limits are absent or unsafe.
 #[test]
 fn config_rejects_unsafe_shapes() {
     let err = ExtConfig::default()
@@ -298,6 +307,36 @@ fn config_rejects_unsafe_shapes() {
     let err = ExtConfig {
         jid: Some("tau@example.org".to_owned()),
         password_secret: Some("xmpp_password".to_owned()),
+        ..Default::default()
+    }
+    .validate(&BTreeMap::new(), None)
+    .err()
+    .expect("missing password secret rejected");
+    assert!(err.contains("missing or empty"));
+
+    let err = ExtConfig {
+        jid: Some("tau@example.org".to_owned()),
+        password_secret: Some("xmpp_password".to_owned()),
+        ..Default::default()
+    }
+    .validate(&empty_password_secrets(), None)
+    .err()
+    .expect("empty password secret rejected");
+    assert!(err.contains("missing or empty"));
+
+    let err = ExtConfig {
+        jid: Some("tau@example.org".to_owned()),
+        password_secret: Some("xmpp_password".to_owned()),
+        ..Default::default()
+    }
+    .validate(&secrets(), None)
+    .err()
+    .expect("empty allowlist rejected");
+    assert!(err.contains("allowed_jids"));
+
+    let err = ExtConfig {
+        jid: Some("tau@example.org".to_owned()),
+        password_secret: Some("xmpp_password".to_owned()),
         allowed_jids: vec!["me@example.org".to_owned()],
         default_recipient: Some("other@example.org".to_owned()),
         routing: RoutingConfig {
@@ -309,6 +348,52 @@ fn config_rejects_unsafe_shapes() {
     .err()
     .expect("default recipient not allowed");
     assert!(err.contains("default_recipient"));
+
+    let err = ExtConfig {
+        jid: Some("tau@example.org".to_owned()),
+        password_secret: Some("xmpp_password".to_owned()),
+        allowed_jids: vec!["me@example.org".to_owned()],
+        default_recipient: Some("me@example.org".to_owned()),
+        routing: RoutingConfig {
+            mode: Some("carrier_pigeon".to_owned()),
+        },
+        ..Default::default()
+    }
+    .validate(&secrets(), None)
+    .err()
+    .expect("unsupported routing mode rejected");
+    assert!(err.contains("routing.mode"));
+
+    let err = ExtConfig {
+        jid: Some("tau@example.org".to_owned()),
+        password_secret: Some("xmpp_password".to_owned()),
+        allowed_jids: vec!["me@example.org".to_owned()],
+        default_recipient: Some("me@example.org".to_owned()),
+        routing: RoutingConfig {
+            mode: Some("muc".to_owned()),
+        },
+        ..Default::default()
+    }
+    .validate(&secrets(), None)
+    .err()
+    .expect("muc service required");
+    assert!(err.contains("muc.service"));
+
+    let err = ExtConfig {
+        jid: Some("tau@example.org".to_owned()),
+        password_secret: Some("xmpp_password".to_owned()),
+        allowed_jids: vec!["me@example.org".to_owned()],
+        default_recipient: Some("me@example.org".to_owned()),
+        routing: RoutingConfig {
+            mode: Some("direct_resource".to_owned()),
+        },
+        max_message_bytes: Some(0),
+        ..Default::default()
+    }
+    .validate(&secrets(), None)
+    .err()
+    .expect("zero limit rejected");
+    assert!(err.contains("max_message_bytes"));
 
     let err = ExtConfig {
         jid: Some("tau@example.org".to_owned()),

@@ -251,102 +251,150 @@ impl ExtConfig {
         secrets: &BTreeMap<String, tau_proto::SecretValue>,
         instance_name: Option<String>,
     ) -> Result<RuntimeConfig, String> {
-        let account_text = self
-            .jid
-            .ok_or_else(|| "xmpp config requires `jid`".to_owned())?;
-        let account = Jid::new(&account_text).map_err(|e| format!("invalid xmpp `jid`: {e}"))?;
-        if account.resource().is_some() {
-            return Err(
-                "xmpp `jid` must be a bare account JID; Tau generates unique resources".to_owned(),
-            );
-        }
-        let secret_name = self
-            .password_secret
-            .ok_or_else(|| "xmpp config requires `password_secret`".to_owned())?;
-        let password = secrets
-            .get(&secret_name)
-            .map(tau_proto::SecretValue::expose_secret)
-            .filter(|password| !password.trim().is_empty())
-            .ok_or_else(|| format!("xmpp secret `{secret_name}` is missing or empty"))?;
-        if self.allowed_jids.is_empty() {
-            return Err("xmpp config requires non-empty `allowed_jids`".to_owned());
-        }
-        let allowed_jids = self
-            .allowed_jids
-            .iter()
-            .map(|entry| AllowedJid::parse(entry))
-            .collect::<Result<Vec<_>, _>>()?;
-        let default_text = self
-            .default_recipient
-            .ok_or_else(|| "xmpp config requires `default_recipient`".to_owned())?;
-        let default_recipient = Jid::new(&default_text)
-            .map_err(|e| format!("invalid xmpp `default_recipient`: {e}"))?;
-        if !allowed_jids
-            .iter()
-            .any(|allowed| allowed.matches(&default_recipient))
-        {
-            return Err("xmpp `default_recipient` must match `allowed_jids`".to_owned());
-        }
-        let routing_mode = match self.routing.mode.as_deref().unwrap_or("muc") {
-            "muc" => RoutingMode::Muc,
-            "direct_resource" => RoutingMode::DirectResource,
-            other => return Err(format!("unsupported xmpp routing.mode `{other}`")),
-        };
-        let muc_service = match self.muc.service {
-            Some(service) => {
-                let jid =
-                    Jid::new(&service).map_err(|e| format!("invalid xmpp muc.service: {e}"))?;
-                if jid.node().is_some() || jid.resource().is_some() {
-                    return Err(
-                        "xmpp `muc.service` must be a domain-only JID like `conference.example.org`"
-                            .to_owned(),
-                    );
-                }
-                Some(jid.to_bare())
-            }
-            None => None,
-        };
-        if routing_mode == RoutingMode::Muc && muc_service.is_none() {
-            return Err("xmpp routing.mode `muc` requires `muc.service`".to_owned());
-        }
-        let max_message_bytes = self.max_message_bytes.unwrap_or(DEFAULT_MESSAGE_LIMIT);
-        if max_message_bytes == 0 {
-            return Err("xmpp `max_message_bytes` must be greater than zero".to_owned());
-        }
-        if max_message_bytes > MAX_MESSAGE_LIMIT {
-            return Err(format!(
-                "xmpp `max_message_bytes` must be at most {MAX_MESSAGE_LIMIT}"
-            ));
-        }
+        let account_jid = validate_account_jid(self.jid)?;
+        let password = resolve_password(secrets, self.password_secret)?;
+        let allowed_jids = validate_allowed_jids(self.allowed_jids)?;
+        let default_recipient = validate_default_recipient(self.default_recipient, &allowed_jids)?;
+        let routing_mode = self.routing.validate()?;
+        let muc = self.muc.validate(routing_mode)?;
+        let max_message_bytes = validate_max_message_bytes(self.max_message_bytes)?;
         Ok(RuntimeConfig {
-            account_jid: account.to_bare(),
-            password: password.to_owned(),
+            account_jid,
+            password,
             allowed_jids,
             default_recipient,
             routing_mode,
-            resource_prefix: clean_token_or(
-                self.resource_prefix
-                    .as_deref()
-                    .unwrap_or(DEFAULT_RESOURCE_PREFIX),
-                DEFAULT_RESOURCE_PREFIX,
-            ),
-            muc: MucConfig {
-                service: muc_service,
-                room_prefix: clean_token_or(
-                    self.muc
-                        .room_prefix
-                        .as_deref()
-                        .unwrap_or(DEFAULT_ROOM_PREFIX),
-                    DEFAULT_ROOM_PREFIX,
-                ),
-                expose_real_jids: self.muc.expose_real_jids.unwrap_or(true),
-                trust_muc_membership: self.muc.trust_muc_membership.unwrap_or(false),
-                invite_default_recipient: self.muc.invite_default_recipient.unwrap_or(true),
-            },
+            resource_prefix: validate_resource_prefix(self.resource_prefix),
+            muc,
             max_message_bytes,
             instance_name,
         })
     }
+}
+
+impl RoutingConfig {
+    /// Validate the configured routing mode.
+    fn validate(self) -> Result<RoutingMode, String> {
+        match self.mode.as_deref().unwrap_or("muc") {
+            "muc" => Ok(RoutingMode::Muc),
+            "direct_resource" => Ok(RoutingMode::DirectResource),
+            other => Err(format!("unsupported xmpp routing.mode `{other}`")),
+        }
+    }
+}
+
+impl MucConfigRaw {
+    /// Validate MUC-specific options for the selected routing mode.
+    fn validate(self, routing_mode: RoutingMode) -> Result<MucConfig, String> {
+        let service = validate_muc_service(self.service)?;
+        if routing_mode == RoutingMode::Muc && service.is_none() {
+            return Err("xmpp routing.mode `muc` requires `muc.service`".to_owned());
+        }
+        Ok(MucConfig {
+            service,
+            room_prefix: validate_room_prefix(self.room_prefix),
+            expose_real_jids: self.expose_real_jids.unwrap_or(true),
+            trust_muc_membership: self.trust_muc_membership.unwrap_or(false),
+            invite_default_recipient: self.invite_default_recipient.unwrap_or(true),
+        })
+    }
+}
+
+fn validate_account_jid(jid: Option<String>) -> Result<BareJid, String> {
+    let account_text = jid.ok_or_else(|| "xmpp config requires `jid`".to_owned())?;
+    let account = Jid::new(&account_text).map_err(|e| format!("invalid xmpp `jid`: {e}"))?;
+    if account.resource().is_some() {
+        return Err(
+            "xmpp `jid` must be a bare account JID; Tau generates unique resources".to_owned(),
+        );
+    }
+    Ok(account.to_bare())
+}
+
+fn resolve_password(
+    secrets: &BTreeMap<String, tau_proto::SecretValue>,
+    password_secret: Option<String>,
+) -> Result<String, String> {
+    let secret_name =
+        password_secret.ok_or_else(|| "xmpp config requires `password_secret`".to_owned())?;
+    secrets
+        .get(&secret_name)
+        .map(tau_proto::SecretValue::expose_secret)
+        .filter(|password| !password.trim().is_empty())
+        .map(str::to_owned)
+        .ok_or_else(|| format!("xmpp secret `{secret_name}` is missing or empty"))
+}
+
+fn validate_allowed_jids(entries: Vec<String>) -> Result<Vec<AllowedJid>, String> {
+    if entries.is_empty() {
+        return Err("xmpp config requires non-empty `allowed_jids`".to_owned());
+    }
+    entries
+        .iter()
+        .map(|entry| AllowedJid::parse(entry))
+        .collect::<Result<Vec<_>, _>>()
+}
+
+fn validate_default_recipient(
+    default_recipient: Option<String>,
+    allowed_jids: &[AllowedJid],
+) -> Result<Jid, String> {
+    let default_text =
+        default_recipient.ok_or_else(|| "xmpp config requires `default_recipient`".to_owned())?;
+    let default_recipient =
+        Jid::new(&default_text).map_err(|e| format!("invalid xmpp `default_recipient`: {e}"))?;
+    if allowed_jids
+        .iter()
+        .any(|allowed| allowed.matches(&default_recipient))
+    {
+        Ok(default_recipient)
+    } else {
+        Err("xmpp `default_recipient` must match `allowed_jids`".to_owned())
+    }
+}
+
+fn validate_muc_service(service: Option<String>) -> Result<Option<BareJid>, String> {
+    service
+        .map(|service| {
+            let jid = Jid::new(&service).map_err(|e| format!("invalid xmpp muc.service: {e}"))?;
+            if jid.node().is_some() || jid.resource().is_some() {
+                return Err(
+                    "xmpp `muc.service` must be a domain-only JID like `conference.example.org`"
+                        .to_owned(),
+                );
+            }
+            Ok(jid.to_bare())
+        })
+        .transpose()
+}
+
+fn validate_max_message_bytes(max_message_bytes: Option<usize>) -> Result<usize, String> {
+    let max_message_bytes = max_message_bytes.unwrap_or(DEFAULT_MESSAGE_LIMIT);
+    if max_message_bytes == 0 {
+        return Err("xmpp `max_message_bytes` must be greater than zero".to_owned());
+    }
+    if max_message_bytes > MAX_MESSAGE_LIMIT {
+        return Err(format!(
+            "xmpp `max_message_bytes` must be at most {MAX_MESSAGE_LIMIT}"
+        ));
+    }
+    Ok(max_message_bytes)
+}
+
+fn validate_resource_prefix(resource_prefix: Option<String>) -> String {
+    clean_token_or(
+        resource_prefix
+            .as_deref()
+            .unwrap_or(DEFAULT_RESOURCE_PREFIX),
+        DEFAULT_RESOURCE_PREFIX,
+    )
+}
+
+fn validate_room_prefix(room_prefix: Option<String>) -> String {
+    clean_token_or(
+        room_prefix.as_deref().unwrap_or(DEFAULT_ROOM_PREFIX),
+        DEFAULT_ROOM_PREFIX,
+    )
 }
 
 #[derive(Default)]
