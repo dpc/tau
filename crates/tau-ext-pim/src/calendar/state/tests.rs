@@ -96,6 +96,108 @@ fn claimed_calendar_change_can_be_released_after_provider_failure() {
 }
 
 #[test]
+fn calendar_change_approval_validation_rejects_unsafe_persisted_records() {
+    // Persisted approvals gate side-effecting calendar writes. Keep representative
+    // rejection cases pinned so validation helper refactors cannot accidentally
+    // skip identity, status, metadata, field, description, or attendee checks.
+    #[derive(Clone, Copy)]
+    enum Mutation {
+        UnsupportedSchema,
+        EmbeddedIdMismatch,
+        StatusMismatch,
+        UnsupportedCommand,
+        UnsafeTitle,
+        UnsafeDescription,
+        TooManyAttendees,
+        UnsafeAttendee,
+    }
+
+    let base = || {
+        let mut approval = CalendarChangeApproval::pending("create_event", "google", "primary");
+        approval.id = "1".to_owned();
+        approval
+    };
+
+    use Mutation::{
+        EmbeddedIdMismatch, StatusMismatch, TooManyAttendees, UnsafeAttendee, UnsafeDescription,
+        UnsafeTitle, UnsupportedCommand, UnsupportedSchema,
+    };
+
+    for (case, mutate, expected_id, expected_error) in [
+        (
+            "unsupported schema",
+            UnsupportedSchema,
+            Some("1"),
+            "unsupported schema",
+        ),
+        (
+            "embedded id mismatch",
+            EmbeddedIdMismatch,
+            Some("2"),
+            "mismatched embedded id",
+        ),
+        (
+            "status mismatch",
+            StatusMismatch,
+            Some("1"),
+            "mismatched embedded status",
+        ),
+        (
+            "unsupported command",
+            UnsupportedCommand,
+            Some("1"),
+            "unsafe metadata",
+        ),
+        (
+            "unsafe title",
+            UnsafeTitle,
+            Some("1"),
+            "field `title` contains unsafe text",
+        ),
+        (
+            "unsafe description",
+            UnsafeDescription,
+            Some("1"),
+            "field `description` contains unsafe text",
+        ),
+        (
+            "too many attendees",
+            TooManyAttendees,
+            Some("1"),
+            "too many attendees",
+        ),
+        (
+            "unsafe attendee",
+            UnsafeAttendee,
+            Some("1"),
+            "unsafe attendee",
+        ),
+    ] {
+        let mut approval = base();
+        match mutate {
+            UnsupportedSchema => approval.schema = CHANGE_SCHEMA + 1,
+            EmbeddedIdMismatch => {}
+            StatusMismatch => approval.status = "approved".to_owned(),
+            UnsupportedCommand => approval.command = "unknown".to_owned(),
+            UnsafeTitle => approval.title = Some("unsafe\nline".to_owned()),
+            UnsafeDescription => approval.description = Some("unsafe\u{202e}text".to_owned()),
+            TooManyAttendees => {
+                approval.attendees = Some(vec!["person@example.test".to_owned(); 201])
+            }
+            UnsafeAttendee => approval.attendees = Some(vec!["unsafe\nattendee".to_owned()]),
+        }
+
+        let error =
+            validate_calendar_change_approval(&approval, "pending", expected_id).expect_err(case);
+
+        assert!(
+            error.contains(expected_error),
+            "{case}: `{error}` did not contain `{expected_error}`"
+        );
+    }
+}
+
+#[test]
 fn google_auth_tokens_and_pending_requests_are_private() {
     // Google refresh tokens and device codes are secrets. Persist them only
     // under owner-only files named by a hash of the account id.

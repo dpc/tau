@@ -577,6 +577,18 @@ fn validate_calendar_change_approval(
     expected_status: &str,
     expected_id: Option<&str>,
 ) -> Result<(), String> {
+    validate_change_approval_identity(approval, expected_status, expected_id)?;
+    validate_change_approval_metadata(approval)?;
+    validate_change_approval_fields(approval)?;
+    validate_change_approval_attendees(approval)?;
+    Ok(())
+}
+
+fn validate_change_approval_identity(
+    approval: &CalendarChangeApproval,
+    expected_status: &str,
+    expected_id: Option<&str>,
+) -> Result<(), String> {
     if approval.schema != CHANGE_SCHEMA {
         return Err(format!(
             "calendar change `{}` has unsupported schema",
@@ -603,29 +615,59 @@ fn validate_calendar_change_approval(
             approval.id
         ));
     }
-    if !matches!(
-        approval.command.as_str(),
-        "create_event" | "update_event" | "delete_event" | "respond_invite"
-    ) || !is_safe_persisted_line(&approval.command, MAX_CHANGE_FIELD_CHARS)
-        || !is_safe_persisted_line(&approval.account, MAX_CHANGE_FIELD_CHARS)
-        || !is_safe_persisted_line(&approval.calendar, MAX_CHANGE_FIELD_CHARS)
-        || !is_safe_persisted_line(&approval.reason, MAX_CHANGE_FIELD_CHARS)
-    {
+    Ok(())
+}
+
+fn validate_change_approval_metadata(approval: &CalendarChangeApproval) -> Result<(), String> {
+    if !is_allowed_calendar_change_command(&approval.command) {
         return Err(format!(
             "calendar change `{}` contains unsafe metadata",
             approval.id
         ));
     }
-    validate_optional_line(approval.event_id.as_ref(), "event_id")?;
-    validate_optional_line(approval.etag.as_ref(), "etag")?;
-    validate_optional_line(approval.title.as_ref(), "title")?;
+
+    for value in [
+        &approval.command,
+        &approval.account,
+        &approval.calendar,
+        &approval.reason,
+    ] {
+        if !is_safe_persisted_line(value, MAX_CHANGE_FIELD_CHARS) {
+            return Err(format!(
+                "calendar change `{}` contains unsafe metadata",
+                approval.id
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn is_allowed_calendar_change_command(command: &str) -> bool {
+    matches!(
+        command,
+        "create_event" | "update_event" | "delete_event" | "respond_invite"
+    )
+}
+
+fn validate_change_approval_fields(approval: &CalendarChangeApproval) -> Result<(), String> {
+    for (field, value) in [
+        ("event_id", approval.event_id.as_ref()),
+        ("etag", approval.etag.as_ref()),
+        ("title", approval.title.as_ref()),
+        ("location", approval.location.as_ref()),
+        ("start", approval.start.as_ref()),
+        ("end", approval.end.as_ref()),
+        ("timezone", approval.timezone.as_ref()),
+        ("response", approval.response.as_ref()),
+        ("result_event_id", approval.result_event_id.as_ref()),
+    ] {
+        validate_optional_line(value, field)?;
+    }
     validate_optional_multiline(approval.description.as_ref(), "description")?;
-    validate_optional_line(approval.location.as_ref(), "location")?;
-    validate_optional_line(approval.start.as_ref(), "start")?;
-    validate_optional_line(approval.end.as_ref(), "end")?;
-    validate_optional_line(approval.timezone.as_ref(), "timezone")?;
-    validate_optional_line(approval.response.as_ref(), "response")?;
-    validate_optional_line(approval.result_event_id.as_ref(), "result_event_id")?;
+    Ok(())
+}
+
+fn validate_change_approval_attendees(approval: &CalendarChangeApproval) -> Result<(), String> {
     if let Some(attendees) = &approval.attendees {
         if MAX_ATTENDEES_HARD < attendees.len() {
             return Err("calendar change contains too many attendees".to_owned());
