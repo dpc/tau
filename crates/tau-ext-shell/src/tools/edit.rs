@@ -25,59 +25,19 @@ pub(crate) fn edit_file(
 
     let edits = argument_array(arguments, "edits")
         .map_err(|error| with_display_args(&display_args, ToolFailure::from(error)))?;
-    if edits.is_empty() {
-        return Err(with_display_args(
-            &display_args,
-            ToolFailure::new("edits array must not be empty"),
-        ));
-    }
-    if MAX_EDITS_PER_CALL < edits.len() {
-        return Err(with_display_args(
-            &display_args,
-            ToolFailure::new(format!(
-                "requested edit count exceeds limit of {MAX_EDITS_PER_CALL}"
-            )),
-        ));
-    }
+    validate_edit_count(edits.len(), &display_args)?;
 
     let (original_bytes, original_missing) =
         read_original_or_empty(&path_buf, &display_args, world)?;
     let original_lines = LineIndex::new(&original_bytes);
 
-    let mut replacements = Vec::new();
-    let mut requested_ranges = Vec::new();
-    for edit in edits {
-        reject_legacy_line_count(edit, &display_args)?;
-        let range = parse_edit_range(edit, &original_lines, &display_args)?;
-        let new_text = cbor_map_text(edit, "newText").ok_or_else(|| {
-            with_display_args(
-                &display_args,
-                ToolFailure::new("each edit must have a string newText"),
-            )
-        })?;
-        requested_ranges.push(range.display.clone());
-        display_args = edit_display_args(&display_path, &requested_ranges);
-        let context_line = parse_required_context_line(edit, &display_args)?;
-        let start_byte = original_lines.byte_start_for_line(range.start_line, original_bytes.len());
-        let end_byte =
-            original_lines.byte_start_for_line(range.end_line_exclusive, original_bytes.len());
-        let mut new_text = new_text.as_bytes().to_vec();
-        normalize_new_text_line_ending(
-            &mut new_text,
-            &original_bytes,
-            &original_lines,
-            &range,
-            start_byte,
-        );
-        replacements.push(LineReplacement {
-            start_line: range.start_line,
-            end_line_exclusive: range.end_line_exclusive,
-            start_byte,
-            end_byte,
-            new_text,
-            context_line,
-        });
-    }
+    let mut replacements = collect_line_replacements(
+        edits,
+        &display_path,
+        &mut display_args,
+        &original_bytes,
+        &original_lines,
+    )?;
 
     validate_non_overlapping(&replacements, &display_args)?;
     validate_context_lines(
@@ -87,14 +47,7 @@ pub(crate) fn edit_file(
         &display_args,
     )?;
 
-    let mut result = original_bytes.clone();
-    replacements.sort_by_key(|replacement| std::cmp::Reverse(replacement.start_byte));
-    for replacement in &replacements {
-        result.splice(
-            replacement.start_byte..replacement.end_byte,
-            replacement.new_text.iter().copied(),
-        );
-    }
+    let result = apply_line_replacements(&original_bytes, &mut replacements);
 
     let changed = original_missing || result != original_bytes;
     if changed {
@@ -104,25 +57,11 @@ pub(crate) fn edit_file(
         })?;
     }
 
-    let diff = match (
-        std::str::from_utf8(&original_bytes),
-        std::str::from_utf8(&result),
-    ) {
-        (Ok(original), Ok(result)) => Some(compute_diff(original, result)),
-        _ => None,
-    };
-
     let display = ToolUseState {
         args: display_args.clone(),
         status: ToolUseStatus::Success,
         status_text: "ok".to_owned(),
-        payload: match diff {
-            Some(diff) if changed => Some(ToolUsePayload::Diff(diff)),
-            None if changed => Some(ToolUsePayload::Text {
-                text: "[diff skipped: file is not valid UTF-8]".to_owned(),
-            }),
-            _ => None,
-        },
+        payload: edit_display_payload(&original_bytes, &result, changed),
         ..Default::default()
     };
     let result_lines = LineIndex::new(&result);
@@ -135,6 +74,102 @@ pub(crate) fn edit_file(
         ),
         display,
     })
+}
+
+fn validate_edit_count(edits: usize, display_args: &str) -> Result<(), ToolFailure> {
+    if edits == 0 {
+        return Err(with_display_args(
+            display_args,
+            ToolFailure::new("edits array must not be empty"),
+        ));
+    }
+    if MAX_EDITS_PER_CALL < edits {
+        return Err(with_display_args(
+            display_args,
+            ToolFailure::new(format!(
+                "requested edit count exceeds limit of {MAX_EDITS_PER_CALL}"
+            )),
+        ));
+    }
+    Ok(())
+}
+
+fn collect_line_replacements<'a>(
+    edits: &'a [CborValue],
+    display_path: &str,
+    display_args: &mut String,
+    original_bytes: &[u8],
+    original_lines: &LineIndex,
+) -> Result<Vec<LineReplacement<'a>>, ToolFailure> {
+    let mut replacements = Vec::new();
+    let mut requested_ranges = Vec::new();
+    for edit in edits {
+        reject_legacy_line_count(edit, display_args)?;
+        let range = parse_edit_range(edit, original_lines, display_args)?;
+        let new_text = cbor_map_text(edit, "newText").ok_or_else(|| {
+            with_display_args(
+                display_args,
+                ToolFailure::new("each edit must have a string newText"),
+            )
+        })?;
+        requested_ranges.push(range.display.clone());
+        *display_args = edit_display_args(display_path, &requested_ranges);
+        let context_line = parse_required_context_line(edit, display_args)?;
+        let start_byte = original_lines.byte_start_for_line(range.start_line, original_bytes.len());
+        let end_byte =
+            original_lines.byte_start_for_line(range.end_line_exclusive, original_bytes.len());
+        let mut new_text = new_text.as_bytes().to_vec();
+        normalize_new_text_line_ending(
+            &mut new_text,
+            original_bytes,
+            original_lines,
+            &range,
+            start_byte,
+        );
+        replacements.push(LineReplacement {
+            start_line: range.start_line,
+            end_line_exclusive: range.end_line_exclusive,
+            start_byte,
+            end_byte,
+            new_text,
+            context_line,
+        });
+    }
+    Ok(replacements)
+}
+
+fn apply_line_replacements(
+    original_bytes: &[u8],
+    replacements: &mut [LineReplacement<'_>],
+) -> Vec<u8> {
+    let mut result = original_bytes.to_vec();
+    replacements.sort_by_key(|replacement| std::cmp::Reverse(replacement.start_byte));
+    for replacement in replacements {
+        result.splice(
+            replacement.start_byte..replacement.end_byte,
+            replacement.new_text.iter().copied(),
+        );
+    }
+    result
+}
+
+fn edit_display_payload(
+    original_bytes: &[u8],
+    result: &[u8],
+    changed: bool,
+) -> Option<ToolUsePayload> {
+    if !changed {
+        return None;
+    }
+    match (
+        std::str::from_utf8(original_bytes),
+        std::str::from_utf8(result),
+    ) {
+        (Ok(original), Ok(result)) => Some(ToolUsePayload::Diff(compute_diff(original, result))),
+        _ => Some(ToolUsePayload::Text {
+            text: "[diff skipped: file is not valid UTF-8]".to_owned(),
+        }),
+    }
 }
 
 struct EditRange {
