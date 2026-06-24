@@ -697,6 +697,17 @@ fn validate_auth_config(
     let Some(config) = config else {
         return Ok(None);
     };
+    reject_deprecated_auth_config(account_id, &config)?;
+    match config.method {
+        AuthMethod::Command => Err(migration_error(account_id, "auth.method command")),
+        AuthMethod::Oauth2 => validate_oauth2_auth_config(account_id, config),
+        AuthMethod::Password | AuthMethod::None => {
+            validate_non_oauth2_auth_config(account_id, config)
+        }
+    }
+}
+
+fn reject_deprecated_auth_config(account_id: &str, config: &AuthConfig) -> Result<(), String> {
     if config.password_env.is_some() {
         return Err(migration_error(account_id, "auth.password_env"));
     }
@@ -709,41 +720,51 @@ fn validate_auth_config(
     if config.oauth2_token_command.is_some() {
         return Err(migration_error(account_id, "auth.oauth2_token_command"));
     }
-    if matches!(config.method, AuthMethod::Command) {
-        return Err(migration_error(account_id, "auth.method command"));
+    Ok(())
+}
+
+fn validate_oauth2_auth_config(
+    account_id: &str,
+    config: AuthConfig,
+) -> Result<Option<ValidatedAuthConfig>, String> {
+    if config.password_secret.is_some() {
+        return Err(format!(
+            "account `{account_id}` auth.password_secret is only valid for password auth"
+        ));
     }
-    if matches!(config.method, AuthMethod::Oauth2) {
-        if config.password_secret.is_some() {
-            return Err(format!(
-                "account `{account_id}` auth.password_secret is only valid for password auth"
-            ));
-        }
-        if config.provider != Some(EmailOauth2Provider::Google) {
-            return Err(format!(
-                "account `{account_id}` auth.provider must be google for oauth2 email auth"
-            ));
-        }
-        let client_id_secret = config.client_id_secret.ok_or_else(|| {
-            format!(
-                "account `{account_id}` auth.client_id_secret is required for oauth2 google auth"
-            )
-        })?;
-        validate_secret_name(account_id, "auth.client_id_secret", &client_id_secret)?;
-        if let Some(secret) = &config.client_secret_secret {
-            validate_secret_name(account_id, "auth.client_secret_secret", secret)?;
-        }
-        if let Some(secret) = &config.refresh_token_secret {
-            validate_secret_name(account_id, "auth.refresh_token_secret", secret)?;
-        }
-        return Ok(Some(ValidatedAuthConfig {
-            method: config.method,
-            password_secret: None,
-            provider: config.provider,
-            client_id_secret: Some(client_id_secret),
-            client_secret_secret: config.client_secret_secret,
-            refresh_token_secret: config.refresh_token_secret,
-        }));
+    if config.provider != Some(EmailOauth2Provider::Google) {
+        return Err(format!(
+            "account `{account_id}` auth.provider must be google for oauth2 email auth"
+        ));
     }
+    let client_id_secret = config.client_id_secret.ok_or_else(|| {
+        format!("account `{account_id}` auth.client_id_secret is required for oauth2 google auth")
+    })?;
+    validate_secret_name(account_id, "auth.client_id_secret", &client_id_secret)?;
+    validate_optional_secret_name(
+        account_id,
+        "auth.client_secret_secret",
+        config.client_secret_secret.as_deref(),
+    )?;
+    validate_optional_secret_name(
+        account_id,
+        "auth.refresh_token_secret",
+        config.refresh_token_secret.as_deref(),
+    )?;
+    Ok(Some(ValidatedAuthConfig {
+        method: config.method,
+        password_secret: None,
+        provider: config.provider,
+        client_id_secret: Some(client_id_secret),
+        client_secret_secret: config.client_secret_secret,
+        refresh_token_secret: config.refresh_token_secret,
+    }))
+}
+
+fn validate_non_oauth2_auth_config(
+    account_id: &str,
+    config: AuthConfig,
+) -> Result<Option<ValidatedAuthConfig>, String> {
     if config.provider.is_some()
         || config.client_id_secret.is_some()
         || config.client_secret_secret.is_some()
@@ -758,11 +779,11 @@ fn validate_auth_config(
             "account `{account_id}` auth.password_secret is required for password auth; declare the secret under the enabled extension's secrets and set auth.password_secret to that name"
         ));
     }
-    if let Some(secret) = &config.password_secret
-        && let Err(message) = validate_secret_name(account_id, "auth.password_secret", secret)
-    {
-        return Err(message);
-    }
+    validate_optional_secret_name(
+        account_id,
+        "auth.password_secret",
+        config.password_secret.as_deref(),
+    )?;
     Ok(Some(ValidatedAuthConfig {
         method: config.method,
         password_secret: config.password_secret,
@@ -771,6 +792,17 @@ fn validate_auth_config(
         client_secret_secret: None,
         refresh_token_secret: None,
     }))
+}
+
+fn validate_optional_secret_name(
+    account_id: &str,
+    field: &str,
+    secret: Option<&str>,
+) -> Result<(), String> {
+    if let Some(secret) = secret {
+        validate_secret_name(account_id, field, secret)?;
+    }
+    Ok(())
 }
 
 fn inactive_auth_config(config: Option<AuthConfig>) -> Option<ValidatedAuthConfig> {
