@@ -732,157 +732,215 @@ pub(crate) fn dispatch_dir_lock_tool(
         return;
     }
 
-    let command = match argument_text(&invoke.arguments, "command") {
-        Ok(command) => command,
-        Err(message) => {
-            send_event(
-                tx,
-                tool_error(&invoke, message, Some(invoke.arguments.clone())),
-            );
-            return;
-        }
-    };
-    let dir_arg = match argument_text(&invoke.arguments, "directory") {
-        Ok(directory) => directory,
-        Err(message) => {
-            send_event(
-                tx,
-                tool_error(&invoke, message, Some(invoke.arguments.clone())),
-            );
-            return;
-        }
-    };
-    let dir = match canonical_existing_dir(Path::new(&dir_arg)) {
-        Ok(dir) => dir,
-        Err(message) => {
-            send_event(
-                tx,
-                tool_error_with_args(
-                    &invoke,
-                    message,
-                    Some(invoke.arguments.clone()),
-                    Some(dir_arg.clone()),
-                ),
-            );
+    let request = match DirLockToolRequest::parse(&invoke) {
+        Ok(request) => request,
+        Err(error) => {
+            send_event(tx, *error);
             return;
         }
     };
 
-    match command.as_str() {
-        "update" => {
-            let wait_invoke = invoke.clone();
-            let wait_dir = dir.clone();
-            let wait_tx = tx.clone();
-            match manager.acquire_manual(
-                invoke.call_id.clone(),
-                invoke.agent_id.clone(),
-                dir.clone(),
-                move || {
-                    send_event(
-                        &wait_tx,
-                        waiting_progress_event(&wait_invoke, &[wait_dir], None),
-                    )
-                },
-            ) {
-                Ok(()) => send_event(
-                    tx,
-                    tool_result(
-                        &invoke,
-                        dir_lock_result_value(&dir_arg, &dir, Some(true)),
-                        dir_lock_display("update", &dir),
-                    ),
-                ),
-                Err(ManualLockAcquireError::Cancelled) => {
-                    send_event(tx, cancelled_event(invoke));
-                }
-                Err(ManualLockAcquireError::AlreadyHeld { dir: held_dir }) => send_event(
-                    tx,
-                    tool_error_with_args(
-                        &invoke,
-                        DUPLICATE_LOCK_ERROR.to_owned(),
-                        Some(duplicate_manual_lock_details(
-                            &invoke.agent_id,
-                            &held_dir,
-                            &dir,
-                        )),
-                        Some(dir_lock_display_args("update", &dir)),
-                    ),
-                ),
-                Err(ManualLockAcquireError::Abandoned(lock)) => send_event(
-                    tx,
-                    tool_error_with_args(
-                        &invoke,
-                        lock.message(),
-                        Some(lock.details()),
-                        Some(dir_lock_display_args("update", &lock.dir)),
-                    ),
-                ),
-            }
+    match request.command.as_str() {
+        "update" => dispatch_dir_lock_update(invoke, manager, tx, request),
+        "unlock" => dispatch_dir_lock_unlock(invoke, manager, tx, request),
+        _ => send_event(tx, invalid_dir_lock_command_error(&invoke, &request)),
+    }
+}
+
+struct DirLockToolRequest {
+    command: String,
+    input_directory: String,
+    dir: PathBuf,
+}
+
+impl DirLockToolRequest {
+    fn parse(invoke: &ToolStarted) -> Result<Self, Box<Event>> {
+        let command = argument_text(&invoke.arguments, "command").map_err(|message| {
+            Box::new(tool_error(invoke, message, Some(invoke.arguments.clone())))
+        })?;
+        let input_directory = argument_text(&invoke.arguments, "directory").map_err(|message| {
+            Box::new(tool_error(invoke, message, Some(invoke.arguments.clone())))
+        })?;
+        let dir = canonical_existing_dir(Path::new(&input_directory)).map_err(|message| {
+            Box::new(tool_error_with_args(
+                invoke,
+                message,
+                Some(invoke.arguments.clone()),
+                Some(input_directory.clone()),
+            ))
+        })?;
+
+        Ok(Self {
+            command,
+            input_directory,
+            dir,
+        })
+    }
+}
+
+fn dispatch_dir_lock_update(
+    invoke: ToolStarted,
+    manager: &DirLockManager,
+    tx: &mpsc::Sender<HarnessInputMessage>,
+    request: DirLockToolRequest,
+) {
+    let wait_invoke = invoke.clone();
+    let wait_dir = request.dir.clone();
+    let wait_tx = tx.clone();
+    let acquire_result = manager.acquire_manual(
+        invoke.call_id.clone(),
+        invoke.agent_id.clone(),
+        request.dir.clone(),
+        move || {
+            send_event(
+                &wait_tx,
+                waiting_progress_event(&wait_invoke, &[wait_dir], None),
+            )
+        },
+    );
+
+    match acquire_result {
+        Ok(()) => send_dir_lock_update_result(&invoke, tx, &request),
+        Err(ManualLockAcquireError::Cancelled) => send_event(tx, cancelled_event(invoke)),
+        Err(ManualLockAcquireError::AlreadyHeld { dir: held_dir }) => {
+            send_duplicate_dir_lock_error(&invoke, tx, &request.dir, &held_dir);
         }
-        "unlock" => {
-            let owner_arg = match optional_argument_text(&invoke.arguments, "owner_agent_id") {
-                Ok(owner_arg) => owner_arg,
-                Err(message) => {
-                    send_event(
-                        tx,
-                        tool_error_with_args(
-                            &invoke,
-                            message,
-                            Some(invoke.arguments.clone()),
-                            Some(dir_lock_display_args("unlock", &dir)),
-                        ),
-                    );
-                    return;
-                }
-            };
-            let owner = match owner_arg.as_deref() {
-                Some(owner) => match owner.parse::<AgentId>() {
-                    Ok(owner) => owner,
-                    Err(error) => {
-                        send_event(
-                            tx,
-                            tool_error_with_args(
-                                &invoke,
-                                format!("invalid owner_agent_id `{owner}`: {error}"),
-                                Some(invoke.arguments.clone()),
-                                Some(dir_lock_display_args("unlock", &dir)),
-                            ),
-                        );
-                        return;
-                    }
-                },
-                None => invoke.agent_id.clone(),
-            };
-            match manager.unlock_manual(&owner, &dir) {
-                Ok(()) => send_event(
-                    tx,
-                    tool_result(
-                        &invoke,
-                        dir_lock_result_value(&dir_arg, &dir, Some(false)),
-                        dir_lock_display("unlock", &dir),
-                    ),
-                ),
-                Err(message) => send_event(
-                    tx,
-                    tool_error_with_args(
-                        &invoke,
-                        message,
-                        Some(invoke.arguments.clone()),
-                        Some(dir_lock_display_args("unlock", &dir)),
-                    ),
-                ),
-            }
+        Err(ManualLockAcquireError::Abandoned(lock)) => {
+            send_abandoned_dir_lock_error(&invoke, tx, "update", &lock);
         }
-        _ => send_event(
+    }
+}
+
+fn dispatch_dir_lock_unlock(
+    invoke: ToolStarted,
+    manager: &DirLockManager,
+    tx: &mpsc::Sender<HarnessInputMessage>,
+    request: DirLockToolRequest,
+) {
+    let owner = match dir_lock_unlock_owner(&invoke, &request.dir) {
+        Ok(owner) => owner,
+        Err(error) => {
+            send_event(tx, *error);
+            return;
+        }
+    };
+
+    match manager.unlock_manual(&owner, &request.dir) {
+        Ok(()) => send_dir_lock_unlock_result(&invoke, tx, &request),
+        Err(message) => send_event(
             tx,
             tool_error_with_args(
                 &invoke,
-                "argument `command` must be `update` or `unlock`".to_owned(),
+                message,
                 Some(invoke.arguments.clone()),
-                Some(dir_lock_display_args(command.as_str(), &dir)),
+                Some(dir_lock_display_args("unlock", &request.dir)),
             ),
         ),
     }
+}
+
+fn dir_lock_unlock_owner(invoke: &ToolStarted, dir: &Path) -> Result<AgentId, Box<Event>> {
+    let owner_arg =
+        optional_argument_text(&invoke.arguments, "owner_agent_id").map_err(|message| {
+            Box::new(tool_error_with_args(
+                invoke,
+                message,
+                Some(invoke.arguments.clone()),
+                Some(dir_lock_display_args("unlock", dir)),
+            ))
+        })?;
+
+    match owner_arg.as_deref() {
+        Some(owner) => owner.parse::<AgentId>().map_err(|error| {
+            Box::new(tool_error_with_args(
+                invoke,
+                format!("invalid owner_agent_id `{owner}`: {error}"),
+                Some(invoke.arguments.clone()),
+                Some(dir_lock_display_args("unlock", dir)),
+            ))
+        }),
+        None => Ok(invoke.agent_id.clone()),
+    }
+}
+
+fn send_dir_lock_update_result(
+    invoke: &ToolStarted,
+    tx: &mpsc::Sender<HarnessInputMessage>,
+    request: &DirLockToolRequest,
+) {
+    send_dir_lock_result(invoke, tx, "update", request, true);
+}
+
+fn send_dir_lock_unlock_result(
+    invoke: &ToolStarted,
+    tx: &mpsc::Sender<HarnessInputMessage>,
+    request: &DirLockToolRequest,
+) {
+    send_dir_lock_result(invoke, tx, "unlock", request, false);
+}
+
+fn send_dir_lock_result(
+    invoke: &ToolStarted,
+    tx: &mpsc::Sender<HarnessInputMessage>,
+    command: &str,
+    request: &DirLockToolRequest,
+    locked: bool,
+) {
+    send_event(
+        tx,
+        tool_result(
+            invoke,
+            dir_lock_result_value(&request.input_directory, &request.dir, Some(locked)),
+            dir_lock_display(command, &request.dir),
+        ),
+    );
+}
+
+fn send_duplicate_dir_lock_error(
+    invoke: &ToolStarted,
+    tx: &mpsc::Sender<HarnessInputMessage>,
+    requested_dir: &Path,
+    held_dir: &Path,
+) {
+    send_event(
+        tx,
+        tool_error_with_args(
+            invoke,
+            DUPLICATE_LOCK_ERROR.to_owned(),
+            Some(duplicate_manual_lock_details(
+                &invoke.agent_id,
+                held_dir,
+                requested_dir,
+            )),
+            Some(dir_lock_display_args("update", requested_dir)),
+        ),
+    );
+}
+
+fn send_abandoned_dir_lock_error(
+    invoke: &ToolStarted,
+    tx: &mpsc::Sender<HarnessInputMessage>,
+    command: &str,
+    lock: &AbandonedLock,
+) {
+    send_event(
+        tx,
+        tool_error_with_args(
+            invoke,
+            lock.message(),
+            Some(lock.details()),
+            Some(dir_lock_display_args(command, &lock.dir)),
+        ),
+    );
+}
+
+fn invalid_dir_lock_command_error(invoke: &ToolStarted, request: &DirLockToolRequest) -> Event {
+    tool_error_with_args(
+        invoke,
+        "argument `command` must be `update` or `unlock`".to_owned(),
+        Some(invoke.arguments.clone()),
+        Some(dir_lock_display_args(&request.command, &request.dir)),
+    )
 }
 
 /// Return the canonical update-lock directories for a mutating ext-shell tool.
