@@ -76,6 +76,22 @@ authorization code. Routed `ActionInvoke` delivery still carries the raw
 argument to the owning extension. Future schema/protocol sensitive-argument
 metadata should replace this action-id-specific debug-log redaction.
 
+## Client event boundary
+
+UI clients are local UI/control peers, not providers. Client `emit` intake must
+preserve provider ownership by routing provider-category events through the
+extension/provider event path, where provider-source and prompt-owner validation
+still apply. Non-provider client events are partitioned into harness-owned UI
+commands, validated per-agent metadata set/unset facts, and a narrow fallback
+allowlist. UI command handlers keep their existing keep-going result at the
+dispatch-helper boundary; the outer client-message layer remains responsible for
+connection lifetime. Metadata writes are validated and enqueued through the normal
+publish path; fallback publication is limited to explicitly allowed UI/live
+events and extension-owned custom events, using the explicit transient override
+or the event default. Tool lifecycle/terminal facts and harness-owned lifecycle,
+membership, transcript, and status facts must not be accepted through client
+fallback.
+
 ## Extension boundary
 
 Extensions are less-trusted peers connected over the Tau protocol. They may

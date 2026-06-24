@@ -5308,18 +5308,77 @@ impl Harness {
             return Ok(true);
         }
 
+        let (keep_going, event) = self.handle_client_ui_event(client_id, event)?;
+        let Some(event) = event else {
+            return Ok(keep_going);
+        };
+        let Some(event) = self.handle_client_agent_metadata_event(client_id, event) else {
+            return Ok(true);
+        };
+        self.handle_client_fallback_event(client_id, event, transient_override);
+        Ok(true)
+    }
+
+    fn handle_client_ui_event(
+        &mut self,
+        client_id: &str,
+        event: Event,
+    ) -> Result<(bool, Option<Event>), HarnessError> {
         match event {
-            Event::UiRoleSelect(select) => self.handle_ui_role_select(select),
-            Event::UiAgentModelSelect(select) => self.handle_ui_agent_model_select(select),
-            Event::UiRoleUpdate(req) => self.handle_ui_role_update(req),
-            Event::UiPromptSubmitted(prompt) => self.handle_ui_prompt_submitted(prompt),
-            Event::ActionInvoke(invoke) => self.handle_action_invoke(client_id, invoke),
+            Event::UiRoleSelect(select) => self
+                .handle_ui_role_select(select)
+                .map(|keep_going| (keep_going, None)),
+            Event::UiAgentModelSelect(select) => self
+                .handle_ui_agent_model_select(select)
+                .map(|keep_going| (keep_going, None)),
+            Event::UiRoleUpdate(req) => self
+                .handle_ui_role_update(req)
+                .map(|keep_going| (keep_going, None)),
+            Event::UiPromptSubmitted(prompt) => self
+                .handle_ui_prompt_submitted(prompt)
+                .map(|keep_going| (keep_going, None)),
+            Event::ActionInvoke(invoke) => self
+                .handle_action_invoke(client_id, invoke)
+                .map(|keep_going| (keep_going, None)),
             Event::ActionSchemaPublished(_) | Event::ActionResult(_) | Event::ActionError(_) => {
-                Ok(true)
+                Ok((true, None))
             }
-            Event::UiSwitchSession(req) => self.handle_ui_switch_session(client_id, req),
-            Event::UiCreateAgent(req) => self.handle_ui_create_agent(req),
-            Event::UiSetAgentDisplayName(req) => self.handle_ui_set_agent_display_name(req),
+            Event::UiSwitchSession(req) => self
+                .handle_ui_switch_session(client_id, req)
+                .map(|keep_going| (keep_going, None)),
+            Event::UiCreateAgent(req) => self
+                .handle_ui_create_agent(req)
+                .map(|keep_going| (keep_going, None)),
+            Event::UiSetAgentDisplayName(req) => self
+                .handle_ui_set_agent_display_name(req)
+                .map(|keep_going| (keep_going, None)),
+            Event::UiTreeRequest(req) => self
+                .handle_ui_tree_request(client_id, req)
+                .map(|keep_going| (keep_going, None)),
+            Event::UiNavigateTree(req) => self
+                .handle_ui_navigate_tree(client_id, req)
+                .map(|keep_going| (keep_going, None)),
+            Event::UiCompactRequest(req) => self
+                .handle_ui_compact_request(client_id, req)
+                .map(|keep_going| (keep_going, None)),
+            Event::UiCancelPrompt(req) => {
+                self.handle_cancel_prompt(&req);
+                Ok((true, None))
+            }
+            Event::UiRecallQueuedPrompt(req) => {
+                self.handle_recall_queued_prompt(&req);
+                Ok((true, None))
+            }
+            other => Ok((true, Some(other))),
+        }
+    }
+
+    fn handle_client_agent_metadata_event(
+        &mut self,
+        client_id: &str,
+        event: Event,
+    ) -> Option<Event> {
+        match event {
             Event::AgentMetadataSet(set) => {
                 if self.validate_agent_metadata_set(&set).is_ok() {
                     self.enqueue_publish(
@@ -5330,7 +5389,7 @@ impl Harness {
                         None,
                     );
                 }
-                Ok(true)
+                None
             }
             Event::AgentMetadataUnset(unset) => {
                 if self.validate_agent_metadata_unset(&unset).is_ok() {
@@ -5342,31 +5401,26 @@ impl Harness {
                         None,
                     );
                 }
-                Ok(true)
+                None
             }
-            Event::UiTreeRequest(req) => self.handle_ui_tree_request(client_id, req),
-            Event::UiNavigateTree(req) => self.handle_ui_navigate_tree(client_id, req),
-            Event::UiCompactRequest(req) => self.handle_ui_compact_request(client_id, req),
-            Event::UiCancelPrompt(req) => {
-                self.handle_cancel_prompt(&req);
-                Ok(true)
-            }
-            Event::UiRecallQueuedPrompt(req) => {
-                self.handle_recall_queued_prompt(&req);
-                Ok(true)
-            }
-            other => {
-                if !Self::is_client_fallback_emit_allowed(&other)
-                    || Self::requires_tool_event_intake(&other)
-                    || Self::is_peer_forbidden_harness_fact(&other)
-                {
-                    return Ok(true);
-                }
-                let transient = transient_override.unwrap_or_else(|| other.defaults_to_transient());
-                self.enqueue_publish(Some(client_id), other, transient, false, None);
-                Ok(true)
-            }
+            other => Some(other),
         }
+    }
+
+    fn handle_client_fallback_event(
+        &mut self,
+        client_id: &str,
+        event: Event,
+        transient_override: Option<bool>,
+    ) {
+        if !Self::is_client_fallback_emit_allowed(&event)
+            || Self::requires_tool_event_intake(&event)
+            || Self::is_peer_forbidden_harness_fact(&event)
+        {
+            return;
+        }
+        let transient = transient_override.unwrap_or_else(|| event.defaults_to_transient());
+        self.enqueue_publish(Some(client_id), event, transient, false, None);
     }
 
     fn handle_ui_role_select(
