@@ -91,7 +91,7 @@ use crate::prompt::{
     built_in_system_prompt_templates, render_agents_context_message,
     render_effective_prompt_message,
 };
-use crate::secrets::{load_secret_sources, resolve_extension_secrets};
+use crate::secrets::{ResolvedExtensionSecrets, load_secret_sources, resolve_extension_secrets};
 use crate::settings::{Config, ExtensionStartupDiagnostic, load_harness_settings_or_warn};
 use crate::tool_turn::{ForegroundAction, PendingToolInvocation, ToolTurnMachine};
 
@@ -1818,6 +1818,56 @@ struct HarnessBaseParts {
     dirs: tau_config::settings::TauDirs,
 }
 
+struct ConfiguredHarnessStartup {
+    /// Session root used for stores, debug logs, and supervised extension logs.
+    sessions_dir: PathBuf,
+    /// Secrets and optional-extension skip state resolved before extension
+    /// spawn.
+    extension_secrets: ResolvedExtensionSecrets,
+    /// Non-fatal harness settings parse error to surface after clients attach.
+    harness_settings_error: Option<tau_config::settings::SettingsError>,
+    /// Missing configured startup role warning to surface after clients attach.
+    missing_default_role: Option<MissingDefaultRole>,
+    /// Timestamp used for startup tracing.
+    started_at: Instant,
+}
+
+struct StartupRoles {
+    /// Effective roles loaded from harness settings.
+    available_roles: HashMap<String, tau_config::settings::AgentRole>,
+    /// Runtime role overrides loaded from settings.
+    role_overrides: HashMap<String, tau_config::settings::AgentRole>,
+    /// Startup role selected after fallback handling.
+    selected_role: String,
+    /// Role groups visible to clients.
+    available_role_groups: Vec<tau_proto::HarnessRoleGroup>,
+    /// Warning emitted when the configured default role was unavailable.
+    missing_default_role: Option<MissingDefaultRole>,
+    /// Model selected for the startup role before provider metadata arrives.
+    selected_model: Option<ModelId>,
+}
+
+struct StartupHarnessParts {
+    /// Runtime state directory for this harness.
+    state_dir: PathBuf,
+    /// Filesystem/config directories used by the harness.
+    dirs: tau_config::settings::TauDirs,
+    /// Policy store backing event-bus subscription policy.
+    policy_store: PolicyStore,
+    /// Session store with the eager session not yet loaded.
+    store: SessionStore,
+    /// Per-agent transcript store.
+    agent_store: AgentStore,
+    /// Session id the harness is initially bound to.
+    eager_session_id: String,
+    /// Launch reason and persistence policy.
+    launch: HarnessSessionLaunch,
+    /// Effective harness settings.
+    harness_settings: tau_config::settings::HarnessSettings,
+    /// Startup role selection state.
+    roles: StartupRoles,
+}
+
 /// One user-facing `/tree` prompt rewind anchor derived from durable prompt
 /// provenance and resolved through the folded agent tree.
 struct PromptAnchorTarget<'a> {
@@ -2217,127 +2267,27 @@ impl Harness {
         initial_client_error_stream: &mut Option<InitialClientStartupErrorOutput>,
     ) -> Result<(Self, Option<ConnectionId>), HarnessError> {
         let launch = launch.validate()?;
-        let session_persistence = launch.session_persistence;
-        let startup_started_at = Instant::now();
         tracing::debug!(target: "tau_harness::startup", eager_session_id, "constructing harness from config");
         let state_dir = state_dir.into();
-        let sessions_dir = tau_config::settings::sessions_dir_of(&state_dir);
-        let (tx, rx) = mpsc::channel();
-        tracing::debug!(target: "tau_harness::startup", elapsed_ms = startup_started_at.elapsed().as_millis(), "opening policy store");
-        let policy_store = PolicyStore::open(policy_store_path_from(&state_dir))?;
-        tracing::debug!(target: "tau_harness::startup", elapsed_ms = startup_started_at.elapsed().as_millis(), "policy store opened");
-        let bus = EventBus::with_subscription_policy(Box::new(
-            DefaultSubscriptionPolicy::with_store(policy_store),
-        ));
-        tracing::debug!(target: "tau_harness::startup", elapsed_ms = startup_started_at.elapsed().as_millis(), "opening session store");
-        let agents_dir = state_dir.join("agents");
-        let store = if session_persistence.is_ephemeral() {
-            SessionStore::open_ephemeral(&sessions_dir)?
-        } else {
-            SessionStore::open_lazy(&sessions_dir)?
-        };
-        let agent_store = AgentStore::open_lazy(&agents_dir)?;
-        tracing::debug!(target: "tau_harness::startup", elapsed_ms = startup_started_at.elapsed().as_millis(), "session store opened");
-
-        let secret_sources =
-            load_secret_sources().map_err(|error| HarnessError::Participant(error.to_string()))?;
-        let extension_secrets = resolve_extension_secrets(config, &state_dir, &secret_sources)
-            .map_err(|error| HarnessError::Participant(error.to_string()))?;
-
-        tracing::debug!(target: "tau_harness::startup", elapsed_ms = startup_started_at.elapsed().as_millis(), "loading harness settings");
-        let (harness_settings, harness_settings_error) = load_harness_settings_or_warn(&dirs);
-        let system_prompt_templates = load_system_prompt_templates(dirs.config_dir.as_deref());
-        let LoadedRoles {
-            roles: available_roles,
-            role_overrides,
-            selected_role,
-            role_groups: available_role_groups,
-            missing_default_role,
-        } = load_roles(&harness_settings);
-        let custom_prompts = harness_settings
-            .custom_prompts
-            .iter()
-            .map(|prompt| tau_proto::HarnessCustomPrompt {
-                id: prompt.id.clone(),
-                text: prompt.text.clone(),
-            })
-            .collect();
-        if available_roles.is_empty() {
-            return Err(HarnessError::Participant(
-                "no roles are enabled; enable at least one role in harness.yaml or with --enable-role <role>".to_owned(),
-            ));
-        }
-        let selected_model =
-            select_model_for_role(&HashMap::new(), &available_roles, &selected_role);
-        tracing::debug!(target: "tau_harness::startup", selected_model = ?selected_model, elapsed_ms = startup_started_at.elapsed().as_millis(), "harness settings loaded");
-        if session_persistence.is_durable() {
-            crate::session_cleanup::spawn_session_cleanup(
-                sessions_dir.clone(),
-                harness_settings.session_retention(),
-            );
-        }
-        let mut store = store;
-        let _ = store.load_session(eager_session_id)?;
-        let mut harness = Self::from_base_parts(HarnessBaseParts {
-            tx,
-            rx,
-            bus,
-            state_dir: state_dir.clone(),
-            store,
-            agent_store,
-            session_persistence,
-            current_session_id: eager_session_id.into(),
-            current_session_start_reason: launch.reason,
-            available_roles,
-            available_role_groups,
-            custom_prompts,
-            role_overrides,
-            tool_policy: harness_settings.tool_policy.clone(),
-            selected_role,
-            selected_model,
-            agent_id_template: harness_settings.agent_id_template.clone(),
-            agent_display_name_template: harness_settings.agent_display_name_template.clone(),
-            system_prompt_templates,
-            dirs,
-        });
-
-        if session_persistence.is_durable() {
-            let _ = harness.enable_debug_log(&sessions_dir.join(eager_session_id))?;
-            tracing::debug!(target: "tau_harness::startup", elapsed_ms = startup_started_at.elapsed().as_millis(), "debug event log enabled");
-            // Record metadata so `-r` can find this session even before it has
-            // membership entries. Also acquires the flock on
-            // `<sessions_dir>/<eager_session_id>/lock`.
-            harness.store.record_session_meta(eager_session_id)?;
-            tracing::debug!(target: "tau_harness::startup", elapsed_ms = startup_started_at.elapsed().as_millis(), "session metadata recorded");
-        }
+        let (mut harness, startup) =
+            Self::build_configured_harness(config, state_dir, dirs, eager_session_id, launch)?;
 
         if matches!(launch.reason, tau_proto::SessionStartReason::Resume) {
             harness.rehydrate_agents_from_session();
         }
-        let initial_client_id = if let Some(initial_client) = initial_client {
-            let client_id = match initial_client {
-                InitialClient::Stdio => harness.accept_stdio_client()?,
-            };
-            *initial_client_error_stream = None;
-            if let Err(error) = harness.wait_for_initial_ui_subscribe() {
-                harness.send_startup_disconnect_to_initial_client(Some(&client_id), &error);
-                return Err(error);
-            }
-            Some(client_id)
-        } else {
-            None
-        };
+        let initial_client_id =
+            harness.accept_initial_client(initial_client, initial_client_error_stream)?;
         harness.publish_current_session_dir();
         harness.emit_extension_startup_diagnostics(&config.extension_startup_diagnostics);
-        harness.emit_extension_startup_diagnostics(&extension_secrets.diagnostics);
+        harness.emit_extension_startup_diagnostics(&startup.extension_secrets.diagnostics);
 
         if let Err(error) = harness.spawn_configured_extensions(
             config,
-            &sessions_dir,
+            &startup.sessions_dir,
             eager_session_id,
-            &extension_secrets.secrets,
-            &extension_secrets.skipped_extensions,
-            startup_started_at,
+            &startup.extension_secrets.secrets,
+            &startup.extension_secrets.skipped_extensions,
+            startup.started_at,
         ) {
             harness.send_startup_disconnect_to_initial_client(initial_client_id.as_ref(), &error);
             return Err(error);
@@ -2346,24 +2296,242 @@ impl Harness {
             harness.send_startup_disconnect_to_initial_client(initial_client_id.as_ref(), &error);
             return Err(error);
         }
-        tracing::debug!(target: "tau_harness::startup", elapsed_ms = startup_started_at.elapsed().as_millis(), "extensions ready");
+        tracing::debug!(target: "tau_harness::startup", elapsed_ms = startup.started_at.elapsed().as_millis(), "extensions ready");
         #[cfg(test)]
         harness.register_harness_tools();
         harness.publish_delegate_roles_context();
-        tracing::debug!(target: "tau_harness::startup", elapsed_ms = startup_started_at.elapsed().as_millis(), "harness tools registered");
+        tracing::debug!(target: "tau_harness::startup", elapsed_ms = startup.started_at.elapsed().as_millis(), "harness tools registered");
         harness.check_config_exists();
-        harness.emit_startup_settings_errors(harness_settings_error);
-        harness.emit_missing_default_role(missing_default_role);
-        tracing::debug!(target: "tau_harness::startup", elapsed_ms = startup_started_at.elapsed().as_millis(), "config checks complete");
+        harness.emit_startup_settings_errors(startup.harness_settings_error);
+        harness.emit_missing_default_role(startup.missing_default_role);
+        tracing::debug!(target: "tau_harness::startup", elapsed_ms = startup.started_at.elapsed().as_millis(), "config checks complete");
 
         harness.start_session_init(eager_session_id.into(), launch.reason);
-        tracing::debug!(target: "tau_harness::startup", elapsed_ms = startup_started_at.elapsed().as_millis(), "session init started");
+        tracing::debug!(target: "tau_harness::startup", elapsed_ms = startup.started_at.elapsed().as_millis(), "session init started");
         if let Err(error) = harness.wait_for_session_init() {
             harness.send_startup_disconnect_to_initial_client(initial_client_id.as_ref(), &error);
             return Err(error);
         }
-        tracing::debug!(target: "tau_harness::startup", elapsed_ms = startup_started_at.elapsed().as_millis(), "session init complete");
+        tracing::debug!(target: "tau_harness::startup", elapsed_ms = startup.started_at.elapsed().as_millis(), "session init complete");
         Ok((harness, initial_client_id))
+    }
+
+    fn build_configured_harness(
+        config: &Config,
+        state_dir: PathBuf,
+        dirs: tau_config::settings::TauDirs,
+        eager_session_id: &str,
+        launch: HarnessSessionLaunch,
+    ) -> Result<(Self, ConfiguredHarnessStartup), HarnessError> {
+        let startup_started_at = Instant::now();
+        let sessions_dir = tau_config::settings::sessions_dir_of(&state_dir);
+        let (harness, missing_default_role, extension_secrets, harness_settings_error) =
+            Self::open_configured_harness(
+                config,
+                state_dir,
+                sessions_dir.clone(),
+                dirs,
+                eager_session_id,
+                launch,
+            )?;
+        Ok((
+            harness,
+            ConfiguredHarnessStartup {
+                sessions_dir,
+                extension_secrets,
+                harness_settings_error,
+                missing_default_role,
+                started_at: startup_started_at,
+            },
+        ))
+    }
+
+    fn resolve_startup_extension_secrets(
+        config: &Config,
+        state_dir: &Path,
+    ) -> Result<ResolvedExtensionSecrets, HarnessError> {
+        let secret_sources =
+            load_secret_sources().map_err(|error| HarnessError::Participant(error.to_string()))?;
+        resolve_extension_secrets(config, state_dir, &secret_sources)
+            .map_err(|error| HarnessError::Participant(error.to_string()))
+    }
+
+    fn open_configured_harness(
+        config: &Config,
+        state_dir: PathBuf,
+        sessions_dir: PathBuf,
+        dirs: tau_config::settings::TauDirs,
+        eager_session_id: &str,
+        launch: HarnessSessionLaunch,
+    ) -> Result<
+        (
+            Self,
+            Option<MissingDefaultRole>,
+            ResolvedExtensionSecrets,
+            Option<tau_config::settings::SettingsError>,
+        ),
+        HarnessError,
+    > {
+        let startup_started_at = Instant::now();
+        tracing::debug!(target: "tau_harness::startup", elapsed_ms = startup_started_at.elapsed().as_millis(), "opening policy store");
+        let policy_store = PolicyStore::open(policy_store_path_from(&state_dir))?;
+        tracing::debug!(target: "tau_harness::startup", elapsed_ms = startup_started_at.elapsed().as_millis(), "policy store opened");
+        tracing::debug!(target: "tau_harness::startup", elapsed_ms = startup_started_at.elapsed().as_millis(), "opening session store");
+        let (store, agent_store) =
+            Self::open_startup_stores(&state_dir, &sessions_dir, launch.session_persistence)?;
+        tracing::debug!(target: "tau_harness::startup", elapsed_ms = startup_started_at.elapsed().as_millis(), "session store opened");
+        let extension_secrets = Self::resolve_startup_extension_secrets(config, &state_dir)?;
+        tracing::debug!(target: "tau_harness::startup", elapsed_ms = startup_started_at.elapsed().as_millis(), "loading harness settings");
+        let (harness_settings, harness_settings_error) = load_harness_settings_or_warn(&dirs);
+        let roles = Self::load_startup_roles(&harness_settings)?;
+        let missing_default_role = roles.missing_default_role.clone();
+        tracing::debug!(target: "tau_harness::startup", selected_model = ?roles.selected_model, elapsed_ms = startup_started_at.elapsed().as_millis(), "harness settings loaded");
+        if launch.session_persistence.is_durable() {
+            crate::session_cleanup::spawn_session_cleanup(
+                sessions_dir.clone(),
+                harness_settings.session_retention(),
+            );
+        }
+        let mut harness = Self::assemble_startup_harness(StartupHarnessParts {
+            state_dir,
+            dirs,
+            policy_store,
+            store,
+            agent_store,
+            eager_session_id: eager_session_id.to_owned(),
+            launch,
+            harness_settings,
+            roles,
+        })?;
+        harness.prepare_initial_session_storage(
+            &sessions_dir,
+            eager_session_id,
+            startup_started_at,
+        )?;
+        Ok((
+            harness,
+            missing_default_role,
+            extension_secrets,
+            harness_settings_error,
+        ))
+    }
+
+    fn open_startup_stores(
+        state_dir: &Path,
+        sessions_dir: &Path,
+        session_persistence: tau_core::SessionPersistenceMode,
+    ) -> Result<(SessionStore, AgentStore), HarnessError> {
+        let store = if session_persistence.is_ephemeral() {
+            SessionStore::open_ephemeral(sessions_dir)?
+        } else {
+            SessionStore::open_lazy(sessions_dir)?
+        };
+        let agent_store = AgentStore::open_lazy(state_dir.join("agents"))?;
+        Ok((store, agent_store))
+    }
+
+    fn load_startup_roles(
+        harness_settings: &tau_config::settings::HarnessSettings,
+    ) -> Result<StartupRoles, HarnessError> {
+        let LoadedRoles {
+            roles: available_roles,
+            role_overrides,
+            selected_role,
+            role_groups: available_role_groups,
+            missing_default_role,
+        } = load_roles(harness_settings);
+        if available_roles.is_empty() {
+            return Err(HarnessError::Participant(
+                "no roles are enabled; enable at least one role in harness.yaml or with --enable-role <role>".to_owned(),
+            ));
+        }
+        let selected_model =
+            select_model_for_role(&HashMap::new(), &available_roles, &selected_role);
+        Ok(StartupRoles {
+            available_roles,
+            role_overrides,
+            selected_role,
+            available_role_groups,
+            missing_default_role,
+            selected_model,
+        })
+    }
+
+    fn assemble_startup_harness(mut parts: StartupHarnessParts) -> Result<Self, HarnessError> {
+        let _ = parts.store.load_session(&parts.eager_session_id)?;
+        let (tx, rx) = mpsc::channel();
+        let bus = EventBus::with_subscription_policy(Box::new(
+            DefaultSubscriptionPolicy::with_store(parts.policy_store),
+        ));
+        let custom_prompts = parts
+            .harness_settings
+            .custom_prompts
+            .iter()
+            .map(|prompt| tau_proto::HarnessCustomPrompt {
+                id: prompt.id.clone(),
+                text: prompt.text.clone(),
+            })
+            .collect();
+        Ok(Self::from_base_parts(HarnessBaseParts {
+            tx,
+            rx,
+            bus,
+            state_dir: parts.state_dir,
+            store: parts.store,
+            agent_store: parts.agent_store,
+            session_persistence: parts.launch.session_persistence,
+            current_session_id: parts.eager_session_id.into(),
+            current_session_start_reason: parts.launch.reason,
+            available_roles: parts.roles.available_roles,
+            available_role_groups: parts.roles.available_role_groups,
+            custom_prompts,
+            role_overrides: parts.roles.role_overrides,
+            tool_policy: parts.harness_settings.tool_policy.clone(),
+            selected_role: parts.roles.selected_role,
+            selected_model: parts.roles.selected_model,
+            agent_id_template: parts.harness_settings.agent_id_template.clone(),
+            agent_display_name_template: parts.harness_settings.agent_display_name_template.clone(),
+            system_prompt_templates: load_system_prompt_templates(parts.dirs.config_dir.as_deref()),
+            dirs: parts.dirs,
+        }))
+    }
+
+    fn prepare_initial_session_storage(
+        &mut self,
+        sessions_dir: &Path,
+        eager_session_id: &str,
+        startup_started_at: Instant,
+    ) -> Result<(), HarnessError> {
+        if self.session_persistence.is_ephemeral() {
+            return Ok(());
+        }
+        let _ = self.enable_debug_log(&sessions_dir.join(eager_session_id))?;
+        tracing::debug!(target: "tau_harness::startup", elapsed_ms = startup_started_at.elapsed().as_millis(), "debug event log enabled");
+        // Record metadata so `-r` can find this session even before it has
+        // membership entries. Also acquires the flock on
+        // `<sessions_dir>/<eager_session_id>/lock`.
+        self.store.record_session_meta(eager_session_id)?;
+        tracing::debug!(target: "tau_harness::startup", elapsed_ms = startup_started_at.elapsed().as_millis(), "session metadata recorded");
+        Ok(())
+    }
+
+    fn accept_initial_client(
+        &mut self,
+        initial_client: Option<InitialClient>,
+        initial_client_error_stream: &mut Option<InitialClientStartupErrorOutput>,
+    ) -> Result<Option<ConnectionId>, HarnessError> {
+        let Some(initial_client) = initial_client else {
+            return Ok(None);
+        };
+        let client_id = match initial_client {
+            InitialClient::Stdio => self.accept_stdio_client()?,
+        };
+        *initial_client_error_stream = None;
+        if let Err(error) = self.wait_for_initial_ui_subscribe() {
+            self.send_startup_disconnect_to_initial_client(Some(&client_id), &error);
+            return Err(error);
+        }
+        Ok(Some(client_id))
     }
 
     fn spawn_configured_extensions(
