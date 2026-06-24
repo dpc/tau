@@ -201,94 +201,149 @@ pub fn resolve_extensions_with_cli_overrides_and_diagnostics(
     builtins: Vec<BuiltinExtension>,
     cli_overrides: &[ExtensionCliOverride],
 ) -> Result<ResolvedExtensions, ResolveExtensionsError> {
-    // Pass 1: seed an indexed map with built-ins, in order.
-    let mut order: Vec<String> = builtins.iter().map(|b| b.name.clone()).collect();
-    let mut entries: HashMap<String, ResolvedExtension> = builtins
+    let (order, entries) = seed_builtin_extension_entries(builtins);
+    let (order, entries) = apply_user_extension_entries(settings, order, entries);
+    let entries = apply_extension_cli_overrides(entries, cli_overrides)?;
+    resolved_extension_entries(order, entries)
+}
+
+fn seed_builtin_extension_entries(
+    builtins: Vec<BuiltinExtension>,
+) -> (Vec<String>, HashMap<String, ResolvedExtension>) {
+    let order: Vec<String> = builtins.iter().map(|b| b.name.clone()).collect();
+    let entries = builtins
         .into_iter()
         .map(|b| {
-            (
-                b.name,
-                ResolvedExtension {
-                    prefix: b.prefix,
-                    command: b.command,
-                    suffix: b.suffix,
-                    enable: b.enable,
-                    require: b.require,
-                    role: b.role,
-                    cwd: b.cwd,
-                    config: b.config,
-                    secrets: b.secrets,
-                },
-            )
+            let name = b.name.clone();
+            (name, ResolvedExtension::from_builtin(b))
         })
         .collect();
 
-    // Pass 2: overlay user entries. Sort user keys deterministically.
+    (order, entries)
+}
+
+impl ResolvedExtension {
+    fn from_builtin(builtin: BuiltinExtension) -> Self {
+        Self {
+            prefix: builtin.prefix,
+            command: builtin.command,
+            suffix: builtin.suffix,
+            enable: builtin.enable,
+            require: builtin.require,
+            role: builtin.role,
+            cwd: builtin.cwd,
+            config: builtin.config,
+            secrets: builtin.secrets,
+        }
+    }
+
+    fn from_user_entry(user: &ExtensionEntry) -> Self {
+        Self {
+            prefix: user.prefix.clone().unwrap_or_default(),
+            command: user.command.clone().unwrap_or_default(),
+            suffix: user.suffix.clone().unwrap_or_default(),
+            enable: user.enable.unwrap_or(true),
+            require: user.require.unwrap_or(true),
+            role: user.role.clone(),
+            cwd: user.cwd.clone().flatten(),
+            config: user
+                .config
+                .clone()
+                .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new())),
+            secrets: user.secrets.clone().unwrap_or_default(),
+        }
+    }
+
+    fn apply_user_entry(&mut self, user: &ExtensionEntry) {
+        if let Some(prefix) = user.prefix.as_ref() {
+            self.prefix = prefix.clone();
+        }
+        if let Some(command) = user.command.as_ref() {
+            self.command = command.clone();
+            // Setting `command` replaces the built-in's full argv tail.
+            // `suffix` is cleared so users overriding only `command`
+            // don't accidentally inherit the built-in's subcommand
+            // tokens (e.g. `["component", "ext-provider-builtin"]`). Users
+            // who want to keep them must set `suffix` explicitly below.
+            self.suffix = Vec::new();
+        }
+        if let Some(suffix) = user.suffix.as_ref() {
+            self.suffix = suffix.clone();
+        }
+        if let Some(enable) = user.enable {
+            self.enable = enable;
+        }
+        if let Some(require) = user.require {
+            self.require = require;
+        }
+        if let Some(role) = user.role.as_ref() {
+            self.role = Some(role.clone());
+        }
+        if let Some(cwd) = user.cwd.as_ref() {
+            self.cwd = cwd.clone();
+        }
+        if let Some(over) = user.config.clone() {
+            self.config = merge_json(self.config.take(), over);
+        }
+        if let Some(secrets) = user.secrets.as_ref() {
+            self.secrets.extend(secrets.clone());
+        }
+    }
+
+    fn into_enabled_extension_config(
+        self,
+        name: String,
+    ) -> Result<Option<ExtensionConfig>, ResolveExtensionsError> {
+        let mut argv = self.prefix;
+        argv.extend(self.command);
+        argv.extend(self.suffix);
+        let Some((program, args)) = split_extension_argv(argv) else {
+            if self.require {
+                return Err(ResolveExtensionsError::EmptyCommand(name));
+            }
+            return Ok(None);
+        };
+
+        Ok(Some(ExtensionConfig {
+            name,
+            command: program,
+            args,
+            role: self.role,
+            require: self.require,
+            cwd: self.cwd,
+            config: self.config,
+            secrets: self.secrets,
+        }))
+    }
+}
+
+fn apply_user_extension_entries(
+    settings: &HarnessSettings,
+    mut order: Vec<String>,
+    mut entries: HashMap<String, ResolvedExtension>,
+) -> (Vec<String>, HashMap<String, ResolvedExtension>) {
     let mut user_keys: Vec<&String> = settings.extensions.keys().collect();
     user_keys.sort();
     for name in user_keys {
         let user: &ExtensionEntry = &settings.extensions[name];
         match entries.get_mut(name) {
             Some(existing) => {
-                if let Some(prefix) = user.prefix.as_ref() {
-                    existing.prefix = prefix.clone();
-                }
-                if let Some(command) = user.command.as_ref() {
-                    existing.command = command.clone();
-                    // Setting `command` replaces the built-in's full argv tail.
-                    // `suffix` is cleared so users overriding only `command`
-                    // don't accidentally inherit the built-in's subcommand
-                    // tokens (e.g. `["component", "ext-provider-builtin"]`). Users
-                    // who want to keep them must set `suffix` explicitly below.
-                    existing.suffix = Vec::new();
-                }
-                if let Some(suffix) = user.suffix.as_ref() {
-                    existing.suffix = suffix.clone();
-                }
-                if let Some(enable) = user.enable {
-                    existing.enable = enable;
-                }
-                if let Some(require) = user.require {
-                    existing.require = require;
-                }
-                if let Some(role) = user.role.as_ref() {
-                    existing.role = Some(role.clone());
-                }
-                if let Some(cwd) = user.cwd.as_ref() {
-                    existing.cwd = cwd.clone();
-                }
-                if let Some(over) = user.config.clone() {
-                    existing.config = merge_json(existing.config.take(), over);
-                }
-                if let Some(secrets) = user.secrets.as_ref() {
-                    existing.secrets.extend(secrets.clone());
-                }
+                existing.apply_user_entry(user);
             }
             None => {
-                let command = user.command.clone().unwrap_or_default();
                 order.push(name.clone());
-                entries.insert(
-                    name.clone(),
-                    ResolvedExtension {
-                        prefix: user.prefix.clone().unwrap_or_default(),
-                        command,
-                        suffix: user.suffix.clone().unwrap_or_default(),
-                        enable: user.enable.unwrap_or(true),
-                        require: user.require.unwrap_or(true),
-                        role: user.role.clone(),
-                        cwd: user.cwd.clone().flatten(),
-                        config: user
-                            .config
-                            .clone()
-                            .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new())),
-                        secrets: user.secrets.clone().unwrap_or_default(),
-                    },
-                );
+                entries.insert(name.clone(), ResolvedExtension::from_user_entry(user));
             }
         }
     }
 
-    // Pass 3: apply command-line availability overrides in argument order.
+    (order, entries)
+}
+
+fn apply_extension_cli_overrides(
+    mut entries: HashMap<String, ResolvedExtension>,
+    cli_overrides: &[ExtensionCliOverride],
+) -> Result<HashMap<String, ResolvedExtension>, ResolveExtensionsError> {
     for override_ in cli_overrides {
         match override_ {
             ExtensionCliOverride::Enable(extension_name) => {
@@ -316,50 +371,49 @@ pub fn resolve_extensions_with_cli_overrides_and_diagnostics(
         }
     }
 
-    // Pass 4: produce ExtensionConfigs in declared order, dropping
-    // disabled entries. argv = prefix ++ command ++ suffix; argv[0]
-    // is the executable, rest are args.
-    let mut out = Vec::new();
+    Ok(entries)
+}
+
+fn resolved_extension_entries(
+    order: Vec<String>,
+    mut entries: HashMap<String, ResolvedExtension>,
+) -> Result<ResolvedExtensions, ResolveExtensionsError> {
+    let mut extensions = Vec::new();
     let mut diagnostics = Vec::new();
     for name in order {
         let entry = entries.remove(&name).expect("seeded above");
         if !entry.enable {
             continue;
         }
-        let mut argv = entry.prefix;
-        argv.extend(entry.command);
-        argv.extend(entry.suffix);
-        let (program, args) = match argv.split_first() {
-            Some((first, rest)) => (first.clone(), rest.to_vec()),
-            None if entry.require => return Err(ResolveExtensionsError::EmptyCommand(name)),
-            None => {
-                tracing::warn!(
-                    target: "tau_harness::startup",
-                    extension = %name,
-                    "optional extension did not initialize: resolved command is empty"
-                );
-                diagnostics.push(ExtensionStartupDiagnostic {
-                    extension: name.clone(),
-                    message: format!("optional extension {name} did not initialize"),
-                });
-                continue;
-            }
-        };
-        out.push(ExtensionConfig {
-            name,
-            command: program,
-            args,
-            role: entry.role,
-            require: entry.require,
-            cwd: entry.cwd,
-            config: entry.config,
-            secrets: entry.secrets,
-        });
+        match entry.into_enabled_extension_config(name.clone())? {
+            Some(extension) => extensions.push(extension),
+            None => push_optional_empty_command_diagnostic(name, &mut diagnostics),
+        }
     }
     Ok(ResolvedExtensions {
-        extensions: out,
+        extensions,
         diagnostics,
     })
+}
+
+fn split_extension_argv(argv: Vec<String>) -> Option<(String, Vec<String>)> {
+    let (program, args) = argv.split_first()?;
+    Some((program.clone(), args.to_vec()))
+}
+
+fn push_optional_empty_command_diagnostic(
+    name: String,
+    diagnostics: &mut Vec<ExtensionStartupDiagnostic>,
+) {
+    tracing::warn!(
+        target: "tau_harness::startup",
+        extension = %name,
+        "optional extension did not initialize: resolved command is empty"
+    );
+    diagnostics.push(ExtensionStartupDiagnostic {
+        extension: name.clone(),
+        message: format!("optional extension {name} did not initialize"),
+    });
 }
 
 /// Merge `over` on top of `base` for extension config objects.
