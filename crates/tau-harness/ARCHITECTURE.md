@@ -126,6 +126,18 @@ user prompt through the same machinery as UI prompt intake. The durable
 transcript fact remains the harness-owned `agent.prompt_submitted`; extensions
 may not forge prompt or message transcript facts directly.
 
+Cross-harness agent messages use the dedicated `ExternalAgentMessage` protocol
+RPC, not `Emit`. The sender-side built-in `message` tool parses
+`<session-id>/<agent_id>` addresses, treats the current session as local, and
+performs runtime-dir lookup plus socket round-trip on a helper thread. Completion
+returns to the event loop as a `HarnessCommand`, so target socket latency never
+blocks normal event processing. The receiver accepts the RPC only from a socket
+peer that completed the narrow external-message hello, validates that the target
+session is its active `current_session_id` and the recipient is live or pending,
+then publishes the harness-owned inbound `agent.message_received` projection
+through the ordinary durable path. Generic peer-authored
+`agent.message_sent`/`agent.message_received` emits remain rejected.
+
 ## Optional extension startup
 
 Extension startup availability is controlled by resolved `ExtensionConfig.require`.

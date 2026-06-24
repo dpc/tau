@@ -1009,6 +1009,7 @@ fn agent_message_received_event(recipient_id: &str) -> Event {
     Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
         message_id: tau_proto::AgentMessageId::from("msg-intercept"),
         sender_id: tau_proto::AgentId::parse("agent-message-sender").expect("agent id"),
+        sender_session_id: None,
         recipient_id: tau_proto::AgentId::parse(recipient_id).expect("agent id"),
         kind: tau_proto::AgentMessageKind::Message,
         message: "hello".to_owned(),

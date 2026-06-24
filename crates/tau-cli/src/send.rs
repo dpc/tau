@@ -1,6 +1,5 @@
 //! Headless command submission client.
 
-use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 
 use tau_proto::{Event, HarnessInputMessage};
@@ -99,22 +98,9 @@ fn role_event_for_command(rest: &str) -> Option<Event> {
 }
 
 fn find_daemon_for_session(session_id: &str) -> Option<PathBuf> {
-    let runtime_dir = tau_harness::runtime_dir::harnesses_dir();
-    for entry in std::fs::read_dir(runtime_dir).ok()?.flatten() {
-        let socket = entry.path();
-        if socket.extension().and_then(|ext| ext.to_str()) != Some("sock") {
-            continue;
-        }
-        let harness_path = socket.with_extension("");
-        if tau_harness::runtime_dir::read_session_id(&harness_path).as_deref() != Some(session_id) {
-            continue;
-        }
-        if UnixStream::connect(&socket).is_ok() {
-            return Some(harness_path);
-        }
-        tau_harness::runtime_dir::remove_harness_files(&harness_path);
-    }
-    None
+    tau_harness::runtime_dir::find_harness_for_session(session_id)
+        .ok()
+        .flatten()
 }
 
 #[cfg(test)]

@@ -225,6 +225,49 @@ fn agent_watch_ignores_mid_turn_tool_call_responses() {
     assert!(agent_watch_response_should_notify(&response).is_none());
 }
 
+/// Ensures the message tool treats `user`, bare agent ids, and
+/// `<current-session>/<agent>` as local recipients so existing local workflows
+/// are not forced through the external socket path.
+#[test]
+fn message_recipient_parser_recognizes_user_local_and_current_session() {
+    let current: tau_proto::SessionId = "session-a".into();
+
+    assert!(matches!(
+        parse_message_recipient("user", &current),
+        Ok(MessageRecipientAddress::User)
+    ));
+    assert!(matches!(
+        parse_message_recipient("agent_a", &current),
+        Ok(MessageRecipientAddress::LocalAgent(agent)) if agent.as_str() == "agent_a"
+    ));
+    assert!(matches!(
+        parse_message_recipient("session-a/agent_b", &current),
+        Ok(MessageRecipientAddress::LocalAgent(agent)) if agent.as_str() == "agent_b"
+    ));
+}
+
+/// Ensures external message addresses require exactly one slash and a valid
+/// right-hand agent id, preventing ambiguous `session/agent/extra` parsing.
+#[test]
+fn message_recipient_parser_validates_external_address_grammar() {
+    let current: tau_proto::SessionId = "session-a".into();
+
+    match parse_message_recipient("session-b/agent_b", &current).expect("valid external recipient")
+    {
+        MessageRecipientAddress::ExternalAgent {
+            session_id,
+            agent_id,
+        } => {
+            assert_eq!(session_id.as_str(), "session-b");
+            assert_eq!(agent_id.as_str(), "agent_b");
+        }
+        _ => panic!("expected external recipient"),
+    }
+    assert!(parse_message_recipient("session-b/agent/extra", &current).is_err());
+    assert!(parse_message_recipient("session-b/", &current).is_err());
+    assert!(parse_message_recipient("session-b/bad/agent", &current).is_err());
+}
+
 #[test]
 fn wait_initial_display_uses_tracked_target_tool_name() {
     // Regression for provider-owned running display: the wait tool should

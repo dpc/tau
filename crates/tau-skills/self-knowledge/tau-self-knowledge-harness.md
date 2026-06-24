@@ -20,9 +20,9 @@ Common startup flow:
 
 1. The CLI chooses or resumes a session id.
 2. The CLI creates a child `tau component harness` process and passes session metadata through `TAU_SESSION_ID` and `TAU_SESSION_STATUS`.
-3. The harness creates a per-process runtime directory under Tau's runtime root and binds `tau.sock` inside it.
-4. After startup is ready for discovery, the harness writes runtime markers: project directory, pid, and session id.
-5. Later UI clients discover the daemon through those markers and connect to the runtime-dir Unix socket.
+3. The harness creates a per-process runtime socket at `${XDG_RUNTIME_DIR}/tau/harnesses/<pid>.sock` (or the `/tmp/tau-$USER/harnesses/` fallback).
+4. After startup is ready for discovery, the harness writes `${XDG_RUNTIME_DIR}/tau/harnesses/<pid>.json` metadata: pid, project root, Tau version, and current active session id.
+5. Later UI clients discover the daemon through that metadata and connect to the runtime-dir Unix socket. When `/session new` succeeds inside the same daemon, the metadata `session_id` is updated to the new active session.
 
 The runtime-dir harness path always binds its generated socket path itself. It does not use socket activation, because Tau attach/discovery expects the socket to exist at the generated runtime-dir path.
 
@@ -76,6 +76,16 @@ This is intended for externally supervised foreground harness processes where th
 Running `tau component harness` directly starts the harness component without the terminal UI parent. It uses the default session id when `TAU_SESSION_ID` is not set and binds its own runtime-dir socket.
 
 This path is useful for debugging or embedding the harness component, but it does not receive an initial UI over stdio unless `--initial-ui-stdio` is supplied by the CLI-managed startup path.
+
+Runtime-dir harness metadata advertises the daemon's current active session id,
+not just its startup session. `/session new` reuses the daemon process and
+updates this metadata after a successful switch so attach/send and
+cross-harness agent-message discovery do not route to stale sessions.
+
+The harness-owned `message` tool can address another running harness with
+`<session-id>/<agent_id>`. The current session prefix is treated as local; other
+sessions are delivered with a dedicated external-message socket RPC on a helper
+thread so the harness event loop is not blocked.
 
 ## Embedded one-shot runs
 

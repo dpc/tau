@@ -137,3 +137,21 @@ for one list operation. These quotas bound individual harness operations; they d
 not bound aggregate disk use across many files. See
 [SECURITY.md](../SECURITY.md#harness-and-extension-boundaries) for the trust
 boundary and hardening assumptions.
+
+## External agent-message RPC
+
+Cross-harness `message` tool delivery uses a dedicated
+`external_agent_message` / `external_agent_message_result` RPC instead of
+generic `emit`. The sending harness opens the target harness socket discovered
+from active-session runtime metadata, sends a `hello` with the narrow external
+client kind/name, then sends `external_agent_message` with `request_id`,
+`message_id`, sender session/agent identity, recipient session/agent identity,
+kind, and message body.
+
+The receiving harness accepts this RPC only from peers that completed that
+external-message hello. It validates that the requested recipient session is its
+current active session, the message is non-empty, and the recipient agent is live
+or pending before publishing the harness-owned `agent.message_received`
+projection. The result echoes `request_id` and carries an error string on
+rejection. Raw `emit` of `agent.message_sent` or `agent.message_received` remains
+forbidden.

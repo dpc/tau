@@ -374,6 +374,40 @@ impl<'a> InternalToolHost<'a> {
             .publish_agent_message_from_agent(conversation_id, recipient_id, message)
     }
 
+    /// Return the harness's active session id.
+    pub fn current_session_id(&self) -> tau_proto::SessionId {
+        self.harness.current_session_id.clone()
+    }
+
+    /// Publish an external message and arrange asynchronous tool completion.
+    #[allow(clippy::too_many_arguments)]
+    pub fn publish_external_agent_message(
+        &mut self,
+        conversation_id: &AgentId,
+        recipient_session_id: tau_proto::SessionId,
+        recipient_id: tau_proto::AgentId,
+        message: String,
+        call_id: ToolCallId,
+        tool_name: ToolName,
+        tool_type: tau_proto::ToolType,
+        details: CborValue,
+    ) -> Result<(), String> {
+        self.harness.publish_external_agent_message_from_agent(
+            conversation_id,
+            recipient_session_id,
+            recipient_id,
+            message,
+            tau_proto::AgentMessageKind::Message,
+            Some(crate::harness::ExternalMessageToolCompletion {
+                conversation_id: conversation_id.clone(),
+                call_id,
+                tool_name,
+                tool_type,
+                details,
+            }),
+        )
+    }
+
     /// Publish an agent-to-agent message by public sender and recipient ids.
     pub fn publish_agent_message_from_agent_ids(
         &mut self,

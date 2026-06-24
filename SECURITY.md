@@ -21,6 +21,16 @@ usage across many files, sandbox arbitrary extension code, or prevent protocol
 payloads from being deserialized before the harness validates an operation. Run
 only extensions you trust to execute on your machine.
 
+Cross-harness agent messages are local IPC between Tau harness daemons for the
+same user. They use a dedicated external-message RPC rather than generic event
+`emit`; extensions and ordinary UI clients cannot publish harness-owned
+`agent.message_sent` / `agent.message_received` projections directly. The
+receiving harness validates its active target session and recipient state before
+recording an inbound projection. Runtime daemon metadata is discovery data only:
+`session_id` means the daemon's current active session and is updated on
+`/session new`; stale or ambiguous metadata must fail discovery rather than
+silently choosing a target.
+
 `extensions.<name>.require: false` is only a degraded-startup availability
 policy for trusted local extensions. It lets Tau continue without that extension
 when startup/config/secret/pre-Ready setup fails; it is not a sandbox and does

@@ -947,6 +947,7 @@ fn run_harness_daemon_with_internal_tools_and_initial_client(
         ),
         &mut initial_client_error_stream,
     )?;
+    harness.set_runtime_harness_path(harness_paths.path().to_path_buf());
     harness.install_internal_tool_handlers(internal_tool_handlers);
     tracing::debug!(target: "tau_harness::startup", elapsed_ms = startup_started_at.elapsed().as_millis(), "harness constructed");
 

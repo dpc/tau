@@ -813,6 +813,7 @@ fn assemble_conversation_assigns_roles_for_sent_and_received_agent_messages() {
         tau_proto::AgentMessageReceived {
             message_id: "msg-agent".into(),
             sender_id: tau_proto::AgentId::parse("manager").expect("agent id"),
+            sender_session_id: None,
             recipient_id: tau_proto::AgentId::parse("main").expect("agent id"),
             kind: tau_proto::AgentMessageKind::Message,
             message: "please investigate".to_owned(),
@@ -849,6 +850,7 @@ fn assemble_conversation_replays_watch_response_as_notification_only() {
         tau_proto::AgentMessageReceived {
             message_id: "msg-watch".into(),
             sender_id: watched.clone(),
+            sender_session_id: None,
             recipient_id: main,
             kind: tau_proto::AgentMessageKind::WatchResponse,
             message: "done <response>&</response>".to_owned(),

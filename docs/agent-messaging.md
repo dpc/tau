@@ -51,6 +51,28 @@ message({"recipient_id":"engineer_b","message":"Please also inspect crates/tau-c
 
 The UI may display, summarize, or hide agent-to-agent messages depending on `/set show-messages`. The recipient agent also receives a hidden internal prompt with the message body XML-escaped inside a `<message>` wrapper.
 
+## Send to an agent in another active session
+
+Use `<session-id>/<agent_id>` as `recipient_id` to address an agent owned by
+another running harness daemon:
+
+```text
+message({"recipient_id":"01JZ.../engineer_b","message":"Please compare this with your session."})
+```
+
+If the session id is the current active session, the address is treated as a
+local agent id. Otherwise the message tool performs runtime-daemon discovery and
+a dedicated external-message RPC on a helper thread, so the harness event loop is
+not blocked by socket lookup or target validation. On confirmed delivery, the
+sender transcript records `agent.message_sent` with recipient
+`external_agent { session_id, agent_id }`; the recipient transcript records
+`agent.message_received` with `sender_session_id`. UI and prompt rendering show
+external addresses as `session/agent`.
+
+External delivery failures (no daemon, stale socket, ambiguous session, wrong
+active target session, stopped/unknown recipient) fail the tool call and do not
+record a successful sender-side projection.
+
 ## Watch another agent's responses
 
 Use `agent_watch` to enable or disable hidden async notifications when another
@@ -80,7 +102,10 @@ agent_watch({"agent_id":"engineer_b","enable":false})
 
 ## Invalid recipients and arguments
 
-A non-`user` recipient must be a live or pending `agent_id`. Otherwise the tool fails and no `agent.message_sent` or `agent.message_received` projection is emitted.
+A non-`user` local recipient must be a live or pending `agent_id`. External
+recipients must contain exactly one slash and a slash-free valid `agent_id` on
+the right-hand side. Otherwise the tool fails and no `agent.message_sent` or
+`agent.message_received` projection is emitted.
 
 If the id was never known, the tool reports an unknown recipient:
 

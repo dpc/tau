@@ -51,6 +51,26 @@ rendered provider tool definitions for good calls, and failure-triggered injecti
 is one-shot per agent branch while invalid registrations produce mandatory
 diagnostics.
 
+## Cross-harness agent messages use a dedicated asynchronous RPC
+
+Status: unconfirmed
+
+The harness-owned `message` tool treats `<session-id>/<agent_id>` as an external
+address only when the session id differs from the current active session. It
+must not pack the session id into `AgentId`; protocol and event payloads carry
+session and agent identity separately.
+
+External delivery uses a dedicated socket RPC, not generic `emit`, and the
+runtime-dir lookup plus socket round-trip runs off the event loop. The helper
+thread reports completion back with a harness command. Sender-side
+`agent.message_sent` projections represent confirmed delivery, so lookup/socket
+or target validation failure completes the tool with an error without recording a
+successful send projection.
+
+Tests should cover the runtime metadata active-session contract, stale/ambiguous
+discovery, untrusted peer rejection, target-session and recipient validation,
+external prompt/UI labels, and failure not publishing a sent projection.
+
 Schema-guided argument repair runs only in the pre-dispatch validation failure
 branch. The harness executes a repaired call only after the repaired arguments
 pass the same schema validator, emits a non-mandatory notice/log trace for the

@@ -1756,6 +1756,13 @@ pub struct ExtPromptSubmitRequest {
 pub enum AgentMessageRecipient {
     /// Deliver the message to another durable agent transcript.
     Agent { agent_id: AgentId },
+    /// Deliver the message to an agent owned by another active harness session.
+    ExternalAgent {
+        /// Active session id of the harness that should receive the message.
+        session_id: SessionId,
+        /// Agent id within the target harness.
+        agent_id: AgentId,
+    },
     /// Deliver the message to the human user.
     User,
 }
@@ -1772,7 +1779,8 @@ pub enum AgentMessageKind {
 }
 
 impl AgentMessageKind {
-    fn is_default(&self) -> bool {
+    /// Returns true when this value is the default message kind.
+    pub fn is_default(&self) -> bool {
         *self == Self::default()
     }
 }
@@ -1812,6 +1820,10 @@ pub struct AgentMessageReceived {
     pub message_id: AgentMessageId,
     /// Agent id of the sender.
     pub sender_id: AgentId,
+    /// Active session id of an external sender. Absent for same-session/local
+    /// senders and for legacy records written before cross-harness messages.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sender_session_id: Option<SessionId>,
     /// Recipient agent id that received the message.
     pub recipient_id: AgentId,
     /// Delivery source semantics.

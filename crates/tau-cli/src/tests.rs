@@ -787,6 +787,24 @@ fn agent_message(sender_id: &str, recipient: &str, message: &str) -> Event {
     })
 }
 
+fn external_agent_message(
+    sender_id: &str,
+    session_id: &str,
+    recipient: &str,
+    message: &str,
+) -> Event {
+    Event::AgentMessageSent(tau_proto::AgentMessageSent {
+        message_id: format!("msg-{sender_id}-{session_id}-{recipient}").into(),
+        sender_id: agent_id(sender_id),
+        recipient: tau_proto::AgentMessageRecipient::ExternalAgent {
+            session_id: session_id.into(),
+            agent_id: agent_id(recipient),
+        },
+        kind: tau_proto::AgentMessageKind::Message,
+        message: message.to_owned(),
+    })
+}
+
 fn visible_lines(vt: &VtWriter, w: u16) -> Vec<String> {
     vt.screen_text(w)
         .into_iter()
@@ -2941,6 +2959,43 @@ fn agent_messages_render_all_recipients_as_history() {
     }
     sync(&handle);
     assert!(!vt.screen_contains(80, "Message from manager_11111111 to engineer_22222222:"));
+}
+
+#[test]
+fn external_agent_messages_render_session_agent_labels() {
+    let (_term, handle, vt) = setup(96, 8);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        cli_test_theme(),
+    );
+
+    renderer.handle(&external_agent_message(
+        "manager_11111111",
+        "session-2",
+        "engineer_22222222",
+        "hello external",
+    ));
+    renderer.handle(&Event::AgentMessageReceived(
+        tau_proto::AgentMessageReceived {
+            message_id: "msg-inbound-external".into(),
+            sender_id: agent_id("reviewer_33333333"),
+            sender_session_id: Some("session-3".into()),
+            recipient_id: agent_id("manager_11111111"),
+            kind: tau_proto::AgentMessageKind::Message,
+            message: "hello back".to_owned(),
+        },
+    ));
+    sync(&handle);
+
+    assert!(vt.screen_contains(
+        96,
+        "Message from manager_11111111 to session-2/engineer_22222222:"
+    ));
+    assert!(vt.screen_contains(
+        96,
+        "Message from session-3/reviewer_33333333 to manager_11111111:"
+    ));
 }
 
 #[test]

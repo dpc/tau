@@ -1215,9 +1215,12 @@ mod semantic_event_router;
 mod subagents_tool;
 mod user_skill_invocation;
 
+pub(crate) use subagents_tool::ExternalMessageToolCompletion;
+
 /// Connection ID used for harness-owned tools and their side-query
 /// [`PromptOriginator`] name (e.g. `skill`, `agent_start`, and `wait`).
 pub(crate) const HARNESS_CONNECTION_ID: &str = "__harness__";
+pub(crate) const EXTERNAL_AGENT_MESSAGE_CLIENT_NAME: &str = "tau-external-agent-message";
 
 #[derive(Debug)]
 struct PendingStartAgentRequest {
@@ -1329,6 +1332,11 @@ pub struct Harness {
     /// session membership/debug/log artifacts and session-scoped extension
     /// data.
     pub(crate) session_persistence: tau_core::SessionPersistenceMode,
+    /// Runtime harness path stem for this daemon's socket/metadata pair.
+    ///
+    /// Daemon-mode harnesses set this so `/session new` can keep discovery
+    /// metadata's active session id synchronized with `current_session_id`.
+    pub(crate) runtime_harness_path: Option<PathBuf>,
     /// The single session this harness owns. UserMessages with a
     /// different `session_id` are rejected. Pi-style: one harness =
     /// one active session at a time. Switching sessions tears the
@@ -1370,6 +1378,8 @@ pub struct Harness {
     /// Used to start follower threads for log-based replay + delivery.
     pub(crate) client_writers:
         std::collections::HashMap<tau_proto::ConnectionId, Sender<WriterCommand>>,
+    /// Socket clients that completed the narrow external-message RPC hello.
+    external_message_peers: HashSet<tau_proto::ConnectionId>,
     /// A UI sent `/detach` while the harness was still in startup gating.
     /// The main event loop consumes this to preserve detach semantics after
     /// startup completes.
@@ -1966,6 +1976,7 @@ impl Harness {
             store: parts.store,
             agent_store: parts.agent_store,
             session_persistence: parts.session_persistence,
+            runtime_harness_path: None,
             current_session_id: parts.current_session_id,
             current_session_start_reason: parts.current_session_start_reason,
             agent_id_rng: StdRng::from_entropy(),
@@ -1976,6 +1987,7 @@ impl Harness {
             pending_action_invocations: HashMap::new(),
             event_log: EventLog::new(),
             client_writers: HashMap::new(),
+            external_message_peers: HashSet::new(),
             startup_detach_requested: false,
             lifecycle_messages: Vec::new(),
             replayable_harness_notices: Vec::new(),
@@ -2515,6 +2527,11 @@ impl Harness {
         Ok(())
     }
 
+    /// Record the runtime harness metadata path stem owned by the daemon.
+    pub(crate) fn set_runtime_harness_path(&mut self, path: PathBuf) {
+        self.runtime_harness_path = Some(path);
+    }
+
     fn accept_initial_client(
         &mut self,
         initial_client: Option<InitialClient>,
@@ -2779,6 +2796,46 @@ impl Harness {
     fn handle_harness_command(&mut self, command: HarnessCommand) -> Result<(), HarnessError> {
         match command {
             HarnessCommand::ConnectExtension(command) => self.connect_extension(*command),
+            HarnessCommand::ExternalMessageToolCompleted(command) => {
+                if self.tool_agents.get(&command.call_id) != Some(&command.conversation_id)
+                    || !self.agents.contains_key(&command.conversation_id)
+                {
+                    tracing::debug!(
+                        target: "tau_harness::external_agent_message",
+                        conversation_id = %command.conversation_id,
+                        call_id = %command.call_id,
+                        "dropping stale external message tool completion"
+                    );
+                    return Ok(());
+                }
+                match command.result {
+                    Ok(()) => {
+                        if let Some(sent_event) = command.sent_event {
+                            self.publish_for_agent_from(
+                                &command.conversation_id,
+                                Some(HARNESS_CONNECTION_ID),
+                                Event::AgentMessageSent(sent_event),
+                            );
+                        }
+                        self.finish_harness_owned_tool_with_result(
+                            &command.conversation_id,
+                            command.call_id,
+                            command.tool_name,
+                            command.tool_type,
+                            "Message sent".to_owned(),
+                            None,
+                        );
+                    }
+                    Err(message) => self.finish_harness_owned_tool_with_error(
+                        &command.conversation_id,
+                        command.call_id,
+                        command.tool_name,
+                        command.tool_type,
+                        message,
+                        Some(command.details),
+                    ),
+                }
+            }
         }
         Ok(())
     }
@@ -3417,14 +3474,19 @@ impl Harness {
 
     fn deliver_agent_message(&mut self, message: &tau_proto::AgentMessageReceived) {
         let escaped_message = escape_agent_message_for_prompt(&message.message);
+        let sender_label = message
+            .sender_session_id
+            .as_ref()
+            .map(|session_id| format!("{session_id}/{}", message.sender_id))
+            .unwrap_or_else(|| message.sender_id.to_string());
         let text = match message.kind {
             tau_proto::AgentMessageKind::Message => format!(
                 "[tau-internal]: You have received a message from {}\n\n<message>\n{}\n</message>",
-                message.sender_id, escaped_message
+                sender_label, escaped_message
             ),
             tau_proto::AgentMessageKind::WatchResponse => format!(
                 "[tau-internal]: Agent {} finished its turn\n\n<response>\n{}\n</response>",
-                message.sender_id, escaped_message
+                sender_label, escaped_message
             ),
         };
         if let Some(cid) = self
@@ -4815,7 +4877,8 @@ impl Harness {
             HarnessInputMessage::Disconnect(_)
             | HarnessInputMessage::GetRenderedSystemPrompt(_)
             | HarnessInputMessage::GetRenderedPrompt(_)
-            | HarnessInputMessage::GetRenderedToolDefinitions(_) => {}
+            | HarnessInputMessage::GetRenderedToolDefinitions(_)
+            | HarnessInputMessage::ExternalAgentMessage(_) => {}
         }
         Ok(())
     }
@@ -5406,6 +5469,12 @@ impl Harness {
                     );
                     return Ok(false);
                 }
+                if hello.client_kind == ClientKind::External
+                    && hello.client_name.as_str() == EXTERNAL_AGENT_MESSAGE_CLIENT_NAME
+                {
+                    self.external_message_peers
+                        .insert(tau_proto::ConnectionId::from(client_id));
+                }
                 Ok(true)
             }
             HarnessInputMessage::Subscribe(subscribe) => {
@@ -5439,6 +5508,21 @@ impl Harness {
             }
             HarnessInputMessage::GetRenderedToolDefinitions(request) => {
                 self.send_rendered_tool_definitions_result(client_id, request);
+                Ok(true)
+            }
+            HarnessInputMessage::ExternalAgentMessage(request) => {
+                if !self
+                    .external_message_peers
+                    .contains(&tau_proto::ConnectionId::from(client_id))
+                {
+                    return Ok(true);
+                }
+                let result = self.handle_external_agent_message_request(request);
+                let _ = self.bus.send_to(
+                    client_id,
+                    None,
+                    HarnessOutputMessage::ExternalAgentMessageResult(result),
+                );
                 Ok(true)
             }
             HarnessInputMessage::Emit(emit) => {
@@ -6556,6 +6640,8 @@ impl Harness {
         self.pending_provider_prompts
             .retain(|_, provider_id| provider_id.as_str() != connection_id);
         self.client_writers
+            .remove(&tau_proto::ConnectionId::from(connection_id));
+        self.external_message_peers
             .remove(&tau_proto::ConnectionId::from(connection_id));
         if self
             .provider_models_by_extension
@@ -8989,6 +9075,17 @@ impl Harness {
             // Send the new debug log to the new session's dir, so each
             // session is self-contained.
             let _ = self.enable_debug_log(&self.sessions_dir().join(new_session_id.as_str()));
+        }
+        if let Some(path) = &self.runtime_harness_path
+            && let Err(error) = crate::runtime_dir::update_session_id(path, new_session_id.as_str())
+        {
+            tracing::warn!(
+                target: "tau_harness::runtime_dir",
+                path = %path.display(),
+                session_id = %new_session_id,
+                %error,
+                "failed to update runtime metadata after session switch"
+            );
         }
         self.start_session_init(new_session_id.clone(), reason);
         self.publish_current_session_dir();

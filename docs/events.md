@@ -302,20 +302,21 @@ harness/agent.
   requesting extension. Carries the same `query_id`.
 - **`agent.message_sent`** — Harness-owned immutable sender-side projection for
   a short message an agent sent to another agent or to the user. Carries stable
-  `message_id`, `sender_id`, recipient (`agent_id` or `user`), and `message`; it
-  does not carry a `session_id`.
+  `message_id`, `sender_id`, recipient (`agent_id`, `external_agent
+  { session_id, agent_id }`, or `user`), and `message`.
 - **`agent.message_received`** — Harness-owned immutable recipient-side
   projection for an agent-to-agent message. Carries the same stable
-  `message_id`, the `sender_id`, the receiving `recipient_id`, and `message`;
-  user-recipient messages have no received projection. User-recipient sent
-  projections are human-visible broadcasts that UIs always render fully in the
-  currently visible transcript. UI subscribers filter, summarize, or fully
-  display agent-to-agent message projections according to `/set show-messages`.
-  Agent recipients are delivered as hidden internal prompts; if a side/delegate
-  agent is about to finish, teardown waits until the message turn has been
-  dispatched and answered. Interceptors cannot drop or rewrite these validated
-  projections. See [agent-messaging.md](agent-messaging.md) for model-facing tool
-  examples.
+  `message_id`, the `sender_id`, optional `sender_session_id` for external
+  senders, the receiving `recipient_id`, and `message`; user-recipient messages
+  have no received projection. User-recipient sent projections are human-visible
+  broadcasts that UIs always render fully in the currently visible transcript. UI
+  subscribers filter, summarize, or fully display agent-to-agent message
+  projections according to `/set show-messages`. Agent recipients are delivered
+  as hidden internal prompts; external senders render as `session/agent`. If a
+  side/delegate agent is about to finish, teardown waits until the message turn
+  has been dispatched and answered. Interceptors cannot drop or rewrite these
+  validated projections. See [agent-messaging.md](agent-messaging.md) for
+  model-facing tool examples.
 - **`extension.event`** — Custom extension-defined event with an
   extension-owned dotted name and CBOR payload. The nested name must have
   non-empty category and call segments, and must not use reserved first-party

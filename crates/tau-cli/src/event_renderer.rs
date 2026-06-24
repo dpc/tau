@@ -3279,25 +3279,27 @@ impl EventRenderer {
                 format!(
                     "Response from {} to {}",
                     message.sender_id,
-                    Self::agent_message_sent_recipient_label(message)
+                    Self::agent_message_sent_recipient_display(message)
                 )
             }
             Event::AgentMessageSent(message) => format!(
                 "Message from {} to {}",
                 message.sender_id,
-                Self::agent_message_sent_recipient_label(message)
+                Self::agent_message_sent_recipient_display(message)
             ),
             Event::AgentMessageReceived(message)
                 if message.kind == tau_proto::AgentMessageKind::WatchResponse =>
             {
                 format!(
                     "Response from {} to {}",
-                    message.sender_id, message.recipient_id
+                    Self::agent_message_received_sender_label(message),
+                    message.recipient_id
                 )
             }
             Event::AgentMessageReceived(message) => format!(
                 "Message from {} to {}",
-                message.sender_id, message.recipient_id
+                Self::agent_message_received_sender_label(message),
+                message.recipient_id
             ),
             _ => unreachable!("only agent message events are rendered here"),
         }
@@ -3311,11 +3313,25 @@ impl EventRenderer {
         }
     }
 
-    fn agent_message_sent_recipient_label(message: &tau_proto::AgentMessageSent) -> &str {
+    fn agent_message_sent_recipient_display(message: &tau_proto::AgentMessageSent) -> String {
         match &message.recipient {
-            tau_proto::AgentMessageRecipient::Agent { agent_id } => agent_id.as_str(),
-            tau_proto::AgentMessageRecipient::User => "user",
+            tau_proto::AgentMessageRecipient::Agent { agent_id } => agent_id.to_string(),
+            tau_proto::AgentMessageRecipient::ExternalAgent {
+                session_id,
+                agent_id,
+            } => {
+                format!("{session_id}/{agent_id}")
+            }
+            tau_proto::AgentMessageRecipient::User => "user".to_owned(),
         }
+    }
+
+    fn agent_message_received_sender_label(message: &tau_proto::AgentMessageReceived) -> String {
+        message
+            .sender_session_id
+            .as_ref()
+            .map(|session_id| format!("{session_id}/{}", message.sender_id))
+            .unwrap_or_else(|| message.sender_id.to_string())
     }
 
     fn is_user_broadcast_agent_message(event: &Event) -> bool {
@@ -3335,6 +3351,7 @@ impl EventRenderer {
     ) -> Option<&str> {
         match &message.recipient {
             tau_proto::AgentMessageRecipient::Agent { agent_id } => Some(agent_id.as_str()),
+            tau_proto::AgentMessageRecipient::ExternalAgent { .. } => None,
             tau_proto::AgentMessageRecipient::User => None,
         }
     }

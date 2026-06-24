@@ -8,6 +8,11 @@ Harness input and output messages are directionally typed. Keep request/response
 
 `encode_message` writes one self-delimiting CBOR item. `decode_message_from_slice` and the harness input/output slice helpers must decode exactly one item and reject trailing bytes; use `MessageReader` for streams of concatenated messages.
 
+External agent-message delivery is modeled as a dedicated directional RPC
+(`external_agent_message` / `external_agent_message_result`) rather than as a
+generic `emit`. The payload carries sender and recipient session ids separately
+from slash-free `AgentId`s; do not encode `session/agent` into `AgentId`.
+
 ## Provider-visible tool responses
 
 Tool result events carry raw CBOR for non-provider consumers, but provider prompt construction must render tool outputs through `ToolResponse::render()`. That render path is the central defense-in-depth normalization boundary after tool-local semantic escaping.

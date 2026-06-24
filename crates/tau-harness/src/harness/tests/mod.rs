@@ -73,6 +73,7 @@ enum TestMessage {
     RenderedPromptResult(Box<tau_proto::RenderedPromptResult>),
     RenderedToolDefinitionsResult(Box<tau_proto::RenderedToolDefinitionsResult>),
     ExtensionDataResult(Box<tau_proto::ExtensionDataResult>),
+    ExternalAgentMessageResult(tau_proto::ExternalAgentMessageResult),
 }
 
 impl TestProtocolItem {
@@ -116,6 +117,9 @@ impl TestProtocolItem {
             HarnessOutputMessage::ExtensionDataResult(message) => {
                 Self::Message(TestMessage::ExtensionDataResult(message))
             }
+            HarnessOutputMessage::ExternalAgentMessageResult(message) => {
+                Self::Message(TestMessage::ExternalAgentMessageResult(message))
+            }
         }
     }
 
@@ -153,7 +157,8 @@ impl TestMessage {
             | Self::RenderedSystemPromptResult(_)
             | Self::RenderedPromptResult(_)
             | Self::RenderedToolDefinitionsResult(_)
-            | Self::ExtensionDataResult(_) => {
+            | Self::ExtensionDataResult(_)
+            | Self::ExternalAgentMessageResult(_) => {
                 panic!("test frame shim cannot send harness-output message as input")
             }
         }
@@ -910,7 +915,7 @@ fn render_self_knowledge_config_content_inserts_config_defaults() {
 
     assert!(!rendered.contains("{harness_config}"));
     assert!(!rendered.contains("{ui_config}"));
-    assert!(rendered.contains("${XDG_RUNTIME_DIR}/tau/<pid>/"));
+    assert!(rendered.contains("${XDG_RUNTIME_DIR}/tau/harnesses/"));
     assert!(rendered.contains("session_retention_days: 60"));
     assert!(rendered.contains("show_thinking: true"));
     assert!(rendered.contains("{{role_group}}-{{random_alphanumeric 4}}"));

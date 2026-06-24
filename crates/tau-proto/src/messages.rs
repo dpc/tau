@@ -17,8 +17,8 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    CborValue, ClientKind, Event, EventSelector, ExtensionName, InterceptionPriority,
-    ToolDefinition,
+    AgentId, AgentMessageId, AgentMessageKind, CborValue, ClientKind, Event, EventSelector,
+    ExtensionName, InterceptionPriority, SessionId, ToolDefinition,
 };
 
 // ---------------------------------------------------------------------------
@@ -298,6 +298,39 @@ pub struct Emit {
     /// True when the event should skip durable semantic logs.
     #[serde(default, skip_serializing_if = "core::ops::Not::not")]
     pub transient: bool,
+}
+
+/// Peer-to-harness RPC that asks the active target harness to publish a
+/// harness-owned external agent-message delivery.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ExternalAgentMessageRequest {
+    /// Sender-generated request correlation id.
+    pub request_id: String,
+    /// Stable logical message id shared by sender and recipient projections.
+    pub message_id: AgentMessageId,
+    /// Active session id of the sending harness.
+    pub sender_session_id: SessionId,
+    /// Agent id of the sender in the sending harness.
+    pub sender_id: AgentId,
+    /// Active session id expected on the receiving harness.
+    pub recipient_session_id: SessionId,
+    /// Agent id of the recipient in the receiving harness.
+    pub recipient_id: AgentId,
+    /// Delivery source semantics.
+    #[serde(default, skip_serializing_if = "AgentMessageKind::is_default")]
+    pub kind: AgentMessageKind,
+    /// Message body.
+    pub message: String,
+}
+
+/// Harness-to-peer response for an external agent-message RPC.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ExternalAgentMessageResult {
+    /// Request correlation id copied from the request.
+    pub request_id: String,
+    /// Empty on success; otherwise a bounded user-facing delivery error.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 impl Emit {
@@ -709,6 +742,7 @@ pub enum HarnessInputMessage {
     GetRenderedPrompt(GetRenderedPrompt),
     GetRenderedToolDefinitions(GetRenderedToolDefinitions),
     ExtensionDataRequest(ExtensionDataRequest),
+    ExternalAgentMessage(ExternalAgentMessageRequest),
 }
 
 impl HarnessInputMessage {
@@ -742,6 +776,7 @@ pub enum HarnessOutputMessage {
     RenderedPromptResult(Box<RenderedPromptResult>),
     RenderedToolDefinitionsResult(Box<RenderedToolDefinitionsResult>),
     ExtensionDataResult(Box<ExtensionDataResult>),
+    ExternalAgentMessageResult(ExternalAgentMessageResult),
 }
 
 impl HarnessOutputMessage {

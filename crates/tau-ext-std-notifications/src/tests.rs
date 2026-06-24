@@ -25,6 +25,7 @@ fn message_variant(msg: &HarnessInputMessage) -> &'static str {
         HarnessInputMessage::GetRenderedPrompt(_) => "GetRenderedPrompt",
         HarnessInputMessage::GetRenderedToolDefinitions(_) => "GetRenderedToolDefinitions",
         HarnessInputMessage::ExtensionDataRequest(_) => "ExtensionDataRequest",
+        HarnessInputMessage::ExternalAgentMessage(_) => "ExternalAgentMessage",
     }
 }
 

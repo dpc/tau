@@ -2,6 +2,8 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::thread;
+use std::time::Duration;
 
 use tau_proto::{
     AgentContextKey, AgentContextValue, AgentId, AgentMessageReceived, AgentMessageSent, CborValue,
@@ -10,6 +12,7 @@ use tau_proto::{
 };
 
 use crate::error::HarnessError;
+use crate::event::{ExternalMessageToolCompletedCommand, HarnessCommand, HarnessEvent};
 use crate::harness::{AgentMessageRecipientStatus, AgentToolCall, HARNESS_CONNECTION_ID, Harness};
 
 /// Model-visible name of the harness-owned wait tool.
@@ -284,12 +287,129 @@ impl Harness {
                 Event::AgentMessageReceived(AgentMessageReceived {
                     message_id,
                     sender_id,
+                    sender_session_id: None,
                     recipient_id: agent_id,
                     kind,
                     message,
                 }),
             );
         }
+        Ok(())
+    }
+
+    /// Prepare the sender-side projection for an external message and start a
+    /// worker that performs runtime-dir lookup plus socket RPC off the harness
+    /// event loop. The projection is published only after confirmed delivery.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn publish_external_agent_message_from_agent(
+        &mut self,
+        conversation_id: &AgentId,
+        recipient_session_id: tau_proto::SessionId,
+        recipient_id: AgentId,
+        message: String,
+        kind: tau_proto::AgentMessageKind,
+        completion: Option<ExternalMessageToolCompletion>,
+    ) -> Result<(), String> {
+        let sender_id = self
+            .ensure_agent_id_for_agent(conversation_id)
+            .ok_or_else(|| "sender agent no longer exists".to_owned())?;
+        let sender_id: tau_proto::AgentId = crate::parse_agent_id(&sender_id);
+        let message_id = next_agent_message_id(&sender_id);
+        let request_id = format!("external-{message_id}");
+        let sent_event = (kind == tau_proto::AgentMessageKind::Message).then(|| AgentMessageSent {
+            message_id: message_id.clone(),
+            sender_id: sender_id.clone(),
+            recipient: tau_proto::AgentMessageRecipient::ExternalAgent {
+                session_id: recipient_session_id.clone(),
+                agent_id: recipient_id.clone(),
+            },
+            kind,
+            message: message.clone(),
+        });
+        let request = tau_proto::ExternalAgentMessageRequest {
+            request_id,
+            message_id,
+            sender_session_id: self.current_session_id.clone(),
+            sender_id,
+            recipient_session_id,
+            recipient_id,
+            kind,
+            message,
+        };
+        let tx = self.tx.clone();
+        thread::spawn(move || {
+            let result = send_external_agent_message_request(request);
+            if let Some(completion) = completion {
+                let _ = tx.send(HarnessEvent::Command(
+                    HarnessCommand::ExternalMessageToolCompleted(Box::new(
+                        ExternalMessageToolCompletedCommand {
+                            conversation_id: completion.conversation_id,
+                            call_id: completion.call_id,
+                            tool_name: completion.tool_name,
+                            tool_type: completion.tool_type,
+                            result,
+                            details: completion.details,
+                            sent_event,
+                        },
+                    )),
+                ));
+            }
+        });
+        Ok(())
+    }
+
+    /// Handle an external agent message RPC accepted from a socket client.
+    pub(crate) fn handle_external_agent_message_request(
+        &mut self,
+        request: tau_proto::ExternalAgentMessageRequest,
+    ) -> tau_proto::ExternalAgentMessageResult {
+        let request_id = request.request_id.clone();
+        let result = self.receive_external_agent_message(request);
+        tau_proto::ExternalAgentMessageResult {
+            request_id,
+            error: result.err(),
+        }
+    }
+
+    fn receive_external_agent_message(
+        &mut self,
+        request: tau_proto::ExternalAgentMessageRequest,
+    ) -> Result<(), String> {
+        if request.recipient_session_id != self.current_session_id {
+            return Err(format!(
+                "target harness is on active session `{}`, not `{}`",
+                self.current_session_id, request.recipient_session_id
+            ));
+        }
+        if request.message.trim().is_empty() {
+            return Err("`message` must not be empty".to_owned());
+        }
+        match self.agent_message_recipient_status(request.recipient_id.as_str()) {
+            AgentMessageRecipientStatus::Live => {}
+            AgentMessageRecipientStatus::Stopped => {
+                return Err(format!(
+                    "stopped message recipient: `{}`",
+                    request.recipient_id
+                ));
+            }
+            AgentMessageRecipientStatus::Unknown => {
+                return Err(format!(
+                    "unknown message recipient: `{}`",
+                    request.recipient_id
+                ));
+            }
+        }
+        self.publish_event(
+            Some(HARNESS_CONNECTION_ID),
+            Event::AgentMessageReceived(AgentMessageReceived {
+                message_id: request.message_id,
+                sender_id: request.sender_id,
+                sender_session_id: Some(request.sender_session_id),
+                recipient_id: request.recipient_id,
+                kind: request.kind,
+                message: request.message,
+            }),
+        );
         Ok(())
     }
 
@@ -528,6 +648,67 @@ impl Harness {
             }
             self.on_tool_call_complete(wait_call_id.as_str());
             self.clear_tool_call_tracking(wait_call_id.as_str());
+        }
+    }
+}
+
+/// State needed to complete an external message tool call after async delivery.
+pub(crate) struct ExternalMessageToolCompletion {
+    /// Conversation that owns the tool call.
+    pub(crate) conversation_id: AgentId,
+    /// Tool call id to complete.
+    pub(crate) call_id: ToolCallId,
+    /// Visible tool name for the result/error.
+    pub(crate) tool_name: ToolName,
+    /// Tool type declared on the call.
+    pub(crate) tool_type: ToolType,
+    /// Original arguments used as error details.
+    pub(crate) details: CborValue,
+}
+
+fn send_external_agent_message_request(
+    request: tau_proto::ExternalAgentMessageRequest,
+) -> Result<(), String> {
+    let harness_path =
+        crate::runtime_dir::find_harness_for_session(request.recipient_session_id.as_str())
+            .map_err(|err| err.to_string())?
+            .ok_or_else(|| {
+                format!(
+                    "no running daemon for session `{}`",
+                    request.recipient_session_id
+                )
+            })?;
+    let socket = crate::runtime_dir::socket_path(&harness_path);
+    let mut peer = tau_socket::SocketPeer::connect(&socket)
+        .map_err(|err| format!("failed to connect to target harness: {err}"))?;
+    peer.send(&tau_proto::HarnessInputMessage::Hello(tau_proto::Hello {
+        protocol_version: tau_proto::PROTOCOL_VERSION,
+        client_name: crate::harness::EXTERNAL_AGENT_MESSAGE_CLIENT_NAME.into(),
+        client_kind: tau_proto::ClientKind::External,
+    }))
+    .map_err(|err| format!("failed to send external message hello: {err}"))?;
+    peer.send(&tau_proto::HarnessInputMessage::ExternalAgentMessage(
+        request.clone(),
+    ))
+    .map_err(|err| format!("failed to send external message request: {err}"))?;
+    let deadline = Duration::from_secs(10);
+    loop {
+        match peer
+            .recv_timeout(deadline)
+            .map_err(|err| format!("failed to receive external message result: {err}"))?
+        {
+            tau_socket::SocketReceive::Message {
+                message: tau_proto::HarnessOutputMessage::ExternalAgentMessageResult(result),
+            } if result.request_id == request.request_id => {
+                return result.error.map_or(Ok(()), Err);
+            }
+            tau_socket::SocketReceive::Message { .. } => continue,
+            tau_socket::SocketReceive::Timeout => {
+                return Err("timed out waiting for external message result".to_owned());
+            }
+            tau_socket::SocketReceive::Closed => {
+                return Err("target harness closed before external message result".to_owned());
+            }
         }
     }
 }

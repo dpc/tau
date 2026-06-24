@@ -162,6 +162,7 @@ fn representative_events() -> Vec<Event> {
         Event::AgentMessageReceived(AgentMessageReceived {
             message_id: "msg-2".into(),
             sender_id: agent_id("engineer_abcd1234"),
+            sender_session_id: None,
             recipient_id: agent_id("reviewer_efgh5678"),
             kind: AgentMessageKind::Message,
             message: "hello back".to_owned(),
@@ -419,6 +420,16 @@ fn representative_input_messages() -> Vec<HarnessInputMessage> {
                 path: ExtensionDataPath::new("notes/state.cbor"),
             },
         }),
+        HarnessInputMessage::ExternalAgentMessage(ExternalAgentMessageRequest {
+            request_id: "external-1".to_owned(),
+            message_id: "msg-external-1".into(),
+            sender_session_id: "sender-session".into(),
+            sender_id: agent_id("sender_agent"),
+            recipient_session_id: "recipient-session".into(),
+            recipient_id: agent_id("recipient_agent"),
+            kind: AgentMessageKind::Message,
+            message: "hello external".to_owned(),
+        }),
     ]
 }
 
@@ -493,6 +504,10 @@ fn representative_output_messages() -> Vec<HarnessOutputMessage> {
                 },
             },
         })),
+        HarnessOutputMessage::ExternalAgentMessageResult(ExternalAgentMessageResult {
+            request_id: "external-1".to_owned(),
+            error: None,
+        }),
     ]
 }
 
@@ -536,6 +551,7 @@ fn agent_message_events_have_names_and_persistence_defaults() {
     let received = Event::AgentMessageReceived(AgentMessageReceived {
         message_id: "msg-2".into(),
         sender_id: agent_id("engineer_abcd1234"),
+        sender_session_id: None,
         recipient_id: agent_id("reviewer_efgh5678"),
         kind: AgentMessageKind::Message,
         message: "hello back".to_owned(),
@@ -561,6 +577,7 @@ fn agent_message_kind_defaults_and_serializes_only_when_non_default() {
     let explicit_message = AgentMessageReceived {
         message_id: "msg-message".into(),
         sender_id: agent_id("engineer_abcd1234"),
+        sender_session_id: None,
         recipient_id: agent_id("reviewer_efgh5678"),
         kind: AgentMessageKind::Message,
         message: "hello".to_owned(),

@@ -21,6 +21,26 @@ const SHUTDOWN_GRACE: Duration = Duration::from_secs(2);
 pub(crate) enum HarnessCommand {
     /// Install a spawned extension connection and release its reader.
     ConnectExtension(Box<ExtensionConnectCommand>),
+    /// Complete an asynchronous external message tool delivery attempt.
+    ExternalMessageToolCompleted(Box<ExternalMessageToolCompletedCommand>),
+}
+
+/// Completion payload for asynchronous external message tool delivery.
+pub(crate) struct ExternalMessageToolCompletedCommand {
+    /// Conversation that owns the tool call.
+    pub(crate) conversation_id: tau_proto::AgentId,
+    /// Tool call id being completed.
+    pub(crate) call_id: tau_proto::ToolCallId,
+    /// Visible tool name for terminal result/error events.
+    pub(crate) tool_name: tau_proto::ToolName,
+    /// Tool type declared by the provider.
+    pub(crate) tool_type: tau_proto::ToolType,
+    /// `Ok` on delivery success, `Err` with user-facing failure text.
+    pub(crate) result: Result<(), String>,
+    /// Original call arguments for error details.
+    pub(crate) details: tau_proto::CborValue,
+    /// Sender-side projection to publish only after confirmed delivery.
+    pub(crate) sent_event: Option<tau_proto::AgentMessageSent>,
 }
 
 /// Internal event type — all reader threads feed this into one channel.

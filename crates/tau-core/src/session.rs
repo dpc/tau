@@ -140,6 +140,9 @@ pub enum AgentEntry {
         direction: AgentMessageDirection,
         /// Sender agent id.
         sender_id: AgentId,
+        /// Active session id for an external sender, if this inbound message
+        /// originated in another harness session.
+        sender_session_id: Option<tau_proto::SessionId>,
         /// Recipient agent or user.
         recipient: AgentMessageRecipient,
         /// Delivery source semantics.
@@ -858,6 +861,7 @@ impl AgentTree {
             message_id: message.message_id.clone(),
             direction: AgentMessageDirection::Outbound,
             sender_id: message.sender_id.clone(),
+            sender_session_id: None,
             recipient: message.recipient.clone(),
             kind: message.kind,
             message: message.message.clone(),
@@ -872,6 +876,7 @@ impl AgentTree {
             message_id: message.message_id.clone(),
             direction: AgentMessageDirection::Inbound,
             sender_id: message.sender_id.clone(),
+            sender_session_id: message.sender_session_id.clone(),
             recipient: AgentMessageRecipient::Agent {
                 agent_id: message.recipient_id.clone(),
             },

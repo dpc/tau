@@ -32,11 +32,11 @@ Tau follows the XDG directories:
   - `events.cbor` — durable agent transcript log and source of truth for replaying that agent tree.
   - `meta.json` — agent metadata such as cwd, creation time, and latest prompt preview.
   - `lock` — flock used while the daemon has the agent loaded for writing.
-- Runtime: `${XDG_RUNTIME_DIR}/tau/<pid>/` or `/tmp/tau-$USER/<pid>/`
-  - `tau.sock` — Unix socket for clients.
-  - `tau.dir` — project root marker used for daemon discovery.
-  - `tau.pid` — daemon process id.
-  - `tau.session_id` — session id bound to the daemon.
+- Runtime: `${XDG_RUNTIME_DIR}/tau/harnesses/` or `/tmp/tau-$USER/harnesses/`
+  - `<pid>.sock` — Unix socket for clients.
+  - `<pid>.json` — daemon discovery metadata containing pid, project root,
+    Tau version, and the daemon's current active `session_id`; `/session new`
+    updates this field after the daemon switches sessions successfully.
 
 ## Event logs are usually the first place to look
 
@@ -66,7 +66,12 @@ cargo r -- dev send <session_id> /compact
 cargo r -- dev send <session_id> '!pwd'
 ```
 
-The command requires the session id and finds the matching running daemon via its runtime `tau.session_id` marker. It supports normal prompts, core slash commands, and `!` / `!!` shell-command submissions.
+The command requires the session id and finds the matching running daemon via
+runtime harness metadata. That metadata's `session_id` is the daemon's active
+current session and is updated by `/session new`; stale sockets are cleaned
+during discovery, and ambiguous live matches are treated as an error. It
+supports normal prompts, core slash commands, and `!` / `!!` shell-command
+submissions.
 
 ## Quick inspection workflow
 

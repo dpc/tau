@@ -1071,10 +1071,33 @@ fn handle_message_tool_call(
     let call_id = call.id.clone();
     host.ensure_internal_tool_tracking(conversation_id, call, &visible_tool_name);
     let result = parse_message_args(&call.arguments).and_then(|parsed| {
-        host.publish_agent_message(conversation_id, parsed.recipient_id, parsed.message)
+        match parse_message_recipient(&parsed.recipient_id, &host.current_session_id())? {
+            MessageRecipientAddress::User => host
+                .publish_agent_message(conversation_id, "user".to_owned(), parsed.message)
+                .map(|()| MessageToolFlow::Finished),
+            MessageRecipientAddress::LocalAgent(agent_id) => host
+                .publish_agent_message(conversation_id, agent_id.to_string(), parsed.message)
+                .map(|()| MessageToolFlow::Finished),
+            MessageRecipientAddress::ExternalAgent {
+                session_id,
+                agent_id,
+            } => {
+                host.publish_external_agent_message(
+                    conversation_id,
+                    session_id,
+                    agent_id,
+                    parsed.message,
+                    call_id.clone(),
+                    visible_tool_name.clone(),
+                    call.tool_type,
+                    call.arguments.clone(),
+                )?;
+                Ok(MessageToolFlow::PendingExternal)
+            }
+        }
     });
     match result {
-        Ok(()) => host.finish_tool_with_result(
+        Ok(MessageToolFlow::Finished) => host.finish_tool_with_result(
             conversation_id,
             call_id,
             visible_tool_name,
@@ -1082,6 +1105,7 @@ fn handle_message_tool_call(
             "Message sent".to_owned(),
             None,
         ),
+        Ok(MessageToolFlow::PendingExternal) => {}
         Err(message) => host.finish_tool_with_error(
             conversation_id,
             call_id,
@@ -1092,6 +1116,11 @@ fn handle_message_tool_call(
         ),
     }
     Ok(())
+}
+
+enum MessageToolFlow {
+    Finished,
+    PendingExternal,
 }
 
 impl BuiltinTools {
@@ -1145,6 +1174,49 @@ impl BuiltinTools {
 struct MessageArgs {
     recipient_id: String,
     message: String,
+}
+
+enum MessageRecipientAddress {
+    User,
+    LocalAgent(tau_proto::AgentId),
+    ExternalAgent {
+        session_id: tau_proto::SessionId,
+        agent_id: tau_proto::AgentId,
+    },
+}
+
+fn parse_message_recipient(
+    raw: &str,
+    current_session_id: &tau_proto::SessionId,
+) -> Result<MessageRecipientAddress, String> {
+    if raw == "user" {
+        return Ok(MessageRecipientAddress::User);
+    }
+    let slash_count = raw.matches('/').count();
+    if slash_count == 0 {
+        return tau_proto::AgentId::parse(raw)
+            .map(MessageRecipientAddress::LocalAgent)
+            .map_err(|err| format!("invalid message recipient agent id `{raw}`: {err}"));
+    }
+    if slash_count != 1 {
+        return Err("external recipient must have exactly one `/`".to_owned());
+    }
+    let (session, agent) = raw
+        .split_once('/')
+        .expect("one slash checked before split_once");
+    if session.is_empty() || agent.is_empty() {
+        return Err("external recipient must be `<session-id>/<agent_id>`".to_owned());
+    }
+    let agent_id = tau_proto::AgentId::parse(agent)
+        .map_err(|err| format!("invalid external recipient agent id `{agent}`: {err}"))?;
+    let session_id = tau_proto::SessionId::from(session.to_owned());
+    if &session_id == current_session_id {
+        return Ok(MessageRecipientAddress::LocalAgent(agent_id));
+    }
+    Ok(MessageRecipientAddress::ExternalAgent {
+        session_id,
+        agent_id,
+    })
 }
 
 fn parse_message_args(arguments: &CborValue) -> Result<MessageArgs, String> {
@@ -1500,7 +1572,7 @@ fn agent_start_tool_spec() -> ToolSpec {
 }
 
 fn message_tool_spec() -> ToolSpec {
-    ToolSpec { name: ToolName::new(MESSAGE_TOOL_NAME), model_visible_name: None, description: Some("Send an async message to another agent, or the user. Use recipient_id `user`, or a `sub_agent_id` returned by `agent_start`. Requires `recipient_id` and `message`.".to_owned()), tool_type: ToolType::Function, parameters: Some(serde_json::json!({"type":"object","properties":{"recipient_id":{"type":"string","description":"Recipient agent_id, or the special value `user`."},"message":{"type":"string","description":"Message body."}},"required":["recipient_id","message"],"additionalProperties":false})), format: None, tags: Vec::new(), enabled_by_default: true, background_support: Some(BackgroundSupport::Never), examples: Vec::new() }
+    ToolSpec { name: ToolName::new(MESSAGE_TOOL_NAME), model_visible_name: None, description: Some("Send an async message to another agent, or the user. Use recipient_id `user`, a local agent id, or an external `<session-id>/<agent_id>` address. Requires `recipient_id` and `message`.".to_owned()), tool_type: ToolType::Function, parameters: Some(serde_json::json!({"type":"object","properties":{"recipient_id":{"type":"string","description":"Recipient `user`, local agent_id, or external `<session-id>/<agent_id>`."},"message":{"type":"string","description":"Message body."}},"required":["recipient_id","message"],"additionalProperties":false})), format: None, tags: Vec::new(), enabled_by_default: true, background_support: Some(BackgroundSupport::Never), examples: Vec::new() }
 }
 
 fn agent_watch_tool_spec() -> ToolSpec {

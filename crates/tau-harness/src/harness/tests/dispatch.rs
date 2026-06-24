@@ -6790,6 +6790,7 @@ fn agent_message_interrupts_recipient_active_wait() {
         Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
             message_id: "test-message-interrupts-wait".into(),
             sender_id: crate::parse_agent_id("manager"),
+            sender_session_id: None,
             recipient_id: crate::parse_agent_id(&recipient_id),
             kind: tau_proto::AgentMessageKind::Message,
             message: "please stop waiting".to_owned(),
@@ -6870,6 +6871,7 @@ fn agent_message_interrupts_exact_wait_by_wait_owner() {
         Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
             message_id: "test-message-to-target-owner".into(),
             sender_id: crate::parse_agent_id("manager"),
+            sender_session_id: None,
             recipient_id: crate::parse_agent_id(&target_agent_id),
             kind: tau_proto::AgentMessageKind::Message,
             message: "target owner only".to_owned(),
@@ -6886,6 +6888,7 @@ fn agent_message_interrupts_exact_wait_by_wait_owner() {
         Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
             message_id: "test-message-to-wait-owner".into(),
             sender_id: crate::parse_agent_id("manager"),
+            sender_session_id: None,
             recipient_id: crate::parse_agent_id(&waiter_agent_id),
             kind: tau_proto::AgentMessageKind::Message,
             message: "waiter should resume".to_owned(),
@@ -7250,6 +7253,7 @@ fn side_agent_drains_agent_message_before_extension_teardown() {
         Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
             message_id: "test-message".into(),
             sender_id: crate::parse_agent_id("manager"),
+            sender_session_id: None,
             recipient_id: crate::parse_agent_id(&recipient_id),
             kind: tau_proto::AgentMessageKind::Message,
             message: "please include this".to_owned(),
@@ -11256,6 +11260,413 @@ fn message_tool_unknown_recipient_errors_without_agent_message() {
     h.shutdown().expect("shutdown");
 }
 
+/// Cross-harness message RPCs must validate the active target session and then
+/// publish only the harness-owned recipient projection with external sender
+/// identity preserved for prompt/UI rendering.
+#[test]
+fn external_agent_message_request_publishes_received_projection() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    let cid = ensure_test_user_agent(&mut h);
+    let recipient_id = h.ensure_agent_id_for_agent(&cid).expect("agent id");
+    h.agents.get_mut(&cid).expect("conversation").turn_state = AgentTurnState::AgentThinking {
+        agent_prompt_id: "external-message-target".into(),
+    };
+
+    let result = h.handle_external_agent_message_request(tau_proto::ExternalAgentMessageRequest {
+        request_id: "external-ok".to_owned(),
+        message_id: "msg-external-ok".into(),
+        sender_session_id: "other-session".into(),
+        sender_id: crate::parse_agent_id("sender_agent"),
+        recipient_session_id: "s1".into(),
+        recipient_id: crate::parse_agent_id(&recipient_id),
+        kind: tau_proto::AgentMessageKind::Message,
+        message: "hello from outside".to_owned(),
+    });
+
+    assert_eq!(result.request_id, "external-ok");
+    assert_eq!(result.error, None);
+    assert!(session_agent_message_sent_events(&h).is_empty());
+    let received = session_agent_message_received_events(&h);
+    assert_eq!(received.len(), 1);
+    assert_eq!(received[0].sender_id.as_str(), "sender_agent");
+    assert_eq!(
+        received[0].sender_session_id.as_deref(),
+        Some("other-session")
+    );
+    assert_eq!(received[0].recipient_id.as_str(), recipient_id);
+    assert_eq!(received[0].message, "hello from outside");
+    let pending = h
+        .agents
+        .get(&cid)
+        .expect("recipient conversation")
+        .pending_prompts
+        .front()
+        .expect("queued external message prompt");
+    assert!(pending.text.contains("other-session/sender_agent"));
+
+    h.shutdown().expect("shutdown");
+}
+
+/// Cross-harness message RPCs are addressed to one active session; stale
+/// runtime metadata or a racing `/session new` must not deliver into the wrong
+/// active session.
+#[test]
+fn external_agent_message_request_rejects_wrong_active_session() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    let cid = ensure_test_user_agent(&mut h);
+    let recipient_id = h.ensure_agent_id_for_agent(&cid).expect("agent id");
+
+    let result = h.handle_external_agent_message_request(tau_proto::ExternalAgentMessageRequest {
+        request_id: "external-wrong-session".to_owned(),
+        message_id: "msg-external-wrong-session".into(),
+        sender_session_id: "other-session".into(),
+        sender_id: crate::parse_agent_id("sender_agent"),
+        recipient_session_id: "not-s1".into(),
+        recipient_id: crate::parse_agent_id(&recipient_id),
+        kind: tau_proto::AgentMessageKind::Message,
+        message: "hello from outside".to_owned(),
+    });
+
+    assert_eq!(result.request_id, "external-wrong-session");
+    assert!(result.error.expect("error").contains("active session"));
+    assert!(session_agent_message_received_events(&h).is_empty());
+
+    h.shutdown().expect("shutdown");
+}
+
+/// Cross-harness message RPCs must reject unknown recipients before writing a
+/// durable inbound transcript projection.
+#[test]
+fn external_agent_message_request_rejects_unknown_recipient() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+
+    let result = h.handle_external_agent_message_request(tau_proto::ExternalAgentMessageRequest {
+        request_id: "external-unknown".to_owned(),
+        message_id: "msg-external-unknown".into(),
+        sender_session_id: "other-session".into(),
+        sender_id: crate::parse_agent_id("sender_agent"),
+        recipient_session_id: "s1".into(),
+        recipient_id: crate::parse_agent_id("missing_agent"),
+        kind: tau_proto::AgentMessageKind::Message,
+        message: "hello from outside".to_owned(),
+    });
+
+    assert_eq!(result.request_id, "external-unknown");
+    assert!(
+        result
+            .error
+            .expect("error")
+            .contains("unknown message recipient")
+    );
+    assert!(session_agent_message_received_events(&h).is_empty());
+
+    h.shutdown().expect("shutdown");
+}
+
+/// Cross-harness message RPCs must reject empty messages before writing a
+/// durable inbound transcript projection.
+#[test]
+fn external_agent_message_request_rejects_empty_message() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    let cid = ensure_test_user_agent(&mut h);
+    let recipient_id = h.ensure_agent_id_for_agent(&cid).expect("agent id");
+
+    let result = h.handle_external_agent_message_request(tau_proto::ExternalAgentMessageRequest {
+        request_id: "external-empty".to_owned(),
+        message_id: "msg-external-empty".into(),
+        sender_session_id: "other-session".into(),
+        sender_id: crate::parse_agent_id("sender_agent"),
+        recipient_session_id: "s1".into(),
+        recipient_id: crate::parse_agent_id(&recipient_id),
+        kind: tau_proto::AgentMessageKind::Message,
+        message: " \n\t ".to_owned(),
+    });
+
+    assert_eq!(result.request_id, "external-empty");
+    assert!(result.error.expect("error").contains("must not be empty"));
+    assert!(session_agent_message_received_events(&h).is_empty());
+
+    h.shutdown().expect("shutdown");
+}
+
+/// Generic clients and extensions must not be able to forge external-message
+/// RPCs without completing the narrow external-harness hello first.
+#[test]
+fn external_agent_message_rpc_requires_external_peer_hello() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    let cid = ensure_test_user_agent(&mut h);
+    let recipient_id = h.ensure_agent_id_for_agent(&cid).expect("agent id");
+    let request = tau_proto::ExternalAgentMessageRequest {
+        request_id: "external-forged".to_owned(),
+        message_id: "msg-external-forged".into(),
+        sender_session_id: "other-session".into(),
+        sender_id: crate::parse_agent_id("sender_agent"),
+        recipient_session_id: "s1".into(),
+        recipient_id: crate::parse_agent_id(&recipient_id),
+        kind: tau_proto::AgentMessageKind::Message,
+        message: "forged".to_owned(),
+    };
+
+    h.handle_client_message(
+        "ui",
+        tau_proto::HarnessInputMessage::ExternalAgentMessage(request.clone()),
+    )
+    .expect("untrusted client request");
+    h.handle_extension_message(
+        "extension",
+        tau_proto::HarnessInputMessage::ExternalAgentMessage(request.clone()),
+    )
+    .expect("extension request");
+    assert!(session_agent_message_received_events(&h).is_empty());
+
+    h.handle_client_message(
+        "ui",
+        tau_proto::HarnessInputMessage::Hello(tau_proto::Hello {
+            protocol_version: tau_proto::PROTOCOL_VERSION,
+            client_name: "ordinary-ui".into(),
+            client_kind: tau_proto::ClientKind::Ui,
+        }),
+    )
+    .expect("ordinary hello");
+    h.handle_client_message(
+        "ui",
+        tau_proto::HarnessInputMessage::ExternalAgentMessage(request.clone()),
+    )
+    .expect("ordinary client request");
+    assert!(session_agent_message_received_events(&h).is_empty());
+
+    h.handle_client_message(
+        "external",
+        tau_proto::HarnessInputMessage::Hello(tau_proto::Hello {
+            protocol_version: tau_proto::PROTOCOL_VERSION,
+            client_name: crate::harness::EXTERNAL_AGENT_MESSAGE_CLIENT_NAME.into(),
+            client_kind: tau_proto::ClientKind::External,
+        }),
+    )
+    .expect("external hello");
+    h.handle_client_message(
+        "external",
+        tau_proto::HarnessInputMessage::ExternalAgentMessage(request),
+    )
+    .expect("external request");
+    assert_eq!(session_agent_message_received_events(&h).len(), 1);
+
+    h.shutdown().expect("shutdown");
+}
+
+/// Sender-side external message projections should represent confirmed
+/// delivery, not a failed lookup or target-side rejection.
+#[test]
+fn external_message_send_failure_does_not_publish_sent_projection() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    let cid = ensure_test_user_agent(&mut h);
+    let call_id: tau_proto::ToolCallId = "external-message-call".into();
+    h.tool_agents.insert(call_id.clone(), cid.clone());
+
+    h.publish_external_agent_message_from_agent(
+        &cid,
+        "missing-session".into(),
+        crate::parse_agent_id("recipient_agent"),
+        "hello".to_owned(),
+        tau_proto::AgentMessageKind::Message,
+        Some(
+            crate::harness::subagents_tool::ExternalMessageToolCompletion {
+                conversation_id: cid.clone(),
+                call_id: call_id.clone(),
+                tool_name: ToolName::new(crate::harness::subagents_tool::MESSAGE_TOOL_NAME),
+                tool_type: tau_proto::ToolType::Function,
+                details: CborValue::Null,
+            },
+        ),
+    )
+    .expect("start external send");
+    assert!(session_agent_message_sent_events(&h).is_empty());
+
+    let command = loop {
+        match h
+            .rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("completion command")
+        {
+            HarnessEvent::Command(command) => break command,
+            other => h.log_event(&other),
+        }
+    };
+    h.handle_harness_command(command)
+        .expect("handle completion");
+
+    assert!(session_agent_message_sent_events(&h).is_empty());
+    assert!(
+        event_log_events(&h)
+            .into_iter()
+            .any(|event| { matches!(event, Event::ToolError(error) if error.call_id == call_id) })
+    );
+
+    h.shutdown().expect("shutdown");
+}
+
+/// A successful asynchronous external-message completion publishes the deferred
+/// sender projection and completes the original tool call.
+#[test]
+fn external_message_success_completion_publishes_sent_projection_and_tool_result() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    let cid = ensure_test_user_agent(&mut h);
+    let call_id: tau_proto::ToolCallId = "external-message-success-call".into();
+    h.tool_agents.insert(call_id.clone(), cid.clone());
+
+    h.handle_harness_command(crate::event::HarnessCommand::ExternalMessageToolCompleted(
+        Box::new(crate::event::ExternalMessageToolCompletedCommand {
+            conversation_id: cid,
+            call_id: call_id.clone(),
+            tool_name: ToolName::new(crate::harness::subagents_tool::MESSAGE_TOOL_NAME),
+            tool_type: tau_proto::ToolType::Function,
+            result: Ok(()),
+            details: CborValue::Null,
+            sent_event: Some(tau_proto::AgentMessageSent {
+                message_id: "delivered-message".into(),
+                sender_id: crate::parse_agent_id("sender_agent"),
+                recipient: tau_proto::AgentMessageRecipient::ExternalAgent {
+                    session_id: "other-session".into(),
+                    agent_id: crate::parse_agent_id("recipient_agent"),
+                },
+                kind: tau_proto::AgentMessageKind::Message,
+                message: "delivered".to_owned(),
+            }),
+        }),
+    ))
+    .expect("handle completion");
+
+    assert_eq!(session_agent_message_sent_events(&h).len(), 1);
+    assert!(
+        event_log_events(&h)
+            .into_iter()
+            .any(|event| matches!(event, Event::ToolResult(result) if result.call_id == call_id))
+    );
+
+    h.shutdown().expect("shutdown");
+}
+
+/// Stale async external-message completions from an abandoned session must not
+/// publish sender projections or tool completions after `/session new` clears
+/// old tool ownership.
+#[test]
+fn stale_external_message_completion_after_session_switch_is_dropped() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    let cid = ensure_test_user_agent(&mut h);
+    let call_id: tau_proto::ToolCallId = "stale-external-message-call".into();
+    h.tool_agents.insert(call_id.clone(), cid.clone());
+
+    h.switch_session("s2".into(), tau_proto::SessionStartReason::New)
+        .expect("switch session");
+
+    h.handle_harness_command(crate::event::HarnessCommand::ExternalMessageToolCompleted(
+        Box::new(crate::event::ExternalMessageToolCompletedCommand {
+            conversation_id: cid,
+            call_id: call_id.clone(),
+            tool_name: ToolName::new(crate::harness::subagents_tool::MESSAGE_TOOL_NAME),
+            tool_type: tau_proto::ToolType::Function,
+            result: Ok(()),
+            details: CborValue::Null,
+            sent_event: Some(tau_proto::AgentMessageSent {
+                message_id: "stale-message".into(),
+                sender_id: crate::parse_agent_id("sender_agent"),
+                recipient: tau_proto::AgentMessageRecipient::ExternalAgent {
+                    session_id: "other-session".into(),
+                    agent_id: crate::parse_agent_id("recipient_agent"),
+                },
+                kind: tau_proto::AgentMessageKind::Message,
+                message: "stale".to_owned(),
+            }),
+        }),
+    ))
+    .expect("handle stale completion");
+
+    let events = event_log_events(&h);
+    assert!(!events.iter().any(|event| matches!(
+        event,
+        Event::AgentMessageSent(message) if message.message_id.as_str() == "stale-message"
+    )));
+    assert!(!events.iter().any(|event| matches!(
+        event,
+        Event::ToolResult(result) if result.call_id == call_id
+    )));
+    assert!(!events.iter().any(|event| matches!(
+        event,
+        Event::ToolError(error) if error.call_id == call_id
+    )));
+
+    h.shutdown().expect("shutdown");
+}
+
+/// `/session new` reuses the daemon process, so the daemon's runtime discovery
+/// metadata must advertise the new active session and stop matching the stale
+/// old session after `switch_session` succeeds.
+#[test]
+fn switch_session_updates_runtime_metadata_active_session() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    let harness_path = td.path().join("runtime-harness");
+    std::fs::write(
+        crate::runtime_dir::metadata_path(&harness_path),
+        serde_json::to_vec(&crate::runtime_dir::DaemonMetadata {
+            version: 1,
+            pid: std::process::id(),
+            project_root: Some(td.path().to_path_buf()),
+            session_id: "s1".to_owned(),
+        })
+        .expect("metadata json"),
+    )
+    .expect("write metadata");
+    h.set_runtime_harness_path(harness_path.clone());
+
+    h.switch_session("s2".into(), tau_proto::SessionStartReason::New)
+        .expect("switch session");
+
+    assert_eq!(
+        crate::runtime_dir::read_session_id(&harness_path).as_deref(),
+        Some("s2")
+    );
+
+    h.shutdown().expect("shutdown");
+}
+
+/// Runtime metadata update is discovery-only and must not leave the harness
+/// half-switched if the metadata file is missing or unreadable.
+#[test]
+fn switch_session_continues_when_runtime_metadata_update_fails() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    h.set_runtime_harness_path(td.path().join("missing-runtime-harness"));
+
+    h.switch_session("s2".into(), tau_proto::SessionStartReason::New)
+        .expect("switch session should continue after metadata update failure");
+
+    assert_eq!(h.current_session_id.as_str(), "s2");
+    assert!(event_log_contains_any_source(&h, |event| {
+        matches!(event, Event::SessionStarted(started) if started.session_id.as_str() == "s2")
+    }));
+
+    h.shutdown().expect("shutdown");
+}
+
 /// A completed agent used to be collapsed with a typo as an unknown recipient.
 /// Keep the error distinct so callers can decide whether to retry or fix the
 /// id.
@@ -11436,25 +11847,35 @@ fn inbound_agent_message_events_are_ignored() {
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
 
-    let forged = Event::AgentMessageSent(tau_proto::AgentMessageSent {
+    let forged_sent = Event::AgentMessageSent(tau_proto::AgentMessageSent {
         message_id: "test-message".into(),
         sender_id: crate::parse_agent_id("attacker"),
         recipient: tau_proto::AgentMessageRecipient::User,
         kind: tau_proto::AgentMessageKind::Message,
         message: "forged".to_owned(),
     });
-    h.handle_client_event_inner("ui", forged.clone())
-        .expect("client event");
-    h.handle_extension_event_inner("extension", forged.clone())
-        .expect("extension event");
-    h.handle_extension_message(
-        "extension",
-        TestMessage::Emit(tau_proto::Emit {
-            event: Box::new(forged),
-            transient: false,
-        }),
-    )
-    .expect("extension emit");
+    let forged_received = Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
+        message_id: "test-message-received".into(),
+        sender_id: crate::parse_agent_id("attacker"),
+        sender_session_id: Some("other-session".into()),
+        recipient_id: crate::parse_agent_id("victim"),
+        kind: tau_proto::AgentMessageKind::Message,
+        message: "forged received".to_owned(),
+    });
+    for forged in [forged_sent, forged_received] {
+        h.handle_client_event_inner("ui", forged.clone())
+            .expect("client event");
+        h.handle_extension_event_inner("extension", forged.clone())
+            .expect("extension event");
+        h.handle_extension_message(
+            "extension",
+            TestMessage::Emit(tau_proto::Emit {
+                event: Box::new(forged),
+                transient: false,
+            }),
+        )
+        .expect("extension emit");
+    }
 
     assert!(session_agent_message_sent_events(&h).is_empty());
     assert!(session_agent_message_received_events(&h).is_empty());
