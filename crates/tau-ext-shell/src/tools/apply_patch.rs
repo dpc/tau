@@ -161,184 +161,247 @@ fn apply_hunks(
         return Err(ApplyPatchFailure::new("No files were modified.", &[]));
     }
 
-    let cwd = world.current_dir().to_path_buf();
-    let mut changes = Vec::with_capacity(hunks.len());
+    HunkApplier::new(world, hunks.len()).apply(hunks)
+}
 
-    for hunk in hunks {
+struct HunkApplier<'world> {
+    /// Filesystem abstraction used for reads, writes, and deletes.
+    world: &'world mut ShellWorld,
+    /// Directory used to resolve relative patch paths.
+    cwd: PathBuf,
+    /// Changes already applied, used both for summaries and partial failures.
+    changes: Vec<AppliedChange>,
+}
+
+impl<'world> HunkApplier<'world> {
+    fn new(world: &'world mut ShellWorld, expected_hunks: usize) -> Self {
+        Self {
+            cwd: world.current_dir().to_path_buf(),
+            world,
+            changes: Vec::with_capacity(expected_hunks),
+        }
+    }
+
+    fn apply(mut self, hunks: &[Hunk]) -> Result<Vec<AppliedChange>, ApplyPatchFailure> {
+        for hunk in hunks {
+            self.apply_hunk(hunk)?;
+        }
+        Ok(self.changes)
+    }
+
+    fn apply_hunk(&mut self, hunk: &Hunk) -> Result<(), ApplyPatchFailure> {
         match hunk {
             Hunk::Add { path, contents } => {
-                let abs = resolve_path(&cwd, path);
-                if read_optional_file(&abs, world)
-                    .map_err(|message| ApplyPatchFailure::new(message, &changes))?
-                    .is_some()
-                {
-                    return Err(ApplyPatchFailure::new(
-                        format!("Add File target already exists: {}", render_path(&abs)),
-                        &changes,
-                    ));
-                }
-                let old_content = String::new();
-                write_file_creating_parent(&abs, contents, world).map_err(|error| {
-                    ApplyPatchFailure::new(
-                        format!(
-                            "Failed to write file {}: {}",
-                            render_path(&abs),
-                            render_diagnostic(error)
-                        ),
-                        &changes,
-                    )
-                })?;
-                changes.push(AppliedChange {
-                    display_path: render_path(path),
-                    path: abs.clone(),
-                    status: ChangeStatus::Add,
-                    old_content,
-                    new_content: Some(contents.clone()),
-                });
+                self.apply_add(path, contents)?;
             }
             Hunk::Delete { path } => {
-                let abs = resolve_path(&cwd, path);
-                if world.is_dir(&abs).map_err(|_| {
-                    ApplyPatchFailure::new(
-                        format!("Failed to delete file {}", render_path(&abs)),
-                        &changes,
-                    )
-                })? {
-                    return Err(ApplyPatchFailure::new(
-                        format!("Failed to delete file {}", render_path(&abs)),
-                        &changes,
-                    ));
-                }
-                let old_content = world
-                    .read_to_string_limited(&abs, MAX_SAFE_FILE_READ_BYTES)
-                    .map_err(|_| {
-                        ApplyPatchFailure::new(
-                            format!("Failed to delete file {}", render_path(&abs)),
-                            &changes,
-                        )
-                    })?;
-                world.remove_file(&abs).map_err(|_| {
-                    ApplyPatchFailure::new(
-                        format!("Failed to delete file {}", render_path(&abs)),
-                        &changes,
-                    )
-                })?;
-                changes.push(AppliedChange {
-                    display_path: render_path(path),
-                    path: abs.clone(),
-                    status: ChangeStatus::Delete,
-                    old_content,
-                    new_content: None,
-                });
+                self.apply_delete(path)?;
             }
             Hunk::Update {
                 path,
                 move_path,
                 chunks,
             } => {
-                let abs = resolve_path(&cwd, path);
-                let old_content = world
-                    .read_to_string_limited(&abs, MAX_SAFE_FILE_READ_BYTES)
-                    .map_err(|error| {
-                        ApplyPatchFailure::new(
-                            format!(
-                                "Failed to read file to update {}: {}",
-                                render_path(&abs),
-                                render_diagnostic(error)
-                            ),
-                            &changes,
-                        )
-                    })?;
-                let new_content = derive_new_contents_from_chunks(&abs, &old_content, chunks)
-                    .map_err(|message| ApplyPatchFailure::new(message, &changes))?;
-
-                let (change_path, display_path) = if let Some(move_path) = move_path {
-                    let dest_abs = resolve_path(&cwd, move_path);
-                    if read_optional_file(&dest_abs, world)
-                        .map_err(|message| ApplyPatchFailure::new(message, &changes))?
-                        .is_some()
-                    {
-                        return Err(ApplyPatchFailure::new(
-                            format!(
-                                "Move destination already exists: {}",
-                                render_path(&dest_abs)
-                            ),
-                            &changes,
-                        ));
-                    }
-                    write_file_creating_parent(&dest_abs, &new_content, world).map_err(
-                        |error| {
-                            ApplyPatchFailure::new(
-                                format!(
-                                    "Failed to write file {}: {}",
-                                    render_path(&dest_abs),
-                                    render_diagnostic(error)
-                                ),
-                                &changes,
-                            )
-                        },
-                    )?;
-                    let dest_write_change_index = changes.len();
-                    changes.push(AppliedChange {
-                        display_path: render_path(move_path),
-                        path: dest_abs.clone(),
-                        status: ChangeStatus::Add,
-                        old_content: String::new(),
-                        new_content: Some(new_content.clone()),
-                    });
-                    if world.is_dir(&abs).map_err(|_| {
-                        ApplyPatchFailure::new(
-                            format!("Failed to remove original {}", render_path(&abs)),
-                            &changes,
-                        )
-                    })? {
-                        return Err(ApplyPatchFailure::new(
-                            format!("Failed to remove original {}", render_path(&abs)),
-                            &changes,
-                        ));
-                    }
-                    world.remove_file(&abs).map_err(|_| {
-                        ApplyPatchFailure::new(
-                            format!("Failed to remove original {}", render_path(&abs)),
-                            &changes,
-                        )
-                    })?;
-                    changes[dest_write_change_index] = AppliedChange {
-                        display_path: render_path(move_path),
-                        path: abs.clone(),
-                        status: ChangeStatus::Modify,
-                        old_content: old_content.clone(),
-                        new_content: Some(new_content.clone()),
-                    };
-                    continue;
-                } else {
-                    world
-                        .write_file(&abs, new_content.as_bytes())
-                        .map_err(|error| {
-                            ApplyPatchFailure::new(
-                                format!(
-                                    "Failed to write file {}: {}",
-                                    render_path(&abs),
-                                    render_diagnostic(error)
-                                ),
-                                &changes,
-                            )
-                        })?;
-                    (abs.clone(), render_path(path))
-                };
-
-                changes.push(AppliedChange {
-                    display_path,
-                    path: change_path,
-                    status: ChangeStatus::Modify,
-                    old_content,
-                    new_content: Some(new_content),
-                });
+                self.apply_update(path, move_path.as_deref(), chunks)?;
             }
+        }
+        Ok(())
+    }
+
+    fn apply_add(&mut self, path: &Path, contents: &str) -> Result<(), ApplyPatchFailure> {
+        let abs = resolve_path(&self.cwd, path);
+        if self.read_optional_file(&abs)?.is_some() {
+            return Err(self.failure(format!(
+                "Add File target already exists: {}",
+                render_path(&abs)
+            )));
+        }
+        write_file_creating_parent(&abs, contents, self.world).map_err(|error| {
+            self.failure(format!(
+                "Failed to write file {}: {}",
+                render_path(&abs),
+                render_diagnostic(error)
+            ))
+        })?;
+        self.changes.push(AppliedChange {
+            display_path: render_path(path),
+            path: abs,
+            status: ChangeStatus::Add,
+            old_content: String::new(),
+            new_content: Some(contents.to_owned()),
+        });
+        Ok(())
+    }
+
+    fn apply_delete(&mut self, path: &Path) -> Result<(), ApplyPatchFailure> {
+        let abs = resolve_path(&self.cwd, path);
+        self.ensure_not_dir_for_delete(&abs)?;
+        let old_content = self.read_file_to_delete(&abs)?;
+        self.remove_file_to_delete(&abs)?;
+        self.changes.push(AppliedChange {
+            display_path: render_path(path),
+            path: abs,
+            status: ChangeStatus::Delete,
+            old_content,
+            new_content: None,
+        });
+        Ok(())
+    }
+
+    fn apply_update(
+        &mut self,
+        path: &Path,
+        move_path: Option<&Path>,
+        chunks: &[UpdateChunk],
+    ) -> Result<(), ApplyPatchFailure> {
+        let abs = resolve_path(&self.cwd, path);
+        let old_content = self.read_file_to_update(&abs)?;
+        let new_content = derive_new_contents_from_chunks(&abs, &old_content, chunks)
+            .map_err(|message| self.failure(message))?;
+
+        if let Some(move_path) = move_path {
+            self.apply_move_update(&abs, move_path, old_content, new_content)
+        } else {
+            self.apply_in_place_update(path, abs, old_content, new_content)
         }
     }
 
-    Ok(changes)
+    fn apply_in_place_update(
+        &mut self,
+        path: &Path,
+        abs: PathBuf,
+        old_content: String,
+        new_content: String,
+    ) -> Result<(), ApplyPatchFailure> {
+        self.world
+            .write_file(&abs, new_content.as_bytes())
+            .map_err(|error| {
+                self.failure(format!(
+                    "Failed to write file {}: {}",
+                    render_path(&abs),
+                    render_diagnostic(error)
+                ))
+            })?;
+        self.changes.push(AppliedChange {
+            display_path: render_path(path),
+            path: abs,
+            status: ChangeStatus::Modify,
+            old_content,
+            new_content: Some(new_content),
+        });
+        Ok(())
+    }
+
+    fn apply_move_update(
+        &mut self,
+        source_abs: &Path,
+        move_path: &Path,
+        old_content: String,
+        new_content: String,
+    ) -> Result<(), ApplyPatchFailure> {
+        let dest_abs = resolve_path(&self.cwd, move_path);
+        if self.read_optional_file(&dest_abs)?.is_some() {
+            return Err(self.failure(format!(
+                "Move destination already exists: {}",
+                render_path(&dest_abs)
+            )));
+        }
+        let dest_write_change_index =
+            self.write_and_record_move_destination(move_path, &dest_abs, &new_content)?;
+        self.remove_move_source(source_abs)?;
+        // Until the source removal succeeds, failures must report the already
+        // written destination as a partial Add. Only the fully successful move
+        // is summarized as one Modify of the original file.
+        self.changes[dest_write_change_index] = AppliedChange {
+            display_path: render_path(move_path),
+            path: source_abs.to_path_buf(),
+            status: ChangeStatus::Modify,
+            old_content,
+            new_content: Some(new_content),
+        };
+        Ok(())
+    }
+
+    fn write_and_record_move_destination(
+        &mut self,
+        move_path: &Path,
+        dest_abs: &Path,
+        new_content: &str,
+    ) -> Result<usize, ApplyPatchFailure> {
+        write_file_creating_parent(dest_abs, new_content, self.world).map_err(|error| {
+            self.failure(format!(
+                "Failed to write file {}: {}",
+                render_path(dest_abs),
+                render_diagnostic(error)
+            ))
+        })?;
+        let change_index = self.changes.len();
+        self.changes.push(AppliedChange {
+            display_path: render_path(move_path),
+            path: dest_abs.to_path_buf(),
+            status: ChangeStatus::Add,
+            old_content: String::new(),
+            new_content: Some(new_content.to_owned()),
+        });
+        Ok(change_index)
+    }
+
+    fn ensure_not_dir_for_delete(&mut self, abs: &Path) -> Result<(), ApplyPatchFailure> {
+        if self
+            .world
+            .is_dir(abs)
+            .map_err(|_| self.failure(format!("Failed to delete file {}", render_path(abs))))?
+        {
+            return Err(self.failure(format!("Failed to delete file {}", render_path(abs))));
+        }
+        Ok(())
+    }
+
+    fn read_file_to_delete(&mut self, abs: &Path) -> Result<String, ApplyPatchFailure> {
+        self.world
+            .read_to_string_limited(abs, MAX_SAFE_FILE_READ_BYTES)
+            .map_err(|_| self.failure(format!("Failed to delete file {}", render_path(abs))))
+    }
+
+    fn remove_file_to_delete(&mut self, abs: &Path) -> Result<(), ApplyPatchFailure> {
+        self.world
+            .remove_file(abs)
+            .map_err(|_| self.failure(format!("Failed to delete file {}", render_path(abs))))
+    }
+
+    fn read_file_to_update(&mut self, abs: &Path) -> Result<String, ApplyPatchFailure> {
+        self.world
+            .read_to_string_limited(abs, MAX_SAFE_FILE_READ_BYTES)
+            .map_err(|error| {
+                self.failure(format!(
+                    "Failed to read file to update {}: {}",
+                    render_path(abs),
+                    render_diagnostic(error)
+                ))
+            })
+    }
+
+    fn remove_move_source(&mut self, source_abs: &Path) -> Result<(), ApplyPatchFailure> {
+        let message = || format!("Failed to remove original {}", render_path(source_abs));
+        if self
+            .world
+            .is_dir(source_abs)
+            .map_err(|_| self.failure(message()))?
+        {
+            return Err(self.failure(message()));
+        }
+        self.world
+            .remove_file(source_abs)
+            .map_err(|_| self.failure(message()))
+    }
+
+    fn read_optional_file(&mut self, path: &Path) -> Result<Option<String>, ApplyPatchFailure> {
+        read_optional_file(path, self.world).map_err(|message| self.failure(message))
+    }
+
+    fn failure(&self, message: impl Into<String>) -> ApplyPatchFailure {
+        ApplyPatchFailure::new(message, &self.changes)
+    }
 }
 
 fn display_payload_for_changes(changes: &[AppliedChange], summary: &str) -> Option<ToolUsePayload> {

@@ -156,3 +156,65 @@ fn add_file_rejects_existing_target() {
         "original\n"
     );
 }
+
+/// Ensures a failed move after destination write reports the destination as a
+/// partial Add and does not claim the full move/update succeeded.
+#[cfg(unix)]
+#[test]
+fn move_update_remove_failure_records_destination_as_partial_add() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let source_dir = temp.path().join("readonly-source");
+    let dest_dir = temp.path().join("writable-dest");
+    std::fs::create_dir_all(&source_dir).expect("create source dir");
+    std::fs::create_dir_all(&dest_dir).expect("create destination dir");
+    let source = source_dir.join("source.txt");
+    let destination = dest_dir.join("destination.txt");
+    std::fs::write(&source, "old\n").expect("write source");
+    std::fs::set_permissions(&source_dir, std::fs::Permissions::from_mode(0o555))
+        .expect("make source dir read-only");
+
+    let mut world = ShellWorld::real();
+    let result = apply_hunks(
+        &[Hunk::Update {
+            path: source.clone(),
+            move_path: Some(destination.clone()),
+            chunks: vec![UpdateChunk {
+                change_context: None,
+                old_lines: vec!["old".to_owned()],
+                new_lines: vec!["new".to_owned()],
+                is_end_of_file: false,
+            }],
+        }],
+        &mut world,
+    );
+
+    std::fs::set_permissions(&source_dir, std::fs::Permissions::from_mode(0o755))
+        .expect("restore source dir permissions");
+    let err = result.expect_err("source removal should fail after writing destination");
+
+    assert!(
+        err.message.contains("Failed to remove original"),
+        "unexpected error: {}",
+        err.message
+    );
+    assert_eq!(
+        std::fs::read_to_string(&destination).expect("read destination"),
+        "new\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&source).expect("read source"),
+        "old\n"
+    );
+    assert_eq!(
+        err.changes,
+        vec![AppliedChange {
+            display_path: render_path(&destination),
+            path: destination,
+            status: ChangeStatus::Add,
+            old_content: String::new(),
+            new_content: Some("new\n".to_owned()),
+        }]
+    );
+}
