@@ -270,95 +270,94 @@ impl HighTerm {
     pub fn get_next_event(&mut self) -> io::Result<Event> {
         loop {
             let raw = self.term.get_next_event()?;
-
-            match raw {
-                RawEvent::BufferChanged => {
-                    if self.maybe_run_command_completion() {
-                        self.sync_menu_block();
-                        self.handle.redraw_sync();
-                        return Ok(Event::BufferChanged);
-                    }
-                    self.sync_menu_block();
-                    self.handle.redraw();
-                    return Ok(Event::BufferChanged);
-                }
-
-                RawEvent::CompletionAccept => {
-                    // Accept-without-submit: the buffer already
-                    // reflects the chosen candidate. Sync the menu
-                    // (now closed) and loop so the user has to press
-                    // Enter again to actually submit.
-                    self.sync_menu_block();
-                    self.handle.redraw();
-                    continue;
-                }
-
-                RawEvent::BackTab => return Ok(Event::BackTab),
-
-                RawEvent::Escape => return Ok(Event::Escape),
-
-                RawEvent::Line(line) => {
-                    if !line.is_empty() {
-                        self.prompt_history.push(line.clone());
-                    }
-                    self.sync_menu_block();
-                    self.handle.redraw();
-                    return Ok(Event::Line(line));
-                }
-
-                RawEvent::Eof => {
-                    self.sync_menu_block();
-                    return Ok(Event::Eof);
-                }
-
-                RawEvent::CancelPrompt => {
-                    self.sync_menu_block();
-                    self.handle.redraw_sync();
-                    return Ok(Event::CancelPrompt);
-                }
-
-                RawEvent::Resize { width, height } => {
-                    self.sync_menu_block();
-                    self.handle.redraw();
-                    return Ok(Event::Resize { width, height });
-                }
-
-                RawEvent::FocusChanged { focused } => return Ok(Event::FocusChanged { focused }),
-
-                RawEvent::Notice(message) => {
-                    self.sync_menu_block();
-                    self.print_local(&message);
-                    self.handle.redraw_sync();
-                    return Ok(Event::BufferChanged);
-                }
-
-                RawEvent::ExternalEditor => {
-                    self.sync_menu_block();
-                    let outcome =
-                        self.run_prompt_action(PromptShellAction::Edit(PromptShellCommand {
-                            command: "$TAU_EDITOR \"$TAU_PROMPT_PATH\"".to_owned(),
-                            trim: false,
-                        }));
-                    self.handle.redraw_sync();
-                    match outcome {
-                        PromptActionOutcome::BufferChanged => return Ok(Event::BufferChanged),
-                        PromptActionOutcome::Continue => continue,
-                        PromptActionOutcome::Return(event) => return Ok(event),
-                    }
-                }
-
-                RawEvent::Binding(action) => {
-                    self.sync_menu_block();
-                    let outcome = self.run_binding(&action);
-                    self.handle.redraw_sync();
-                    match outcome {
-                        PromptActionOutcome::BufferChanged => return Ok(Event::BufferChanged),
-                        PromptActionOutcome::Continue => continue,
-                        PromptActionOutcome::Return(event) => return Ok(event),
-                    }
-                }
+            match self.handle_next_raw_event(raw) {
+                NextEventStep::Return(event) => return Ok(event),
+                NextEventStep::Continue => continue,
             }
         }
+    }
+
+    fn handle_next_raw_event(&mut self, raw: RawEvent) -> NextEventStep {
+        match raw {
+            RawEvent::BufferChanged => self.handle_buffer_changed_event(),
+            RawEvent::CompletionAccept => self.handle_completion_accept_event(),
+            RawEvent::BackTab => NextEventStep::Return(Event::BackTab),
+            RawEvent::Escape => NextEventStep::Return(Event::Escape),
+            RawEvent::Line(line) => self.handle_line_event(line),
+            RawEvent::Eof => {
+                self.sync_menu_block();
+                NextEventStep::Return(Event::Eof)
+            }
+            RawEvent::CancelPrompt => {
+                self.sync_menu_block();
+                self.handle.redraw_sync();
+                NextEventStep::Return(Event::CancelPrompt)
+            }
+            RawEvent::Resize { width, height } => {
+                self.sync_menu_block();
+                self.handle.redraw();
+                NextEventStep::Return(Event::Resize { width, height })
+            }
+            RawEvent::FocusChanged { focused } => {
+                NextEventStep::Return(Event::FocusChanged { focused })
+            }
+            RawEvent::Notice(message) => self.handle_notice_event(&message),
+            RawEvent::ExternalEditor => self.handle_external_editor_event(),
+            RawEvent::Binding(action) => self.handle_binding_event(&action),
+        }
+    }
+
+    fn handle_buffer_changed_event(&mut self) -> NextEventStep {
+        if self.maybe_run_command_completion() {
+            self.sync_menu_block();
+            self.handle.redraw_sync();
+            return NextEventStep::Return(Event::BufferChanged);
+        }
+        self.sync_menu_block();
+        self.handle.redraw();
+        NextEventStep::Return(Event::BufferChanged)
+    }
+
+    fn handle_completion_accept_event(&mut self) -> NextEventStep {
+        // Accept-without-submit: the buffer already reflects the chosen
+        // candidate. Sync the menu (now closed) and loop so the user has to
+        // press Enter again to actually submit.
+        self.sync_menu_block();
+        self.handle.redraw();
+        NextEventStep::Continue
+    }
+
+    fn handle_line_event(&mut self, line: String) -> NextEventStep {
+        if !line.is_empty() {
+            self.prompt_history.push(line.clone());
+        }
+        self.sync_menu_block();
+        self.handle.redraw();
+        NextEventStep::Return(Event::Line(line))
+    }
+
+    fn handle_notice_event(&mut self, message: &str) -> NextEventStep {
+        self.sync_menu_block();
+        self.print_local(message);
+        self.handle.redraw_sync();
+        NextEventStep::Return(Event::BufferChanged)
+    }
+
+    fn handle_external_editor_event(&mut self) -> NextEventStep {
+        self.sync_menu_block();
+        let outcome = self.run_prompt_action(PromptShellAction::Edit(PromptShellCommand {
+            command: "$TAU_EDITOR \"$TAU_PROMPT_PATH\"".to_owned(),
+            trim: false,
+        }));
+        self.handle.redraw_sync();
+        outcome.into_next_event_step()
+    }
+
+    fn handle_binding_event(&mut self, action: &str) -> NextEventStep {
+        self.sync_menu_block();
+        let outcome = self.run_binding(action);
+        self.handle.redraw_sync();
+        outcome.into_next_event_step()
     }
 
     /// Updates the suggestion block to match the raw term's
@@ -687,6 +686,21 @@ enum PromptActionOutcome {
     BufferChanged,
     Continue,
     Return(Event),
+}
+
+enum NextEventStep {
+    Return(Event),
+    Continue,
+}
+
+impl PromptActionOutcome {
+    fn into_next_event_step(self) -> NextEventStep {
+        match self {
+            Self::BufferChanged => NextEventStep::Return(Event::BufferChanged),
+            Self::Continue => NextEventStep::Continue,
+            Self::Return(event) => NextEventStep::Return(event),
+        }
+    }
 }
 
 impl PromptShellAction {
