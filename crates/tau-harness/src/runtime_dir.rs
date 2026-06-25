@@ -184,6 +184,13 @@ pub fn prepare_harness_paths(
 }
 
 /// Finds a running harness daemon for the given project root.
+///
+/// Discovery verifies matching candidates by connecting to their sockets. If a
+/// matching socket cannot be reached, its runtime files are removed only when
+/// the metadata pid is known to be no longer running; live-pid files are
+/// preserved so a transient liveness-probe failure cannot make a daemon
+/// permanently undiscoverable. Platforms without a safe pid-liveness backend
+/// conservatively preserve unreachable candidates.
 #[must_use]
 pub fn find_harness_for_dir(project_root: &Path) -> Option<PathBuf> {
     let runtime_dir = harnesses_dir();
@@ -211,7 +218,7 @@ pub fn find_harness_for_dir(project_root: &Path) -> Option<PathBuf> {
         {
             if verify_harness_running(&harness_path) {
                 return Some(harness_path);
-            } else {
+            } else if !is_process_running(metadata.pid) {
                 remove_harness_files(&harness_path);
             }
         }
@@ -223,7 +230,12 @@ pub fn find_harness_for_dir(project_root: &Path) -> Option<PathBuf> {
 /// Finds the single live harness advertising `session_id` as its active
 /// session.
 ///
-/// Stale socket/metadata pairs are removed. Returns `Ok(None)` when no live
+/// Discovery verifies candidates by connecting to their sockets. If a matching
+/// socket cannot be reached, its runtime files are removed only when the
+/// metadata pid is known to be no longer running. When the pid is still alive
+/// or cannot be safely checked, discovery returns no match for this call but
+/// preserves the files so a transient liveness-probe failure does not make a
+/// live daemon permanently undiscoverable. Returns `Ok(None)` when no live
 /// daemon advertises the session and `Err` when multiple live daemons do.
 pub fn find_harness_for_session(
     session_id: &str,
@@ -251,7 +263,7 @@ pub fn find_harness_for_session(
         }
         if verify_harness_running(&harness_path) {
             matches.push(harness_path);
-        } else {
+        } else if !is_process_running(metadata.pid) {
             remove_harness_files(&harness_path);
         }
     }
@@ -277,6 +289,20 @@ pub fn remove_harness_files(harness_path: &Path) {
     let _ = std::fs::remove_file(metadata_path(harness_path));
 }
 
+#[cfg(target_os = "linux")]
+fn is_process_running(pid: u32) -> bool {
+    Path::new("/proc").join(pid.to_string()).exists()
+}
+
+#[cfg(not(target_os = "linux"))]
+fn is_process_running(_pid: u32) -> bool {
+    // Tau forbids unsafe code, so avoid libc `kill(pid, 0)` here. Preserving
+    // files is the conservative fallback: discovery still never returns a
+    // candidate whose socket probe failed, but non-Linux platforms may retain
+    // stale runtime files until a future safe liveness backend is added.
+    true
+}
+
 fn paths_equal(a: &Path, b: &Path) -> bool {
     match (a.canonicalize(), b.canonicalize()) {
         (Ok(a_canon), Ok(b_canon)) => a_canon == b_canon,
@@ -287,6 +313,7 @@ fn paths_equal(a: &Path, b: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use std::os::unix::net::UnixListener;
+    use std::process::{Child, Command};
 
     use tempfile::TempDir;
 
@@ -353,6 +380,7 @@ mod tests {
 
     /// Ensures session discovery removes dead socket metadata instead of
     /// returning a daemon that cannot accept the external-message RPC.
+    #[cfg(target_os = "linux")]
     #[test]
     fn find_harness_for_session_removes_stale_socket() {
         let temp = TempDir::new().expect("temp runtime");
@@ -360,12 +388,52 @@ mod tests {
         let project_root = temp.path().join("project");
         std::fs::create_dir_all(&project_root).expect("project root");
         let paths = prepare_harness_paths(&project_root, "session").expect("paths");
-        paths.write_metadata().expect("write metadata");
+        write_metadata_with_pid(paths.path(), &project_root, "session", dead_pid());
         std::fs::write(paths.socket_path(), b"not a listener").expect("stale socket marker");
 
         assert_eq!(find_harness_for_session("session").expect("lookup"), None);
         assert!(!metadata_path(paths.path()).exists());
         assert!(!paths.socket_path().exists());
+    }
+
+    /// Ensures a transient connection failure cannot unlink runtime metadata
+    /// for a harness whose process still exists. This protects
+    /// external-message discovery from turning one failed liveness probe
+    /// into a permanent "no running daemon" failure for a live session.
+    #[test]
+    fn find_harness_for_session_keeps_files_when_pid_is_alive() {
+        let temp = TempDir::new().expect("temp runtime");
+        let _guard = runtime_override(&temp);
+        let child = ChildGuard::new();
+        let project_root = temp.path().join("project");
+        std::fs::create_dir_all(&project_root).expect("project root");
+        let paths = prepare_harness_paths(&project_root, "session").expect("paths");
+        write_metadata_with_pid(paths.path(), &project_root, "session", child.id());
+        std::fs::write(paths.socket_path(), b"not a listener").expect("stale socket marker");
+
+        assert_eq!(find_harness_for_session("session").expect("lookup"), None);
+        assert!(metadata_path(paths.path()).exists());
+        assert!(paths.socket_path().exists());
+    }
+
+    /// Ensures project-root discovery uses the same pid-gated stale cleanup as
+    /// session discovery. External-message sends use session lookup, while CLI
+    /// attach uses project lookup; both must avoid destroying live daemon
+    /// markers after a transient probe failure.
+    #[test]
+    fn find_harness_for_dir_keeps_files_when_pid_is_alive() {
+        let temp = TempDir::new().expect("temp runtime");
+        let _guard = runtime_override(&temp);
+        let child = ChildGuard::new();
+        let project_root = temp.path().join("project");
+        std::fs::create_dir_all(&project_root).expect("project root");
+        let paths = prepare_harness_paths(&project_root, "session").expect("paths");
+        write_metadata_with_pid(paths.path(), &project_root, "session", child.id());
+        std::fs::write(paths.socket_path(), b"not a listener").expect("stale socket marker");
+
+        assert_eq!(find_harness_for_dir(&project_root), None);
+        assert!(metadata_path(paths.path()).exists());
+        assert!(paths.socket_path().exists());
     }
 
     /// Ensures discovery reports ambiguity when two live harnesses advertise
@@ -399,5 +467,53 @@ mod tests {
             find_harness_for_session("same-session"),
             Err(FindHarnessForSessionError::Ambiguous { .. })
         ));
+    }
+
+    fn write_metadata_with_pid(path: &Path, project_root: &Path, session_id: &str, pid: u32) {
+        std::fs::write(
+            metadata_path(path),
+            serde_json::to_vec(&DaemonMetadata {
+                version: 1,
+                pid,
+                project_root: Some(project_root.to_path_buf()),
+                session_id: session_id.to_owned(),
+            })
+            .expect("metadata json"),
+        )
+        .expect("write metadata");
+    }
+
+    struct ChildGuard {
+        child: Child,
+    }
+
+    impl ChildGuard {
+        fn new() -> Self {
+            Self {
+                child: Command::new("sleep")
+                    .arg("30")
+                    .spawn()
+                    .expect("spawn sleep"),
+            }
+        }
+
+        fn id(&self) -> u32 {
+            self.child.id()
+        }
+    }
+
+    impl Drop for ChildGuard {
+        fn drop(&mut self) {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn dead_pid() -> u32 {
+        let mut child = Command::new("true").spawn().expect("spawn true");
+        let pid = child.id();
+        child.wait().expect("wait true");
+        pid
     }
 }

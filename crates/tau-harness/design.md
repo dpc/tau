@@ -67,6 +67,12 @@ thread reports completion back with a harness command. Sender-side
 or target validation failure completes the tool with an error without recording a
 successful send projection.
 
+Runtime-dir stale cleanup is conservative: failed socket probes must not remove
+discovery files while the advertised daemon pid is still live. Dead-pid entries
+remain eligible for cleanup where Tau has a safe pid-liveness backend, but a
+transient connection failure must not make a running daemon permanently
+undiscoverable to external-message lookup or CLI attach.
+
 Tests should cover the runtime metadata active-session contract, stale/ambiguous
 discovery, untrusted peer rejection, target-session and recipient validation,
 external prompt/UI labels, and failure not publishing a sent projection.

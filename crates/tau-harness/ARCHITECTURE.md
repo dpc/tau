@@ -137,6 +137,11 @@ session is its active `current_session_id` and the recipient is live or pending,
 then publishes the harness-owned inbound `agent.message_received` projection
 through the ordinary durable path. Generic peer-authored
 `agent.message_sent`/`agent.message_received` emits remain rejected.
+Runtime-dir discovery verifies matching candidates by connecting to their
+sockets. A failed probe is not enough to unlink discovery files while the
+metadata pid is still live; dead-pid entries are eligible for cleanup on
+platforms where Tau has a safe pid-liveness backend, so a transient probe
+failure does not permanently hide a running daemon.
 
 ## Optional extension startup
 

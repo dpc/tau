@@ -29,7 +29,9 @@ receiving harness validates its active target session and recipient state before
 recording an inbound projection. Runtime daemon metadata is discovery data only:
 `session_id` means the daemon's current active session and is updated on
 `/session new`; stale or ambiguous metadata must fail discovery rather than
-silently choosing a target.
+silently choosing a target. A failed socket probe alone must not delete runtime
+discovery files while the metadata pid is still live; dead-pid entries remain
+eligible for cleanup on platforms where Tau has a safe pid-liveness backend.
 
 `extensions.<name>.require: false` is only a degraded-startup availability
 policy for trusted local extensions. It lets Tau continue without that extension
