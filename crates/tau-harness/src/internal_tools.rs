@@ -400,6 +400,7 @@ impl<'a> InternalToolHost<'a> {
             tau_proto::AgentMessageKind::Message,
             Some(crate::harness::ExternalMessageToolCompletion {
                 conversation_id: conversation_id.clone(),
+                session_generation: self.harness.current_session_generation,
                 call_id,
                 tool_name,
                 tool_type,

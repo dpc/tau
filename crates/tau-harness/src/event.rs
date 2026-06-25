@@ -29,6 +29,9 @@ pub(crate) enum HarnessCommand {
 pub(crate) struct ExternalMessageToolCompletedCommand {
     /// Conversation that owns the tool call.
     pub(crate) conversation_id: tau_proto::AgentId,
+    /// Session generation that was active when the external message tool call
+    /// started.
+    pub(crate) session_generation: u64,
     /// Tool call id being completed.
     pub(crate) call_id: tau_proto::ToolCallId,
     /// Visible tool name for terminal result/error events.

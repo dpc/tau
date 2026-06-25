@@ -11464,6 +11464,98 @@ fn external_agent_message_rpc_requires_external_peer_hello() {
     h.shutdown().expect("shutdown");
 }
 
+/// A real Unix-socket external client can deliver an external agent message to
+/// another live harness through the dedicated hello plus RPC path.
+#[test]
+fn external_agent_message_rpc_delivers_over_real_socket_between_harnesses() {
+    let td = TempDir::new().expect("tempdir");
+    let sender_sp = td.path().join("sender-state");
+    let target_sp = td.path().join("target-state");
+    let mut sender = echo_harness(&sender_sp).expect("start sender");
+    let mut target = echo_harness(&target_sp).expect("start target");
+    let target_cid = ensure_test_user_agent(&mut target);
+    let recipient_id = target
+        .ensure_agent_id_for_agent(&target_cid)
+        .expect("target agent id");
+    target
+        .agents
+        .get_mut(&target_cid)
+        .expect("target conversation")
+        .turn_state = AgentTurnState::AgentThinking {
+        agent_prompt_id: "socket-external-message-target".into(),
+    };
+
+    let socket_path = td.path().join("target.sock");
+    let listener = std::os::unix::net::UnixListener::bind(&socket_path).expect("bind socket");
+    let mut peer = tau_socket::SocketPeer::connect(&socket_path).expect("connect peer");
+    let (stream, _) = listener.accept().expect("accept peer");
+    target.accept_client(stream).expect("accept client");
+
+    peer.send(&tau_proto::HarnessInputMessage::Hello(tau_proto::Hello {
+        protocol_version: tau_proto::PROTOCOL_VERSION,
+        client_name: crate::harness::EXTERNAL_AGENT_MESSAGE_CLIENT_NAME.into(),
+        client_kind: tau_proto::ClientKind::External,
+    }))
+    .expect("send external hello");
+    peer.send(&tau_proto::HarnessInputMessage::ExternalAgentMessage(
+        tau_proto::ExternalAgentMessageRequest {
+            request_id: "socket-external-ok".to_owned(),
+            message_id: "socket-message-ok".into(),
+            sender_session_id: sender.current_session_id.clone(),
+            sender_id: crate::parse_agent_id("sender_agent"),
+            recipient_session_id: target.current_session_id.clone(),
+            recipient_id: crate::parse_agent_id(&recipient_id),
+            kind: tau_proto::AgentMessageKind::Message,
+            message: "hello over socket".to_owned(),
+        },
+    ))
+    .expect("send external message");
+
+    let deadline = Instant::now() + std::time::Duration::from_secs(5);
+    let result = loop {
+        match target.rx.recv_timeout(std::time::Duration::from_millis(20)) {
+            Ok(HarnessEvent::FromConnection {
+                connection_id,
+                message,
+            }) => {
+                target
+                    .handle_client_message(&connection_id, *message)
+                    .expect("handle socket message");
+            }
+            Ok(other) => target.log_event(&other),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                panic!("target harness event channel disconnected");
+            }
+        }
+        match peer
+            .recv_timeout(std::time::Duration::from_millis(20))
+            .expect("receive rpc result")
+        {
+            tau_socket::SocketReceive::Message {
+                message: tau_proto::HarnessOutputMessage::ExternalAgentMessageResult(result),
+            } => break result,
+            tau_socket::SocketReceive::Message { .. } => continue,
+            tau_socket::SocketReceive::Timeout if Instant::now() < deadline => continue,
+            tau_socket::SocketReceive::Timeout => panic!("timed out waiting for rpc result"),
+            tau_socket::SocketReceive::Closed => panic!("socket closed before rpc result"),
+        }
+    };
+
+    assert_eq!(result.request_id, "socket-external-ok");
+    assert_eq!(result.error, None);
+    let received = session_agent_message_received_events(&target);
+    assert_eq!(received.len(), 1);
+    assert_eq!(
+        received[0].sender_session_id,
+        Some(sender.current_session_id.clone())
+    );
+    assert_eq!(received[0].message, "hello over socket");
+
+    target.shutdown().expect("shutdown target");
+    sender.shutdown().expect("shutdown sender");
+}
+
 /// Sender-side external message projections should represent confirmed
 /// delivery, not a failed lookup or target-side rejection.
 #[test]
@@ -11484,6 +11576,7 @@ fn external_message_send_failure_does_not_publish_sent_projection() {
         Some(
             crate::harness::subagents_tool::ExternalMessageToolCompletion {
                 conversation_id: cid.clone(),
+                session_generation: h.current_session_generation,
                 call_id: call_id.clone(),
                 tool_name: ToolName::new(crate::harness::subagents_tool::MESSAGE_TOOL_NAME),
                 tool_type: tau_proto::ToolType::Function,
@@ -11531,6 +11624,7 @@ fn external_message_success_completion_publishes_sent_projection_and_tool_result
     h.handle_harness_command(crate::event::HarnessCommand::ExternalMessageToolCompleted(
         Box::new(crate::event::ExternalMessageToolCompletedCommand {
             conversation_id: cid,
+            session_generation: h.current_session_generation,
             call_id: call_id.clone(),
             tool_name: ToolName::new(crate::harness::subagents_tool::MESSAGE_TOOL_NAME),
             tool_type: tau_proto::ToolType::Function,
@@ -11561,10 +11655,11 @@ fn external_message_success_completion_publishes_sent_projection_and_tool_result
 }
 
 /// Stale async external-message completions from an abandoned session must not
-/// publish sender projections or tool completions after `/session new` clears
-/// old tool ownership.
+/// publish sender projections or tool completions after `/session new`, even if
+/// the new session happens to reinstall the same conversation/tool ownership
+/// keys before the old worker finishes.
 #[test]
-fn stale_external_message_completion_after_session_switch_is_dropped() {
+fn stale_external_message_completion_after_session_switch_with_reused_ids_is_dropped() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
@@ -11574,10 +11669,18 @@ fn stale_external_message_completion_after_session_switch_is_dropped() {
 
     h.switch_session("s2".into(), tau_proto::SessionStartReason::New)
         .expect("switch session");
+    let replacement_cid = ensure_test_user_agent(&mut h);
+    let replacement_agent = h
+        .agents
+        .remove(&replacement_cid)
+        .expect("replacement agent");
+    h.agents.insert(cid.clone(), replacement_agent);
+    h.tool_agents.insert(call_id.clone(), cid.clone());
 
     h.handle_harness_command(crate::event::HarnessCommand::ExternalMessageToolCompleted(
         Box::new(crate::event::ExternalMessageToolCompletedCommand {
             conversation_id: cid,
+            session_generation: 0,
             call_id: call_id.clone(),
             tool_name: ToolName::new(crate::harness::subagents_tool::MESSAGE_TOOL_NAME),
             tool_type: tau_proto::ToolType::Function,

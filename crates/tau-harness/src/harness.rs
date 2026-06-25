@@ -1337,12 +1337,18 @@ pub struct Harness {
     /// Daemon-mode harnesses set this so `/session new` can keep discovery
     /// metadata's active session id synchronized with `current_session_id`.
     pub(crate) runtime_harness_path: Option<PathBuf>,
-    /// The single session this harness owns. UserMessages with a
-    /// different `session_id` are rejected. Pi-style: one harness =
-    /// one active session at a time. Switching sessions tears the
-    /// harness down and respawns extensions; that's a future
-    /// `switch_session` operation, not silent multi-session.
+    /// The single active session this harness currently owns. User messages and
+    /// harness-owned RPCs with a different `session_id` are rejected. `/session
+    /// new` reuses the daemon process but switches this binding, clears
+    /// session-scoped runtime state, and starts a new session init sequence.
     pub(crate) current_session_id: SessionId,
+    /// Monotonic in-process generation for the active session binding.
+    ///
+    /// Incremented on every successful `switch_session` so asynchronous
+    /// completions can prove they still belong to the same logical session
+    /// binding even if a later session recreates the same conversation/tool
+    /// ids.
+    pub(crate) current_session_generation: u64,
     /// Reason associated with the current session binding. Late UI subscribers
     /// receive a replayed `SessionStarted` snapshot with this reason.
     pub(crate) current_session_start_reason: tau_proto::SessionStartReason,
@@ -1978,6 +1984,7 @@ impl Harness {
             session_persistence: parts.session_persistence,
             runtime_harness_path: None,
             current_session_id: parts.current_session_id,
+            current_session_generation: 0,
             current_session_start_reason: parts.current_session_start_reason,
             agent_id_rng: StdRng::from_entropy(),
             tool_agents: HashMap::new(),
@@ -2797,13 +2804,16 @@ impl Harness {
         match command {
             HarnessCommand::ConnectExtension(command) => self.connect_extension(*command),
             HarnessCommand::ExternalMessageToolCompleted(command) => {
-                if self.tool_agents.get(&command.call_id) != Some(&command.conversation_id)
+                if command.session_generation != self.current_session_generation
+                    || self.tool_agents.get(&command.call_id) != Some(&command.conversation_id)
                     || !self.agents.contains_key(&command.conversation_id)
                 {
                     tracing::debug!(
                         target: "tau_harness::external_agent_message",
                         conversation_id = %command.conversation_id,
                         call_id = %command.call_id,
+                        completion_generation = command.session_generation,
+                        current_generation = self.current_session_generation,
                         "dropping stale external message tool completion"
                     );
                     return Ok(());
@@ -9061,6 +9071,7 @@ impl Harness {
         self.stopped_agent_ids.clear();
 
         self.current_session_id = new_session_id.clone();
+        self.current_session_generation = self.current_session_generation.saturating_add(1);
         self.current_session_start_reason = reason;
         if matches!(reason, tau_proto::SessionStartReason::Resume) {
             self.rehydrate_agents_from_session();

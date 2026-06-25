@@ -3,7 +3,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tau_proto::{
     AgentContextKey, AgentContextValue, AgentId, AgentMessageReceived, AgentMessageSent, CborValue,
@@ -344,6 +344,7 @@ impl Harness {
                     HarnessCommand::ExternalMessageToolCompleted(Box::new(
                         ExternalMessageToolCompletedCommand {
                             conversation_id: completion.conversation_id,
+                            session_generation: completion.session_generation,
                             call_id: completion.call_id,
                             tool_name: completion.tool_name,
                             tool_type: completion.tool_type,
@@ -656,6 +657,8 @@ impl Harness {
 pub(crate) struct ExternalMessageToolCompletion {
     /// Conversation that owns the tool call.
     pub(crate) conversation_id: AgentId,
+    /// Session generation active when the tool call was dispatched.
+    pub(crate) session_generation: u64,
     /// Tool call id to complete.
     pub(crate) call_id: ToolCallId,
     /// Visible tool name for the result/error.
@@ -691,10 +694,13 @@ fn send_external_agent_message_request(
         request.clone(),
     ))
     .map_err(|err| format!("failed to send external message request: {err}"))?;
-    let deadline = Duration::from_secs(10);
+    let deadline = Instant::now() + Duration::from_secs(10);
     loop {
+        let Some(timeout) = deadline.checked_duration_since(Instant::now()) else {
+            return Err("timed out waiting for external message result".to_owned());
+        };
         match peer
-            .recv_timeout(deadline)
+            .recv_timeout(timeout)
             .map_err(|err| format!("failed to receive external message result: {err}"))?
         {
             tau_socket::SocketReceive::Message {
