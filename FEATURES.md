@@ -772,7 +772,8 @@ The editor file also includes a Markdown trailer after:
 
 Everything after the marker is ignored when Tau reads the file back. The
 trailer quotes useful context for composing the next prompt: the current
-in-flight response, the last agent response, and the previous submitted prompt.
+in-flight response and last agent response from the currently selected
+agent/transcript, plus the previous submitted prompt.
 If you accidentally edit text below the marker, Tau detects that the trailer
 changed and shows the edited text under `Previously edited text below TAU
 trailer` the next time you open `$EDITOR`. That recovered text is still not

@@ -267,6 +267,15 @@ pub(crate) struct EventRenderer {
     /// rather drop one editor-context update than crash the renderer
     /// thread.
     editor_context: std::sync::Arc<std::sync::Mutex<tau_cli_term::EditorContext>>,
+    /// Per-visible-transcript response context published into
+    /// [`Self::editor_context`]. Prompt-local editor fields such as previous
+    /// prompt and trailer recovery remain in the shared context.
+    editor_conversation_context: EditorConversationContext,
+    /// True while folding an event for a hidden agent transcript. During this
+    /// window renderer fields contain the hidden agent's snapshot, but
+    /// input-loop mirrors must continue exposing the actually visible
+    /// transcript.
+    suppress_editor_context_publish: bool,
     /// Symbol shown before the active prompt input.
     prompt_symbol: String,
     /// Symbol shown before submitted prompts in the transcript.
@@ -282,6 +291,7 @@ pub(crate) struct EventRenderer {
 #[derive(Default)]
 struct AgentUiState {
     output: tau_cli_term::OutputSnapshot,
+    editor_conversation_context: EditorConversationContext,
     prompts: HashMap<String, PromptState>,
     last_user_block: Option<(tau_cli_term::BlockId, String)>,
     queued_user_blocks: VecDeque<(tau_cli_term::BlockId, String)>,
@@ -306,6 +316,12 @@ struct AgentUiState {
     prompt_tool_summary_active: bool,
     cumulative_agent_latency: Duration,
     agent_activity: AgentActivity,
+}
+
+#[derive(Default)]
+struct EditorConversationContext {
+    current_response: Option<String>,
+    last_response: Option<String>,
 }
 
 enum EventAgentIdResolution {
@@ -1109,6 +1125,8 @@ impl EventRenderer {
             editor_context: std::sync::Arc::new(std::sync::Mutex::new(
                 tau_cli_term::EditorContext::default(),
             )),
+            editor_conversation_context: EditorConversationContext::default(),
+            suppress_editor_context_publish: false,
             prompt_symbol,
             submitted_prompt_symbol,
             agent_in_progress: Arc::new(AtomicBool::new(false)),
@@ -1248,6 +1266,7 @@ impl EventRenderer {
     fn take_visible_agent_state(&mut self) -> AgentUiState {
         AgentUiState {
             output: self.handle.output_snapshot(),
+            editor_conversation_context: std::mem::take(&mut self.editor_conversation_context),
             prompts: std::mem::take(&mut self.prompts),
             last_user_block: self.last_user_block.take(),
             queued_user_blocks: std::mem::take(&mut self.queued_user_blocks),
@@ -1276,18 +1295,27 @@ impl EventRenderer {
     }
 
     fn restore_visible_agent_state(&mut self, state: AgentUiState) {
-        self.restore_visible_agent_state_inner(state, true);
+        self.restore_visible_agent_state_inner(state, true, true);
     }
 
     fn restore_hidden_agent_state(&mut self, state: AgentUiState) {
-        self.restore_visible_agent_state_inner(state, false);
+        self.restore_visible_agent_state_inner(state, false, false);
     }
 
-    fn restore_visible_agent_state_inner(&mut self, state: AgentUiState, redraw: bool) {
+    fn restore_visible_agent_state_inner(
+        &mut self,
+        state: AgentUiState,
+        redraw: bool,
+        publish_editor_context: bool,
+    ) {
         if redraw {
             self.handle.replace_output_snapshot(state.output);
         } else {
             self.handle.replace_output_snapshot_quiet(state.output);
+        }
+        self.editor_conversation_context = state.editor_conversation_context;
+        if publish_editor_context {
+            self.publish_editor_conversation_context();
         }
         self.prompts = state.prompts;
         self.last_user_block = state.last_user_block;
@@ -1433,6 +1461,35 @@ impl EventRenderer {
         &self,
     ) -> std::sync::Arc<std::sync::Mutex<tau_cli_term::EditorContext>> {
         self.editor_context.clone()
+    }
+
+    fn publish_editor_conversation_context(&self) {
+        if self.suppress_editor_context_publish {
+            return;
+        }
+        if let Ok(mut context) = self.editor_context.lock() {
+            context.current_response = self.editor_conversation_context.current_response.clone();
+            context.last_response = self.editor_conversation_context.last_response.clone();
+        }
+    }
+
+    fn set_editor_current_response(&mut self, text: Option<String>) {
+        self.editor_conversation_context.current_response = text;
+        self.publish_editor_conversation_context();
+    }
+
+    fn set_editor_last_response(&mut self, text: String) {
+        self.editor_conversation_context.last_response = Some(text);
+        self.editor_conversation_context.current_response = None;
+        self.publish_editor_conversation_context();
+    }
+
+    fn with_editor_context_publish_suppressed<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> R {
+        let previous = self.suppress_editor_context_publish;
+        self.suppress_editor_context_publish = true;
+        let result = f(self);
+        self.suppress_editor_context_publish = previous;
+        result
     }
 
     /// Returns a shared flag that is true while any agent/session work
@@ -2615,14 +2672,17 @@ impl EventRenderer {
                 .unwrap_or_default();
             let handle = self.handle.clone();
             handle.with_redraw_suppressed(|| {
-                self.restore_hidden_agent_state(target_state);
-                self.displayed_agent_id = Some(target_agent_id.clone());
-                self.handle_recorded_at_for_visible_agent(event, recorded_at);
-                let target_state = self.take_visible_agent_state();
-                self.agents_ui_state.insert(target_agent_id, target_state);
-                self.restore_hidden_agent_state(visible_state);
+                self.with_editor_context_publish_suppressed(|this| {
+                    this.restore_hidden_agent_state(target_state);
+                    this.displayed_agent_id = Some(target_agent_id.clone());
+                    this.handle_recorded_at_for_visible_agent(event, recorded_at);
+                    let target_state = this.take_visible_agent_state();
+                    this.agents_ui_state.insert(target_agent_id, target_state);
+                    this.restore_hidden_agent_state(visible_state);
+                });
             });
             self.displayed_agent_id = None;
+            self.publish_editor_conversation_context();
             self.update_agent_in_progress();
             return;
         }
@@ -2646,18 +2706,21 @@ impl EventRenderer {
             .unwrap_or_default();
         let handle = self.handle.clone();
         handle.with_redraw_suppressed(|| {
-            self.restore_hidden_agent_state(target_state);
-            self.displayed_agent_id = Some(target_agent_id.clone());
-            self.handle_recorded_at_for_visible_agent(event, recorded_at);
-            let target_state = self.take_visible_agent_state();
-            self.agents_ui_state.insert(target_agent_id, target_state);
-            let visible_state = self
-                .agents_ui_state
-                .remove(&visible_agent_id)
-                .unwrap_or_default();
-            self.restore_hidden_agent_state(visible_state);
+            self.with_editor_context_publish_suppressed(|this| {
+                this.restore_hidden_agent_state(target_state);
+                this.displayed_agent_id = Some(target_agent_id.clone());
+                this.handle_recorded_at_for_visible_agent(event, recorded_at);
+                let target_state = this.take_visible_agent_state();
+                this.agents_ui_state.insert(target_agent_id, target_state);
+                let visible_state = this
+                    .agents_ui_state
+                    .remove(&visible_agent_id)
+                    .unwrap_or_default();
+                this.restore_hidden_agent_state(visible_state);
+            });
         });
         self.displayed_agent_id = Some(visible_agent_id);
+        self.publish_editor_conversation_context();
         self.update_agent_in_progress();
     }
 
@@ -3483,8 +3546,8 @@ impl EventRenderer {
     }
 
     fn clear_editor_current_response_for_user_prompt(&mut self, is_user_prompt: bool) {
-        if is_user_prompt && let Ok(mut context) = self.editor_context.lock() {
-            context.current_response = None;
+        if is_user_prompt {
+            self.set_editor_current_response(None);
         }
     }
 
@@ -3676,14 +3739,8 @@ impl EventRenderer {
         update: &tau_proto::ProviderResponseUpdated,
         text: &str,
     ) {
-        if update.originator.is_user()
-            && let Ok(mut context) = self.editor_context.lock()
-        {
-            context.current_response = if text.is_empty() {
-                None
-            } else {
-                Some(text.to_owned())
-            };
+        if update.originator.is_user() {
+            self.set_editor_current_response((!text.is_empty()).then(|| text.to_owned()));
         }
     }
 
@@ -3905,11 +3962,8 @@ impl EventRenderer {
         let Some(text) = full_assistant_text else {
             return;
         };
-        if finished.originator.is_user()
-            && let Ok(mut context) = self.editor_context.lock()
-        {
-            context.last_response = Some(text.to_owned());
-            context.current_response = None;
+        if finished.originator.is_user() {
+            self.set_editor_last_response(text.to_owned());
         }
     }
 

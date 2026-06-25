@@ -1482,6 +1482,127 @@ fn switching_between_displayed_agents_restores_transcripts() {
     assert!(handle.full_render_count() > full_render_count);
 }
 
+/// Ensures the external prompt editor trailer is seeded from the visible
+/// agent's response history, not from the most recent hidden agent response
+/// processed by the renderer. It also preserves prompt-local editor fields that
+/// are shared with the active input draft rather than with hidden transcripts.
+#[test]
+fn hidden_agent_response_does_not_replace_visible_editor_context() {
+    let (_term, handle, _vt) = setup(80, 24);
+    let mut renderer = EventRenderer::new(
+        handle,
+        tau_cli_term::CompletionData::new(),
+        cli_test_theme(),
+    );
+    renderer.switch_agent("worker-1".to_owned());
+    renderer.handle(&Event::ProviderResponseFinished(
+        finished_response_with_usage(
+            "worker-1-sp-0",
+            "worker-1",
+            20_000,
+            0,
+            0,
+            "worker one response",
+        ),
+    ));
+    {
+        let editor_context = renderer.editor_context();
+        let mut editor_context = editor_context.lock().expect("editor context");
+        editor_context.previous_prompt = Some("visible previous prompt".to_owned());
+        editor_context.edited_trailer_recovery = Some("visible recovery".to_owned());
+    }
+
+    renderer.handle(&Event::ProviderResponseFinished(
+        finished_response_with_usage(
+            "worker-2-sp-0",
+            "worker-2",
+            20_000,
+            0,
+            0,
+            "worker two response",
+        ),
+    ));
+
+    let visible_context = renderer.editor_context();
+    let visible_context = visible_context.lock().expect("editor context").clone();
+    assert_eq!(
+        visible_context.last_response.as_deref(),
+        Some("worker one response")
+    );
+    assert_eq!(visible_context.current_response, None);
+    assert_eq!(
+        visible_context.previous_prompt.as_deref(),
+        Some("visible previous prompt")
+    );
+    assert_eq!(
+        visible_context.edited_trailer_recovery.as_deref(),
+        Some("visible recovery")
+    );
+
+    renderer.switch_agent("worker-2".to_owned());
+
+    let worker_two_context = renderer.editor_context();
+    let worker_two_context = worker_two_context.lock().expect("editor context").clone();
+    assert_eq!(
+        worker_two_context.last_response.as_deref(),
+        Some("worker two response")
+    );
+    assert_eq!(
+        worker_two_context.previous_prompt.as_deref(),
+        Some("visible previous prompt")
+    );
+    assert_eq!(
+        worker_two_context.edited_trailer_recovery.as_deref(),
+        Some("visible recovery")
+    );
+}
+
+/// Ensures the no-agent editor prompt context is not seeded with the last
+/// selected agent's response and remains isolated from later hidden responses
+/// owned by that old agent.
+#[test]
+fn clearing_selected_agent_clears_response_editor_context() {
+    let (_term, handle, _vt) = setup(80, 24);
+    let mut renderer = EventRenderer::new(
+        handle,
+        tau_cli_term::CompletionData::new(),
+        cli_test_theme(),
+    );
+    renderer.switch_agent("worker-1".to_owned());
+    renderer.handle(&Event::ProviderResponseFinished(
+        finished_response_with_usage(
+            "worker-1-sp-0",
+            "worker-1",
+            20_000,
+            0,
+            0,
+            "worker one response",
+        ),
+    ));
+
+    renderer.clear_selected_agent();
+    let no_agent_context = renderer.editor_context();
+    let no_agent_context = no_agent_context.lock().expect("editor context").clone();
+    assert_eq!(no_agent_context.current_response, None);
+    assert_eq!(no_agent_context.last_response, None);
+
+    renderer.handle(&Event::ProviderResponseFinished(
+        finished_response_with_usage(
+            "worker-1-sp-1",
+            "worker-1",
+            20_000,
+            0,
+            0,
+            "later hidden worker response",
+        ),
+    ));
+
+    let no_agent_context = renderer.editor_context();
+    let no_agent_context = no_agent_context.lock().expect("editor context").clone();
+    assert_eq!(no_agent_context.current_response, None);
+    assert_eq!(no_agent_context.last_response, None);
+}
+
 #[test]
 fn switching_agents_preserves_turn_stats_cache_hit_baseline() {
     // Regression: switching away and back re-renders turn-stats blocks, so the

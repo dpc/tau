@@ -241,6 +241,12 @@ input coordination assumes a single foreground reader thread; background
 renderer threads must not write while the terminal is released to an external
 program.
 
+External-editor prompt trailers are prompt-surface text. They may quote
+assistant responses and prior prompt text to help compose the next prompt, but
+the terminal UI must scope response context to the currently visible/no-agent
+transcript and must not let hidden-agent rendering publish a different agent's
+response into the shared editor context.
+
 Transcript Markdown-lite formatting is a presentation-only terminal UI feature.
 It must not change protocol events, persisted logs, model context, or non-UI
 clients, and it must produce only Tau styled text spans rather than raw terminal

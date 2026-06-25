@@ -192,3 +192,21 @@ surface syntax.
 Status: confirmed, 2026-06-19, dpc
 
 Terminal streaming accumulates `provider.response_updated.deltas` per prompt and provider output index. If a UI sees a delta for an unknown in-flight prompt, it may create a live block with an ellipsis prefix to indicate missed earlier transient deltas; the final `provider.response_finished` replaces live content with complete durable output. Provider status updates are rendered as transient status text and do not enter assistant response accumulation.
+
+## Per-agent prompt-editor response context
+
+Status: confirmed, 2026-06-25, dpc
+
+The terminal UI keeps visible transcript state in renderer fields and snapshots
+hidden agent transcripts in `AgentUiState`. Response text used by the external
+prompt editor's trailer follows the same per-agent snapshot boundary: current and
+last assistant response context belongs to the viewed/no-agent transcript, while
+prompt-local fields such as previous prompt and trailer recovery stay with the
+active input/editor flow.
+
+When routing an event for a hidden agent, the renderer may temporarily restore
+that hidden snapshot into renderer fields to reuse normal folding code. During
+that hidden fold it must not publish hidden response context through shared
+input-loop mirrors such as `EditorContext`; Ctrl+O and other prompt actions must
+continue seeing the actually visible/no-agent context until the user explicitly
+switches transcripts.
