@@ -800,7 +800,12 @@ fn dispatch_action_invoke(invoke: ActionInvoke, lock_manager: &DirLockManager) -
         Ok(dir) => dir,
         Err(message) => return action_error(invoke, message),
     };
-    let removed = lock_manager.force_unlock_overlapping(&dir);
+    let removed = match lock_manager.force_unlock_overlapping(&dir) {
+        Ok(removed) => removed,
+        Err(message) => {
+            return action_error(invoke, format!("dir_lock backend error: {message}"));
+        }
+    };
     if removed.is_empty() {
         return action_error(
             invoke,
@@ -1165,6 +1170,14 @@ fn dispatch_locked_tool_invoke(
                     "automatic directory lock is outside your manual lock coverage: {}",
                     dir.display()
                 )),
+                tx,
+            );
+            return;
+        }
+        Err(crate::dir_lock::LockAcquireError::Backend(message)) => {
+            send_tool_failure(
+                invoke,
+                crate::display::ToolFailure::new(format!("dir_lock backend error: {message}")),
                 tx,
             );
             return;

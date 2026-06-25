@@ -45,9 +45,12 @@ lease locks are no longer held. The filesystem backend therefore coordinates
 Tau/ext-shell processes on the same host and user account without treating
 timestamps as liveness proof. Filesystem `instance_id`s are internal lease
 identifiers; model/user-visible diagnostics and `owner_agent_id` recovery use
-only `AgentId`. Backend reconfiguration initializes the requested backend before
+only `AgentId`. The backend is initialized only when directory locking is
+enabled. Backend reconfiguration initializes the requested backend before
 swapping it in, so initialization failure is reported as `ConfigError` while the
-previous backend and its lock state remain active.
+previous backend and its lock state remain active. Backend swaps are also
+rejected while automatic locks are active, because those guards release through
+the backend that granted them and must remain visible to later acquisitions.
 
 The read-write inference and automatic lock acquisition happen under the
 `DirLockManager` state lock. A shell call queued as read-write must still have

@@ -9,7 +9,10 @@ This note documents the move of filesystem update coordination out of `agent_sta
 - The tool name is `dir_lock`; Tau tool names do not allow hyphens.
 - `dir_lock` is registered disabled by default. Setting ext-shell config `dir_lock.enable = true` enables the handler and opts mutating ext-shell tools into locking.
 - `dir_lock.backend` defaults to `"memory"`, preserving historical process-local
-  coordination. Setting `dir_lock.backend = "filesystem"` stores lock state in a
+  coordination. The backend setting is only initialized while
+  `dir_lock.enable = true`; setting `backend = "filesystem"` with locking still
+  disabled does not create or validate filesystem state. Setting
+  `dir_lock.backend = "filesystem"` stores lock state in a
   per-user registry under `dir_lock.state_dir`, `$XDG_RUNTIME_DIR/tau/ext-shell-dir-locks`,
   or a verified private temp fallback so multiple Tau/ext-shell process instances
   on the same host and user account coordinate with each other.
@@ -48,6 +51,11 @@ locks before running:
 - `shell` and `gpt_shell`: no longer accept an explicit access-mode argument. If the calling agent holds a manual lock covering the canonical `cwd` (or the agent's remembered cwd when `cwd` is omitted), the shell call is inferred read-write and takes an automatic lock. Otherwise it is inferred read-only and skips automatic update locking. Relative `apply_patch`, `dir_lock`, and filesystem-tool paths are resolved against the same remembered cwd before lock selection/execution. Once lock selection starts, the tool executes with that cwd snapshot even if later cwd metadata commits while it is waiting.
 
 Automatic locks are held only for the tool invocation duration. They serialize with manual locks and with other automatic mutating calls. When the calling agent already owns a covering manual lock, automatic calls under that lock reenter the same writer section and do not wait on same-owner automatic calls; other agents remain blocked until the manual lock is released and all active automatic calls finish. Tool calls are admitted to ext-shell's bounded scheduler before attempting automatic lock acquisition, so a blocked mutating call occupies a worker until the lock is granted, cancelled, abandoned, or session cleanup cancels waiters.
+
+Backend reconfiguration fails with a configuration error while any automatic
+lock is active. This keeps a running mutating tool protected by the backend that
+admitted it until its guard releases, instead of switching later acquisitions to
+a different backend that cannot see the active lock.
 
 `read`, `grep`, `find`, `ls`, and inferred read-only `shell` / `gpt_shell` calls remain free to run while update locks are held. With `dir_lock.enable = false`, all shell calls are ordinary read-write commands and no access-mode chip is published for the UI. User `!` shell commands are UI commands, not agent tool calls, and are intentionally excluded.
 

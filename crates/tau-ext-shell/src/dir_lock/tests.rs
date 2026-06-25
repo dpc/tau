@@ -1,4 +1,4 @@
-use super::fs::{registry_generation, registry_waiter_count};
+use super::fs::{registry_generation, registry_waiter_count, set_fail_reap_for_test};
 use super::*;
 
 fn path(value: &str) -> PathBuf {
@@ -586,7 +586,17 @@ fn filesystem_lock_config(state_dir: &Path) -> DirLockConfig {
     }
 }
 
+fn disabled_filesystem_lock_config(state_dir: &Path) -> DirLockConfig {
+    DirLockConfig {
+        enable: false,
+        backend: DirLockBackendConfig::Filesystem,
+        state_dir: Some(state_dir.to_path_buf()),
+        enforce_ro_bind: true,
+    }
+}
+
 fn filesystem_lock_manager(state_dir: &Path) -> DirLockManager {
+    std::fs::create_dir_all(state_dir).expect("create state dir");
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -694,19 +704,17 @@ fn filesystem_backend_cancellation_removes_registry_waiter() {
         .expect("manual lock c");
 }
 
-/// Ensures a new filesystem backend instance reaps registry records whose
-/// owning instance lease lock has been released by process/manager shutdown.
+/// Ensures filesystem backend shutdown removes this instance's registry records
+/// so a later manager can acquire the same path without waiting.
 #[test]
-fn filesystem_backend_reaps_dead_instance_locks() {
+fn filesystem_backend_shutdown_releases_instance_locks() {
     let tempdir = tempfile::TempDir::new().expect("tempdir");
     {
         let manager_a = filesystem_lock_manager(tempdir.path());
         manager_a
             .acquire_manual("manual-a".into(), agent_id("agent-a"), path("/repo"), || {})
             .expect("manual lock a");
-        // Drop without shutdown to simulate an ext-shell process disappearing;
-        // the instance lease is released and the registry entry should be
-        // reaped.
+        manager_a.shutdown();
     }
     let manager_b = filesystem_lock_manager(tempdir.path());
     manager_b
@@ -735,7 +743,9 @@ fn filesystem_backend_force_unlock_propagates_across_instances() {
         )
         .expect("manual lock a");
 
-    let removed = manager_b.force_unlock_overlapping(Path::new("/repo"));
+    let removed = manager_b
+        .force_unlock_overlapping(Path::new("/repo"))
+        .expect("force unlock");
     assert_eq!(removed.len(), 1);
     assert_eq!(removed[0].owner, agent_id("agent-a"));
     assert_eq!(removed[0].dir, path("/repo/a"));
@@ -932,4 +942,380 @@ fn filesystem_wait_polling_does_not_bump_registry_generation() {
         waiter.join().expect("waiter"),
         Err(ManualLockAcquireError::Cancelled)
     ));
+}
+
+/// Ensures backend reconfiguration fails closed while a memory-backend
+/// automatic lock is active, preventing new acquisitions from ignoring the
+/// in-flight mutating tool that still releases through the old backend.
+#[test]
+fn reconfigure_to_filesystem_rejects_active_memory_auto_lock() {
+    let tempdir = tempfile::TempDir::new().expect("tempdir");
+    let state_dir = tempdir.path().join("state");
+    let manager = DirLockManager::default();
+    let guard = manager
+        .acquire_auto(
+            "auto-a".into(),
+            agent_id("agent-a"),
+            vec![path("/repo")],
+            || {},
+        )
+        .expect("memory automatic lock");
+
+    let error = manager
+        .configure(&filesystem_lock_config(&state_dir))
+        .expect_err("active auto lock must block backend swap");
+    assert!(error.contains("automatic directory lock"));
+    drop(guard);
+    manager
+        .configure(&filesystem_lock_config(&state_dir))
+        .expect("backend can switch after active auto drops");
+}
+
+/// Ensures backend reconfiguration fails closed while a filesystem-backend
+/// automatic lock is active, preserving cross-instance protection until the
+/// mutating tool's guard releases its persisted lock.
+#[test]
+fn reconfigure_from_filesystem_rejects_active_filesystem_auto_lock() {
+    let tempdir = tempfile::TempDir::new().expect("tempdir");
+    let manager = filesystem_lock_manager(tempdir.path());
+    let guard = manager
+        .acquire_auto(
+            "auto-a".into(),
+            agent_id("agent-a"),
+            vec![path("/repo")],
+            || {},
+        )
+        .expect("filesystem automatic lock");
+
+    let error = manager
+        .configure(&DirLockConfig {
+            enable: true,
+            ..DirLockConfig::default()
+        })
+        .expect_err("active filesystem auto lock must block backend swap");
+    assert!(error.contains("filesystem automatic directory lock"));
+    drop(guard);
+    manager
+        .configure(&DirLockConfig {
+            enable: true,
+            ..DirLockConfig::default()
+        })
+        .expect("backend can switch after active auto drops");
+}
+
+/// Ensures `backend = "filesystem"` remains inert while directory locking is
+/// disabled, so merely naming the backend does not create or validate state
+/// until `dir_lock.enable = true` opts the feature in.
+#[test]
+fn disabled_filesystem_backend_does_not_initialize_state_dir() {
+    let tempdir = tempfile::TempDir::new().expect("tempdir");
+    let state_dir = tempdir.path().join("locks");
+    let manager = DirLockManager::default();
+    manager
+        .configure(&disabled_filesystem_lock_config(&state_dir))
+        .expect("disabled filesystem backend should not initialize");
+    assert!(
+        !state_dir.exists(),
+        "disabled filesystem backend should not create state"
+    );
+}
+
+fn subprocess_helper_env() -> Option<(PathBuf, PathBuf, PathBuf, PathBuf, bool)> {
+    let state_dir = std::env::var_os("TAU_DIR_LOCK_SUBPROCESS_STATE").map(PathBuf::from)?;
+    let ready = std::env::var_os("TAU_DIR_LOCK_SUBPROCESS_READY").map(PathBuf::from)?;
+    let release = std::env::var_os("TAU_DIR_LOCK_SUBPROCESS_RELEASE").map(PathBuf::from)?;
+    let lock_dir = std::env::var_os("TAU_DIR_LOCK_SUBPROCESS_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| path("/repo"));
+    let abort = std::env::var_os("TAU_DIR_LOCK_SUBPROCESS_ABORT").is_some();
+    Some((state_dir, ready, release, lock_dir, abort))
+}
+
+/// Helper invoked as a separate test process by the subprocess filesystem
+/// backend tests; ignored in normal test runs because it is only meaningful
+/// when the parent supplies coordination paths through environment variables.
+#[test]
+#[ignore]
+fn filesystem_subprocess_lock_holder_helper() {
+    let Some((state_dir, ready, release, lock_dir, abort)) = subprocess_helper_env() else {
+        return;
+    };
+    let manager = filesystem_lock_manager(&state_dir);
+    manager
+        .acquire_manual(
+            "manual-child".into(),
+            agent_id("agent-child"),
+            lock_dir,
+            || {},
+        )
+        .expect("child manual lock");
+    std::fs::write(&ready, b"ready").expect("write ready");
+    if abort {
+        std::process::abort();
+    }
+    let start = std::time::Instant::now();
+    while !release.exists() {
+        assert!(start.elapsed() < std::time::Duration::from_secs(120));
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+}
+
+fn spawn_lock_holder(
+    state_dir: &Path,
+    ready: &Path,
+    release: &Path,
+    abort: bool,
+) -> std::process::Child {
+    spawn_lock_holder_for_dir(state_dir, ready, release, Path::new("/repo"), abort)
+}
+
+fn spawn_lock_holder_for_dir(
+    state_dir: &Path,
+    ready: &Path,
+    release: &Path,
+    lock_dir: &Path,
+    abort: bool,
+) -> std::process::Child {
+    let current_exe = std::env::current_exe().expect("current test binary");
+    let mut command = std::process::Command::new(current_exe);
+    command
+        .arg("--ignored")
+        .arg("--exact")
+        .arg("dir_lock::tests::filesystem_subprocess_lock_holder_helper")
+        .env("TAU_DIR_LOCK_SUBPROCESS_STATE", state_dir)
+        .env("TAU_DIR_LOCK_SUBPROCESS_READY", ready)
+        .env("TAU_DIR_LOCK_SUBPROCESS_RELEASE", release)
+        .env("TAU_DIR_LOCK_SUBPROCESS_DIR", lock_dir);
+    if abort {
+        command.env("TAU_DIR_LOCK_SUBPROCESS_ABORT", "1");
+    }
+    command.spawn().expect("spawn lock holder")
+}
+
+/// Ensures the filesystem backend really coordinates across OS processes, not
+/// only across multiple managers inside one Rust process.
+#[test]
+fn filesystem_backend_blocks_real_subprocess_until_exit() {
+    let tempdir = tempfile::TempDir::new().expect("tempdir");
+    let state_dir = tempdir.path().join("state");
+    let ready = tempdir.path().join("ready");
+    let release = tempdir.path().join("release");
+    let mut child = spawn_lock_holder(&state_dir, &ready, &release, false);
+    wait_until(|| ready.exists());
+
+    let manager = filesystem_lock_manager(&state_dir);
+    let waiter = std::thread::spawn({
+        let manager = manager.clone();
+        move || {
+            manager.acquire_manual_with_policy(
+                "manual-parent".into(),
+                agent_id("agent-parent"),
+                path("/repo"),
+                || {},
+                LockWaitPolicy {
+                    liveness_interval: Duration::from_millis(25),
+                    abandoned_after: Duration::from_secs(60),
+                },
+            )
+        }
+    });
+    std::thread::sleep(Duration::from_millis(150));
+    assert!(!waiter.is_finished(), "subprocess lease must block parent");
+    std::fs::write(&release, b"release").expect("release child");
+    child.wait().expect("child exits");
+    waiter.join().expect("waiter").expect("parent acquired");
+}
+
+/// Ensures an abnormal process exit releases the OS lease and lets a peer reap
+/// the abandoned registry record before acquiring the same directory.
+#[test]
+fn filesystem_backend_reaps_abnormally_exited_subprocess() {
+    let tempdir = tempfile::TempDir::new().expect("tempdir");
+    let state_dir = tempdir.path().join("state");
+    let ready = tempdir.path().join("ready");
+    let release = tempdir.path().join("release");
+    let mut child = spawn_lock_holder(&state_dir, &ready, &release, true);
+    wait_until(|| ready.exists());
+    let _ = child.wait().expect("child abort status");
+
+    let manager = filesystem_lock_manager(&state_dir);
+    manager
+        .acquire_manual(
+            "manual-parent".into(),
+            agent_id("agent-parent"),
+            path("/repo"),
+            || panic!("dead subprocess should be reaped before waiting"),
+        )
+        .expect("parent acquired after reap");
+}
+
+/// Ensures uncertain lease-liveness errors fail closed: if a peer lease exists
+/// but cannot be opened for liveness probing, the filesystem backend reports an
+/// explicit backend error instead of reaping the peer and granting a
+/// conflicting lock.
+#[cfg(unix)]
+#[test]
+fn filesystem_backend_preserves_peer_record_on_lease_open_error() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tempdir = tempfile::TempDir::new().expect("tempdir");
+    let state_dir = tempdir.path().join("state");
+    let ready = tempdir.path().join("ready");
+    let release = tempdir.path().join("release");
+    let mut child =
+        spawn_lock_holder_for_dir(&state_dir, &ready, &release, Path::new("/unrelated"), false);
+    wait_until(|| ready.exists());
+
+    let manager = filesystem_lock_manager(&state_dir);
+    let instances_dir = state_dir.join("instances");
+    let original_permissions = std::fs::metadata(&instances_dir)
+        .expect("instances metadata")
+        .permissions();
+    std::fs::set_permissions(&instances_dir, std::fs::Permissions::from_mode(0o000))
+        .expect("hide instances dir");
+    let result = manager.acquire_manual(
+        "manual-parent".into(),
+        agent_id("agent-parent"),
+        path("/repo"),
+        || panic!("uncertain lease liveness should not wait or acquire"),
+    );
+    assert!(matches!(result, Err(ManualLockAcquireError::Backend(_))));
+
+    std::fs::set_permissions(&instances_dir, original_permissions).expect("restore instances dir");
+    std::fs::write(&release, b"release").expect("release child");
+    child.wait().expect("child exits");
+}
+
+/// Ensures backend-error exits after a filesystem waiter has been persisted
+/// remove that waiter best-effort, so the live owning instance does not leave a
+/// stale FIFO entry that blocks unrelated later acquisitions.
+#[cfg(unix)]
+#[test]
+fn filesystem_backend_error_after_enqueue_cleans_up_waiter() {
+    let tempdir = tempfile::TempDir::new().expect("tempdir");
+    let manager_a = filesystem_lock_manager(tempdir.path());
+    let manager_b = filesystem_lock_manager(tempdir.path());
+    manager_a
+        .acquire_manual("manual-a".into(), agent_id("agent-a"), path("/repo"), || {})
+        .expect("blocking manual lock");
+
+    let waiter = std::thread::spawn({
+        let manager_b = manager_b.clone();
+        move || {
+            manager_b.acquire_manual_with_policy(
+                "manual-b".into(),
+                agent_id("agent-b"),
+                path("/repo"),
+                || {},
+                LockWaitPolicy {
+                    liveness_interval: Duration::from_millis(25),
+                    abandoned_after: Duration::from_secs(60),
+                },
+            )
+        }
+    });
+    wait_until(|| registry_waiter_count(tempdir.path()).expect("registry") == 1);
+
+    set_fail_reap_for_test(Some(tempdir.path().to_path_buf()));
+    assert!(matches!(
+        waiter.join().expect("waiter"),
+        Err(ManualLockAcquireError::Backend(_))
+    ));
+    set_fail_reap_for_test(None);
+    assert_eq!(
+        registry_waiter_count(tempdir.path()).expect("registry"),
+        0,
+        "backend-error cleanup should remove the failed call's waiter"
+    );
+
+    let manager_c = filesystem_lock_manager(tempdir.path());
+    let later = std::thread::spawn({
+        let manager_c = manager_c.clone();
+        move || {
+            manager_c.acquire_manual(
+                "manual-c".into(),
+                agent_id("agent-c"),
+                path("/other"),
+                || {},
+            )
+        }
+    });
+    std::thread::sleep(Duration::from_millis(150));
+    assert!(
+        later.is_finished(),
+        "unrelated later acquisition must not be FIFO-blocked by stale waiter"
+    );
+    later.join().expect("later").expect("later acquired");
+}
+
+/// Ensures a queued filesystem automatic waiter cannot become an invisible old
+/// backend lock while a backend reconfiguration is paused after its active-lock
+/// check. The waiter must re-enter the backend admission gate before granting;
+/// if the configure wins, old-backend shutdown cancels the queued waiter.
+#[test]
+fn filesystem_queued_auto_grant_serializes_with_backend_reconfigure() {
+    let tempdir = tempfile::TempDir::new().expect("tempdir");
+    let manager = filesystem_lock_manager(tempdir.path());
+    manager
+        .acquire_manual(
+            "manual-blocker".into(),
+            agent_id("agent-blocker"),
+            path("/repo"),
+            || {},
+        )
+        .expect("blocking manual lock");
+
+    let waiter = std::thread::spawn({
+        let manager = manager.clone();
+        move || {
+            manager.acquire_auto(
+                "auto-waiter".into(),
+                agent_id("agent-waiter"),
+                vec![path("/repo")],
+                || {},
+            )
+        }
+    });
+    wait_until(|| registry_waiter_count(tempdir.path()).expect("registry") == 1);
+
+    let pause = install_configure_pause_for_test();
+    let configure = std::thread::spawn({
+        let manager = manager.clone();
+        move || {
+            manager.configure(&DirLockConfig {
+                enable: true,
+                backend: DirLockBackendConfig::Memory,
+                state_dir: None,
+                enforce_ro_bind: true,
+            })
+        }
+    });
+    pause.wait_until_reached();
+
+    manager
+        .unlock_manual(&agent_id("agent-blocker"), Path::new("/repo"))
+        .expect("release blocker");
+    std::thread::sleep(Duration::from_millis(100));
+    assert!(
+        !waiter.is_finished(),
+        "queued waiter must block on backend admission while configure is paused"
+    );
+
+    pause.release();
+    clear_configure_pause_for_test();
+    configure.join().expect("configure").expect("configure");
+    assert!(matches!(
+        waiter.join().expect("waiter"),
+        Err(LockAcquireError::Cancelled)
+    ));
+
+    let guard = manager
+        .acquire_auto(
+            "auto-memory".into(),
+            agent_id("agent-memory"),
+            vec![path("/repo")],
+            || {},
+        )
+        .expect("new memory backend auto lock");
+    drop(guard);
 }

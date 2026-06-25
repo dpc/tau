@@ -19,7 +19,7 @@ mod fs;
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Condvar, Mutex, mpsc};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, mpsc};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
@@ -28,7 +28,10 @@ use tau_proto::{
     ToolProgress, ToolResult, ToolResultKind, ToolStarted, ToolType, ToolUseState, ToolUseStatus,
 };
 
-use self::fs::{FsAutoAcquireRequest, FsLockBackend, StateDirSource, default_fs_state_dir};
+use self::fs::{
+    FsAutoAcquireRequest, FsLockBackend, FsManualAcquireRequest, StateDirSource,
+    default_fs_state_dir,
+};
 use crate::argument::{argument_text, optional_argument_text};
 use crate::config::{DirLockBackendConfig, DirLockConfig};
 use crate::display::{ToolFailure, ok_display};
@@ -43,6 +46,40 @@ const ABANDONED_LOCK_ERROR: &str = "dir_lock_abandoned";
 const ABANDONED_LOCK_OUTPUT: &str = "Directory locked and inactive - possibly abandoned. Consider messaging the lock owner agent and/or force-unlocking with `dir_lock unlock` using `blocking_directory` as `directory` and `lock_owner_id` as `owner_agent_id`.";
 const DUPLICATE_LOCK_ERROR: &str = "dir_lock_duplicate";
 const DUPLICATE_LOCK_OUTPUT: &str = "Directory lock already held by this agent. Unlock the existing lock before locking another overlapping directory.";
+
+#[cfg(test)]
+static CONFIGURE_PAUSE_FOR_TEST: std::sync::LazyLock<Mutex<Option<Arc<ConfigurePauseForTest>>>> =
+    std::sync::LazyLock::new(|| Mutex::new(None));
+
+#[cfg(test)]
+#[derive(Debug)]
+struct ConfigurePauseForTest {
+    state: Mutex<ConfigurePauseStateForTest>,
+    changed: Condvar,
+}
+
+#[cfg(test)]
+#[derive(Debug, Default)]
+struct ConfigurePauseStateForTest {
+    reached: bool,
+    release: bool,
+}
+
+#[cfg(test)]
+impl ConfigurePauseForTest {
+    fn wait_until_reached(&self) {
+        let mut state = self.state.lock().expect("configure pause state");
+        while !state.reached {
+            state = self.changed.wait(state).expect("configure pause state");
+        }
+    }
+
+    fn release(&self) {
+        let mut state = self.state.lock().expect("configure pause state");
+        state.release = true;
+        self.changed.notify_all();
+    }
+}
 
 #[derive(Clone, Copy, Debug)]
 struct LockWaitPolicy {
@@ -135,6 +172,7 @@ struct DirLockInner {
     state: Mutex<LockState>,
     changed: Condvar,
     fs_backend: Mutex<Option<FsLockBackend>>,
+    backend_gate: Mutex<()>,
 }
 
 #[derive(Debug, Default)]
@@ -192,6 +230,7 @@ pub(crate) enum LockAcquireError {
     Abandoned(AbandonedLock),
     SelfConflict { dir: PathBuf },
     NotCovered,
+    Backend(String),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -199,6 +238,7 @@ pub(crate) enum ManualLockAcquireError {
     Cancelled,
     AlreadyHeld { dir: PathBuf },
     Abandoned(AbandonedLock),
+    Backend(String),
 }
 
 #[derive(Clone, Debug)]
@@ -236,8 +276,14 @@ impl Drop for AutoDirLockGuard {
 impl DirLockManager {
     /// Reconfigure the directory-lock storage backend.
     pub(crate) fn configure(&self, config: &DirLockConfig) -> Result<(), String> {
+        if !config.enable {
+            return Ok(());
+        }
+        let _admission_guard = self.backend_admission_gate();
         match config.backend {
             DirLockBackendConfig::Memory => {
+                self.reject_backend_change_with_active_automatic_locks("memory")?;
+                pause_configure_after_active_check_for_test();
                 let removed_backend = self
                     .inner
                     .fs_backend
@@ -266,6 +312,8 @@ impl DirLockManager {
                 if current_matches {
                     return Ok(());
                 }
+                self.reject_backend_change_with_active_automatic_locks("filesystem")?;
+                pause_configure_after_active_check_for_test();
                 let new_backend = FsLockBackend::initialize(
                     &requested,
                     if config.state_dir.is_some() {
@@ -294,6 +342,49 @@ impl DirLockManager {
                 Ok(())
             }
         }
+    }
+
+    fn reject_backend_change_with_active_automatic_locks(
+        &self,
+        requested_backend: &str,
+    ) -> Result<(), String> {
+        let memory_auto_count = self
+            .inner
+            .state
+            .lock()
+            .expect("dir lock state poisoned")
+            .automatic
+            .len();
+        if 0 < memory_auto_count {
+            return Err(format!(
+                "cannot switch dir_lock backend to {requested_backend} while {memory_auto_count} automatic directory lock(s) are active"
+            ));
+        }
+        if let Some(backend) = self.fs_backend() {
+            let fs_auto_count = backend.active_auto_count()?;
+            if 0 < fs_auto_count {
+                return Err(format!(
+                    "cannot switch dir_lock backend to {requested_backend} while {fs_auto_count} filesystem automatic directory lock(s) are active"
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn backend_admission_gate(&self) -> MutexGuard<'_, ()> {
+        self.inner
+            .backend_gate
+            .lock()
+            .expect("dir lock backend gate poisoned")
+    }
+
+    fn is_current_fs_backend(&self, backend: &FsLockBackend) -> bool {
+        self.inner
+            .fs_backend
+            .lock()
+            .expect("dir lock backend poisoned")
+            .as_ref()
+            .is_some_and(|current| current.same_instance_as(backend))
     }
 
     fn fs_backend(&self) -> Option<FsLockBackend> {
@@ -368,6 +459,7 @@ impl DirLockManager {
     where
         F: FnOnce(),
     {
+        let admission_guard = self.backend_admission_gate();
         if let Some(backend) = self.fs_backend() {
             return backend.acquire_auto(
                 FsAutoAcquireRequest {
@@ -379,6 +471,7 @@ impl DirLockManager {
                 },
                 on_wait,
                 policy,
+                admission_guard,
             );
         }
         let dirs = normalize_lock_dirs(dirs);
@@ -394,6 +487,7 @@ impl DirLockManager {
         }
         if state.can_grant_now(&owner, &dirs, WaitKind::Automatic) {
             let id = state.add_auto(owner, dirs);
+            drop(admission_guard);
             return Ok(AutoDirLockGuard {
                 manager: self.clone(),
                 token: AutoLockToken::Memory(id),
@@ -401,6 +495,7 @@ impl DirLockManager {
         }
 
         let waiter = state.push_waiter(call_id, owner, dirs, WaitKind::Automatic);
+        drop(admission_guard);
         drop(state);
         if let Some(on_wait) = on_wait.take() {
             on_wait();
@@ -481,8 +576,19 @@ impl DirLockManager {
     where
         F: FnOnce(),
     {
+        let admission_guard = self.backend_admission_gate();
         if let Some(backend) = self.fs_backend() {
-            return backend.acquire_manual(self, call_id, owner, dir, on_wait, policy);
+            return backend.acquire_manual(
+                FsManualAcquireRequest {
+                    manager: self,
+                    call_id,
+                    agent_id: owner,
+                    dir,
+                },
+                on_wait,
+                policy,
+                admission_guard,
+            );
         }
         let dirs = vec![dir];
         let mut on_wait = Some(on_wait);
@@ -493,10 +599,12 @@ impl DirLockManager {
         if state.can_grant_now(&owner, &dirs, WaitKind::Manual) {
             state.add_manual(owner, dirs, Instant::now());
             self.inner.changed.notify_all();
+            drop(admission_guard);
             return Ok(());
         }
 
         let waiter = state.push_waiter(call_id, owner, dirs, WaitKind::Manual);
+        drop(admission_guard);
         drop(state);
         if let Some(on_wait) = on_wait.take() {
             on_wait();
@@ -622,13 +730,16 @@ impl DirLockManager {
     /// This is used by the user-facing slash action for recovery from stale or
     /// mistaken manual locks. Automatic locks held by running tools are not
     /// touched.
-    pub(crate) fn force_unlock_overlapping(&self, dir: &Path) -> Vec<ForceUnlockedLock> {
+    pub(crate) fn force_unlock_overlapping(
+        &self,
+        dir: &Path,
+    ) -> Result<Vec<ForceUnlockedLock>, String> {
         if let Some(backend) = self.fs_backend() {
-            let removed = backend.force_unlock_overlapping(dir);
+            let removed = backend.force_unlock_overlapping(dir)?;
             if !removed.is_empty() {
                 self.inner.changed.notify_all();
             }
-            return removed;
+            return Ok(removed);
         }
         let mut state = self.inner.state.lock().expect("dir lock state poisoned");
         let mut removed = Vec::new();
@@ -645,7 +756,7 @@ impl DirLockManager {
         if !removed.is_empty() {
             self.inner.changed.notify_all();
         }
-        removed
+        Ok(removed)
     }
 
     /// Release all manual locks owned by an unloaded agent.
@@ -730,6 +841,45 @@ impl DirLockManager {
         }
     }
 }
+
+#[cfg(test)]
+fn install_configure_pause_for_test() -> Arc<ConfigurePauseForTest> {
+    let pause = Arc::new(ConfigurePauseForTest {
+        state: Mutex::new(ConfigurePauseStateForTest::default()),
+        changed: Condvar::new(),
+    });
+    *CONFIGURE_PAUSE_FOR_TEST
+        .lock()
+        .expect("configure pause hook") = Some(pause.clone());
+    pause
+}
+
+#[cfg(test)]
+fn clear_configure_pause_for_test() {
+    *CONFIGURE_PAUSE_FOR_TEST
+        .lock()
+        .expect("configure pause hook") = None;
+}
+
+#[cfg(test)]
+fn pause_configure_after_active_check_for_test() {
+    let pause = CONFIGURE_PAUSE_FOR_TEST
+        .lock()
+        .expect("configure pause hook")
+        .clone();
+    let Some(pause) = pause else {
+        return;
+    };
+    let mut state = pause.state.lock().expect("configure pause state");
+    state.reached = true;
+    pause.changed.notify_all();
+    while !state.release {
+        state = pause.changed.wait(state).expect("configure pause state");
+    }
+}
+
+#[cfg(not(test))]
+fn pause_configure_after_active_check_for_test() {}
 
 impl LockState {
     fn push_waiter(
@@ -995,6 +1145,12 @@ fn dispatch_dir_lock_update(
         Err(ManualLockAcquireError::Abandoned(lock)) => {
             send_abandoned_dir_lock_error(&invoke, tx, "update", &lock);
         }
+        Err(ManualLockAcquireError::Backend(message)) => {
+            send_event(
+                tx,
+                backend_error_event(&invoke, "update", &request.dir, message),
+            );
+        }
     }
 }
 
@@ -1032,6 +1188,21 @@ fn dispatch_dir_lock_unlock(
             ),
         ),
     }
+}
+
+fn backend_error_event(invoke: &ToolStarted, command: &str, dir: &Path, message: String) -> Event {
+    tool_error_with_args(
+        invoke,
+        format!("dir_lock backend error: {message}"),
+        Some(CborValue::Map(vec![
+            cbor_text_entry("error", "dir_lock_backend_error"),
+            cbor_text_entry(
+                "output",
+                "Directory lock backend failed; the requested mutating operation was not run.",
+            ),
+        ])),
+        Some(dir_lock_display_args(command, dir)),
+    )
 }
 
 fn dir_lock_unlock_owner(invoke: &ToolStarted, dir: &Path) -> Result<UnlockOwner, Box<Event>> {

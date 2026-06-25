@@ -4,7 +4,7 @@ use std::collections::VecDeque;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, MutexGuard};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use fs2::FileExt;
@@ -19,6 +19,10 @@ use super::{
 
 const FS_REGISTRY_VERSION: u32 = 1;
 const FS_POLL_INTERVAL: Duration = Duration::from_millis(50);
+
+#[cfg(test)]
+static FAIL_REAP_FOR_TEST: std::sync::LazyLock<std::sync::Mutex<Option<PathBuf>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(None));
 
 /// Filesystem-backed lock registry plus this instance's lease handle.
 #[derive(Clone, Debug)]
@@ -59,12 +63,21 @@ impl StateDirSource {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct FsRegistry {
+    /// Persistent registry format version used to reject incompatible state.
     version: u32,
+    /// Monotonic change counter bumped whenever persisted lock state changes.
     generation: u64,
+    /// Next FIFO waiter id, unique within this registry file.
     next_waiter_id: u64,
+    /// Next automatic lock id, unique within this registry file.
     next_auto_id: u64,
+    /// Manual locks retained until explicit unlock, owner cleanup, or lease
+    /// reap.
     manual: Vec<FsManualLock>,
+    /// Automatic locks held only for the lifetime of active mutating tool
+    /// calls.
     automatic: Vec<FsAutomaticLock>,
+    /// FIFO queue of blocked manual and automatic acquisitions.
     waiters: VecDeque<FsWaiter>,
 }
 
@@ -84,32 +97,47 @@ impl Default for FsRegistry {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 struct FsOwner {
+    /// Internal ext-shell process lease id that disambiguates equal agent ids.
     instance_id: FsInstanceId,
+    /// User-visible agent id used in diagnostics and explicit owner unlocks.
     agent_id: AgentId,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct FsManualLock {
+    /// Instance/agent pair that owns this manual lock.
     owner: FsOwner,
+    /// Canonical directory reserved by this manual lock.
     dir: PathBuf,
+    /// Registry-wall-clock acquisition timestamp for stale-lock diagnostics.
     acquired_at_ms: u64,
+    /// Last acquisition or same-owner automatic use for abandonment detection.
     last_used_at_ms: u64,
+    /// Same-owner automatic lock ids currently running under this manual lock.
     active_auto_ids: Vec<u64>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct FsAutomaticLock {
+    /// Automatic lock id referenced by manual `active_auto_ids`.
     id: u64,
+    /// Instance/agent pair that owns the active mutating tool.
     owner: FsOwner,
+    /// Canonical directories covered by this automatic lock.
     dirs: Vec<PathBuf>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct FsWaiter {
+    /// FIFO waiter id persisted so pollers can find their queue entry.
     id: u64,
+    /// Tool call id used by cancellation to remove this queued waiter.
     call_id: ToolCallId,
+    /// Instance/agent pair waiting for the lock.
     owner: FsOwner,
+    /// Canonical directories requested by this waiter.
     dirs: Vec<PathBuf>,
+    /// Whether this queued request is a manual lock or automatic tool lock.
     kind: WaitKind,
 }
 
@@ -119,6 +147,13 @@ pub(super) struct FsAutoAcquireRequest<'a> {
     pub(super) agent_id: AgentId,
     pub(super) dirs: Vec<PathBuf>,
     pub(super) require_manual_cover: bool,
+}
+
+pub(super) struct FsManualAcquireRequest<'a> {
+    pub(super) manager: &'a DirLockManager,
+    pub(super) call_id: ToolCallId,
+    pub(super) agent_id: AgentId,
+    pub(super) dir: PathBuf,
 }
 
 impl FsLockBackend {
@@ -158,11 +193,16 @@ impl FsLockBackend {
         }
     }
 
+    pub(super) fn same_instance_as(&self, other: &Self) -> bool {
+        self.state_dir == other.state_dir && self.instance_id == other.instance_id
+    }
+
     pub(super) fn acquire_auto<F>(
         &self,
         request: FsAutoAcquireRequest<'_>,
         on_wait: F,
         policy: LockWaitPolicy,
+        admission_guard: MutexGuard<'_, ()>,
     ) -> Result<AutoDirLockGuard, LockAcquireError>
     where
         F: FnOnce(),
@@ -172,9 +212,17 @@ impl FsLockBackend {
         let mut waiter_id = None;
         let mut on_wait = Some(on_wait);
         let mut next_liveness_check = Instant::now() + policy.liveness_interval;
+        let mut admission_guard = Some(admission_guard);
         loop {
             let outcome = with_registry_lock(&self.state_dir, |registry| {
-                self.reap_dead_instances(registry);
+                self.reap_dead_instances(registry)?;
+                if waiter_id.is_some()
+                    && admission_guard.is_some()
+                    && !request.manager.is_current_fs_backend(self)
+                {
+                    registry.remove_waiter(waiter_id);
+                    return Ok(FsAcquireOutcome::Cancelled);
+                }
                 if request.require_manual_cover && !registry.manual_covers(&owner, &dirs) {
                     registry.remove_waiter(waiter_id);
                     return Ok(FsAcquireOutcome::NotCovered);
@@ -210,6 +258,9 @@ impl FsLockBackend {
                         return Ok(FsAcquireOutcome::NotCovered);
                     }
                     if !registry.has_conflict(&queued.owner, &queued.dirs, queued.kind) {
+                        if admission_guard.is_none() {
+                            return Ok(FsAcquireOutcome::NeedsAdmission);
+                        }
                         let queued = registry.waiters.pop_front().expect("front waiter");
                         let id = registry.add_auto(queued.owner, queued.dirs, now_ms());
                         return Ok(FsAcquireOutcome::Granted(id));
@@ -230,7 +281,11 @@ impl FsLockBackend {
                 }
                 Ok(FsAcquireOutcome::Waiting)
             })
-            .map_err(|_| LockAcquireError::Cancelled)?;
+            .map_err(|error| {
+                cleanup_waiter_after_backend_error(self, waiter_id);
+                LockAcquireError::Backend(error)
+            })?;
+            drop(admission_guard.take());
             match outcome {
                 FsAcquireOutcome::Granted(id) => {
                     return Ok(AutoDirLockGuard {
@@ -247,6 +302,10 @@ impl FsLockBackend {
                     return Err(LockAcquireError::SelfConflict { dir });
                 }
                 FsAcquireOutcome::NotCovered => return Err(LockAcquireError::NotCovered),
+                FsAcquireOutcome::NeedsAdmission => {
+                    admission_guard = Some(request.manager.backend_admission_gate());
+                    continue;
+                }
                 FsAcquireOutcome::Waiting => {}
             }
             if let Some(on_wait) = on_wait.take() {
@@ -261,24 +320,30 @@ impl FsLockBackend {
 
     pub(super) fn acquire_manual<F>(
         &self,
-        manager: &DirLockManager,
-        call_id: ToolCallId,
-        agent_id: AgentId,
-        dir: PathBuf,
+        request: FsManualAcquireRequest<'_>,
         on_wait: F,
         policy: LockWaitPolicy,
+        admission_guard: MutexGuard<'_, ()>,
     ) -> Result<(), ManualLockAcquireError>
     where
         F: FnOnce(),
     {
-        let owner = self.owner(agent_id);
-        let dirs = vec![dir];
+        let owner = self.owner(request.agent_id);
+        let dirs = vec![request.dir];
         let mut waiter_id = None;
         let mut on_wait = Some(on_wait);
         let mut next_liveness_check = Instant::now() + policy.liveness_interval;
+        let mut admission_guard = Some(admission_guard);
         loop {
             let outcome = with_registry_lock(&self.state_dir, |registry| {
-                self.reap_dead_instances(registry);
+                self.reap_dead_instances(registry)?;
+                if waiter_id.is_some()
+                    && admission_guard.is_some()
+                    && !request.manager.is_current_fs_backend(self)
+                {
+                    registry.remove_waiter(waiter_id);
+                    return Ok(FsManualOutcome::Cancelled);
+                }
                 if let Some(held_dir) = registry.manual_lock_owned_overlapping(&owner, &dirs) {
                     registry.remove_waiter(waiter_id);
                     return Ok(FsManualOutcome::AlreadyHeld(held_dir));
@@ -289,7 +354,7 @@ impl FsLockBackend {
                 }
                 let id = *waiter_id.get_or_insert_with(|| {
                     registry.push_waiter(
-                        call_id.clone(),
+                        request.call_id.clone(),
                         owner.clone(),
                         dirs.clone(),
                         WaitKind::Manual,
@@ -308,6 +373,9 @@ impl FsLockBackend {
                         return Ok(FsManualOutcome::AlreadyHeld(held_dir));
                     }
                     if !registry.has_conflict(&queued.owner, &queued.dirs, queued.kind) {
+                        if admission_guard.is_none() {
+                            return Ok(FsManualOutcome::NeedsAdmission);
+                        }
                         let queued = registry.waiters.pop_front().expect("front waiter");
                         registry.add_manual(queued.owner, queued.dirs, now_ms());
                         return Ok(FsManualOutcome::Granted);
@@ -328,7 +396,10 @@ impl FsLockBackend {
                 }
                 Ok(FsManualOutcome::Waiting)
             })
-            .map_err(|_| ManualLockAcquireError::Cancelled)?;
+            .map_err(|error| {
+                cleanup_waiter_after_backend_error(self, waiter_id);
+                ManualLockAcquireError::Backend(error)
+            })?;
             match outcome {
                 FsManualOutcome::Granted => return Ok(()),
                 FsManualOutcome::Cancelled => return Err(ManualLockAcquireError::Cancelled),
@@ -338,15 +409,20 @@ impl FsLockBackend {
                 FsManualOutcome::Abandoned(lock) => {
                     return Err(ManualLockAcquireError::Abandoned(lock));
                 }
+                FsManualOutcome::NeedsAdmission => {
+                    admission_guard = Some(request.manager.backend_admission_gate());
+                    continue;
+                }
                 FsManualOutcome::Waiting => {}
             }
+            drop(admission_guard.take());
             if let Some(on_wait) = on_wait.take() {
                 on_wait();
             }
             if next_liveness_check <= Instant::now() {
                 next_liveness_check = Instant::now() + policy.liveness_interval;
             }
-            sleep_for_lock_poll(manager, next_liveness_check);
+            sleep_for_lock_poll(request.manager, next_liveness_check);
         }
     }
 
@@ -361,7 +437,7 @@ impl FsLockBackend {
             agent_id: agent_id.clone(),
         };
         with_registry_lock(&self.state_dir, |registry| {
-            self.reap_dead_instances(registry);
+            self.reap_dead_instances(registry)?;
             let pos = registry.manual.iter().position(|lock| {
                 lock.dir == dir
                     && match scope {
@@ -398,9 +474,12 @@ impl FsLockBackend {
         .unwrap_or(false)
     }
 
-    pub(super) fn force_unlock_overlapping(&self, dir: &Path) -> Vec<ForceUnlockedLock> {
+    pub(super) fn force_unlock_overlapping(
+        &self,
+        dir: &Path,
+    ) -> Result<Vec<ForceUnlockedLock>, String> {
         with_registry_lock(&self.state_dir, |registry| {
-            self.reap_dead_instances(registry);
+            self.reap_dead_instances(registry)?;
             let mut removed = Vec::new();
             registry.manual.retain(|lock| {
                 let should_remove = paths_overlap(&lock.dir, dir);
@@ -417,7 +496,17 @@ impl FsLockBackend {
             }
             Ok(removed)
         })
-        .unwrap_or_default()
+    }
+
+    pub(super) fn active_auto_count(&self) -> Result<usize, String> {
+        with_registry_lock(&self.state_dir, |registry| {
+            self.reap_dead_instances(registry)?;
+            Ok(registry
+                .automatic
+                .iter()
+                .filter(|lock| lock.owner.instance_id == self.instance_id)
+                .count())
+        })
     }
 
     pub(super) fn release_agent(&self, agent_id: &AgentId) -> usize {
@@ -474,7 +563,17 @@ impl FsLockBackend {
         });
     }
 
-    fn reap_dead_instances(&self, registry: &mut FsRegistry) {
+    fn reap_dead_instances(&self, registry: &mut FsRegistry) -> Result<(), String> {
+        #[cfg(test)]
+        if FAIL_REAP_FOR_TEST
+            .lock()
+            .expect("test reap failure mutex")
+            .as_ref()
+            .is_some_and(|state_dir| state_dir == &self.state_dir)
+        {
+            return Err("injected dir_lock reap failure".to_owned());
+        }
+
         let instances: Vec<FsInstanceId> = registry
             .manual
             .iter()
@@ -498,12 +597,13 @@ impl FsLockBackend {
             if dead.contains(&instance) {
                 continue;
             }
-            if instance_is_dead(&self.state_dir, &instance) {
-                dead.push(instance);
+            match instance_liveness(&self.state_dir, &instance)? {
+                InstanceLiveness::Dead => dead.push(instance),
+                InstanceLiveness::Alive => {}
             }
         }
         if dead.is_empty() {
-            return;
+            return Ok(());
         }
         registry
             .manual
@@ -515,12 +615,14 @@ impl FsLockBackend {
             .waiters
             .retain(|waiter| !dead.contains(&waiter.owner.instance_id));
         registry.bump();
+        Ok(())
     }
 }
 
 enum FsAcquireOutcome {
     Granted(u64),
     Waiting,
+    NeedsAdmission,
     Cancelled,
     Abandoned(AbandonedLock),
     SelfConflict(PathBuf),
@@ -530,6 +632,7 @@ enum FsAcquireOutcome {
 enum FsManualOutcome {
     Granted,
     Waiting,
+    NeedsAdmission,
     Cancelled,
     AlreadyHeld(PathBuf),
     Abandoned(AbandonedLock),
@@ -725,6 +828,22 @@ fn with_registry_lock<T>(
     result
 }
 
+fn cleanup_waiter_after_backend_error(backend: &FsLockBackend, waiter_id: Option<u64>) {
+    let Some(waiter_id) = waiter_id else {
+        return;
+    };
+    let _ = with_registry_lock(&backend.state_dir, |registry| {
+        let before = registry.waiters.len();
+        registry.waiters.retain(|waiter| {
+            !(waiter.owner.instance_id == backend.instance_id && waiter.id == waiter_id)
+        });
+        if registry.waiters.len() != before {
+            registry.bump();
+        }
+        Ok(())
+    });
+}
+
 fn read_registry(state_dir: &Path) -> Result<FsRegistry, String> {
     let path = state_dir.join("registry.json");
     match File::open(&path) {
@@ -759,6 +878,11 @@ pub(super) fn registry_generation(state_dir: &Path) -> Result<u64, String> {
 #[cfg(test)]
 pub(super) fn registry_waiter_count(state_dir: &Path) -> Result<usize, String> {
     read_registry(state_dir).map(|registry| registry.waiters.len())
+}
+
+#[cfg(test)]
+pub(super) fn set_fail_reap_for_test(state_dir: Option<PathBuf>) {
+    *FAIL_REAP_FOR_TEST.lock().expect("test reap failure mutex") = state_dir;
 }
 
 fn write_registry(
@@ -884,18 +1008,38 @@ fn instance_lock_path(state_dir: &Path, instance_id: &FsInstanceId) -> PathBuf {
         .join(format!("{}.lock", instance_id.as_str()))
 }
 
-fn instance_is_dead(state_dir: &Path, instance_id: &FsInstanceId) -> bool {
+enum InstanceLiveness {
+    Alive,
+    Dead,
+}
+
+fn instance_liveness(
+    state_dir: &Path,
+    instance_id: &FsInstanceId,
+) -> Result<InstanceLiveness, String> {
     let path = instance_lock_path(state_dir, instance_id);
-    let Ok(file) = OpenOptions::new().read(true).write(true).open(&path) else {
-        return true;
+    let file = match OpenOptions::new().read(true).write(true).open(&path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(InstanceLiveness::Dead);
+        }
+        Err(error) => {
+            return Err(format!(
+                "failed to open dir_lock instance lease {} while checking liveness: {error}",
+                path.display()
+            ));
+        }
     };
     match file.try_lock_exclusive() {
         Ok(()) => {
             let _ = file.unlock();
-            true
+            Ok(InstanceLiveness::Dead)
         }
-        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => false,
-        Err(_) => true,
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Ok(InstanceLiveness::Alive),
+        Err(error) => Err(format!(
+            "failed to test dir_lock instance lease {}: {error}",
+            path.display()
+        )),
     }
 }
 

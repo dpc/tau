@@ -4960,10 +4960,10 @@ fn shell_extension_reports_config_error_for_insecure_dir_lock_state_dir() {
     writer.flush().expect("flush");
 }
 
+/// Ensures the directory-lock mechanism remains opt-in while read-only bind
+/// mount enforcement defaults on once that mechanism is enabled.
 #[test]
 fn shell_enforce_ro_bind_defaults_true_under_dir_lock_config() {
-    // The directory-lock mechanism is opt-in, but enforced read-only bind mounts
-    // default on once that mechanism is enabled.
     assert!(ExtConfig::default().dir_lock.enforce_ro_bind);
 
     let config = tau_extension::parse_config::<ExtConfig>(&CborValue::Map(vec![(
