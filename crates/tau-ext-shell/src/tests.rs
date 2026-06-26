@@ -2564,7 +2564,12 @@ fn edit_result_reports_minimal_status_without_model_diff() {
 
     let output = edit_file(&edit_arguments(
         &file_path,
-        vec![context_line_edit(1, 1, "alpha BETA gamma\n", "")],
+        vec![context_line_edit(
+            1,
+            1,
+            "alpha BETA gamma\n",
+            "alpha beta gamma",
+        )],
     ))
     .expect("edit");
 
@@ -2594,7 +2599,7 @@ fn edit_self_replacement_counts_without_diff() {
 
     let output = edit_file(&edit_arguments(
         &file_path,
-        vec![context_line_edit(1, 1, "same\n", "")],
+        vec![context_line_edit(1, 1, "same\n", "same")],
     ))
     .expect("edit");
 
@@ -2643,7 +2648,7 @@ fn edit_existing_symlink_updates_target() {
 
     let result = edit_file(&edit_arguments(
         &link_path,
-        vec![context_line_edit(1, 1, "new\n", "")],
+        vec![context_line_edit(1, 1, "new\n", "old")],
     ))
     .expect("edit")
     .result;
@@ -2682,7 +2687,7 @@ fn edit_context_line_rejects_invalid_utf8_original_line() {
 
     let error = edit_file(&edit_arguments(
         &file_path,
-        vec![context_line_edit(2, 2, "SECOND\n", "abc�def")],
+        vec![context_line_edit(1, 1, "FIRST\n", "abc�def")],
     ))
     .expect_err("invalid UTF-8 context_line should fail");
 
@@ -2743,7 +2748,7 @@ fn edit_rejects_overlapping_ranges_without_partial_write() {
     let error = edit_file(&edit_arguments(
         &file_path,
         vec![
-            context_line_edit(1, 2, "x\n", ""),
+            context_line_edit(1, 2, "x\n", "aa"),
             context_line_edit(2, 2, "y\n", "aa"),
         ],
     ))
@@ -3778,7 +3783,7 @@ fn edit_adds_missing_line_ending_before_following_content() {
 
     let _result = edit_file(&edit_arguments(
         &file_path,
-        vec![context_line_edit(2, 2, "replacement", "before")],
+        vec![context_line_edit(2, 2, "replacement", "target")],
     ))
     .expect("replacement without line ending should be normalized")
     .result;
@@ -3796,7 +3801,7 @@ fn edit_preserves_final_newline_at_end_of_file() {
 
     let _result = edit_file(&edit_arguments(
         &file_path,
-        vec![context_line_edit(2, 2, "replacement", "before")],
+        vec![context_line_edit(2, 2, "replacement", "target")],
     ))
     .expect("last line replacement should preserve final newline")
     .result;
@@ -3815,7 +3820,7 @@ fn edit_preserves_original_crlf_when_adding_missing_line_ending() {
 
     let _result = edit_file(&edit_arguments(
         &file_path,
-        vec![context_line_edit(2, 2, "replacement", "before")],
+        vec![context_line_edit(2, 2, "replacement", "target")],
     ))
     .expect("replacement should reuse original line ending")
     .result;
@@ -3833,7 +3838,7 @@ fn edit_noop_after_normalization_reports_unchanged() {
 
     let result = edit_file(&edit_arguments(
         &file_path,
-        vec![context_line_edit(1, 1, "a", "")],
+        vec![context_line_edit(1, 1, "a", "a")],
     ))
     .expect("normalization may make an edit a no-op")
     .result;
@@ -3850,7 +3855,7 @@ fn edit_deletion_before_following_content_does_not_add_newline_header() {
 
     let _result = edit_file(&edit_arguments(
         &file_path,
-        vec![context_line_edit(2, 2, "", "before")],
+        vec![context_line_edit(2, 2, "", "target")],
     ))
     .expect("deletion should not be normalized")
     .result;
@@ -3868,7 +3873,7 @@ fn edit_preserves_original_cr_when_adding_missing_line_ending() {
 
     let _result = edit_file(&edit_arguments(
         &file_path,
-        vec![context_line_edit(2, 2, "replacement", "before")],
+        vec![context_line_edit(2, 2, "replacement", "target")],
     ))
     .expect("replacement should reuse original CR line ending")
     .result;
@@ -3920,8 +3925,8 @@ fn edit_uses_original_line_numbers_for_multiple_replacements() {
             arguments: edit_arguments(
                 &file_path,
                 vec![
-                    context_line_edit(1, 1, "x\ny\n", ""),
-                    context_line_edit(3, 3, "z\n", "b"),
+                    context_line_edit(1, 1, "x\ny\n", "a"),
+                    context_line_edit(3, 3, "z\n", "c"),
                 ],
             ),
             agent_id: tau_proto::AgentId::parse("agent-1").expect("agent id"),
@@ -3999,7 +4004,7 @@ fn edit_appends_to_line_after_trailing_newline() {
 
     let result = edit_file(&edit_arguments(
         &file_path,
-        vec![context_half_open_edit(2, 2, "cat\n", "fish")],
+        vec![context_half_open_edit(2, 2, "cat\n", "")],
     ))
     .expect("edit")
     .result;
@@ -4019,7 +4024,7 @@ fn edit_half_open_replaces_line_range() {
 
     let _result = edit_file(&edit_arguments(
         &file_path,
-        vec![context_half_open_edit(2, 3, "TWO", "one")],
+        vec![context_half_open_edit(2, 3, "TWO", "two")],
     ))
     .expect("boundary replacement should edit line 2")
     .result;
@@ -4038,8 +4043,8 @@ fn edit_half_open_inserts_at_top_and_middle() {
     let output = edit_file(&edit_arguments(
         &file_path,
         vec![
-            context_half_open_edit(1, 1, "zero", ""),
-            context_half_open_edit(2, 2, "middle", "one"),
+            context_half_open_edit(1, 1, "zero", "one"),
+            context_half_open_edit(2, 2, "middle", "two"),
         ],
     ))
     .expect("empty half-open ranges should insert");
@@ -4056,16 +4061,16 @@ fn edit_half_open_inserts_at_top_and_middle() {
 }
 
 #[test]
-fn edit_half_open_context_lines_empty_insertion_with_previous_line() {
+fn edit_half_open_context_lines_empty_insertion_with_start_line() {
     let tempdir = TempDir::new().expect("tempdir");
     let file_path = tempdir.path().join("edit.txt");
     fs::write(&file_path, "one\n").expect("write");
 
     edit_file(&edit_arguments(
         &file_path,
-        vec![context_half_open_edit(1, 1, "zero\n", "")],
+        vec![context_half_open_edit(1, 1, "zero\n", "one")],
     ))
-    .expect("empty insertion at BOF should accept empty context_line");
+    .expect("empty insertion at BOF should accept start-line context_line");
 
     assert_eq!(
         fs::read_to_string(&file_path).expect("read back"),
@@ -4081,7 +4086,7 @@ fn edit_half_open_appends_after_file_with_trailing_newline() {
 
     edit_file(&edit_arguments(
         &file_path,
-        vec![context_half_open_edit(2, 2, "two\n", "one")],
+        vec![context_half_open_edit(2, 2, "two\n", "")],
     ))
     .expect("EOF insertion should not add blank line after existing line ending");
 
@@ -4099,7 +4104,7 @@ fn edit_half_open_inserts_before_line_without_trailing_newline() {
 
     let _result = edit_file(&edit_arguments(
         &file_path,
-        vec![context_half_open_edit(1, 1, "zero", "")],
+        vec![context_half_open_edit(1, 1, "zero", "one")],
     ))
     .expect("insertion before unterminated content should stay line-oriented")
     .result;
@@ -4117,7 +4122,7 @@ fn edit_half_open_insertion_preserves_following_crlf() {
 
     edit_file(&edit_arguments(
         &file_path,
-        vec![context_half_open_edit(2, 2, "middle", "one")],
+        vec![context_half_open_edit(2, 2, "middle", "two")],
     ))
     .expect("boundary insertion should use following line ending style");
 
@@ -4135,7 +4140,7 @@ fn edit_half_open_appends_after_file_without_trailing_newline() {
 
     let _result = edit_file(&edit_arguments(
         &file_path,
-        vec![context_half_open_edit(2, 2, "two\n", "one")],
+        vec![context_half_open_edit(2, 2, "two\n", "")],
     ))
     .expect("EOF insertion should keep line boundary")
     .result;
@@ -4278,7 +4283,7 @@ fn edit_rejects_range_past_end_without_trailing_newline() {
 
     let error = edit_file(&edit_arguments(
         &file_path,
-        vec![context_line_edit(1, 2, "x", "")],
+        vec![context_line_edit(1, 2, "x", "hello")],
     ))
     .expect_err("range should fail");
 
@@ -4290,15 +4295,16 @@ fn edit_rejects_range_past_end_without_trailing_newline() {
 }
 
 #[test]
-fn edit_context_line_allows_matching_first_line() {
+fn edit_context_line_allows_matching_start_line() {
     let tempdir = TempDir::new().expect("tempdir");
     let file_path = tempdir.path().join("edit.txt");
     fs::write(&file_path, "alpha\nbeta\ngamma\n").expect("write");
 
-    // Context-line edits make the line-number assumption explicit before writing.
+    // Regression coverage: context_line must match start_line's original content,
+    // not the previous line.
     let result = edit_file(&edit_arguments(
         &file_path,
-        vec![context_line_edit(2, 2, "BETA\n", "alpha")],
+        vec![context_line_edit(2, 2, "BETA\n", "beta")],
     ))
     .expect("edit")
     .result;
@@ -4307,6 +4313,32 @@ fn edit_context_line_allows_matching_first_line() {
     assert_eq!(
         fs::read_to_string(&file_path).expect("read back"),
         "alpha\nBETA\ngamma\n"
+    );
+}
+
+#[test]
+fn edit_context_line_rejects_previous_line_for_replacement() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let file_path = tempdir.path().join("edit.txt");
+    fs::write(&file_path, "alpha\nbeta\ngamma\n").expect("write");
+
+    // Prevents restoring the rejected behavior where line 2 replacements used
+    // line 1 as their context_line anchor.
+    let error = edit_file(&edit_arguments(
+        &file_path,
+        vec![context_line_edit(2, 2, "BETA\n", "alpha")],
+    ))
+    .expect_err("previous-line context should fail");
+
+    assert_eq!(
+        error.message,
+        "context_line wrong - must equal current line 2, see current content in the response"
+    );
+    let details = error.details.as_deref().expect("details");
+    assert_eq!(cbor_int_field(details, "context_line_number"), Some(2));
+    assert_eq!(
+        fs::read_to_string(&file_path).expect("read back"),
+        "alpha\nbeta\ngamma\n"
     );
 }
 
@@ -4326,26 +4358,26 @@ fn edit_context_line_rejects_stale_line_number_and_returns_context_line_context(
     let error = edit_file(&edit_arguments(
         &file_path,
         vec![
-            context_line_edit(1, 1, "LINE 001\n", ""),
+            context_line_edit(1, 1, "LINE 001\n", "line 001"),
             context_line_edit(12, 40, "replacement\n", "wrong"),
         ],
     ))
     .expect_err("context_line mismatch should fail");
 
-    let expected_context = (1..=21)
+    let expected_context = (2..=22)
         .map(|line| format!("{line} line {line:03}"))
         .collect::<Vec<_>>()
         .join("\n");
     assert_eq!(
         error.message,
-        "context_line wrong - must equal current line 11, see current content in the response"
+        "context_line wrong - must equal current line 12, see current content in the response"
     );
     let details = error.details.as_deref().expect("details");
     assert_eq!(
         cbor_map_text(details, "line-numbered content"),
         Some(expected_context.as_str())
     );
-    assert_eq!(cbor_int_field(details, "context_line_number"), Some(11));
+    assert_eq!(cbor_int_field(details, "context_line_number"), Some(12));
     assert_eq!(error.display.payload, None);
     assert_eq!(error.display.stats.lines, Some(21));
     assert_eq!(
@@ -4361,8 +4393,8 @@ fn edit_rejects_non_empty_context_line_for_missing_file_insertion() {
     let tempdir = TempDir::new().expect("tempdir");
     let file_path = tempdir.path().join("missing.txt");
 
-    // Missing files have no line before the insertion point, so creation must
-    // use an empty context_line.
+    // Missing files have no start_line content, so creation must use an empty
+    // context_line.
     let error = edit_file(&edit_arguments(
         &file_path,
         vec![context_half_open_edit(1, 1, "created\n", "not-empty")],
@@ -4371,13 +4403,13 @@ fn edit_rejects_non_empty_context_line_for_missing_file_insertion() {
 
     assert_eq!(
         error.message,
-        "context_line wrong - must equal \"\" for file start, see current content in the response"
+        "context_line wrong - must equal \"\" for missing line 1, see current content in the response"
     );
     assert!(!file_path.exists());
 }
 
 #[test]
-fn edit_rejects_non_empty_context_line_at_file_start_with_recovery_context() {
+fn edit_rejects_wrong_context_line_at_file_start_with_recovery_context() {
     let tempdir = TempDir::new().expect("tempdir");
     let file_path = tempdir.path().join("edit.txt");
     fs::write(&file_path, "alpha\nbeta\n").expect("write");
@@ -4386,14 +4418,14 @@ fn edit_rejects_non_empty_context_line_at_file_start_with_recovery_context() {
         &file_path,
         vec![context_line_edit(1, 1, "ALPHA\n", "not-empty")],
     ))
-    .expect_err("non-empty context_line at file start should fail");
+    .expect_err("wrong context_line at file start should fail");
 
     assert_eq!(
         error.message,
-        "context_line wrong - must equal \"\" for file start, see current content in the response"
+        "context_line wrong - must equal current line 1, see current content in the response"
     );
     let details = error.details.as_deref().expect("details");
-    assert_eq!(cbor_int_field(details, "context_line_number"), Some(0));
+    assert_eq!(cbor_int_field(details, "context_line_number"), Some(1));
     assert_eq!(
         cbor_map_text(details, "line-numbered content"),
         Some("1 alpha\n2 beta")
@@ -4405,20 +4437,20 @@ fn edit_rejects_non_empty_context_line_at_file_start_with_recovery_context() {
 }
 
 #[test]
-fn edit_empty_insertion_rejects_following_line_as_context_line() {
+fn edit_empty_insertion_rejects_previous_line_as_context_line() {
     let tempdir = TempDir::new().expect("tempdir");
     let file_path = tempdir.path().join("edit.txt");
     fs::write(&file_path, "one\ntwo\n").expect("write");
 
     let error = edit_file(&edit_arguments(
         &file_path,
-        vec![context_half_open_edit(2, 2, "middle\n", "two")],
+        vec![context_half_open_edit(2, 2, "middle\n", "one")],
     ))
-    .expect_err("empty insertion should reject following-line context");
+    .expect_err("empty insertion should reject previous-line context");
 
     assert_eq!(
         error.message,
-        "context_line wrong - must equal current line 1, see current content in the response"
+        "context_line wrong - must equal current line 2, see current content in the response"
     );
     assert_eq!(
         fs::read_to_string(&file_path).expect("read back"),
@@ -4474,7 +4506,7 @@ fn edit_context_line_trims_trailing_newline_characters() {
     let tempdir = TempDir::new().expect("tempdir");
     let file_path = tempdir.path().join("edit.txt");
 
-    for context_line in ["alpha\n", "alpha\r", "alpha\r\n", "alpha\n\n"] {
+    for context_line in ["beta\n", "beta\r", "beta\r\n", "beta\n\n"] {
         fs::write(&file_path, "alpha\nbeta\n").expect("write");
         edit_file(&edit_arguments(
             &file_path,
@@ -4522,7 +4554,7 @@ fn edit_context_line_matches_crlf_line_without_ending() {
 
     let result = edit_file(&edit_arguments(
         &file_path,
-        vec![context_line_edit(2, 2, "TWO\r\n", "one")],
+        vec![context_line_edit(2, 2, "TWO\r\n", "two")],
     ))
     .expect("edit")
     .result;
@@ -4542,7 +4574,7 @@ fn edit_context_line_allows_empty_append_line_after_trailing_newline() {
 
     let result = edit_file(&edit_arguments(
         &file_path,
-        vec![context_half_open_edit(2, 2, "cat\n", "fish")],
+        vec![context_half_open_edit(2, 2, "cat\n", "")],
     ))
     .expect("edit")
     .result;
@@ -4562,7 +4594,7 @@ fn edit_handles_crlf_line_ranges() {
 
     let result = edit_file(&edit_arguments(
         &file_path,
-        vec![context_line_edit(2, 2, "TWO\r\n", "one")],
+        vec![context_line_edit(2, 2, "TWO\r\n", "two")],
     ))
     .expect("edit")
     .result;
@@ -6889,7 +6921,7 @@ fn edit_context_line_rejects_invalid_utf8_bytes_without_writing() {
 
     let error = edit_file(&edit_arguments(
         &file_path,
-        vec![context_line_edit(2, 2, "SECOND\n", "abc�def")],
+        vec![context_line_edit(1, 1, "FIRST\n", "abc�def")],
     ))
     .expect_err("invalid UTF-8 context_line should fail");
 

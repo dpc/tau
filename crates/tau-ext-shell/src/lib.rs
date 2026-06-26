@@ -204,9 +204,9 @@ fn registered_tool_specs(dir_lock_enabled: bool) -> Vec<ToolSpec> {
              applied simultaneously. Non-empty replacements are kept as whole \
              lines. Ranges must be non-overlapping. Missing files are treated as \
              empty and missing parent directories are created. Per-edit `context_line` \
-             must exactly match the original line immediately before `start_line`; \
-             use an empty context_line when `start_line` is 1. EOF appends use \
-             the original last line as context when the file is non-empty."
+             must exactly match the original content of `start_line`. Use an empty \
+             context_line when `start_line` is the append slot past the end of the \
+             file."
                 .to_owned(),
         ),
         tool_type: tau_proto::ToolType::Function,
@@ -241,7 +241,7 @@ fn registered_tool_specs(dir_lock_enabled: bool) -> Vec<ToolSpec> {
                             },
                             "context_line": {
                                 "type": "string",
-                                "description": "Exact expected content of the original line immediately before start_line, including spaces and tabs. Use an empty context_line when start_line is 1. Appends at EOF use the original last line as context when the file is non-empty. If it does not match, the edit fails and returns current line-numbered context around the expected context line."
+                                "description": "Exact expected content of the original start_line, including spaces and tabs. Use an empty context_line when start_line is the append slot past the end of the file. If it does not match, the edit fails and returns current line-numbered context around the expected context line."
                             }
                         },
                         "required": ["start_line", "end_line_exclusive", "newText", "context_line"],
@@ -267,7 +267,7 @@ fn registered_tool_specs(dir_lock_enabled: bool) -> Vec<ToolSpec> {
                         example_field("start_line", example_int(10)),
                         example_field("end_line_exclusive", example_int(11)),
                         example_field("newText", example_text("replacement line")),
-                        example_field("context_line", example_text("line before replacement")),
+                        example_field("context_line", example_text("line being replaced")),
                     ])]),
                 ),
             ]),

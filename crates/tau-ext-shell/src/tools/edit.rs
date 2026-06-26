@@ -370,18 +370,14 @@ fn validate_context_lines(
 ) -> Result<(), ToolFailure> {
     for replacement in replacements {
         let context_line = replacement.context_line;
-        let context_line_number = replacement.start_line.saturating_sub(1);
-        let actual_context_line = if context_line_number == 0 {
-            Some("")
-        } else {
-            original_lines.line_content_text(context_line_number, original_bytes)
-        };
+        let context_line_number = replacement.start_line;
+        let actual_context_line =
+            original_lines.line_content_text(context_line_number, original_bytes);
         if actual_context_line == Some(context_line) {
             continue;
         }
-        let current_context_line_invalid_utf8 = context_line_number != 0
-            && original_lines.has_line(context_line_number)
-            && actual_context_line.is_none();
+        let current_context_line_invalid_utf8 =
+            original_lines.has_line(context_line_number) && actual_context_line.is_none();
         return Err(context_line_mismatch_failure(
             replacement,
             original_bytes,
@@ -399,7 +395,7 @@ fn context_line_mismatch_failure(
     current_context_line_invalid_utf8: bool,
 ) -> ToolFailure {
     let start_line = replacement.start_line;
-    let context_line_number = start_line.saturating_sub(1);
+    let context_line_number = start_line;
     let context_anchor_line = context_line_number.max(1);
     let context_start_line = context_anchor_line
         .saturating_sub(CONTEXT_LINE_MISMATCH_CONTEXT_LINES)
@@ -448,9 +444,10 @@ fn context_line_mismatch_failure(
         format!(
             "context_line wrong - current line {context_line_number} is not valid UTF-8, so no context_line string can match it; see current content in the response"
         )
-    } else if context_line_number == 0 {
-        "context_line wrong - must equal \"\" for file start, see current content in the response"
-            .to_owned()
+    } else if !LineIndex::new(original_bytes).has_line(context_line_number) {
+        format!(
+            "context_line wrong - must equal \"\" for missing line {context_line_number}, see current content in the response"
+        )
     } else {
         format!(
             "context_line wrong - must equal current line {context_line_number}, see current content in the response"
