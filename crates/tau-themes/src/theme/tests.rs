@@ -1,5 +1,7 @@
 use super::*;
 
+/// Ensures an empty theme is safe to use and leaves all text unstyled rather
+/// than requiring callers to special-case missing theme configuration.
 #[test]
 fn empty_theme_resolves_to_defaults() {
     let theme = Theme::new();
@@ -13,6 +15,8 @@ fn empty_theme_resolves_to_defaults() {
     assert_eq!(resolved[0].style, ThemeStyle::default());
 }
 
+/// Ensures a registered semantic style name resolves through the theme's style
+/// table and carries all supported attributes.
 #[test]
 fn named_style_resolves() {
     let theme: Theme = Theme::parse(
@@ -55,6 +59,8 @@ fn description_metadata_is_optional_and_parsed() {
     assert_eq!(old_format.description(), None);
 }
 
+/// Ensures spans explicitly marked with the default index bypass any configured
+/// theme styles and resolve to no formatting.
 #[test]
 fn default_idx_resolves_to_default_style() {
     let theme: Theme = Theme::parse(
@@ -73,6 +79,8 @@ fn default_idx_resolves_to_default_style() {
     assert_eq!(resolved[0].style, ThemeStyle::default());
 }
 
+/// Ensures JSON5 themes can use web-style hex RGB colors for exact theme
+/// tuning, not only the named ANSI color palette.
 #[test]
 fn hex_color_in_theme() {
     let theme: Theme = Theme::parse(
@@ -107,6 +115,8 @@ fn hex_color_in_theme() {
     );
 }
 
+/// Ensures sibling spans do not leak styles into each other and default spans
+/// remain unstyled after styled siblings.
 #[test]
 fn multiple_spans_resolve_independently() {
     let theme: Theme = Theme::parse(
@@ -138,6 +148,8 @@ fn multiple_spans_resolve_independently() {
     assert_eq!(resolved[2].style, ThemeStyle::default());
 }
 
+/// Ensures nested spans inherit unspecified attributes from outer spans while
+/// allowing inner spans to override attributes they set.
 #[test]
 fn nested_spans_inherit_and_override_styles() {
     let theme: Theme = Theme::parse(
@@ -256,6 +268,8 @@ fn builtin_dpc_theme_parses() {
     let _ = theme.resolve_style(&StyleName::new("user.prompt"));
 }
 
+/// Ensures user-authored theme typos are rejected instead of being silently
+/// ignored and producing confusing styling behavior.
 #[test]
 fn theme_rejects_unknown_fields() {
     // Theme files are user-authored config. Unknown top-level or style fields
@@ -280,6 +294,8 @@ fn builtin_light_theme_parses() {
     let _ = theme.resolve_style(&StyleName::new("user.prompt"));
 }
 
+/// Ensures callers can safely resolve missing style names in built-in themes
+/// without receiving stale or inherited formatting.
 #[test]
 fn builtin_theme_missing_style_is_default() {
     let theme = Theme::builtin();

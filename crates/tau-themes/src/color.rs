@@ -9,23 +9,47 @@ use std::fmt;
 /// A terminal color.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Color {
+    /// ANSI black.
     Black,
+    /// ANSI dark red.
     DarkRed,
+    /// ANSI dark green.
     DarkGreen,
+    /// ANSI dark yellow.
     DarkYellow,
+    /// ANSI dark blue.
     DarkBlue,
+    /// ANSI dark magenta.
     DarkMagenta,
+    /// ANSI dark cyan.
     DarkCyan,
+    /// ANSI dark grey.
     DarkGrey,
+    /// ANSI bright red.
     Red,
+    /// ANSI bright green.
     Green,
+    /// ANSI bright yellow.
     Yellow,
+    /// ANSI bright blue.
     Blue,
+    /// ANSI bright magenta.
     Magenta,
+    /// ANSI bright cyan.
     Cyan,
+    /// ANSI bright white.
     White,
+    /// ANSI bright grey.
     Grey,
-    Rgb { r: u8, g: u8, b: u8 },
+    /// A 24-bit RGB color.
+    Rgb {
+        /// Red channel value.
+        r: u8,
+        /// Green channel value.
+        g: u8,
+        /// Blue channel value.
+        b: u8,
+    },
 }
 
 impl Color {
@@ -56,15 +80,13 @@ impl Color {
     }
 
     fn parse_hex(hex: &str) -> Result<Self, ColorParseError> {
-        if hex.len() != 6 {
+        if hex.len() != 6 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
             return Err(ColorParseError(format!("#{hex}")));
         }
-        let r =
-            u8::from_str_radix(&hex[0..2], 16).map_err(|_| ColorParseError(format!("#{hex}")))?;
-        let g =
-            u8::from_str_radix(&hex[2..4], 16).map_err(|_| ColorParseError(format!("#{hex}")))?;
-        let b =
-            u8::from_str_radix(&hex[4..6], 16).map_err(|_| ColorParseError(format!("#{hex}")))?;
+        let rgb = u32::from_str_radix(hex, 16).map_err(|_| ColorParseError(format!("#{hex}")))?;
+        let r = ((rgb >> 16) & 0xff) as u8;
+        let g = ((rgb >> 8) & 0xff) as u8;
+        let b = (rgb & 0xff) as u8;
         Ok(Self::Rgb { r, g, b })
     }
 }
@@ -90,3 +112,6 @@ impl<'de> serde::Deserialize<'de> for Color {
         Color::parse(&s).map_err(serde::de::Error::custom)
     }
 }
+
+#[cfg(test)]
+mod tests;

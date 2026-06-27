@@ -15,11 +15,17 @@ use crate::text::{SpanTree, StyleIdx, StyleName, ThemedText};
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ThemeStyle {
+    /// Optional foreground/text color.
     pub fg: Option<Color>,
+    /// Optional background color.
     pub bg: Option<Color>,
+    /// Whether text should be bold.
     pub bold: bool,
+    /// Whether text should be underlined.
     pub underline: bool,
+    /// Whether text should be italicized.
     pub italic: bool,
+    /// Whether text should be struck through.
     pub strikethrough: bool,
 }
 
@@ -166,14 +172,18 @@ fn effective_style(stack: &[ThemeStyle]) -> ThemeStyle {
 
 /// A span of text with resolved style attributes.
 pub struct ResolvedSpan<'a> {
+    /// Text fragment covered by this resolved span.
     pub text: &'a str,
+    /// Effective style attributes for [`Self::text`].
     pub style: ThemeStyle,
 }
 
 /// Errors that can occur when loading a theme file.
 #[derive(Debug)]
 pub enum ThemeLoadError {
+    /// Reading the theme file failed.
     Io(std::path::PathBuf, io::Error),
+    /// Parsing the theme file as JSON5 failed.
     Parse(std::path::PathBuf, json5::Error),
 }
 
