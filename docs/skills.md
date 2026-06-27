@@ -15,6 +15,13 @@ Tau scans skills in priority order:
 
 When multiple skills use the same name, Tau keeps the candidate with the newest available modification time and reports the conflict as a collision. Skills with readable timestamps beat skills without timestamps. If timestamps are equal or unavailable, the earlier discovered candidate stays selected. User XDG skill roots (`~/.config/agents*`) explicitly beat legacy user skill roots (`~/.agents*`) before modified time is considered. Built-in skills use the harness binary build time as their timestamp, falling back to the executable file mtime when build metadata is unavailable.
 
+Discovery is best-effort and resource-bounded. Tau reads only the bounded
+frontmatter prefix needed for metadata, not the whole skill body, and skips a
+skill with a diagnostic if its frontmatter does not close before the discovery
+read limit. Symlinked skill roots and all symlink entries inside skill roots,
+including symlinked files, are skipped so discovery does not escape configured
+roots into arbitrary or huge filesystem trees.
+
 Preferred layout:
 
 ```text
@@ -92,4 +99,9 @@ Otherwise Tau returns matching skill names, descriptions, `matched_terms`, `matc
 
 ## Size limits
 
-Skill loading and content search read a bounded 64 KiB prefix of each skill file. If loading truncates after frontmatter was closed, Tau returns the available body prefix and marks the result as truncated. If truncation happens before the frontmatter closing fence, Tau errors instead of treating YAML frontmatter as skill body.
+Session-start discovery reads a bounded 64 KiB frontmatter prefix for metadata.
+If the frontmatter closes inside that prefix, discovery ignores the rest of the
+body until the skill is explicitly loaded or searched. If the closing fence is
+not found before the limit, the skill is skipped with a diagnostic.
+
+Skill loading and content search read a separate bounded 64 KiB prefix of each skill file. If loading truncates after frontmatter was closed, Tau returns the available body prefix and marks the result as truncated. If truncation happens before the frontmatter closing fence, Tau errors instead of treating YAML frontmatter as skill body.

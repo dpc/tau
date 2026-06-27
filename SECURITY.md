@@ -147,6 +147,12 @@ cycle continues.
 
 Skills are prompt instructions loaded from local/project Markdown files, not a sandbox or permission boundary. Project skills can be malicious prompt content. `disable-model-invocation` hides a skill from Tau's model-visible skill surfaces, but a model with filesystem tools could still read the underlying file if it learns the path. `allowed-tools` and similar frontmatter fields do not grant or restrict Tau tool permissions.
 
+Skill discovery is best-effort and resource-bounded. It reads only a bounded
+frontmatter prefix during session startup, skips and diagnoses skills whose
+frontmatter does not close inside that prefix, and skips symlinked skill roots
+plus all symlink entries inside skill roots so project-controlled roots cannot
+expand discovery into arbitrary or huge filesystem trees.
+
 User `/skill` invocation explicitly reads the selected skill file, strips frontmatter, and injects the skill body into the next model prompt along with any user arguments. Treat invoking a skill as intentionally adding that local file content to the conversation context.
 
 ## Telegram extension

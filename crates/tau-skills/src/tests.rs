@@ -632,6 +632,47 @@ fn load_from_empty_dirs() {
 }
 
 #[test]
+fn load_from_dirs_reads_only_bounded_discovery_metadata_for_large_body() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let skill_dir = tmp.path().join("large-body");
+    fs::create_dir_all(&skill_dir).expect("mkdir");
+    let mut content = format!(
+        "---\nname: large-body\ndescription: Large body\n---\n{}",
+        "x".repeat(MAX_SKILL_DISCOVERY_BYTES)
+    )
+    .into_bytes();
+    content.push(0xff);
+    fs::write(skill_dir.join("SKILL.md"), content).expect("write");
+
+    let result = load_skills_from_dirs(&[tmp.path().to_owned()]);
+    assert_eq!(result.skills.len(), 1);
+    assert_eq!(result.skills[0].name, "large-body");
+    assert!(result.diagnostics.is_empty());
+}
+
+#[test]
+fn load_from_dirs_skips_oversized_unclosed_frontmatter() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let skill_dir = tmp.path().join("large-frontmatter");
+    fs::create_dir_all(&skill_dir).expect("mkdir");
+    fs::write(
+        skill_dir.join("SKILL.md"),
+        format!(
+            "---\nname: large-frontmatter\ndescription: {}\n",
+            "x".repeat(MAX_SKILL_DISCOVERY_BYTES * 2)
+        ),
+    )
+    .expect("write");
+
+    let result = load_skills_from_dirs(&[tmp.path().to_owned()]);
+    assert!(result.skills.is_empty());
+    assert!(result.diagnostics.iter().any(|diagnostic| {
+        diagnostic.kind == DiagnosticKind::Skipped
+            && diagnostic.message.contains("discovery read limit")
+    }));
+}
+
+#[test]
 fn built_in_tau_self_knowledge_skills_load_from_embedded_markdown() {
     let skills = built_in_skills();
     let names: Vec<&str> = skills.iter().map(|skill| skill.name.as_str()).collect();
@@ -898,11 +939,12 @@ fn load_from_dirs_is_sorted_by_name() {
 }
 
 #[test]
-fn discover_follows_symlinked_dirs() {
+fn discover_skips_symlinked_dirs() {
     use std::os::unix::fs::symlink;
 
     let tmp = tempfile::tempdir().expect("tempdir");
-    let real = tmp.path().join("real-skill");
+    let outside = tempfile::tempdir().expect("outside tempdir");
+    let real = outside.path().join("real-skill");
     let nested = real.join("nested");
     fs::create_dir_all(&nested).expect("mkdir");
     fs::write(
@@ -914,10 +956,63 @@ fn discover_follows_symlinked_dirs() {
     let link = tmp.path().join("link");
     symlink(&real, &link).expect("symlink");
 
-    let paths = discover_skill_paths(&link);
-    assert_eq!(paths.len(), 1);
-    assert!(paths[0].starts_with(&link));
-    assert!(paths[0].ends_with("nested/SKILL.md"));
+    let paths = discover_skill_paths(tmp.path());
+    assert!(paths.is_empty());
+
+    let result = load_skills_from_dirs(&[tmp.path().to_owned()]);
+    assert!(result.skills.is_empty());
+    assert!(result.diagnostics.iter().any(|diagnostic| {
+        diagnostic.kind == DiagnosticKind::Warning && diagnostic.message.contains("symlink")
+    }));
+}
+
+#[test]
+fn discover_skips_symlinked_files() {
+    use std::os::unix::fs::symlink;
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let outside = tempfile::tempdir().expect("outside tempdir");
+    let target = outside.path().join("external.md");
+    fs::write(
+        &target,
+        "---\nname: external\ndescription: External skill\n---\n",
+    )
+    .expect("write");
+    symlink(&target, tmp.path().join("external.md")).expect("symlink");
+
+    let paths = discover_skill_paths(tmp.path());
+    assert!(paths.is_empty());
+
+    let result = load_skills_from_dirs(&[tmp.path().to_owned()]);
+    assert!(result.skills.is_empty());
+    assert!(result.diagnostics.iter().any(|diagnostic| {
+        diagnostic.kind == DiagnosticKind::Warning && diagnostic.message.contains("symlink")
+    }));
+}
+
+#[test]
+fn load_from_dirs_skips_symlinked_root() {
+    use std::os::unix::fs::symlink;
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let outside = tempfile::tempdir().expect("outside tempdir");
+    let real = outside.path().join("skills");
+    let skill_dir = real.join("outside-skill");
+    fs::create_dir_all(&skill_dir).expect("mkdir");
+    fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\nname: outside-skill\ndescription: Outside skill\n---\n",
+    )
+    .expect("write");
+    let link = tmp.path().join("skills");
+    symlink(&real, &link).expect("symlink");
+
+    let result = load_skills_from_dirs(&[link]);
+    assert!(result.skills.is_empty());
+    assert!(result.diagnostics.iter().any(|diagnostic| {
+        diagnostic.kind == DiagnosticKind::Warning
+            && diagnostic.message.contains("symlinked skill root")
+    }));
 }
 
 #[test]
@@ -926,21 +1021,48 @@ fn discover_symlink_cycles_do_not_recurse_forever() {
 
     let tmp = tempfile::tempdir().expect("tempdir");
     let real = tmp.path().join("real");
-    let b = real.join("b");
-    fs::create_dir_all(&b).expect("mkdir");
+    let cycle_parent = real.join("cycle-parent");
+    let skill_dir = real.join("skill-dir");
+    fs::create_dir_all(&cycle_parent).expect("mkdir cycle parent");
+    fs::create_dir_all(&skill_dir).expect("mkdir skill dir");
     fs::write(
-        b.join("SKILL.md"),
-        "---\nname: b\ndescription: nested skill\n---\n",
+        skill_dir.join("SKILL.md"),
+        "---\nname: skill-dir\ndescription: nested skill\n---\n",
     )
     .expect("write");
-    symlink(&real, b.join("cycle")).expect("symlink");
+    symlink(&real, cycle_parent.join("cycle")).expect("symlink");
 
-    let link = tmp.path().join("link");
-    symlink(&real, &link).expect("symlink");
-
-    let paths = discover_skill_paths(&link);
+    let paths = discover_skill_paths(&real);
     assert_eq!(paths.len(), 1);
-    assert!(paths[0].ends_with("b/SKILL.md"));
+    assert!(paths[0].ends_with("skill-dir/SKILL.md"));
+}
+
+#[test]
+fn truncate_description_is_utf8_safe_and_marks_truncation() {
+    let description = "é".repeat(MAX_DESCRIPTION_LENGTH);
+    let truncated = truncate_description(&description);
+    assert!(truncated.len() <= MAX_DESCRIPTION_LENGTH);
+    assert!(truncated.is_char_boundary(truncated.len()));
+    assert!(truncated.ends_with('…'));
+}
+
+#[test]
+fn skill_name_validation_helpers_report_first_error() {
+    assert!(is_valid_skill_name("valid-skill-1"));
+    assert_eq!(
+        skill_name_validation_message("").as_deref(),
+        Some("name is empty")
+    );
+    assert!(
+        skill_name_validation_message("Bad_Name")
+            .expect("invalid name")
+            .contains("invalid characters")
+    );
+    assert!(
+        skill_name_validation_message("-bad")
+            .expect("invalid name")
+            .contains("hyphen")
+    );
 }
 
 // -- strip_frontmatter --------------------------------------------------

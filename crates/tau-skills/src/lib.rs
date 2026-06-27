@@ -13,6 +13,7 @@ use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
+use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -105,11 +106,16 @@ impl Skill {
 /// Non-fatal diagnostic emitted during skill loading.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SkillDiagnostic {
+    /// Path of the skill file, directory entry, or root associated with the
+    /// diagnostic.
     pub path: PathBuf,
+    /// Machine-readable diagnostic category.
     pub kind: DiagnosticKind,
+    /// Human-readable diagnostic text suitable for notices/logs.
     pub message: String,
 }
 
+/// Category for a skill loading diagnostic.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DiagnosticKind {
     /// Soft issue — the skill still loads.
@@ -124,7 +130,10 @@ pub enum DiagnosticKind {
 
 /// Result of loading skills from one or more directories.
 pub struct LoadSkillsResult {
+    /// Valid skills selected after loading, validation, and duplicate-name
+    /// collision resolution.
     pub skills: Vec<Skill>,
+    /// Warnings, skips, and collision notes emitted while scanning/loading.
     pub diagnostics: Vec<SkillDiagnostic>,
 }
 
@@ -135,6 +144,7 @@ pub struct LoadSkillsResult {
 const MAX_NAME_LENGTH: usize = 64;
 pub const MAX_DESCRIPTION_LENGTH: usize = 1024;
 pub const MAX_ARGUMENT_HINT_LENGTH: usize = 256;
+const MAX_SKILL_DISCOVERY_BYTES: usize = 64 * 1024;
 const SKILL_FILENAME: &str = "SKILL.md";
 const SELF_KNOWLEDGE_VERSION_TOKEN: &str = "__TAU_SELF_KNOWLEDGE_VERSION__";
 const TAU_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -510,6 +520,10 @@ fn parse_argument_hint(
     Some(truncate_argument_hint(hint).into_owned())
 }
 
+/// Truncate a skill description to [`MAX_DESCRIPTION_LENGTH`] bytes.
+///
+/// The returned value is borrowed when no truncation is needed. Truncation is
+/// UTF-8 safe and reserves room for a trailing ellipsis (`…`).
 pub fn truncate_description(description: &str) -> Cow<'_, str> {
     if description.len() <= MAX_DESCRIPTION_LENGTH {
         return Cow::Borrowed(description);
@@ -525,6 +539,11 @@ pub fn truncate_description(description: &str) -> Cow<'_, str> {
     Cow::Owned(truncated)
 }
 
+/// Return the first validation error for a proposed skill name.
+///
+/// Valid names are non-empty, at most 64 bytes, lowercase ASCII
+/// alphanumeric-with-hyphens, and do not start/end with a hyphen or contain
+/// consecutive hyphens.
 pub fn skill_name_validation_message(name: &str) -> Option<String> {
     if name.is_empty() {
         return Some("name is empty".to_owned());
@@ -553,6 +572,7 @@ pub fn skill_name_validation_message(name: &str) -> Option<String> {
     None
 }
 
+/// Return whether `name` satisfies Tau's skill-name rules.
 pub fn is_valid_skill_name(name: &str) -> bool {
     skill_name_validation_message(name).is_none()
 }
@@ -681,19 +701,37 @@ pub fn load_skill_from_content(
 ///    skills.
 /// 3. Recurse into subdirectories to find `SKILL.md`.
 /// 4. Skip dot-prefixed entries and `node_modules`.
-/// 5. Follow symlinked directories recursively, with canonical-path cycle
-///    protection.
+/// 5. Skip symlinked roots and symlinked entries so project-controlled skill
+///    roots cannot expand discovery outside the configured roots.
 pub fn discover_skill_paths(root: &Path) -> Vec<PathBuf> {
+    discover_skill_paths_with_diagnostics(root).0
+}
+
+fn discover_skill_paths_with_diagnostics(root: &Path) -> (Vec<PathBuf>, Vec<SkillDiagnostic>) {
     let mut paths = Vec::new();
+    let mut diagnostics = Vec::new();
+    if root
+        .symlink_metadata()
+        .map(|metadata| metadata.file_type().is_symlink())
+        .unwrap_or(false)
+    {
+        diagnostics.push(SkillDiagnostic {
+            path: root.to_owned(),
+            kind: DiagnosticKind::Warning,
+            message: "skipping symlinked skill root during skill discovery".to_owned(),
+        });
+        return (paths, diagnostics);
+    }
     let mut visited = BTreeSet::new();
-    discover_skill_paths_inner(root, true, &mut paths, &mut visited);
-    paths
+    discover_skill_paths_inner(root, true, &mut paths, &mut diagnostics, &mut visited);
+    (paths, diagnostics)
 }
 
 fn discover_skill_paths_inner(
     dir: &Path,
     is_root: bool,
     out: &mut Vec<PathBuf>,
+    diagnostics: &mut Vec<SkillDiagnostic>,
     visited: &mut BTreeSet<PathBuf>,
 ) {
     if let Ok(canonical) = dir.canonicalize()
@@ -738,8 +776,14 @@ fn discover_skill_paths_inner(
         };
 
         let path = entry.path();
-        if file_type.is_dir() || file_type.is_symlink() {
-            discover_skill_paths_inner(&path, false, out, visited);
+        if file_type.is_symlink() {
+            diagnostics.push(SkillDiagnostic {
+                path,
+                kind: DiagnosticKind::Warning,
+                message: "skipping symlink during skill discovery".to_owned(),
+            });
+        } else if file_type.is_dir() {
+            discover_skill_paths_inner(&path, false, out, diagnostics, visited);
         } else if file_type.is_file() && is_root && name_str.ends_with(".md") {
             out.push(path);
         }
@@ -795,6 +839,41 @@ fn collision_message(name: &str, kept_path: &Path, ignored_path: &Path, reason: 
     )
 }
 
+fn read_skill_discovery_content(path: &Path) -> Result<String, SkillDiagnostic> {
+    let mut file = fs::File::open(path).map_err(|error| SkillDiagnostic {
+        path: path.to_owned(),
+        kind: DiagnosticKind::Warning,
+        message: format!("failed to read: {error}"),
+    })?;
+    let total_bytes = file.metadata().map(|metadata| metadata.len()).unwrap_or(0);
+    let mut bytes = Vec::new();
+    file.by_ref()
+        .take(MAX_SKILL_DISCOVERY_BYTES.saturating_add(1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|error| SkillDiagnostic {
+            path: path.to_owned(),
+            kind: DiagnosticKind::Warning,
+            message: format!("failed to read: {error}"),
+        })?;
+
+    let truncated = MAX_SKILL_DISCOVERY_BYTES < bytes.len();
+    if truncated {
+        bytes.truncate(MAX_SKILL_DISCOVERY_BYTES);
+    }
+    let content = String::from_utf8_lossy(&bytes).into_owned();
+    if truncated && has_unclosed_frontmatter(&content) {
+        return Err(SkillDiagnostic {
+            path: path.to_owned(),
+            kind: DiagnosticKind::Skipped,
+            message: format!(
+                "frontmatter closing fence was not found before the {MAX_SKILL_DISCOVERY_BYTES} byte discovery read limit; file has {total_bytes} bytes"
+            ),
+        });
+    }
+
+    Ok(content)
+}
+
 // ---------------------------------------------------------------------------
 // Multi-directory loading
 // ---------------------------------------------------------------------------
@@ -828,16 +907,13 @@ pub fn load_skills_from_skill_dirs(dirs: &[SkillDir]) -> LoadSkillsResult {
     let mut all_diagnostics = Vec::new();
 
     for dir in dirs {
-        let paths = discover_skill_paths(&dir.path);
+        let (paths, discovery_diagnostics) = discover_skill_paths_with_diagnostics(&dir.path);
+        all_diagnostics.extend(discovery_diagnostics);
         for path in paths {
-            let content = match fs::read_to_string(&path) {
-                Ok(c) => c,
-                Err(e) => {
-                    all_diagnostics.push(SkillDiagnostic {
-                        path: path.clone(),
-                        kind: DiagnosticKind::Warning,
-                        message: format!("failed to read: {e}"),
-                    });
+            let content = match read_skill_discovery_content(&path) {
+                Ok(content) => content,
+                Err(diagnostic) => {
+                    all_diagnostics.push(diagnostic);
                     continue;
                 }
             };

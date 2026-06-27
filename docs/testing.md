@@ -66,3 +66,13 @@ Responses-style parsers must also cover final snapshot/done events (for example
 `response.output_text.done`, tool argument/input done events, and
 `response.output_item.done`) because providers can send complete content there
 without earlier deltas.
+
+
+## Skill discovery and loading
+
+`tau-skills` tests should cover frontmatter parsing, validation helper
+contracts, deterministic directory discovery, bounded discovery reads,
+symlink-entry skips, collision winner selection, scoped prompt defaults, and
+built-in self-knowledge skills. Prefer focused fixtures that exercise one
+contract at a time, including oversized bodies/frontmatter and UTF-8-safe
+truncation edge cases.
