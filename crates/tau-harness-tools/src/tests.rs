@@ -309,7 +309,7 @@ fn wait_initial_display_tracks_only_running_or_backgrounded_tools() {
     let mut state = BuiltinState::default();
     state.record_tool_started("shell-call".into(), ToolName::new("shell"));
 
-    state.record_tool_lifecycle_event(&Event::ProviderToolResult(tool_result(
+    state.record_runtime_bookkeeping_event(&Event::ProviderToolResult(tool_result(
         "shell-call",
         ToolResultKind::BackgroundPlaceholder,
     )));
@@ -318,13 +318,80 @@ fn wait_initial_display_tracks_only_running_or_backgrounded_tools() {
         .expect("wait display after placeholder");
     assert_eq!(display.args, "shell");
 
-    state.record_tool_lifecycle_event(&Event::ToolBackgroundResult(tool_background_result(
+    state.record_runtime_bookkeeping_event(&Event::ToolBackgroundResult(tool_background_result(
         "shell-call",
     )));
     let display = state
         .initial_display(&wait_call("shell-call"))
         .expect("wait display after finish");
     assert_eq!(display.args, "");
+}
+
+/// Ensures cancellation bookkeeping follows the target tool lifecycle instead
+/// of keeping stale ids forever, so a completed target is not later reported as
+/// "already canceled" and the in-memory set stays bounded.
+#[test]
+fn cancel_request_tracking_is_cleared_when_target_finishes() {
+    let mut state = BuiltinState::default();
+    let call_id = ToolCallId::from("shell-call");
+    state.cancel_requested.insert(call_id.clone());
+
+    state.record_runtime_bookkeeping_event(&Event::ToolBackgroundResult(tool_background_result(
+        call_id.as_str(),
+    )));
+
+    assert!(!state.cancel_requested.contains(&call_id));
+}
+
+/// Ensures session shutdown drops runtime-only bookkeeping for abandoned
+/// in-flight tools and agent watches, because session switching can occur
+/// without individual terminal events for every tracked call.
+#[test]
+fn session_runtime_state_cleanup_clears_in_flight_bookkeeping() {
+    let mut state = BuiltinState::default();
+    let call_id = ToolCallId::from("shell-call");
+    state.cancel_requested.insert(call_id.clone());
+    state.record_tool_started(call_id.clone(), ToolName::new("shell"));
+    state
+        .agent_watchers
+        .entry("agent-child".to_owned())
+        .or_default()
+        .insert("agent-parent".to_owned());
+    state.pending_delegates.insert(
+        "delegate-1".to_owned(),
+        PendingDelegate {
+            call_id,
+            tool_name: ToolName::new(AGENT_START_TOOL_NAME),
+            started_at: Instant::now(),
+            self_agent_id: "agent-parent".to_owned(),
+            agent_id: "agent-child".to_owned(),
+            task_name: "review".to_owned(),
+            input_stats: ToolUseStats::default(),
+        },
+    );
+
+    state.record_runtime_bookkeeping_event(&Event::SessionShutdown(tau_proto::SessionShutdown {
+        session_id: "session-next".into(),
+    }));
+
+    assert!(state.cancel_requested.is_empty());
+    assert!(state.in_progress_tool_names.is_empty());
+    assert!(state.agent_watchers.is_empty());
+    assert!(state.pending_delegates.is_empty());
+}
+
+/// Ensures whitespace-only cancellation targets are rejected as empty rather
+/// than being published as impossible tool ids.
+#[test]
+fn cancel_args_reject_whitespace_only_tool_call_id() {
+    let args = CborValue::Map(vec![(
+        CborValue::Text("tool_call_id".to_owned()),
+        CborValue::Text(" \n\t ".to_owned()),
+    )]);
+
+    let err = parse_cancel_args(&args).expect_err("whitespace id should fail");
+
+    assert_eq!(err, "`tool_call_id` must not be empty");
 }
 
 #[test]

@@ -61,11 +61,18 @@ impl BuiltinState {
         }
     }
 
+    fn clear_session_runtime_state(&mut self) {
+        self.pending_delegates.clear();
+        self.cancel_requested.clear();
+        self.in_progress_tool_names.clear();
+        self.agent_watchers.clear();
+    }
+
     fn record_tool_started(&mut self, call_id: ToolCallId, tool_name: ToolName) {
         self.in_progress_tool_names.insert(call_id, tool_name);
     }
 
-    fn record_tool_lifecycle_event(&mut self, event: &Event) {
+    fn record_runtime_bookkeeping_event(&mut self, event: &Event) {
         match event {
             Event::ToolResult(result) => {
                 self.record_tool_finished(&result.call_id);
@@ -90,12 +97,14 @@ impl BuiltinState {
             Event::ToolRejected(rejected) => {
                 self.record_tool_finished(&rejected.call_id);
             }
+            Event::SessionShutdown(_) => self.clear_session_runtime_state(),
             _ => {}
         }
     }
 
     fn record_tool_finished(&mut self, call_id: &ToolCallId) {
         self.in_progress_tool_names.remove(call_id);
+        self.cancel_requested.remove(call_id);
     }
 
     fn initial_display(&self, call: &AgentToolCall) -> Option<ToolUseState> {
@@ -268,7 +277,7 @@ impl InternalToolHandler for BuiltinTools {
                 self.state
                     .lock()
                     .expect("builtin tool state poisoned")
-                    .record_tool_lifecycle_event(event);
+                    .record_runtime_bookkeeping_event(event);
                 Ok(())
             }
         }
@@ -1543,7 +1552,7 @@ fn parse_cancel_args(arguments: &CborValue) -> Result<ToolCallId, String> {
         let CborValue::Text(name) = k else { continue };
         if name == "tool_call_id" {
             return match v {
-                CborValue::Text(text) if !text.is_empty() => Ok(text.clone().into()),
+                CborValue::Text(text) if !text.trim().is_empty() => Ok(text.clone().into()),
                 CborValue::Text(_) => Err("`tool_call_id` must not be empty".to_owned()),
                 _ => Err("`tool_call_id` must be a string".to_owned()),
             };
