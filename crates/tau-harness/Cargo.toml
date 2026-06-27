@@ -50,4 +50,5 @@ tracing.workspace = true
 built.workspace = true
 
 [dev-dependencies]
+fs2.workspace = true
 tau-ext-shell = { workspace = true, features = ["echo-agent"] }

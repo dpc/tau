@@ -2165,14 +2165,15 @@ impl Harness {
         }
         let selected_model =
             select_model_for_role(&HashMap::new(), &available_roles, &selected_role);
+        let mut store = store;
+        let _ = store.load_session(eager_session_id)?;
         if session_persistence.is_durable() {
             crate::session_cleanup::spawn_session_cleanup(
                 sessions_dir.clone(),
                 harness_settings.session_retention(),
+                vec![SessionId::from(eager_session_id)],
             );
         }
-        let mut store = store;
-        let _ = store.load_session(eager_session_id)?;
         let mut harness = Self::from_base_parts(HarnessBaseParts {
             tx,
             rx,
@@ -2404,13 +2405,8 @@ impl Harness {
         let (harness_settings, harness_settings_error) = load_harness_settings_or_warn(&dirs);
         let roles = Self::load_startup_roles(&harness_settings)?;
         let missing_default_role = roles.missing_default_role.clone();
+        let session_retention = harness_settings.session_retention();
         tracing::debug!(target: "tau_harness::startup", selected_model = ?roles.selected_model, elapsed_ms = startup_started_at.elapsed().as_millis(), "harness settings loaded");
-        if launch.session_persistence.is_durable() {
-            crate::session_cleanup::spawn_session_cleanup(
-                sessions_dir.clone(),
-                harness_settings.session_retention(),
-            );
-        }
         let mut harness = Self::assemble_startup_harness(StartupHarnessParts {
             state_dir,
             dirs,
@@ -2427,6 +2423,13 @@ impl Harness {
             eager_session_id,
             startup_started_at,
         )?;
+        if launch.session_persistence.is_durable() {
+            crate::session_cleanup::spawn_session_cleanup(
+                sessions_dir.clone(),
+                session_retention,
+                vec![SessionId::from(eager_session_id)],
+            );
+        }
         Ok((
             harness,
             missing_default_role,
@@ -2777,7 +2780,7 @@ impl Harness {
         let tau_proto::HarnessInputMessage::Emit(emit) = message.as_ref() else {
             return false;
         };
-        self.event_targets_ephemeral_agent(&emit.event)
+        self.event_targets_ephemeral_agent(&emit.event, None)
     }
 
     fn queue_extension_connect(
@@ -3302,7 +3305,7 @@ impl Harness {
         // outbound copy. Offline cache/cost analysis tools that read
         // `events.jsonl` would otherwise see zeros where the running
         // session totals belong.
-        let skip_debug_log = self.event_targets_ephemeral_agent(&event);
+        let skip_debug_log = self.event_targets_ephemeral_agent(&event, sync_head_for.as_ref());
         if !skip_debug_log && let Some(log) = &mut self.debug_log {
             log.log_published_event(source_id.as_ref(), &event, recorded_at);
         }
@@ -3653,6 +3656,7 @@ impl Harness {
             event,
             Event::ProviderToolResult(_)
                 | Event::ProviderToolError(_)
+                | Event::ToolResult(_)
                 | Event::ToolError(_)
                 | Event::ToolCancelled(_)
                 | Event::ToolBackgroundResult(_)
@@ -3671,11 +3675,15 @@ impl Harness {
         })
     }
 
-    fn event_targets_ephemeral_agent(&self, event: &Event) -> bool {
+    fn event_targets_ephemeral_agent(
+        &self,
+        event: &Event,
+        sync_head_for: Option<&ConversationHeadSync>,
+    ) -> bool {
         self.agent_creation_event_targets_ephemeral_agent(event)
             || self.agent_addressed_event_targets_ephemeral_agent(event)
             || self.tool_event_targets_ephemeral_agent(event)
-            || self.agent_scoped_event_targets_ephemeral_agent(event)
+            || self.agent_scoped_event_targets_ephemeral_agent(event, sync_head_for)
     }
 
     fn agent_creation_event_targets_ephemeral_agent(&self, event: &Event) -> bool {
@@ -3740,9 +3748,13 @@ impl Harness {
         }
     }
 
-    fn agent_scoped_event_targets_ephemeral_agent(&self, event: &Event) -> bool {
+    fn agent_scoped_event_targets_ephemeral_agent(
+        &self,
+        event: &Event,
+        sync_head_for: Option<&ConversationHeadSync>,
+    ) -> bool {
         self.agent_id_for_event(event)
-            .or_else(|| self.agent_scoped_agent_id_for_event(event, None))
+            .or_else(|| self.agent_scoped_agent_id_for_event(event, sync_head_for))
             .is_some_and(|agent_id| self.agent_is_ephemeral(&agent_id))
     }
 

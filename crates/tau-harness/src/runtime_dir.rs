@@ -76,8 +76,15 @@ pub fn root_runtime_dir() -> PathBuf {
     dirs::runtime_dir()
         .map(|dir| dir.join("tau"))
         .unwrap_or_else(|| {
-            let user = std::env::var("USER").unwrap_or_else(|_| "unknown".to_owned());
-            PathBuf::from(format!("/tmp/tau-{user}"))
+            #[cfg(unix)]
+            {
+                PathBuf::from(format!("/tmp/tau-{}", current_euid()))
+            }
+            #[cfg(not(unix))]
+            {
+                let user = std::env::var("USER").unwrap_or_else(|_| "unknown".to_owned());
+                PathBuf::from(format!("/tmp/tau-{user}"))
+            }
         })
 }
 
@@ -170,8 +177,11 @@ pub fn prepare_harness_paths(
     session_id: &str,
 ) -> Result<HarnessPaths, std::io::Error> {
     let pid = std::process::id();
-    let path = harnesses_dir().join(pid.to_string());
-    std::fs::create_dir_all(harnesses_dir())?;
+    let root_dir = root_runtime_dir();
+    ensure_private_runtime_dir(&root_dir)?;
+    let harnesses_dir = root_dir.join(HARNESSES_DIR);
+    ensure_private_runtime_dir(&harnesses_dir)?;
+    let path = harnesses_dir.join(pid.to_string());
     Ok(HarnessPaths {
         path,
         metadata: DaemonMetadata {
@@ -181,6 +191,69 @@ pub fn prepare_harness_paths(
             session_id: session_id.to_owned(),
         },
     })
+}
+
+fn ensure_private_runtime_dir(path: &Path) -> Result<(), std::io::Error> {
+    std::fs::create_dir_all(path)?;
+    let metadata = std::fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!(
+                "runtime directory `{}` must not be a symlink",
+                path.display()
+            ),
+        ));
+    }
+    if !metadata.is_dir() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotADirectory,
+            format!("runtime path `{}` is not a directory", path.display()),
+        ));
+    }
+    ensure_private_runtime_dir_platform(path, &metadata)
+}
+
+#[cfg(unix)]
+fn ensure_private_runtime_dir_platform(
+    path: &Path,
+    metadata: &std::fs::Metadata,
+) -> Result<(), std::io::Error> {
+    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+
+    let uid = current_euid();
+    if metadata.uid() != uid {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!(
+                "runtime directory `{}` is owned by uid {}, not current uid {uid}",
+                path.display(),
+                metadata.uid()
+            ),
+        ));
+    }
+
+    let mode = metadata.permissions().mode() & 0o777;
+    if mode != 0o700 {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn ensure_private_runtime_dir_platform(
+    _path: &Path,
+    _metadata: &std::fs::Metadata,
+) -> Result<(), std::io::Error> {
+    Ok(())
+}
+
+#[cfg(unix)]
+#[allow(unsafe_code)]
+fn current_euid() -> u32 {
+    // SAFETY: `geteuid` has no preconditions and only reads the process'
+    // effective user id.
+    unsafe { libc::geteuid() }
 }
 
 /// Finds a running harness daemon for the given project root.
@@ -467,6 +540,58 @@ mod tests {
             find_harness_for_session("same-session"),
             Err(FindHarnessForSessionError::Ambiguous { .. })
         ));
+    }
+
+    /// Ensures daemon startup creates private runtime directories rather than
+    /// relying on the process umask, protecting fallback IPC sockets and
+    /// metadata from other local users.
+    #[cfg(unix)]
+    #[test]
+    fn prepare_harness_paths_creates_private_runtime_dirs() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let temp = TempDir::new().expect("temp runtime");
+        let _guard = runtime_override(&temp);
+        let project_root = temp.path().join("project");
+        std::fs::create_dir_all(&project_root).expect("project root");
+
+        let paths = prepare_harness_paths(&project_root, "session").expect("paths");
+
+        let root_mode = std::fs::metadata(root_runtime_dir())
+            .expect("root metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        let harnesses_mode = std::fs::metadata(harnesses_dir())
+            .expect("harnesses metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(root_mode, 0o700);
+        assert_eq!(harnesses_mode, 0o700);
+        assert_eq!(paths.path().parent(), Some(harnesses_dir().as_path()));
+    }
+
+    /// Ensures a pre-existing runtime symlink is refused instead of followed
+    /// before binding daemon IPC sockets or writing discovery metadata.
+    #[cfg(unix)]
+    #[test]
+    fn prepare_harness_paths_rejects_symlink_runtime_root() {
+        let temp = TempDir::new().expect("temp runtime");
+        let _guard = runtime_override(&temp);
+        let real = temp.path().join("real");
+        std::fs::create_dir_all(&real).expect("real runtime target");
+        std::os::unix::fs::symlink(&real, root_runtime_dir()).expect("runtime symlink");
+        let project_root = temp.path().join("project");
+        std::fs::create_dir_all(&project_root).expect("project root");
+
+        let error = match prepare_harness_paths(&project_root, "session") {
+            Ok(_) => panic!("symlink runtime root must be rejected"),
+            Err(error) => error,
+        };
+
+        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+        assert!(error.to_string().contains("must not be a symlink"));
     }
 
     fn write_metadata_with_pid(path: &Path, project_root: &Path, session_id: &str, pid: u32) {

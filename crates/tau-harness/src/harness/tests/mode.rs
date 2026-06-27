@@ -393,17 +393,86 @@ fn tool_backed_start_agent_request_targets_ephemeral_agent() {
     h.tool_agents.insert(tool_call_id.clone(), cid);
 
     assert!(
-        h.event_targets_ephemeral_agent(&Event::StartAgentRequest(StartAgentRequest {
-            query_id: "ephemeral-tool-delegate".to_owned(),
-            instruction: "delegate without leaking prompt text".to_owned(),
-            role: Some("senior-engineer".to_owned()),
-            input_stats: tau_proto::ToolUseStats::default(),
-            tool_call_id: Some(tool_call_id),
-            task_name: Some("ephemeral delegate".to_owned()),
-            parent_agent: None,
-        })),
+        h.event_targets_ephemeral_agent(
+            &Event::StartAgentRequest(StartAgentRequest {
+                query_id: "ephemeral-tool-delegate".to_owned(),
+                instruction: "delegate without leaking prompt text".to_owned(),
+                role: Some("senior-engineer".to_owned()),
+                input_stats: tau_proto::ToolUseStats::default(),
+                tool_call_id: Some(tool_call_id),
+                task_name: Some("ephemeral delegate".to_owned()),
+                parent_agent: None,
+            }),
+            None,
+        ),
         "tool-backed delegate requests from ephemeral agents must be classified as ephemeral"
     );
+}
+
+/// Ensures terminal tool-event debug-log classification can still identify an
+/// ephemeral owner from the publish-stamped conversation snapshot after
+/// call-id tracking has been cleared while interception delayed commit.
+#[test]
+fn sync_head_classifies_ephemeral_terminal_tool_events() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = quiet_provider_harness(&sp).expect("harness");
+    h.handle_ui_create_agent(tau_proto::UiCreateAgent {
+        session_id: "s1".into(),
+        role: "senior-engineer".to_owned(),
+        model_override: None,
+        metadata: Vec::new(),
+        initial_prompt: None,
+        message_class: tau_proto::PromptMessageClass::User,
+        originator: tau_proto::PromptOriginator::User,
+        ctx_id: None,
+        parent_agent: None,
+        ephemeral: true,
+    })
+    .expect("create ephemeral agent");
+    let agent_id = event_log_events(&h)
+        .into_iter()
+        .find_map(|event| match event {
+            Event::AgentStarted(started) if started.ephemeral => Some(started.agent_id),
+            _ => None,
+        })
+        .expect("ephemeral agent");
+    let cid = h
+        .agent_routes
+        .get(agent_id.as_str())
+        .cloned()
+        .expect("ephemeral route");
+    let sync = crate::harness::interception::ConversationHeadSync {
+        cid,
+        agent_id: Some(agent_id),
+    };
+
+    for event in [
+        Event::ToolResult(ToolResult {
+            call_id: ToolCallId::from("cleared-before-commit-tool"),
+            tool_name: ToolName::new("debug_secret_tool"),
+            tool_type: tau_proto::ToolType::Function,
+            result: CborValue::Text("tool-result-debug-secret".to_owned()),
+            kind: tau_proto::ToolResultKind::Final,
+            display: None,
+            originator: tau_proto::PromptOriginator::User,
+        }),
+        Event::ProviderToolResult(ToolResult {
+            call_id: ToolCallId::from("cleared-before-commit"),
+            tool_name: ToolName::new("debug_secret_tool"),
+            tool_type: tau_proto::ToolType::Function,
+            result: CborValue::Text("tool-result-debug-secret".to_owned()),
+            kind: tau_proto::ToolResultKind::Final,
+            display: None,
+            originator: tau_proto::PromptOriginator::User,
+        }),
+    ] {
+        assert!(
+            h.event_targets_ephemeral_agent(&event, Some(&sync)),
+            "{} must use sync_head_for after call tracking is cleared",
+            event.name()
+        );
+    }
 }
 
 /// Prevents delegated work from leaking an ephemeral parent's task into a

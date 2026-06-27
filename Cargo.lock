@@ -3438,6 +3438,7 @@ dependencies = [
  "built",
  "ciborium",
  "dirs",
+ "fs2",
  "handlebars",
  "json5",
  "libc",
