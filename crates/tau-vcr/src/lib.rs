@@ -248,15 +248,27 @@ impl VcrStore {
     /// Reads and parses the cassette for `key`.
     ///
     /// Returns `Ok(None)` when the cassette does not exist.
+    /// Only [`std::io::ErrorKind::NotFound`] is treated as absence. Other read
+    /// failures return [`VcrError::Read`] so record-if-missing callers do not
+    /// silently fall through to live recording when a cassette path is present
+    /// but unreadable.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VcrError::InvalidKey`] for unsupported keys,
+    /// [`VcrError::Read`] for non-`NotFound` read failures, and
+    /// [`VcrError::Parse`] when an existing cassette cannot be deserialized
+    /// as `T`.
     pub fn get<T>(&self, key: &str) -> Result<Option<T>, VcrError>
     where
         T: DeserializeOwned,
     {
         let path = self.path(key)?;
-        if !path.exists() {
-            return Ok(None);
+        match std::fs::read(&path) {
+            Ok(bytes) => parse_yaml(&path, &bytes).map(Some),
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(source) => Err(VcrError::Read { path, source }),
         }
-        read_yaml(&path).map(Some)
     }
 
     /// Serializes and writes the cassette for `key`, replacing any existing
@@ -276,6 +288,13 @@ impl VcrStore {
     }
 }
 
+/// Builds a request-mismatch error with serialized expected and actual request
+/// payloads for diagnostics.
+///
+/// The serialized payloads are included in [`VcrError`]'s
+/// [`std::fmt::Display`] output because callers commonly surface VCR failures
+/// by converting the error directly to a string. If serialization fails, that
+/// side is replaced with a compact serialization-error marker.
 pub fn request_mismatch<T, U>(key: impl Into<String>, expected: &T, actual: &U) -> VcrError
 where
     T: Serialize,
@@ -388,8 +407,15 @@ impl fmt::Display for VcrError {
             Self::UnsupportedVersion { key, version } => {
                 write!(f, "cassette `{key}` has unsupported version {version}")
             }
-            Self::RequestMismatch { key, .. } => {
-                write!(f, "cassette `{key}` request does not match")
+            Self::RequestMismatch {
+                key,
+                expected,
+                actual,
+            } => {
+                write!(
+                    f,
+                    "cassette `{key}` request does not match\nexpected:\n{expected}\nactual:\n{actual}"
+                )
             }
         }
     }
@@ -411,15 +437,11 @@ impl std::error::Error for VcrError {
     }
 }
 
-fn read_yaml<T>(path: &Path) -> Result<T, VcrError>
+fn parse_yaml<T>(path: &Path, bytes: &[u8]) -> Result<T, VcrError>
 where
     T: DeserializeOwned,
 {
-    let bytes = std::fs::read(path).map_err(|source| VcrError::Read {
-        path: path.to_path_buf(),
-        source,
-    })?;
-    serde_yaml_ng::from_slice(&bytes).map_err(|source| VcrError::Parse {
+    serde_yaml_ng::from_slice(bytes).map_err(|source| VcrError::Parse {
         path: path.to_path_buf(),
         source,
     })

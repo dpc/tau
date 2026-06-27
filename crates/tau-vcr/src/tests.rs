@@ -57,8 +57,27 @@ fn store_get_returns_none_for_missing_cassette() {
     assert!(loaded.is_none());
 }
 
+/// Only true absent cassette files should be treated as missing. Other IO
+/// failures must surface so replay/record-if-missing callers do not silently
+/// fall through to the live path when the cassette path is present but
+/// unreadable.
+#[cfg(unix)]
+#[test]
+fn store_get_reports_read_errors_instead_of_treating_them_as_missing() {
+    let tempdir = TempDir::new().expect("tempdir");
+    std::os::unix::fs::symlink("loop.yaml", tempdir.path().join("loop.yaml"))
+        .expect("create symlink loop cassette");
+    let store = VcrStore::new(tempdir.path());
+
+    let error = store
+        .get::<serde_json::Value>("loop")
+        .expect_err("symlink loop should be a read error");
+
+    assert!(matches!(error, VcrError::Read { .. }));
+}
+
 /// Request validation is caller-owned, but `tau-vcr` still provides a standard
-/// diagnostic error constructor so mismatches have consistent key and payload
+/// diagnostic error constructor so mismatches have consistent key and payload.
 #[test]
 fn request_mismatch_error_carries_serialized_payloads() {
     let error = request_mismatch("tc-main-0001", &json!({"old": true}), &json!({"new": true}));
@@ -72,6 +91,19 @@ fn request_mismatch_error_carries_serialized_payloads() {
         }
         other => panic!("unexpected error: {other:?}"),
     }
+}
+
+/// Most callers convert VCR errors directly to user-visible strings. Including
+/// serialized request payloads in `Display` prevents mismatch diagnostics from
+/// losing the very details needed to refresh or fix a cassette.
+#[test]
+fn request_mismatch_display_includes_serialized_payloads() {
+    let error = request_mismatch("tc-main-0001", &json!({"old": true}), &json!({"new": true}));
+    let display = error.to_string();
+
+    assert!(display.contains("tc-main-0001"));
+    assert!(display.contains("old"));
+    assert!(display.contains("new"));
 }
 
 /// Tau's safe automatic recording workflow is record-if-missing: existing
