@@ -1,8 +1,15 @@
 //! Fixtures for Tau's multiprocess VCR end-to-end tests.
+//!
+//! These helpers are opt-in integration fixtures, not hermetic unit-test
+//! sandboxes. They run a trusted local `tau` binary, use the user's normal
+//! provider authentication store through the provider extension, and let the
+//! shell extension execute commands with the user's permissions. The fixture
+//! isolates Tau harness/config/session state for the test turn, but
+//! deliberately does not rewrite process-wide XDG environment variables.
 
 use std::path::{Path, PathBuf};
 
-use tau_harness::{EmbeddedOptions, run_embedded_message_with_options};
+use tau_harness::{EmbeddedOptions, InteractionOutcome, run_embedded_message_with_options};
 use tempfile::TempDir;
 
 const DEFAULT_SESSION_ID: &str = "vcr-e2e-session";
@@ -10,34 +17,52 @@ const DEFAULT_SESSION_ID: &str = "vcr-e2e-session";
 /// A real headless Tau run with isolated harness config and state.
 ///
 /// The caller owns VCR mode through normal environment variables such as
-/// `TAU_VCR` and `TAU_VCR_DIR`. The fixture intentionally does not override XDG
-/// state so provider extensions can use the user's real auth store.
+/// `TAU_VCR` and `TAU_VCR_DIR`. The fixture isolates Tau config, fixture state,
+/// and embedded-harness session state, but intentionally does not rewrite
+/// process-wide XDG environment variables so provider extensions can use the
+/// user's real auth store.
 #[derive(Debug)]
 pub struct VcrFixture {
+    /// Temporary root that owns all fixture-local directories for the test
+    /// turn.
     _tempdir: TempDir,
+    /// Isolated Tau config directory containing the generated `harness.yaml`.
     config_dir: PathBuf,
+    /// Isolated Tau state directory passed through
+    /// [`tau_config::settings::TauDirs`].
     state_dir: PathBuf,
+    /// Harness session/event state root used by the embedded harness helper.
     harness_state_dir: PathBuf,
+    /// Working directory configured for the shell extension.
     work_dir: PathBuf,
+    /// Stable session id used to match VCR cassette traffic across runs.
     session_id: String,
 }
 
 impl VcrFixture {
     /// Creates a fixture from the e2e environment.
     ///
-    /// Returns `Ok(None)` when the caller did not opt into VCR e2e execution by
-    /// setting `TAU_VCR`, `TAU_VCR_DIR`, and `TAU_E2E_MODEL`. This keeps normal
-    /// workspace test runs independent of live provider credentials.
+    /// Returns `Ok(None)` when the caller did not opt into VCR e2e execution:
+    /// `TAU_VCR` is missing/off, or `TAU_E2E_MODEL` is missing. Active VCR
+    /// modes (`record-if-missing` and `replay-only`) require `TAU_VCR_DIR`;
+    /// invalid or non-Unicode environment values return `Err` so
+    /// misconfigured e2e runs fail loudly instead of silently using live
+    /// providers outside cassette mode.
     pub fn from_env(name: &str) -> Result<Option<Self>, Box<dyn std::error::Error>> {
-        if std::env::var_os("TAU_VCR").is_none()
-            || std::env::var_os("TAU_VCR_DIR").is_none()
-            || std::env::var_os("TAU_E2E_MODEL").is_none()
-        {
+        if !vcr_enabled_from_env()? {
             eprintln!(
-                "skipping {name}: set TAU_VCR, TAU_VCR_DIR, and TAU_E2E_MODEL to run VCR e2e"
+                "skipping {name}: set TAU_VCR=record-if-missing or replay-only, TAU_VCR_DIR, \
+                 and TAU_E2E_MODEL to run VCR e2e"
             );
             return Ok(None);
         }
+        let Some(model) = e2e_model_from_env()? else {
+            eprintln!(
+                "skipping {name}: set TAU_VCR=record-if-missing or replay-only, TAU_VCR_DIR, \
+                 and TAU_E2E_MODEL to run VCR e2e"
+            );
+            return Ok(None);
+        };
 
         let tempdir = TempDir::new()?;
         let root = tempdir.path().join(sanitize_name(name));
@@ -60,16 +85,16 @@ impl VcrFixture {
                 .unwrap_or_else(|_| DEFAULT_SESSION_ID.to_owned()),
         };
         let tau_bin = std::env::var("TAU_E2E_TAU_BIN").unwrap_or_else(|_| "tau".to_owned());
-        fixture.write_harness_config(
-            &std::env::var("TAU_E2E_MODEL")?,
-            &canonicalize_command_if_path(&tau_bin),
-        )?;
+        fixture.write_harness_config(&model, &canonicalize_command_if_path(&tau_bin))?;
         Ok(Some(fixture))
     }
 
-    /// Runs one real embedded Tau turn. VCR mismatch or missing cassette errors
-    /// surface as the returned harness error.
-    pub fn run_turn(&self, prompt: &str) -> Result<(), tau_harness::HarnessError> {
+    /// Runs one real embedded Tau turn and returns its trace.
+    ///
+    /// VCR mismatch or missing cassette errors surface as the returned harness
+    /// error. Callers should assert on the returned progress messages when a
+    /// test needs to prove that a specific tool was actually invoked.
+    pub fn run_turn(&self, prompt: &str) -> Result<InteractionOutcome, tau_harness::HarnessError> {
         run_embedded_message_with_options(
             &self.harness_state_dir,
             &self.session_id,
@@ -80,8 +105,7 @@ impl VcrFixture {
                     state_dir: Some(self.state_dir.clone()),
                 })
                 .build(),
-        )?;
-        Ok(())
+        )
     }
 
     fn write_harness_config(
@@ -104,7 +128,7 @@ impl VcrFixture {
                     "    roles:\n",
                     "      vcr-e2e:\n",
                     "        model: {model}\n",
-                    "        tools: [shell, apply_patch]\n",
+                    "        tools: [shell]\n",
                     "extensions:\n",
                     "  provider-builtin:\n",
                     "    command: [{tau_bin}]\n",
@@ -126,6 +150,39 @@ impl VcrFixture {
         )?;
         Ok(())
     }
+}
+
+fn vcr_enabled_from_env() -> Result<bool, Box<dyn std::error::Error>> {
+    let mode = match std::env::var("TAU_VCR") {
+        Ok(value) => Some(value),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(std::env::VarError::NotUnicode(_)) => {
+            return Err("TAU_VCR is not valid Unicode".into());
+        }
+    };
+    vcr_enabled(mode.as_deref(), std::env::var_os("TAU_VCR_DIR").is_some())
+}
+
+fn e2e_model_from_env() -> Result<Option<String>, Box<dyn std::error::Error>> {
+    match std::env::var("TAU_E2E_MODEL") {
+        Ok(value) => Ok(Some(value)),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => Err("TAU_E2E_MODEL is not valid Unicode".into()),
+    }
+}
+
+fn vcr_enabled(mode: Option<&str>, has_vcr_dir: bool) -> Result<bool, Box<dyn std::error::Error>> {
+    let mode = match mode {
+        Some(value) => tau_vcr::VcrMode::parse(value)?,
+        None => tau_vcr::VcrMode::Off,
+    };
+    if mode == tau_vcr::VcrMode::Off {
+        return Ok(false);
+    }
+    if !has_vcr_dir {
+        return Err("TAU_VCR_DIR must be set when TAU_VCR is enabled".into());
+    }
+    Ok(true)
 }
 
 fn canonicalize_command_if_path(command: &str) -> String {
@@ -160,3 +217,6 @@ fn sanitize_name(name: &str) -> String {
         })
         .collect()
 }
+
+#[cfg(test)]
+mod tests;

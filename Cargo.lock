@@ -3250,6 +3250,7 @@ dependencies = [
  "serde_json",
  "tau-config",
  "tau-harness",
+ "tau-vcr",
  "tempfile",
 ]
 

@@ -18,4 +18,5 @@ workspace = true
 serde_json.workspace = true
 tau-config.workspace = true
 tau-harness.workspace = true
+tau-vcr.workspace = true
 tempfile.workspace = true
