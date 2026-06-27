@@ -187,6 +187,13 @@ where CLI-owned commands, dynamic extension actions, harness-owned prompt
 commands, and the unknown leading-slash fallback intentionally share similar
 surface syntax.
 
+Persistent prompt-history storage tests should cover the length-prefixed record
+boundary: ordered round trips, bounded/unsupported/malformed records, torn or
+oversized tails before append, and redaction/routing at the chat-command layer.
+Keep these as focused unit tests around `prompt_history` plus routing tests for
+command-line redaction; do not require interactive terminal E2E checks for
+storage-format regressions.
+
 ## Provider response delta accumulation
 
 Status: confirmed, 2026-06-19, dpc
