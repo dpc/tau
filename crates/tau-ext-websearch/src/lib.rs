@@ -61,6 +61,8 @@ const MAX_IN_FLIGHT: usize = 8;
 const ERROR_BODY_MAX_BYTES: usize = 64 * 1024;
 const SUCCESS_BODY_MAX_BYTES: usize = 1024 * 1024;
 const TOOL_OUTPUT_MAX_BYTES: usize = 512 * 1024;
+const TRUNCATED_SUFFIX: &str = "… (truncated)";
+const REDACTED_COMPONENT: &str = "…";
 
 /// Run the extension over stdio.
 ///
@@ -401,11 +403,14 @@ fn dispatch_tool_invoke(
     }
     let event = match invoke.tool_name.as_str() {
         EXA_TOOL_NAME => dispatch_exa(invoke, searcher),
-        PARALLEL_SEARCH_TOOL_NAME => {
-            dispatch_parallel(invoke, parallel_client, PARALLEL_REMOTE_SEARCH_TOOL)
-        }
+        PARALLEL_SEARCH_TOOL_NAME => dispatch_parallel(
+            invoke,
+            parallel_client,
+            PARALLEL_REMOTE_SEARCH_TOOL,
+            "query",
+        ),
         PARALLEL_FETCH_TOOL_NAME => {
-            dispatch_parallel(invoke, parallel_client, PARALLEL_REMOTE_FETCH_TOOL)
+            dispatch_parallel(invoke, parallel_client, PARALLEL_REMOTE_FETCH_TOOL, "url")
         }
         _ => Event::ToolError(ToolError {
             call_id: invoke.call_id,
@@ -414,7 +419,7 @@ fn dispatch_tool_invoke(
             display: Some(error_display("unknown tool")),
             message: "unknown tool".to_owned(),
             details: None,
-            originator: tau_proto::PromptOriginator::User,
+            originator: invoke.originator,
         }),
     };
     let _ = tx.send(HarnessInputMessage::emit(event));
@@ -465,7 +470,7 @@ fn dispatch_exa(invoke: ToolStarted, searcher: &dyn Searcher) -> Event {
                     result: CborValue::Text(text.clone()),
                     kind: tau_proto::ToolResultKind::Final,
                     display: Some(exa_ok_display(&text)),
-                    originator: tau_proto::PromptOriginator::User,
+                    originator: invoke.originator,
                 })
             }
             Err(message) => tool_error(invoke, message),
@@ -478,8 +483,11 @@ fn dispatch_parallel(
     invoke: ToolStarted,
     client: &dyn ParallelClient,
     remote_tool: &'static str,
+    required_field: &str,
 ) -> Event {
-    match cbor_to_json(&invoke.arguments) {
+    match validate_parallel_args(&invoke.arguments, required_field)
+        .and_then(|()| cbor_to_json(&invoke.arguments))
+    {
         Ok(arguments) => match client.call(remote_tool, arguments) {
             Ok(text) => {
                 tracing::debug!(target: LOG_TARGET, remote_tool, response_len = text.len(), "parallel search MCP returned");
@@ -490,7 +498,7 @@ fn dispatch_parallel(
                     result: CborValue::Text(text.clone()),
                     kind: tau_proto::ToolResultKind::Final,
                     display: Some(ok_display(&text)),
-                    originator: tau_proto::PromptOriginator::User,
+                    originator: invoke.originator,
                 })
             }
             Err(message) => tool_error(invoke, message),
@@ -507,8 +515,29 @@ fn tool_error(invoke: ToolStarted, message: String) -> Event {
         display: Some(error_display(&message)),
         message,
         details: Some(invoke.arguments),
-        originator: tau_proto::PromptOriginator::User,
+        originator: invoke.originator,
     })
+}
+
+fn validate_parallel_args(arguments: &CborValue, required_field: &str) -> Result<(), String> {
+    let CborValue::Map(entries) = arguments else {
+        return Err("arguments must be an object".to_owned());
+    };
+    for (key, value) in entries {
+        let CborValue::Text(key) = key else {
+            return Err("argument object keys must be strings".to_owned());
+        };
+        if key == required_field {
+            let CborValue::Text(text) = value else {
+                return Err(format!("`{required_field}` must be a string"));
+            };
+            if text.trim().is_empty() {
+                return Err(format!("`{required_field}` must not be empty"));
+            }
+            return Ok(());
+        }
+    }
+    Err(format!("missing string argument: {required_field}"))
 }
 
 fn ok_display(response: &str) -> ToolUseState {
@@ -687,7 +716,9 @@ impl Searcher for HttpExaSearcher {
             },
         });
         let payload = post_mcp(&self.agent, &endpoint, body, "exa")?;
-        limit_tool_output(decode_mcp_text_result(&payload, "exa")?, "exa")
+        let text = decode_mcp_text_result(&payload, "exa")
+            .map_err(|e| sanitize_endpoint_error(&e, &endpoint))?;
+        limit_tool_output(text, "exa").map_err(|e| sanitize_endpoint_error(&e, &endpoint))
     }
 
     fn set_endpoint(&self, endpoint: String) {
@@ -741,7 +772,9 @@ impl ParallelClient for HttpParallelClient {
             },
         });
         let payload = post_mcp(&self.agent, &endpoint, body, "parallel")?;
-        limit_tool_output(decode_mcp_text_result(&payload, "parallel")?, "parallel")
+        let text = decode_mcp_text_result(&payload, "parallel")
+            .map_err(|e| sanitize_endpoint_error(&e, &endpoint))?;
+        limit_tool_output(text, "parallel").map_err(|e| sanitize_endpoint_error(&e, &endpoint))
     }
 
     fn set_endpoint(&self, endpoint: String) {
@@ -764,13 +797,13 @@ fn post_mcp(
         .map_err(|e| {
             format!(
                 "{provider} MCP transport error: {}",
-                redact_endpoint_in_error(&e.to_string(), endpoint)
+                sanitize_endpoint_error(&e.to_string(), endpoint)
             )
         })?;
     let mut response = response;
     if !response.status().is_success() {
         let code = response.status().as_u16();
-        let body = read_capped(response.body_mut().as_reader());
+        let body = sanitize_endpoint_error(&read_capped(response.body_mut().as_reader()), endpoint);
         return Err(format!("{provider} MCP returned HTTP {code}: {body}"));
     }
     read_success_body(response.body_mut().as_reader(), provider)
@@ -804,6 +837,53 @@ fn redact_endpoint_in_error(message: &str, endpoint: &str) -> String {
     message.replace(endpoint, &redact_endpoint(endpoint))
 }
 
+fn sanitize_endpoint_error(message: &str, endpoint: &str) -> String {
+    let mut redacted = redact_endpoint_in_error(message, endpoint);
+    let Ok(url) = Url::parse(endpoint) else {
+        return cap_model_visible_error(redacted);
+    };
+
+    let mut fragmentless = url.clone();
+    fragmentless.set_fragment(None);
+    redacted = redacted.replace(fragmentless.as_str(), &redact_url(&fragmentless));
+
+    if let Some(query) = url.query() {
+        let target = format!("{}?{query}", url.path());
+        redacted = redacted.replace(&target, url.path());
+        for part in query.split('&') {
+            let (key, value) = part.split_once('=').unwrap_or((part, ""));
+            if !key.is_empty() {
+                redacted = redacted.replace(key, REDACTED_COMPONENT);
+            }
+            if !value.is_empty() {
+                redacted = redacted.replace(value, REDACTED_COMPONENT);
+            }
+        }
+        for (key, value) in url.query_pairs() {
+            if !key.is_empty() {
+                redacted = redacted.replace(key.as_ref(), REDACTED_COMPONENT);
+            }
+            if !value.is_empty() {
+                redacted = redacted.replace(value.as_ref(), REDACTED_COMPONENT);
+            }
+        }
+    }
+    if let Some(fragment) = url.fragment()
+        && !fragment.is_empty()
+    {
+        redacted = redacted.replace(fragment, REDACTED_COMPONENT);
+    }
+    if !url.username().is_empty() {
+        redacted = redacted.replace(url.username(), REDACTED_COMPONENT);
+    }
+    if let Some(password) = url.password()
+        && !password.is_empty()
+    {
+        redacted = redacted.replace(password, REDACTED_COMPONENT);
+    }
+    cap_model_visible_error(redacted)
+}
+
 fn redact_endpoint(endpoint: &str) -> String {
     let Some((scheme, rest)) = endpoint.split_once("://") else {
         return "<redacted endpoint>".to_owned();
@@ -814,6 +894,10 @@ fn redact_endpoint(endpoint: &str) -> String {
     let path = &rest[authority_end..];
     let path_end = path.find(['?', '#']).unwrap_or(path.len());
     format!("{scheme}://{host_port}{}", &path[..path_end])
+}
+
+fn redact_url(url: &Url) -> String {
+    redact_endpoint(url.as_str())
 }
 
 fn read_capped(reader: impl std::io::Read) -> String {
@@ -827,9 +911,23 @@ fn read_capped(reader: impl std::io::Read) -> String {
     }
     let mut s = String::from_utf8_lossy(&buf).into_owned();
     if truncated {
-        s.push_str("… (truncated)");
+        s.push_str(TRUNCATED_SUFFIX);
     }
     s
+}
+
+fn cap_model_visible_error(mut text: String) -> String {
+    if text.len() <= TOOL_OUTPUT_MAX_BYTES {
+        return text;
+    }
+
+    let mut end = TOOL_OUTPUT_MAX_BYTES.saturating_sub(TRUNCATED_SUFFIX.len());
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text.truncate(end);
+    text.push_str(TRUNCATED_SUFFIX);
+    text
 }
 
 fn decode_mcp_text_result(payload: &str, provider: &str) -> Result<String, String> {
@@ -839,6 +937,11 @@ fn decode_mcp_text_result(payload: &str, provider: &str) -> Result<String, Strin
             .get("message")
             .and_then(|v| v.as_str())
             .unwrap_or("MCP returned a JSON-RPC error");
+        if message.len() > TOOL_OUTPUT_MAX_BYTES {
+            return Err(format!(
+                "{provider} MCP JSON-RPC error message exceeded {TOOL_OUTPUT_MAX_BYTES} bytes"
+            ));
+        }
         return Err(message.to_owned());
     }
     let content = json

@@ -102,6 +102,10 @@ userinfo, query strings, or fragments. The extension must not log raw endpoint
 override URLs, must reject URL userinfo credentials and unsupported auth forms,
 and must not send Parallel Authorization headers. Production provider endpoints
 must use HTTPS; plaintext HTTP is only acceptable for loopback test endpoints.
+Provider transport diagnostics and JSON-RPC errors can be surfaced as
+model-visible tool errors, so configured endpoint echoes, request targets, query
+keys/values, fragments, and userinfo must be sanitized and finally bounded before
+return.
 
 ## Core shell extension
 

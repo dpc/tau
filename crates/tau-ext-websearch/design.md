@@ -16,7 +16,10 @@ Endpoint fields are ordinary extension config, but raw endpoint URL values are
 log-sensitive because URLs can contain credentials in userinfo, query strings, or
 fragments. Endpoint URLs are validated before use, userinfo is rejected, and
 HTTPS is required except for loopback HTTP endpoints used by deterministic tests.
-Logs must not print raw endpoint URLs.
+Logs must not print raw endpoint URLs. Provider transport diagnostics and
+JSON-RPC error messages may become model-visible tool errors, so they must be
+sanitized for configured endpoint echoes, request targets, query keys/values,
+fragments, and userinfo before being returned.
 
 ## Runtime safeguards
 
@@ -25,7 +28,10 @@ Status: unconfirmed
 The extension bounds concurrent provider calls. When all permits are occupied,
 new calls fail fast with a busy `ToolError` so the protocol reader can continue
 handling `Configure` and `Disconnect` messages. Successful MCP response bodies
-and decoded model-visible text are capped separately.
+and decoded model-visible text are capped separately. HTTP error bodies,
+JSON-RPC error messages, and sanitized provider diagnostics are also bounded;
+oversized JSON-RPC error messages are replaced with compact deterministic
+diagnostics.
 
 ## Testing strategy
 

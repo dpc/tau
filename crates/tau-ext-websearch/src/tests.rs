@@ -423,6 +423,10 @@ fn searcher_error_surfaces_as_tool_error() {
     let searcher = StubSearcher::err("upstream timed out");
     let (mut reader, mut writer) = spawn_with_searcher(searcher);
     drain_startup(&mut reader);
+    let originator = tau_proto::PromptOriginator::Extension {
+        name: tau_proto::ExtensionName::new("fixture"),
+        query_id: "query-error".to_owned(),
+    };
 
     writer
         .write_event(&Event::ToolStarted(ToolStarted {
@@ -433,7 +437,7 @@ fn searcher_error_surfaces_as_tool_error() {
                 CborValue::Text("anything".to_owned()),
             )]),
             agent_id: tau_proto::AgentId::parse("agent-1").expect("agent id"),
-            originator: tau_proto::PromptOriginator::User,
+            originator: originator.clone(),
         }))
         .expect("write");
     writer.flush().expect("flush");
@@ -443,6 +447,37 @@ fn searcher_error_surfaces_as_tool_error() {
         panic!("expected ToolError, got {event:?}");
     };
     assert_eq!(err.message, "upstream timed out");
+    assert_eq!(err.originator, originator);
+}
+
+/// Ensures tool replies keep the original prompt originator so side prompts and
+/// user prompts remain distinguishable after extension execution.
+#[test]
+fn tool_result_preserves_prompt_originator() {
+    let searcher = StubSearcher::ok("ok");
+    let originator = tau_proto::PromptOriginator::Extension {
+        name: tau_proto::ExtensionName::new("fixture"),
+        query_id: "query-1".to_owned(),
+    };
+
+    let event = dispatch_exa(
+        ToolStarted {
+            call_id: "call-originator".into(),
+            tool_name: tau_proto::ToolName::new(EXA_TOOL_NAME),
+            arguments: CborValue::Map(vec![(
+                CborValue::Text("query".to_owned()),
+                CborValue::Text("anything".to_owned()),
+            )]),
+            agent_id: tau_proto::AgentId::parse("agent-1").expect("agent id"),
+            originator: originator.clone(),
+        },
+        searcher.as_ref(),
+    );
+
+    let Event::ToolResult(result) = event else {
+        panic!("expected ToolResult, got {event:?}");
+    };
+    assert_eq!(result.originator, originator);
 }
 
 /// Ensures local Exa argument validation enforces the advertised result-count
@@ -711,6 +746,10 @@ fn forwards_parallel_search_to_web_search_and_returns_text() {
     let parallel = StubParallelClient::ok("search result");
     let (mut reader, mut writer) = spawn_extension(searcher, parallel.clone());
     drain_startup(&mut reader);
+    let originator = tau_proto::PromptOriginator::Extension {
+        name: tau_proto::ExtensionName::new("fixture"),
+        query_id: "parallel-query".to_owned(),
+    };
 
     writer
         .write_event(&Event::ToolStarted(ToolStarted {
@@ -727,7 +766,7 @@ fn forwards_parallel_search_to_web_search_and_returns_text() {
                 ),
             ]),
             agent_id: tau_proto::AgentId::parse("agent-1").expect("agent id"),
-            originator: tau_proto::PromptOriginator::User,
+            originator: originator.clone(),
         }))
         .expect("write");
     writer.flush().expect("flush");
@@ -739,6 +778,7 @@ fn forwards_parallel_search_to_web_search_and_returns_text() {
     assert_eq!(result.call_id.as_str(), "call-6");
     assert_eq!(result.tool_name.as_str(), PARALLEL_SEARCH_TOOL_NAME);
     assert_eq!(result.result, CborValue::Text("search result".to_owned()));
+    assert_eq!(result.originator, originator);
 
     let calls = parallel.calls.lock().expect("lock");
     assert_eq!(calls.len(), 1);
@@ -777,6 +817,34 @@ fn forwards_parallel_fetch_to_web_fetch() {
     assert_eq!(calls.len(), 1);
     assert_eq!(calls[0].0, PARALLEL_REMOTE_FETCH_TOOL);
     assert_eq!(calls[0].1["url"], "https://example.com");
+}
+
+/// Ensures Parallel calls enforce their advertised required fields locally
+/// instead of forwarding malformed requests to the provider.
+#[test]
+fn parallel_missing_required_argument_is_rejected_before_forwarding() {
+    let searcher = StubSearcher::ok("unused");
+    let parallel = StubParallelClient::ok("unused");
+    let (mut reader, mut writer) = spawn_extension(searcher, parallel.clone());
+    drain_startup(&mut reader);
+
+    writer
+        .write_event(&Event::ToolStarted(ToolStarted {
+            call_id: "call-missing-query".into(),
+            tool_name: tau_proto::ToolName::new(PARALLEL_SEARCH_TOOL_NAME),
+            arguments: CborValue::Map(Vec::new()),
+            agent_id: tau_proto::AgentId::parse("agent-1").expect("agent id"),
+            originator: tau_proto::PromptOriginator::User,
+        }))
+        .expect("write");
+    writer.flush().expect("flush");
+
+    let event = reader.read_event().expect("read").expect("event");
+    let Event::ToolError(err) = event else {
+        panic!("expected ToolError, got {event:?}");
+    };
+    assert!(err.message.contains("query"), "message: {}", err.message);
+    assert!(parallel.calls.lock().expect("lock").is_empty());
 }
 
 /// Ensures Parallel JSON conversion rejects CBOR maps that cannot be
@@ -886,6 +954,28 @@ fn oversized_decoded_text_is_rejected() {
     assert!(err.contains("exceeded"), "err: {err}");
 }
 
+/// Ensures oversized JSON-RPC error messages are rejected with a compact error
+/// before becoming model-visible tool error text.
+#[test]
+fn oversized_jsonrpc_error_message_is_rejected() {
+    let body = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "error": {
+            "code": -32000,
+            "message": "x".repeat(TOOL_OUTPUT_MAX_BYTES + 1),
+        }
+    })
+    .to_string();
+    let err = decode_mcp_text_result(&body, "exa").expect_err("should fail");
+    assert!(err.contains("exceeded"), "err: {err}");
+    assert!(
+        err.len() < 200,
+        "oversized provider message should not be echoed: {}",
+        err.len()
+    );
+}
+
 /// Ensures endpoint redaction strips credentials and query strings from any
 /// transport error that includes the configured endpoint verbatim.
 #[test]
@@ -895,6 +985,184 @@ fn endpoint_redaction_removes_query_and_userinfo_secrets() {
     assert!(!redacted.contains("secret"), "redacted: {redacted}");
     assert!(!redacted.contains("exaApiKey"), "redacted: {redacted}");
     assert_eq!(redacted, "failed to connect to https://example.com/mcp");
+}
+
+/// Ensures non-success HTTP responses cannot echo endpoint query credentials
+/// back into model-visible provider error text.
+#[test]
+fn http_error_body_redacts_endpoint_query_secrets() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let endpoint = format!(
+        "http://{}/mcp?exaApiKey=secret#frag",
+        listener.local_addr().expect("addr")
+    );
+    let server = thread::spawn(move || {
+        let (stream, _) = listener.accept().expect("accept");
+        let mut reader = IoBufReader::new(stream.try_clone().expect("clone"));
+        loop {
+            let mut line = String::new();
+            reader.read_line(&mut line).expect("read line");
+            if line == "\r\n" {
+                break;
+            }
+        }
+        let response_body = "failed /mcp?exaApiKey=secret";
+        let response = format!(
+            "HTTP/1.1 500 Internal Server Error\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            response_body.len(),
+            response_body
+        );
+        std::io::Write::write_all(&mut &stream, response.as_bytes()).expect("write");
+    });
+
+    let err = HttpExaSearcher::new(endpoint)
+        .search("rust", 1)
+        .expect_err("server returned HTTP 500");
+    server.join().expect("join");
+    assert!(!err.contains("secret"), "err: {err}");
+    assert!(!err.contains("exaApiKey"), "err: {err}");
+}
+
+/// Ensures JSON-RPC provider errors cannot echo endpoint query credentials back
+/// into model-visible tool error text.
+#[test]
+fn jsonrpc_error_message_redacts_endpoint_query_secrets() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let endpoint = format!(
+        "http://{}/mcp?exaApiKey=secret#frag",
+        listener.local_addr().expect("addr")
+    );
+    let echoed_endpoint = endpoint.trim_end_matches("#frag").to_owned();
+    let server = thread::spawn(move || {
+        let (stream, _) = listener.accept().expect("accept");
+        let mut reader = IoBufReader::new(stream.try_clone().expect("clone"));
+        let mut content_len = 0usize;
+        loop {
+            let mut line = String::new();
+            reader.read_line(&mut line).expect("read line");
+            if line == "\r\n" {
+                break;
+            }
+            if let Some((name, value)) = line.split_once(':')
+                && name.eq_ignore_ascii_case("content-length")
+            {
+                content_len = value.trim().parse().expect("content length");
+            }
+        }
+        let mut body = vec![0; content_len];
+        reader.read_exact(&mut body).expect("body");
+        let response_body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "error": {
+                "code": -32000,
+                "message": format!("failed {echoed_endpoint} and /mcp?exaApiKey=secret"),
+            }
+        })
+        .to_string();
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            response_body.len(),
+            response_body
+        );
+        std::io::Write::write_all(&mut &stream, response.as_bytes()).expect("write");
+    });
+
+    let err = HttpExaSearcher::new(endpoint)
+        .search("rust", 1)
+        .expect_err("server returned JSON-RPC error");
+    server.join().expect("join");
+    assert!(!err.contains("secret"), "err: {err}");
+    assert!(!err.contains("exaApiKey"), "err: {err}");
+}
+
+/// Ensures the Parallel client applies the same JSON-RPC endpoint redaction as
+/// Exa before surfacing provider errors to the model.
+#[test]
+fn parallel_jsonrpc_error_message_redacts_endpoint_query_secrets() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let endpoint = format!(
+        "http://{}/mcp?parallelApiKey=secret#frag",
+        listener.local_addr().expect("addr")
+    );
+    let echoed_endpoint = endpoint.trim_end_matches("#frag").to_owned();
+    let server = thread::spawn(move || {
+        let (stream, _) = listener.accept().expect("accept");
+        let mut reader = IoBufReader::new(stream.try_clone().expect("clone"));
+        let mut content_len = 0usize;
+        loop {
+            let mut line = String::new();
+            reader.read_line(&mut line).expect("read line");
+            if line == "\r\n" {
+                break;
+            }
+            if let Some((name, value)) = line.split_once(':')
+                && name.eq_ignore_ascii_case("content-length")
+            {
+                content_len = value.trim().parse().expect("content length");
+            }
+        }
+        let mut body = vec![0; content_len];
+        reader.read_exact(&mut body).expect("body");
+        let response_body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "error": {
+                "code": -32000,
+                "message": format!("failed {echoed_endpoint} and /mcp?parallelApiKey=secret"),
+            }
+        })
+        .to_string();
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            response_body.len(),
+            response_body
+        );
+        std::io::Write::write_all(&mut &stream, response.as_bytes()).expect("write");
+    });
+
+    let err = HttpParallelClient::new(endpoint)
+        .call(
+            PARALLEL_REMOTE_SEARCH_TOOL,
+            serde_json::json!({ "query": "rust" }),
+        )
+        .expect_err("server returned JSON-RPC error");
+    server.join().expect("join");
+    assert!(!err.contains("secret"), "err: {err}");
+    assert!(!err.contains("parallelApiKey"), "err: {err}");
+}
+
+/// Ensures endpoint sanitization cannot expand short repeated query secrets
+/// beyond the model-visible error cap.
+#[test]
+fn endpoint_sanitization_caps_short_pattern_expansion() {
+    let err = sanitize_endpoint_error(
+        &"a".repeat(TOOL_OUTPUT_MAX_BYTES),
+        "https://example.com/mcp?a=a",
+    );
+    assert!(err.len() <= TOOL_OUTPUT_MAX_BYTES, "len: {}", err.len());
+    assert!(err.ends_with(TRUNCATED_SUFFIX), "err suffix missing");
+}
+
+/// Ensures an empty URL fragment is not treated as a replacement pattern, which
+/// would otherwise insert redaction text between every character.
+#[test]
+fn endpoint_sanitization_ignores_empty_fragment() {
+    let err = sanitize_endpoint_error("ordinary error", "https://example.com/mcp#");
+    assert_eq!(err, "ordinary error");
+}
+
+/// Ensures sanitization covers both raw percent-encoded endpoint query
+/// components and their decoded forms.
+#[test]
+fn endpoint_sanitization_redacts_percent_encoded_query_components() {
+    let err = sanitize_endpoint_error(
+        "failed exa%41piKey=secret token=s%2Bcret decoded s+cret",
+        "https://example.com/mcp?exa%41piKey=secret&token=s%2Bcret",
+    );
+    for leaked in ["exa%41piKey", "exaApiKey", "secret", "s%2Bcret", "s+cret"] {
+        assert!(!err.contains(leaked), "leaked {leaked:?} in {err}");
+    }
 }
 
 /// Ensures integer-valued CBOR floats remain compatible with callers that

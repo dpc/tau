@@ -69,6 +69,13 @@ responses cannot grow without bound. At most eight searches/fetches run at once;
 additional calls fail fast with a busy tool error so harness control messages are
 not blocked behind network calls.
 
+Provider transport diagnostics and JSON-RPC error messages can become
+model-visible `ToolError` text. Before surfacing them, the extension sanitizes
+echoes of the configured endpoint URL, request target, query keys/values,
+fragment, and userinfo, then applies a final model-visible error cap. Oversized
+JSON-RPC error messages are replaced with a compact deterministic error instead
+of echoing provider text.
+
 Tests use local stubs or loopback HTTP servers and do not contact live providers.
 
 ## Tracing
