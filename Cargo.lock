@@ -3152,7 +3152,6 @@ dependencies = [
 name = "tau-cli"
 version = "0.1.0"
 dependencies = [
- "base64",
  "built",
  "ciborium",
  "clap",
@@ -3207,6 +3206,7 @@ dependencies = [
 name = "tau-cli-term-raw"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "bon",
  "crossterm",
  "tau-blocking-notify-channel",

@@ -2632,15 +2632,17 @@ pub struct ShellCommandFinished {
 /// change. Useful for surfacing notifications, build status, or any
 /// other state to terminal-side tooling.
 ///
-/// The UI base64-encodes `value` and emits the appropriate escape
-/// sequence form (plain, or `\x1bPtmux;...\x1b\\` wrapped when running
-/// inside `tmux`). Components without access to a terminal — or
-/// running through a UI that ignores the event — are no-ops.
+/// Producers should validate `name` before emitting the event. The terminal UI
+/// validates again and skips invalid names instead of writing malformed escape
+/// sequences. The UI base64-encodes `value` and emits the appropriate escape
+/// sequence form (plain, or `\x1bPtmux;...\x1b\\` wrapped when running inside
+/// `tmux`). Components without access to a terminal — or running through a UI
+/// that ignores the event — are no-ops.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct Osc1337SetUserVar {
     /// User-variable name. Must be printable ASCII without `=` or
-    /// control characters; the UI does not validate this and passes
-    /// it through verbatim.
+    /// control characters. Terminal UIs validate and skip invalid names as
+    /// defense in depth.
     pub name: String,
     /// Value to associate with `name`. Arbitrary bytes are fine — the
     /// UI base64-encodes before transmission.

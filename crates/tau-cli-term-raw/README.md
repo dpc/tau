@@ -187,6 +187,21 @@ Two execution contexts cooperate:
 Any thread holding a `TermHandle` can mutate zones and trigger a redraw.
 Multiple redraws coalesce into one via the notify channel.
 
+## Test strategy
+
+Most tests use `Term::new_virtual()` so the input loop receives injected
+`RawEvent`s and the redraw thread writes to an in-memory `Write`. Rendered bytes
+are fed into `vt100::Parser`, which lets tests assert visible rows, scrollback,
+cursor placement, and terminal side effects without owning the real terminal.
+
+The suite covers the renderer at several levels: low-level full-redraw and
+scrolling helpers, model-vs-vt100 scrollback equivalence checks, redraw
+coalescing and `redraw_sync`, resize/full-redraw rebuilds, prompt history,
+completion, paste/newline normalization, and local prompt scrolling. Tests that
+exercise terminal ownership use the virtual pause/resume hooks to verify that
+the redraw thread stays silent while an external editor or picker owns the
+terminal.
+
 ## References
 
 - Fish shell screen rendering: <https://github.com/fish-shell/fish-shell/blob/master/src/screen.rs>

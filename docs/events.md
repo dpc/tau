@@ -411,7 +411,9 @@ sequences to a real terminal. Harness-owned code and extensions may emit these;
 the UI is the only consumer. Components without a terminal silently no-op.
 
 - **`term.osc1337_set_user_var`** — Ask the UI to write an iTerm2
-  OSC 1337 `SetUserVar` escape sequence. The UI base64-encodes the
+  OSC 1337 `SetUserVar` escape sequence. Producers should validate
+  names before emitting the event; the terminal UI validates again and
+  skips invalid names as defense in depth. The UI base64-encodes the
   value and tmux-wraps if needed. Useful for surfacing notifications,
   build status, or other state to terminal-side tooling.
 - **`term.bell`** — Ask the attached terminal UI to ring/flash according to the

@@ -15,6 +15,7 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+base64.workspace = true
 bon.workspace = true
 crossterm.workspace = true
 tau-blocking-notify-channel.workspace = true

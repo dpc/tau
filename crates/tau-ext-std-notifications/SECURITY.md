@@ -9,8 +9,9 @@ It should treat harness event text and display names as untrusted template data.
   closed through `ConfigError`.
 - Template inputs (`agent.name`, prompts, responses, summaries, cwd, hostname)
   can contain arbitrary user/model text.
-- The UI writes OSC 1337 user-var names into terminal escape sequences verbatim.
-  This crate validates rendered names before emitting them.
+- The terminal UI validates OSC 1337 user-var names and skips invalid names as
+  defense in depth before writing escape sequences. This crate also validates
+  rendered names before emitting them so bad configuration fails closed early.
 
 ## OSC 1337 keys
 
@@ -20,7 +21,8 @@ bytes. Statically invalid keys reject configuration. Keys that become invalid
 only after rendering runtime data are skipped and logged.
 
 `osc1337.value` is not restricted by this crate because the UI base64-encodes
-the value before writing the terminal escape.
+the value before writing the terminal escape. When the UI runs inside tmux it
+wraps the OSC sequence for tmux passthrough.
 
 ## Command hooks
 

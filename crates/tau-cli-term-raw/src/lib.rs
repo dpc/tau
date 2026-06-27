@@ -115,6 +115,14 @@ pub struct Candidate {
 /// empty result closes the completion menu; a non-empty result opens
 /// it (or refreshes it if already open).
 pub trait CompletionSource: Send + Sync {
+    /// Returns whole-buffer completion candidates for `buffer`.
+    ///
+    /// `cursor` is a UTF-8 byte offset into `buffer`, clamped to a grapheme
+    /// boundary by the prompt before this hook is called. The hook runs
+    /// synchronously on the input-event path, so implementations should avoid
+    /// blocking work. Accepting or previewing a returned candidate replaces the
+    /// entire prompt buffer with [`Candidate::replacement`] and places the
+    /// cursor at the replacement's end.
     fn candidates(&self, buffer: &str, cursor: usize) -> Vec<Candidate>;
 }
 
@@ -260,10 +268,10 @@ struct SharedState {
     /// blocking on recv).
     sync_requested: u64,
     sync_completed: u64,
-    /// Raw escape sequences (or any other byte string) waiting to be
-    /// written by the redraw thread on its next pass. Producers push
-    /// here via `TermHandle::print_terminal_escape` to ensure their
-    /// bytes don't interleave with the active frame's render output.
+    /// Non-model terminal side effects waiting to be written by the redraw
+    /// thread on its next pass. Producers use narrow typed APIs on
+    /// [`TermHandle`] so callers cannot inject arbitrary cursor movement or
+    /// clear-screen escapes behind the renderer's back.
     pending_raw: Vec<String>,
     /// Nested redraw suppression counter used while the CLI renderer updates
     /// an off-screen agent transcript snapshot.
@@ -1276,12 +1284,46 @@ impl TermHandle {
         st.ensure_input_cursor_visible();
     }
 
-    /// Queues a raw byte string (typically a terminal escape sequence
-    /// that doesn't change visible output, like an OSC user-var
-    /// notification) to be written by the redraw thread on its next
-    /// pass. Goes through the redraw loop so the bytes never
-    /// interleave with an in-flight frame.
-    pub fn print_terminal_escape(&self, sequence: impl Into<String>) {
+    /// Queues a terminal bell to be written by the redraw thread on its next
+    /// pass. Goes through the redraw loop so the byte never interleaves with an
+    /// in-flight frame.
+    pub fn print_terminal_bell(&self) {
+        self.queue_terminal_side_effect("\x07");
+    }
+
+    /// Queues an iTerm2 OSC 1337 `SetUserVar` side effect.
+    ///
+    /// `name` must be non-empty printable ASCII, must not contain `=`, and must
+    /// be at most 128 bytes. Invalid names are skipped and logged without
+    /// echoing the invalid bytes. When `in_tmux` is true, the OSC is wrapped in
+    /// a tmux passthrough DCS sequence so the outer terminal receives it.
+    ///
+    /// `value` is base64-encoded before being written. Invalid `name` values
+    /// are rejected and logged rather than emitted because OSC names are
+    /// structural escape-sequence fields.
+    pub fn print_osc1337_set_user_var(&self, name: &str, value: &str, in_tmux: bool) {
+        if let Err(error) = validate_osc1337_name(name) {
+            tracing::warn!(
+                target: "tau_cli_term_raw::terminal_side_effect",
+                name_len = name.len(),
+                error,
+                "skipping invalid OSC 1337 SetUserVar side effect"
+            );
+            return;
+        }
+        let encoded = {
+            use base64::Engine as _;
+            base64::engine::general_purpose::STANDARD.encode(value.as_bytes())
+        };
+        let sequence = if in_tmux {
+            format!("\x1bPtmux;\x1b\x1b]1337;SetUserVar={name}={encoded}\x07\x1b\\")
+        } else {
+            format!("\x1b]1337;SetUserVar={name}={encoded}\x07")
+        };
+        self.queue_terminal_side_effect(sequence);
+    }
+
+    fn queue_terminal_side_effect(&self, sequence: impl Into<String>) {
         let notify = {
             let mut st = self.lock();
             st.pending_raw.push(sequence.into());
@@ -1291,6 +1333,22 @@ impl TermHandle {
             self.redraw.notify();
         }
     }
+}
+
+fn validate_osc1337_name(name: &str) -> Result<(), &'static str> {
+    if name.is_empty() {
+        return Err("name must not be empty");
+    }
+    if name.len() > 128 {
+        return Err("name must be at most 128 bytes");
+    }
+    if !name
+        .bytes()
+        .all(|b| (0x20..=0x7e).contains(&b) && b != b'=')
+    {
+        return Err("name must be printable ASCII without '='");
+    }
+    Ok(())
 }
 
 /// Raw terminal events from the crossterm reader thread.
@@ -1355,6 +1413,12 @@ impl Term {
     ///
     /// Enters raw mode and spawns the redraw thread.
     /// Returns the prompt engine and a cloneable [`TermHandle`].
+    ///
+    /// # Errors
+    ///
+    /// Returns terminal I/O errors from enabling raw mode or terminal input
+    /// features. If feature setup fails after raw mode was enabled, raw mode is
+    /// disabled on a best-effort basis before returning the error.
     pub fn new(
         left_prompt: impl Into<StyledText>,
         cursor_shape: CursorShape,
@@ -1382,13 +1446,10 @@ impl Term {
         // `Ctrl+Enter` that vanilla terminals collapse into a bare
         // `\r`. Terminals that don't implement the protocol silently
         // ignore the escape and we keep the legacy behavior.
-        let _ = crossterm::execute!(
-            io::stdout(),
-            crossterm::event::EnableBracketedPaste,
-            crossterm::event::EnableFocusChange,
-            PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES),
-            cursor_shape.crossterm_style()
-        );
+        if let Err(error) = write_external_resume_features(&mut io::stdout(), cursor_shape) {
+            let _ = terminal::disable_raw_mode();
+            return Err(error);
+        }
 
         let redraw_state = Arc::clone(&state);
         let redraw_writer: Box<dyn Write + Send> = Box::new(io::stdout());
@@ -1481,6 +1542,12 @@ impl Term {
     /// Handles key editing internally (insert, delete, cursor movement)
     /// and only surfaces events the downstream cares about. Triggers
     /// a redraw before returning so internal state changes are visible.
+    ///
+    /// # Errors
+    ///
+    /// Returns terminal I/O errors from crossterm polling or reading on real
+    /// terminals. Virtual terminals return EOF when their injected input
+    /// channel is disconnected.
     pub fn get_next_event(&self) -> io::Result<Event> {
         loop {
             let raw = match self.next_raw()? {
@@ -1697,7 +1764,7 @@ impl Term {
     }
 
     /// Re-acquires raw mode + bracketed paste after an external
-    /// program. Marks the redraw thread'\''s `Screen` cache stale so the
+    /// program. Marks the redraw thread's `Screen` cache stale so the
     /// next render repaints from scratch; without this, the cache
     /// would diff against what we *thought* was on screen and skip
     /// drawing anything since the editor exited.
@@ -2483,21 +2550,31 @@ fn write_external_resume_features(
 impl Drop for Term {
     fn drop(&mut self) {
         self.shutdown();
-        if self.owns_raw_mode {
+        if self.should_write_drop_terminal_cleanup() {
             // Pair the terminal modes we set in `new`: disable paste/focus,
             // pop the keyboard-protocol push, and return cursor shape to the
             // user's configured default so shells and other programs don't
             // inherit Tau's prompt cursor.
-            let _ = crossterm::execute!(
-                io::stdout(),
-                PopKeyboardEnhancementFlags,
-                crossterm::event::DisableFocusChange,
-                crossterm::event::DisableBracketedPaste,
-                SetCursorStyle::DefaultUserShape,
-            );
+            let _ = write_drop_terminal_cleanup(&mut io::stdout());
             let _ = terminal::disable_raw_mode();
         }
     }
+}
+
+impl Term {
+    fn should_write_drop_terminal_cleanup(&self) -> bool {
+        self.owns_raw_mode && !self.handle.lock().external_paused
+    }
+}
+
+fn write_drop_terminal_cleanup(writer: &mut impl Write) -> io::Result<()> {
+    crossterm::execute!(
+        writer,
+        PopKeyboardEnhancementFlags,
+        crossterm::event::DisableFocusChange,
+        crossterm::event::DisableBracketedPaste,
+        SetCursorStyle::DefaultUserShape,
+    )
 }
 
 // --- Rendering helpers ---
@@ -2519,7 +2596,6 @@ enum LineSource {
 /// and blocks with empty content (so callers can "hide" a block by
 /// swapping its content to empty without leaving a blank row).
 fn layout_id_list(
-    _zone: &'static str,
     ids: &[BlockId],
     blocks: &HashMap<BlockId, StyledBlock>,
     block_debug_ids: &HashMap<BlockId, String>,
@@ -2566,7 +2642,6 @@ impl HistoryLayoutCache {
         let mut lines = Vec::new();
         let mut sources = Vec::new();
         layout_id_list(
-            "history",
             &st.history,
             &st.blocks,
             &st.block_debug_ids,
@@ -2896,7 +2971,6 @@ fn layout_tail(st: &SharedState, history_height: usize) -> TailLayout {
     let mut sources: Vec<LineSource> = Vec::new();
 
     layout_id_list(
-        "above_active",
         &st.above_active,
         &st.blocks,
         &st.block_debug_ids,
@@ -2906,7 +2980,6 @@ fn layout_tail(st: &SharedState, history_height: usize) -> TailLayout {
     );
     let active_height = lines.len();
     layout_id_list(
-        "above_sticky",
         &st.above_sticky,
         &st.blocks,
         &st.block_debug_ids,
@@ -3003,7 +3076,6 @@ fn layout_tail(st: &SharedState, history_height: usize) -> TailLayout {
         lines.push(line);
     }
     layout_id_list(
-        "suggestions",
         &st.suggestions,
         &st.blocks,
         &st.block_debug_ids,
@@ -3012,7 +3084,6 @@ fn layout_tail(st: &SharedState, history_height: usize) -> TailLayout {
         &mut sources,
     );
     layout_id_list(
-        "below",
         &st.below,
         &st.blocks,
         &st.block_debug_ids,
@@ -3211,9 +3282,15 @@ fn render_shutdown_if_requested(
     prev_width: usize,
     sync_condvar: &std::sync::Condvar,
 ) -> bool {
-    let st = state.lock().expect("term state mutex poisoned");
+    let mut st = state.lock().expect("term state mutex poisoned");
     if !st.shutdown {
         return false;
+    }
+    if st.external_paused {
+        st.sync_completed = st.sync_requested;
+        drop(st);
+        sync_condvar.notify_all();
+        return true;
     }
 
     // Final render + move cursor below all content.

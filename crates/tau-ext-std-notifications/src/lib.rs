@@ -65,8 +65,10 @@ pub const SUMMARY_TIMEOUT_SECONDS: u64 = 10;
 
 /// Maximum OSC 1337 user-variable name length accepted by this extension.
 ///
-/// The terminal UI passes names through verbatim into an escape sequence, so
-/// notification keys are intentionally short and restricted.
+/// The terminal UI also validates and skips invalid names as defense in depth,
+/// but notification keys are intentionally validated before emission so
+/// configuration errors fail closed and runtime-invalid template output is
+/// dropped before it reaches the UI.
 const MAX_OSC1337_NAME_LEN: usize = 128;
 
 /// Instruction sent to the agent as a side prompt when the idle

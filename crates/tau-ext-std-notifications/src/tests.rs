@@ -1980,8 +1980,8 @@ fn osc1337_name_validator_covers_documented_constraints() {
 }
 
 /// A statically invalid OSC user-var key must fail configuration validation
-/// before any notification fires. The UI writes OSC names verbatim, so keys
-/// containing `=` would corrupt the SetUserVar escape sequence.
+/// before any notification fires. The UI also rejects malformed OSC names, and
+/// this extension should fail closed before invalid keys reach that boundary.
 #[test]
 fn invalid_static_osc1337_key_emits_config_error() {
     let bad_config = tau_proto::json_to_cbor(&serde_json::json!({

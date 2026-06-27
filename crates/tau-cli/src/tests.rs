@@ -56,11 +56,11 @@ fn agent_id(value: &str) -> tau_proto::AgentId {
     tau_proto::AgentId::parse(value).expect("valid test agent id")
 }
 use super::tool_render::{
-    CompactionStatus, ToolStatus, build_delegate_completion_display, build_osc1337_set_user_var,
-    cache_hit_percent, format_turn_stats_line, render_action_error_block,
-    render_action_output_block, render_compaction_block, render_delegate_display,
-    render_diff_tool_block, render_multi_diff_tool_block, render_shell_block, render_tool_block,
-    render_tool_use_state, render_turn_stats_block, streaming_block, synthesize_fallback_display,
+    CompactionStatus, ToolStatus, build_delegate_completion_display, cache_hit_percent,
+    format_turn_stats_line, render_action_error_block, render_action_output_block,
+    render_compaction_block, render_delegate_display, render_diff_tool_block,
+    render_multi_diff_tool_block, render_shell_block, render_tool_block, render_tool_use_state,
+    render_turn_stats_block, streaming_block, synthesize_fallback_display,
 };
 
 #[test]
@@ -6687,17 +6687,6 @@ fn render_shell_block_abbreviates_inline_command_and_status_but_preserves_output
     assert!(text.contains("err: command failed ┄very long diagnostic"));
     assert!(!text.contains(status));
     assert!(text.contains(output));
-}
-
-#[test]
-fn build_osc1337_set_user_var_encodes_value_and_respects_tmux() {
-    let plain = build_osc1337_set_user_var("user-notification", "hello", false);
-    assert_eq!(plain, "\x1b]1337;SetUserVar=user-notification=aGVsbG8=\x07");
-    let wrapped = build_osc1337_set_user_var("user-notification", "hello", true);
-    assert_eq!(
-        wrapped,
-        "\x1bPtmux;\x1b\x1b]1337;SetUserVar=user-notification=aGVsbG8=\x07\x1b\\",
-    );
 }
 
 #[test]

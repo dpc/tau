@@ -21,12 +21,12 @@ use crate::markdown_render::{
 use crate::skill_commands::SkillCommandState;
 use crate::tool_render::{
     CompactionStatus, ToolCallDisplay, ToolSummaryDisplay, build_delegate_completion_display,
-    build_osc1337_set_user_var, build_tool_summary_display, diff_payload_counts,
-    extension_status_block, extract_diff, format_token_count, pending_tool_call_display,
-    render_compaction_block, render_delegate_display, render_diff_tool_block,
-    render_harness_notice, render_multi_diff_tool_block, render_shell_block, render_tool_block,
-    render_tool_use_state, render_turn_stats_block, session_status_block, streaming_block,
-    synthesize_fallback_display, system_loaded_block, tool_duration_suffix, ui_dir_block,
+    build_tool_summary_display, diff_payload_counts, extension_status_block, extract_diff,
+    format_token_count, pending_tool_call_display, render_compaction_block,
+    render_delegate_display, render_diff_tool_block, render_harness_notice,
+    render_multi_diff_tool_block, render_shell_block, render_tool_block, render_tool_use_state,
+    render_turn_stats_block, session_status_block, streaming_block, synthesize_fallback_display,
+    system_loaded_block, tool_duration_suffix, ui_dir_block,
 };
 
 pub(crate) const UI_IO_MEDIUM_BYTES_PER_SEC: u64 = 10 * 1024;
@@ -5298,12 +5298,12 @@ impl EventRenderer {
         match event {
             Event::Osc1337SetUserVar(req) => {
                 let in_tmux = std::env::var_os("TMUX").is_some();
-                let seq = build_osc1337_set_user_var(&req.name, &req.value, in_tmux);
-                self.handle.print_terminal_escape(seq);
+                self.handle
+                    .print_osc1337_set_user_var(&req.name, &req.value, in_tmux);
                 true
             }
             Event::TermBell(_) => {
-                self.handle.print_terminal_escape("\x07".to_owned());
+                self.handle.print_terminal_bell();
                 true
             }
             _ => false,

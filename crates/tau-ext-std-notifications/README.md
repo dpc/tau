@@ -132,11 +132,12 @@ strict mode. Current variables include `hook`, `agent.id`, `agent.name`
 `turn.agent_summary` (set only for idle hooks with
 `agent_summary: true`, empty on timeout/error).
 
-Rendered OSC user-var keys are validated before emission because the UI writes
-them into terminal escape sequences verbatim. Keys must be non-empty printable
-ASCII, must not contain `=`, BEL/ESC, or other control characters, and must be
-at most 128 bytes. A statically invalid key rejects the config; a key that only
-becomes invalid after rendering untrusted runtime data is skipped and logged.
+Rendered OSC user-var keys are validated before emission, and the terminal UI
+validates again before writing escape sequences. Keys must be non-empty
+printable ASCII, must not contain `=`, BEL/ESC, or other control characters, and
+must be at most 128 bytes. A statically invalid key rejects the config; a key
+that only becomes invalid after rendering untrusted runtime data is skipped and
+logged.
 
 Command hooks are trusted local configuration. The extension spawns them
 detached from stdin/stdout/stderr, but each command runs in its own thread until

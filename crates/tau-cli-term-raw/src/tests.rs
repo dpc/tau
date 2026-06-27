@@ -78,6 +78,46 @@ fn external_pause_disables_and_resume_enables_focus_reporting() {
     assert!(resume.contains("\u{1b}[?1004h"), "resume: {resume:?}");
 }
 
+/// Dropping the prompt while an external program owns the terminal must not
+/// write Tau's final shutdown frame into the editor/picker screen.
+#[test]
+fn shutdown_does_not_render_while_external_paused() {
+    let buf = SharedBuffer::new();
+    let mut parser = vt100::Parser::new(5, 40, 0);
+    let (term, handle, _input_tx) =
+        Term::new_virtual(40, 5, "> ", Box::new(buf.clone()), CursorShape::Bar);
+
+    handle.print_output("before-pause", "visible before pause");
+    flush_redraws(&handle, &buf, &mut parser);
+    assert!(buf.is_empty(), "test should start with drained output");
+
+    term.pause_for_external_with_release(|| Ok(()))
+        .expect("virtual pause");
+    assert!(buf.is_empty(), "pause sync should not render while paused");
+
+    drop(term);
+    assert!(buf.is_empty(), "shutdown must not write while paused");
+}
+
+/// Real terminal cleanup is also skipped while paused; the pause path has
+/// already disabled raw-mode terminal features before handing ownership to the
+/// external program.
+#[test]
+fn drop_cleanup_is_skipped_while_external_paused() {
+    let buf = SharedBuffer::new();
+    let (mut term, _handle, _input_tx) =
+        Term::new_virtual(40, 5, "> ", Box::new(buf), CursorShape::Bar);
+    term.owns_raw_mode = true;
+
+    assert!(term.should_write_drop_terminal_cleanup());
+    term.pause_for_external_with_release(|| Ok(()))
+        .expect("virtual pause");
+    assert!(!term.should_write_drop_terminal_cleanup());
+
+    // Keep this virtual test from attempting real terminal cleanup on drop.
+    term.owns_raw_mode = false;
+}
+
 /// Real terminal poll errors must propagate through `get_next_event` instead
 /// of being treated as EOF.
 #[test]
@@ -602,7 +642,7 @@ fn redraw_suppression_is_scoped() {
             st.redraw_dirty_while_suppressed = false;
         }
 
-        handle.print_terminal_escape("\x1b]1337;CurrentDir=/tmp\x07");
+        handle.print_osc1337_set_user_var("CurrentDir", "/tmp", false);
         {
             let mut st = handle.lock();
             assert!(st.redraw_dirty_while_suppressed);
@@ -1747,6 +1787,15 @@ impl SharedBuffer {
             buf.clear();
         }
     }
+
+    fn is_empty(&self) -> bool {
+        self.0.lock().expect("shared buffer poisoned").is_empty()
+    }
+
+    fn drain_bytes(&self) -> Vec<u8> {
+        let mut buf = self.0.lock().expect("shared buffer poisoned");
+        std::mem::take(&mut *buf)
+    }
 }
 
 impl io::Write for SharedBuffer {
@@ -1761,6 +1810,40 @@ impl io::Write for SharedBuffer {
     fn flush(&mut self) -> io::Result<()> {
         Ok(())
     }
+}
+
+/// Terminal side effects are intentionally narrow: OSC user-var values are
+/// encoded by the raw layer and invalid names are skipped instead of allowing
+/// arbitrary escape injection.
+#[test]
+fn terminal_side_effect_api_encodes_and_validates_osc_user_vars() {
+    let buf = SharedBuffer::new();
+    let (term, handle, _input_tx) =
+        Term::new_virtual(40, 5, "> ", Box::new(buf.clone()), CursorShape::Bar);
+    handle.redraw_sync();
+    let _ = buf.drain_bytes();
+
+    handle.print_osc1337_set_user_var("user-notification", "hello", false);
+    handle.redraw_sync();
+    let bytes = String::from_utf8(buf.drain_bytes()).expect("utf8 output");
+    assert!(bytes.contains("\x1b]1337;SetUserVar=user-notification=aGVsbG8=\x07"));
+
+    handle.print_osc1337_set_user_var("user-notification", "hello", true);
+    handle.redraw_sync();
+    let bytes = String::from_utf8(buf.drain_bytes()).expect("utf8 output");
+    assert!(
+        bytes.contains("\x1bPtmux;\x1b\x1b]1337;SetUserVar=user-notification=aGVsbG8=\x07\x1b\\")
+    );
+
+    handle.print_osc1337_set_user_var("bad=key", "ignored", false);
+    handle.redraw_sync();
+    let bytes = String::from_utf8(buf.drain_bytes()).expect("utf8 output");
+    assert!(
+        !bytes.contains("SetUserVar=") && !bytes.contains("\x1b]1337;"),
+        "invalid OSC names must not emit an OSC side effect: {bytes:?}"
+    );
+
+    drop(term);
 }
 
 /// Helper: get visible rows from a vt100 parser as trimmed strings.

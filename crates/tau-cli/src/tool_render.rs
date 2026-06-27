@@ -175,26 +175,6 @@ pub(crate) fn cache_hit_percent(
     Some(percent.min(100) as u8)
 }
 
-/// Build the iTerm2 OSC 1337 `SetUserVar` escape sequence for the
-/// given (name, value) pair, with `value` base64-encoded.
-///
-/// When `in_tmux` is true the sequence is wrapped in
-/// `\x1bPtmux;...\x1b\\` and the inner ESC is doubled so tmux passes
-/// the OSC through to the outer terminal instead of consuming it.
-/// Mirrors the shape used by the `user-notification.sh` reference
-/// script. Caller is responsible for detecting tmux (typically by
-/// checking `$TMUX`).
-pub(crate) fn build_osc1337_set_user_var(name: &str, value: &str, in_tmux: bool) -> String {
-    use base64::Engine as _;
-    use base64::engine::general_purpose::STANDARD;
-    let encoded = STANDARD.encode(value.as_bytes());
-    if in_tmux {
-        format!("\x1bPtmux;\x1b\x1b]1337;SetUserVar={name}={encoded}\x07\x1b\\")
-    } else {
-        format!("\x1b]1337;SetUserVar={name}={encoded}\x07")
-    }
-}
-
 pub(crate) fn format_token_count(tokens: u64) -> String {
     if tokens < 1_000 {
         return tokens.to_string();
