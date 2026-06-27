@@ -1,5 +1,7 @@
 use std::io::BufReader;
 use std::process::{Command, Stdio};
+use std::sync::mpsc;
+use std::time::Duration;
 
 use tau_proto::{HarnessOutputMessage, PeerInputReader};
 
@@ -44,12 +46,27 @@ extensions:
         .expect("spawn tau harness");
     let _stdin = child.stdin.take();
     let stdout = child.stdout.take().expect("stdout");
-    let mut reader = PeerInputReader::new(BufReader::new(stdout));
+    let (sender, receiver) = mpsc::channel();
+    let reader_thread = std::thread::spawn(move || {
+        let mut reader = PeerInputReader::new(BufReader::new(stdout));
+        let _ = sender.send(reader.read_message());
+    });
 
-    let message = reader
-        .read_message()
-        .expect("read startup disconnect")
-        .expect("startup disconnect");
+    let message = match receiver.recv_timeout(Duration::from_secs(10)) {
+        Ok(message) => message
+            .expect("read startup disconnect")
+            .expect("startup disconnect"),
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = reader_thread.join();
+            panic!("timed out waiting for startup disconnect on child stdout");
+        }
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+            panic!("startup disconnect reader thread exited without reporting a result");
+        }
+    };
+    reader_thread.join().expect("reader thread");
     let HarnessOutputMessage::Disconnect(disconnect) = message else {
         panic!("expected disconnect frame");
     };

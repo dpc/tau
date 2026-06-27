@@ -16,6 +16,8 @@ use tau_config::settings::{
     HarnessSettings, RoleCliOverride,
 };
 
+const TEST_DUMMY_EXTENSION_NAME: &str = "test-dummy";
+
 /// The resolved harness configuration handed to the daemon.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Config {
@@ -359,7 +361,10 @@ fn apply_extension_cli_overrides(
                 entry.enable = false;
             }
             ExtensionCliOverride::EnableAll => {
-                for entry in entries.values_mut() {
+                for (name, entry) in entries.iter_mut() {
+                    if name == TEST_DUMMY_EXTENSION_NAME {
+                        continue;
+                    }
                     entry.enable = true;
                 }
             }

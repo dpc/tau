@@ -3129,6 +3129,7 @@ dependencies = [
  "tau-ext-test-dummy",
  "tau-ext-websearch",
  "tau-ext-xmpp",
+ "tau-harness",
  "tau-proto",
  "tempfile",
 ]

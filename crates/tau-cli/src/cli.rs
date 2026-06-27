@@ -63,7 +63,9 @@ pub struct RoleOverrideArgs {
 
 #[derive(Args)]
 pub struct ExtensionOverrideArgs {
-    /// Enable every configured extension before later CLI extension overrides.
+    /// Enable non-test configured extensions before later CLI extension
+    /// overrides. The built-in test-dummy fixture still requires explicit
+    /// `--enable-extension test-dummy`.
     #[arg(long = "enable-extensions-all", global = true, action = clap::ArgAction::Count)]
     pub enable_extensions_all: u8,
 
@@ -180,9 +182,9 @@ pub enum Command {
     /// Bundled extensions are components too, but not every component is an
     /// extension; for example, the harness is a component.
     Component {
-        /// Component name (harness, ext-provider-builtin, ext-shell,
-        /// ext-test-dummy, ext-std-notifications, ext-websearch, ext-email,
-        /// ext-pim)
+        /// Component name (harness or a bundled extension such as ext-shell,
+        /// ext-provider-builtin, ext-websearch, ext-pim, ext-rhai,
+        /// ext-telegram, ext-xmpp, ext-std-notifications, or ext-test-dummy)
         name: String,
 
         /// Use stdin/stdout as the initial UI connection before starting

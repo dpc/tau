@@ -202,6 +202,29 @@ fn resolve_extensions_cli_overrides_apply_after_user_config() {
 }
 
 #[test]
+fn resolve_extensions_enable_all_skips_test_dummy_builtin() {
+    let s = HarnessSettings::built_in();
+
+    let resolved = resolve_extensions_with_cli_overrides(
+        &s,
+        builtins(),
+        &[tau_config::settings::ExtensionCliOverride::EnableAll],
+    )
+    .expect("resolve");
+    let names = resolved
+        .iter()
+        .map(|extension| extension.name.as_str())
+        .collect::<Vec<_>>();
+
+    assert!(names.contains(&"std-pim"));
+    assert!(names.contains(&"std-email"));
+    assert!(
+        !names.contains(&"test-dummy"),
+        "the test fixture must require explicit --enable-extension test-dummy"
+    );
+}
+
+#[test]
 fn resolve_extensions_cli_can_enable_disabled_user_extension() {
     let mut s = HarnessSettings::built_in();
     s.extensions.insert(
