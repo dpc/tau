@@ -666,6 +666,10 @@ fn harness_cli_alias_table_normalizes_all_legacy_keys() {
         ("toolPolicy", "tool_policy"),
         ("agents.idTemplate", "agents.id_template"),
         ("agents.displayNameTemplate", "agents.display_name_template"),
+        (
+            "toolPolicy.rules.local.enabled",
+            "tool_policy.rules.local.enable",
+        ),
         ("roleGroups.engineer.enabled", "role_groups.engineer.enable"),
         (
             "roleGroups.engineer.thinkingSummary",
@@ -1275,6 +1279,29 @@ fn harness_config_cli_map_override_disables_tool_policy_with_enabled_alias() {
             .expect("load");
 
     assert!(!settings.tool_policy.rules["builtin.chatgpt-shell"].enable);
+}
+
+/// Ensures dotted CLI overrides normalize tool policy rule aliases before
+/// duplicate detection, matching file-layer and whole-map override behavior.
+#[test]
+fn harness_config_cli_overrides_reject_tool_policy_rule_alias_conflicts() {
+    let td = TempDir::new().expect("tempdir");
+    let dir = td.path();
+    let overrides = [
+        HarnessConfigCliOverride::from_str("tool_policy.rules.local.enabled=false")
+            .expect("legacy override"),
+        HarnessConfigCliOverride::from_str("tool_policy.rules.local.enable=true")
+            .expect("canonical override"),
+    ];
+
+    let error =
+        load_harness_settings_with_cli_overrides_in(&dirs_with_config(dir), &[], &overrides)
+            .expect_err("conflicting tool policy aliases");
+
+    assert!(
+        error.to_string().contains("enabled") && error.to_string().contains("enable"),
+        "unexpected error: {error}"
+    );
 }
 
 /// Ensures role tool allow/deny lists load into effective role settings.

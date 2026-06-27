@@ -2046,6 +2046,9 @@ fn normalize_harness_config_override_key(key: &str) -> String {
             parts[2] = canonical_role_key(parts[2]);
         }
     }
+    if parts[0] == "tool_policy" && parts.len() > 3 && parts[1] == "rules" {
+        parts[3] = canonical_tool_policy_rule_key(parts[3]);
+    }
     parts.join(".")
 }
 
@@ -2081,6 +2084,13 @@ fn canonical_role_key(key: &str) -> &str {
         "disableToolTags" => "disable_tool_tags",
         "enableTools" => "enable_tools",
         "disableTools" => "disable_tools",
+        _ => key,
+    }
+}
+
+fn canonical_tool_policy_rule_key(key: &str) -> &str {
+    match key {
+        "enabled" => "enable",
         _ => key,
     }
 }
