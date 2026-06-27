@@ -15,6 +15,12 @@ work before `run` returns, subject to a bounded shutdown join timeout.
 This keeps script execution non-concurrent while still allowing host shell
 commands to run without blocking harness frame handling.
 
+Shell output capture is also bounded after foreground completion, timeout, or
+cancellation. Unix commands run in an owned process group/session, but detached
+descendants can survive with inherited stdout/stderr pipes; the runtime drains
+only immediately available pipe output for a bounded post-stop window instead of
+waiting for pipe EOF.
+
 ## Protocol tests drive `run`
 
 Status: unconfirmed

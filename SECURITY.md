@@ -195,7 +195,12 @@ register agent-invokable tools, handle model-originated tool calls, emit raw Tau
 events, and execute host shell commands directly through the Rhai extension.
 These shell commands intentionally do not route through `tau-ext-shell` and do
 not participate in ext-shell directory-update locks; only enable scripts you
-would be comfortable running as local programs.
+would be comfortable running as local programs. On Unix, Rhai shell commands use
+an owned process group/session for timeout and shutdown cleanup, but commands can
+detach descendants into another process group/session while keeping stdout/stderr
+inherited. Those descendants may survive the owned process-group kill, so Rhai
+shell output capture after foreground completion, timeout, or cancellation is
+bounded and must not wait indefinitely for pipe EOF.
 
 ## Interception boundary
 

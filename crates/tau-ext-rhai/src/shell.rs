@@ -6,6 +6,13 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::time::{Duration, Instant};
 
+/// Maximum bytes captured per stdout or stderr pipe.
+const MAX_CAPTURE_BYTES: usize = 512 * 1024;
+
+/// Maximum time to drain immediately available pipe output after the foreground
+/// shell command exits or is killed.
+const POST_STOP_DRAIN_TIMEOUT: Duration = Duration::from_millis(50);
+
 /// Shared cancellation and process-group state for one shell worker.
 #[derive(Clone, Default)]
 pub(crate) struct ShellCancel {
@@ -95,8 +102,15 @@ pub(crate) fn run_shell_command(
     };
     cancel.set_process_group(&child);
 
-    let stdout = child.stdout.take().map(read_pipe_capped);
-    let stderr = child.stderr.take().map(read_pipe_capped);
+    let pipe_stop = Arc::new(AtomicBool::new(false));
+    let stdout = child
+        .stdout
+        .take()
+        .map(|pipe| read_pipe_capped(pipe, pipe_stop.clone()));
+    let stderr = child
+        .stderr
+        .take()
+        .map(|pipe| read_pipe_capped(pipe, pipe_stop.clone()));
     let deadline = Instant::now().checked_add(timeout);
     let mut timed_out = false;
     let mut canceled = false;
@@ -121,9 +135,12 @@ pub(crate) fn run_shell_command(
     };
     // A shell can exit while background descendants keep inherited stdout/stderr
     // pipes open. Kill the process group before joining pipe readers so
-    // shutdown, timeout, and ordinary completion cannot wedge on those
-    // descendants.
+    // shutdown, timeout, and ordinary completion cannot wedge on normal
+    // background descendants. Also ask pipe readers to stop after draining what
+    // is immediately available: descendants may deliberately detach from the
+    // process group while keeping inherited pipes open.
     cancel.kill_process_group();
+    pipe_stop.store(true, Ordering::SeqCst);
 
     let out = stdout
         .map(|h| h.join().unwrap_or_default())
@@ -213,45 +230,117 @@ fn kill_process_group_id(pgid: i32) -> i32 {
 #[derive(Default)]
 struct CapturedPipe {
     text: String,
+    stored_bytes: usize,
     bytes: usize,
     truncated: bool,
     valid_utf8: bool,
 }
 
-fn read_pipe_capped<R: Read + Send + 'static>(
-    mut pipe: R,
-) -> std::thread::JoinHandle<CapturedPipe> {
-    std::thread::spawn(move || {
-        const MAX_CAPTURE_BYTES: usize = 512 * 1024;
-        let mut captured = CapturedPipe {
+impl CapturedPipe {
+    fn new() -> Self {
+        Self {
             valid_utf8: true,
             ..Default::default()
-        };
+        }
+    }
+
+    fn push_bytes(&mut self, bytes: &[u8]) {
+        self.bytes += bytes.len();
+        let room = MAX_CAPTURE_BYTES.saturating_sub(self.stored_bytes);
+        if room < bytes.len() {
+            self.truncated = true;
+        }
+        if room == 0 {
+            return;
+        }
+        let take = room.min(bytes.len());
+        self.stored_bytes += take;
+        match std::str::from_utf8(&bytes[..take]) {
+            Ok(s) => self.text.push_str(s),
+            Err(_) => {
+                self.valid_utf8 = false;
+                self.text.push_str(&String::from_utf8_lossy(&bytes[..take]));
+            }
+        }
+    }
+
+    fn reached_capture_cap(&self) -> bool {
+        MAX_CAPTURE_BYTES <= self.stored_bytes
+    }
+}
+
+#[cfg(unix)]
+fn read_pipe_capped<R>(mut pipe: R, stop: Arc<AtomicBool>) -> std::thread::JoinHandle<CapturedPipe>
+where
+    R: Read + Send + 'static + std::os::fd::AsRawFd,
+{
+    set_nonblocking(&pipe);
+    std::thread::spawn(move || {
+        let mut captured = CapturedPipe::new();
         let mut buf = [0u8; 8192];
+        let mut post_stop_deadline = None;
         loop {
+            if post_stop_deadline.is_none() && stop.load(Ordering::SeqCst) {
+                post_stop_deadline = Some(Instant::now() + POST_STOP_DRAIN_TIMEOUT);
+            }
+            if post_stop_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+                break;
+            }
             match pipe.read(&mut buf) {
-                Ok(0) | Err(_) => break,
-                Ok(n) => {
-                    captured.bytes += n;
-                    let room = MAX_CAPTURE_BYTES.saturating_sub(captured.text.len());
-                    if room < n {
-                        captured.truncated = true;
+                Ok(0) => break,
+                Err(ref error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    let sleep_for = post_stop_deadline
+                        .map(|deadline| deadline.saturating_duration_since(Instant::now()))
+                        .map(|remaining| remaining.min(Duration::from_millis(5)))
+                        .unwrap_or_else(|| Duration::from_millis(5));
+                    if sleep_for.is_zero() {
+                        break;
                     }
-                    if room > 0 {
-                        let take = room.min(n);
-                        match std::str::from_utf8(&buf[..take]) {
-                            Ok(s) => captured.text.push_str(s),
-                            Err(_) => {
-                                captured.valid_utf8 = false;
-                                captured
-                                    .text
-                                    .push_str(&String::from_utf8_lossy(&buf[..take]));
-                            }
-                        }
+                    std::thread::sleep(sleep_for);
+                }
+                Err(ref error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(_) => break,
+                Ok(n) => {
+                    captured.push_bytes(&buf[..n]);
+                    if post_stop_deadline.is_some() && captured.reached_capture_cap() {
+                        break;
                     }
                 }
             }
         }
         captured
     })
+}
+
+#[cfg(not(unix))]
+fn read_pipe_capped<R>(mut pipe: R, _stop: Arc<AtomicBool>) -> std::thread::JoinHandle<CapturedPipe>
+where
+    R: Read + Send + 'static,
+{
+    std::thread::spawn(move || {
+        let mut captured = CapturedPipe::new();
+        let mut buf = [0u8; 8192];
+        loop {
+            match pipe.read(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => captured.push_bytes(&buf[..n]),
+            }
+        }
+        captured
+    })
+}
+
+#[cfg(unix)]
+fn set_nonblocking<R: std::os::fd::AsRawFd>(pipe: &R) {
+    let fd = pipe.as_raw_fd();
+    #[allow(unsafe_code)]
+    // SAFETY: `fd` is a live pipe descriptor borrowed from `pipe`. `fcntl` does
+    // not take ownership of it. Failures only reduce us to ordinary blocking
+    // pipe behavior for unusual platforms/descriptors, so they are ignored.
+    unsafe {
+        let flags = libc::fcntl(fd, libc::F_GETFL);
+        if flags != -1 {
+            let _ = libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
+        }
+    }
 }

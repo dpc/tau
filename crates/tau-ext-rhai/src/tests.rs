@@ -132,6 +132,33 @@ fn emitted_transient(message: &HarnessInputMessage) -> Option<bool> {
     }
 }
 
+fn tool_result_output(frames: &[HarnessInputMessage]) -> &str {
+    for frame in frames {
+        let Some(Event::ToolResult(result)) = emitted_event(frame) else {
+            continue;
+        };
+        let CborValue::Map(fields) = &result.result else {
+            continue;
+        };
+        for (key, value) in fields {
+            if let (CborValue::Text(key), CborValue::Text(output)) = (key, value)
+                && key == "output"
+            {
+                return output;
+            }
+        }
+    }
+    panic!("tool result output");
+}
+
+fn setsid_available() -> bool {
+    std::process::Command::new("sh")
+        .arg("-c")
+        .arg("command -v setsid >/dev/null")
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
 #[test]
 fn bootstrap_waits_for_configure_then_uses_init_plan() {
     // The Rhai extension must not send subscriptions until it has the
@@ -1073,10 +1100,73 @@ fn shell_completion_kills_background_descendant_holding_output_pipe() {
     let frames = run_frames(&[configure_with_script(&script), started]);
 
     assert!(started_at.elapsed() < Duration::from_secs(1));
-    assert!(frames.iter().any(|frame| matches!(
-        emitted_event(frame),
-        Some(Event::ToolResult(result)) if result.result != CborValue::Null
-    )));
+    assert_eq!(tool_result_output(&frames), "done");
+}
+
+#[test]
+fn shell_completion_does_not_wait_for_detached_descendant_holding_output_pipe() {
+    // A hostile or careless trusted command can detach from the shell process
+    // group while keeping inherited stdout open. The extension should still
+    // return promptly with already-captured output instead of waiting for pipe
+    // EOF from a process group it no longer owns. This regression requires the
+    // `setsid` helper to be available in the test environment.
+    if !setsid_available() {
+        eprintln!("skipping detached setsid regression: setsid not available");
+        return;
+    }
+    let dir = tempfile::tempdir().expect("tempdir");
+    let script = write_script(
+        &dir,
+        r#"
+            fn init(config) { register_tool("detached_pipe", #{}, Fn("detached_pipe")); }
+            fn detached_pipe(args, c) {
+                return shell_spawn("setsid sh -c 'sleep 2' & printf done", #{ timeout: 10 });
+            }
+        "#,
+    );
+    let started = HarnessOutputMessage::deliver_live(
+        UnixMicros::new(1),
+        tool_started("detached_pipe", CborValue::Map(Vec::new())),
+    );
+
+    let started_at = Instant::now();
+    let frames = run_frames(&[configure_with_script(&script), started]);
+
+    assert!(started_at.elapsed() < Duration::from_secs(1));
+    assert_eq!(tool_result_output(&frames), "done");
+}
+
+#[test]
+fn shell_completion_bounds_detached_descendant_continuing_to_write() {
+    // Post-completion pipe draining must have an absolute bound. A detached
+    // descendant that keeps writing to inherited stdout after the foreground
+    // shell exits should not keep the pipe reader alive indefinitely. This
+    // regression requires the `setsid` helper to be available in the test
+    // environment.
+    if !setsid_available() {
+        eprintln!("skipping detached setsid writer regression: setsid not available");
+        return;
+    }
+    let dir = tempfile::tempdir().expect("tempdir");
+    let script = write_script(
+        &dir,
+        r#"
+            fn init(config) { register_tool("writing_pipe", #{}, Fn("writing_pipe")); }
+            fn writing_pipe(args, c) {
+                return shell_spawn("setsid sh -c 'i=0; while [ $i -lt 200 ]; do printf x; i=$((i+1)); sleep 0.01; done' & printf done", #{ timeout: 10 });
+            }
+        "#,
+    );
+    let started = HarnessOutputMessage::deliver_live(
+        UnixMicros::new(1),
+        tool_started("writing_pipe", CborValue::Map(Vec::new())),
+    );
+
+    let started_at = Instant::now();
+    let frames = run_frames(&[configure_with_script(&script), started]);
+
+    assert!(started_at.elapsed() < Duration::from_secs(1));
+    assert!(tool_result_output(&frames).contains("done"));
 }
 
 #[test]
