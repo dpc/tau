@@ -9,7 +9,7 @@
 use std::path::{Path, PathBuf};
 use std::{fmt, io};
 
-use tau_core::{AgentEntry, PolicyStore, SessionMembership, SessionStore, SessionStoreError};
+use tau_core::{AgentEntry, PolicyStore, SessionStore, SessionStoreError};
 use tau_proto::{
     CborValue, ContentPart, ContextItem, EventSelector, ToolCallItem, ToolResultStatus,
 };
@@ -17,7 +17,9 @@ use tau_proto::{
 /// Errors from the read-only inspection paths.
 #[derive(Debug)]
 pub enum InspectError {
+    /// A filesystem operation failed while reading inspection data.
     Io(io::Error),
+    /// The session or policy store could not be opened or decoded.
     SessionStore(SessionStoreError),
 }
 
@@ -68,23 +70,43 @@ pub fn default_sessions_dir() -> PathBuf {
     tau_config::settings::sessions_dir_of(&default_state_dir())
 }
 
+/// Returns the conventional session id used when no explicit session id is
+/// selected.
 #[must_use]
 pub fn default_session_id() -> &'static str {
     "default"
 }
 
+/// Opens a session store at `path` using the core session-store implementation.
+///
+/// This creates the store root when it does not already exist. Prefer
+/// [`session_lines`] or [`session_list_lines`] for read-only command output.
 pub fn open_session_store(path: impl AsRef<Path>) -> Result<SessionStore, InspectError> {
     SessionStore::open(path.as_ref()).map_err(InspectError::from)
 }
 
+/// Opens a policy store at `path` using the core policy-store implementation.
+///
+/// This creates the parent directory when it does not already exist. Prefer
+/// [`policy_lines`] for read-only command output.
 pub fn open_policy_store(path: impl AsRef<Path>) -> Result<PolicyStore, InspectError> {
     PolicyStore::open(path.as_ref()).map_err(InspectError::from)
 }
 
+/// Returns printable lines describing the currently loaded agents in one
+/// session.
+///
+/// Missing session roots and missing session ids are reported as a
+/// human-readable “not found” line instead of creating on-disk session
+/// directories.
 pub fn session_lines(
     path: impl AsRef<Path>,
     session_id: &str,
 ) -> Result<Vec<String>, InspectError> {
+    let path = path.as_ref();
+    if !path.try_exists()? {
+        return Ok(vec![format!("session {session_id} not found")]);
+    }
     let store = open_session_store(path)?;
     let Some(tree) = store.session(session_id) else {
         return Ok(vec![format!("session {session_id} not found")]);
@@ -97,7 +119,14 @@ pub fn session_lines(
         .collect())
 }
 
+/// Returns printable lines summarizing all persisted sessions.
+///
+/// A missing session root is treated as an empty store without creating it.
 pub fn session_list_lines(path: impl AsRef<Path>) -> Result<Vec<String>, InspectError> {
+    let path = path.as_ref();
+    if !path.try_exists()? {
+        return Ok(vec!["no sessions".to_owned()]);
+    }
     let store = open_session_store(path)?;
     let mut sessions = store.sessions();
     sessions.sort_by(|a, b| a.session_id().cmp(b.session_id()));
@@ -113,7 +142,15 @@ pub fn session_list_lines(path: impl AsRef<Path>) -> Result<Vec<String>, Inspect
         .collect())
 }
 
+/// Returns printable lines summarizing persisted subscription-policy approvals.
+///
+/// A missing policy file or state directory is treated as an empty policy store
+/// without creating it.
 pub fn policy_lines(path: impl AsRef<Path>) -> Result<Vec<String>, InspectError> {
+    let path = path.as_ref();
+    if !path.try_exists()? {
+        return Ok(vec!["no policy approvals".to_owned()]);
+    }
     let store = open_policy_store(path)?;
     let mut approvals = store.approvals().to_vec();
     approvals.sort_by(|a, b| a.connection_name.cmp(&b.connection_name));
@@ -188,11 +225,6 @@ fn format_tool_result_item(item: &tau_proto::ToolResultItem) -> String {
             format!("tool.cancelled {} -> {reason}", item.call_id)
         }
     }
-}
-
-#[must_use]
-pub fn latest_agent_preview(_session: &SessionMembership) -> Option<String> {
-    None
 }
 
 fn assistant_output_preview(items: &[ContextItem]) -> Option<String> {
