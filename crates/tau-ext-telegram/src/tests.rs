@@ -1,4 +1,4 @@
-use std::sync::Mutex;
+use std::sync::{Condvar, Mutex};
 
 use tau_proto::{HarnessInputMessage, ToolStarted};
 
@@ -72,6 +72,62 @@ impl TelegramClient for SlowPollClient {
     }
 }
 
+struct ControlledPollClient {
+    first_response: Mutex<Option<Vec<TgUpdate>>>,
+    response_ready: Condvar,
+    called: Mutex<bool>,
+    called_ready: Condvar,
+}
+
+impl ControlledPollClient {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            first_response: Mutex::new(None),
+            response_ready: Condvar::new(),
+            called: Mutex::new(false),
+            called_ready: Condvar::new(),
+        })
+    }
+
+    fn wait_for_call(&self) {
+        let called = self.called.lock().expect("lock");
+        let (called, _timeout) = self
+            .called_ready
+            .wait_timeout_while(called, Duration::from_secs(1), |called| !*called)
+            .expect("wait");
+        assert!(*called, "poller did not issue getUpdates");
+    }
+
+    fn release_first_response(&self, updates: Vec<TgUpdate>) {
+        *self.first_response.lock().expect("lock") = Some(updates);
+        self.response_ready.notify_all();
+    }
+}
+
+impl TelegramClient for ControlledPollClient {
+    fn get_updates(
+        &self,
+        _cfg: &RuntimeConfig,
+        _offset: Option<i64>,
+    ) -> Result<Vec<TgUpdate>, String> {
+        {
+            let mut called = self.called.lock().expect("lock");
+            *called = true;
+            self.called_ready.notify_all();
+        }
+        let response = self.first_response.lock().expect("lock");
+        let mut response = self
+            .response_ready
+            .wait_while(response, |response| response.is_none())
+            .expect("wait");
+        Ok(response.take().unwrap_or_default())
+    }
+
+    fn send_message(&self, _cfg: &RuntimeConfig, _chat_id: i64, _text: &str) -> Result<(), String> {
+        Ok(())
+    }
+}
+
 fn cfg() -> RuntimeConfig {
     RuntimeConfig {
         bot_token: "token".to_owned(),
@@ -120,6 +176,11 @@ fn extension() -> (
     let ext = Extension::new(client.clone(), tx);
     ext.apply_config(cfg(), None);
     (ext, rx, client)
+}
+
+fn process_update(ext: &Extension, update: TgUpdate) {
+    let config_generation = ext.state.lock().expect("lock").config_generation;
+    ext.process_update_for_generation(update, config_generation);
 }
 
 /// Telegram bridge tools are disabled by default because each role must make an
@@ -181,6 +242,41 @@ fn config_rejects_missing_token_or_empty_allowlist() {
     assert!(err.contains("allowed_user_ids"));
 }
 
+/// Bot tokens are embedded in Bot API request paths, so endpoint overrides must
+/// not let production plaintext or URL credentials leak the token.
+#[test]
+fn config_rejects_unsafe_api_base_overrides() {
+    let mut secrets = BTreeMap::new();
+    secrets.insert("bot".to_owned(), tau_proto::SecretValue::new("token"));
+
+    for api_base in [
+        "http://example.com",
+        "https://user@example.com",
+        "https://example.com?debug=1",
+        "https://example.com/#frag",
+    ] {
+        let err = ExtConfig {
+            bot_token_secret: Some("bot".to_owned()),
+            allowed_user_ids: vec![123],
+            api_base: Some(api_base.to_owned()),
+            ..Default::default()
+        }
+        .validate(&secrets)
+        .err()
+        .expect("unsafe api_base should be rejected");
+        assert!(err.contains("api_base"), "{api_base}: {err}");
+    }
+
+    ExtConfig {
+        bot_token_secret: Some("bot".to_owned()),
+        allowed_user_ids: vec![123],
+        api_base: Some("http://127.0.0.1:1234".to_owned()),
+        ..Default::default()
+    }
+    .validate(&secrets)
+    .expect("loopback http test endpoint should be allowed");
+}
+
 /// `telegram_send` is intentionally gated on prior registration so arbitrary
 /// agents cannot send messages without opting into the Telegram bridge first.
 #[test]
@@ -220,16 +316,19 @@ fn incoming_unallowed_user_is_not_routed() {
         .expect("lock")
         .registered_agents
         .insert(agent_id("agent-1"));
-    ext.process_update(TgUpdate {
-        update_id: 1,
-        message: Some(TgMessage {
-            chat_id: 123,
-            chat_type: None,
-            user_id: 999,
-            from_name: None,
-            text: Some("hello".to_owned()),
-        }),
-    });
+    process_update(
+        &ext,
+        TgUpdate {
+            update_id: 1,
+            message: Some(TgMessage {
+                chat_id: 123,
+                chat_type: None,
+                user_id: 999,
+                from_name: None,
+                text: Some("hello".to_owned()),
+            }),
+        },
+    );
     assert!(rx.try_recv().is_err());
 }
 
@@ -245,16 +344,19 @@ fn textless_allowed_message_gets_unsupported_reply() {
         .registered_agents
         .insert(agent_id("agent-1"));
 
-    ext.process_update(TgUpdate {
-        update_id: 1,
-        message: Some(TgMessage {
-            chat_id: 123,
-            chat_type: None,
-            user_id: 123,
-            from_name: None,
-            text: None,
-        }),
-    });
+    process_update(
+        &ext,
+        TgUpdate {
+            update_id: 1,
+            message: Some(TgMessage {
+                chat_id: 123,
+                chat_type: None,
+                user_id: 123,
+                from_name: None,
+                text: None,
+            }),
+        },
+    );
 
     assert!(rx.try_recv().is_err());
     assert_eq!(
@@ -273,16 +375,19 @@ fn one_registered_agent_routes_plain_text() {
         .expect("lock")
         .registered_agents
         .insert(agent_id("agent-1"));
-    ext.process_update(TgUpdate {
-        update_id: 1,
-        message: Some(TgMessage {
-            chat_id: 123,
-            chat_type: None,
-            user_id: 123,
-            from_name: Some("alice".to_owned()),
-            text: Some("hello".to_owned()),
-        }),
-    });
+    process_update(
+        &ext,
+        TgUpdate {
+            update_id: 1,
+            message: Some(TgMessage {
+                chat_id: 123,
+                chat_type: None,
+                user_id: 123,
+                from_name: Some("alice".to_owned()),
+                text: Some("hello".to_owned()),
+            }),
+        },
+    );
     let HarnessInputMessage::Emit(emit) = rx.recv().expect("prompt") else {
         panic!("emit")
     };
@@ -303,16 +408,19 @@ fn multiple_agents_without_selection_do_not_route() {
         state.registered_agents.insert(agent_id("agent-1"));
         state.registered_agents.insert(agent_id("agent-2"));
     }
-    ext.process_update(TgUpdate {
-        update_id: 1,
-        message: Some(TgMessage {
-            chat_id: 123,
-            chat_type: None,
-            user_id: 123,
-            from_name: None,
-            text: Some("hello".to_owned()),
-        }),
-    });
+    process_update(
+        &ext,
+        TgUpdate {
+            update_id: 1,
+            message: Some(TgMessage {
+                chat_id: 123,
+                chat_type: None,
+                user_id: 123,
+                from_name: None,
+                text: Some("hello".to_owned()),
+            }),
+        },
+    );
     assert!(rx.try_recv().is_err());
     assert!(client.sent.lock().expect("lock")[0].1.contains("Multiple"));
 }
@@ -335,26 +443,32 @@ fn bot_commands_show_agent_id_before_display_name() {
             .insert(agent_id("agent-2"), "Beta".to_owned());
     }
 
-    ext.process_update(TgUpdate {
-        update_id: 1,
-        message: Some(TgMessage {
-            chat_id: 123,
-            chat_type: None,
-            user_id: 123,
-            from_name: None,
-            text: Some("/agents".to_owned()),
-        }),
-    });
-    ext.process_update(TgUpdate {
-        update_id: 2,
-        message: Some(TgMessage {
-            chat_id: 123,
-            chat_type: None,
-            user_id: 123,
-            from_name: None,
-            text: Some("/select agent-2".to_owned()),
-        }),
-    });
+    process_update(
+        &ext,
+        TgUpdate {
+            update_id: 1,
+            message: Some(TgMessage {
+                chat_id: 123,
+                chat_type: None,
+                user_id: 123,
+                from_name: None,
+                text: Some("/agents".to_owned()),
+            }),
+        },
+    );
+    process_update(
+        &ext,
+        TgUpdate {
+            update_id: 2,
+            message: Some(TgMessage {
+                chat_id: 123,
+                chat_type: None,
+                user_id: 123,
+                from_name: None,
+                text: Some("/select agent-2".to_owned()),
+            }),
+        },
+    );
 
     let sent = client.sent.lock().expect("lock");
     assert_eq!(
@@ -382,16 +496,19 @@ fn agents_list_omits_empty_or_duplicate_display_names() {
             .insert(agent_id("agent-3"), "agent-3".to_owned());
     }
 
-    ext.process_update(TgUpdate {
-        update_id: 1,
-        message: Some(TgMessage {
-            chat_id: 123,
-            chat_type: None,
-            user_id: 123,
-            from_name: None,
-            text: Some("/agents".to_owned()),
-        }),
-    });
+    process_update(
+        &ext,
+        TgUpdate {
+            update_id: 1,
+            message: Some(TgMessage {
+                chat_id: 123,
+                chat_type: None,
+                user_id: 123,
+                from_name: None,
+                text: Some("/agents".to_owned()),
+            }),
+        },
+    );
 
     assert_eq!(
         client.sent.lock().expect("lock")[0].1,
@@ -410,16 +527,19 @@ fn malformed_slash_commands_are_not_routed_as_prompts() {
         .registered_agents
         .insert(agent_id("agent-1"));
     for (update_id, text) in [(1, "/startx"), (2, "/select"), (3, "/to")] {
-        ext.process_update(TgUpdate {
-            update_id,
-            message: Some(TgMessage {
-                chat_id: 123,
-                chat_type: None,
-                user_id: 123,
-                from_name: None,
-                text: Some(text.to_owned()),
-            }),
-        });
+        process_update(
+            &ext,
+            TgUpdate {
+                update_id,
+                message: Some(TgMessage {
+                    chat_id: 123,
+                    chat_type: None,
+                    user_id: 123,
+                    from_name: None,
+                    text: Some(text.to_owned()),
+                }),
+            },
+        );
     }
     assert!(rx.try_recv().is_err());
     let sent = client.sent.lock().expect("lock");
@@ -438,26 +558,32 @@ fn select_then_plain_text_routes_to_selected_agent() {
         state.registered_agents.insert(agent_id("agent-1"));
         state.registered_agents.insert(agent_id("agent-2"));
     }
-    ext.process_update(TgUpdate {
-        update_id: 1,
-        message: Some(TgMessage {
-            chat_id: 123,
-            chat_type: None,
-            user_id: 123,
-            from_name: None,
-            text: Some("/select agent-2".to_owned()),
-        }),
-    });
-    ext.process_update(TgUpdate {
-        update_id: 2,
-        message: Some(TgMessage {
-            chat_id: 123,
-            chat_type: None,
-            user_id: 123,
-            from_name: None,
-            text: Some("hi".to_owned()),
-        }),
-    });
+    process_update(
+        &ext,
+        TgUpdate {
+            update_id: 1,
+            message: Some(TgMessage {
+                chat_id: 123,
+                chat_type: None,
+                user_id: 123,
+                from_name: None,
+                text: Some("/select agent-2".to_owned()),
+            }),
+        },
+    );
+    process_update(
+        &ext,
+        TgUpdate {
+            update_id: 2,
+            message: Some(TgMessage {
+                chat_id: 123,
+                chat_type: None,
+                user_id: 123,
+                from_name: None,
+                text: Some("hi".to_owned()),
+            }),
+        },
+    );
     let HarnessInputMessage::Emit(emit) = rx.recv().expect("prompt") else {
         panic!("emit")
     };
@@ -513,16 +639,19 @@ fn unconfigured_group_chat_is_refused() {
         state.learned_chat = None;
         state.registered_agents.insert(agent_id("agent-1"));
     }
-    ext.process_update(TgUpdate {
-        update_id: 1,
-        message: Some(TgMessage {
-            chat_id: -100,
-            chat_type: Some("supergroup".to_owned()),
-            user_id: 123,
-            from_name: None,
-            text: Some("hello".to_owned()),
-        }),
-    });
+    process_update(
+        &ext,
+        TgUpdate {
+            update_id: 1,
+            message: Some(TgMessage {
+                chat_id: -100,
+                chat_type: Some("supergroup".to_owned()),
+                user_id: 123,
+                from_name: None,
+                text: Some("hello".to_owned()),
+            }),
+        },
+    );
     assert!(rx.try_recv().is_err());
     assert!(
         client.sent.lock().expect("lock")[0]
@@ -541,16 +670,19 @@ fn configured_group_chat_can_route() {
         state.config.as_mut().expect("config").configured_chat_id = Some(-100);
         state.registered_agents.insert(agent_id("agent-1"));
     }
-    ext.process_update(TgUpdate {
-        update_id: 1,
-        message: Some(TgMessage {
-            chat_id: -100,
-            chat_type: Some("supergroup".to_owned()),
-            user_id: 123,
-            from_name: None,
-            text: Some("hello".to_owned()),
-        }),
-    });
+    process_update(
+        &ext,
+        TgUpdate {
+            update_id: 1,
+            message: Some(TgMessage {
+                chat_id: -100,
+                chat_type: Some("supergroup".to_owned()),
+                user_id: 123,
+                from_name: None,
+                text: Some("hello".to_owned()),
+            }),
+        },
+    );
     let HarnessInputMessage::Emit(emit) = rx.recv().expect("prompt") else {
         panic!("emit")
     };
@@ -568,16 +700,19 @@ fn configured_chat_rejects_other_private_chat() {
         .expect("lock")
         .registered_agents
         .insert(agent_id("agent-1"));
-    ext.process_update(TgUpdate {
-        update_id: 1,
-        message: Some(TgMessage {
-            chat_id: 456,
-            chat_type: Some("private".to_owned()),
-            user_id: 123,
-            from_name: None,
-            text: Some("hello".to_owned()),
-        }),
-    });
+    process_update(
+        &ext,
+        TgUpdate {
+            update_id: 1,
+            message: Some(TgMessage {
+                chat_id: 456,
+                chat_type: Some("private".to_owned()),
+                user_id: 123,
+                from_name: None,
+                text: Some("hello".to_owned()),
+            }),
+        },
+    );
     assert!(rx.try_recv().is_err());
     assert!(
         client.sent.lock().expect("lock")[0]
@@ -596,16 +731,19 @@ fn unconfigured_private_text_before_start_does_not_route() {
         state.config.as_mut().expect("config").configured_chat_id = None;
         state.registered_agents.insert(agent_id("agent-1"));
     }
-    ext.process_update(TgUpdate {
-        update_id: 1,
-        message: Some(TgMessage {
-            chat_id: 123,
-            chat_type: Some("private".to_owned()),
-            user_id: 123,
-            from_name: None,
-            text: Some("hello".to_owned()),
-        }),
-    });
+    process_update(
+        &ext,
+        TgUpdate {
+            update_id: 1,
+            message: Some(TgMessage {
+                chat_id: 123,
+                chat_type: Some("private".to_owned()),
+                user_id: 123,
+                from_name: None,
+                text: Some("hello".to_owned()),
+            }),
+        },
+    );
     assert!(rx.try_recv().is_err());
     assert!(client.sent.lock().expect("lock")[0].1.contains("/start"));
 }
@@ -620,16 +758,19 @@ fn unconfigured_to_before_start_does_not_route() {
         state.config.as_mut().expect("config").configured_chat_id = None;
         state.registered_agents.insert(agent_id("agent-1"));
     }
-    ext.process_update(TgUpdate {
-        update_id: 1,
-        message: Some(TgMessage {
-            chat_id: 123,
-            chat_type: Some("private".to_owned()),
-            user_id: 123,
-            from_name: None,
-            text: Some("/to agent-1 hello".to_owned()),
-        }),
-    });
+    process_update(
+        &ext,
+        TgUpdate {
+            update_id: 1,
+            message: Some(TgMessage {
+                chat_id: 123,
+                chat_type: Some("private".to_owned()),
+                user_id: 123,
+                from_name: None,
+                text: Some("/to agent-1 hello".to_owned()),
+            }),
+        },
+    );
     assert!(rx.try_recv().is_err());
     assert!(client.sent.lock().expect("lock")[0].1.contains("/start"));
 }
@@ -650,26 +791,32 @@ fn linked_chat_rejects_other_private_chat() {
             .insert(456);
         state.registered_agents.insert(agent_id("agent-1"));
     }
-    ext.process_update(TgUpdate {
-        update_id: 1,
-        message: Some(TgMessage {
-            chat_id: 123,
-            chat_type: Some("private".to_owned()),
-            user_id: 123,
-            from_name: None,
-            text: Some("/start".to_owned()),
-        }),
-    });
-    ext.process_update(TgUpdate {
-        update_id: 2,
-        message: Some(TgMessage {
-            chat_id: 456,
-            chat_type: Some("private".to_owned()),
-            user_id: 456,
-            from_name: None,
-            text: Some("/start".to_owned()),
-        }),
-    });
+    process_update(
+        &ext,
+        TgUpdate {
+            update_id: 1,
+            message: Some(TgMessage {
+                chat_id: 123,
+                chat_type: Some("private".to_owned()),
+                user_id: 123,
+                from_name: None,
+                text: Some("/start".to_owned()),
+            }),
+        },
+    );
+    process_update(
+        &ext,
+        TgUpdate {
+            update_id: 2,
+            message: Some(TgMessage {
+                chat_id: 456,
+                chat_type: Some("private".to_owned()),
+                user_id: 456,
+                from_name: None,
+                text: Some("/start".to_owned()),
+            }),
+        },
+    );
     ext.dispatch_tool(tool(SEND_TOOL_NAME, "agent-1", message_args("reply")));
     let _progress = rx.recv().expect("progress");
     let _result = rx.recv().expect("result");
@@ -690,16 +837,19 @@ fn reconfigured_chat_id_requires_reregistration_before_send() {
         state.config.as_mut().expect("config").configured_chat_id = None;
         state.registered_agents.insert(agent_id("agent-1"));
     }
-    ext.process_update(TgUpdate {
-        update_id: 1,
-        message: Some(TgMessage {
-            chat_id: 123,
-            chat_type: Some("private".to_owned()),
-            user_id: 123,
-            from_name: None,
-            text: Some("/start".to_owned()),
-        }),
-    });
+    process_update(
+        &ext,
+        TgUpdate {
+            update_id: 1,
+            message: Some(TgMessage {
+                chat_id: 123,
+                chat_type: Some("private".to_owned()),
+                user_id: 123,
+                from_name: None,
+                text: Some("/start".to_owned()),
+            }),
+        },
+    );
     let mut new_cfg = cfg();
     new_cfg.configured_chat_id = Some(456);
     ext.apply_config(new_cfg, None);
@@ -734,16 +884,19 @@ fn unallowed_group_user_cannot_route() {
         .expect("lock")
         .registered_agents
         .insert(agent_id("agent-1"));
-    ext.process_update(TgUpdate {
-        update_id: 1,
-        message: Some(TgMessage {
-            chat_id: -100,
-            chat_type: Some("supergroup".to_owned()),
-            user_id: 999,
-            from_name: None,
-            text: Some("hello".to_owned()),
-        }),
-    });
+    process_update(
+        &ext,
+        TgUpdate {
+            update_id: 1,
+            message: Some(TgMessage {
+                chat_id: -100,
+                chat_type: Some("supergroup".to_owned()),
+                user_id: 999,
+                from_name: None,
+                text: Some("hello".to_owned()),
+            }),
+        },
+    );
     assert!(rx.try_recv().is_err());
     assert!(client.sent.lock().expect("lock").is_empty());
 }
@@ -966,4 +1119,209 @@ fn initial_empty_drain_then_fresh_message_routes() {
     };
     assert_eq!(req.text, "[telegram from alice] fresh");
     assert_eq!(client.poll_timeouts.lock().expect("lock")[0], 0);
+}
+
+/// Switching to a different Telegram bot token changes the update stream, so
+/// the extension must reset its offset and drain that bot's existing backlog
+/// before routing fresh messages.
+#[test]
+fn reconfigured_bot_token_resets_update_backlog_drain() {
+    let (ext, _rx, _client) = extension();
+    {
+        let mut state = ext.state.lock().expect("lock");
+        state.poller_drained_initial_backlog = true;
+        state.next_update_offset = Some(99);
+    }
+
+    let mut new_cfg = cfg();
+    new_cfg.bot_token = "different-token".to_owned();
+    ext.apply_config(new_cfg, None);
+
+    let state = ext.state.lock().expect("lock");
+    assert!(!state.poller_drained_initial_backlog);
+    assert_eq!(state.next_update_offset, None);
+}
+
+/// Changing the Bot API endpoint also changes the update stream, so stale
+/// offsets from the previous endpoint must be dropped.
+#[test]
+fn reconfigured_api_base_resets_update_backlog_drain() {
+    let (ext, _rx, _client) = extension();
+    {
+        let mut state = ext.state.lock().expect("lock");
+        state.poller_drained_initial_backlog = true;
+        state.next_update_offset = Some(99);
+    }
+
+    let mut new_cfg = cfg();
+    new_cfg.api_base = "http://127.0.0.1:1234".to_owned();
+    ext.apply_config(new_cfg, None);
+
+    let state = ext.state.lock().expect("lock");
+    assert!(!state.poller_drained_initial_backlog);
+    assert_eq!(state.next_update_offset, None);
+}
+
+/// Tuning poll timeout alone does not change the Telegram update stream, so the
+/// extension should keep the acknowledged offset and avoid redraining already
+/// processed updates.
+#[test]
+fn reconfigured_poll_timeout_keeps_update_offset() {
+    let (ext, _rx, _client) = extension();
+    {
+        let mut state = ext.state.lock().expect("lock");
+        state.poller_drained_initial_backlog = true;
+        state.next_update_offset = Some(99);
+    }
+
+    let mut new_cfg = cfg();
+    new_cfg.poll_timeout_seconds = 5;
+    ext.apply_config(new_cfg, None);
+
+    let state = ext.state.lock().expect("lock");
+    assert!(state.poller_drained_initial_backlog);
+    assert_eq!(state.next_update_offset, Some(99));
+}
+
+/// Poll responses captured under an older config generation must be discarded
+/// after reconfiguration so old-stream updates cannot advance or drain the new
+/// stream.
+#[test]
+fn old_generation_empty_poll_response_does_not_drain_new_stream() {
+    let (tx, rx) = mpsc::channel();
+    let client = ControlledPollClient::new();
+    let ext = Extension::new(client.clone(), tx);
+    ext.apply_config(cfg(), None);
+    ext.dispatch_tool(tool(REGISTER_TOOL_NAME, "agent-1", bool_args(true)));
+    let _progress = rx.recv().expect("progress");
+    let _result = rx.recv().expect("result");
+    client.wait_for_call();
+
+    let mut new_cfg = cfg();
+    new_cfg.bot_token = "different-token".to_owned();
+    ext.apply_config(new_cfg, None);
+    client.release_first_response(Vec::new());
+    std::thread::sleep(Duration::from_millis(100));
+
+    let state = ext.state.lock().expect("lock");
+    assert!(!state.poller_drained_initial_backlog);
+    assert_eq!(state.next_update_offset, None);
+    assert!(rx.try_recv().is_err());
+}
+
+/// Non-empty poll responses from an old config generation must also be
+/// discarded, avoiding both stale offset updates and prompt submission under
+/// the new config.
+#[test]
+fn old_generation_non_empty_poll_response_does_not_route_or_advance_offset() {
+    let (tx, rx) = mpsc::channel();
+    let client = ControlledPollClient::new();
+    let ext = Extension::new(client.clone(), tx);
+    ext.apply_config(cfg(), None);
+    ext.dispatch_tool(tool(REGISTER_TOOL_NAME, "agent-1", bool_args(true)));
+    let _progress = rx.recv().expect("progress");
+    let _result = rx.recv().expect("result");
+    client.wait_for_call();
+
+    let mut new_cfg = cfg();
+    new_cfg.api_base = "http://127.0.0.1:1234".to_owned();
+    ext.apply_config(new_cfg, None);
+    client.release_first_response(vec![TgUpdate {
+        update_id: 55,
+        message: Some(TgMessage {
+            chat_id: 123,
+            chat_type: Some("private".to_owned()),
+            user_id: 123,
+            from_name: Some("alice".to_owned()),
+            text: Some("stale".to_owned()),
+        }),
+    }]);
+    std::thread::sleep(Duration::from_millis(100));
+
+    let state = ext.state.lock().expect("lock");
+    assert!(!state.poller_drained_initial_backlog);
+    assert_eq!(state.next_update_offset, None);
+    assert!(rx.try_recv().is_err());
+}
+
+/// Even after the poll loop's first generation check succeeds, a later config
+/// change before per-update processing must stop stale updates from routing
+/// through the new current config.
+#[test]
+fn stale_generation_update_processing_does_not_reread_current_config() {
+    let (ext, rx, client) = extension();
+    ext.state
+        .lock()
+        .expect("lock")
+        .registered_agents
+        .insert(agent_id("agent-1"));
+    let old_generation = ext.state.lock().expect("lock").config_generation;
+    assert!(ext.poll_response_matches_config(old_generation));
+
+    let mut new_cfg = cfg();
+    new_cfg.bot_token = "different-token".to_owned();
+    ext.apply_config(new_cfg, None);
+    ext.state
+        .lock()
+        .expect("lock")
+        .registered_agents
+        .insert(agent_id("agent-1"));
+
+    ext.process_update_for_generation(
+        TgUpdate {
+            update_id: 55,
+            message: Some(TgMessage {
+                chat_id: 123,
+                chat_type: Some("private".to_owned()),
+                user_id: 123,
+                from_name: Some("alice".to_owned()),
+                text: Some("stale".to_owned()),
+            }),
+        },
+        old_generation,
+    );
+
+    assert!(rx.try_recv().is_err());
+    assert!(client.sent.lock().expect("lock").is_empty());
+}
+
+/// Invalid reconfiguration fails closed: previous registrations and chat state
+/// are cleared so neither old Telegram messages nor agent sends keep using the
+/// previous access policy.
+#[test]
+fn invalid_reconfiguration_clears_active_bridge_state() {
+    let (ext, rx, client) = extension();
+    ext.state
+        .lock()
+        .expect("lock")
+        .registered_agents
+        .insert(agent_id("agent-1"));
+
+    ext.clear_config_after_error();
+    process_update(
+        &ext,
+        TgUpdate {
+            update_id: 1,
+            message: Some(TgMessage {
+                chat_id: 123,
+                chat_type: Some("private".to_owned()),
+                user_id: 123,
+                from_name: None,
+                text: Some("hello".to_owned()),
+            }),
+        },
+    );
+    assert!(rx.try_recv().is_err());
+    assert!(client.sent.lock().expect("lock").is_empty());
+
+    ext.dispatch_tool(tool(SEND_TOOL_NAME, "agent-1", message_args("reply")));
+    let _progress = rx.recv().expect("progress");
+    let msg = rx.recv().expect("result");
+    let HarnessInputMessage::Emit(emit) = msg else {
+        panic!("emit")
+    };
+    let Event::ToolError(error) = *emit.event else {
+        panic!("tool error")
+    };
+    assert!(error.message.contains("telegram_register"));
 }

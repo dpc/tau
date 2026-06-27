@@ -17,3 +17,14 @@
   their `chat_id` is explicitly configured by the user.
 - Text is treated as untrusted user input and is prefixed with Telegram source
   context before being submitted to Tau.
+- Reconfiguration fails closed. If a new config cannot be parsed or validated,
+  the active runtime config, registrations, selected agents, learned chat, and
+  update offset state are cleared until a valid config is applied and agents
+  explicitly register again.
+- In-flight poll responses captured under an older configuration are discarded
+  so old Telegram streams cannot advance offsets, mark backlog draining complete,
+  send replies, or submit prompts after reconfiguration.
+- If `api_base` is overridden for tests, production endpoints must use HTTPS.
+  Plaintext HTTP is accepted only for loopback hosts, and userinfo, query, and
+  fragment components are rejected because the bot token is embedded in request
+  paths.

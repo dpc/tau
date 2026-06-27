@@ -8,9 +8,15 @@ until a Tau agent calls `telegram_register(enabled: true)`.
 
 Runtime state is intentionally in memory: registered agents, labels, selected
 agent per chat, learned private chat link, and update offset are forgotten when
-the extension restarts. The first poll after lazy startup uses non-long-poll
-requests to drain Telegram's existing backlog until it receives an empty batch,
-so pre-registration messages are not submitted as fresh prompts.
+the extension restarts. Update offsets and backlog-drain state are scoped to the
+Telegram update stream, identified by the Bot API base URL plus bot token. When
+that stream identity changes, the extension resets the offset and drains the new
+stream before routing messages. The first poll after lazy startup uses
+non-long-poll requests to drain Telegram's existing backlog until it receives an
+empty batch, so pre-registration messages are not submitted as fresh prompts.
+Poll responses captured under an older configuration generation are discarded
+instead of advancing offsets, marking the new stream drained, or routing old
+updates.
 
 ## Harness boundary
 

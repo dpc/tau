@@ -82,6 +82,14 @@ struct RuntimeConfig {
     poll_timeout_seconds: u64,
 }
 
+impl RuntimeConfig {
+    /// Telegram update offsets are scoped to the Bot API endpoint plus bot
+    /// token; switching either value starts reading a different update stream.
+    fn uses_same_update_stream_as(&self, other: &Self) -> bool {
+        self.api_base == other.api_base && self.bot_token == other.bot_token
+    }
+}
+
 /// Raw deserialized extension config from `harness.yaml`.
 #[derive(Clone, Debug, Default, serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -119,9 +127,7 @@ impl ExtConfig {
             .unwrap_or_else(|| DEFAULT_API_BASE.to_owned())
             .trim_end_matches('/')
             .to_owned();
-        if api_base.is_empty() {
-            return Err("telegram `api_base` must not be empty".to_owned());
-        }
+        validate_api_base(&api_base)?;
         let poll_timeout_seconds = self
             .poll_timeout_seconds
             .unwrap_or(DEFAULT_POLL_TIMEOUT_SECONDS);
@@ -168,9 +174,19 @@ struct LinkedChat {
     user_id: i64,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct ConfigGeneration(u64);
+
+impl ConfigGeneration {
+    fn next(self) -> Self {
+        Self(self.0.wrapping_add(1))
+    }
+}
+
 #[derive(Default)]
 struct State {
     config: Option<RuntimeConfig>,
+    config_generation: ConfigGeneration,
     registered_agents: HashSet<AgentId>,
     agent_labels: HashMap<AgentId, String>,
     selected_agent_by_chat: HashMap<i64, AgentId>,
@@ -199,6 +215,11 @@ impl Extension {
 
     fn apply_config(&self, cfg: RuntimeConfig, _state_dir: Option<std::path::PathBuf>) {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.config_generation = state.config_generation.next();
+        let update_stream_changed = state
+            .config
+            .as_ref()
+            .is_some_and(|old_cfg| !old_cfg.uses_same_update_stream_as(&cfg));
         let old_active_chat = state
             .config
             .as_ref()
@@ -218,7 +239,27 @@ impl Extension {
             state.registered_agents.clear();
             state.selected_agent_by_chat.clear();
         }
+        if update_stream_changed {
+            state.poller_drained_initial_backlog = false;
+            state.next_update_offset = None;
+        }
         state.config = Some(cfg);
+    }
+
+    fn clear_config_after_error(&self) {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.config_generation = state.config_generation.next();
+        state.config = None;
+        state.registered_agents.clear();
+        state.selected_agent_by_chat.clear();
+        state.learned_chat = None;
+        state.poller_drained_initial_backlog = false;
+        state.next_update_offset = None;
+    }
+
+    fn poll_response_matches_config(&self, config_generation: ConfigGeneration) -> bool {
+        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.config.is_some() && state.config_generation == config_generation
     }
 
     fn dispatch_tool(&self, invoke: ToolStarted) {
@@ -334,34 +375,54 @@ impl Extension {
         }
     }
 
-    fn process_update(&self, update: TgUpdate) {
+    fn process_update_for_generation(&self, update: TgUpdate, config_generation: ConfigGeneration) {
         let Some(message) = update.message else {
             return;
         };
-        let Some(cfg) = self.config_for_allowed_message(&message) else {
+        let Some(cfg) = self.config_for_allowed_message(&message, config_generation) else {
             return;
         };
         let is_private_chat = is_private_message_chat(&message);
         let active_chat = self.active_chat(&cfg);
-        if self.rejects_inactive_chat(&cfg, &message, active_chat, is_private_chat) {
+        if self.rejects_inactive_chat(
+            &cfg,
+            &message,
+            active_chat,
+            is_private_chat,
+            config_generation,
+        ) {
             return;
         }
-        let Some(text) = self.trimmed_message_text(&cfg, &message) else {
+        let Some(text) = self.trimmed_message_text(&cfg, &message, config_generation) else {
             return;
         };
         let (command, rest) = parse_command(&text);
-        if self.rejects_unlinked_command(&cfg, &message, active_chat, command) {
+        if self.rejects_unlinked_command(&cfg, &message, active_chat, command, config_generation) {
             return;
         }
-        if self.handle_command(&cfg, &message, is_private_chat, command, rest) {
+        if self.handle_command(
+            &cfg,
+            &message,
+            is_private_chat,
+            command,
+            rest,
+            config_generation,
+        ) {
             return;
         }
 
-        self.route_plain_text(&cfg, &message, &text);
+        self.route_plain_text(&cfg, &message, &text, config_generation);
     }
 
-    fn config_for_allowed_message(&self, message: &TgMessage) -> Option<RuntimeConfig> {
+    fn config_for_allowed_message(
+        &self,
+        message: &TgMessage,
+        config_generation: ConfigGeneration,
+    ) -> Option<RuntimeConfig> {
         let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if state.config_generation != config_generation {
+            return None;
+        }
         let cfg = state.config.clone()?;
         if cfg.allowed_user_ids.contains(&message.user_id) {
             Some(cfg)
@@ -383,6 +444,7 @@ impl Extension {
         message: &TgMessage,
         active_chat: Option<i64>,
         is_private_chat: bool,
+        config_generation: ConfigGeneration,
     ) -> bool {
         if let Some(configured_chat_id) = cfg.configured_chat_id {
             if message.chat_id != configured_chat_id {
@@ -390,6 +452,7 @@ impl Extension {
                     cfg,
                     message.chat_id,
                     "This Tau bridge is configured for a different Telegram chat.",
+                    config_generation,
                 );
                 return true;
             }
@@ -398,6 +461,7 @@ impl Extension {
                 cfg,
                 message.chat_id,
                 "This Tau bridge is already linked to a different Telegram chat.",
+                config_generation,
             );
             return true;
         }
@@ -407,19 +471,26 @@ impl Extension {
                 cfg,
                 message.chat_id,
                 "Group chats are only supported when this chat_id is explicitly configured.",
+                config_generation,
             );
             return true;
         }
         false
     }
 
-    fn trimmed_message_text(&self, cfg: &RuntimeConfig, message: &TgMessage) -> Option<String> {
+    fn trimmed_message_text(
+        &self,
+        cfg: &RuntimeConfig,
+        message: &TgMessage,
+        config_generation: ConfigGeneration,
+    ) -> Option<String> {
         let text = message.text.as_deref().unwrap_or_default().trim();
         if text.is_empty() {
             self.reply(
                 cfg,
                 message.chat_id,
                 "Only text messages are supported by this Tau bridge.",
+                config_generation,
             );
             None
         } else {
@@ -433,6 +504,7 @@ impl Extension {
         message: &TgMessage,
         active_chat: Option<i64>,
         command: Option<&str>,
+        config_generation: ConfigGeneration,
     ) -> bool {
         if cfg.configured_chat_id.is_some()
             || active_chat.is_some()
@@ -445,6 +517,7 @@ impl Extension {
             cfg,
             message.chat_id,
             "Send /start to link this private chat before routing messages to Tau.",
+            config_generation,
         );
         true
     }
@@ -456,22 +529,23 @@ impl Extension {
         is_private_chat: bool,
         command: Option<&str>,
         rest: &str,
+        config_generation: ConfigGeneration,
     ) -> bool {
         match command {
             Some("/start") => {
-                self.handle_start_command(cfg, message, is_private_chat);
+                self.handle_start_command(cfg, message, is_private_chat, config_generation);
                 true
             }
             Some("/agents") => {
-                self.handle_agents_command(cfg, message.chat_id);
+                self.handle_agents_command(cfg, message.chat_id, config_generation);
                 true
             }
             Some("/select") => {
-                self.handle_select_command(cfg, message.chat_id, rest);
+                self.handle_select_command(cfg, message.chat_id, rest, config_generation);
                 true
             }
             Some("/to") => {
-                self.handle_to_command(cfg, message, rest);
+                self.handle_to_command(cfg, message, rest, config_generation);
                 true
             }
             Some(_) => {
@@ -479,6 +553,7 @@ impl Extension {
                     cfg,
                     message.chat_id,
                     "Unknown Telegram command. Supported commands: /start, /agents, /select, /to.",
+                    config_generation,
                 );
                 true
             }
@@ -491,6 +566,7 @@ impl Extension {
         cfg: &RuntimeConfig,
         message: &TgMessage,
         is_private_chat: bool,
+        config_generation: ConfigGeneration,
     ) {
         if cfg.configured_chat_id.is_none() {
             if !is_private_chat {
@@ -498,34 +574,60 @@ impl Extension {
                     cfg,
                     message.chat_id,
                     "Group chats require an explicit configured chat_id.",
+                    config_generation,
                 );
                 return;
             }
             let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            if state.config_generation != config_generation {
+                return;
+            }
             state.learned_chat = Some(LinkedChat {
                 chat_id: message.chat_id,
                 user_id: message.user_id,
             });
         }
-        self.reply(cfg, message.chat_id, help_text());
+        self.reply(cfg, message.chat_id, help_text(), config_generation);
     }
 
-    fn handle_agents_command(&self, cfg: &RuntimeConfig, chat_id: i64) {
+    fn handle_agents_command(
+        &self,
+        cfg: &RuntimeConfig,
+        chat_id: i64,
+        config_generation: ConfigGeneration,
+    ) {
         let reply = {
             let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            if state.config_generation != config_generation {
+                return;
+            }
             agents_text(&state)
         };
-        self.reply(cfg, chat_id, &reply);
+        self.reply(cfg, chat_id, &reply, config_generation);
     }
 
-    fn handle_select_command(&self, cfg: &RuntimeConfig, chat_id: i64, rest: &str) {
+    fn handle_select_command(
+        &self,
+        cfg: &RuntimeConfig,
+        chat_id: i64,
+        rest: &str,
+        config_generation: ConfigGeneration,
+    ) {
         if rest.trim().is_empty() {
-            self.reply(cfg, chat_id, "Usage: /select <agent-id-or-prefix>");
+            self.reply(
+                cfg,
+                chat_id,
+                "Usage: /select <agent-id-or-prefix>",
+                config_generation,
+            );
             return;
         }
 
         let reply = {
             let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            if state.config_generation != config_generation {
+                return;
+            }
             match resolve_agent(&state, rest.trim()) {
                 Ok(agent_id) => {
                     state
@@ -536,33 +638,46 @@ impl Extension {
                 Err(reply) => reply,
             }
         };
-        self.reply(cfg, chat_id, &reply);
+        self.reply(cfg, chat_id, &reply, config_generation);
     }
 
-    fn handle_to_command(&self, cfg: &RuntimeConfig, message: &TgMessage, rest: &str) {
+    fn handle_to_command(
+        &self,
+        cfg: &RuntimeConfig,
+        message: &TgMessage,
+        rest: &str,
+        config_generation: ConfigGeneration,
+    ) {
         let (target, body) = split_first(rest);
         if target.is_empty() || body.trim().is_empty() {
             self.reply(
                 cfg,
                 message.chat_id,
                 "Usage: /to <agent-id-or-prefix> <message>",
+                config_generation,
             );
             return;
         }
 
         match self.resolve_registered_agent(target) {
-            Ok(agent_id) => self.route_text(message, agent_id, body.trim()),
+            Ok(agent_id) => self.route_text(message, agent_id, body.trim(), config_generation),
             Err(reply) => {
-                self.reply(cfg, message.chat_id, &reply);
+                self.reply(cfg, message.chat_id, &reply, config_generation);
             }
         }
     }
 
-    fn route_plain_text(&self, cfg: &RuntimeConfig, message: &TgMessage, text: &str) {
+    fn route_plain_text(
+        &self,
+        cfg: &RuntimeConfig,
+        message: &TgMessage,
+        text: &str,
+        config_generation: ConfigGeneration,
+    ) {
         match self.plain_text_target(message.chat_id) {
-            Ok(agent_id) => self.route_text(message, agent_id, text),
+            Ok(agent_id) => self.route_text(message, agent_id, text, config_generation),
             Err(reply) => {
-                self.reply(cfg, message.chat_id, &reply);
+                self.reply(cfg, message.chat_id, &reply, config_generation);
             }
         }
     }
@@ -595,11 +710,29 @@ impl Extension {
         resolve_agent(&state, target)
     }
 
-    fn reply(&self, cfg: &RuntimeConfig, chat_id: i64, text: &str) {
+    fn reply(
+        &self,
+        cfg: &RuntimeConfig,
+        chat_id: i64,
+        text: &str,
+        config_generation: ConfigGeneration,
+    ) {
+        if !self.poll_response_matches_config(config_generation) {
+            return;
+        }
         let _ = self.client.send_message(cfg, chat_id, text);
     }
 
-    fn route_text(&self, message: &TgMessage, agent_id: AgentId, text: &str) {
+    fn route_text(
+        &self,
+        message: &TgMessage,
+        agent_id: AgentId,
+        text: &str,
+        config_generation: ConfigGeneration,
+    ) {
+        if !self.poll_response_matches_config(config_generation) {
+            return;
+        }
         let source = message
             .from_name
             .as_deref()
@@ -624,6 +757,34 @@ fn is_private_message_chat(message: &TgMessage) -> bool {
         .chat_type
         .as_deref()
         .is_none_or(|kind| kind == "private")
+}
+
+fn validate_api_base(api_base: &str) -> Result<(), String> {
+    if api_base.is_empty() {
+        return Err("telegram `api_base` must not be empty".to_owned());
+    }
+    let url = url::Url::parse(api_base)
+        .map_err(|e| format!("telegram `api_base` must be a valid URL: {e}"))?;
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err("telegram `api_base` must not include userinfo".to_owned());
+    }
+    if url.query().is_some() || url.fragment().is_some() {
+        return Err("telegram `api_base` must not include query or fragment".to_owned());
+    }
+    match url.scheme() {
+        "https" => Ok(()),
+        "http" if url.host().is_some_and(is_loopback_host) => Ok(()),
+        "http" => Err("telegram `api_base` may use http only for loopback hosts".to_owned()),
+        _ => Err("telegram `api_base` must use https, or http for loopback tests".to_owned()),
+    }
+}
+
+fn is_loopback_host(host: url::Host<&str>) -> bool {
+    match host {
+        url::Host::Domain(domain) => domain.eq_ignore_ascii_case("localhost"),
+        url::Host::Ipv4(addr) => addr.is_loopback(),
+        url::Host::Ipv6(addr) => addr.is_loopback(),
+    }
 }
 
 fn sleep_interruptibly(shutdown: &AtomicBool, total: Duration) {
@@ -657,12 +818,14 @@ fn poll_loop(
         if shutdown.load(Ordering::Relaxed) {
             return;
         }
-        let (cfg, offset) = {
+        let (cfg, offset, config_generation) = {
             let state = ext.state.lock().unwrap_or_else(|e| e.into_inner());
             let Some(cfg) = state.config.clone() else {
-                return;
+                drop(state);
+                sleep_interruptibly(&shutdown, Duration::from_millis(50));
+                continue;
             };
-            (cfg, state.next_update_offset)
+            (cfg, state.next_update_offset, state.config_generation)
         };
         let mut request_cfg = cfg.clone();
         let draining_initial_backlog = {
@@ -677,9 +840,16 @@ fn poll_loop(
                 if shutdown.load(Ordering::Relaxed) {
                     return;
                 }
+                if !ext.poll_response_matches_config(config_generation) {
+                    continue;
+                }
+                let mut stale_generation = false;
                 let draining = {
                     let mut state = ext.state.lock().unwrap_or_else(|e| e.into_inner());
-                    if !state.poller_drained_initial_backlog {
+                    if state.config_generation != config_generation || state.config.is_none() {
+                        stale_generation = true;
+                        false
+                    } else if !state.poller_drained_initial_backlog {
                         if let Some(max_update_id) = updates.iter().map(|u| u.update_id).max() {
                             state.next_update_offset = Some(max_update_id + 1);
                         }
@@ -691,6 +861,9 @@ fn poll_loop(
                         false
                     }
                 };
+                if stale_generation {
+                    continue;
+                }
                 if draining {
                     continue;
                 }
@@ -700,12 +873,18 @@ fn poll_loop(
                 for update in updates {
                     {
                         let mut state = ext.state.lock().unwrap_or_else(|e| e.into_inner());
+                        if state.config_generation != config_generation || state.config.is_none() {
+                            break;
+                        }
                         state.next_update_offset = Some(update.update_id + 1);
                     }
-                    ext.process_update(update);
+                    ext.process_update_for_generation(update, config_generation);
                 }
             }
             Err(message) => {
+                if !ext.poll_response_matches_config(config_generation) {
+                    continue;
+                }
                 tracing::warn!(target: LOG_TARGET, error = %message, "telegram polling failed");
                 sleep_interruptibly(&shutdown, Duration::from_secs(5));
             }
@@ -780,6 +959,7 @@ where
                 {
                     Ok(cfg) => ext.apply_config(cfg, msg.state_dir),
                     Err(message) => {
+                        ext.clear_config_after_error();
                         let _ = tx.send(HarnessInputMessage::ConfigError(ConfigError { message }));
                     }
                 }
