@@ -1,4 +1,12 @@
+//! Terminal screen layout and styled-cell rendering utilities.
+//!
+//! Styling is represented structurally instead of as inline ANSI bytes. Caller
+//! text may still contain tabs, newlines, and other controls; layout and cell
+//! emission sanitize those values before terminal output.
+
+/// Screen state tracker and terminal renderer.
 pub mod screen;
+/// Styled text, block, and cell data model.
 pub mod style;
 
 pub use screen::{Screen, emit_styled_cells, layout_block, layout_lines};

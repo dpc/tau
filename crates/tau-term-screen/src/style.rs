@@ -128,40 +128,52 @@ pub(crate) fn visit_styled_graphemes(spans: &[Span], mut f: impl FnMut(&str, Sty
 /// Visual attributes for a single character cell.
 #[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
 pub struct Style {
+    /// Optional foreground color applied to rendered cells.
     pub fg: Option<Color>,
+    /// Optional background color applied to rendered cells.
     pub bg: Option<Color>,
+    /// Whether cells should be emitted with bold text.
     pub bold: bool,
+    /// Whether cells should be emitted with underline.
     pub underline: bool,
+    /// Whether cells should be emitted with italic text.
     pub italic: bool,
+    /// Whether cells should be emitted with strikethrough text.
     pub strikethrough: bool,
 }
 
 impl Style {
+    /// Returns this style with a foreground color set.
     pub fn fg(mut self, color: Color) -> Self {
         self.fg = Some(color);
         self
     }
 
+    /// Returns this style with a background color set.
     pub fn bg(mut self, color: Color) -> Self {
         self.bg = Some(color);
         self
     }
 
+    /// Returns this style with bold text enabled.
     pub fn bold(mut self) -> Self {
         self.bold = true;
         self
     }
 
+    /// Returns this style with underline enabled.
     pub fn underline(mut self) -> Self {
         self.underline = true;
         self
     }
 
+    /// Returns this style with italic text enabled.
     pub fn italic(mut self) -> Self {
         self.italic = true;
         self
     }
 
+    /// Returns this style with strikethrough text enabled.
     pub fn strikethrough(mut self) -> Self {
         self.strikethrough = true;
         self
@@ -190,6 +202,7 @@ impl Cell {
         }
     }
 
+    /// Creates a styled terminal cell, sanitizing control characters.
     pub fn new(ch: char, style: Style) -> Self {
         let ch = Self::sanitized_char(ch);
         Self {
@@ -199,6 +212,7 @@ impl Cell {
         }
     }
 
+    /// Creates an unstyled terminal cell, sanitizing control characters.
     pub fn plain(ch: char) -> Self {
         let ch = Self::sanitized_char(ch);
         Self {
@@ -235,13 +249,23 @@ impl Cell {
 }
 
 /// A run of text with a uniform style.
+///
+/// Spans are concatenated before grapheme segmentation so clusters may cross a
+/// span boundary. Keep style boundaries on grapheme-cluster boundaries when
+/// predictable per-cluster styling matters.
 #[derive(Clone, Debug)]
 pub struct Span {
+    /// Plain text belonging to this span.
     pub text: String,
+    /// Style associated with text in this span.
+    ///
+    /// If a rendered grapheme cluster crosses span boundaries, [`StyledText`]
+    /// uses the style at the cluster's first scalar value.
     pub style: Style,
 }
 
 impl Span {
+    /// Creates a span with explicit text and style.
     pub fn new(text: impl Into<String>, style: Style) -> Self {
         Self {
             text: text.into(),
@@ -249,6 +273,7 @@ impl Span {
         }
     }
 
+    /// Creates an unstyled span.
     pub fn plain(text: impl Into<String>) -> Self {
         Self {
             text: text.into(),
@@ -261,20 +286,27 @@ impl Span {
 ///
 /// Can be constructed from plain `&str` / `String` (unstyled),
 /// a single [`Span`], or a `Vec<Span>`.
+///
+/// Layout concatenates all spans before grapheme segmentation. Splitting a
+/// grapheme cluster across spans is supported for width and wrapping, but the
+/// cluster uses the style active at its first scalar value.
 #[derive(Clone, Debug, Default)]
 pub struct StyledText {
     spans: Vec<Span>,
 }
 
 impl StyledText {
+    /// Creates an empty styled text sequence.
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Appends a styled span to this text sequence.
     pub fn push(&mut self, span: Span) {
         self.spans.push(span);
     }
 
+    /// Returns the spans that make up this text sequence.
     pub fn spans(&self) -> &[Span] {
         &self.spans
     }
@@ -338,32 +370,54 @@ impl From<Vec<Span>> for StyledText {
 
 /// Opaque numeric identifier for a [`StyledBlock`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct BlockId(pub u64);
+pub struct BlockId(
+    /// Stable numeric identity assigned by the higher-level block owner.
+    pub u64,
+);
 
 /// Horizontal alignment within a block.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Align {
+    /// Place content at the left edge of the content area.
     #[default]
     Left,
+    /// Center content within the content area.
     Center,
 }
 
 /// A unit of layout: styled content with background, alignment, and margins.
 ///
-/// When rendered, the block's content is word-wrapped to the available
-/// width (after subtracting margins), aligned within that space, and
-/// the block's background color fills any remaining cells.
+/// When rendered, the block's content is wrapped at the available
+/// terminal-column width (after subtracting margins), aligned within that
+/// space, and the block's background color fills remaining content-area cells.
 #[derive(Clone, Debug)]
 pub struct StyledBlock {
+    /// Primary content rendered in the block's content area.
     pub content: StyledText,
+    /// Optional right-aligned adornment for single-row left-aligned blocks.
+    ///
+    /// `layout_block` renders this only when [`Self::align`] is
+    /// [`Align::Left`], primary content lays out to one row, and both sides
+    /// fit with separator padding.
     pub right_content: StyledText,
+    /// Optional background color for the content area and its padding.
     pub bg: Option<Color>,
+    /// Horizontal alignment applied to primary content.
     pub align: Align,
+    /// Requested transparent left margin width in terminal columns.
+    ///
+    /// `layout_block` may clamp this so each row has at least one content
+    /// column.
     pub margin_left: u16,
+    /// Requested transparent right margin width in terminal columns.
+    ///
+    /// `layout_block` may clamp this so each row has at least one content
+    /// column.
     pub margin_right: u16,
 }
 
 impl StyledBlock {
+    /// Creates a left-aligned block with no margins or background.
     pub fn new(content: impl Into<StyledText>) -> Self {
         Self {
             content: content.into(),
@@ -375,31 +429,46 @@ impl StyledBlock {
         }
     }
 
+    /// Returns this block with a content-area background color.
     pub fn bg(mut self, color: Color) -> Self {
         self.bg = Some(color);
         self
     }
 
+    /// Returns this block with the requested content alignment.
     pub fn align(mut self, align: Align) -> Self {
         self.align = align;
         self
     }
 
+    /// Returns this block with right-side adornment content.
+    ///
+    /// The adornment is rendered only for left-aligned, single-row primary
+    /// content when both sides fit with separator padding.
     pub fn right_content(mut self, content: impl Into<StyledText>) -> Self {
         self.right_content = content.into();
         self
     }
 
+    /// Returns this block with a requested transparent left margin.
+    ///
+    /// The margin may be clamped during layout.
     pub fn margin_left(mut self, n: u16) -> Self {
         self.margin_left = n;
         self
     }
 
+    /// Returns this block with a requested transparent right margin.
+    ///
+    /// The margin may be clamped during layout.
     pub fn margin_right(mut self, n: u16) -> Self {
         self.margin_right = n;
         self
     }
 
+    /// Returns this block with requested transparent left and right margins.
+    ///
+    /// The margins may be clamped during layout.
     pub fn margins(mut self, left: u16, right: u16) -> Self {
         self.margin_left = left;
         self.margin_right = right;

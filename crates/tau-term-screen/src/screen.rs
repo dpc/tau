@@ -39,7 +39,10 @@ fn normalize_cell_lines(lines: &[Vec<Cell>]) -> Vec<Vec<Cell>> {
         .collect()
 }
 
-/// Column width of a cell slice (sum of individual display widths).
+/// Terminal-column width of a cell slice (sum of individual display widths).
+///
+/// This is not the same as `cells.len()`: a wide grapheme may occupy multiple
+/// terminal columns while zero-width continuations occupy none.
 fn cols(cells: &[Cell]) -> usize {
     cells.iter().map(|c| c.col_width()).sum()
 }
@@ -96,6 +99,11 @@ struct ChangedLineRange {
 }
 
 impl Screen {
+    /// Creates an empty virtual screen for a terminal of the given width.
+    ///
+    /// `width` is measured in terminal columns. Passing `0` is treated as a
+    /// one-column terminal so layout and cursor math always have a positive
+    /// width.
     pub fn new(width: usize) -> Self {
         Self {
             lines: Vec::new(),
@@ -658,8 +666,10 @@ pub fn layout_lines(
 /// Lays out a [`StyledBlock`] into physical terminal lines.
 ///
 /// Subtracts margins from `width`, wraps content to the remaining
-/// space, applies alignment, and fills background. Each returned row
-/// is exactly `width` cells wide.
+/// space, applies alignment, and fills background. Each returned row has total
+/// display width of exactly `width` terminal columns. The number of [`Cell`]
+/// values is not necessarily `width`, because wide graphemes can occupy
+/// multiple columns and continuation cells can occupy none.
 pub fn layout_block(block: &StyledBlock, width: usize) -> Vec<Vec<Cell>> {
     let width = width.max(1);
     let requested_ml = block.margin_left as usize;
