@@ -382,6 +382,11 @@ impl StateStore {
         self.load_change_approval("approved", id)
     }
 
+    /// Load one denied calendar change by id.
+    pub(crate) fn denied_change_by_id(&self, id: &str) -> Result<CalendarChangeApproval, String> {
+        self.load_change_approval("denied", id)
+    }
+
     /// Return an existing pending calendar change approval or create it.
     pub(crate) fn pending_change(
         &self,
@@ -419,8 +424,16 @@ impl StateStore {
         self.file_exists(&self.change_path("sending", id)?)
     }
 
+    /// Return true if a denied calendar change tombstone exists.
+    pub(crate) fn change_denied_exists(&self, id: &str) -> Result<bool, String> {
+        self.file_exists(&self.change_path("denied", id)?)
+    }
+
     /// Claim one pending calendar change for execution.
     pub(crate) fn claim_change(&self, id: &str) -> Result<CalendarChangeApproval, String> {
+        if self.change_denied_exists(id)? {
+            return Err(format!("calendar change `{id}` was denied"));
+        }
         let approval = self.pending_change_by_id(id)?;
         let mut sending = approval.clone();
         sending.status = "sending".to_owned();
@@ -443,6 +456,9 @@ impl StateStore {
     /// Restore a claimed calendar change to pending after execution failed.
     pub(crate) fn release_claimed_change(&self, id: &str) -> Result<(), String> {
         let mut approval = self.load_change_approval("sending", id)?;
+        if self.change_denied_exists(id)? {
+            return self.storage.delete_file(&self.change_path("sending", id)?);
+        }
         approval.status = "pending".to_owned();
         let pending_path = self.change_path("pending", id)?;
         match self.create_json(&pending_path, &approval) {
@@ -471,6 +487,10 @@ impl StateStore {
 
     /// Deny a pending calendar change.
     pub(crate) fn deny_change(&self, id: &str) -> Result<(), String> {
+        if self.change_denied_exists(id)? {
+            let _ = self.storage.delete_file(&self.change_path("pending", id)?);
+            return Ok(());
+        }
         self.move_pending_change(id, "denied")
     }
 

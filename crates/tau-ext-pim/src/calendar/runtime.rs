@@ -15,7 +15,7 @@ use super::config::{
     ValidatedBackendConfig, ValidatedConfig, ValidatedPolicy,
 };
 use super::google::{GoogleBackend, GoogleEvent, GoogleEventWrite};
-use super::ics_feed::{IcsEvent, IcsFeedBackend, TimeRange};
+use super::ics_feed::{IcsEvent, IcsFeedBackend, TimeRange, normalize_feed_url};
 use super::state::{CalendarChangeApproval, CalendarLogEntry, GooglePendingAuth, StateStore};
 use super::tool::{
     CalendarCommand, CalendarRangeArgs, CreateEventArgs, DeleteEventArgs, ListCalendarsArgs,
@@ -182,6 +182,7 @@ impl RuntimeState {
         storage: SharedStorage,
     ) -> Result<(), String> {
         let result = cfg.validate().and_then(|config| {
+            validate_config_secrets(&config, &secrets)?;
             let state_dir = state_dir.unwrap_or_default();
             Ok(Engine {
                 config,
@@ -241,6 +242,79 @@ impl RuntimeState {
             Err(message) => action_error(invoke, message),
         }
     }
+}
+
+fn validate_config_secrets(
+    config: &ValidatedConfig,
+    secrets: &BTreeMap<String, SecretValue>,
+) -> Result<(), String> {
+    if !config.enable {
+        return Ok(());
+    }
+    for account in config.accounts.values() {
+        if !account.enable {
+            continue;
+        }
+        match &account.backend {
+            Some(ValidatedBackendConfig::IcsFeed {
+                url_secret: Some(secret),
+                allow_plain_http,
+                ..
+            }) => {
+                let value =
+                    required_config_secret(&account.id, "backend.url_secret", secret, secrets)?;
+                normalize_feed_url(&value, *allow_plain_http)?;
+            }
+            Some(ValidatedBackendConfig::Google {
+                client_id_secret,
+                client_secret_secret,
+                refresh_token_secret,
+                ..
+            }) => {
+                required_config_secret(
+                    &account.id,
+                    "backend.client_id_secret",
+                    client_id_secret,
+                    secrets,
+                )?;
+                for (field, secret) in [
+                    (
+                        "backend.client_secret_secret",
+                        client_secret_secret.as_deref(),
+                    ),
+                    (
+                        "backend.refresh_token_secret",
+                        refresh_token_secret.as_deref(),
+                    ),
+                ] {
+                    let Some(secret) = secret else { continue };
+                    required_config_secret(&account.id, field, secret, secrets)?;
+                }
+            }
+            Some(ValidatedBackendConfig::Caldav { .. })
+            | Some(ValidatedBackendConfig::IcsFeed {
+                url_secret: None, ..
+            })
+            | None => {}
+        }
+    }
+    Ok(())
+}
+
+fn required_config_secret(
+    account_id: &str,
+    field: &str,
+    secret: &str,
+    secrets: &BTreeMap<String, SecretValue>,
+) -> Result<String, String> {
+    secrets
+        .get(secret)
+        .map(|secret| secret.expose_secret().to_owned())
+        .ok_or_else(|| {
+            format!(
+                "calendar account `{account_id}` {field} `{secret}` was not provided in Configure.secrets; declare it under the enabled extension's secrets"
+            )
+        })
 }
 
 enum BackendEvent {
@@ -566,6 +640,15 @@ impl Engine {
     }
 
     fn action_change_approve(&self, id: &str) -> Result<String, String> {
+        if self.state.change_denied_exists(id)? {
+            let denied = self.state.denied_change_by_id(id)?;
+            return Err(format!(
+                "Calendar change {id} was denied. command={} account={} calendar={}",
+                safe_display_line(&denied.command),
+                safe_display_line(&denied.account),
+                safe_display_line(&denied.calendar)
+            ));
+        }
         if self.state.change_pending_exists(id)? {
             let pending = self.state.pending_change_by_id(id)?;
             self.validate_persisted_change(&pending)?;

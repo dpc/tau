@@ -1448,6 +1448,108 @@ fn ics_feed_plain_http_requires_loopback_or_opt_in() {
         .expect("explicit opt-in accepts plain HTTP");
 }
 
+#[test]
+fn calendar_config_secrets_are_checked_at_configure_time() {
+    // Calendar provider credentials and private feed URLs must fail during
+    // Configure, not later when a model invokes a tool and gets a partial
+    // runtime-specific error.
+    let cfg = CalendarExtensionConfig {
+        enable: true,
+        accounts: vec![CalendarAccountConfig {
+            id: "google".to_owned(),
+            enable: true,
+            backend: Some(CalendarBackendConfig::Google {
+                client_id_secret: "client".to_owned(),
+                client_secret_secret: Some("client_secret".to_owned()),
+                refresh_token_secret: Some("refresh".to_owned()),
+                api_base: None,
+            }),
+            calendars: CalendarSelectionConfig {
+                default: Some("primary".to_owned()),
+                allow: vec!["primary".to_owned()],
+            },
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let config = cfg.validate().expect("shape validates");
+    let mut secrets = BTreeMap::new();
+    secrets.insert("client".to_owned(), SecretValue::new("client-id"));
+
+    let err = validate_config_secrets(&config, &secrets).expect_err("missing secrets reject");
+
+    assert!(err.contains("client_secret"), "{err}");
+}
+
+#[test]
+fn calendar_secret_feed_url_is_validated_at_configure_time() {
+    // A secret-backed feed URL is still a provider endpoint carrying private
+    // bearer-like data, so apply the same URL policy before accepting config.
+    let cfg = CalendarExtensionConfig {
+        enable: true,
+        accounts: vec![CalendarAccountConfig {
+            id: "feed".to_owned(),
+            enable: true,
+            backend: Some(CalendarBackendConfig::IcsFeed {
+                url_secret: Some("feed_url".to_owned()),
+                url: None,
+                allow_plain_http: false,
+            }),
+            calendars: CalendarSelectionConfig {
+                default: Some("main".to_owned()),
+                allow: vec!["main".to_owned()],
+            },
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let config = cfg.validate().expect("shape validates");
+    let mut secrets = BTreeMap::new();
+    secrets.insert(
+        "feed_url".to_owned(),
+        SecretValue::new("http://example.test/private.ics"),
+    );
+
+    let err = validate_config_secrets(&config, &secrets).expect_err("unsafe secret URL rejects");
+
+    assert!(err.contains("https:// or webcal://"), "{err}");
+}
+
+#[test]
+fn denied_calendar_change_tombstone_blocks_stale_pending_approval() {
+    // Denial tombstones are fail-closed. If pending deletion previously failed
+    // after writing a denial, approval must not execute the stale pending record.
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let engine = google_test_engine(temp.path());
+    let mut change = CalendarChangeApproval::pending("delete_event", "google", "primary");
+    change.event_id = Some("evt".to_owned());
+    let id = engine
+        .state
+        .pending_change(&change)
+        .expect("pending change");
+    let pending_path = temp
+        .path()
+        .join("state/approvals/calendar-change/pending")
+        .join(format!("{id}.json"));
+    let pending_bytes = std::fs::read(&pending_path).expect("read pending");
+
+    engine.state.deny_change(&id).expect("deny change");
+    std::fs::write(&pending_path, pending_bytes).expect("restore stale pending");
+
+    let err = engine
+        .action_change_approve(&id)
+        .expect_err("denied tombstone wins");
+
+    assert!(err.contains("was denied"), "{err}");
+    assert!(
+        engine
+            .state
+            .change_pending_exists(&id)
+            .expect("pending remains")
+    );
+    assert!(engine.state.claim_change(&id).is_err());
+}
+
 fn test_engine(root: &std::path::Path) -> Engine {
     let cfg = CalendarExtensionConfig {
         enable: true,

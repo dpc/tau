@@ -127,6 +127,56 @@ fn google_config_allows_missing_refresh_token_for_action_auth() {
     assert!(refresh_token_secret.is_none());
 }
 
+#[test]
+fn ics_feed_url_secret_names_are_validated() {
+    // Secret names are harness keys, not filesystem paths. Reject path-like
+    // names at configuration validation time before runtime lookup.
+    let cfg = CalendarExtensionConfig {
+        enable: true,
+        accounts: vec![CalendarAccountConfig {
+            id: "feed".to_owned(),
+            backend: Some(CalendarBackendConfig::IcsFeed {
+                url_secret: Some("../feed-url".to_owned()),
+                url: None,
+                allow_plain_http: false,
+            }),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+
+    let err = match cfg.validate() {
+        Ok(_) => panic!("path-like secret is rejected"),
+        Err(err) => err,
+    };
+    assert!(err.contains("may only contain"), "{err}");
+}
+
+#[test]
+fn caldav_backend_is_rejected_until_implemented() {
+    // Accepting a backend that runtime read/write paths ignore makes enabled
+    // accounts look configured while every useful command fails later.
+    let cfg = CalendarExtensionConfig {
+        enable: true,
+        accounts: vec![CalendarAccountConfig {
+            id: "dav".to_owned(),
+            backend: Some(CalendarBackendConfig::Caldav {
+                url: Some("https://calendar.example.test/dav".to_owned()),
+                login: Some("alice".to_owned()),
+                password_secret: Some("dav_password".to_owned()),
+            }),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+
+    let err = match cfg.validate() {
+        Ok(_) => panic!("unimplemented backend is rejected"),
+        Err(err) => err,
+    };
+    assert!(err.contains("not implemented"), "{err}");
+}
+
 fn google_backend_with_api_base(api_base: &str) -> CalendarBackendConfig {
     CalendarBackendConfig::Google {
         client_id_secret: "client".to_owned(),

@@ -348,15 +348,9 @@ impl ValidatedAccount {
                     api_base,
                 })
             }
-            Some(CalendarBackendConfig::Caldav {
-                url,
-                login,
-                password_secret,
-            }) => Some(ValidatedBackendConfig::Caldav {
-                url,
-                login,
-                password_secret,
-            }),
+            Some(CalendarBackendConfig::Caldav { .. }) => {
+                return Err("calendar backend type `caldav` is not implemented".to_owned());
+            }
             None => None,
         };
         Ok(Self {
@@ -394,30 +388,16 @@ fn validate_ics_feed_source(
             Err("ics_feed url must not be empty".to_owned())
         }
         (None, Some(url)) => validate_ics_feed_literal_url(url, allow_plain_http),
-        (Some(_), None) => Ok(()),
+        (Some(secret), None) => validate_secret_name("ics_feed url_secret", secret),
         (None, None) => Err("ics_feed requires exactly one of url_secret or url".to_owned()),
         (Some(_), Some(_)) => Err("ics_feed accepts only one of url_secret or url".to_owned()),
     }
 }
 
 fn validate_ics_feed_literal_url(url: &str, allow_plain_http: bool) -> Result<(), String> {
-    let candidate = url
-        .trim()
-        .strip_prefix("webcal://")
-        .map(|rest| format!("https://{rest}"))
-        .unwrap_or_else(|| url.trim().to_owned());
-    let parsed = Url::parse(&candidate)
-        .map_err(|error| format!("ics_feed url must be absolute: {error}"))?;
-    if parsed.scheme() == "http"
-        && !allow_plain_http
-        && !parsed.host_str().is_some_and(is_loopback_host)
-    {
-        return Err(
-            "ics_feed url must use https:// or webcal:// unless allow_plain_http is enabled"
-                .to_owned(),
-        );
-    }
-    Ok(())
+    crate::calendar::ics_feed::normalize_feed_url(url, allow_plain_http)
+        .map(|_| ())
+        .map_err(|message| message.replace("iCalendar feed URL", "ics_feed url"))
 }
 
 fn normalize_backend_url(field: &str, value: &str) -> Result<String, String> {

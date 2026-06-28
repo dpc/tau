@@ -267,7 +267,7 @@ impl IcsFeedBackend {
     }
 }
 
-fn normalize_feed_url(url: &str, allow_plain_http: bool) -> Result<String, String> {
+pub(crate) fn normalize_feed_url(url: &str, allow_plain_http: bool) -> Result<String, String> {
     let trimmed = url.trim();
     if trimmed.is_empty() {
         return Err("iCalendar feed URL must not be empty".to_owned());
