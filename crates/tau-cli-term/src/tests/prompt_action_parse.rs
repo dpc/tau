@@ -46,7 +46,7 @@ fn parses_shell_insert_with_trim() {
 
 #[test]
 fn parses_shell_edit_preserves_colons_in_command() {
-    let parsed = PromptShellAction::parse("shell-prompt-edit:full:bash -c 'echo a:b:c'");
+    let parsed = PromptShellAction::parse("shell-prompt-edit:raw:bash -c 'echo a:b:c'");
     match parsed {
         Some(PromptShellAction::Edit(cmd)) => {
             assert!(!cmd.trim);
@@ -88,4 +88,13 @@ fn parses_application_actions_generically() {
 fn malformed_shell_action_returns_none() {
     assert!(PromptShellAction::parse("shell-prompt-bogus:trim:cmd").is_none());
     assert!(PromptShellAction::parse("shell-prompt-edit:trim").is_none());
+}
+
+/// Ensures colon-form prompt actions reject unknown output modes locally
+/// instead of silently treating a mistyped mode as untrimmed command output.
+#[test]
+fn unknown_shell_action_mode_returns_none() {
+    assert!(PromptShellAction::parse("shell-prompt-insert:bogus:cmd").is_none());
+    assert!(PromptShellAction::parse("shell-prompt-edit:full:cmd").is_none());
+    assert!(PromptShellAction::parse("prompt-history-search:line:cmd").is_none());
 }

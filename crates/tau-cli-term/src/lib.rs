@@ -707,6 +707,7 @@ impl PromptActionOutcome {
 
 impl PromptShellAction {
     // Keep prompt-local action names, Term::trigger_named_action,
+    // crates/tau-cli/src/chat.rs::encode_binding_action,
     // built-in.cli-bindings.yaml, and docs/cli-keybindings.md in sync.
     fn parse(action: &str) -> Option<Self> {
         match action {
@@ -724,10 +725,14 @@ impl PromptShellAction {
             return (!action.is_empty() && !action.contains(':'))
                 .then(|| Self::Action(action.to_owned()));
         };
-        let command = command.to_owned();
+        let trim = match mode {
+            "trim" => true,
+            "raw" => false,
+            _ => return None,
+        };
         let command = PromptShellCommand {
-            command,
-            trim: mode == "trim",
+            command: command.to_owned(),
+            trim,
         };
         match name {
             "shell-prompt-insert" => Some(Self::Insert(command)),

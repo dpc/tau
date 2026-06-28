@@ -36,6 +36,9 @@ Colon-form prompt actions are crate-local protocols:
 - `shell-prompt-edit:<mode>:<command>` edits the current prompt through a temp file,
 - `prompt-history-search:<mode>:<command>` feeds indexed prompt history rows to a picker command.
 
+The `<mode>` segment is `trim` to strip leading/trailing command output whitespace
+or `raw` to preserve command output as-is.
+
 Malformed or unknown colon-form actions fail locally instead of being forwarded as application actions.
 
 ## History model
