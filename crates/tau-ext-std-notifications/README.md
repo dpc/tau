@@ -20,7 +20,7 @@ configured, the four hook groups map to these trigger points:
 | Hook | Trigger | Typical OSC user-var | Typical value |
 |---|---|---|---|
 | `agent_start` | `agent.prompt_submitted` (originator: User) | `user-notification` | `protoss-probe-ack` |
-| `agent_end` | Final `provider.response_finished` (no pending tool calls, originator: User) | `user-notification` | `protoss-upgrade-complete` |
+| `agent_end` | Final `provider.response_finished` (no pending tool calls, no active background tools for that agent, originator: User) | `user-notification` | `protoss-upgrade-complete` |
 | `agent_idle` | Idle window elapses after a final response | `user-text-notification` | JSON payload (see below) |
 | `agent_idle_all` | Idle window elapses after every loaded agent in a session is idle | `user-text-notification` | JSON payload (see below) |
 
@@ -28,6 +28,11 @@ The "final response" filter only treats responses with `tool_calls`
 empty as the end of an agent turn. Mid-turn finishes (tool-call
 batches the harness will run, then re-prompt) are skipped so the
 end-of-turn sound only fires once per real turn.
+
+If a user-originated tool call is backgrounded, the `agent_end` and
+per-agent `agent_idle` hooks are deferred until that agent's background tool
+finishes. Background tools for another loaded agent do not block the current
+agent's completion notification.
 
 The `originator: User` filter ensures *side conversations* spawned
 by other extensions (or by this one — see below) do not retrigger
@@ -132,6 +137,10 @@ strict mode. Current variables include `hook`, `agent.id`, `agent.name`
 `turn.agent_summary` (set only for idle hooks with
 `agent_summary: true`, empty on timeout/error).
 
+Use the `json` helper when embedding untrusted template values into a JSON
+payload, for example `"body":{{json turn.agent_summary}}`. The helper renders a
+JSON literal string/value; do not wrap its output in additional quotes.
+
 Rendered OSC user-var keys are validated before emission, and the terminal UI
 validates again before writing escape sequences. Keys must be non-empty
 printable ASCII, must not contain `=`, BEL/ESC, or other control characters, and
@@ -139,10 +148,14 @@ must be at most 128 bytes. A statically invalid key rejects the config; a key
 that only becomes invalid after rendering untrusted runtime data is skipped and
 logged.
 
+Rendered OSC values larger than 64 KiB are skipped so untrusted prompt,
+response, or summary text cannot amplify terminal-facing side effects without
+bound.
+
 Command hooks are trusted local configuration. The extension spawns them
 detached from stdin/stdout/stderr, but each command runs in its own thread until
 the process exits. Keep commands short-lived and avoid hooks that can block
-indefinitely.
+indefinitely. Rendered command argv elements larger than 16 KiB are skipped.
 
 ### Bell-only completion example
 

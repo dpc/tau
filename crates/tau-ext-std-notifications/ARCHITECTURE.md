@@ -10,6 +10,26 @@ Hook and option keys use snake_case (`agent_start`, `agent_end`, `agent_idle`, `
 
 Prompt-start and turn-end notifications are user-visible main-turn effects. They use `PromptOriginator::User` prompt/provider events and ignore extension side conversations so delegate work and idle-summary queries do not ring sounds or perturb per-agent idle timers.
 
+Visible-turn notification state is tracked per agent, not globally. Duplicate
+prompt suppression, the last prompt text used by templates, deferred final
+responses, and active background-tool blockers belong to the agent whose turn
+created them. This lets multiple loaded agents make interleaved progress without
+one agent suppressing another agent's `agent_start`/`agent_end` hooks or mixing
+`turn.*` template data.
+
+`agent.prompt_terminated` marks the corresponding user-originated prompt id
+consumed, clears that prompt's in-flight notification state, and emits no
+completion hooks or idle timers. It does not by itself clear active
+background-tool blockers; those remain indexed by tool call until
+`tool.background_result` / `tool.background_error` so terminal tool events can
+clean state without ringing a terminated prompt's completion.
+
+Background blockers are learned from provider-visible background placeholders
+(`provider.tool_result`, and `tool.result` for compatibility, with
+`kind = background_placeholder`) using the owner learned from the preceding
+tool-call `provider.response_finished`; active blockers are removed only by
+terminal background result/error events.
+
 `agent_idle_all` uses harness-owned `agent.state` snapshots as its busy/idle source of truth, together with `session.agent_loaded` and `session.agent_unloaded` membership. Provider final-response events only update template context (`turn.user_prompt` / `turn.agent_response`) for the eventual all-idle notification; they do not decide whether the session is idle. This keeps side-query prompt/response traffic from clearing a pending all-idle notification.
 
 ## Idle timers
@@ -24,8 +44,9 @@ conversation has inherited the transcript that triggered the notification.
 
 Unit tests drive the extension through encoded harness frames and assert emitted
 events. State-machine changes should add or update tests for event ordering,
-replay filtering, side-agent originator filtering, background-tool deferral,
-all-idle session membership, config reloads, and idle deadline timing. Keep
+replay filtering, side-agent originator filtering, per-agent interleaving,
+prompt termination, background-tool deferral, all-idle session membership,
+config reloads, and idle deadline timing. Keep
 timer windows short and bounded; use `UnixStream::pair` tests only when the test
 must observe an emitted request before sending the matching response. Terminal
 side-effect changes need regression coverage for config-time validation and

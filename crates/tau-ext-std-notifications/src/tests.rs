@@ -257,6 +257,35 @@ fn agent_state(agent_id: &str, state: tau_proto::AgentRuntimeState) -> Event {
         state,
     })
 }
+
+fn agent_prompt_terminated(agent_id: &str, agent_prompt_id: &str) -> Event {
+    Event::AgentPromptTerminated(tau_proto::AgentPromptTerminated {
+        agent_id: tau_proto::AgentId::parse(agent_id).expect("agent id"),
+        agent_prompt_id: agent_prompt_id.into(),
+        reason: tau_proto::AgentPromptTerminationReason::Canceled,
+        originator: tau_proto::PromptOriginator::User,
+    })
+}
+
+fn agent_prompt_created_for_agent(agent_id: &str, agent_prompt_id: &str) -> Event {
+    Event::AgentPromptCreated(tau_proto::AgentPromptCreated {
+        agent_prompt_id: agent_prompt_id.into(),
+        agent_id: tau_proto::AgentId::parse(agent_id).expect("agent id"),
+        session_id: "s1".into(),
+        system_prompt: String::new(),
+        context: tau_proto::PromptContext::default(),
+        tools: Vec::new(),
+        tools_ref: None,
+        model: "test/model".parse().expect("model id"),
+        model_params: tau_proto::ModelParams::default(),
+        tool_choice: Default::default(),
+        originator: tau_proto::PromptOriginator::User,
+        share_user_cache_key: false,
+        ctx_id: None,
+        compaction: None,
+    })
+}
+
 fn assistant_finished_response_for_agent(
     agent_id: &str,
     agent_prompt_id: &str,
@@ -753,6 +782,104 @@ fn new_prompt_does_not_forget_previous_background_tool() {
         vec![VALUE_AGENT_START, VALUE_AGENT_START],
         "end sound must wait until the old background tool completes",
     );
+}
+
+/// A background tool in one agent must not block completion notifications for a
+/// different loaded agent.
+#[test]
+fn background_tool_deferral_is_scoped_to_owning_agent() {
+    let mut input = Vec::new();
+    let mut writer = EventWriter::new(&mut input);
+    writer
+        .write_frame(&configure_frame(tau_proto::json_to_cbor(
+            &serde_json::json!({
+                "agent_start": [],
+                "agent_end": [{
+                    "osc1337": { "key": SOUND_VAR_NAME, "value": "end:{{agent.id}}" },
+                }],
+                "agent_idle": [],
+            }),
+        )))
+        .expect("write config");
+    writer
+        .write_event(&user_prompt_submitted_for_agent(
+            "main",
+            "slow",
+            tau_proto::PromptOriginator::User,
+        ))
+        .expect("main prompt");
+    writer
+        .write_event(&Event::ProviderResponseFinished(
+            tool_call_finished_response(
+                "sp-main-tools",
+                ToolCallItem {
+                    call_id: "call-main-bg".into(),
+                    name: tau_proto::ToolName::new("shell"),
+                    tool_type: tau_proto::ToolType::Function,
+                    arguments: tau_proto::CborValue::Null,
+                },
+                tau_proto::PromptOriginator::User,
+            ),
+        ))
+        .expect("main tool call");
+    writer
+        .write_event(&user_prompt_submitted_for_agent(
+            "other",
+            "quick",
+            tau_proto::PromptOriginator::User,
+        ))
+        .expect("other prompt");
+    writer
+        .write_event(&Event::ProviderToolResult(tool_background_placeholder(
+            "call-main-bg",
+            tau_proto::PromptOriginator::User,
+        )))
+        .expect("main bg placeholder");
+    writer
+        .write_event(&Event::ProviderResponseFinished(
+            assistant_finished_response_for_agent(
+                "main",
+                "sp-main",
+                "main done",
+                tau_proto::PromptOriginator::User,
+            ),
+        ))
+        .expect("main final");
+    writer
+        .write_event(&Event::ProviderResponseFinished(
+            assistant_finished_response_for_agent(
+                "other",
+                "sp-other",
+                "other done",
+                tau_proto::PromptOriginator::User,
+            ),
+        ))
+        .expect("other final");
+    writer
+        .write_event(&Event::ToolBackgroundResult(tool_background_result(
+            "call-main-bg",
+            tau_proto::PromptOriginator::User,
+        )))
+        .expect("main bg result");
+    writer.write_frame(&disconnect_frame(None)).expect("write");
+    writer.flush().expect("flush");
+
+    let mut output = Vec::new();
+    run_with_idle(Cursor::new(input), &mut output, Duration::from_secs(3600)).expect("run");
+
+    let mut reader = EventReader::new(Cursor::new(output));
+    drain_lifecycle(&mut reader);
+    let other_end = reader.read_event().expect("read").expect("other end");
+    let Event::Osc1337SetUserVar(osc) = other_end else {
+        panic!("expected other end OSC, got {other_end:?}");
+    };
+    assert_eq!(osc.value, "end:other");
+    let main_end = reader.read_event().expect("read").expect("main end");
+    let Event::Osc1337SetUserVar(osc) = main_end else {
+        panic!("expected main end OSC, got {main_end:?}");
+    };
+    assert_eq!(osc.value, "end:main");
+    assert!(reader.read_event().expect("read eof").is_none());
 }
 
 /// If a final response is waiting on a background tool that never reports
@@ -1876,6 +2003,43 @@ fn idle_command_runs_with_rendered_template_args() {
     handle.join().expect("ext thread");
 }
 
+/// Oversized rendered command arguments should skip the command rather than
+/// spawning a local process with unbounded untrusted template data.
+#[test]
+fn oversized_rendered_command_arg_skips_command() {
+    use tempfile::TempDir;
+
+    let td = TempDir::new().expect("tempdir");
+    let out_path = td.path().join("out.txt");
+    let cmd = format!("touch {dest}", dest = out_path.display());
+
+    let oversized = "x".repeat(MAX_COMMAND_ARG_LEN + 1);
+    let cfg = tau_proto::json_to_cbor(&serde_json::json!({
+        "agent_end": [{
+            "command": ["bash", "-c", cmd, "_marker", oversized],
+        }],
+    }));
+    let mut input = Vec::new();
+    let mut writer = EventWriter::new(&mut input);
+    writer.write_frame(&configure_frame(cfg)).expect("write");
+    writer
+        .write_event(&Event::ProviderResponseFinished(
+            assistant_finished_response("sp-0", "done", tau_proto::PromptOriginator::User),
+        ))
+        .expect("write response");
+    writer.write_frame(&disconnect_frame(None)).expect("write");
+    writer.flush().expect("flush");
+
+    let mut output = Vec::new();
+    run_with_idle(Cursor::new(input), &mut output, Duration::from_secs(3600)).expect("run");
+
+    thread::sleep(Duration::from_millis(50));
+    assert!(
+        !out_path.exists(),
+        "oversized command argument should skip spawning the command",
+    );
+}
+
 /// A bogus `config` value (one that doesn't match `ExtConfig`)
 /// must trigger a `LifecycleConfigError` carrying a human-readable
 /// message, so the harness can surface it to the user.
@@ -2054,6 +2218,85 @@ fn runtime_invalid_osc1337_key_is_skipped() {
         reader.read_event().expect("read").is_none(),
         "runtime-invalid OSC key should skip emission",
     );
+}
+
+/// The `json` helper should make untrusted prompt/response text safe to embed
+/// into JSON notification payloads instead of letting quotes or newlines break
+/// downstream consumers' expected structure.
+#[test]
+fn json_helper_quotes_untrusted_template_values() {
+    let mut input = Vec::new();
+    let mut writer = EventWriter::new(&mut input);
+    writer
+        .write_frame(&configure_frame(tau_proto::json_to_cbor(
+            &serde_json::json!({
+                "agent_end": [{
+                    "osc1337": {
+                        "key": TEXT_VAR_NAME,
+                        "value": "{\"body\":{{json turn.agent_response}}}",
+                    },
+                }],
+            }),
+        )))
+        .expect("write config");
+    writer
+        .write_event(&Event::ProviderResponseFinished(
+            assistant_finished_response(
+                "sp-0",
+                "quote: \"yes\"\nnext",
+                tau_proto::PromptOriginator::User,
+            ),
+        ))
+        .expect("write response");
+    writer.write_frame(&disconnect_frame(None)).expect("write");
+    writer.flush().expect("flush");
+
+    let mut output = Vec::new();
+    run_with_idle(Cursor::new(input), &mut output, Duration::from_secs(3600)).expect("run");
+
+    let mut reader = EventReader::new(Cursor::new(output));
+    drain_lifecycle(&mut reader);
+    let event = reader.read_event().expect("read").expect("osc");
+    let Event::Osc1337SetUserVar(osc) = event else {
+        panic!("expected text OSC, got {event:?}");
+    };
+    let payload: serde_json::Value = serde_json::from_str(&osc.value).expect("valid JSON");
+    assert_eq!(payload["body"], "quote: \"yes\"\nnext");
+}
+
+/// Oversized rendered OSC values are skipped so untrusted model text cannot
+/// amplify terminal-facing side effects without bound.
+#[test]
+fn oversized_rendered_osc_value_is_skipped() {
+    let mut input = Vec::new();
+    let mut writer = EventWriter::new(&mut input);
+    writer
+        .write_frame(&configure_frame(tau_proto::json_to_cbor(
+            &serde_json::json!({
+                "agent_end": [{
+                    "osc1337": { "key": TEXT_VAR_NAME, "value": "{{turn.agent_response}}" },
+                }],
+            }),
+        )))
+        .expect("write config");
+    writer
+        .write_event(&Event::ProviderResponseFinished(
+            assistant_finished_response(
+                "sp-0",
+                &"x".repeat(MAX_OSC1337_VALUE_LEN + 1),
+                tau_proto::PromptOriginator::User,
+            ),
+        ))
+        .expect("write response");
+    writer.write_frame(&disconnect_frame(None)).expect("write");
+    writer.flush().expect("flush");
+
+    let mut output = Vec::new();
+    run_with_idle(Cursor::new(input), &mut output, Duration::from_secs(3600)).expect("run");
+
+    let mut reader = EventReader::new(Cursor::new(output));
+    drain_lifecycle(&mut reader);
+    assert!(reader.read_event().expect("read eof").is_none());
 }
 
 /// Idle summary requests run in a side conversation, so the emitted instruction
@@ -2372,4 +2615,211 @@ fn duplicate_agent_prompt_submitted_during_same_turn_emits_one_start_sound() {
     assert_eq!(osc.value, VALUE_AGENT_END);
 
     assert!(reader.read_event().expect("read eof").is_none());
+}
+
+/// Interleaved user turns for different agents should each get their own start
+/// and end notification. This prevents the duplicate-suppression state for one
+/// active agent from muting another loaded agent's visible turn.
+#[test]
+fn interleaved_agents_each_emit_start_and_end_with_own_prompt_context() {
+    let mut input = Vec::new();
+    let mut writer = EventWriter::new(&mut input);
+    writer
+        .write_frame(&configure_frame(tau_proto::json_to_cbor(
+            &serde_json::json!({
+                "agent_start": [{
+                    "osc1337": { "key": SOUND_VAR_NAME, "value": "start:{{agent.id}}:{{turn.user_prompt}}" },
+                }],
+                "agent_end": [{
+                    "osc1337": { "key": SOUND_VAR_NAME, "value": "end:{{agent.id}}:{{turn.user_prompt}}:{{turn.agent_response}}" },
+                }],
+            }),
+        )))
+        .expect("write config");
+    writer
+        .write_event(&user_prompt_submitted_for_agent(
+            "main",
+            "main prompt",
+            tau_proto::PromptOriginator::User,
+        ))
+        .expect("main prompt");
+    writer
+        .write_event(&user_prompt_submitted_for_agent(
+            "other",
+            "other prompt",
+            tau_proto::PromptOriginator::User,
+        ))
+        .expect("other prompt");
+    writer
+        .write_event(&Event::ProviderResponseFinished(
+            assistant_finished_response_for_agent(
+                "main",
+                "sp-main",
+                "main done",
+                tau_proto::PromptOriginator::User,
+            ),
+        ))
+        .expect("main done");
+    writer
+        .write_event(&Event::ProviderResponseFinished(
+            assistant_finished_response_for_agent(
+                "other",
+                "sp-other",
+                "other done",
+                tau_proto::PromptOriginator::User,
+            ),
+        ))
+        .expect("other done");
+    writer.write_frame(&disconnect_frame(None)).expect("write");
+    writer.flush().expect("flush");
+
+    let mut output = Vec::new();
+    run_with_idle(Cursor::new(input), &mut output, Duration::from_secs(3600)).expect("run");
+
+    let mut reader = EventReader::new(Cursor::new(output));
+    drain_lifecycle(&mut reader);
+    let mut values = Vec::new();
+    while let Some(Event::Osc1337SetUserVar(osc)) = reader.read_event().expect("read") {
+        values.push(osc.value);
+    }
+    assert_eq!(
+        values,
+        [
+            "start:main:main prompt",
+            "start:other:other prompt",
+            "end:main:main prompt:main done",
+            "end:other:other prompt:other done",
+        ],
+    );
+}
+
+/// Prompt termination means no provider response will arrive. The extension
+/// should clear the in-flight state so a later prompt for the same agent is
+/// treated as a fresh user turn and can ring its start notification.
+#[test]
+fn terminated_prompt_clears_in_flight_turn_state() {
+    let mut input = Vec::new();
+    let mut writer = EventWriter::new(&mut input);
+    writer
+        .write_frame(&default_notifications_config_frame())
+        .expect("write config");
+    writer
+        .write_event(&user_prompt_submitted(
+            "first",
+            tau_proto::PromptOriginator::User,
+        ))
+        .expect("first prompt");
+    writer
+        .write_event(&agent_prompt_terminated("main", "sp-first"))
+        .expect("terminated");
+    writer
+        .write_event(&user_prompt_submitted(
+            "second",
+            tau_proto::PromptOriginator::User,
+        ))
+        .expect("second prompt");
+    writer.write_frame(&disconnect_frame(None)).expect("write");
+    writer.flush().expect("flush");
+
+    let mut output = Vec::new();
+    run_with_idle(Cursor::new(input), &mut output, Duration::from_secs(3600)).expect("run");
+
+    let mut reader = EventReader::new(Cursor::new(output));
+    drain_lifecycle(&mut reader);
+    let first = reader.read_event().expect("read").expect("first start");
+    let Event::Osc1337SetUserVar(osc) = first else {
+        panic!("expected first start OSC");
+    };
+    assert_eq!(osc.value, VALUE_AGENT_START);
+    let second = reader.read_event().expect("read").expect("second start");
+    let Event::Osc1337SetUserVar(osc) = second else {
+        panic!("expected second start OSC");
+    };
+    assert_eq!(osc.value, VALUE_AGENT_START);
+    assert!(reader.read_event().expect("read eof").is_none());
+}
+
+/// A termination for an older non-current prompt must still mark that prompt id
+/// consumed so a stale provider completion cannot emit a belated end sound.
+#[test]
+fn stale_completion_after_non_current_termination_is_ignored() {
+    let mut input = Vec::new();
+    let mut writer = EventWriter::new(&mut input);
+    writer
+        .write_frame(&default_notifications_config_frame())
+        .expect("write config");
+    writer
+        .write_event(&agent_prompt_created_for_agent("main", "sp-current"))
+        .expect("current prompt created");
+    writer
+        .write_event(&agent_prompt_terminated("main", "sp-old"))
+        .expect("old terminated");
+    writer
+        .write_event(&Event::ProviderResponseFinished(
+            assistant_finished_response("sp-old", "stale", tau_proto::PromptOriginator::User),
+        ))
+        .expect("stale response");
+    writer.write_frame(&disconnect_frame(None)).expect("write");
+    writer.flush().expect("flush");
+
+    let mut output = Vec::new();
+    run_with_idle(Cursor::new(input), &mut output, Duration::from_secs(3600)).expect("run");
+
+    let mut reader = EventReader::new(Cursor::new(output));
+    drain_lifecycle(&mut reader);
+    assert!(reader.read_event().expect("read eof").is_none());
+}
+
+/// Per-agent idle timers should survive another agent starting a prompt. This
+/// prevents one loaded agent from cancelling another agent's pending idle text.
+#[test]
+fn agent_idle_timers_are_scoped_per_agent() {
+    let mut input = Vec::new();
+    let mut writer = EventWriter::new(&mut input);
+    writer
+        .write_frame(&configure_frame(tau_proto::json_to_cbor(
+            &serde_json::json!({
+                "agent_idle": [{
+                    "delay_seconds": 0,
+                    "osc1337": { "key": TEXT_VAR_NAME, "value": "idle:{{agent.id}}" },
+                }],
+            }),
+        )))
+        .expect("write config");
+    writer
+        .write_event(&user_prompt_submitted_for_agent(
+            "main",
+            "main",
+            tau_proto::PromptOriginator::User,
+        ))
+        .expect("main prompt");
+    writer
+        .write_event(&Event::ProviderResponseFinished(
+            assistant_finished_response_for_agent(
+                "main",
+                "sp-main",
+                "done",
+                tau_proto::PromptOriginator::User,
+            ),
+        ))
+        .expect("main response");
+    writer
+        .write_event(&user_prompt_submitted_for_agent(
+            "other",
+            "other",
+            tau_proto::PromptOriginator::User,
+        ))
+        .expect("other prompt");
+    writer.flush().expect("flush");
+
+    let mut output = Vec::new();
+    run_with_idle(Cursor::new(input), &mut output, Duration::from_millis(1)).expect("run");
+
+    let mut reader = EventReader::new(Cursor::new(output));
+    drain_lifecycle(&mut reader);
+    let idle = reader.read_event().expect("read").expect("idle");
+    let Event::Osc1337SetUserVar(osc) = idle else {
+        panic!("expected main idle OSC, got {idle:?}");
+    };
+    assert_eq!(osc.value, "idle:main");
 }

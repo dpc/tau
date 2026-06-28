@@ -7,12 +7,16 @@
 //! for:
 //! - `agent.prompt_submitted`
 //! - final `provider.response_finished` (only when `stop_reason` does not
-//!   request tools and no backgrounded main-agent tools remain active)
+//!   request tools and no backgrounded tools for the triggering agent remain
+//!   active)
 //! - idle deadlines after a final response
 //!
-//! The per-agent idle timer resets on every user-originated
-//! `agent.prompt_submitted` / `provider.prompt_submitted`; pending idle hooks
-//! that are still waiting for their idle deadline are extended by
+//! A per-agent idle timer resets on that agent's user-originated
+//! `agent.prompt_submitted`, and on matching user-originated
+//! `provider.prompt_submitted` when the prompt owner is known. Unowned provider
+//! prompt submissions clear conservatively for compatibility with older event
+//! streams. Pending idle hooks that are still waiting for their idle deadline
+//! are extended by
 //! `ui.prompt_draft` typing pings.
 //!
 //! The downstream tooling (typically a terminal multiplexer status
@@ -70,6 +74,12 @@ pub const SUMMARY_TIMEOUT_SECONDS: u64 = 10;
 /// configuration errors fail closed and runtime-invalid template output is
 /// dropped before it reaches the UI.
 const MAX_OSC1337_NAME_LEN: usize = 128;
+
+/// Maximum rendered OSC user-variable value bytes emitted by this extension.
+const MAX_OSC1337_VALUE_LEN: usize = 64 * 1024;
+
+/// Maximum rendered command argv element bytes accepted by this extension.
+const MAX_COMMAND_ARG_LEN: usize = 16 * 1024;
 
 /// Instruction sent to the agent as a side prompt when the idle
 /// timer fires. Mirrors the prompt Pi's `idle-notification.ts` uses,
@@ -227,6 +237,84 @@ struct AllIdleTurnContext {
     /// Last final assistant response seen for this agent.
     agent_response: String,
 }
+
+/// Per-agent visible-turn notification state.
+#[derive(Default)]
+struct AgentTurnState {
+    /// Whether a visible user prompt has started and is awaiting a final
+    /// response.
+    waiting_for_final_response: bool,
+    /// Whether the current visible turn has already emitted its completion
+    /// hook.
+    turn_end_emitted: bool,
+    /// Whether the final response is deferred until this agent's background
+    /// tools finish.
+    final_response_pending_background_tools: bool,
+    /// Prompt id for a final response deferred behind background tool
+    /// completion.
+    pending_final_response_prompt: Option<tau_proto::AgentPromptId>,
+    /// Current agent prompt id for this agent's visible turn, when the
+    /// harness has published it.
+    current_agent_prompt_id: Option<tau_proto::AgentPromptId>,
+    /// Assistant text for a final response deferred behind background tool
+    /// completion.
+    pending_final_response_text: String,
+    /// Last visible user prompt text supplied to turn-aware hook templates.
+    last_user_prompt: String,
+    /// User-originated background tool calls still blocking this agent's
+    /// completion notification.
+    active_background_tools: HashSet<tau_proto::ToolCallId>,
+}
+
+impl AgentTurnState {
+    fn begin_prompt(&mut self, text: String) -> bool {
+        if self.waiting_for_final_response {
+            return false;
+        }
+        self.current_agent_prompt_id = None;
+        self.last_user_prompt = text;
+        self.waiting_for_final_response = true;
+        self.turn_end_emitted = false;
+        true
+    }
+
+    fn record_prompt_created(&mut self, prompt_id: tau_proto::AgentPromptId) {
+        self.current_agent_prompt_id = Some(prompt_id);
+    }
+
+    fn defer_final_response(&mut self, prompt_id: tau_proto::AgentPromptId, response_text: String) {
+        self.final_response_pending_background_tools = true;
+        self.pending_final_response_prompt = Some(prompt_id);
+        self.current_agent_prompt_id = self.pending_final_response_prompt.clone();
+        self.pending_final_response_text = response_text;
+    }
+
+    fn terminate_prompt_preserving_backgrounds(&mut self) {
+        self.waiting_for_final_response = false;
+        self.turn_end_emitted = false;
+        self.final_response_pending_background_tools = false;
+        self.pending_final_response_prompt = None;
+        self.pending_final_response_text.clear();
+        self.current_agent_prompt_id = None;
+    }
+
+    fn cancel_deferred_final_response(
+        &mut self,
+        completed_response_prompts: &mut HashSet<tau_proto::AgentPromptId>,
+    ) -> Option<tau_proto::AgentPromptId> {
+        let canceled_prompt_id = self.pending_final_response_prompt.take();
+        if let Some(prompt_id) = &canceled_prompt_id {
+            completed_response_prompts.insert(prompt_id.clone());
+        }
+        self.final_response_pending_background_tools = false;
+        self.pending_final_response_text.clear();
+        self.current_agent_prompt_id = None;
+        self.waiting_for_final_response = false;
+        self.turn_end_emitted = false;
+        canceled_prompt_id
+    }
+}
+
 /// Per-session state used to detect all-agents-idle transitions.
 #[derive(Default)]
 struct SessionIdleTracker {
@@ -333,6 +421,17 @@ fn response_text(items: &[tau_proto::ContextItem]) -> String {
         }
     }
     out
+}
+
+fn tool_call_ids(
+    items: &[tau_proto::ContextItem],
+) -> impl Iterator<Item = tau_proto::ToolCallId> + '_ {
+    items.iter().filter_map(|item| {
+        let tau_proto::ContextItem::ToolCall(tool_call) = item else {
+            return None;
+        };
+        Some(tool_call.call_id.clone())
+    })
 }
 
 impl PendingIdleHook {
@@ -524,6 +623,8 @@ fn write_handshake<W: Write>(
             tau_proto::EventName::PROVIDER_PROMPT_SUBMITTED,
             tau_proto::EventName::PROVIDER_RESPONSE_FINISHED,
             tau_proto::EventName::AGENT_PROMPT_SUBMITTED,
+            tau_proto::EventName::AGENT_PROMPT_CREATED,
+            tau_proto::EventName::AGENT_PROMPT_TERMINATED,
             tau_proto::EventName::AGENT_STARTED,
             tau_proto::EventName::AGENT_DISPLAY_NAME_SET,
             tau_proto::EventName::AGENT_STATE,
@@ -534,6 +635,9 @@ fn write_handshake<W: Write>(
             // deadline so the desktop notification doesn't fire mid-sentence.
             tau_proto::EventName::UI_PROMPT_DRAFT,
             tau_proto::EventName::TOOL_RESULT,
+            tau_proto::EventName::TOOL_ERROR,
+            tau_proto::EventName::PROVIDER_TOOL_RESULT,
+            tau_proto::EventName::PROVIDER_TOOL_ERROR,
             tau_proto::EventName::TOOL_BACKGROUND_RESULT,
             tau_proto::EventName::TOOL_BACKGROUND_ERROR,
             // Side-query results come back point-to-point from the harness, but
@@ -581,12 +685,13 @@ where
 
 /// Mutable state for the std-notifications protocol loop.
 ///
-/// The loop keeps per-user-turn state (`idle`, `waiting_for_final_response`,
-/// deferred background-tool fields) separate from all-agents-idle state
-/// (`idle_all`, `session_idle`, `all_idle_context`). All-idle tracking is
-/// updated before sub-agent filtering because harness-owned `agent.state` and
-/// session membership are the source of truth, while user-visible prompt/end
-/// hooks must ignore extension side conversations.
+/// The loop keeps per-agent visible-turn state (`agent_turns`, prompt ids, and
+/// background-tool owners) separate from per-agent idle timers (`idle`) and
+/// all-agents-idle state (`idle_all`, `session_idle`, `all_idle_context`).
+/// All-idle tracking is updated before sub-agent filtering because
+/// harness-owned `agent.state` and session membership are the source of truth,
+/// while user-visible prompt/end hooks must ignore extension side
+/// conversations.
 struct NotificationLoop<W: Write> {
     /// Protocol writer used for config errors, emitted events, and side-agent
     /// requests.
@@ -614,36 +719,19 @@ struct NotificationLoop<W: Write> {
     ignored_summary_agents: HashMap<String, tau_proto::AgentId>,
     /// Durable agent display names used by hook template contexts.
     agent_display_names: HashMap<tau_proto::AgentId, String>,
+    /// Per-agent visible-turn state. This is intentionally not global: Tau can
+    /// have multiple loaded agents with interleaved user-originated turns.
+    agent_turns: HashMap<tau_proto::AgentId, AgentTurnState>,
+    /// Owner index for tool calls whose owning agent is known.
+    tool_call_agents: HashMap<tau_proto::ToolCallId, tau_proto::AgentId>,
+    /// Owner index for agent prompt ids whose owning agent is known.
+    agent_prompt_agents: HashMap<tau_proto::AgentPromptId, tau_proto::AgentId>,
     /// Whether inbound input is closed while idle notifications may still be
     /// pending.
     input_closed: bool,
-    /// Whether a visible user prompt has started and is awaiting a final
-    /// response.
-    waiting_for_final_response: bool,
-    /// Whether the current visible turn has already emitted its completion
-    /// hook.
-    turn_end_emitted: bool,
-    /// Whether the final response is deferred until all active user-originated
-    /// background tools finish; when set, the three pending-final-response
-    /// fields below describe the completion hook that may still be emitted.
-    final_response_pending_background_tools: bool,
-    /// Prompt id for a final response deferred behind background tool
-    /// completion.
-    pending_final_response_prompt: Option<tau_proto::AgentPromptId>,
-    /// Agent id for a final response deferred behind background tool
-    /// completion.
-    pending_final_response_agent: Option<tau_proto::AgentId>,
-    /// Assistant text for a final response deferred behind background tool
-    /// completion.
-    pending_final_response_text: String,
-    /// Last visible user prompt text supplied to turn-aware hook templates.
-    last_user_prompt: String,
     /// Provider response prompt ids already consumed for end-of-turn
     /// notification logic.
     completed_response_prompts: HashSet<tau_proto::AgentPromptId>,
-    /// User-originated background tool calls still blocking completion
-    /// notification.
-    active_background_tools: HashSet<tau_proto::ToolCallId>,
     /// Monotonic suffix for idle-summary side-agent query ids.
     next_query_id: u64,
 }
@@ -668,16 +756,11 @@ impl<W: Write> NotificationLoop<W> {
             all_idle_context: HashMap::new(),
             ignored_summary_agents: HashMap::new(),
             agent_display_names: HashMap::new(),
+            agent_turns: HashMap::new(),
+            tool_call_agents: HashMap::new(),
+            agent_prompt_agents: HashMap::new(),
             input_closed: false,
-            waiting_for_final_response: false,
-            turn_end_emitted: false,
-            final_response_pending_background_tools: false,
-            pending_final_response_prompt: None,
-            pending_final_response_agent: None,
-            pending_final_response_text: String::new(),
-            last_user_prompt: String::new(),
             completed_response_prompts: HashSet::new(),
-            active_background_tools: HashSet::new(),
             next_query_id: 0,
         }
     }
@@ -839,10 +922,15 @@ impl<W: Write> NotificationLoop<W> {
             Event::ProviderResponseFinished(finished)
                 if finished.originator.is_user() && !finished.stop_reason.requests_tool_calls() =>
             {
+                let user_prompt = self
+                    .agent_turns
+                    .get(&finished.agent_id)
+                    .map(|turn| turn.last_user_prompt.clone())
+                    .unwrap_or_default();
                 self.all_idle_context.insert(
                     finished.agent_id.clone(),
                     AllIdleTurnContext {
-                        user_prompt: self.last_user_prompt.clone(),
+                        user_prompt,
                         agent_response: response_text(&finished.output_items),
                     },
                 );
@@ -946,13 +1034,24 @@ impl<W: Write> NotificationLoop<W> {
             Event::AgentDisplayNameSet(name) => {
                 self.set_display_name(name.agent_id, Some(&name.display_name));
             }
-            Event::ProviderPromptSubmitted(_) => self.idle.clear(),
+            Event::ProviderPromptSubmitted(prompt) => {
+                self.handle_provider_prompt_submitted(prompt);
+            }
             Event::AgentPromptSubmitted(prompt) => self.handle_agent_prompt(prompt)?,
+            Event::AgentPromptCreated(created) => self.handle_agent_prompt_created(created),
+            Event::AgentPromptTerminated(terminated) => {
+                self.handle_agent_prompt_terminated(terminated);
+            }
             Event::UiPromptDraft(_) => self.extend_idle_deadlines(idle_duration),
             Event::ProviderResponseFinished(finished) => {
                 self.handle_provider_response_finished(finished, idle_duration)?;
             }
-            Event::ToolResult(result) => self.handle_tool_result(result),
+            Event::ToolResult(result) | Event::ProviderToolResult(result) => {
+                self.handle_tool_result(result);
+            }
+            Event::ToolError(error) | Event::ProviderToolError(error) => {
+                self.handle_tool_error(error);
+            }
             Event::ToolBackgroundResult(result) => {
                 self.handle_background_tool_finished(
                     result.call_id,
@@ -987,39 +1086,78 @@ impl<W: Write> NotificationLoop<W> {
         prompt: tau_proto::AgentPromptSubmitted,
     ) -> Result<(), Box<dyn Error>> {
         self.set_display_name(prompt.agent_id.clone(), prompt.display_name.as_deref());
-        self.idle.clear();
+        self.idle
+            .retain(|pending| pending.agent_id != prompt.agent_id);
         if prompt.message_class.is_internal() {
             tracing::trace!(target: LOG_TARGET, "skipping internal prompt submit");
             return Ok(());
         }
-        if self.final_response_pending_background_tools {
-            self.cancel_deferred_final_response();
+        let turn = self.agent_turns.entry(prompt.agent_id.clone()).or_default();
+        if turn.final_response_pending_background_tools
+            && let Some(prompt_id) =
+                turn.cancel_deferred_final_response(&mut self.completed_response_prompts)
+        {
+            self.agent_prompt_agents.remove(&prompt_id);
         }
-        if !self.waiting_for_final_response {
-            self.last_user_prompt = prompt.text.clone();
+        if turn.begin_prompt(prompt.text) {
             let agent_name = display_name_for_agent(&self.agent_display_names, &prompt.agent_id);
             let ctx = template_context(
                 "agent_start",
                 &prompt.agent_id,
                 &agent_name,
-                &self.last_user_prompt,
+                &turn.last_user_prompt,
                 "",
                 "",
             );
             emit_hooks(&mut self.writer, &self.config.agent_start, &ctx)?;
-            self.waiting_for_final_response = true;
-            self.turn_end_emitted = false;
         }
         Ok(())
     }
 
-    fn cancel_deferred_final_response(&mut self) {
-        self.final_response_pending_background_tools = false;
-        if let Some(prompt_id) = self.pending_final_response_prompt.take() {
-            self.completed_response_prompts.insert(prompt_id);
+    fn handle_provider_prompt_submitted(&mut self, prompt: tau_proto::ProviderPromptSubmitted) {
+        if !prompt.originator.is_user() {
+            return;
         }
-        self.waiting_for_final_response = false;
-        self.turn_end_emitted = false;
+        if let Some(agent_id) = self.agent_prompt_agents.get(&prompt.agent_prompt_id) {
+            self.idle.retain(|pending| &pending.agent_id != agent_id);
+        } else {
+            self.idle.clear();
+        }
+    }
+
+    fn handle_agent_prompt_created(&mut self, created: tau_proto::AgentPromptCreated) {
+        if !created.originator.is_user() {
+            return;
+        }
+        self.agent_prompt_agents
+            .insert(created.agent_prompt_id.clone(), created.agent_id.clone());
+        self.agent_turns
+            .entry(created.agent_id)
+            .or_default()
+            .record_prompt_created(created.agent_prompt_id);
+    }
+
+    fn handle_agent_prompt_terminated(&mut self, terminated: tau_proto::AgentPromptTerminated) {
+        if !terminated.originator.is_user() {
+            return;
+        }
+        self.completed_response_prompts
+            .insert(terminated.agent_prompt_id.clone());
+        self.agent_prompt_agents.remove(&terminated.agent_prompt_id);
+        if let Some(turn) = self.agent_turns.get_mut(&terminated.agent_id) {
+            if turn
+                .current_agent_prompt_id
+                .as_ref()
+                .is_some_and(|prompt_id| prompt_id != &terminated.agent_prompt_id)
+            {
+                return;
+            }
+            if turn.pending_final_response_prompt.as_ref() == Some(&terminated.agent_prompt_id) {
+                let _ = turn.cancel_deferred_final_response(&mut self.completed_response_prompts);
+            } else {
+                turn.terminate_prompt_preserving_backgrounds();
+            }
+        }
     }
 
     fn extend_idle_deadlines(&mut self, idle_duration: Duration) {
@@ -1040,10 +1178,18 @@ impl<W: Write> NotificationLoop<W> {
         finished: tau_proto::ProviderResponseFinished,
         idle_duration: Duration,
     ) -> Result<(), Box<dyn Error>> {
+        if finished.stop_reason.requests_tool_calls() {
+            self.track_tool_call_owners(&finished);
+            self.agent_prompt_agents.remove(&finished.agent_prompt_id);
+        }
         if self.should_skip_finished_response(&finished) {
             return Ok(());
         }
-        if self.active_background_tools.is_empty() {
+        let active_background_tools_empty = self
+            .agent_turns
+            .get(&finished.agent_id)
+            .is_none_or(|turn| turn.active_background_tools.is_empty());
+        if active_background_tools_empty {
             self.emit_finished_response(finished, idle_duration)?;
         } else {
             self.defer_finished_response(finished);
@@ -1066,11 +1212,22 @@ impl<W: Write> NotificationLoop<W> {
             tracing::trace!(target: LOG_TARGET, agent_prompt_id = %finished.agent_prompt_id, "skipping already-completed response");
             return true;
         }
-        if self.turn_end_emitted {
+        if self
+            .agent_turns
+            .get(&finished.agent_id)
+            .is_some_and(|turn| turn.turn_end_emitted)
+        {
             tracing::trace!(target: LOG_TARGET, "skipping already-completed turn");
             return true;
         }
         false
+    }
+
+    fn track_tool_call_owners(&mut self, finished: &tau_proto::ProviderResponseFinished) {
+        for call_id in tool_call_ids(&finished.output_items) {
+            self.tool_call_agents
+                .insert(call_id, finished.agent_id.clone());
+        }
     }
 
     fn emit_finished_response(
@@ -1079,48 +1236,89 @@ impl<W: Write> NotificationLoop<W> {
         idle_duration: Duration,
     ) -> Result<(), Box<dyn Error>> {
         let agent_id = finished.agent_id.clone();
+        self.agent_prompt_agents
+            .insert(finished.agent_prompt_id.clone(), agent_id.clone());
         let agent_name = display_name_for_agent(&self.agent_display_names, &agent_id);
         let agent_response = response_text(&finished.output_items);
+        let turn = self.agent_turns.entry(agent_id.clone()).or_default();
+        turn.record_prompt_created(finished.agent_prompt_id.clone());
         emit_agent_end(
             &mut self.writer,
-            &mut self.waiting_for_final_response,
-            &mut self.turn_end_emitted,
+            turn,
             &mut self.idle,
             idle_duration,
             &self.config,
             agent_id,
             agent_name,
-            self.last_user_prompt.clone(),
+            turn.last_user_prompt.clone(),
             agent_response,
         )?;
         self.completed_response_prompts
-            .insert(finished.agent_prompt_id);
+            .insert(finished.agent_prompt_id.clone());
+        self.agent_prompt_agents.remove(&finished.agent_prompt_id);
         Ok(())
     }
 
     fn defer_finished_response(&mut self, finished: tau_proto::ProviderResponseFinished) {
-        self.final_response_pending_background_tools = true;
-        self.pending_final_response_prompt = Some(finished.agent_prompt_id);
-        self.pending_final_response_agent = Some(finished.agent_id);
-        self.pending_final_response_text = response_text(&finished.output_items);
+        self.agent_prompt_agents
+            .insert(finished.agent_prompt_id.clone(), finished.agent_id.clone());
+        let turn = self.agent_turns.entry(finished.agent_id).or_default();
+        turn.defer_final_response(
+            finished.agent_prompt_id,
+            response_text(&finished.output_items),
+        );
         tracing::debug!(
             target: LOG_TARGET,
-            active_background_tools = self.active_background_tools.len(),
+            active_background_tools = turn.active_background_tools.len(),
             "deferring end notification until background tools complete",
         );
+    }
+
+    fn handle_tool_error(&mut self, error: tau_proto::ToolError) {
+        if error.originator.is_user() {
+            self.tool_call_agents.remove(&error.call_id);
+        }
     }
 
     fn handle_tool_result(&mut self, result: tau_proto::ToolResult) {
         if result.originator.is_user()
             && result.kind == tau_proto::ToolResultKind::BackgroundPlaceholder
         {
-            self.active_background_tools.insert(result.call_id);
+            let Some(agent_id) = self.agent_for_tool_result(&result.call_id) else {
+                tracing::warn!(
+                    target: LOG_TARGET,
+                    call_id = %result.call_id,
+                    "background tool placeholder has no known owning agent; ignoring for notifications",
+                );
+                return;
+            };
+            self.tool_call_agents
+                .insert(result.call_id.clone(), agent_id.clone());
+            let turn = self.agent_turns.entry(agent_id).or_default();
+            turn.active_background_tools.insert(result.call_id);
             tracing::trace!(
                 target: LOG_TARGET,
-                active_background_tools = self.active_background_tools.len(),
+                active_background_tools = turn.active_background_tools.len(),
                 "background tool started",
             );
+        } else if result.originator.is_user() {
+            self.tool_call_agents.remove(&result.call_id);
         }
+    }
+
+    fn agent_for_tool_result(&self, call_id: &tau_proto::ToolCallId) -> Option<tau_proto::AgentId> {
+        self.tool_call_agents.get(call_id).cloned().or_else(|| {
+            // Prefer the provider tool-call owner index. The single-waiting-agent
+            // fallback keeps legacy/fixture streams working when they emit a
+            // background placeholder without the preceding tool-call response.
+            let mut waiting_agents = self
+                .agent_turns
+                .iter()
+                .filter(|(_, turn)| turn.waiting_for_final_response)
+                .map(|(agent_id, _)| agent_id.clone());
+            let agent_id = waiting_agents.next()?;
+            waiting_agents.next().is_none().then_some(agent_id)
+        })
     }
 
     fn handle_background_tool_finished(
@@ -1132,23 +1330,25 @@ impl<W: Write> NotificationLoop<W> {
         if !originator.is_user() {
             return Ok(());
         }
-        self.active_background_tools.remove(&call_id);
+        let Some(agent_id) = self.tool_call_agents.remove(&call_id) else {
+            return Ok(());
+        };
+        let Some(turn) = self.agent_turns.get_mut(&agent_id) else {
+            return Ok(());
+        };
+        turn.active_background_tools.remove(&call_id);
         if maybe_emit_deferred_agent_end(
             &mut self.writer,
-            &mut self.waiting_for_final_response,
-            &mut self.turn_end_emitted,
-            &mut self.final_response_pending_background_tools,
+            turn,
             &mut self.idle,
             idle_duration,
             &self.config,
-            &self.active_background_tools,
             &self.agent_display_names,
-            &mut self.pending_final_response_agent,
-            &self.last_user_prompt,
-            &mut self.pending_final_response_text,
-        )? && let Some(prompt_id) = self.pending_final_response_prompt.take()
+            &agent_id,
+        )? && let Some(prompt_id) = turn.pending_final_response_prompt.take()
         {
-            self.completed_response_prompts.insert(prompt_id);
+            self.completed_response_prompts.insert(prompt_id.clone());
+            self.agent_prompt_agents.remove(&prompt_id);
         }
         Ok(())
     }
@@ -1364,8 +1564,7 @@ fn emit_due_idle_hook<W: Write>(
 #[allow(clippy::too_many_arguments)]
 fn emit_agent_end<W: Write>(
     writer: &mut PeerOutputWriter<BufWriter<W>>,
-    waiting_for_final_response: &mut bool,
-    turn_end_emitted: &mut bool,
+    turn: &mut AgentTurnState,
     idle: &mut Vec<PendingIdleHook>,
     default_idle_duration: Duration,
     config: &ExtConfig,
@@ -1383,8 +1582,8 @@ fn emit_agent_end<W: Write>(
         "",
     );
     emit_hooks(writer, &config.agent_end, &ctx)?;
-    *waiting_for_final_response = false;
-    *turn_end_emitted = true;
+    turn.waiting_for_final_response = false;
+    turn.turn_end_emitted = true;
     arm_idle_hooks(
         idle,
         default_idle_duration,
@@ -1396,38 +1595,28 @@ fn emit_agent_end<W: Write>(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 fn maybe_emit_deferred_agent_end<W: Write>(
     writer: &mut PeerOutputWriter<BufWriter<W>>,
-    waiting_for_final_response: &mut bool,
-    turn_end_emitted: &mut bool,
-    final_response_pending_background_tools: &mut bool,
+    turn: &mut AgentTurnState,
     idle: &mut Vec<PendingIdleHook>,
     default_idle_duration: Duration,
     config: &ExtConfig,
-    active_background_tools: &HashSet<tau_proto::ToolCallId>,
     agent_display_names: &HashMap<tau_proto::AgentId, String>,
-    pending_agent_id: &mut Option<tau_proto::AgentId>,
-    user_prompt: &str,
-    pending_response: &mut String,
+    agent_id: &tau_proto::AgentId,
 ) -> Result<bool, Box<dyn Error>> {
-    if *final_response_pending_background_tools && active_background_tools.is_empty() {
-        *final_response_pending_background_tools = false;
-        let Some(agent_id) = pending_agent_id.take() else {
-            return Ok(false);
-        };
-        let agent_name = display_name_for_agent(agent_display_names, &agent_id);
-        let agent_response = std::mem::take(pending_response);
+    if turn.final_response_pending_background_tools && turn.active_background_tools.is_empty() {
+        turn.final_response_pending_background_tools = false;
+        let agent_name = display_name_for_agent(agent_display_names, agent_id);
+        let agent_response = std::mem::take(&mut turn.pending_final_response_text);
         emit_agent_end(
             writer,
-            waiting_for_final_response,
-            turn_end_emitted,
+            turn,
             idle,
             default_idle_duration,
             config,
-            agent_id,
+            agent_id.clone(),
             agent_name,
-            user_prompt.to_owned(),
+            turn.last_user_prompt.clone(),
             agent_response,
         )?;
         return Ok(true);
@@ -1443,7 +1632,7 @@ fn arm_idle_hooks(
     user_prompt: String,
     agent_response: String,
 ) {
-    idle.clear();
+    idle.retain(|pending| pending.agent_id != agent_id);
     let now = Instant::now();
     for (hook_index, hook) in config.agent_idle.iter().enumerate() {
         idle.push(PendingIdleHook {
@@ -1559,9 +1748,21 @@ fn emit_hook<W: Write>(
         let name = render_template(&osc.key, ctx)?;
         let value = render_template(&osc.value, ctx)?;
         match validate_osc1337_name(&name) {
-            Ok(()) => writer.write_message(&HarnessInputMessage::emit(
-                Event::Osc1337SetUserVar(Osc1337SetUserVar { name, value }),
-            ))?,
+            Ok(()) => {
+                match validate_rendered_value_len("osc1337.value", &value, MAX_OSC1337_VALUE_LEN) {
+                    Ok(()) => writer.write_message(&HarnessInputMessage::emit(
+                        Event::Osc1337SetUserVar(Osc1337SetUserVar { name, value }),
+                    ))?,
+                    Err(message) => {
+                        tracing::warn!(
+                            target: LOG_TARGET,
+                            value_len = value.len(),
+                            error = %message,
+                            "skipping notification with oversized OSC 1337 user-var value",
+                        );
+                    }
+                }
+            }
             Err(message) => {
                 tracing::warn!(
                     target: LOG_TARGET,
@@ -1624,7 +1825,33 @@ fn render_template(template: &str, ctx: &TemplateContext<'_>) -> Result<String, 
     let mut handlebars = handlebars::Handlebars::new();
     handlebars.set_strict_mode(true);
     handlebars.register_escape_fn(handlebars::no_escape);
+    handlebars.register_helper("json", Box::new(JsonHelper));
     Ok(handlebars.render_template(template, ctx)?)
+}
+
+/// Handlebars helper that renders its first argument as a JSON literal.
+struct JsonHelper;
+
+impl handlebars::HelperDef for JsonHelper {
+    fn call_inner<'reg: 'rc, 'rc>(
+        &self,
+        h: &handlebars::Helper<'rc>,
+        _: &'reg handlebars::Handlebars<'reg>,
+        _: &'rc handlebars::Context,
+        _: &mut handlebars::RenderContext<'reg, 'rc>,
+    ) -> Result<handlebars::ScopedJson<'rc>, handlebars::RenderError> {
+        let Some(value) = h.param(0) else {
+            return Ok(handlebars::ScopedJson::Derived(serde_json::Value::String(
+                "null".to_owned(),
+            )));
+        };
+        let rendered = serde_json::to_string(value.value()).map_err(|err| {
+            handlebars::RenderErrorReason::Other(format!("json helper failed: {err}"))
+        })?;
+        Ok(handlebars::ScopedJson::Derived(serde_json::Value::String(
+            rendered,
+        )))
+    }
 }
 
 fn validate_osc1337_name(name: &str) -> Result<(), String> {
@@ -1644,6 +1871,16 @@ fn validate_osc1337_name(name: &str) -> Result<(), String> {
         if ch.is_ascii_control() || ch == '=' {
             return Err("must not contain '=', BEL/ESC, or control characters".to_owned());
         }
+    }
+    Ok(())
+}
+
+fn validate_rendered_value_len(kind: &str, value: &str, max_len: usize) -> Result<(), String> {
+    if value.len() > max_len {
+        return Err(format!(
+            "{kind} rendered value must be at most {max_len} bytes, got {}",
+            value.len()
+        ));
     }
     Ok(())
 }
@@ -1708,7 +1945,22 @@ fn spawn_command(command_template: &[String], ctx: &TemplateContext<'_>) {
     let mut argv = Vec::with_capacity(command_template.len());
     for part in command_template {
         match render_template(part, ctx) {
-            Ok(rendered) => argv.push(rendered),
+            Ok(rendered) => {
+                if let Err(message) = validate_rendered_value_len(
+                    "command argv element",
+                    &rendered,
+                    MAX_COMMAND_ARG_LEN,
+                ) {
+                    tracing::warn!(
+                        target: LOG_TARGET,
+                        arg_len = rendered.len(),
+                        error = %message,
+                        "skipping notification command with oversized argument",
+                    );
+                    return;
+                }
+                argv.push(rendered);
+            }
             Err(e) => {
                 tracing::warn!(
                     target: LOG_TARGET,

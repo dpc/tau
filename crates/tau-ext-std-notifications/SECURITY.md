@@ -9,6 +9,10 @@ It should treat harness event text and display names as untrusted template data.
   closed through `ConfigError`.
 - Template inputs (`agent.name`, prompts, responses, summaries, cwd, hostname)
   can contain arbitrary user/model text.
+- Template outputs are terminal-facing side effects. Rendered OSC values are
+  bounded to 64 KiB and rendered command argv elements are bounded to 16 KiB so
+  untrusted prompt/response/summary text cannot amplify those side effects
+  without limit.
 - The terminal UI validates OSC 1337 user-var names and skips invalid names as
   defense in depth before writing escape sequences. This crate also validates
   rendered names before emitting them so bad configuration fails closed early.
@@ -20,9 +24,15 @@ contain `=`, BEL/ESC, or other control characters, and must be at most 128
 bytes. Statically invalid keys reject configuration. Keys that become invalid
 only after rendering runtime data are skipped and logged.
 
-`osc1337.value` is not restricted by this crate because the UI base64-encodes
-the value before writing the terminal escape. When the UI runs inside tmux it
-wraps the OSC sequence for tmux passthrough.
+`osc1337.value` may contain arbitrary text because the UI base64-encodes
+the value before writing the terminal escape, but rendered values larger than
+64 KiB are skipped. When the UI runs inside tmux it wraps the OSC sequence for
+tmux passthrough.
+
+When templates render JSON payloads, use the `json` Handlebars helper for
+untrusted values, for example `"body":{{json turn.agent_summary}}`. The helper
+renders a complete JSON literal; wrapping it in additional quotes defeats the
+escaping.
 
 ## Command hooks
 
@@ -30,7 +40,7 @@ Command hooks execute trusted local commands from user configuration. They run
 with the extension process environment and current working directory, with
 stdin/stdout/stderr detached. A hook command that blocks can keep its worker
 thread and child process alive indefinitely, so configure only short-lived
-commands.
+commands. Rendered argv elements larger than 16 KiB are skipped.
 
 ## Summary side queries
 

@@ -14,8 +14,8 @@ advertise: false
 Tau's built-in configuration enables no notifications by default. A typical OSC 1337 hook configuration emits:
 
 - `agent_start`, on user prompt submit: `user-notification = protoss-probe-ack`.
-- `agent_end`, on final provider response when no tool call is requested and no main-agent background tools remain: `user-notification = protoss-upgrade-complete`.
-- `agent_idle`, after an idle window following a final response, whatever `user-text-notification` payload the user configured.
+- `agent_end`, on final provider response when no tool call is requested and no background tools for that triggering agent remain: `user-notification = protoss-upgrade-complete`.
+- `agent_idle`, after an idle window following a final response for that agent, whatever `user-text-notification` payload the user configured.
 - `agent_idle_all`, after an idle window once every loaded agent in the session is idle.
 
 If an idle hook's `agent_summary` is true, the idle path first asks the agent for a one-sentence summary before firing that hook. The side-query instruction includes a bounded copy of the recent user prompt and assistant response so the summary has explicit turn context, and long summary results are clamped before template rendering. Hook commands are detached argv arrays rendered as Handlebars templates; they are trusted local configuration and should be short-lived.
@@ -23,6 +23,8 @@ If an idle hook's `agent_summary` is true, the idle path first asks the agent fo
 Hook items can also emit `term.bell` with `bell: true`.
 
 The extension reacts only to live events. Replay-marked frames (subscribe-time catch-up history the harness re-delivers when an extension joins an already-initialized session) are skipped, so old prompts and responses never ring sounds or fire idle notifications.
+
+Visible-turn state is tracked per agent. Interleaved loaded agents should each get their own `agent_start`, `agent_end`, background-tool deferral, and `agent_idle` timing. If the harness publishes `agent.prompt_terminated` for a user prompt, the extension clears that prompt's in-flight state without ringing completion sounds or arming idle notifications, and later stale completions for that prompt are ignored.
 
 
 ## Configuration
@@ -68,14 +70,16 @@ extensions:
             value: 'The agent {{agent.id}} on {{host}} in {{cwd_basename}} is waiting.'
 ```
 
-Each hook item must set at least one of `bell`, `command`, or `osc1337`. The `command`, `osc1337.key`, and `osc1337.value` fields are Handlebars templates.
+Each hook item must set at least one of `bell`, `command`, or `osc1337`. The `command`, `osc1337.key`, and `osc1337.value` fields are Handlebars templates. Use the `json` helper when embedding untrusted values into JSON payloads, e.g. `"body":{{json turn.agent_summary}}`.
 
 Rendered OSC user-var keys must be non-empty printable ASCII, must not contain `=`, BEL/ESC, or other control characters, and must be at most 128 bytes. Statically invalid keys reject the config; keys that become invalid only after runtime template rendering are skipped and logged.
+
+Rendered OSC values larger than 64 KiB are skipped. Rendered command argv elements larger than 16 KiB are skipped. Command hooks remain trusted local configuration and should be short-lived.
 
 Template variables:
 
 - `hook` — hook currently firing: `agent_start`, `agent_end`, `agent_idle`, or `agent_idle_all`.
-- `agent.id` — durable Tau agent id for the main conversation.
+- `agent.id` — durable Tau agent id for the triggering conversation/agent.
 - `agent.name` — current display name for the agent, falling back to `agent.id` when unset.
 - `host` — hostname observed by the extension process.
 - `cwd` — current working directory observed by the extension process.
