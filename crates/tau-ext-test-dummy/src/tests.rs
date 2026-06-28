@@ -18,6 +18,19 @@ fn invoke_restart() -> HarnessOutputMessage {
     }))
 }
 
+fn extension_originated_restart() -> HarnessOutputMessage {
+    HarnessOutputMessage::deliver(Event::ToolStarted(ToolStarted {
+        call_id: "extension-call".into(),
+        tool_name: tau_proto::ToolName::new(RESTART_TEST_DUMMY_TOOL_NAME),
+        arguments: tau_proto::CborValue::Map(Vec::new()),
+        agent_id: tau_proto::AgentId::parse("agent-1").expect("agent id"),
+        originator: PromptOriginator::Extension {
+            name: tau_proto::ExtensionName::new("fixture"),
+            query_id: "query-1".to_owned(),
+        },
+    }))
+}
+
 fn replayed_restart() -> HarnessOutputMessage {
     HarnessOutputMessage::deliver_replay(
         UnixMicros::new(1_700_000_000_000_000),
@@ -70,6 +83,13 @@ fn emitted_event(message: &HarnessInputMessage) -> Option<&Event> {
     match message {
         HarnessInputMessage::Emit(emit) => Some(emit.event.as_ref()),
         _ => None,
+    }
+}
+
+fn fixture_extension_originator() -> PromptOriginator {
+    PromptOriginator::Extension {
+        name: tau_proto::ExtensionName::new("fixture"),
+        query_id: "query-1".to_owned(),
     }
 }
 
@@ -210,6 +230,44 @@ fn invalid_restart_mode_emits_config_error() {
         "error should describe invalid restart mode: {}",
         error.message
     );
+}
+
+/// Verifies deterministic success replies preserve non-user invocation origin.
+#[test]
+fn restart_tool_result_preserves_originator() {
+    let frames = run_restart_frames(
+        &[restart_config("success"), extension_originated_restart()],
+        1,
+    );
+
+    let result = frames
+        .iter()
+        .find_map(|frame| match emitted_event(frame) {
+            Some(Event::ToolResult(result)) => Some(result),
+            _ => None,
+        })
+        .expect("configured success should return a tool result");
+    assert_eq!(result.call_id.as_str(), "extension-call");
+    assert_eq!(result.originator, fixture_extension_originator());
+}
+
+/// Verifies deterministic error replies preserve non-user invocation origin.
+#[test]
+fn restart_tool_error_preserves_originator() {
+    let frames = run_restart_frames(
+        &[restart_config("error"), extension_originated_restart()],
+        1,
+    );
+
+    let error = frames
+        .iter()
+        .find_map(|frame| match emitted_event(frame) {
+            Some(Event::ToolError(error)) => Some(error),
+            _ => None,
+        })
+        .expect("configured error should return a tool error");
+    assert_eq!(error.call_id.as_str(), "extension-call");
+    assert_eq!(error.originator, fixture_extension_originator());
 }
 
 /// Verifies replayed tool-start events do not re-run side-effecting tool logic.

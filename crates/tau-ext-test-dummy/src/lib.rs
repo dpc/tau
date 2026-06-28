@@ -341,7 +341,7 @@ fn restart_success(invoke: tau_proto::ToolStarted) -> HarnessInputMessage {
         result: tau_proto::CborValue::Text("restart succeeded".to_owned()),
         kind: ToolResultKind::Final,
         display: None,
-        originator: tau_proto::PromptOriginator::User,
+        originator: invoke.originator,
     }))
 }
 
@@ -353,7 +353,7 @@ fn restart_error(invoke: tau_proto::ToolStarted) -> HarnessInputMessage {
         message: "restarting failed".to_owned(),
         details: None,
         display: None,
-        originator: tau_proto::PromptOriginator::User,
+        originator: invoke.originator,
     }))
 }
 

@@ -14,6 +14,8 @@ Regression coverage should include:
 - invalid config emitting `ConfigError`;
 - replayed `tool.started` deliveries producing no tool result/error and no
   forced exit behavior;
+- preserving the incoming `tool.started` originator on deterministic success and
+  error restart replies, including extension-originated invocations;
 - prompt interception rewriting whole-word ASCII `tao` to `tau`;
 - preserving replacement case;
 - ignoring substrings inside ASCII words;
