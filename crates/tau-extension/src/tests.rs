@@ -57,6 +57,8 @@ fn cbor_from_json(json: serde_json::Value) -> tau_proto::CborValue {
     tau_proto::json_to_cbor(&json)
 }
 
+/// Ensures valid harness configuration values decode into the extension's
+/// typed configuration struct, preserving the helper's core success path.
 #[test]
 fn parse_config_returns_typed_struct() {
     let value = cbor_from_json(serde_json::json!({ "n": 7 }));
@@ -64,6 +66,8 @@ fn parse_config_returns_typed_struct() {
     assert_eq!(cfg, Demo { n: 7 });
 }
 
+/// Ensures invalid configuration reports the actionable serde message directly
+/// so extensions can forward useful `ConfigError` text to the harness.
 #[test]
 fn parse_config_error_strips_debug_wrapper() {
     let value = cbor_from_json(serde_json::json!({ "wrong": 7 }));
@@ -74,7 +78,9 @@ fn parse_config_error_strips_debug_wrapper() {
     assert!(err.contains("wrong"), "got: {err}");
 }
 
-/// Ensures repeated same-priority intercepts become one wire registration.
+/// Ensures repeated same-priority intercepts become one wire registration, so
+/// callers can compose intercept declarations without changing the harness's
+/// single-registration wire shape.
 #[test]
 fn handshake_accumulates_intercepts_into_one_message() {
     let priority = InterceptionPriority::new(5);
@@ -157,7 +163,9 @@ fn handshake_try_intercept_rejects_mixed_priorities_immediately() {
     ));
 }
 
-/// Ensures the handshake writes the full protocol prelude in wire order.
+/// Ensures the handshake writes the full protocol prelude in wire order,
+/// because the harness startup state machine interprets each frame in that
+/// sequence.
 #[test]
 fn handshake_writes_full_prelude_in_order() {
     let priority = InterceptionPriority::new(3);
@@ -218,7 +226,8 @@ fn handshake_writes_full_prelude_in_order() {
     );
 }
 
-/// Ensures empty subscriptions are omitted and ready messages are preserved.
+/// Ensures empty subscriptions are omitted while ready messages are preserved,
+/// avoiding no-op wire noise without losing extension startup status text.
 #[test]
 fn handshake_omits_empty_subscribe_and_preserves_ready_message() {
     let messages = handshake_messages(Handshake::tool("demo").ready_message("ready"));
