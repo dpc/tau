@@ -66,9 +66,9 @@ impl ExtensionCommand {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ChildExit {
     /// Numeric process exit code when the platform reports normal exit.
-    pub exit_code: Option<i32>,
+    exit_code: Option<i32>,
     /// Unix signal number when the process was terminated by signal.
-    pub signal: Option<i32>,
+    signal: Option<i32>,
 }
 
 impl ChildExit {
@@ -77,6 +77,22 @@ impl ChildExit {
             exit_code: status.code(),
             signal: exit_signal(status),
         }
+    }
+
+    /// Returns the numeric process exit code when the platform reports normal
+    /// exit.
+    #[must_use]
+    pub fn exit_code(&self) -> Option<i32> {
+        self.exit_code
+    }
+
+    /// Returns the Unix signal number when the process was terminated by a
+    /// signal.
+    ///
+    /// Non-Unix platforms always return `None`.
+    #[must_use]
+    pub fn signal(&self) -> Option<i32> {
+        self.signal
     }
 }
 

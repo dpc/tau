@@ -130,7 +130,7 @@ fn recv_timeout_reports_clean_stdout_close() {
     let exit = child
         .wait_for_exit(Duration::from_secs(2))
         .expect("child should exit");
-    assert_eq!(exit.exit_code, Some(0));
+    assert_eq!(exit.exit_code(), Some(0));
 }
 
 /// Ensures truncated protocol data remains a decode error instead of a clean
@@ -176,7 +176,7 @@ fn stdout_reader_handles_message_burst_without_loss() {
     let exit = child
         .wait_for_exit(Duration::from_secs(2))
         .expect("child should exit");
-    assert_eq!(exit.exit_code, Some(0));
+    assert_eq!(exit.exit_code(), Some(0));
 }
 
 /// Ensures the spawn policy applies the configured child working directory.
@@ -201,7 +201,7 @@ fn spawn_uses_configured_working_dir() {
     let exit = child
         .wait_for_exit(Duration::from_secs(2))
         .expect("child should exit");
-    assert_eq!(exit.exit_code, Some(0));
+    assert_eq!(exit.exit_code(), Some(0));
     fs::remove_dir_all(working_dir).expect("working dir should be removed");
 }
 
@@ -253,7 +253,7 @@ fn terminate_kills_long_running_child() {
     let exit = child
         .terminate(Duration::from_secs(2))
         .expect("child should terminate");
-    assert_ne!(exit.exit_code, Some(0));
+    assert_ne!(exit.exit_code(), Some(0));
 }
 
 /// Ensures Drop performs best-effort direct child cleanup when callers forget
@@ -293,7 +293,7 @@ fn stderr_policy_null_discards_child_stderr() {
         let exit = child
             .wait_for_exit(Duration::from_secs(2))
             .expect("child should exit");
-        assert_eq!(exit.exit_code, Some(0));
+        assert_eq!(exit.exit_code(), Some(0));
         return;
     }
 
@@ -425,15 +425,15 @@ fn supervised_child_exchanges_protocol_events_over_stdio() {
     let exit = child
         .wait_for_exit(Duration::from_secs(2))
         .expect("child should exit");
-    assert_eq!(exit.exit_code, Some(0));
+    assert_eq!(exit.exit_code(), Some(0));
     assert_eq!(
         child.exited_event(42.into(), &exit),
         Event::ExtensionExited(tau_proto::ExtensionExited {
             instance_id: 42.into(),
             extension_name: "test-child".into(),
             pid: Some(child.pid()),
-            exit_code: Some(0),
-            signal: None,
+            exit_code: exit.exit_code(),
+            signal: exit.signal(),
         })
     );
 }
@@ -453,6 +453,6 @@ fn restarted_child_can_reregister_after_exit() {
         let exit = child
             .wait_for_exit(Duration::from_secs(2))
             .expect("child should exit");
-        assert_eq!(exit.exit_code, Some(0));
+        assert_eq!(exit.exit_code(), Some(0));
     }
 }
