@@ -37,6 +37,97 @@ fn validation_error_reports_path_expected_type_and_actual_type() {
     assert_eq!(error.to_string(), "$.count: expected integer, got string");
 }
 
+/// Ensures numeric bound checks do not accept non-finite floats or let large
+/// integers bypass integral JSON bounds through lossy `f64` conversion.
+#[test]
+fn validation_error_rejects_non_finite_and_imprecise_numbers() {
+    let tool = strict_tool(serde_json::json!({
+        "type": "object",
+        "properties": {
+            "ratio": { "type": "number" },
+            "count": { "type": "integer", "maximum": 9007199254740992_i64 }
+        },
+        "required": ["ratio", "count"],
+        "additionalProperties": false
+    }));
+
+    let nan_error = validate_tool_arguments(
+        &tool,
+        &CborValue::Map(vec![
+            (
+                CborValue::Text("ratio".to_owned()),
+                CborValue::Float(f64::NAN),
+            ),
+            (
+                CborValue::Text("count".to_owned()),
+                CborValue::Integer(1.into()),
+            ),
+        ]),
+    )
+    .expect_err("non-finite float must fail");
+    assert_eq!(nan_error.to_string(), "$.ratio: number must be finite");
+
+    let large_integer_error = validate_tool_arguments(
+        &tool,
+        &CborValue::Map(vec![
+            (CborValue::Text("ratio".to_owned()), CborValue::Float(1.0)),
+            (
+                CborValue::Text("count".to_owned()),
+                CborValue::Integer(9_007_199_254_740_993_i64.into()),
+            ),
+        ]),
+    )
+    .expect_err("integer beyond exact maximum must fail");
+    assert_eq!(
+        large_integer_error.to_string(),
+        "$.count: must be at most 9007199254740992"
+    );
+}
+
+/// Ensures unsigned integer bounds above `i64::MAX` are compared exactly
+/// instead of falling through to lossy floating-point comparison.
+#[test]
+fn validation_error_checks_unsigned_integer_bounds_exactly() {
+    let tool = strict_tool(serde_json::json!({
+        "type": "object",
+        "properties": {
+            "count": {
+                "type": "integer",
+                "minimum": 9223372036854775808_u64,
+                "maximum": 9223372036854775809_u64
+            }
+        },
+        "required": ["count"],
+        "additionalProperties": false
+    }));
+
+    let too_small = validate_tool_arguments(
+        &tool,
+        &CborValue::Map(vec![(
+            CborValue::Text("count".to_owned()),
+            CborValue::Integer(9_223_372_036_854_775_807_i64.into()),
+        )]),
+    )
+    .expect_err("integer below unsigned minimum must fail");
+    assert_eq!(
+        too_small.to_string(),
+        "$.count: must be at least 9223372036854775808"
+    );
+
+    let too_large = validate_tool_arguments(
+        &tool,
+        &CborValue::Map(vec![(
+            CborValue::Text("count".to_owned()),
+            CborValue::Integer(9_223_372_036_854_775_810_u64.into()),
+        )]),
+    )
+    .expect_err("integer above unsigned maximum must fail");
+    assert_eq!(
+        too_large.to_string(),
+        "$.count: must be at most 9223372036854775809"
+    );
+}
+
 /// Ensures enum failures list allowed values and include a near-value hint
 /// only when the edit-distance match is clear.
 #[test]

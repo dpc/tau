@@ -17,7 +17,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
-use tau_proto::{AgentId, ConnectionId, Event, NodeId, UnixMicros};
+use tau_proto::{AgentId, AgentIdParseError, ConnectionId, Event, NodeId, UnixMicros};
 
 use crate::session::{
     AgentEventParent, AgentEventValidationError, AgentMeta, AgentTree, PersistedAgentEvent,
@@ -58,6 +58,10 @@ pub enum AgentStoreError {
     },
     InvalidAgentDir {
         path: PathBuf,
+    },
+    InvalidAgentId {
+        agent_id: String,
+        source: AgentIdParseError,
     },
     InvalidEvent {
         source: AgentEventValidationError,
@@ -116,6 +120,9 @@ impl fmt::Display for AgentStoreError {
                 "invalid agent directory name (non-utf8): {}",
                 path.display()
             ),
+            Self::InvalidAgentId { agent_id, source } => {
+                write!(f, "invalid agent id `{agent_id}`: {source}")
+            }
             Self::InvalidEvent { source } => write!(f, "invalid agent event: {source}"),
             Self::InvalidSequence {
                 path,
@@ -144,6 +151,7 @@ impl Error for AgentStoreError {
             Self::Write { source, .. } => Some(source),
             Self::Decode { source, .. } => Some(source),
             Self::Encode { source, .. } => Some(source),
+            Self::InvalidAgentId { source, .. } => Some(source),
             Self::InvalidEvent { source } => Some(source),
             Self::Locked { .. }
             | Self::InvalidAgentDir { .. }
@@ -175,6 +183,13 @@ impl AgentPersistenceMode {
     pub const fn is_ephemeral(self) -> bool {
         matches!(self, Self::Ephemeral)
     }
+}
+
+fn parse_agent_id_for_store(agent_id: &str) -> Result<AgentId, AgentStoreError> {
+    AgentId::parse(agent_id).map_err(|source| AgentStoreError::InvalidAgentId {
+        agent_id: agent_id.to_owned(),
+        source,
+    })
 }
 
 /// Result of one [`AgentStore::append_agent_event_at`] call:
@@ -288,7 +303,7 @@ impl AgentStore {
     }
 
     fn load_agent_if_needed(&mut self, agent_id: &str) -> Result<(), AgentStoreError> {
-        let aid = AgentId::parse(agent_id).expect("agent store load requires parsed agent id");
+        let aid = parse_agent_id_for_store(agent_id)?;
         if self.agents.contains_key(&aid) {
             return Ok(());
         }
@@ -300,7 +315,8 @@ impl AgentStore {
             return Ok(());
         }
         let events = load_agent_events(&events_path)?;
-        let tree = AgentTree::from_events(aid.clone(), &events);
+        let tree = AgentTree::try_from_events(aid.clone(), &events)
+            .map_err(|source| AgentStoreError::InvalidEvent { source })?;
         self.agents.insert(aid, tree);
         Ok(())
     }
@@ -337,7 +353,7 @@ impl AgentStore {
     /// process-local and [`Self::agent_events`] returns the in-memory replay
     /// stream.
     pub fn mark_agent_ephemeral(&mut self, agent_id: &str) -> Result<(), AgentStoreError> {
-        let aid = AgentId::parse(agent_id).expect("ephemeral agent id requires parsed agent id");
+        let aid = parse_agent_id_for_store(agent_id)?;
         let agent_dir = self.agent_dir(agent_id);
         if agent_dir.join("events.cbor").exists() || agent_dir.join("meta.json").exists() {
             return Err(AgentStoreError::PersistenceConflict {
@@ -365,7 +381,7 @@ impl AgentStore {
     /// Acquires an exclusive flock on the agent's `lock` file if not
     /// already held.
     fn ensure_locked(&mut self, agent_id: &str) -> Result<(), AgentStoreError> {
-        let sid = AgentId::parse(agent_id).expect("agent store lock requires parsed agent id");
+        let sid = parse_agent_id_for_store(agent_id)?;
         if self.locks.contains_key(&sid) {
             return Ok(());
         }
@@ -462,7 +478,7 @@ impl AgentStore {
         event: Event,
         recorded_at: UnixMicros,
     ) -> Result<AgentAppendOutcome, AgentStoreError> {
-        let sid = AgentId::parse(agent_id).expect("agent event append requires parsed agent id");
+        let sid = parse_agent_id_for_store(agent_id)?;
         let persistence = self.agent_persistence(agent_id);
         if persistence.is_durable() {
             self.ensure_locked(agent_id)?;
@@ -534,16 +550,19 @@ impl AgentStore {
         &self,
         agent_id: &str,
     ) -> Result<Vec<PersistedAgentEvent>, AgentStoreError> {
-        if let Ok(agent_id) = AgentId::parse(agent_id)
-            && self.ephemeral_agents.contains(&agent_id)
-        {
+        let parsed_agent_id =
+            AgentId::parse(agent_id).map_err(|source| AgentStoreError::InvalidAgentId {
+                agent_id: agent_id.to_owned(),
+                source,
+            })?;
+        if self.ephemeral_agents.contains(&parsed_agent_id) {
             return Ok(self
                 .ephemeral_events
-                .get(&agent_id)
+                .get(&parsed_agent_id)
                 .cloned()
                 .unwrap_or_default());
         }
-        let path = self.agent_dir(agent_id).join("events.cbor");
+        let path = self.agent_dir(parsed_agent_id.as_str()).join("events.cbor");
         load_agent_events(&path)
     }
 
@@ -581,12 +600,12 @@ impl AgentStore {
 
     /// Reads sidecar metadata for one durable or ephemeral agent, if it exists.
     pub fn agent_meta(&self, agent_id: &str) -> io::Result<Option<AgentMeta>> {
-        if let Ok(agent_id) = AgentId::parse(agent_id)
-            && self.ephemeral_agents.contains(&agent_id)
-        {
-            return Ok(self.ephemeral_meta.get(&agent_id).cloned());
+        let parsed_agent_id = AgentId::parse(agent_id)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+        if self.ephemeral_agents.contains(&parsed_agent_id) {
+            return Ok(self.ephemeral_meta.get(&parsed_agent_id).cloned());
         }
-        let path = self.agent_dir(agent_id).join("meta.json");
+        let path = self.agent_dir(parsed_agent_id.as_str()).join("meta.json");
         match read_meta(&path) {
             Ok(meta) => Ok(Some(meta)),
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
@@ -598,7 +617,7 @@ impl AgentStore {
     ///
     /// Idempotent: subsequent calls only update `last_touched`.
     pub fn record_agent_meta(&mut self, agent_id: &str) -> Result<(), AgentStoreError> {
-        let aid = AgentId::parse(agent_id).expect("agent metadata requires parsed agent id");
+        let aid = parse_agent_id_for_store(agent_id)?;
         if self.ephemeral_agents.contains(&aid) {
             initialize_ephemeral_meta(
                 self.ephemeral_meta.entry(aid).or_default(),
@@ -623,8 +642,7 @@ impl AgentStore {
 
     /// Records that a human user interacted with an existing agent.
     pub fn record_agent_user_interaction(&mut self, agent_id: &str) -> Result<(), AgentStoreError> {
-        let aid =
-            AgentId::parse(agent_id).expect("agent user interaction requires parsed agent id");
+        let aid = parse_agent_id_for_store(agent_id)?;
         if self.ephemeral_agents.contains(&aid) {
             let now = unix_now();
             let meta = self.ephemeral_meta.entry(aid).or_default();
@@ -695,7 +713,9 @@ pub fn list_agent_metas(agents_dir: &Path) -> io::Result<Vec<(AgentId, AgentMeta
 
 /// Best-effort check whether an agent's lock is currently held.
 pub fn agent_is_locked(agents_dir: &Path, agent_id: &str) -> io::Result<bool> {
-    let lock_path = agents_dir.join(agent_id).join("lock");
+    let agent_id = AgentId::parse(agent_id)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+    let lock_path = agents_dir.join(agent_id.as_str()).join("lock");
     let file = match OpenOptions::new().read(true).write(true).open(&lock_path) {
         Ok(file) => file,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
@@ -889,19 +909,16 @@ where
         source,
     })?;
     loop {
-        let mut length_bytes = [0_u8; 8];
-        match file.read_exact(&mut length_bytes) {
-            Ok(()) => {}
-            Err(source) if source.kind() == io::ErrorKind::UnexpectedEof => return Ok(()),
-            Err(source) => {
-                return Err(AgentStoreError::Read {
+        let Some(record_length) =
+            crate::record_log::read_record_length(&mut file).map_err(|source| {
+                AgentStoreError::Read {
                     path: path.to_path_buf(),
                     source,
-                });
-            }
-        }
-
-        let record_length = u64::from_le_bytes(length_bytes);
+                }
+            })?
+        else {
+            return Ok(());
+        };
         if record_length > MAX_RECORD_BYTES {
             return Err(AgentStoreError::Read {
                 path: path.to_path_buf(),

@@ -57,6 +57,22 @@ modes, including a negative filesystem assertion for memory-only records and a
 positive replay/folding assertion that the in-memory state still behaves like the
 durable equivalent while the process lives.
 
+Durable `events.cbor` replay is fail-closed. Stores verify record framing,
+monotonic durable sequence numbers, path-safe store ids, and the same semantic
+event/parent invariants enforced for live appends before folding replayed state.
+Corrupt, truncated, spliced, or semantically invalid durable records must return a
+typed store error instead of being ignored or panicking during fold.
+
+Durable sequence numbers count only records actually written to the corresponding
+`events.cbor` stream. Memory-only session membership facts update live folded
+state but do not advance the durable sequence cursor, so later durable records
+remain contiguous on disk.
+
+Durable session ids are store path components. The path-component grammar is
+shared by CLI session-id minting, store validation, metadata listing, lock
+probes, and cleanup: minted ids must be bounded and must not contain path
+separators, NUL, or the reserved `.`/`..` names.
+
 ## Tool examples are registration-validated repair metadata
 
 Status: unconfirmed

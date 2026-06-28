@@ -575,8 +575,22 @@ impl AgentTree {
     /// order, so the same event slice always yields the same tree.
     /// Events that don't directly produce an agent entry (lifecycle
     /// chatter, harness notice, etc.) are ignored.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `events` contains a record that violates the same semantic
+    /// event or parent invariants enforced by [`crate::AgentStore`] during
+    /// durable replay. Store callers should use the fallible replay path
+    /// instead of this convenience constructor.
     #[must_use]
     pub fn from_events(agent_id: AgentId, events: &[PersistedAgentEvent]) -> Self {
+        Self::try_from_events(agent_id, events).expect("validated agent events")
+    }
+
+    pub(crate) fn try_from_events(
+        agent_id: AgentId,
+        events: &[PersistedAgentEvent],
+    ) -> Result<Self, AgentEventValidationError> {
         let mut tree = Self {
             agent_id,
             metadata: BTreeMap::new(),
@@ -589,10 +603,12 @@ impl AgentTree {
             tool_call_rounds: HashMap::new(),
         };
         for entry in events {
+            tree.validate_event(&entry.event)?;
+            tree.validate_event_parent(entry.parent)?;
             tree.apply_event_at(entry.parent, &entry.event);
             tree.next_event_seq = entry.seq.next();
         }
-        tree
+        Ok(tree)
     }
 
     /// Returns the sequence the next durable event appended to this

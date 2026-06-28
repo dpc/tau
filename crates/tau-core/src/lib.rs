@@ -10,6 +10,7 @@ mod bus;
 mod connection;
 mod memory;
 mod policy;
+mod record_log;
 mod session;
 mod session_store;
 mod tool_registry;

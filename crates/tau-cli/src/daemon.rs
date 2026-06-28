@@ -11,6 +11,8 @@ use tau_harness::{SessionLaunchStatus, runtime_dir};
 use crate::{CliError, mint_short_id};
 
 const RESUME_PICKER_LIMIT: usize = 10;
+const SESSION_ID_SUFFIX_BYTES: usize = 7;
+const SESSION_ID_MAX_BYTES: usize = 128;
 
 /// How this CLI invocation is related to its harness daemon.
 ///
@@ -123,7 +125,26 @@ pub(crate) fn mint_session_id(cwd: &Path) -> String {
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("session");
-    mint_short_id(basename)
+    mint_short_id(&sanitize_session_id_prefix(basename))
+}
+
+fn sanitize_session_id_prefix(prefix: &str) -> String {
+    let mut prefix = prefix
+        .chars()
+        .map(|ch| match ch {
+            '/' | '\\' | '\0' => '_',
+            ch => ch,
+        })
+        .collect::<String>();
+    let max_prefix_bytes = SESSION_ID_MAX_BYTES - SESSION_ID_SUFFIX_BYTES;
+    while prefix.len() > max_prefix_bytes {
+        prefix.pop();
+    }
+    if prefix == "." || prefix == ".." || prefix.is_empty() {
+        "session".to_owned()
+    } else {
+        prefix
+    }
 }
 
 fn pick_resume_session(_cwd: &Path) -> Result<Option<String>, CliError> {

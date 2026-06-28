@@ -8,7 +8,7 @@ use tau_proto::{
 use crate::{
     AgentEntry, AgentEventParent, AgentStore, AgentStoreError, NodeId, PersistedAgentEvent,
     PersistedAgentEventSeq, PersistedSessionEvent, PersistedSessionEventSeq, SessionStore,
-    SessionStoreError,
+    SessionStoreError, list_session_metas,
 };
 
 fn temp_dir(name: &str) -> PathBuf {
@@ -39,6 +39,18 @@ fn append_raw_cbor<T: serde::Serialize>(path: &std::path::Path, record: &T) {
     file.write_all(&encoded).expect("write record body");
 }
 
+fn append_partial_record_header(path: &std::path::Path) {
+    std::fs::create_dir_all(path.parent().expect("record parent")).expect("create parent");
+    use std::io::Write;
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .expect("open record stream");
+    file.write_all(&[1, 2, 3])
+        .expect("write partial record length");
+}
+
 fn agent_prompt(agent_id: &str, text: &str) -> Event {
     Event::AgentPromptSubmitted(AgentPromptSubmitted {
         agent_id: AgentId::parse(agent_id).expect("agent id"),
@@ -47,6 +59,14 @@ fn agent_prompt(agent_id: &str, text: &str) -> Event {
         originator: PromptOriginator::User,
         display_name: None,
         ctx_id: None,
+    })
+}
+
+fn session_loaded(session_id: &str, agent_id: &str, ephemeral: bool) -> Event {
+    Event::SessionAgentLoaded(SessionAgentLoaded {
+        session_id: SessionId::from(session_id),
+        agent_id: AgentId::parse(agent_id).expect("agent id"),
+        ephemeral,
     })
 }
 
@@ -231,6 +251,43 @@ fn agent_store_rejects_non_sequential_persisted_sequence_on_load() {
 
     let error = AgentStore::open(&agents_dir).expect_err("bad sequence must fail load");
     assert!(matches!(error, AgentStoreError::InvalidSequence { .. }));
+
+    let _ = std::fs::remove_dir_all(agents_dir);
+}
+
+#[test]
+fn agent_store_rejects_partial_persisted_record_header_on_load() {
+    // A torn length header is log corruption, not a clean end-of-file. Loading
+    // must fail instead of silently truncating the durable agent transcript.
+    let agents_dir = temp_dir("agents-torn-header");
+    let events_path = agents_dir.join("agent-1").join("events.cbor");
+    append_partial_record_header(&events_path);
+
+    let error = AgentStore::open(&agents_dir).expect_err("torn header must fail load");
+    assert!(matches!(error, AgentStoreError::Read { .. }));
+
+    let _ = std::fs::remove_dir_all(agents_dir);
+}
+
+#[test]
+fn agent_store_validates_persisted_parent_references_on_load() {
+    // Durable replay must validate the same parent constraints as appends. A
+    // tampered log with a dangling parent must fail before building the tree.
+    let agents_dir = temp_dir("agents-bad-parent");
+    let events_path = agents_dir.join("agent-1").join("events.cbor");
+    append_raw_cbor(
+        &events_path,
+        &PersistedAgentEvent {
+            seq: PersistedAgentEventSeq::new(0),
+            source: None,
+            event: agent_prompt("agent-1", "hello"),
+            parent: AgentEventParent::Under(NodeId::new(99)),
+            recorded_at: tau_proto::UnixMicros::now(),
+        },
+    );
+
+    let error = AgentStore::open(&agents_dir).expect_err("bad parent must fail load");
+    assert!(matches!(error, AgentStoreError::InvalidEvent { .. }));
 
     let _ = std::fs::remove_dir_all(agents_dir);
 }
@@ -476,6 +533,81 @@ fn session_store_can_fold_one_membership_fact_without_persisting_it() {
 }
 
 #[test]
+fn session_store_memory_only_fact_does_not_skip_later_durable_sequence() {
+    // Memory-only membership facts are live state only. They must not consume a
+    // durable sequence number, or a later durable append would make replay fail.
+    let sessions_dir = temp_dir("sessions-ephemeral-then-durable");
+    let mut store = SessionStore::open(&sessions_dir).expect("open session store");
+
+    store
+        .append_session_event_at_with_persistence(
+            "session-1",
+            None,
+            session_loaded("session-1", "agent-ephemeral", true),
+            tau_proto::UnixMicros::now(),
+            crate::SessionPersistenceMode::Ephemeral,
+        )
+        .expect("append memory-only membership");
+    let durable = store
+        .append_session_event(
+            "session-1",
+            None,
+            session_loaded("session-1", "agent-durable", false),
+        )
+        .expect("append durable membership");
+
+    assert_eq!(durable.seq.get(), 0);
+    let reopened = SessionStore::open(&sessions_dir).expect("reopen session store");
+    let events = reopened.session_events("session-1").expect("events");
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].seq.get(), 0);
+
+    let _ = std::fs::remove_dir_all(sessions_dir);
+}
+
+#[test]
+fn session_store_memory_only_fact_between_durable_facts_keeps_sequence_contiguous() {
+    // Interleaving a memory-only membership fact between durable records must not
+    // create an on-disk sequence gap that would break later resume.
+    let sessions_dir = temp_dir("sessions-durable-ephemeral-durable");
+    let mut store = SessionStore::open(&sessions_dir).expect("open session store");
+
+    let first = store
+        .append_session_event(
+            "session-1",
+            None,
+            session_loaded("session-1", "agent-one", false),
+        )
+        .expect("append first durable membership");
+    store
+        .append_session_event_at_with_persistence(
+            "session-1",
+            None,
+            session_loaded("session-1", "agent-ephemeral", true),
+            tau_proto::UnixMicros::now(),
+            crate::SessionPersistenceMode::Ephemeral,
+        )
+        .expect("append memory-only membership");
+    let second = store
+        .append_session_event(
+            "session-1",
+            None,
+            session_loaded("session-1", "agent-two", false),
+        )
+        .expect("append second durable membership");
+
+    assert_eq!(first.seq.get(), 0);
+    assert_eq!(second.seq.get(), 1);
+    let reopened = SessionStore::open(&sessions_dir).expect("reopen session store");
+    let events = reopened.session_events("session-1").expect("events");
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[0].seq.get(), 0);
+    assert_eq!(events[1].seq.get(), 1);
+
+    let _ = std::fs::remove_dir_all(sessions_dir);
+}
+
+#[test]
 fn session_store_rejects_non_sequential_persisted_sequence_on_load() {
     let sessions_dir = temp_dir("sessions-bad-seq");
     let events_path = sessions_dir.join("session-1").join("events.cbor");
@@ -501,6 +633,188 @@ fn session_store_rejects_non_sequential_persisted_sequence_on_load() {
     assert!(matches!(error, SessionStoreError::InvalidSequence { .. }));
 
     let _ = std::fs::remove_dir_all(sessions_dir);
+}
+
+#[test]
+fn session_store_rejects_partial_persisted_record_header_on_load() {
+    // A partial length header means the durable membership log was torn. Resume
+    // must surface that corruption instead of dropping the incomplete tail.
+    let sessions_dir = temp_dir("sessions-torn-header");
+    let events_path = sessions_dir.join("session-1").join("events.cbor");
+    append_partial_record_header(&events_path);
+
+    let error = SessionStore::open(&sessions_dir).expect_err("torn header must fail load");
+    assert!(matches!(error, SessionStoreError::Read { .. }));
+
+    let _ = std::fs::remove_dir_all(sessions_dir);
+}
+
+#[test]
+fn session_store_validates_persisted_membership_events_on_load() {
+    // Durable replay must reject non-membership records instead of silently
+    // ignoring them and advancing the sequence cursor over corrupted data.
+    let sessions_dir = temp_dir("sessions-bad-event");
+    let events_path = sessions_dir.join("session-1").join("events.cbor");
+    append_raw_cbor(
+        &events_path,
+        &PersistedSessionEvent {
+            seq: PersistedSessionEventSeq::new(0),
+            source: None,
+            event: agent_prompt("agent-1", "not membership"),
+            recorded_at: tau_proto::UnixMicros::now(),
+        },
+    );
+
+    let error = SessionStore::open(&sessions_dir).expect_err("bad event must fail load");
+    assert!(matches!(error, SessionStoreError::InvalidEvent { .. }));
+
+    let _ = std::fs::remove_dir_all(sessions_dir);
+}
+
+#[test]
+fn session_store_rejects_path_escaping_session_ids() {
+    // Session ids are used as directory names. They must be a single safe path
+    // component so raw protocol ids cannot escape the configured store root.
+    let sessions_dir = temp_dir("sessions-path-safe");
+    let mut store = SessionStore::open(&sessions_dir).expect("open session store");
+
+    let error = store
+        .append_session_event(
+            "../escaped",
+            None,
+            session_loaded("../escaped", "agent-1", false),
+        )
+        .expect_err("path escaping id must fail");
+    assert!(matches!(error, SessionStoreError::InvalidSessionId { .. }));
+    assert!(!sessions_dir.join("..").join("escaped").exists());
+
+    let error = store
+        .session_events("/tmp/escaped")
+        .expect_err("absolute id must fail");
+    assert!(matches!(error, SessionStoreError::InvalidSessionId { .. }));
+
+    let _ = std::fs::remove_dir_all(sessions_dir);
+}
+
+#[test]
+fn session_store_accepts_cli_minted_path_safe_prefixes() {
+    // CLI session ids are minted from raw cwd basenames plus a suffix, so the
+    // store grammar must allow path-safe spaces, dots, and Unicode characters.
+    let sessions_dir = temp_dir("sessions-cli-shaped");
+    let mut store = SessionStore::open(&sessions_dir).expect("open session store");
+    let session_id = "my project.café-abc123";
+
+    store
+        .append_session_event(
+            session_id,
+            None,
+            session_loaded(session_id, "agent-1", false),
+        )
+        .expect("append cli-shaped session id");
+
+    let reopened = SessionStore::open(&sessions_dir).expect("reopen session store");
+    assert!(reopened.session(session_id).is_some());
+
+    let _ = std::fs::remove_dir_all(sessions_dir);
+}
+
+#[test]
+fn list_session_metas_skips_invalid_session_directories() {
+    // Listing is best-effort discovery. Invalid directory names should not leak
+    // path-unsafe ids to resume/cleanup callers or make valid sessions vanish.
+    let sessions_dir = temp_dir("sessions-list-invalid");
+    let mut store = SessionStore::open(&sessions_dir).expect("open session store");
+    store
+        .record_session_meta("valid-session")
+        .expect("record valid meta");
+
+    let invalid_name = "x".repeat(SESSION_ID_TEST_INVALID_LEN);
+    let invalid_meta_dir = sessions_dir.join(invalid_name);
+    std::fs::create_dir_all(&invalid_meta_dir).expect("create invalid session dir");
+    std::fs::write(
+        invalid_meta_dir.join("meta.json"),
+        serde_json::to_vec(&crate::SessionMeta {
+            created_at: 1,
+            last_touched: 1,
+        })
+        .expect("encode meta"),
+    )
+    .expect("write invalid meta");
+
+    let metas = list_session_metas(&sessions_dir).expect("list metas");
+    assert_eq!(metas.len(), 1);
+    assert_eq!(metas[0].0.as_str(), "valid-session");
+
+    let _ = std::fs::remove_dir_all(sessions_dir);
+}
+
+const SESSION_ID_TEST_INVALID_LEN: usize = 129;
+
+#[test]
+fn agent_store_rejects_path_escaping_agent_ids_for_read_paths() {
+    // Read/probe helpers also join ids into store paths, so invalid AgentIds
+    // must fail before a raw string can escape the configured agents root.
+    let agents_dir = temp_dir("agents-path-safe");
+    let store = AgentStore::open(&agents_dir).expect("open agent store");
+
+    let error = store
+        .agent_events("../escaped")
+        .expect_err("path escaping id must fail");
+    assert!(matches!(error, AgentStoreError::InvalidAgentId { .. }));
+    assert!(store.agent_meta("../escaped").is_err());
+    assert!(crate::agent_is_locked(&agents_dir, "../escaped").is_err());
+
+    let _ = std::fs::remove_dir_all(agents_dir);
+}
+
+#[test]
+fn agent_store_rejects_invalid_agent_ids_without_panicking() {
+    // Invalid AgentIds must return typed store errors at all public write/load
+    // boundaries instead of reaching internal parse panics or escaped paths.
+    let agents_dir = temp_dir("agents-invalid-id");
+    let mut store = AgentStore::open(&agents_dir).expect("open agent store");
+
+    let error = store
+        .append_agent_event("../escaped", None, agent_prompt("agent-1", "hello"))
+        .expect_err("invalid append id must fail");
+    assert!(matches!(error, AgentStoreError::InvalidAgentId { .. }));
+    let error = store
+        .mark_agent_ephemeral("../escaped")
+        .expect_err("invalid ephemeral id must fail");
+    assert!(matches!(error, AgentStoreError::InvalidAgentId { .. }));
+    let error = store
+        .record_agent_meta("../escaped")
+        .expect_err("invalid metadata id must fail");
+    assert!(matches!(error, AgentStoreError::InvalidAgentId { .. }));
+    let error = store
+        .record_agent_user_interaction("../escaped")
+        .expect_err("invalid interaction id must fail");
+    assert!(matches!(error, AgentStoreError::InvalidAgentId { .. }));
+
+    let _ = std::fs::remove_dir_all(agents_dir);
+}
+
+#[test]
+fn agent_store_rejects_invalid_agent_directory_names_on_open() {
+    // Corrupt or manually-created durable directories with unsafe names must be
+    // surfaced as load errors, not parsed with `expect` during eager open.
+    let agents_dir = temp_dir("agents-invalid-dir");
+    let events_path = agents_dir.join("bad.agent").join("events.cbor");
+    append_raw_cbor(
+        &events_path,
+        &PersistedAgentEvent {
+            seq: PersistedAgentEventSeq::new(0),
+            source: None,
+            event: agent_prompt("agent-1", "hello"),
+            parent: AgentEventParent::InheritHead,
+            recorded_at: tau_proto::UnixMicros::now(),
+        },
+    );
+
+    let error = AgentStore::open(&agents_dir).expect_err("invalid directory id must fail");
+    assert!(matches!(error, AgentStoreError::InvalidAgentId { .. }));
+
+    let _ = std::fs::remove_dir_all(agents_dir);
 }
 
 #[test]

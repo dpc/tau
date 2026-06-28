@@ -1234,6 +1234,50 @@ fn validate_number_schema(
     value: &CborValue,
     path: &str,
 ) -> Result<(), ToolArgumentValidationError> {
+    if let CborValue::Float(value) = value
+        && !value.is_finite()
+    {
+        return Err(ToolArgumentValidationError::new(
+            path,
+            "number must be finite",
+        ));
+    }
+    if let Some(minimum) = schema.get("minimum").and_then(serde_json::Value::as_i64)
+        && let Some(integer) = cbor_integer_as_i128(value)
+        && integer < i128::from(minimum)
+    {
+        return Err(ToolArgumentValidationError::new(
+            path,
+            format!("must be at least {minimum}"),
+        ));
+    }
+    if let Some(minimum) = schema.get("minimum").and_then(serde_json::Value::as_u64)
+        && let Some(integer) = cbor_integer_as_i128(value)
+        && integer < i128::from(minimum)
+    {
+        return Err(ToolArgumentValidationError::new(
+            path,
+            format!("must be at least {minimum}"),
+        ));
+    }
+    if let Some(maximum) = schema.get("maximum").and_then(serde_json::Value::as_i64)
+        && let Some(integer) = cbor_integer_as_i128(value)
+        && i128::from(maximum) < integer
+    {
+        return Err(ToolArgumentValidationError::new(
+            path,
+            format!("must be at most {maximum}"),
+        ));
+    }
+    if let Some(maximum) = schema.get("maximum").and_then(serde_json::Value::as_u64)
+        && let Some(integer) = cbor_integer_as_i128(value)
+        && i128::from(maximum) < integer
+    {
+        return Err(ToolArgumentValidationError::new(
+            path,
+            format!("must be at most {maximum}"),
+        ));
+    }
     let Some(number) = cbor_number_as_f64(value) else {
         return Ok(());
     };
@@ -1254,6 +1298,13 @@ fn validate_number_schema(
         ));
     }
     Ok(())
+}
+
+fn cbor_integer_as_i128(value: &CborValue) -> Option<i128> {
+    match value {
+        CborValue::Integer(value) => Some((*value).into()),
+        _ => None,
+    }
 }
 
 fn cbor_number_as_f64(value: &CborValue) -> Option<f64> {

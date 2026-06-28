@@ -107,6 +107,8 @@ pub enum SessionStoreError {
     Locked { path: PathBuf, holder: String },
     /// A session directory could not be converted to UTF-8.
     InvalidSessionDir { path: PathBuf },
+    /// A session id is not safe to use as one store directory name.
+    InvalidSessionId { session_id: String, message: String },
     /// The event is not a session membership fact for this session.
     InvalidEvent { message: String },
     /// A persisted record sequence does not match its position in the log.
@@ -161,6 +163,10 @@ impl fmt::Display for SessionStoreError {
                 "invalid session directory name (non-utf8): {}",
                 path.display()
             ),
+            Self::InvalidSessionId {
+                session_id,
+                message,
+            } => write!(f, "invalid session id `{session_id}`: {message}"),
             Self::InvalidEvent { message } => {
                 write!(f, "invalid session membership event: {message}")
             }
@@ -188,6 +194,7 @@ impl Error for SessionStoreError {
             Self::Encode { source, .. } => Some(source),
             Self::Locked { .. }
             | Self::InvalidSessionDir { .. }
+            | Self::InvalidSessionId { .. }
             | Self::InvalidEvent { .. }
             | Self::InvalidSequence { .. } => None,
         }
@@ -234,18 +241,32 @@ pub struct SessionMembership {
 
 impl SessionMembership {
     /// Builds a session membership view from durable membership facts.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `events` contains a record that is not a valid membership fact
+    /// for `session_id`. [`SessionStore`] uses the fallible replay path when
+    /// loading durable state from disk.
     #[must_use]
     pub fn from_events(session_id: SessionId, events: &[PersistedSessionEvent]) -> Self {
+        Self::try_from_events(session_id, events).expect("validated session events")
+    }
+
+    fn try_from_events(
+        session_id: SessionId,
+        events: &[PersistedSessionEvent],
+    ) -> Result<Self, SessionStoreError> {
         let mut tree = Self {
-            session_id,
+            session_id: session_id.clone(),
             loaded_agents: HashSet::new(),
             next_event_seq: PersistedSessionEventSeq::new(0),
         };
         for record in events {
+            validate_membership_event(session_id.as_str(), &record.event)?;
             tree.apply_event(&record.event);
             tree.next_event_seq = record.seq.next();
         }
-        tree
+        Ok(tree)
     }
 
     /// Returns the session identifier.
@@ -361,25 +382,27 @@ impl SessionStore {
         })
     }
 
-    fn session_dir(&self, session_id: &str) -> PathBuf {
-        self.sessions_dir.join(session_id)
+    fn session_dir(&self, session_id: &SessionId) -> PathBuf {
+        self.sessions_dir.join(session_id.as_str())
     }
 
     fn load_session_if_needed(&mut self, session_id: &str) -> Result<(), SessionStoreError> {
         if self.mode.is_ephemeral() {
             return Ok(());
         }
-        let sid = SessionId::from(session_id);
+        let sid = validate_session_id(session_id)?;
         if self.sessions.contains_key(&sid) {
             return Ok(());
         }
-        let path = self.session_dir(session_id).join("events.cbor");
+        let path = self.session_dir(&sid).join("events.cbor");
         if !path.exists() {
             return Ok(());
         }
         let events = load_session_events(&path)?;
-        self.sessions
-            .insert(sid.clone(), SessionMembership::from_events(sid, &events));
+        self.sessions.insert(
+            sid.clone(),
+            SessionMembership::try_from_events(sid, &events)?,
+        );
         Ok(())
     }
 
@@ -387,11 +410,11 @@ impl SessionStore {
         if self.mode.is_ephemeral() {
             return Ok(());
         }
-        let sid = SessionId::from(session_id);
+        let sid = validate_session_id(session_id)?;
         if self.locks.contains_key(&sid) {
             return Ok(());
         }
-        let session_dir = self.session_dir(session_id);
+        let session_dir = self.session_dir(&sid);
         fs::create_dir_all(&session_dir).map_err(|source| {
             SessionStoreError::CreateParentDirectory {
                 path: session_dir.clone(),
@@ -473,13 +496,14 @@ impl SessionStore {
         recorded_at: UnixMicros,
         event_persistence: SessionPersistenceMode,
     ) -> Result<AppendOutcome, SessionStoreError> {
+        let sid = validate_session_id(session_id)?;
         validate_membership_event(session_id, &event)?;
         let write_to_disk = self.mode.is_durable() && event_persistence.is_durable();
         if write_to_disk {
             self.ensure_locked(session_id)?;
         }
         self.load_session_if_needed(session_id)?;
-        let session_dir = self.session_dir(session_id);
+        let session_dir = self.session_dir(&sid);
         if write_to_disk {
             fs::create_dir_all(&session_dir).map_err(|source| {
                 SessionStoreError::CreateParentDirectory {
@@ -488,7 +512,6 @@ impl SessionStore {
                 }
             })?;
         }
-        let sid = SessionId::from(session_id);
         let tree = self
             .sessions
             .entry(sid.clone())
@@ -504,7 +527,9 @@ impl SessionStore {
             append_cbor_record(&session_dir.join("events.cbor"), &record)?;
         }
         tree.apply_event(&event);
-        tree.advance_next_event_seq();
+        if write_to_disk {
+            tree.advance_next_event_seq();
+        }
         // Sidecar metadata is derived from the durable event stream. Do not let
         // a sidecar write failure make the caller retry this already-persisted
         // sequence and create a duplicate record.
@@ -525,7 +550,8 @@ impl SessionStore {
         if self.mode.is_ephemeral() {
             return Ok(Vec::new());
         }
-        load_session_events(&self.session_dir(session_id).join("events.cbor"))
+        let session_id = validate_session_id(session_id)?;
+        load_session_events(&self.session_dir(&session_id).join("events.cbor"))
     }
 
     /// Returns the storage root for session membership containers.
@@ -540,13 +566,17 @@ impl SessionStore {
         session_id: &str,
     ) -> Result<Option<&SessionMembership>, SessionStoreError> {
         self.load_session_if_needed(session_id)?;
-        Ok(self.sessions.get(&SessionId::from(session_id)))
+        let session_id = validate_session_id(session_id)?;
+        Ok(self.sessions.get(&session_id))
     }
 
     /// Returns one already-loaded session membership view.
     #[must_use]
     pub fn session(&self, session_id: &str) -> Option<&SessionMembership> {
-        self.sessions.get(&SessionId::from(session_id))
+        let Ok(session_id) = validate_session_id(session_id) else {
+            return None;
+        };
+        self.sessions.get(&session_id)
     }
 
     /// Returns all loaded session membership views.
@@ -560,8 +590,9 @@ impl SessionStore {
         if self.mode.is_ephemeral() {
             return Ok(());
         }
-        self.ensure_locked(session_id)?;
-        let path = self.session_dir(session_id).join("meta.json");
+        let session_id = validate_session_id(session_id)?;
+        self.ensure_locked(session_id.as_str())?;
+        let path = self.session_dir(&session_id).join("meta.json");
         let now = unix_now();
         let mut meta = read_meta(&path).unwrap_or_default();
         if meta.created_at == 0 {
@@ -569,6 +600,44 @@ impl SessionStore {
         }
         meta.last_touched = now;
         write_meta(&path, &meta)
+    }
+}
+
+const SESSION_ID_MAX_LEN: usize = 128;
+
+fn validate_session_id(session_id: &str) -> Result<SessionId, SessionStoreError> {
+    if session_id.is_empty() {
+        return Err(invalid_session_id(session_id, "must not be empty"));
+    }
+    if session_id == "." || session_id == ".." {
+        return Err(invalid_session_id(
+            session_id,
+            "must be a single path-safe directory name",
+        ));
+    }
+    if session_id.len() > SESSION_ID_MAX_LEN {
+        return Err(invalid_session_id(
+            session_id,
+            format!("must not exceed {SESSION_ID_MAX_LEN} bytes"),
+        ));
+    }
+    if let Some((index, byte)) = session_id
+        .bytes()
+        .enumerate()
+        .find(|(_, byte)| *byte == b'/' || *byte == b'\\' || *byte == 0)
+    {
+        return Err(invalid_session_id(
+            session_id,
+            format!("invalid byte 0x{byte:02x} at byte offset {index}"),
+        ));
+    }
+    Ok(SessionId::from(session_id))
+}
+
+fn invalid_session_id(session_id: &str, message: impl Into<String>) -> SessionStoreError {
+    SessionStoreError::InvalidSessionId {
+        session_id: session_id.to_owned(),
+        message: message.into(),
     }
 }
 
@@ -615,14 +684,23 @@ pub fn list_session_metas(sessions_dir: &Path) -> io::Result<Vec<(SessionId, Ses
                 continue;
             }
         };
-        out.push((SessionId::from(name), meta));
+        let session_id = match validate_session_id(name) {
+            Ok(session_id) => session_id,
+            Err(error) => {
+                eprintln!("tau: skipping session {name}: {error}");
+                continue;
+            }
+        };
+        out.push((session_id, meta));
     }
     Ok(out)
 }
 
 /// Best-effort check whether a session lock is currently held.
 pub fn session_is_locked(sessions_dir: &Path, session_id: &str) -> io::Result<bool> {
-    let lock_path = sessions_dir.join(session_id).join("lock");
+    let session_id = validate_session_id(session_id)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+    let lock_path = sessions_dir.join(session_id.as_str()).join("lock");
     let file = match OpenOptions::new().read(true).write(true).open(&lock_path) {
         Ok(file) => file,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
@@ -731,18 +809,16 @@ where
         source,
     })?;
     loop {
-        let mut length_bytes = [0_u8; 8];
-        match file.read_exact(&mut length_bytes) {
-            Ok(()) => {}
-            Err(source) if source.kind() == io::ErrorKind::UnexpectedEof => return Ok(()),
-            Err(source) => {
-                return Err(SessionStoreError::Read {
+        let Some(record_length) =
+            crate::record_log::read_record_length(&mut file).map_err(|source| {
+                SessionStoreError::Read {
                     path: path.to_path_buf(),
                     source,
-                });
-            }
-        }
-        let record_length = u64::from_le_bytes(length_bytes);
+                }
+            })?
+        else {
+            return Ok(());
+        };
         if record_length > MAX_RECORD_BYTES {
             return Err(SessionStoreError::Read {
                 path: path.to_path_buf(),
