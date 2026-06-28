@@ -4,6 +4,12 @@
 permissions. Directory update locks are advisory coordination for Tau/ext-shell
 tools, not an operating-system sandbox or access-control boundary.
 
+User-facing `!` / `!!` shell commands stream bounded progress events separately
+from their bounded final captured output. After the per-stream progress cap is
+hit, ext-shell keeps draining child pipes for process liveness and final
+truncation metadata but stops forwarding arbitrary output volume into the event
+stream.
+
 The filesystem directory-lock backend coordinates multiple ext-shell instances
 for the same host and user through a private local registry. The registry
 directory must be private (`0700` on Unix) when explicitly configured; unsafe

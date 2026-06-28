@@ -58,6 +58,9 @@ Scheduler lifecycle tests should cover bounded admission, queued-call
 cancellation, and drop semantics. Dropping the scheduler is the shutdown boundary:
 queued work is discarded, worker threads are woken, and already-running work is
 joined before the protocol writer is expected to drain and exit.
+Long-running search-tool cancellation tests should distinguish early cancellation
+from active process/traversal cancellation and cover the cancellation checks used
+after `grep` / `find` work has started.
 
 
 ## Discovery coverage

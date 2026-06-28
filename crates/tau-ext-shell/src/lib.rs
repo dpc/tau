@@ -928,7 +928,7 @@ fn schedule_tool_started(
     tx: &mpsc::Sender<HarnessInputMessage>,
     config: ExtConfig,
     lock_manager: DirLockManager,
-    running_shells: Arc<Mutex<HashMap<tau_proto::ToolCallId, mpsc::Sender<()>>>>,
+    running_calls: Arc<Mutex<HashMap<tau_proto::ToolCallId, mpsc::Sender<()>>>>,
     cwd_state: CwdState,
 ) -> Result<(), Box<(tau_proto::ToolStarted, crate::display::ToolFailure)>> {
     let priority = priority_for_tool(&invoke, &config);
@@ -955,7 +955,7 @@ fn schedule_tool_started(
                     invoke,
                     config.shell,
                     &tx_for_job,
-                    &running_shells,
+                    &running_calls,
                     &lock_manager,
                     config.dir_lock.enforce_ro_bind,
                     cwd_state.clone(),
@@ -965,7 +965,7 @@ fn schedule_tool_started(
                     invoke,
                     config.shell,
                     &tx_for_job,
-                    &running_shells,
+                    &running_calls,
                     None,
                     config
                         .dir_lock
@@ -1085,7 +1085,7 @@ fn dispatch_locked_tool_invoke(
     invoke: tau_proto::ToolStarted,
     shell_config: ShellConfig,
     tx: &mpsc::Sender<HarnessInputMessage>,
-    running_shells: &Arc<Mutex<HashMap<tau_proto::ToolCallId, mpsc::Sender<()>>>>,
+    running_calls: &Arc<Mutex<HashMap<tau_proto::ToolCallId, mpsc::Sender<()>>>>,
     lock_manager: &DirLockManager,
     enforce_ro_bind: bool,
     cwd_state: CwdState,
@@ -1140,7 +1140,7 @@ fn dispatch_locked_tool_invoke(
                 invoke,
                 shell_config,
                 tx,
-                running_shells,
+                running_calls,
                 None,
                 Some(ShellCommandMode::visible(ShellAccessMode::ReadOnly)),
                 enforce_ro_bind,
@@ -1190,7 +1190,7 @@ fn dispatch_locked_tool_invoke(
         invoke,
         shell_config,
         tx,
-        running_shells,
+        running_calls,
         lock_wait_duration_seconds,
         shell_command_mode,
         enforce_ro_bind,
@@ -1315,7 +1315,7 @@ fn dispatch_tool_invoke(
     invoke: tau_proto::ToolStarted,
     shell_config: ShellConfig,
     tx: &mpsc::Sender<HarnessInputMessage>,
-    running_shells: &Arc<Mutex<HashMap<tau_proto::ToolCallId, mpsc::Sender<()>>>>,
+    running_calls: &Arc<Mutex<HashMap<tau_proto::ToolCallId, mpsc::Sender<()>>>>,
     lock_wait_duration_seconds: Option<u64>,
     shell_command_mode: Option<ShellCommandMode>,
     enforce_ro_bind: bool,
@@ -1389,12 +1389,23 @@ fn dispatch_tool_invoke(
             invoke,
             shell_config,
             tx,
-            running_shells,
+            running_calls,
             lock_wait_duration_seconds,
             shell_command_mode: shell_command_mode.unwrap_or(ShellCommandMode::READ_WRITE_HIDDEN),
             enforce_ro_bind,
             world,
         });
+        return;
+    }
+
+    if invoke.tool_name == GREP_TOOL_NAME || invoke.tool_name == FIND_TOOL_NAME {
+        dispatch_cancellable_non_shell_tool(
+            invoke,
+            tx,
+            running_calls,
+            lock_wait_duration_seconds,
+            world,
+        );
         return;
     }
 
@@ -1417,6 +1428,59 @@ fn dispatch_tool_invoke(
     }
 }
 
+fn dispatch_cancellable_non_shell_tool(
+    invoke: tau_proto::ToolStarted,
+    tx: &mpsc::Sender<HarnessInputMessage>,
+    running_calls: &Arc<Mutex<HashMap<tau_proto::ToolCallId, mpsc::Sender<()>>>>,
+    lock_wait_duration_seconds: Option<u64>,
+    world: crate::tools::world::ShellWorld,
+) {
+    let (cancel_tx, cancel_rx) = mpsc::channel();
+    running_calls
+        .lock()
+        .expect("running call registry lock poisoned")
+        .insert(invoke.call_id.clone(), cancel_tx);
+
+    if let Some(display) = crate::tools::initial_display(&invoke) {
+        let _ = tx.send(HarnessInputMessage::emit(Event::ToolProgress(
+            tau_proto::ToolProgress {
+                call_id: invoke.call_id.clone(),
+                tool_name: invoke.tool_name.clone(),
+                message: None,
+                progress: None,
+                display: Some(display),
+            },
+        )));
+    }
+
+    let call_id = invoke.call_id.clone();
+    let tool_name = invoke.tool_name.clone();
+    let outcome = crate::tools::execute_cancellable_tool(invoke, world, cancel_rx);
+
+    running_calls
+        .lock()
+        .expect("running call registry lock poisoned")
+        .remove(&call_id);
+
+    match outcome {
+        crate::tools::CancellableToolOutcome::Finished(events) => {
+            for event in events {
+                let event = with_lock_wait_duration(event, lock_wait_duration_seconds);
+                let _ = tx.send(HarnessInputMessage::emit(event));
+            }
+        }
+        crate::tools::CancellableToolOutcome::Cancelled => {
+            let event = Event::ToolCancelled(ToolCancelled {
+                call_id,
+                tool_name,
+                tool_type: tau_proto::ToolType::Function,
+            });
+            let event = with_lock_wait_duration(event, lock_wait_duration_seconds);
+            let _ = tx.send(HarnessInputMessage::emit(event));
+        }
+    }
+}
+
 /// Parameters needed to run a cancellable shell-like tool invocation.
 struct CancellableShellDispatch<'a> {
     /// Tool invocation emitted by the harness.
@@ -1427,7 +1491,7 @@ struct CancellableShellDispatch<'a> {
     tx: &'a mpsc::Sender<HarnessInputMessage>,
     /// Shared registry used by cancel requests to signal running shell
     /// processes.
-    running_shells: &'a Arc<Mutex<HashMap<tau_proto::ToolCallId, mpsc::Sender<()>>>>,
+    running_calls: &'a Arc<Mutex<HashMap<tau_proto::ToolCallId, mpsc::Sender<()>>>>,
     /// Seconds spent waiting on a directory lock before this invocation ran.
     lock_wait_duration_seconds: Option<u64>,
     /// Display and access mode chosen for the shell command.
@@ -1444,7 +1508,7 @@ fn dispatch_cancellable_shell_tool(params: CancellableShellDispatch<'_>) {
         invoke,
         shell_config,
         tx,
-        running_shells,
+        running_calls,
         lock_wait_duration_seconds,
         shell_command_mode,
         enforce_ro_bind,
@@ -1456,9 +1520,9 @@ fn dispatch_cancellable_shell_tool(params: CancellableShellDispatch<'_>) {
         tool_name = %invoke.tool_name,
         "registering cancellable shell call"
     );
-    running_shells
+    running_calls
         .lock()
-        .expect("running shell registry lock poisoned")
+        .expect("running call registry lock poisoned")
         .insert(invoke.call_id.clone(), cancel_tx);
 
     let _ = tx.send(HarnessInputMessage::emit(Event::ToolProgress(
@@ -1530,9 +1594,9 @@ fn dispatch_cancellable_shell_tool(params: CancellableShellDispatch<'_>) {
         }
     };
 
-    running_shells
+    running_calls
         .lock()
-        .expect("running shell registry lock poisoned")
+        .expect("running call registry lock poisoned")
         .remove(&invoke.call_id);
     trace!(call_id = %invoke.call_id, "removed shell call from cancellation registry");
     let event = with_lock_wait_duration(event, lock_wait_duration_seconds);

@@ -66,6 +66,11 @@ publish protocol messages. Dropping the scheduler is therefore a deterministic
 shutdown boundary: queued work is discarded, workers are woken, and already
 running jobs are joined before drop returns.
 
+Long-running read-only search tools that run after dequeuing (`grep` / `find`)
+also register cancellation handles while active. Tool cancellation and runtime
+shutdown signal those handles so a running ripgrep child or filesystem traversal
+can stop before scheduler drop waits for worker threads to exit.
+
 At every post-scheduler termination path, including explicit
 `session_shutdown`, `disconnect`, EOF, reader decode errors, and response-send
 errors, ext-shell must shut down `DirLockManager` before dropping

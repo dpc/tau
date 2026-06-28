@@ -2,6 +2,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc;
 
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use ignore::WalkBuilder;
@@ -9,17 +10,33 @@ use tau_proto::CborValue;
 
 use crate::argument::{argument_text, optional_argument_int_strict, optional_argument_text};
 use crate::display::{ToolFailure, ToolOutput, text_stats};
+use crate::tools::CancellableToolRun;
 use crate::truncate::{MAX_OUTPUT_BYTES, MAX_OUTPUT_LINES, truncate_line_oriented};
 
 pub(crate) const DEFAULT_FIND_LIMIT: usize = 1000;
 const MAX_FIND_LIMIT: usize = MAX_OUTPUT_LINES;
 
 pub(crate) fn run_find(arguments: &CborValue) -> Result<ToolOutput, ToolFailure> {
+    match run_find_cancellable(arguments, None)? {
+        CancellableToolRun::Finished(output) => Ok(*output),
+        CancellableToolRun::Cancelled => Err(ToolFailure::new("cancelled")),
+    }
+}
+
+pub(crate) fn run_find_cancellable(
+    arguments: &CborValue,
+    cancel_rx: Option<&mpsc::Receiver<()>>,
+) -> Result<CancellableToolRun, ToolFailure> {
     let request = parse_find_request(arguments)?;
     let search = prepare_find_search(&request)?;
-    let matches = collect_find_matches(&search)?;
+    let mut cancelled = || cancel_rx.is_some_and(|rx| rx.try_recv().is_ok());
+    let Some(matches) = collect_find_matches(&search, &mut cancelled)? else {
+        return Ok(CancellableToolRun::Cancelled);
+    };
 
-    Ok(render_find_output(request, matches))
+    Ok(CancellableToolRun::Finished(Box::new(render_find_output(
+        request, matches,
+    ))))
 }
 
 /// Parsed and validated user request for the find tool.
@@ -112,7 +129,10 @@ fn find_failure_with_args(args: &str, message: impl Into<String>) -> ToolFailure
     ToolFailure::new(message).with_args(args.to_owned())
 }
 
-fn collect_find_matches(search: &FindSearch) -> Result<Vec<String>, ToolFailure> {
+fn collect_find_matches(
+    search: &FindSearch,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<Option<Vec<String>>, ToolFailure> {
     let mut matches = Vec::new();
     for entry in WalkBuilder::new(&search.path)
         .hidden(false)
@@ -123,6 +143,9 @@ fn collect_find_matches(search: &FindSearch) -> Result<Vec<String>, ToolFailure>
         .git_exclude(true)
         .build()
     {
+        if cancelled() {
+            return Ok(None);
+        }
         let entry = entry.map_err(|e| {
             find_failure_with_args(
                 &search.display_args,
@@ -149,7 +172,7 @@ fn collect_find_matches(search: &FindSearch) -> Result<Vec<String>, ToolFailure>
     }
     matches.sort_by_key(|entry| entry.to_lowercase());
 
-    Ok(matches)
+    Ok(Some(matches))
 }
 
 fn render_find_output(request: FindRequest, matches: Vec<String>) -> ToolOutput {
@@ -430,6 +453,56 @@ mod tests {
 
         assert!(notice.contains("Maximum limit reached"));
         assert!(!notice.contains(&format!("limit={}", MAX_FIND_LIMIT * 2)));
+    }
+
+    /// Ensures find observes cancellation before starting traversal through the
+    /// cancellable tool path.
+    #[test]
+    fn find_cancellable_stops_on_early_cancel_request() {
+        let tempdir = tempfile::TempDir::new().expect("tempdir");
+        std::fs::write(tempdir.path().join("alpha.txt"), "x").expect("write file");
+        let args = CborValue::Map(vec![
+            (
+                CborValue::Text("pattern".to_owned()),
+                CborValue::Text("*.txt".to_owned()),
+            ),
+            (
+                CborValue::Text("path".to_owned()),
+                CborValue::Text(tempdir.path().display().to_string()),
+            ),
+        ]);
+        let (cancel_tx, cancel_rx) = std::sync::mpsc::channel();
+        cancel_tx.send(()).expect("send cancel");
+
+        let result = run_find_cancellable(&args, Some(&cancel_rx)).expect("find result");
+
+        assert!(matches!(result, CancellableToolRun::Cancelled));
+    }
+
+    /// Ensures active find traversal checks cancellation between walked
+    /// entries, so a running search has a deterministic path to stop before
+    /// the whole tree has been visited.
+    #[test]
+    fn find_collect_stops_when_cancelled_during_traversal() {
+        let tempdir = tempfile::TempDir::new().expect("tempdir");
+        std::fs::write(tempdir.path().join("alpha.txt"), "x").expect("write alpha");
+        std::fs::write(tempdir.path().join("beta.txt"), "x").expect("write beta");
+        let request = FindRequest {
+            pattern: "*.txt".to_owned(),
+            path: tempdir.path().display().to_string(),
+            limit: DEFAULT_FIND_LIMIT,
+            display_args: "test".to_owned(),
+        };
+        let search = prepare_find_search(&request).expect("search");
+        let mut checks = 0usize;
+
+        let result = collect_find_matches(&search, &mut || {
+            checks += 1;
+            1 < checks
+        })
+        .expect("find collection");
+
+        assert!(result.is_none());
     }
 
     /// Protects find output from path line injection by escaping control

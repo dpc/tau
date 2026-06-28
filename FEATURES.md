@@ -364,8 +364,8 @@ tool for testing. The shell command and any wrapper prefix are configurable:
     // holds a matching manual lock. Otherwise they are inferred read-only.
     // `backend` defaults to "memory"; use "filesystem" plus an optional
     // private `state_dir` to coordinate locks across Tau/ext-shell processes.
-    // `enforce_ro_bind` defaults true and attempts a read-only bind mount for
-    // inferred read-only shell calls.
+    // `enforce_ro_bind` defaults true and requires a read-only bind mount for
+    // inferred read-only shell calls, failing closed if native isolation is unavailable.
     dir_lock: { enable: false, backend: "memory", enforce_ro_bind: true },
   },
 },

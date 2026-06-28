@@ -27,7 +27,7 @@ pub(super) struct ShellRuntime {
     config: ExtConfig,
     scheduler: WorkScheduler,
     tx: mpsc::Sender<HarnessInputMessage>,
-    running_shells: Arc<Mutex<HashMap<tau_proto::ToolCallId, mpsc::Sender<()>>>>,
+    running_calls: Arc<Mutex<HashMap<tau_proto::ToolCallId, mpsc::Sender<()>>>>,
     lock_manager: DirLockManager,
     cwd_state: CwdState,
     start_agent_owners: HashMap<String, tau_proto::AgentId>,
@@ -40,7 +40,7 @@ impl ShellRuntime {
             config,
             scheduler: WorkScheduler::new(tx.clone(), Default::default()),
             tx,
-            running_shells: Arc::new(Mutex::new(HashMap::new())),
+            running_calls: Arc::new(Mutex::new(HashMap::new())),
             lock_manager: DirLockManager::default(),
             cwd_state: CwdState::new(),
             start_agent_owners: HashMap::new(),
@@ -62,6 +62,16 @@ impl ShellRuntime {
         // because scheduler drop joins workers that may be blocked on locks.
         self.lock_manager.shutdown();
         self.scheduler.cancel_all_queued();
+        let running = self
+            .running_calls
+            .lock()
+            .expect("running call registry lock poisoned")
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        for cancel_tx in running {
+            let _ = cancel_tx.send(());
+        }
     }
 
     fn handle_configure(&mut self, msg: tau_proto::Configure) -> Result<(), Box<dyn Error>> {
@@ -179,7 +189,7 @@ impl ShellRuntime {
             &self.tx,
             self.config.clone(),
             self.lock_manager.clone(),
-            Arc::clone(&self.running_shells),
+            Arc::clone(&self.running_calls),
             self.cwd_state.clone(),
         ) {
             let (invoke, failure) = *error;
@@ -369,13 +379,13 @@ impl ShellRuntime {
             return;
         }
         let cancel_tx = self
-            .running_shells
+            .running_calls
             .lock()
-            .expect("running shell registry lock poisoned")
+            .expect("running call registry lock poisoned")
             .get(&request.target_call_id)
             .cloned();
         if let Some(cancel_tx) = cancel_tx {
-            debug!(call_id = %request.target_call_id, "shell cancellation requested for running call");
+            debug!(call_id = %request.target_call_id, "tool cancellation requested for running call");
             if cancel_tx.send(()).is_err() {
                 debug!(call_id = %request.target_call_id, "shell cancellation receiver already gone");
             }
@@ -385,7 +395,7 @@ impl ShellRuntime {
         {
             debug!(call_id = %request.target_call_id, "cancellation requested for waiting dir-lock call");
         } else {
-            debug!(call_id = %request.target_call_id, "shell cancellation requested for unknown call");
+            debug!(call_id = %request.target_call_id, "tool cancellation requested for unknown call");
         }
     }
 
@@ -414,5 +424,55 @@ impl ShellRuntime {
                 Some(_) => {}
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Ensures ToolCancelRequest reaches already-running cancellable tool
+    /// calls, not just queued scheduler work or shell-only registry
+    /// entries.
+    #[test]
+    fn tool_cancel_request_signals_registered_running_call() {
+        let (tx, _rx) = mpsc::channel();
+        let runtime = ShellRuntime::new(tx, ExtConfig::default());
+        let call_id = tau_proto::ToolCallId::new("running-find");
+        let (cancel_tx, cancel_rx) = mpsc::channel();
+        runtime
+            .running_calls
+            .lock()
+            .expect("running call registry")
+            .insert(call_id.clone(), cancel_tx);
+
+        runtime.handle_tool_cancel_request(tau_proto::ToolCancelRequest {
+            target_call_id: call_id,
+        });
+
+        cancel_rx
+            .recv_timeout(std::time::Duration::from_millis(100))
+            .expect("running call cancel signal");
+    }
+
+    /// Ensures runtime shutdown signals registered running cancellable tool
+    /// calls before scheduler drop waits for worker jobs to exit.
+    #[test]
+    fn shutdown_signals_registered_running_call() {
+        let (tx, _rx) = mpsc::channel();
+        let mut runtime = ShellRuntime::new(tx, ExtConfig::default());
+        let call_id = tau_proto::ToolCallId::new("running-grep");
+        let (cancel_tx, cancel_rx) = mpsc::channel();
+        runtime
+            .running_calls
+            .lock()
+            .expect("running call registry")
+            .insert(call_id, cancel_tx);
+
+        runtime.shutdown();
+
+        cancel_rx
+            .recv_timeout(std::time::Duration::from_millis(100))
+            .expect("shutdown cancel signal");
     }
 }

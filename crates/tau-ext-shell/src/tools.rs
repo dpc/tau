@@ -1,5 +1,7 @@
 //! Tool registry: dispatches a `ToolStarted` to the right handler.
 
+use std::sync::mpsc;
+
 use tau_proto::{
     CborValue, Event, ToolError, ToolResult, ToolResultKind, ToolUseState, ToolUseStatus,
     cbor_array_field, cbor_text_field,
@@ -91,6 +93,46 @@ pub(crate) fn execute_tool(invoke: tau_proto::ToolStarted, world: world::ShellWo
             .unwrap_or_else(|| ToolFailure::new("unknown tool".to_owned())),
     );
     events
+}
+
+pub(crate) fn execute_cancellable_tool(
+    invoke: tau_proto::ToolStarted,
+    world: world::ShellWorld,
+    cancel_rx: mpsc::Receiver<()>,
+) -> CancellableToolOutcome {
+    let result = if invoke.tool_name == GREP_TOOL_NAME {
+        grep::run_grep_cancellable(&invoke.arguments, Some(cancel_rx))
+    } else if invoke.tool_name == FIND_TOOL_NAME {
+        find::run_find_cancellable(&invoke.arguments, Some(&cancel_rx))
+    } else {
+        return CancellableToolOutcome::Finished(execute_tool(invoke, world));
+    };
+    let finish = world.finish();
+    match (result, finish) {
+        (Ok(CancellableToolRun::Finished(output)), Ok(())) => {
+            let mut events = Vec::new();
+            push_output(&mut events, invoke, *output);
+            CancellableToolOutcome::Finished(events)
+        }
+        (Ok(CancellableToolRun::Cancelled), _) => CancellableToolOutcome::Cancelled,
+        (Ok(CancellableToolRun::Finished(_)), Err(failure))
+        | (Err(failure), Ok(()))
+        | (Err(failure), Err(_)) => {
+            let mut events = Vec::new();
+            push_failure(&mut events, invoke, failure);
+            CancellableToolOutcome::Finished(events)
+        }
+    }
+}
+
+pub(crate) enum CancellableToolOutcome {
+    Finished(Vec<Event>),
+    Cancelled,
+}
+
+pub(crate) enum CancellableToolRun {
+    Finished(Box<ToolOutput>),
+    Cancelled,
 }
 /// Common Ok/Err → Result/Error wrapping for tool handlers. The handler's
 /// display descriptor and purpose-built failure details are forwarded to the

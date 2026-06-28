@@ -39,7 +39,7 @@ For Tau VCR runs, `ls`, `read`, `edit`, `apply_patch`, `shell`, and `gpt_shell` 
 
 `config.dir_lock.enable` defaults false. When it is true, `dir_lock` is available and mutating `edit` / `apply_patch` calls automatically acquire matching directory locks. `shell` / `gpt_shell` calls are inferred read-write only while the agent holds a manual lock covering the command cwd; otherwise they are inferred read-only and do not wait on update locks. When directory locking is disabled, all shell calls run read-write and the UI does not show an access-mode chip. The extension publishes a `/shell-dir-force-unlock DIRECTORY` user action when a manual lock blocks work long enough to matter. `config.dir_lock.backend` defaults to `"memory"` for process-local coordination; set it to `"filesystem"` with an optional private `state_dir` to coordinate locks across Tau/ext-shell processes on the same host and user account.
 
-Inferred read-only shell mode is advisory unless `config.dir_lock.enforce_ro_bind: true` is set while directory locking is enabled. The read-only bind defaults true under `dir_lock` and uses a read-only bind mount of the tool cwd when supported.
+Inferred read-only shell mode is advisory unless `config.dir_lock.enforce_ro_bind: true` is set while directory locking is enabled. The read-only bind defaults true under `dir_lock`; when enabled, Tau requires a read-only bind mount of the tool cwd and fails the shell call if native isolation is unsupported or cannot be installed.
 
 
 ## Agent context discovery

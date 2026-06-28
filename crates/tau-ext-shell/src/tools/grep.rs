@@ -3,6 +3,8 @@
 use std::fmt;
 use std::io::{BufReader, Read};
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, mpsc};
 
 use tau_proto::CborValue;
 
@@ -11,6 +13,7 @@ use crate::argument::{
 };
 use crate::display::{ToolFailure, ToolOutput, text_stats};
 use crate::isolation::apply_command_isolation;
+use crate::tools::CancellableToolRun;
 use crate::tools::find::{escape_path_text, render_path_bytes};
 use crate::truncate::{MAX_OUTPUT_BYTES, MAX_OUTPUT_LINES, truncate_head};
 
@@ -20,6 +23,16 @@ const MAX_GREP_LIMIT: usize = MAX_OUTPUT_LINES;
 const MAX_GREP_CONTEXT: usize = 20;
 
 pub(crate) fn run_grep(arguments: &CborValue) -> Result<ToolOutput, ToolFailure> {
+    match run_grep_cancellable(arguments, None)? {
+        CancellableToolRun::Finished(output) => Ok(*output),
+        CancellableToolRun::Cancelled => Err(ToolFailure::new("cancelled")),
+    }
+}
+
+pub(crate) fn run_grep_cancellable(
+    arguments: &CborValue,
+    cancel_rx: Option<mpsc::Receiver<()>>,
+) -> Result<CancellableToolRun, ToolFailure> {
     let options = GrepOptions::parse(arguments)?;
     let display_args = options.display_args();
     let with_args = |f: ToolFailure| f.with_args(display_args.clone());
@@ -28,7 +41,12 @@ pub(crate) fn run_grep(arguments: &CborValue) -> Result<ToolOutput, ToolFailure>
         stream,
         status,
         stderr,
-    } = run_ripgrep(&options).map_err(with_args)?;
+        cancelled,
+    } = run_ripgrep(&options, cancel_rx).map_err(with_args)?;
+
+    if cancelled {
+        return Ok(CancellableToolRun::Cancelled);
+    }
 
     // rg exit codes: 0=matches found, 1=no matches, 2=error.
     // Exit-2 is overloaded — ripgrep emits regex parse errors, IO
@@ -42,12 +60,12 @@ pub(crate) fn run_grep(arguments: &CborValue) -> Result<ToolOutput, ToolFailure>
         )));
     }
 
-    Ok(render_grep_output(
+    Ok(CancellableToolRun::Finished(Box::new(render_grep_output(
         stream,
         status,
         display_args,
         options.limit,
-    ))
+    ))))
 }
 
 /// Parsed model-facing grep arguments after validation and defaults.
@@ -191,9 +209,28 @@ struct GrepProcessOutput {
     status: Option<i32>,
     /// Bounded stderr bytes captured for exit-code classification.
     stderr: Vec<u8>,
+    /// Whether a cancellation request terminated ripgrep before completion.
+    cancelled: bool,
 }
 
-fn run_ripgrep(options: &GrepOptions) -> Result<GrepProcessOutput, ToolFailure> {
+fn run_ripgrep(
+    options: &GrepOptions,
+    cancel_rx: Option<mpsc::Receiver<()>>,
+) -> Result<GrepProcessOutput, ToolFailure> {
+    if cancel_rx.as_ref().is_some_and(|rx| rx.try_recv().is_ok()) {
+        return Ok(GrepProcessOutput {
+            stream: GrepStreamResult {
+                result_lines: Vec::new(),
+                match_count: 0,
+                lines_truncated: false,
+                match_limit_reached: false,
+            },
+            status: None,
+            stderr: Vec::new(),
+            cancelled: true,
+        });
+    }
+
     let mut cmd = Command::new("rg");
     cmd.args(options.ripgrep_args())
         .stdout(std::process::Stdio::piped())
@@ -212,25 +249,57 @@ fn run_ripgrep(options: &GrepOptions) -> Result<GrepProcessOutput, ToolFailure> 
         .take()
         .ok_or_else(|| ToolFailure::from("ripgrep stderr pipe missing".to_owned()))?;
     let stderr_handle = std::thread::spawn(move || read_limited_bytes(stderr, MAX_OUTPUT_BYTES));
+    let stop_requested = Arc::new(AtomicBool::new(false));
+    let wait_stop = Arc::clone(&stop_requested);
+    let wait_handle = std::thread::spawn(move || wait_ripgrep(child, wait_stop, cancel_rx));
 
     let stream = read_grep_json(stdout, options.limit);
 
     // If the limit fired we may have killed reading mid-stream; make
     // sure the child does not linger.
     if stream.match_limit_reached {
-        let _ = child.kill();
+        stop_requested.store(true, Ordering::SeqCst);
     }
 
-    let exit_status = child
-        .wait()
-        .map_err(|e| ToolFailure::from(format!("failed to wait for ripgrep: {e}")))?;
+    let wait = wait_handle
+        .join()
+        .map_err(|_| ToolFailure::from("ripgrep waiter thread panicked".to_owned()))?;
     let stderr = stderr_handle.join().unwrap_or_default();
+    let (exit_status, cancelled) = wait?;
 
     Ok(GrepProcessOutput {
         stream,
-        status: exit_status.code(),
+        status: exit_status.and_then(|status| status.code()),
         stderr,
+        cancelled,
     })
+}
+
+fn wait_ripgrep(
+    mut child: std::process::Child,
+    stop_requested: Arc<AtomicBool>,
+    cancel_rx: Option<mpsc::Receiver<()>>,
+) -> Result<(Option<std::process::ExitStatus>, bool), ToolFailure> {
+    let mut cancelled = false;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Ok((Some(status), cancelled)),
+            Ok(None) => {}
+            Err(error) => {
+                return Err(ToolFailure::from(format!(
+                    "failed to wait for ripgrep: {error}"
+                )));
+            }
+        }
+        if cancel_rx.as_ref().is_some_and(|rx| rx.try_recv().is_ok()) {
+            cancelled = true;
+            stop_requested.store(true, Ordering::SeqCst);
+        }
+        if stop_requested.load(Ordering::SeqCst) {
+            let _ = child.kill();
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
 }
 
 fn render_grep_output(
@@ -705,6 +774,53 @@ mod tests {
 
         assert_eq!(captured.len(), 32);
         assert!(captured.iter().all(|byte| *byte == b'x'));
+    }
+
+    /// Ensures an early cancellation request takes the cancellable grep path
+    /// and reports cancellation rather than a normal grep result.
+    #[test]
+    fn grep_cancellable_stops_on_early_cancel_request() {
+        let tempdir = tempfile::TempDir::new().expect("tempdir");
+        std::fs::write(tempdir.path().join("alpha.txt"), "needle").expect("write file");
+        let args = CborValue::Map(vec![
+            (
+                CborValue::Text("pattern".to_owned()),
+                CborValue::Text("needle".to_owned()),
+            ),
+            (
+                CborValue::Text("path".to_owned()),
+                CborValue::Text(tempdir.path().display().to_string()),
+            ),
+        ]);
+        let (cancel_tx, cancel_rx) = mpsc::channel();
+        cancel_tx.send(()).expect("send cancel");
+
+        let result = run_grep_cancellable(&args, Some(cancel_rx)).expect("grep result");
+
+        assert!(matches!(result, CancellableToolRun::Cancelled));
+    }
+
+    /// Ensures the ripgrep waiter can terminate an already-running child when a
+    /// cancellation request arrives after process start.
+    #[test]
+    fn grep_waiter_kills_running_child_on_cancel_request() {
+        let child = Command::new("sh")
+            .arg("-c")
+            .arg("sleep 10")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn sleeping child");
+        let (cancel_tx, cancel_rx) = mpsc::channel();
+        let stop_requested = Arc::new(AtomicBool::new(false));
+        let started = std::time::Instant::now();
+
+        cancel_tx.send(()).expect("send cancel");
+        let (_status, cancelled) =
+            wait_ripgrep(child, stop_requested, Some(cancel_rx)).expect("wait child");
+
+        assert!(cancelled);
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
     }
 
     /// Protects grep output from path line injection by escaping control

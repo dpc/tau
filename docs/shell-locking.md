@@ -65,9 +65,10 @@ granted, the queued shell call falls back to inferred read-only rather than
 running as read-write under stale lock coverage.
 
 `dir_lock.enforce_ro_bind` defaults true and is defense-in-depth for inferred
-read-only shell calls. When enabled and supported by the platform, ext-shell
-attempts a read-only bind mount for the shell cwd; without that native isolation,
-read-only remains advisory.
+read-only shell calls. When enabled, ext-shell requires a read-only bind mount
+for the shell cwd and fails the shell call if native isolation is unsupported or
+cannot be installed. If users explicitly disable it, inferred read-only remains
+advisory.
 
 
 ## UI behavior

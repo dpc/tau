@@ -389,6 +389,8 @@ fn send_user_shell_finished(
 struct UserStreamCapture {
     captured: String,
     clipped: bool,
+    progress_bytes: usize,
+    progress_clipped: bool,
 }
 
 impl UserStreamCapture {
@@ -404,6 +406,25 @@ impl UserStreamCapture {
         } else {
             self.clipped = true;
         }
+    }
+
+    fn progress_chunk(&mut self, chunk: &str) -> Option<String> {
+        if self.progress_clipped {
+            return None;
+        }
+        if self.progress_bytes < MAX_OUTPUT_BYTES {
+            let remaining = MAX_OUTPUT_BYTES - self.progress_bytes;
+            let mut end = remaining.min(chunk.len());
+            while !chunk.is_char_boundary(end) {
+                end -= 1;
+            }
+            self.progress_bytes += end;
+            if end == chunk.len() {
+                return Some(chunk.to_owned());
+            }
+        }
+        self.progress_clipped = true;
+        Some(USER_OUTPUT_TRUNCATED_MARKER.to_owned())
     }
 }
 
@@ -473,14 +494,16 @@ fn read_available_user_shell<R: std::io::Read>(
             Ok(n) => {
                 let chunk = String::from_utf8_lossy(&buf[..n]).into_owned();
                 capture.push_chunk(&chunk);
-                let _ = tx.send(HarnessInputMessage::emit(Event::ShellCommandProgress(
-                    tau_proto::ShellCommandProgress {
-                        command_id: command_id.clone(),
-                        stream,
-                        chunk,
-                        target_agent_id: target_agent_id.clone(),
-                    },
-                )));
+                if let Some(chunk) = capture.progress_chunk(&chunk) {
+                    let _ = tx.send(HarnessInputMessage::emit(Event::ShellCommandProgress(
+                        tau_proto::ShellCommandProgress {
+                            command_id: command_id.clone(),
+                            stream,
+                            chunk,
+                            target_agent_id: target_agent_id.clone(),
+                        },
+                    )));
+                }
             }
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
             Err(_) => {
@@ -789,14 +812,16 @@ fn dispatch_user_shell_command_blocking(
                     Ok(n) => {
                         let chunk = String::from_utf8_lossy(&buf[..n]).into_owned();
                         capture.push_chunk(&chunk);
-                        let _ = tx.send(HarnessInputMessage::emit(Event::ShellCommandProgress(
-                            tau_proto::ShellCommandProgress {
-                                command_id: command_id.clone(),
-                                stream,
-                                chunk,
-                                target_agent_id: target_agent_id.clone(),
-                            },
-                        )));
+                        if let Some(chunk) = capture.progress_chunk(&chunk) {
+                            let _ = tx.send(HarnessInputMessage::emit(
+                                Event::ShellCommandProgress(tau_proto::ShellCommandProgress {
+                                    command_id: command_id.clone(),
+                                    stream,
+                                    chunk,
+                                    target_agent_id: target_agent_id.clone(),
+                                }),
+                            ));
+                        }
                     }
                 }
             }
@@ -1998,6 +2023,21 @@ mod tests {
 
         assert!(truncated.content.ends_with(USER_OUTPUT_TRUNCATED_MARKER));
         assert!(truncated.content.len() <= MAX_OUTPUT_BYTES);
+    }
+
+    /// Ensures user shell progress streaming is independently bounded while
+    /// output capture can keep draining the child pipes for final truncation.
+    #[test]
+    fn user_shell_progress_stream_is_bounded() {
+        let mut capture = UserStreamCapture::default();
+        let first = capture
+            .progress_chunk(&"x".repeat(MAX_OUTPUT_BYTES - 1))
+            .expect("first progress chunk");
+        let marker = capture.progress_chunk("abcdef").expect("truncation marker");
+
+        assert_eq!(first.len(), MAX_OUTPUT_BYTES - 1);
+        assert_eq!(marker, USER_OUTPUT_TRUNCATED_MARKER);
+        assert!(capture.progress_chunk("more").is_none());
     }
 
     fn record_cancelled_shell(
