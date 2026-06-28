@@ -18,6 +18,9 @@ use tempfile::TempDir;
 
 use super::*;
 
+/// Ensures the public `TestRuntime` fixture supports both embedded and daemon
+/// harness paths, preventing regressions where one end-to-end mode loses access
+/// to isolated state or the echo provider.
 #[test]
 fn runtime_supports_embedded_and_daemon_scenarios() {
     let runtime = TestRuntime::new().expect("runtime should be created");
@@ -36,6 +39,17 @@ fn runtime_supports_embedded_and_daemon_scenarios() {
         .expect("daemon message should succeed");
     assert!(!attached.is_empty(), "response should not be empty");
     daemon.join().expect("daemon should exit cleanly");
+}
+
+/// Ensures panic payload formatting keeps useful string payloads instead of
+/// replacing them with an opaque daemon-thread join error message.
+#[test]
+fn panic_payload_label_reports_string_payloads() {
+    let static_str_payload: Box<dyn std::any::Any + Send> = Box::new("static panic");
+    assert_eq!(panic_payload_label(&*static_str_payload), "static panic");
+
+    let string_payload: Box<dyn std::any::Any + Send> = Box::new(String::from("owned panic"));
+    assert_eq!(panic_payload_label(&*string_payload), "owned panic");
 }
 
 struct StreamSink {
@@ -79,12 +93,13 @@ fn stream_connection(
     (connection, reader)
 }
 
-/// End-to-end vertical slice: real OpenAI provider and `tau-ext-shell`
-/// processes wired through a `tau-core` bus, asserting the protocol
-/// handshake and a no-model provider response. Lives here (rather than
-/// inside `tau-core`'s tests) because the provider + extension layers
-/// sit downstream of `tau-core`; keeping the test here avoids
-/// declaring them as dev-dependencies of the very crate they depend on.
+/// Exercises a provider + tool vertical slice with downstream extension crates
+/// wired through a `tau-core` bus, preventing layering regressions without
+/// adding downstream dev-dependencies to `tau-core` itself.
+///
+/// The provider intentionally has no backend configured for the requested
+/// model, so the test verifies the protocol handshake and deterministic
+/// no-network error path rather than any external service behavior.
 #[test]
 fn deterministic_provider_and_tool_complete_one_vertical_slice() {
     let tempdir = TempDir::new().expect("tempdir should exist");

@@ -17,6 +17,7 @@ use tempfile::TempDir;
 #[derive(Debug)]
 pub struct TestRuntime {
     _tempdir: TempDir,
+    /// Filesystem path where the spawned test daemon binds its Unix socket.
     pub socket_path: PathBuf,
     /// Per-state directory containing session subdirs and `policy.cbor`.
     pub state_dir: PathBuf,
@@ -30,8 +31,9 @@ impl TestRuntime {
     /// Creates isolated temporary paths for one test runtime.
     ///
     /// The echo harness bypasses provider-owned model publication and answers
-    /// through the in-process echo tool, which is enough for tests asserting
-    /// "response is non-empty".
+    /// through in-process test fixtures, which is enough for tests asserting
+    /// "response is non-empty" while keeping real provider credentials out of
+    /// end-to-end tests.
     pub fn new() -> Result<Self, std::io::Error> {
         let tempdir = TempDir::new()?;
         let config_dir = tempdir.path().join("config");
@@ -57,14 +59,21 @@ impl TestRuntime {
     /// Starts a foreground daemon in a background thread, eager-initing
     /// the given session id (typically what test code will then send a
     /// message to).
+    ///
+    /// `max_clients` is passed through to [`ServeOptions::max_clients`]. Use
+    /// `Some(n)` for tests that later call [`DaemonHandle::join`], so the
+    /// daemon exits after a bounded number of clients; `None` leaves it
+    /// unbounded.
     pub fn spawn_daemon(&self, eager_session_id: &str, max_clients: Option<usize>) -> DaemonHandle {
         let socket_path = self.socket_path.clone();
         let state_dir = self.state_dir.clone();
         let dirs = self.dirs.clone();
         let eager_session_id = eager_session_id.to_owned();
         let join_handle = thread::spawn(move || {
-            let mut options = ServeOptions::builder().dirs(dirs).build();
-            options.max_clients = max_clients;
+            let options = ServeOptions::builder()
+                .dirs(dirs)
+                .maybe_max_clients(max_clients)
+                .build();
             run_daemon_with_echo(socket_path, state_dir, &eager_session_id, options)
         });
         DaemonHandle { join_handle }
@@ -108,10 +117,30 @@ pub struct DaemonHandle {
 
 impl DaemonHandle {
     /// Waits for the daemon thread to finish.
+    ///
+    /// # Errors
+    ///
+    /// Returns any [`HarnessError`] produced by the daemon serve loop. If the
+    /// daemon thread panicked, returns [`HarnessError::ThreadJoin`] with the
+    /// panic payload string when it is available.
     pub fn join(self) -> Result<(), HarnessError> {
-        self.join_handle
-            .join()
-            .map_err(|_| HarnessError::ThreadJoin("daemon".to_owned()))?
+        match self.join_handle.join() {
+            Ok(result) => result,
+            Err(payload) => Err(HarnessError::ThreadJoin(format!(
+                "daemon ({})",
+                panic_payload_label(&payload)
+            ))),
+        }
+    }
+}
+
+fn panic_payload_label<'a>(payload: &'a (dyn std::any::Any + Send + 'static)) -> &'a str {
+    if let Some(message) = payload.downcast_ref::<&'static str>() {
+        message
+    } else if let Some(message) = payload.downcast_ref::<String>() {
+        message.as_str()
+    } else {
+        "non-string panic payload"
     }
 }
 
@@ -133,7 +162,14 @@ pub fn wait_for_path(path: &Path, timeout: Duration) -> Result<(), WaitError> {
 /// Error returned when waiting for a test condition times out.
 #[derive(Debug)]
 pub enum WaitError {
-    Timeout { path: PathBuf, timeout: Duration },
+    /// The requested filesystem path did not appear before the configured
+    /// timeout elapsed.
+    Timeout {
+        /// Filesystem path that was being waited on.
+        path: PathBuf,
+        /// Maximum duration allowed for the path to appear.
+        timeout: Duration,
+    },
 }
 
 impl std::fmt::Display for WaitError {
