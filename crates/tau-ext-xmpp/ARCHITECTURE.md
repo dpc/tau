@@ -3,6 +3,11 @@
 `std-xmpp` is a disabled-by-default personal XMPP text bridge. It exposes only
 `xmpp_register` and `xmpp_send`; the model never supplies arbitrary destination
 JIDs. The extension does not connect to XMPP until an agent registers.
+Configuration is applied only before the XMPP worker starts. Once an agent
+registration starts the bridge, the worker owns its cloned `RuntimeConfig`,
+including the resolved password and routing policy, and later `Configure`
+messages fail with `ConfigError`. Restart Tau to apply changed XMPP credentials,
+allowlists, routing, or message limits.
 
 A single XMPP account may be used by multiple Tau processes concurrently because
 this extension always requests a generated, high-entropy resource and then uses

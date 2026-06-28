@@ -2,6 +2,12 @@
 
 - The built-in extension is disabled by default and requires an explicit
   password secret plus a non-empty `allowed_jids` allowlist.
+- Pre-start reconfiguration must not leave stale accepted config active after a
+  `Configure` parse/validation error; a later registration must not start with
+  old credentials, allowlists, routing, or message limits. Once the XMPP worker
+  has started, it owns an immutable config snapshot: later `Configure` messages
+  are reported as `ConfigError` diagnostics, and changing credentials,
+  allowlists, or routing requires restarting Tau.
 - The MVP is plaintext XMPP message content protected only by TLS. It does not
   implement OMEMO or any other end-to-end encryption, so the XMPP server and its
   operator can read messages.

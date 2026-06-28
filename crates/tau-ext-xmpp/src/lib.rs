@@ -432,9 +432,29 @@ impl Extension {
         }
     }
 
-    fn apply_config(&self, cfg: RuntimeConfig) {
+    fn apply_config(&self, cfg: RuntimeConfig) -> Result<(), String> {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if state.bridge_started {
+            return Err(immutable_config_error());
+        }
         state.config = Some(cfg);
+        Ok(())
+    }
+
+    fn config_is_locked(&self) -> bool {
+        self.state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .bridge_started
+    }
+
+    fn clear_config_before_start(&self) {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if !state.bridge_started {
+            state.config = None;
+            state.registered_agents.clear();
+            state.conversations.clear();
+        }
     }
 
     fn dispatch_tool(&self, invoke: ToolStarted) {
@@ -2045,14 +2065,30 @@ fn handle_output_message(
 }
 
 fn handle_configure(ext: &Extension, tx: &mpsc::Sender<HarnessInputMessage>, msg: Configure) {
+    if ext.config_is_locked() {
+        let _ = tx.send(HarnessInputMessage::ConfigError(ConfigError {
+            message: immutable_config_error(),
+        }));
+        return;
+    }
     match tau_extension::parse_config::<ExtConfig>(&msg.config)
         .and_then(|cfg| cfg.validate(&msg.secrets, msg.instance_name.map(|name| name.to_string())))
     {
-        Ok(cfg) => ext.apply_config(cfg),
+        Ok(cfg) => {
+            if let Err(message) = ext.apply_config(cfg) {
+                let _ = tx.send(HarnessInputMessage::ConfigError(ConfigError { message }));
+            }
+        }
         Err(message) => {
+            ext.clear_config_before_start();
             let _ = tx.send(HarnessInputMessage::ConfigError(ConfigError { message }));
         }
     }
+}
+
+fn immutable_config_error() -> String {
+    "xmpp configuration cannot be changed after the bridge has started; restart Tau to apply new XMPP settings"
+        .to_owned()
 }
 
 fn handle_delivery(ext: &Extension, delivery: EventDelivery) {

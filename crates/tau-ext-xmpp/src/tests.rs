@@ -221,6 +221,15 @@ fn secrets() -> BTreeMap<String, tau_proto::SecretValue> {
     secrets
 }
 
+fn configure_from_json(config: serde_json::Value) -> Configure {
+    Configure {
+        config: tau_proto::json_to_cbor(&config),
+        instance_name: Some(tau_proto::ExtensionName::new("std-xmpp")),
+        state_dir: None,
+        secrets: secrets(),
+    }
+}
+
 fn empty_password_secrets() -> BTreeMap<String, tau_proto::SecretValue> {
     let mut secrets = BTreeMap::new();
     secrets.insert(
@@ -243,7 +252,7 @@ fn extension() -> (
     let bridge = FakeBridge::new();
     bridge.set_ready(true);
     let ext = Extension::new(bridge.clone(), tx);
-    ext.apply_config(cfg());
+    ext.apply_config(cfg()).expect("apply config");
     ext.state.lock().expect("lock").current_session_id = Some("session-1".into());
     (ext, rx, bridge)
 }
@@ -462,6 +471,83 @@ fn xmpp_register_true_registers_agent_and_starts_bridge() {
     assert!(state.conversations.contains_key(&agent_id("agent-1")));
 }
 
+/// Before the worker starts, a new invalid `Configure` replaces the previous
+/// accepted configuration with no usable configuration. Otherwise a visible
+/// config error could still be followed by registration with stale credentials,
+/// allowlists, or routing policy.
+#[test]
+fn invalid_configure_before_start_clears_stale_config() {
+    let (tx, rx) = mpsc::channel();
+    let bridge = FakeBridge::new();
+    let ext = Extension::new(bridge.clone(), tx.clone());
+    ext.apply_config(cfg()).expect("apply config");
+    ext.state.lock().expect("lock").current_session_id = Some("session-1".into());
+
+    handle_configure(
+        &ext,
+        &tx,
+        configure_from_json(serde_json::json!({
+            "jid": "tau@example.org",
+            "password_secret": "xmpp_password",
+            "default_recipient": "me@example.org",
+            "routing": { "mode": "direct_resource" }
+        })),
+    );
+
+    let HarnessInputMessage::ConfigError(error) = rx.recv().expect("config error") else {
+        panic!("config error")
+    };
+    assert!(error.message.contains("allowed_jids"));
+    assert!(ext.state.lock().expect("lock").config.is_none());
+
+    ext.dispatch_tool(tool(REGISTER_TOOL_NAME, "agent-1", bool_args(true)));
+    let _progress = rx.recv().expect("progress");
+    let HarnessInputMessage::Emit(emit) = rx.recv().expect("result") else {
+        panic!("emit")
+    };
+    let Event::ToolError(error) = *emit.event else {
+        panic!("tool error")
+    };
+    assert!(error.message.contains("not configured"));
+    assert_eq!(*bridge.started.lock().expect("lock"), 0);
+}
+
+/// Runtime configuration is captured by the worker at bridge startup. A later
+/// harness reconfiguration must not silently update only the tool-side state
+/// while the live XMPP worker keeps using the old credentials, allowlist, or
+/// routing mode.
+#[test]
+fn configure_after_bridge_start_reports_config_error() {
+    let (ext, rx, bridge) = extension();
+    let (tx, config_rx) = mpsc::channel();
+    ext.dispatch_tool(tool(REGISTER_TOOL_NAME, "agent-1", bool_args(true)));
+    let _progress = rx.recv().expect("progress");
+    let _result = rx.recv().expect("result");
+
+    handle_configure(
+        &ext,
+        &tx,
+        configure_from_json(serde_json::json!({
+            "jid": "tau@example.org",
+            "password_secret": "xmpp_password",
+            "default_recipient": "me@example.org",
+            "routing": { "mode": "direct_resource" }
+        })),
+    );
+
+    let HarnessInputMessage::ConfigError(error) = config_rx.recv().expect("config error") else {
+        panic!("config error")
+    };
+    assert!(error.message.contains("cannot be changed"));
+    assert!(!error.message.contains("allowed_jids"));
+    assert_eq!(*bridge.started.lock().expect("lock"), 1);
+    let state = ext.state.lock().expect("lock");
+    assert_eq!(
+        state.config.as_ref().map(|cfg| cfg.routing_mode),
+        Some(RoutingMode::Muc)
+    );
+}
+
 /// `xmpp_register` waits for bridge readiness before creating the server-backed
 /// conversation, preventing early startup races from surfacing as immediate
 /// "not online yet" tool failures.
@@ -470,7 +556,7 @@ fn xmpp_register_waits_for_online_readiness() {
     let (tx, rx) = mpsc::channel();
     let bridge = FakeBridge::new();
     let ext = Extension::new(bridge.clone(), tx);
-    ext.apply_config(cfg());
+    ext.apply_config(cfg()).expect("apply config");
     ext.state.lock().expect("lock").current_session_id = Some("session-1".into());
 
     std::thread::scope(|scope| {
@@ -504,7 +590,7 @@ fn xmpp_register_readiness_timeout_is_clear_and_does_not_register() {
         "xmpp connection did not become online within 30s; retry after the account connects",
     );
     let ext = Extension::new(bridge.clone(), tx);
-    ext.apply_config(cfg());
+    ext.apply_config(cfg()).expect("apply config");
     ext.state.lock().expect("lock").current_session_id = Some("session-1".into());
 
     ext.dispatch_tool(tool(REGISTER_TOOL_NAME, "agent-1", bool_args(true)));
@@ -532,7 +618,7 @@ fn xmpp_register_requires_active_session_before_starting_bridge() {
     let (tx, rx) = mpsc::channel();
     let bridge = FakeBridge::new();
     let ext = Extension::new(bridge.clone(), tx);
-    ext.apply_config(cfg());
+    ext.apply_config(cfg()).expect("apply config");
 
     ext.dispatch_tool(tool(REGISTER_TOOL_NAME, "agent-1", bool_args(true)));
     let _progress = rx.recv().expect("progress");
