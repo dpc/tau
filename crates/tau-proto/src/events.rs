@@ -1244,20 +1244,42 @@ pub struct ToolRejected {
     pub originator: PromptOriginator,
 }
 
+/// Provider-facing terminal result class for one logical tool call.
+///
+/// [`Self::Final`] is the normal terminal result: the real tool output is
+/// available and can satisfy both UI rendering and provider tool-call state.
+/// [`Self::BackgroundPlaceholder`] is synthetic foreground completion emitted
+/// when the harness intentionally lets a long-running call continue in the
+/// background; the real completion arrives later as [`ToolBackgroundResult`] or
+/// [`ToolBackgroundError`].
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolResultKind {
+    /// Real terminal tool result.
     #[default]
     Final,
+    /// Synthetic foreground provider completion for a backgrounded call.
     BackgroundPlaceholder,
 }
 
+/// Successful logical tool completion.
+///
+/// For ordinary foreground calls this carries the final tool result. For
+/// backgrounded calls, a result with [`ToolResultKind::BackgroundPlaceholder`]
+/// closes only the provider-visible foreground turn; the later
+/// [`ToolBackgroundResult`] carries the real output.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ToolResult {
+    /// Stable id of the completed tool call.
     pub call_id: ToolCallId,
+    /// Tool name that produced this result.
     pub tool_name: ToolName,
+    /// Protocol-level tool kind echoed from the request.
     pub tool_type: ToolType,
+    /// Tool-owned successful result payload.
     pub result: CborValue,
+    /// Whether this is the real final result or a synthetic background
+    /// placeholder.
     #[serde(default)]
     pub kind: ToolResultKind,
     /// Generic UI state for the completed tool use.
@@ -1278,12 +1300,23 @@ pub struct ToolResult {
     pub originator: PromptOriginator,
 }
 
+/// Failed logical tool completion.
+///
+/// This is terminal for a foreground call. Backgrounded calls that have already
+/// emitted a [`ToolResultKind::BackgroundPlaceholder`] must report their later
+/// failure as [`ToolBackgroundError`] instead, so provider state is not closed
+/// twice.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ToolError {
+    /// Stable id of the failed tool call.
     pub call_id: ToolCallId,
+    /// Tool name that produced this error.
     pub tool_name: ToolName,
+    /// Protocol-level tool kind echoed from the request.
     pub tool_type: ToolType,
+    /// Human-readable failure message.
     pub message: String,
+    /// Optional structured error details for UIs or diagnostics.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub details: Option<CborValue>,
     /// See [`ToolResult::display`]. On error, the state `status` is typically
@@ -1302,12 +1335,19 @@ pub struct ToolError {
 /// with a synthetic background placeholder.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ToolBackgroundResult {
+    /// Stable id of the backgrounded tool call.
     pub call_id: ToolCallId,
+    /// Tool name that produced this result.
     pub tool_name: ToolName,
+    /// Protocol-level tool kind echoed from the request.
     pub tool_type: ToolType,
+    /// Real successful output produced after foreground placeholder completion.
     pub result: CborValue,
+    /// Generic UI state for the completed background tool use.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display: Option<ToolUseState>,
+    /// Echo of the originating [`ToolRequest::originator`]; see
+    /// [`ToolResult::originator`].
     #[serde(default)]
     pub originator: PromptOriginator,
 }
@@ -1316,14 +1356,22 @@ pub struct ToolBackgroundResult {
 /// with a synthetic background placeholder.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ToolBackgroundError {
+    /// Stable id of the backgrounded tool call.
     pub call_id: ToolCallId,
+    /// Tool name that produced this error.
     pub tool_name: ToolName,
+    /// Protocol-level tool kind echoed from the request.
     pub tool_type: ToolType,
+    /// Human-readable failure message from the real background completion.
     pub message: String,
+    /// Optional structured error details for UIs or diagnostics.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub details: Option<CborValue>,
+    /// Generic UI state for the failed background tool use.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display: Option<ToolUseState>,
+    /// Echo of the originating [`ToolRequest::originator`]; see
+    /// [`ToolResult::originator`].
     #[serde(default)]
     pub originator: PromptOriginator,
 }
@@ -1577,7 +1625,7 @@ pub struct DelegateProgress {
     pub task_name: String,
     /// Agent id assigned to the delegated sub-agent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub agent_id: Option<String>,
+    pub agent_id: Option<AgentId>,
     /// Role used by the delegated sub-agent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role: Option<String>,
@@ -3691,6 +3739,7 @@ impl Event {
                 | Self::ProviderPromptSubmitted(_)
                 | Self::ToolProgress(_)
                 | Self::ToolDelegateProgress(_)
+                | Self::ToolError(_)
                 | Self::ActionSchemaPublished(_)
                 | Self::ActionInvoke(_)
                 | Self::ActionResult(_)

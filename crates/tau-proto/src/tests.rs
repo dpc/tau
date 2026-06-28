@@ -81,11 +81,21 @@ fn representative_events() -> Vec<Event> {
             agent_id: agent_id("agent-1"),
             originator: PromptOriginator::User,
         }),
+        Event::ToolUnregister(ToolUnregister {
+            tool_name: ToolName::new("old_echo"),
+        }),
         Event::ToolStarted(ToolStarted {
             call_id: "call-1".into(),
             tool_name: ToolName::new("echo"),
             arguments: CborValue::Text("hello".to_owned()),
             agent_id: agent_id("agent-1"),
+            originator: PromptOriginator::User,
+        }),
+        Event::ToolRejected(ToolRejected {
+            call_id: "call-rejected".into(),
+            tool_name: ToolName::new("missing_tool"),
+            tool_type: ToolType::Function,
+            message: "no provider".to_owned(),
             originator: PromptOriginator::User,
         }),
         Event::ToolResult(ToolResult {
@@ -106,6 +116,23 @@ fn representative_events() -> Vec<Event> {
             display: None,
             originator: PromptOriginator::User,
         }),
+        Event::ToolBackgroundResult(ToolBackgroundResult {
+            call_id: "call-bg".into(),
+            tool_name: ToolName::new("slow_echo"),
+            tool_type: ToolType::Function,
+            result: CborValue::Text("done".to_owned()),
+            display: None,
+            originator: PromptOriginator::User,
+        }),
+        Event::ToolBackgroundError(ToolBackgroundError {
+            call_id: "call-bg-err".into(),
+            tool_name: ToolName::new("slow_echo"),
+            tool_type: ToolType::Function,
+            message: "failed later".to_owned(),
+            details: None,
+            display: None,
+            originator: PromptOriginator::User,
+        }),
         Event::ToolProgress(ToolProgress {
             call_id: "call-1".into(),
             tool_name: ToolName::new("shell"),
@@ -114,6 +141,26 @@ fn representative_events() -> Vec<Event> {
                 current: Some(1),
                 total: Some(10),
             }),
+            display: None,
+        }),
+        Event::ToolCancelRequest(ToolCancelRequest {
+            target_call_id: "call-1".into(),
+        }),
+        Event::ToolCancelled(ToolCancelled {
+            call_id: "call-1".into(),
+            tool_name: ToolName::new("shell"),
+            tool_type: ToolType::Function,
+        }),
+        Event::ToolDelegateProgress(DelegateProgress {
+            call_id: "delegate-call".into(),
+            task_name: "review".to_owned(),
+            agent_id: Some(agent_id("delegate_1")),
+            role: Some("reviewer".to_owned()),
+            ctx_percent: Some(10),
+            ctx_input_tokens: Some(100),
+            ctx_window: Some(1000),
+            tools_in_flight: 0,
+            tools_total: 1,
             display: None,
         }),
         Event::ActionSchemaPublished(ActionSchemaPublished {
@@ -176,6 +223,13 @@ fn representative_events() -> Vec<Event> {
             agent_id: agent_id("engineer_abcd1234"),
             ephemeral: false,
         }),
+        Event::SessionShutdown(SessionShutdown {
+            session_id: "s1".into(),
+        }),
+        Event::SessionAgentUnloaded(SessionAgentUnloaded {
+            session_id: "s1".into(),
+            agent_id: agent_id("engineer_abcd1234"),
+        }),
         Event::AgentPromptSubmitted(AgentPromptSubmitted {
             agent_id: agent_id("engineer_abcd1234"),
             text: "hello".to_owned(),
@@ -183,6 +237,20 @@ fn representative_events() -> Vec<Event> {
             originator: PromptOriginator::User,
             display_name: None,
             ctx_id: None,
+        }),
+        Event::AgentPromptQueued(AgentPromptQueued {
+            agent_id: agent_id("engineer_abcd1234"),
+            text: "queued".to_owned(),
+            message_class: PromptMessageClass::User,
+        }),
+        Event::AgentPromptRecalled(AgentPromptRecalled {
+            agent_id: agent_id("engineer_abcd1234"),
+            text: "queued".to_owned(),
+        }),
+        Event::AgentPromptSteered(AgentPromptSteered {
+            agent_id: agent_id("engineer_abcd1234"),
+            text: "steer".to_owned(),
+            message_class: PromptMessageClass::User,
         }),
         Event::AgentCompactionTriggered(AgentCompactionTriggered {
             agent_id: agent_id("engineer_abcd1234"),
@@ -221,6 +289,65 @@ fn representative_events() -> Vec<Event> {
             reason: AgentPromptTerminationReason::Stale,
             originator: PromptOriginator::User,
         }),
+        Event::AgentPromptPrewarmRequested(AgentPromptPrewarmRequested {
+            agent_id: agent_id("engineer_abcd1234"),
+            session_id: "s1".into(),
+            system_prompt: "You are helpful.".to_owned(),
+            context: PromptContext { blocks: Vec::new() },
+            tools: Vec::new(),
+            model: Some("openai/gpt-4.1".parse().expect("model id")),
+            model_params: ModelParams::default(),
+            tool_choice: ToolChoice::Auto,
+            originator: PromptOriginator::User,
+            share_user_cache_key: false,
+        }),
+        Event::AgentUserMessageInjected(AgentUserMessageInjected {
+            agent_id: agent_id("engineer_abcd1234"),
+            text: "injected".to_owned(),
+            message_class: PromptMessageClass::Internal,
+        }),
+        Event::AgentHeadMoved(AgentHeadMoved {
+            agent_id: agent_id("engineer_abcd1234"),
+            head: AgentHead::Root,
+        }),
+        Event::AgentStarted(AgentStarted {
+            agent_id: agent_id("engineer_abcd1234"),
+            parent_agent: None,
+            role: "engineer".to_owned(),
+            display_name: Some("Main".to_owned()),
+            metadata: Vec::new(),
+            ephemeral: false,
+        }),
+        Event::AgentDisplayNameSet(AgentDisplayNameSet {
+            agent_id: agent_id("engineer_abcd1234"),
+            display_name: "Main".to_owned(),
+        }),
+        Event::AgentMetadataSet(AgentMetadataSet {
+            agent_id: agent_id("engineer_abcd1234"),
+            key: "cwd".into(),
+            value: CborValue::Text("/tmp".to_owned()),
+            inheritable: true,
+        }),
+        Event::AgentMetadataUnset(AgentMetadataUnset {
+            agent_id: agent_id("engineer_abcd1234"),
+            key: "cwd".into(),
+        }),
+        Event::ProviderPromptSubmitted(ProviderPromptSubmitted {
+            agent_prompt_id: "sp-1".into(),
+            originator: PromptOriginator::User,
+        }),
+        Event::ProviderResponseUpdated(ProviderResponseUpdated {
+            agent_prompt_id: "sp-1".into(),
+            agent_id: agent_id("engineer_abcd1234"),
+            deltas: vec![ProviderResponseTextDelta::Message {
+                output_index: 0,
+                text: "Hi".to_owned(),
+                phase: None,
+            }],
+            compaction: None,
+            status: None,
+            originator: PromptOriginator::User,
+        }),
         Event::ProviderResponseFinished(ProviderResponseFinished {
             agent_prompt_id: "sp-1".into(),
             agent_id: agent_id("engineer_abcd1234"),
@@ -241,6 +368,18 @@ fn representative_events() -> Vec<Event> {
             backend: None,
             provider_response_id: None,
             ws_pool_delta: None,
+        }),
+        Event::ProviderCacheMissDiagnostic(ProviderCacheMissDiagnostic {
+            agent_prompt_id: "sp-1".into(),
+            model: "openai/gpt-4.1".parse().expect("model id"),
+            originator: PromptOriginator::User,
+            tool_choice: ToolChoice::Auto,
+            ws_pool_delta: None,
+            input_tokens: 1000,
+            cached_tokens: 100,
+            previous_input_tokens: 900,
+            cacheable_input_tokens: 800,
+            corrected_cache_efficiency: 0.125,
         }),
         Event::ExtensionStarting(ExtensionStarting {
             instance_id: 1.into(),
@@ -279,9 +418,45 @@ fn representative_events() -> Vec<Event> {
             file_path: "/home/user/src/project/AGENTS.md".into(),
             content: "# Project instructions\n- Run tests".to_owned(),
         }),
+        Event::ExtensionContextProviderRegister(ExtensionContextProviderRegister {}),
         Event::ExtensionContextReady(ExtensionContextReady {
             session_id: "s1".into(),
             agent_id: agent_id("agent-1"),
+        }),
+        Event::ExtAgentContextPublish(ExtAgentContextPublish {
+            agent_id: agent_id("agent-1"),
+            key: "cwd".into(),
+            value: AgentContextValue(serde_json::json!("/tmp/project")),
+        }),
+        Event::ExtPromptFragmentPublish(ExtPromptFragmentPublish {
+            fragment: PromptFragment::new(
+                "style-guide",
+                PromptPriority::new(100),
+                PromptContent::new("Be concise."),
+            ),
+        }),
+        Event::ExtPromptSubmitRequest(ExtPromptSubmitRequest {
+            agent_id: agent_id("agent-1"),
+            text: "extension prompt".to_owned(),
+            ctx_id: Some("ctx-1".to_owned()),
+        }),
+        Event::StartAgentRequest(StartAgentRequest {
+            query_id: "query-1".to_owned(),
+            instruction: "check this".to_owned(),
+            role: Some("reviewer".to_owned()),
+            input_stats: ToolUseStats::default(),
+            tool_call_id: Some("delegate-call".into()),
+            task_name: Some("review".to_owned()),
+            parent_agent: Some(agent_id("agent-1")),
+        }),
+        Event::StartAgentAccepted(StartAgentAccepted {
+            query_id: "query-1".to_owned(),
+            agent_id: agent_id("delegate_1"),
+        }),
+        Event::StartAgentResult(StartAgentResult {
+            query_id: "query-1".to_owned(),
+            text: "looks good".to_owned(),
+            error: None,
         }),
         Event::ExtensionEvent(
             CustomEvent::try_new(
@@ -322,6 +497,67 @@ fn representative_events() -> Vec<Event> {
             display: None,
             originator: PromptOriginator::User,
         }),
+        Event::HarnessNotice(HarnessNotice::new(
+            notice_kind::HARNESS_NOTICE,
+            "ready",
+            NoticeLevel::Info,
+        )),
+        Event::HarnessSessionDir(HarnessSessionDir {
+            session_id: "s1".into(),
+            path: "/tmp/tau/session".into(),
+            status: SessionDirStatus::New,
+        }),
+        Event::HarnessUiDir(HarnessUiDir {
+            path: "/tmp/tau/ui".into(),
+        }),
+        Event::HarnessModelsAvailable(HarnessModelsAvailable {
+            models: vec!["openai/gpt-4.1".parse().expect("model id")],
+        }),
+        Event::HarnessRolesAvailable(HarnessRolesAvailable {
+            roles: vec![HarnessRoleInfo {
+                name: "engineer".to_owned(),
+                description: "Engineer".to_owned(),
+                role_description: Some("Writes code".to_owned()),
+                details: Some(HarnessRoleDetails {
+                    model: Some("openai/gpt-4.1".parse().expect("model id")),
+                    ..Default::default()
+                }),
+            }],
+            groups: vec![HarnessRoleGroup {
+                name: "default".to_owned(),
+                roles: vec!["engineer".to_owned()],
+            }],
+            custom_prompts: vec![HarnessCustomPrompt {
+                id: "summarize".to_owned(),
+                text: "Summarize this".to_owned(),
+            }],
+        }),
+        Event::HarnessRoleSelected(HarnessRoleSelected {
+            role: "engineer".to_owned(),
+            model: Some("openai/gpt-4.1".parse().expect("model id")),
+            context_window: Some(128_000),
+            baseline_params: Some(ModelParams::default()),
+            model_params: ModelParams::default(),
+        }),
+        Event::HarnessContextUsageChanged(HarnessContextUsageChanged {
+            input_tokens: Some(100),
+            cached_tokens: Some(20),
+            percent_used: Some(1),
+        }),
+        Event::HarnessAgentContextUsageChanged(HarnessAgentContextUsageChanged {
+            agent_id: agent_id("agent-1"),
+            input_tokens: Some(100),
+            cached_tokens: Some(20),
+            context_window: Some(128_000),
+            percent_used: Some(1),
+        }),
+        Event::AgentState(AgentStateChanged {
+            agent_id: agent_id("agent-1"),
+            state: AgentRuntimeState::Running,
+        }),
+        Event::HarnessEffortsAvailable(HarnessEffortsAvailable {
+            levels: vec![Effort::Off, Effort::Low],
+        }),
         Event::HarnessVerbositiesAvailable(HarnessVerbositiesAvailable {
             levels: vec![Verbosity::Low, Verbosity::Medium, Verbosity::High],
         }),
@@ -333,17 +569,103 @@ fn representative_events() -> Vec<Event> {
                 ThinkingSummary::Detailed,
             ],
         }),
+        Event::UiRoleSelect(UiRoleSelect {
+            role: "engineer".to_owned(),
+        }),
+        Event::UiAgentModelSelect(UiAgentModelSelect {
+            session_id: "s1".into(),
+            target_agent_id: Some(agent_id("agent-1")),
+            model: "openai/gpt-4.1".parse().expect("model id"),
+        }),
         Event::UiRoleUpdate(UiRoleUpdate {
             role: "engineer".to_owned(),
             action: UiRoleUpdateAction::SetVerbosity {
                 verbosity: Some(Verbosity::High),
             },
         }),
-        Event::UiRoleUpdate(UiRoleUpdate {
+        Event::UiDetachRequest(UiDetachRequest {}),
+        Event::UiShellCommand(UiShellCommand {
+            session_id: "s1".into(),
+            command_id: "shell-1".into(),
+            command: "pwd".to_owned(),
+            include_in_context: true,
+            target_agent_id: Some(agent_id("agent-1")),
+        }),
+        Event::UiSwitchSession(UiSwitchSession {
+            new_session_id: "s2".into(),
+            reason: SessionStartReason::New,
+        }),
+        Event::UiCreateAgent(UiCreateAgent {
+            session_id: "s1".into(),
             role: "engineer".to_owned(),
-            action: UiRoleUpdateAction::SetThinkingSummary {
-                thinking_summary: Some(ThinkingSummary::Auto),
-            },
+            model_override: Some("openai/gpt-4.1".parse().expect("model id")),
+            metadata: vec![AgentInitialMetadata {
+                key: "cwd".into(),
+                value: CborValue::Text("/tmp".to_owned()),
+                inheritable: true,
+            }],
+            initial_prompt: Some("hello".to_owned()),
+            message_class: PromptMessageClass::User,
+            originator: PromptOriginator::User,
+            ctx_id: Some("ctx-create".to_owned()),
+            parent_agent: Some(agent_id("parent_1")),
+            ephemeral: false,
+        }),
+        Event::UiTreeRequest(UiTreeRequest {
+            session_id: "s1".into(),
+            target_agent_id: Some(agent_id("agent-1")),
+        }),
+        Event::UiNavigateTree(UiNavigateTree {
+            session_id: "s1".into(),
+            target_agent_id: Some(agent_id("agent-1")),
+            target: UiTreeNavigationTarget::Root,
+        }),
+        Event::UiCompactRequest(UiCompactRequest {
+            session_id: "s1".into(),
+            target_agent_id: Some(agent_id("agent-1")),
+        }),
+        Event::UiPromptDraft(UiPromptDraft {
+            session_id: "s1".into(),
+            text: "draft".to_owned(),
+        }),
+        Event::UiFocusChanged(UiFocusChanged {
+            session_id: "s1".into(),
+            focused: true,
+        }),
+        Event::UiCancelPrompt(UiCancelPrompt {
+            session_id: "s1".into(),
+            target_agent_id: Some(agent_id("agent-1")),
+            agent_prompt_id: Some("sp-1".into()),
+        }),
+        Event::UiRecallQueuedPrompt(UiRecallQueuedPrompt {
+            session_id: "s1".into(),
+            target_agent_id: Some(agent_id("agent-1")),
+        }),
+        Event::UiSetAgentDisplayName(UiSetAgentDisplayName {
+            session_id: "s1".into(),
+            agent_id: agent_id("agent-1"),
+            display_name: "Main".to_owned(),
+        }),
+        Event::Osc1337SetUserVar(Osc1337SetUserVar {
+            name: "tau_status".to_owned(),
+            value: "ready".to_owned(),
+        }),
+        Event::TermBell(TermBell {}),
+        Event::ShellCommandProgress(ShellCommandProgress {
+            command_id: "shell-1".into(),
+            stream: ShellStream::Stdout,
+            chunk: "/tmp\n".to_owned(),
+            target_agent_id: Some(agent_id("agent-1")),
+        }),
+        Event::ShellCommandFinished(ShellCommandFinished {
+            command_id: "shell-1".into(),
+            session_id: "s1".into(),
+            command: "pwd".to_owned(),
+            include_in_context: true,
+            target_agent_id: Some(agent_id("agent-1")),
+            output: "/tmp\n".to_owned(),
+            exit_code: Some(0),
+            cancelled: false,
         }),
     ]
 }
@@ -520,6 +842,165 @@ fn event_name_round_trips_from_string() {
         let serialized = name.to_string();
         assert_eq!(serialized.parse::<EventName>(), Ok(name));
     }
+}
+
+/// Ensures every representative first-party event keeps its serde tag,
+/// `EventName` constant, `Event::name()` dispatch, and default durability in
+/// sync. This guards the protocol-surface rule documented in
+/// `crates/tau-proto/ARCHITECTURE.md`.
+#[test]
+fn first_party_event_wire_tags_match_event_names_and_transience() {
+    let events = representative_events();
+    let mut seen = std::collections::BTreeSet::new();
+    for event in events {
+        if matches!(event, Event::ExtensionEvent(_)) {
+            continue;
+        }
+        let name = event.name();
+        let wire = serde_json::to_value(&event).expect("serialize event");
+        let tag = wire
+            .get("event")
+            .and_then(serde_json::Value::as_str)
+            .expect("event tag");
+
+        assert_eq!(tag, name.to_string(), "wire tag and Event::name diverged");
+        assert_eq!(tag.parse::<EventName>(), Ok(name.clone()));
+        assert_eq!(
+            event.defaults_to_transient(),
+            expected_default_transient(&event),
+            "unexpected default transient setting for {tag}"
+        );
+        assert!(seen.insert(tag.to_owned()), "duplicate sample for {tag}");
+    }
+
+    assert_eq!(seen, expected_first_party_event_names());
+}
+
+fn expected_default_transient(event: &Event) -> bool {
+    matches!(
+        event,
+        Event::ToolCancelled(_)
+            | Event::ProviderResponseUpdated(_)
+            | Event::ProviderPromptSubmitted(_)
+            | Event::ToolProgress(_)
+            | Event::ToolDelegateProgress(_)
+            | Event::ToolError(_)
+            | Event::ActionSchemaPublished(_)
+            | Event::ActionInvoke(_)
+            | Event::ActionResult(_)
+            | Event::ActionError(_)
+            | Event::ShellCommandProgress(_)
+            | Event::UiPromptSubmitted(_)
+            | Event::AgentPromptQueued(_)
+            | Event::AgentPromptRecalled(_)
+            | Event::AgentPromptCreated(_)
+            | Event::AgentPromptTerminated(_)
+            | Event::AgentPromptPrewarmRequested(_)
+            | Event::AgentState(_)
+            | Event::UiCompactRequest(_)
+            | Event::UiCreateAgent(_)
+            | Event::UiPromptDraft(_)
+            | Event::UiFocusChanged(_)
+            | Event::UiSetAgentDisplayName(_)
+    )
+}
+
+fn expected_first_party_event_names() -> std::collections::BTreeSet<String> {
+    [
+        "action.error",
+        "action.invoke",
+        "action.result",
+        "action.schema_published",
+        "agent.compaction_triggered",
+        "agent.display_name_set",
+        "agent.head_moved",
+        "agent.message_received",
+        "agent.message_sent",
+        "agent.metadata_set",
+        "agent.metadata_unset",
+        "agent.prompt_created",
+        "agent.prompt_prewarm_requested",
+        "agent.prompt_queued",
+        "agent.prompt_recalled",
+        "agent.prompt_steered",
+        "agent.prompt_submitted",
+        "agent.prompt_terminated",
+        "agent.start_accepted",
+        "agent.start_request",
+        "agent.start_result",
+        "agent.started",
+        "agent.state",
+        "agent.user_message_injected",
+        "extension.agent_context_publish",
+        "extension.agents_md_available",
+        "extension.context_provider_register",
+        "extension.context_ready",
+        "extension.prompt_fragment_publish",
+        "extension.prompt_submit_request",
+        "extension.ready",
+        "extension.restarting",
+        "extension.skill_available",
+        "extension.starting",
+        "extension.exited",
+        "harness.agent_context_usage_changed",
+        "harness.context_usage_changed",
+        "harness.efforts_available",
+        "harness.models_available",
+        "harness.notice",
+        "harness.role_selected",
+        "harness.roles_available",
+        "harness.session_dir",
+        "harness.thinking_summaries_available",
+        "harness.ui_dir",
+        "harness.verbosities_available",
+        "provider.cache_miss_diagnostic",
+        "provider.models_updated",
+        "provider.prompt_submitted",
+        "provider.response_finished",
+        "provider.response_updated",
+        "provider.tool_error",
+        "provider.tool_result",
+        "session.agent_loaded",
+        "session.agent_unloaded",
+        "session.shutdown",
+        "session.started",
+        "shell.command_finished",
+        "shell.command_progress",
+        "term.bell",
+        "term.osc1337_set_user_var",
+        "tool.background_error",
+        "tool.background_result",
+        "tool.cancel_request",
+        "tool.cancelled",
+        "tool.delegate_progress",
+        "tool.error",
+        "tool.progress",
+        "tool.register",
+        "tool.rejected",
+        "tool.request",
+        "tool.result",
+        "tool.started",
+        "tool.unregister",
+        "ui.agent_model_select",
+        "ui.cancel_prompt",
+        "ui.compact_request",
+        "ui.create_agent",
+        "ui.detach_request",
+        "ui.focus_changed",
+        "ui.navigate_tree",
+        "ui.prompt_draft",
+        "ui.prompt_submitted",
+        "ui.recall_queued_prompt",
+        "ui.role_select",
+        "ui.role_update",
+        "ui.set_agent_display_name",
+        "ui.shell_command",
+        "ui.switch_session",
+        "ui.tree_request",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect()
 }
 
 /// Ensures parsed event names reject malformed segment structure so custom
@@ -1273,6 +1754,15 @@ fn event_defaults_to_transient_marks_progress_kinds() {
             progress: None,
             display: None,
         }),
+        Event::ToolError(ToolError {
+            call_id: "call-1".into(),
+            tool_name: ToolName::new("read"),
+            tool_type: ToolType::Function,
+            message: "failed".to_owned(),
+            details: None,
+            display: None,
+            originator: PromptOriginator::User,
+        }),
         Event::ActionSchemaPublished(ActionSchemaPublished {
             extension_name: "std-email".into(),
             instance_id: 7.into(),
@@ -1364,15 +1854,6 @@ fn event_defaults_to_transient_marks_progress_kinds() {
         Event::AgentMetadataUnset(AgentMetadataUnset {
             agent_id: agent_id("worker"),
             key: AgentMetadataKey::new("ext_core-shell_cwd"),
-        }),
-        Event::ToolError(ToolError {
-            call_id: "call-1".into(),
-            tool_name: ToolName::new("read"),
-            tool_type: ToolType::Function,
-            message: "failed".to_owned(),
-            details: None,
-            display: None,
-            originator: PromptOriginator::User,
         }),
     ];
     for event in &durable {
@@ -1597,27 +2078,43 @@ fn start_agent_request_role_is_optional() {
 }
 
 /// `DelegateProgress` UI metadata is additive. Omitting role must stay
-/// readable.
+/// readable, while delegated agent ids keep their string wire shape and are
+/// validated by the protocol newtype.
 #[test]
-fn delegate_progress_role_is_optional() {
+fn delegate_progress_optional_metadata_and_agent_id_wire_contract() {
     let parsed: DelegateProgress = serde_json::from_value(serde_json::json!({
         "call_id": "call-1",
         "task_name": "audit",
         "tools_in_flight": 0,
         "tools_total": 0
     }))
-    .expect("deserialize progress without role");
+    .expect("deserialize progress without optional metadata");
     assert_eq!(parsed.role, None);
+    assert_eq!(parsed.agent_id, None);
 
     let with_metadata: DelegateProgress = serde_json::from_value(serde_json::json!({
         "call_id": "call-1",
         "task_name": "audit",
+        "agent_id": "agent-1",
         "role": "rush",
         "tools_in_flight": 0,
         "tools_total": 0
     }))
-    .expect("deserialize progress with role");
+    .expect("deserialize progress with role and valid agent id");
     assert_eq!(with_metadata.role.as_deref(), Some("rush"));
+    assert_eq!(with_metadata.agent_id.as_deref(), Some("agent-1"));
+
+    let round_tripped = serde_json::to_value(&with_metadata).expect("serialize progress");
+    assert_eq!(round_tripped["agent_id"], "agent-1");
+
+    serde_json::from_value::<DelegateProgress>(serde_json::json!({
+        "call_id": "call-1",
+        "task_name": "audit",
+        "agent_id": "bad.name",
+        "tools_in_flight": 0,
+        "tools_total": 0
+    }))
+    .expect_err("invalid agent id should fail to deserialize");
 }
 
 /// `Verbosity::next_in` mirrors `Effort::next_in`. Even though the CLI

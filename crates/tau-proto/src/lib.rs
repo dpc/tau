@@ -747,14 +747,13 @@ impl ToolName {
         Self::is_valid(&s).then_some(Self(s))
     }
 
+    /// Borrow this validated tool name as its wire string.
     pub fn as_str(&self) -> &str {
         &self.0
     }
+    /// Consume this tool name and return its validated wire string.
     pub fn into_string(self) -> String {
         self.0
-    }
-    pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
     }
 
     fn is_valid(s: &str) -> bool {

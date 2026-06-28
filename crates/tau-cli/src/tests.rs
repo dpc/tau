@@ -1783,7 +1783,7 @@ fn delegate_progress_does_not_overwrite_display_name_with_task_name() {
     renderer.handle(&Event::ToolDelegateProgress(tau_proto::DelegateProgress {
         call_id: "delegate-call".into(),
         task_name: "look it up".into(),
-        agent_id: Some("engineer-Ab12".to_owned()),
+        agent_id: Some(agent_id("engineer-Ab12")),
         role: Some("senior-engineer".to_owned()),
         ctx_percent: None,
         ctx_input_tokens: None,
@@ -1826,7 +1826,7 @@ fn suspended_agent_stays_blocked_after_lifecycle_updates_until_resume() {
     renderer.handle(&Event::ToolDelegateProgress(tau_proto::DelegateProgress {
         call_id: "delegate-call".into(),
         task_name: "still running".into(),
-        agent_id: Some("worker-1".to_owned()),
+        agent_id: Some(agent_id("worker-1")),
         role: Some("engineer".to_owned()),
         ctx_percent: None,
         ctx_input_tokens: None,
@@ -2242,7 +2242,7 @@ fn delegate_progress_routes_to_hidden_tool_owner() {
     renderer.handle(&Event::ToolDelegateProgress(tau_proto::DelegateProgress {
         call_id: "worker-delegate".into(),
         task_name: "nested".into(),
-        agent_id: Some("engineer_1".to_owned()),
+        agent_id: Some(agent_id("engineer_1")),
         role: Some("engineer".to_owned()),
         ctx_percent: None,
         ctx_input_tokens: None,
@@ -3915,7 +3915,7 @@ fn delegate_side_conversation_keeps_parent_tool_status_visible() {
     renderer.handle(&Event::ToolDelegateProgress(tau_proto::DelegateProgress {
         call_id: "delegate-call".into(),
         task_name: "probe".into(),
-        agent_id: Some("engineer_1".to_owned()),
+        agent_id: Some(agent_id("engineer_1")),
         role: Some("engineer".to_owned()),
         ctx_percent: None,
         ctx_input_tokens: None,
@@ -4948,7 +4948,7 @@ fn delegate_progress_redraws_live_parent_block() {
     renderer.handle(&Event::ToolDelegateProgress(tau_proto::DelegateProgress {
         call_id: "call-delegate".into(),
         task_name: "probe".into(),
-        agent_id: Some("engineer_1".to_owned()),
+        agent_id: Some(agent_id("engineer_1")),
         role: Some("engineer".to_owned()),
         ctx_percent: None,
         ctx_input_tokens: None,

@@ -12033,7 +12033,7 @@ fn inbound_non_extension_owned_fallback_events_are_ignored() {
         Event::ToolDelegateProgress(tau_proto::DelegateProgress {
             call_id: "delegate-call".into(),
             task_name: "forged task".to_owned(),
-            agent_id: Some("forged-agent".to_owned()),
+            agent_id: Some(crate::parse_agent_id("forged-agent")),
             role: Some("engineer".to_owned()),
             ctx_percent: None,
             ctx_input_tokens: None,

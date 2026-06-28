@@ -8297,7 +8297,7 @@ impl Harness {
             return;
         };
         let role = conv.role.clone();
-        let agent_id = conv.agent_id.clone();
+        let agent_id = conv.agent_id.as_deref().map(crate::parse_agent_id);
         let ctx_window = conv.context_input_tokens.and_then(|_| {
             self.model_for_agent_role(conv)
                 .as_ref()
