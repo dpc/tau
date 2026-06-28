@@ -1,7 +1,10 @@
 use std::io::Write as _;
+#[cfg(target_os = "linux")]
+use std::os::unix::fs::PermissionsExt as _;
 use std::os::unix::net::UnixListener;
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
-use std::{fs, thread};
+use std::{env, fs, thread};
 
 use tau_proto::{
     ClientKind, Disconnect, HarnessInputMessage, HarnessOutputMessage, Hello, PROTOCOL_VERSION,
@@ -9,6 +12,47 @@ use tau_proto::{
 use tempfile::TempDir;
 
 use super::*;
+
+static CURRENT_DIR_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+struct CurrentDirGuard {
+    original_dir: std::path::PathBuf,
+}
+
+impl CurrentDirGuard {
+    fn enter(path: &std::path::Path) -> Self {
+        let original_dir = env::current_dir().expect("current directory should be readable");
+        env::set_current_dir(path).expect("temporary cwd should be set");
+        Self { original_dir }
+    }
+}
+
+impl Drop for CurrentDirGuard {
+    fn drop(&mut self) {
+        env::set_current_dir(&self.original_dir).expect("original cwd should be restored");
+    }
+}
+
+/// Ensures the public bind API treats a plain relative filename as having no
+/// parent to create, preserving the supported UnixListener behavior for
+/// cwd-relative socket paths.
+#[test]
+fn bind_accepts_simple_relative_socket_path() {
+    let _lock = CURRENT_DIR_TEST_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .expect("current-dir test lock should not be poisoned");
+    let tempdir = TempDir::new().expect("tempdir should exist");
+    let _current_dir = CurrentDirGuard::enter(tempdir.path());
+
+    let listener = SocketListener::bind("tau.sock").expect("relative socket should bind");
+    assert_eq!(listener.path(), std::path::Path::new("tau.sock"));
+    drop(listener);
+    assert!(
+        !tempdir.path().join("tau.sock").exists(),
+        "relative socket should be cleaned up on drop"
+    );
+}
 
 /// Ensures the public listener accept API uses server-side protocol direction:
 /// accepted clients read peer input messages and write harness output messages.
@@ -134,6 +178,36 @@ fn bind_refuses_active_socket_path() {
     ));
     assert!(socket_path.exists(), "active socket should remain");
 
+    drop(active);
+    fs::remove_file(&socket_path).expect("active socket should clean up");
+}
+
+/// Ensures binding fails closed instead of unlinking an existing socket when
+/// the liveness probe cannot determine whether that socket is inactive.
+#[cfg(target_os = "linux")]
+#[test]
+fn bind_refuses_unprobeable_socket_path() {
+    let tempdir = TempDir::new().expect("tempdir should exist");
+    let socket_path = tempdir.path().join("tau.sock");
+    let active = UnixListener::bind(&socket_path).expect("active listener should bind");
+    let original_permissions = fs::metadata(&socket_path)
+        .expect("socket metadata should be readable")
+        .permissions();
+    fs::set_permissions(&socket_path, fs::Permissions::from_mode(0o000))
+        .expect("socket permissions should be restricted");
+
+    let error = match SocketListener::bind(&socket_path) {
+        Ok(_) => panic!("bind should refuse unprobeable socket"),
+        Err(error) => error,
+    };
+    assert!(matches!(
+        error,
+        SocketTransportError::ProbeExistingSocket { .. }
+    ));
+    assert!(socket_path.exists(), "unprobeable socket should remain");
+
+    fs::set_permissions(&socket_path, original_permissions)
+        .expect("socket permissions should be restored");
     drop(active);
     fs::remove_file(&socket_path).expect("active socket should clean up");
 }

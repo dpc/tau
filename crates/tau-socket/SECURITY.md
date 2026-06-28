@@ -15,7 +15,8 @@ Reliability-sensitive invariants:
   distinct; malformed or truncated frames must be decode errors.
 - Binding must not unlink non-socket paths or active sockets.
 - Active-socket probing intentionally creates a short-lived local connection
-  that an already-running daemon can observe.
+  that an already-running daemon can observe. Existing socket paths are treated
+  as stale only after a refused connection; other probe failures must fail closed.
 - Drop-time cleanup must remove only the socket path created by that listener.
 - Background reader threads must stop when their `SocketPeer` is dropped, and
   unread output must not buffer without bound.

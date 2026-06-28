@@ -3,7 +3,7 @@
 //! This crate exposes a small transport-agnostic socket peer that reuses the
 //! same self-delimiting CBOR event codec as stdio transports.
 
-use std::io::{self, BufReader, BufWriter};
+use std::io::{self, BufWriter};
 use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
@@ -35,6 +35,13 @@ pub enum SocketTransportError {
     ActiveSocketExists {
         /// Socket path that appears to already have a listener.
         path: PathBuf,
+    },
+    /// A pre-existing Unix socket could not be proven inactive.
+    ProbeExistingSocket {
+        /// Socket path whose liveness probe failed.
+        path: PathBuf,
+        /// Underlying probe error.
+        source: io::Error,
     },
     /// Removing an inactive stale Unix socket path failed.
     RemoveStaleSocket {
@@ -109,6 +116,11 @@ impl fmt::Display for SocketTransportError {
                     path.display()
                 )
             }
+            Self::ProbeExistingSocket { path, source } => write!(
+                f,
+                "refusing to replace Unix socket {} after liveness probe failed: {source}",
+                path.display()
+            ),
             Self::RemoveStaleSocket { path, source } => write!(
                 f,
                 "failed to remove stale socket {}: {source}",
@@ -143,6 +155,7 @@ impl std::error::Error for SocketTransportError {
         match self {
             Self::CreateParentDirectory { source, .. } => Some(source),
             Self::RefuseNonSocketPath { .. } | Self::ActiveSocketExists { .. } => None,
+            Self::ProbeExistingSocket { source, .. } => Some(source),
             Self::RemoveStaleSocket { source, .. } => Some(source),
             Self::Bind { source, .. } => Some(source),
             Self::BoundSocketMetadata { source, .. } => Some(source),
@@ -192,23 +205,20 @@ impl SocketListener {
     /// Parent directories are created if needed. An inactive stale Unix socket
     /// may be removed, but non-socket paths and active listeners are refused.
     /// Active-listener detection opens a short-lived connection that can be
-    /// observed by an already-running daemon.
+    /// observed by an already-running daemon. Existing socket paths are treated
+    /// as stale only when that probe fails with
+    /// [`io::ErrorKind::ConnectionRefused`]; other probe failures return
+    /// [`SocketTransportError::ProbeExistingSocket`] without unlinking the
+    /// path.
     ///
     /// # Errors
     ///
     /// Returns an error when directory creation, stale socket cleanup, binding,
     /// post-bind socket metadata inspection, non-socket refusal, or
-    /// active-socket refusal fails or applies.
+    /// active/unverified socket refusal fails or applies.
     pub fn bind(path: impl Into<PathBuf>) -> Result<Self, SocketTransportError> {
         let path = path.into();
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).map_err(|source| {
-                SocketTransportError::CreateParentDirectory {
-                    path: parent.to_path_buf(),
-                    source,
-                }
-            })?;
-        }
+        create_socket_parent_if_needed(&path)?;
         remove_inactive_stale_socket(&path)?;
 
         let listener = UnixListener::bind(&path).map_err(|source| SocketTransportError::Bind {
@@ -285,7 +295,7 @@ impl Drop for SocketListener {
 /// One server-side accepted Unix socket client speaking the protocol.
 pub struct SocketAcceptedClient {
     /// Reader for peer/client-to-harness input messages.
-    reader: HarnessInputReader<BufReader<UnixStream>>,
+    reader: HarnessInputReader<UnixStream>,
     /// Writer for harness-to-peer/client output messages.
     writer: HarnessOutputWriter<BufWriter<UnixStream>>,
 }
@@ -296,7 +306,7 @@ impl SocketAcceptedClient {
             .try_clone()
             .map_err(|source| SocketTransportError::Clone { source })?;
         Ok(Self {
-            reader: HarnessInputReader::new(BufReader::new(stream)),
+            reader: HarnessInputReader::new(stream),
             writer: HarnessOutputWriter::new(BufWriter::new(writer_stream)),
         })
     }
@@ -448,7 +458,7 @@ fn spawn_reader(
 }
 
 fn read_frames(stream: UnixStream, sender: SyncSender<Result<HarnessOutputMessage, DecodeError>>) {
-    let mut reader = PeerInputReader::new(BufReader::new(stream));
+    let mut reader = PeerInputReader::new(stream);
     loop {
         match reader.read_message() {
             Ok(Some(frame)) => {
@@ -465,6 +475,19 @@ fn read_frames(stream: UnixStream, sender: SyncSender<Result<HarnessOutputMessag
     }
 }
 
+fn create_socket_parent_if_needed(path: &Path) -> Result<(), SocketTransportError> {
+    let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    else {
+        return Ok(());
+    };
+    fs::create_dir_all(parent).map_err(|source| SocketTransportError::CreateParentDirectory {
+        path: parent.to_path_buf(),
+        source,
+    })
+}
+
 fn remove_inactive_stale_socket(path: &Path) -> Result<(), SocketTransportError> {
     let Ok(metadata) = fs::symlink_metadata(path) else {
         return Ok(());
@@ -474,10 +497,19 @@ fn remove_inactive_stale_socket(path: &Path) -> Result<(), SocketTransportError>
             path: path.to_path_buf(),
         });
     }
-    if UnixStream::connect(path).is_ok() {
-        return Err(SocketTransportError::ActiveSocketExists {
-            path: path.to_path_buf(),
-        });
+    match UnixStream::connect(path) {
+        Ok(_) => {
+            return Err(SocketTransportError::ActiveSocketExists {
+                path: path.to_path_buf(),
+            });
+        }
+        Err(error) if error.kind() == io::ErrorKind::ConnectionRefused => {}
+        Err(source) => {
+            return Err(SocketTransportError::ProbeExistingSocket {
+                path: path.to_path_buf(),
+                source,
+            });
+        }
     }
     fs::remove_file(path).map_err(|source| SocketTransportError::RemoveStaleSocket {
         path: path.to_path_buf(),
