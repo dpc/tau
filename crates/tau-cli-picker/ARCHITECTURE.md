@@ -26,7 +26,16 @@ Resize events are part of the picker event stream. A resize erases the current f
 
 ## Cleanup and errors
 
-Successful selection clears the picker frame and returns cleanup I/O errors. Cancellation and input errors preserve the original user-facing error; cleanup on those paths is best-effort.
+Successful selection clears the picker frame and returns cleanup I/O errors. Cancellation and input errors preserve the original user-facing error; cleanup on those paths is best-effort. Raw-mode-owning entry points explicitly restore cooked mode before returning; raw-mode restoration failures are reported as I/O errors even if the picker otherwise selected, cancelled, or encountered an input/rendering error so callers are not told terminal ownership was safely released when it was not.
+
+## Testing strategy
+
+Keep key-map tests close to `key.rs`, where terminal events and byte-stream
+bytes are converted into logical picker actions. Picker-loop tests belong in
+`src/tests.rs` and should cover navigation, validation, cancellation, cleanup,
+resize redraws, and raw-mode restoration precedence through injected readers,
+writers, and guards. Rendering tests should assert pure `picker_lines` output so
+layout behavior stays deterministic without requiring a live terminal.
 
 ## Non-goals
 

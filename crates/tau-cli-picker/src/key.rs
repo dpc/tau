@@ -3,6 +3,8 @@ mod tests;
 
 use std::io;
 
+use crossterm::event::Event;
+
 /// High-level picker event produced by an input reader.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PickerEvent {
@@ -63,19 +65,21 @@ fn logical_to_action(key: LogicalKey) -> PickerKey {
 /// the picker can redraw immediately instead of waiting for the next keypress.
 pub(crate) fn read_terminal_event() -> io::Result<PickerEvent> {
     loop {
-        match crossterm::event::read()? {
-            crossterm::event::Event::Key(key) => {
-                if key.kind != crossterm::event::KeyEventKind::Press {
-                    continue;
-                }
-                let logical = terminal_key_to_logical(key);
-                return Ok(PickerEvent::Key(logical_to_action(logical)));
-            }
-            crossterm::event::Event::Resize(width, height) => {
-                return Ok(PickerEvent::Resize { width, height });
-            }
-            _ => {}
+        if let Some(event) = terminal_event_to_picker_event(crossterm::event::read()?) {
+            return Ok(event);
         }
+    }
+}
+
+fn terminal_event_to_picker_event(event: Event) -> Option<PickerEvent> {
+    match event {
+        Event::Key(key) if key.kind == crossterm::event::KeyEventKind::Press => {
+            let logical = terminal_key_to_logical(key);
+            Some(PickerEvent::Key(logical_to_action(logical)))
+        }
+        Event::Key(_) => None,
+        Event::Resize(width, height) => Some(PickerEvent::Resize { width, height }),
+        _ => None,
     }
 }
 

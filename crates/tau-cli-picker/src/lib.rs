@@ -26,7 +26,7 @@ use tau_term_screen::truncate_to_width;
 pub use crate::error::PickerError;
 pub use crate::item::PickerItem;
 use crate::key::{PickerEvent, PickerKey, read_byte_key, read_terminal_event};
-use crate::raw_mode::RawModeGuard;
+use crate::raw_mode::{RawModeCleanup, RawModeGuard};
 
 /// Prompts the user to pick one of `items`, rendering to `stderr`.
 ///
@@ -51,7 +51,11 @@ use crate::raw_mode::RawModeGuard;
 /// [`PickerError::Cancelled`] when the user cancels, and
 /// [`PickerError::Io`] for terminal raw-mode, input, rendering, or normal
 /// selection cleanup failures. Cleanup after cancellation or input errors is
-/// best-effort and does not replace the original error.
+/// best-effort and does not replace the original error, except that explicit
+/// raw-mode restoration failures from this raw-mode-owning entry point are
+/// reported as [`PickerError::Io`] even if the picker otherwise selected,
+/// cancelled, or hit an input/rendering error, so callers are not told the
+/// terminal was safely restored when it may still be raw.
 pub fn pick(prompt: &str, items: &[PickerItem]) -> Result<usize, PickerError> {
     pick_with_raw_mode(
         prompt,
@@ -126,7 +130,7 @@ pub fn pick_with_io(
     )
 }
 
-fn pick_with_raw_mode<G>(
+fn pick_with_raw_mode<G: RawModeCleanup>(
     prompt: &str,
     items: &[PickerItem],
     writer: impl io::Write,
@@ -135,8 +139,14 @@ fn pick_with_raw_mode<G>(
     current_size: impl FnMut() -> (usize, usize),
 ) -> Result<usize, PickerError> {
     validate_items(items)?;
-    let _raw = enable_raw_mode()?;
-    pick_with_event_reader(prompt, items, writer, read_event, current_size)
+    let mut raw = enable_raw_mode()?;
+    let result = pick_with_event_reader(prompt, items, writer, read_event, current_size);
+    let restore_result = raw.restore_raw_mode();
+
+    match restore_result {
+        Ok(()) => result,
+        Err(err) => Err(PickerError::Io(err)),
+    }
 }
 
 fn validate_items(items: &[PickerItem]) -> Result<usize, PickerError> {

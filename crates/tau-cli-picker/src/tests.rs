@@ -3,6 +3,7 @@ use std::io::{self, Cursor};
 use std::sync::{Arc, Mutex};
 
 use crate::key::{PickerEvent, PickerKey, read_byte_key};
+use crate::raw_mode::RawModeCleanup;
 use crate::{
     PickerError, PickerItem, pick_with_event_reader, pick_with_io, pick_with_raw_mode,
     picker_lines, resize_dimension,
@@ -194,7 +195,9 @@ fn raw_mode_picker_validates_items_before_enabling_raw_mode() {
         Vec::<u8>::new(),
         || {
             raw_enabled = true;
-            Ok(())
+            Ok(FailingRawModeGuard {
+                restore_error: None,
+            })
         },
         || panic!("invalid items should not read input"),
         || panic!("invalid items should not sample terminal size"),
@@ -211,7 +214,9 @@ fn raw_mode_picker_validates_items_before_enabling_raw_mode() {
         Vec::<u8>::new(),
         || {
             raw_enabled = true;
-            Ok(())
+            Ok(FailingRawModeGuard {
+                restore_error: None,
+            })
         },
         || panic!("invalid items should not read input"),
         || panic!("invalid items should not sample terminal size"),
@@ -343,6 +348,19 @@ impl io::Write for SharedWriter {
 
     fn flush(&mut self) -> io::Result<()> {
         Ok(())
+    }
+}
+
+struct FailingRawModeGuard {
+    restore_error: Option<io::Error>,
+}
+
+impl RawModeCleanup for FailingRawModeGuard {
+    fn restore_raw_mode(&mut self) -> io::Result<()> {
+        match self.restore_error.take() {
+            Some(err) => Err(err),
+            None => Ok(()),
+        }
     }
 }
 
@@ -511,5 +529,55 @@ fn selection_cleanup_failure_is_reported() {
     match err {
         PickerError::Io(source) => assert_eq!(source.to_string(), "synthetic cleanup error"),
         other => panic!("expected cleanup IO error, got {other:?}"),
+    }
+}
+
+/// Ensures raw-mode-owning picker calls report restoration failure instead of
+/// returning a successful selection while the terminal may still be raw.
+#[test]
+fn raw_mode_restore_failure_replaces_successful_selection() {
+    let it = items(&["one", "two"]);
+    let err = pick_with_raw_mode(
+        "pick",
+        &it,
+        Vec::<u8>::new(),
+        || {
+            Ok(FailingRawModeGuard {
+                restore_error: Some(io::Error::other("synthetic raw restore error")),
+            })
+        },
+        || Ok(PickerEvent::Key(PickerKey::Enter)),
+        || (40, 5),
+    )
+    .expect_err("raw restore failure should be reported");
+
+    match err {
+        PickerError::Io(source) => assert_eq!(source.to_string(), "synthetic raw restore error"),
+        other => panic!("expected raw restore IO error, got {other:?}"),
+    }
+}
+
+/// Ensures raw-mode restoration errors are still surfaced after cancellation so
+/// callers know terminal ownership may not have been released cleanly.
+#[test]
+fn raw_mode_restore_failure_replaces_cancel_error() {
+    let it = items(&["one", "two"]);
+    let err = pick_with_raw_mode(
+        "pick",
+        &it,
+        Vec::<u8>::new(),
+        || {
+            Ok(FailingRawModeGuard {
+                restore_error: Some(io::Error::other("synthetic raw restore error")),
+            })
+        },
+        || Ok(PickerEvent::Key(PickerKey::Cancelled)),
+        || (40, 5),
+    )
+    .expect_err("raw restore failure should be reported");
+
+    match err {
+        PickerError::Io(source) => assert_eq!(source.to_string(), "synthetic raw restore error"),
+        other => panic!("expected raw restore IO error, got {other:?}"),
     }
 }

@@ -1,9 +1,12 @@
 use std::collections::VecDeque;
 use std::io;
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
-use super::{LogicalKey, PickerKey, logical_to_action, read_byte_key, terminal_key_to_logical};
+use super::{
+    LogicalKey, PickerEvent, PickerKey, logical_to_action, read_byte_key,
+    terminal_event_to_picker_event, terminal_key_to_logical,
+};
 
 struct ScriptedReader {
     steps: VecDeque<io::Result<Option<u8>>>,
@@ -144,4 +147,50 @@ fn terminal_documented_controls_decode_to_logical_keys() {
     for (event, expected) in cases {
         assert_eq!(terminal_key_to_logical(event), expected);
     }
+}
+
+/// Ensures the terminal event adapter ignores key releases/repeats so enhanced
+/// keyboard reporting does not double-fire picker actions.
+#[test]
+fn terminal_event_adapter_filters_non_press_keys() {
+    let mut release = KeyEvent::new(KeyCode::Down, KeyModifiers::NONE);
+    release.kind = KeyEventKind::Release;
+    let mut repeat = KeyEvent::new(KeyCode::Down, KeyModifiers::NONE);
+    repeat.kind = KeyEventKind::Repeat;
+
+    assert_eq!(terminal_event_to_picker_event(Event::Key(release)), None);
+    assert_eq!(terminal_event_to_picker_event(Event::Key(repeat)), None);
+}
+
+/// Verifies terminal resize events are surfaced as picker events so the picker
+/// can redraw immediately without waiting for another keypress.
+#[test]
+fn terminal_event_adapter_surfaces_resize_events() {
+    assert_eq!(
+        terminal_event_to_picker_event(Event::Resize(7, 3)),
+        Some(PickerEvent::Resize {
+            width: 7,
+            height: 3
+        })
+    );
+}
+
+/// Ensures unrelated terminal events are ignored by the read loop instead of
+/// being misinterpreted as navigation or cancellation.
+#[test]
+fn terminal_event_adapter_ignores_unrelated_events() {
+    assert_eq!(terminal_event_to_picker_event(Event::FocusGained), None);
+    assert_eq!(terminal_event_to_picker_event(Event::FocusLost), None);
+}
+
+/// Protects the positive terminal-event key path so key presses continue to use
+/// the same logical key map as byte-stream input.
+#[test]
+fn terminal_event_adapter_maps_key_presses() {
+    let press = KeyEvent::new(KeyCode::Down, KeyModifiers::NONE);
+
+    assert_eq!(
+        terminal_event_to_picker_event(Event::Key(press)),
+        Some(PickerEvent::Key(PickerKey::Down))
+    );
 }
