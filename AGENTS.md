@@ -1,6 +1,7 @@
 ## Workspace layout
 
 - `crates/tau` — main end-user binary that bundles first-party components
+- `crates/tau-actions` — shared extension action schema, validation, and slash-line parsing helpers
 - `crates/tau-blocking-notify-channel` — blocking notification channel utility
 - `crates/tau-cli` — CLI entrypoint: starts harness daemon and connects UI clients
 - `crates/tau-cli-picker` — shared interactive picker for terminal selection prompts

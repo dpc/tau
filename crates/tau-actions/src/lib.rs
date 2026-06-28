@@ -13,6 +13,31 @@ use serde::{Deserialize, Serialize};
 /// Current action schema version understood by this crate.
 pub const ACTION_SCHEMA_VERSION: u32 = 1;
 
+/// Maximum UTF-8 byte length accepted for command tokens, argument names,
+/// action identifiers, and static choice values in extension-published schemas.
+pub const MAX_ACTION_TOKEN_BYTES: usize = 128;
+
+/// Maximum UTF-8 byte length accepted for human-readable schema descriptions.
+pub const MAX_ACTION_DESCRIPTION_BYTES: usize = 1024;
+
+/// Maximum number of command nodes accepted in one published schema.
+pub const MAX_ACTION_COMMANDS: usize = 128;
+
+/// Maximum number of positional arguments accepted on one executable action.
+pub const MAX_ACTION_ARGS: usize = 16;
+
+/// Maximum number of static choices accepted on one enum or suggestion list.
+pub const MAX_ACTION_CHOICES: usize = 128;
+
+/// Maximum total number of positional arguments accepted in one schema.
+pub const MAX_ACTION_TOTAL_ARGS: usize = 256;
+
+/// Maximum total number of static choices accepted in one schema.
+pub const MAX_ACTION_TOTAL_CHOICES: usize = 1024;
+
+/// Maximum aggregate UTF-8 bytes accepted across schema-controlled text fields.
+pub const MAX_ACTION_TOTAL_TEXT_BYTES: usize = 64 * 1024;
+
 /// Complete action tree published by one extension instance.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ActionSchema {
@@ -42,6 +67,11 @@ impl ActionSchema {
     }
 
     /// Validate this schema.
+    ///
+    /// Validation enforces the v1 token grammar, leaf/namespace invariants,
+    /// duplicate detection, per-field byte limits, and aggregate resource
+    /// budgets for command nodes, arguments, choices, and schema-controlled
+    /// text.
     pub fn validate(&self) -> Result<(), ValidationError> {
         self.executable_action_ids().map(|_| ())
     }
@@ -57,6 +87,11 @@ impl ActionSchema {
 pub struct ActionCommand {
     /// Root name including `/` (for example `/email`) or child name without
     /// `/`.
+    ///
+    /// Root names must be `/` followed by an ASCII alphanumeric token start and
+    /// then only ASCII alphanumeric, `_`, or `-` characters. Child names use
+    /// the same token grammar without the leading `/`. Names are also
+    /// byte-limited by [`MAX_ACTION_TOKEN_BYTES`].
     pub name: String,
     /// Human-readable command description shown in completions/help.
     pub description: String,
@@ -76,6 +111,11 @@ pub struct ActionCommand {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ActionArg {
     /// Stable argument name used in parsed named-argument maps.
+    ///
+    /// Argument names use the same command-token grammar as child command
+    /// names: ASCII alphanumeric first character followed by ASCII
+    /// alphanumeric, `_`, or `-`, with no slash or whitespace. Names are
+    /// byte-limited by [`MAX_ACTION_TOKEN_BYTES`].
     pub name: String,
     /// Human-readable argument description shown in completions/help.
     pub description: String,
@@ -110,6 +150,9 @@ pub enum ActionArgKind {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ActionChoice {
     /// Wire value accepted by the parser.
+    ///
+    /// Choice values are non-empty, contain no whitespace, and are byte-limited
+    /// by [`MAX_ACTION_TOKEN_BYTES`].
     pub value: String,
     /// Human-readable choice description.
     pub description: String,
@@ -236,6 +279,10 @@ struct SchemaValidator {
     root_names: BTreeSet<String>,
     action_id_set: BTreeSet<String>,
     action_ids: Vec<String>,
+    command_count: usize,
+    arg_count: usize,
+    choice_count: usize,
+    text_bytes: usize,
 }
 
 impl SchemaValidator {
@@ -246,7 +293,14 @@ impl SchemaValidator {
                 schema.version
             )));
         }
+        if schema.roots.len() > MAX_ACTION_COMMANDS {
+            return Err(ValidationError::new(format!(
+                "action schema declares {} root actions; maximum is {MAX_ACTION_COMMANDS}",
+                schema.roots.len()
+            )));
+        }
         for root in &schema.roots {
+            validate_token_len(&root.name, "root action name")?;
             if !is_valid_root_name(&root.name) {
                 return Err(ValidationError::new(format!(
                     "invalid root action name `{}`",
@@ -270,6 +324,15 @@ impl SchemaValidator {
         is_root: bool,
         path: &mut Vec<String>,
     ) -> Result<(), ValidationError> {
+        self.command_count += 1;
+        if self.command_count > MAX_ACTION_COMMANDS {
+            return Err(ValidationError::new(format!(
+                "action schema declares more than {MAX_ACTION_COMMANDS} command nodes"
+            )));
+        }
+        self.add_text_bytes(command.name.len(), "command names")?;
+        self.add_text_bytes(command.description.len(), "command descriptions")?;
+        validate_description_len(&command.description, &path.join(" "))?;
         if !is_root && !is_valid_child_name(&command.name) {
             return Err(ValidationError::new(format!(
                 "invalid child action name `{}` in {}",
@@ -284,6 +347,8 @@ impl SchemaValidator {
                     path.join(" ")
                 )));
             };
+            validate_token_len(action_id, "action_id")?;
+            self.add_text_bytes(action_id.len(), "action ids")?;
             if action_id.trim().is_empty() || has_whitespace(action_id) {
                 return Err(ValidationError::new(format!(
                     "invalid action_id `{action_id}` in {}",
@@ -296,7 +361,7 @@ impl SchemaValidator {
                 )));
             }
             self.action_ids.push(action_id.to_owned());
-            validate_args(&command.args, &path.join(" "))?;
+            self.validate_args(&command.args, &path.join(" "))?;
             return Ok(());
         }
 
@@ -314,6 +379,7 @@ impl SchemaValidator {
         }
         let mut child_names = BTreeSet::new();
         for child in &command.children {
+            validate_token_len(&child.name, "child action name")?;
             if !child_names.insert(child.name.clone()) {
                 return Err(ValidationError::new(format!(
                     "duplicate child action name `{}` in {}",
@@ -327,73 +393,142 @@ impl SchemaValidator {
         }
         Ok(())
     }
-}
 
-fn validate_args(args: &[ActionArg], path: &str) -> Result<(), ValidationError> {
-    let mut names = BTreeSet::new();
-    let mut seen_optional = false;
-    for (index, arg) in args.iter().enumerate() {
-        if !is_valid_child_name(&arg.name) {
+    fn validate_args(&mut self, args: &[ActionArg], path: &str) -> Result<(), ValidationError> {
+        if args.len() > MAX_ACTION_ARGS {
             return Err(ValidationError::new(format!(
-                "invalid argument name `{}` in {path}",
-                arg.name
+                "action `{path}` declares {} arguments; maximum is {MAX_ACTION_ARGS}",
+                args.len()
             )));
         }
-        if !names.insert(arg.name.clone()) {
+        self.arg_count += args.len();
+        if self.arg_count > MAX_ACTION_TOTAL_ARGS {
             return Err(ValidationError::new(format!(
-                "duplicate argument name `{}` in {path}",
-                arg.name
+                "action schema declares more than {MAX_ACTION_TOTAL_ARGS} total arguments"
             )));
         }
-        if !arg.required {
-            seen_optional = true;
-        } else if seen_optional {
-            return Err(ValidationError::new(format!(
-                "required argument `{}` follows an optional argument in {path}",
-                arg.name
-            )));
-        }
-        if !arg.suggestions.is_empty() {
-            validate_choices(&arg.suggestions, &arg.name, path)?;
-        }
-        match &arg.kind {
-            ActionArgKind::RestString if index + 1 != args.len() => {
+        let mut names = BTreeSet::new();
+        let mut seen_optional = false;
+        for (index, arg) in args.iter().enumerate() {
+            validate_token_len(&arg.name, "argument name")?;
+            self.add_text_bytes(arg.name.len(), "argument names")?;
+            validate_description_len(
+                &arg.description,
+                &format!("argument `{}` in {path}", arg.name),
+            )?;
+            self.add_text_bytes(arg.description.len(), "argument descriptions")?;
+            if !is_valid_child_name(&arg.name) {
                 return Err(ValidationError::new(format!(
-                    "rest argument `{}` must be last in {path}",
+                    "invalid argument name `{}` in {path}",
                     arg.name
                 )));
             }
-            ActionArgKind::Enum { values } => validate_choices(values, &arg.name, path)?,
-            ActionArgKind::String | ActionArgKind::Integer | ActionArgKind::RestString => {}
+            if !names.insert(arg.name.clone()) {
+                return Err(ValidationError::new(format!(
+                    "duplicate argument name `{}` in {path}",
+                    arg.name
+                )));
+            }
+            if !arg.required {
+                seen_optional = true;
+            } else if seen_optional {
+                return Err(ValidationError::new(format!(
+                    "required argument `{}` follows an optional argument in {path}",
+                    arg.name
+                )));
+            }
+            if !arg.suggestions.is_empty() {
+                self.validate_choices(&arg.suggestions, &arg.name, path)?;
+            }
+            match &arg.kind {
+                ActionArgKind::RestString if index + 1 != args.len() => {
+                    return Err(ValidationError::new(format!(
+                        "rest argument `{}` must be last in {path}",
+                        arg.name
+                    )));
+                }
+                ActionArgKind::Enum { values } => self.validate_choices(values, &arg.name, path)?,
+                ActionArgKind::String | ActionArgKind::Integer | ActionArgKind::RestString => {}
+            }
         }
+        Ok(())
+    }
+
+    fn validate_choices(
+        &mut self,
+        values: &[ActionChoice],
+        arg_name: &str,
+        path: &str,
+    ) -> Result<(), ValidationError> {
+        if values.is_empty() {
+            return Err(ValidationError::new(format!(
+                "enum argument `{arg_name}` in {path} must declare at least one value"
+            )));
+        }
+        if values.len() > MAX_ACTION_CHOICES {
+            return Err(ValidationError::new(format!(
+                "argument `{arg_name}` in {path} declares {} choices; maximum is {MAX_ACTION_CHOICES}",
+                values.len()
+            )));
+        }
+        self.choice_count += values.len();
+        if self.choice_count > MAX_ACTION_TOTAL_CHOICES {
+            return Err(ValidationError::new(format!(
+                "action schema declares more than {MAX_ACTION_TOTAL_CHOICES} total choices"
+            )));
+        }
+        let mut seen = BTreeSet::new();
+        for choice in values {
+            validate_token_len(&choice.value, "choice value")?;
+            self.add_text_bytes(choice.value.len(), "choice values")?;
+            validate_description_len(
+                &choice.description,
+                &format!("choice `{}` for `{arg_name}` in {path}", choice.value),
+            )?;
+            self.add_text_bytes(choice.description.len(), "choice descriptions")?;
+            if choice.value.is_empty() || has_whitespace(&choice.value) {
+                return Err(ValidationError::new(format!(
+                    "invalid enum value `{}` for `{arg_name}` in {path}",
+                    choice.value
+                )));
+            }
+            if !seen.insert(choice.value.clone()) {
+                return Err(ValidationError::new(format!(
+                    "duplicate enum value `{}` for `{arg_name}` in {path}",
+                    choice.value
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    fn add_text_bytes(&mut self, bytes: usize, field: &str) -> Result<(), ValidationError> {
+        self.text_bytes = self.text_bytes.saturating_add(bytes);
+        if self.text_bytes > MAX_ACTION_TOTAL_TEXT_BYTES {
+            return Err(ValidationError::new(format!(
+                "action schema text exceeds {MAX_ACTION_TOTAL_TEXT_BYTES} total bytes while reading {field}"
+            )));
+        }
+        Ok(())
+    }
+}
+
+fn validate_token_len(value: &str, field: &str) -> Result<(), ValidationError> {
+    if value.len() > MAX_ACTION_TOKEN_BYTES {
+        return Err(ValidationError::new(format!(
+            "{field} is {} bytes; maximum is {MAX_ACTION_TOKEN_BYTES}",
+            value.len()
+        )));
     }
     Ok(())
 }
 
-fn validate_choices(
-    values: &[ActionChoice],
-    arg_name: &str,
-    path: &str,
-) -> Result<(), ValidationError> {
-    if values.is_empty() {
+fn validate_description_len(value: &str, context: &str) -> Result<(), ValidationError> {
+    if value.len() > MAX_ACTION_DESCRIPTION_BYTES {
         return Err(ValidationError::new(format!(
-            "enum argument `{arg_name}` in {path} must declare at least one value"
+            "description for {context} is {} bytes; maximum is {MAX_ACTION_DESCRIPTION_BYTES}",
+            value.len()
         )));
-    }
-    let mut seen = BTreeSet::new();
-    for choice in values {
-        if choice.value.is_empty() || has_whitespace(&choice.value) {
-            return Err(ValidationError::new(format!(
-                "invalid enum value `{}` for `{arg_name}` in {path}",
-                choice.value
-            )));
-        }
-        if !seen.insert(choice.value.clone()) {
-            return Err(ValidationError::new(format!(
-                "duplicate enum value `{}` for `{arg_name}` in {path}",
-                choice.value
-            )));
-        }
     }
     Ok(())
 }
@@ -602,23 +737,33 @@ pub fn usage_for(command: &ActionCommand, path: &[String]) -> String {
 }
 
 /// Return whether a string is a valid root slash command name.
+///
+/// Valid roots are `/` followed by an ASCII alphanumeric token start and then
+/// only ASCII alphanumeric, `_`, or `-` characters.
 #[must_use]
 pub fn is_valid_root_name(name: &str) -> bool {
     let Some(rest) = name.strip_prefix('/') else {
         return false;
     };
-    let mut chars = rest.chars();
+    is_valid_command_segment(rest)
+}
+
+/// Return whether a string is a valid child command or argument name.
+///
+/// Valid child and argument names start with an ASCII alphanumeric character
+/// and then contain only ASCII alphanumeric, `_`, or `-` characters.
+#[must_use]
+pub fn is_valid_child_name(name: &str) -> bool {
+    is_valid_command_segment(name)
+}
+
+fn is_valid_command_segment(name: &str) -> bool {
+    let mut chars = name.chars();
     let Some(first) = chars.next() else {
         return false;
     };
     first.is_ascii_alphanumeric()
         && chars.all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-'))
-}
-
-/// Return whether a string is a valid child command or argument name.
-#[must_use]
-pub fn is_valid_child_name(name: &str) -> bool {
-    !name.is_empty() && !name.starts_with('/') && !has_whitespace(name)
 }
 
 fn has_whitespace(s: &str) -> bool {
