@@ -8,6 +8,9 @@ use tau_proto::{Event, SessionId};
 /// events are the exception: they must still be persisted so resumed agents can
 /// see tool completions that happened after a transient dispatch path.
 pub(crate) fn should_persist_event(event: &Event, transient: bool) -> bool {
+    if is_raw_tool_terminal_event(event) {
+        return false;
+    }
     !transient || is_transient_tool_terminal_event(event)
 }
 
@@ -23,12 +26,14 @@ pub(crate) fn session_membership_id_for_event(event: &Event) -> Option<SessionId
 fn is_transient_tool_terminal_event(event: &Event) -> bool {
     matches!(
         event,
-        Event::ToolResult(_)
-            | Event::ToolError(_)
-            | Event::ProviderToolResult(_)
+        Event::ProviderToolResult(_)
             | Event::ProviderToolError(_)
             | Event::ToolCancelled(_)
             | Event::ToolBackgroundResult(_)
             | Event::ToolBackgroundError(_)
     )
+}
+
+fn is_raw_tool_terminal_event(event: &Event) -> bool {
+    matches!(event, Event::ToolResult(_) | Event::ToolError(_))
 }

@@ -1,11 +1,13 @@
 use tau_proto::{
-    AgentStarted, Event, PromptOriginator, SessionAgentLoaded, SessionAgentUnloaded, ToolError,
-    ToolName, ToolType,
+    AgentStarted, CborValue, Event, PromptOriginator, SessionAgentLoaded, SessionAgentUnloaded,
+    ToolError, ToolName, ToolResult, ToolResultKind, ToolType,
 };
 
 use super::semantic_event_router::{session_membership_id_for_event, should_persist_event};
 use crate::parse_agent_id;
 
+/// Ensures ordinary transient facts remain live-only so progress/status updates
+/// cannot accidentally enter durable session or agent replay logs.
 #[test]
 fn transient_non_tool_event_is_not_persisted() {
     let event = Event::AgentStarted(AgentStarted {
@@ -21,9 +23,42 @@ fn transient_non_tool_event_is_not_persisted() {
     assert!(should_persist_event(&event, false));
 }
 
+/// Ensures raw extension-owned tool completions stay live-only semantic events
+/// even when published through a non-transient helper path; their
+/// provider-owned counterparts are the durable transcript facts.
 #[test]
-fn transient_terminal_tool_event_is_persisted() {
+fn raw_tool_terminal_events_are_not_persisted() {
+    let result = Event::ToolResult(ToolResult {
+        call_id: "call-1".into(),
+        tool_name: ToolName::new("tool"),
+        tool_type: ToolType::Function,
+        result: CborValue::Null,
+        kind: ToolResultKind::Final,
+        display: None,
+        originator: PromptOriginator::User,
+    });
     let event = Event::ToolError(ToolError {
+        call_id: "call-1".into(),
+        tool_name: ToolName::new("tool"),
+        tool_type: ToolType::Function,
+        message: "failed".to_owned(),
+        details: None,
+        display: None,
+        originator: PromptOriginator::User,
+    });
+
+    assert!(!should_persist_event(&result, false));
+    assert!(!should_persist_event(&result, true));
+    assert!(!should_persist_event(&event, false));
+    assert!(!should_persist_event(&event, true));
+}
+
+/// Ensures transient durable tool completions still reach the agent store for
+/// resume/replay; only raw `tool.result` / `tool.error` observer facts are
+/// filtered out before semantic persistence.
+#[test]
+fn transient_provider_terminal_tool_event_is_persisted() {
+    let event = Event::ProviderToolError(ToolError {
         call_id: "call-1".into(),
         tool_name: ToolName::new("tool"),
         tool_type: ToolType::Function,
@@ -36,6 +71,8 @@ fn transient_terminal_tool_event_is_persisted() {
     assert!(should_persist_event(&event, true));
 }
 
+/// Ensures session membership facts continue routing by their embedded session
+/// id instead of falling through to agent transcript persistence.
 #[test]
 fn session_membership_events_route_to_session_log() {
     let loaded = Event::SessionAgentLoaded(SessionAgentLoaded {
