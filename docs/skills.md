@@ -18,9 +18,10 @@ When multiple skills use the same name, Tau keeps the candidate with the newest 
 Discovery is best-effort and resource-bounded. Tau reads only the bounded
 frontmatter prefix needed for metadata, not the whole skill body, and skips a
 skill with a diagnostic if its frontmatter does not close before the discovery
-read limit. Symlinked skill roots and all symlink entries inside skill roots,
-including symlinked files, are skipped so discovery does not escape configured
-roots into arbitrary or huge filesystem trees.
+read limit. Symlinked skill roots, symlinked directories, and symlinked
+Markdown skill files are followed; Tau tracks canonical directories so symlink
+cycles do not recurse forever. Project-controlled skill roots can therefore
+point discovery at other local skill files reachable by the user.
 
 Preferred layout:
 
