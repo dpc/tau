@@ -938,8 +938,10 @@ fn load_from_dirs_is_sorted_by_name() {
     assert_eq!(names, vec!["alpha", "bravo", "mango", "zebra"]);
 }
 
+/// Ensures symlinked skill directories are followed so users can share skill
+/// collections through filesystem indirection.
 #[test]
-fn discover_skips_symlinked_dirs() {
+fn discover_follows_symlinked_dirs() {
     use std::os::unix::fs::symlink;
 
     let tmp = tempfile::tempdir().expect("tempdir");
@@ -957,17 +959,21 @@ fn discover_skips_symlinked_dirs() {
     symlink(&real, &link).expect("symlink");
 
     let paths = discover_skill_paths(tmp.path());
-    assert!(paths.is_empty());
+    assert_eq!(paths.len(), 1);
+    assert!(paths[0].ends_with("link/nested/SKILL.md"));
 
     let result = load_skills_from_dirs(&[tmp.path().to_owned()]);
-    assert!(result.skills.is_empty());
-    assert!(result.diagnostics.iter().any(|diagnostic| {
+    assert_eq!(result.skills.len(), 1);
+    assert_eq!(result.skills[0].name, "real-skill");
+    assert!(!result.diagnostics.iter().any(|diagnostic| {
         diagnostic.kind == DiagnosticKind::Warning && diagnostic.message.contains("symlink")
     }));
 }
 
+/// Ensures direct symlinked Markdown files at a skill root are discovered and
+/// loaded instead of producing a warning and being skipped.
 #[test]
-fn discover_skips_symlinked_files() {
+fn discover_follows_symlinked_files() {
     use std::os::unix::fs::symlink;
 
     let tmp = tempfile::tempdir().expect("tempdir");
@@ -981,17 +987,54 @@ fn discover_skips_symlinked_files() {
     symlink(&target, tmp.path().join("external.md")).expect("symlink");
 
     let paths = discover_skill_paths(tmp.path());
-    assert!(paths.is_empty());
+    assert_eq!(paths.len(), 1);
+    assert!(paths[0].ends_with("external.md"));
 
     let result = load_skills_from_dirs(&[tmp.path().to_owned()]);
-    assert!(result.skills.is_empty());
-    assert!(result.diagnostics.iter().any(|diagnostic| {
+    assert_eq!(result.skills.len(), 1);
+    assert_eq!(result.skills[0].name, "external");
+    assert!(!result.diagnostics.iter().any(|diagnostic| {
         diagnostic.kind == DiagnosticKind::Warning && diagnostic.message.contains("symlink")
     }));
 }
 
+/// Ensures a directory-level `SKILL.md` may be a symlink and still causes that
+/// directory to be treated as a single Pi-style skill.
 #[test]
-fn load_from_dirs_skips_symlinked_root() {
+fn discover_follows_symlinked_skill_md() {
+    use std::os::unix::fs::symlink;
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let outside = tempfile::tempdir().expect("outside tempdir");
+    let target = outside.path().join("SKILL.md");
+    fs::write(
+        &target,
+        "---\nname: linked-skill-md\ndescription: Linked skill\n---\n",
+    )
+    .expect("write");
+    let skill_dir = tmp.path().join("linked");
+    fs::create_dir_all(&skill_dir).expect("mkdir");
+    symlink(&target, skill_dir.join("SKILL.md")).expect("symlink");
+    fs::create_dir_all(skill_dir.join("nested")).expect("mkdir nested");
+    fs::write(
+        skill_dir.join("nested").join("SKILL.md"),
+        "---\nname: nested\ndescription: Nested skill\n---\n",
+    )
+    .expect("write nested");
+
+    let paths = discover_skill_paths(tmp.path());
+    assert_eq!(paths.len(), 1);
+    assert!(paths[0].ends_with("linked/SKILL.md"));
+
+    let result = load_skills_from_dirs(&[tmp.path().to_owned()]);
+    assert_eq!(result.skills.len(), 1);
+    assert_eq!(result.skills[0].name, "linked-skill-md");
+}
+
+/// Ensures a configured skill root may itself be a symlink, matching common
+/// dotfile and shared-skills layouts.
+#[test]
+fn load_from_dirs_follows_symlinked_root() {
     use std::os::unix::fs::symlink;
 
     let tmp = tempfile::tempdir().expect("tempdir");
@@ -1008,13 +1051,15 @@ fn load_from_dirs_skips_symlinked_root() {
     symlink(&real, &link).expect("symlink");
 
     let result = load_skills_from_dirs(&[link]);
-    assert!(result.skills.is_empty());
-    assert!(result.diagnostics.iter().any(|diagnostic| {
-        diagnostic.kind == DiagnosticKind::Warning
-            && diagnostic.message.contains("symlinked skill root")
+    assert_eq!(result.skills.len(), 1);
+    assert_eq!(result.skills[0].name, "outside-skill");
+    assert!(!result.diagnostics.iter().any(|diagnostic| {
+        diagnostic.kind == DiagnosticKind::Warning && diagnostic.message.contains("symlink")
     }));
 }
 
+/// Ensures following symlinked directories still cannot recurse forever when a
+/// symlink points back to an already visited canonical directory.
 #[test]
 fn discover_symlink_cycles_do_not_recurse_forever() {
     use std::os::unix::fs::symlink;

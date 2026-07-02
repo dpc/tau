@@ -701,29 +701,17 @@ pub fn load_skill_from_content(
 ///    skills.
 /// 3. Recurse into subdirectories to find `SKILL.md`.
 /// 4. Skip dot-prefixed entries and `node_modules`.
-/// 5. Skip symlinked roots and symlinked entries so project-controlled skill
-///    roots cannot expand discovery outside the configured roots.
+/// 5. Follow symlinked roots and entries while using canonical directory paths
+///    to avoid recursing forever through symlink cycles.
 pub fn discover_skill_paths(root: &Path) -> Vec<PathBuf> {
     discover_skill_paths_with_diagnostics(root).0
 }
 
 fn discover_skill_paths_with_diagnostics(root: &Path) -> (Vec<PathBuf>, Vec<SkillDiagnostic>) {
     let mut paths = Vec::new();
-    let mut diagnostics = Vec::new();
-    if root
-        .symlink_metadata()
-        .map(|metadata| metadata.file_type().is_symlink())
-        .unwrap_or(false)
-    {
-        diagnostics.push(SkillDiagnostic {
-            path: root.to_owned(),
-            kind: DiagnosticKind::Warning,
-            message: "skipping symlinked skill root during skill discovery".to_owned(),
-        });
-        return (paths, diagnostics);
-    }
+    let diagnostics = Vec::new();
     let mut visited = BTreeSet::new();
-    discover_skill_paths_inner(root, true, &mut paths, &mut diagnostics, &mut visited);
+    discover_skill_paths_inner(root, true, &mut paths, &mut visited);
     (paths, diagnostics)
 }
 
@@ -731,7 +719,6 @@ fn discover_skill_paths_inner(
     dir: &Path,
     is_root: bool,
     out: &mut Vec<PathBuf>,
-    diagnostics: &mut Vec<SkillDiagnostic>,
     visited: &mut BTreeSet<PathBuf>,
 ) {
     if let Ok(canonical) = dir.canonicalize()
@@ -754,7 +741,9 @@ fn discover_skill_paths_inner(
         if e.file_name() != SKILL_FILENAME {
             return false;
         }
-        e.file_type().map(|ft| ft.is_file()).unwrap_or(false)
+        fs::metadata(e.path())
+            .map(|metadata| metadata.is_file())
+            .unwrap_or(false)
     });
     if let Some(entry) = skill_md {
         out.push(entry.path());
@@ -771,20 +760,14 @@ fn discover_skill_paths_inner(
             continue;
         }
 
-        let Ok(file_type) = entry.file_type() else {
+        let path = entry.path();
+        let Ok(metadata) = fs::metadata(&path) else {
             continue;
         };
 
-        let path = entry.path();
-        if file_type.is_symlink() {
-            diagnostics.push(SkillDiagnostic {
-                path,
-                kind: DiagnosticKind::Warning,
-                message: "skipping symlink during skill discovery".to_owned(),
-            });
-        } else if file_type.is_dir() {
-            discover_skill_paths_inner(&path, false, out, diagnostics, visited);
-        } else if file_type.is_file() && is_root && name_str.ends_with(".md") {
+        if metadata.is_dir() {
+            discover_skill_paths_inner(&path, false, out, visited);
+        } else if metadata.is_file() && is_root && name_str.ends_with(".md") {
             out.push(path);
         }
     }
