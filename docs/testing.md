@@ -72,7 +72,8 @@ without earlier deltas.
 
 `tau-skills` tests should cover frontmatter parsing, validation helper
 contracts, deterministic directory discovery, bounded discovery reads,
-symlink-entry skips, collision winner selection, scoped prompt defaults, and
-built-in self-knowledge skills. Prefer focused fixtures that exercise one
-contract at a time, including oversized bodies/frontmatter and UTF-8-safe
-truncation edge cases.
+symlink-following for roots/directories/Markdown skill files, canonical-directory
+cycle prevention, collision winner selection, scoped prompt defaults, and built-in
+self-knowledge skills. Prefer focused fixtures that exercise one contract at a
+time, including oversized bodies/frontmatter and UTF-8-safe truncation edge
+cases.

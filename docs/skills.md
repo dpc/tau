@@ -15,13 +15,15 @@ Tau scans skills in priority order:
 
 When multiple skills use the same name, Tau keeps the candidate with the newest available modification time and reports the conflict as a collision. Skills with readable timestamps beat skills without timestamps. If timestamps are equal or unavailable, the earlier discovered candidate stays selected. User XDG skill roots (`~/.config/agents*`) explicitly beat legacy user skill roots (`~/.agents*`) before modified time is considered. Built-in skills use the harness binary build time as their timestamp, falling back to the executable file mtime when build metadata is unavailable.
 
-Discovery is best-effort and resource-bounded. Tau reads only the bounded
-frontmatter prefix needed for metadata, not the whole skill body, and skips a
-skill with a diagnostic if its frontmatter does not close before the discovery
-read limit. Symlinked skill roots, symlinked directories, and symlinked
-Markdown skill files are followed; Tau tracks canonical directories so symlink
-cycles do not recurse forever. Project-controlled skill roots can therefore
-point discovery at other local skill files reachable by the user.
+Discovery is best-effort and bounded. Tau reads only the bounded frontmatter
+prefix needed for metadata, not the whole skill body, and skips a skill with a
+diagnostic if its frontmatter does not close before the discovery read limit.
+Directory traversal has per-root, per-directory, and depth budgets; exceeding a
+budget emits a diagnostic and skips the remaining over-budget traversal.
+Symlinked skill roots, symlinked directories, and symlinked Markdown skill files
+are followed; Tau tracks canonical directories so symlink cycles do not recurse
+forever. Project-controlled skill roots can therefore point discovery at other
+local skill files reachable by the user.
 
 Preferred layout:
 

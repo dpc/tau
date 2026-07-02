@@ -951,7 +951,7 @@ fn discover_follows_symlinked_dirs() {
     fs::create_dir_all(&nested).expect("mkdir");
     fs::write(
         nested.join("SKILL.md"),
-        "---\nname: real-skill\ndescription: real skill\n---\n",
+        "---\nname: nested\ndescription: real skill\n---\n",
     )
     .expect("write");
 
@@ -964,7 +964,7 @@ fn discover_follows_symlinked_dirs() {
 
     let result = load_skills_from_dirs(&[tmp.path().to_owned()]);
     assert_eq!(result.skills.len(), 1);
-    assert_eq!(result.skills[0].name, "real-skill");
+    assert_eq!(result.skills[0].name, "nested");
     assert!(!result.diagnostics.iter().any(|diagnostic| {
         diagnostic.kind == DiagnosticKind::Warning && diagnostic.message.contains("symlink")
     }));
@@ -1009,7 +1009,7 @@ fn discover_follows_symlinked_skill_md() {
     let target = outside.path().join("SKILL.md");
     fs::write(
         &target,
-        "---\nname: linked-skill-md\ndescription: Linked skill\n---\n",
+        "---\nname: linked\ndescription: Linked skill\n---\n",
     )
     .expect("write");
     let skill_dir = tmp.path().join("linked");
@@ -1028,7 +1028,7 @@ fn discover_follows_symlinked_skill_md() {
 
     let result = load_skills_from_dirs(&[tmp.path().to_owned()]);
     assert_eq!(result.skills.len(), 1);
-    assert_eq!(result.skills[0].name, "linked-skill-md");
+    assert_eq!(result.skills[0].name, "linked");
 }
 
 /// Ensures a configured skill root may itself be a symlink, matching common
@@ -1055,6 +1055,66 @@ fn load_from_dirs_follows_symlinked_root() {
     assert_eq!(result.skills[0].name, "outside-skill");
     assert!(!result.diagnostics.iter().any(|diagnostic| {
         diagnostic.kind == DiagnosticKind::Warning && diagnostic.message.contains("symlink")
+    }));
+}
+
+fn create_entry_budget_overflow_fixture(dir: &Path) {
+    for index in 0..=MAX_SKILL_DISCOVERY_ENTRIES_PER_DIR {
+        fs::create_dir(dir.join(format!("entry-{index:04}"))).expect("mkdir entry");
+    }
+}
+
+/// Ensures an overlarge direct skill root is skipped with a visible diagnostic
+/// instead of allowing discovery to traverse an unbounded directory.
+#[test]
+fn load_from_dirs_diagnoses_overlarge_skill_root() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    create_entry_budget_overflow_fixture(tmp.path());
+
+    let result = load_skills_from_dirs(&[tmp.path().to_owned()]);
+    assert!(result.skills.is_empty());
+    assert!(result.diagnostics.iter().any(|diagnostic| {
+        diagnostic.kind == DiagnosticKind::Warning
+            && diagnostic.message.contains("entry budget exceeded")
+    }));
+}
+
+/// Ensures an overlarge symlinked skill directory is skipped with a diagnostic,
+/// preserving symlink support without allowing unbounded traversal expansion.
+#[test]
+fn load_from_dirs_diagnoses_overlarge_symlinked_directory() {
+    use std::os::unix::fs::symlink;
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let outside = tempfile::tempdir().expect("outside tempdir");
+    create_entry_budget_overflow_fixture(outside.path());
+    symlink(outside.path(), tmp.path().join("link")).expect("symlink");
+
+    let result = load_skills_from_dirs(&[tmp.path().to_owned()]);
+    assert!(result.skills.is_empty());
+    assert!(result.diagnostics.iter().any(|diagnostic| {
+        diagnostic.kind == DiagnosticKind::Warning
+            && diagnostic.path.ends_with("link")
+            && diagnostic.message.contains("entry budget exceeded")
+    }));
+}
+
+/// Ensures deeply nested skill trees are bounded so accidental or malicious
+/// directory chains cannot make startup traversal arbitrarily deep.
+#[test]
+fn load_from_dirs_diagnoses_too_deep_skill_tree() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let mut dir = tmp.path().to_owned();
+    for index in 0..=MAX_SKILL_DISCOVERY_DEPTH {
+        dir = dir.join(format!("level-{index}"));
+        fs::create_dir(&dir).expect("mkdir level");
+    }
+
+    let result = load_skills_from_dirs(&[tmp.path().to_owned()]);
+    assert!(result.skills.is_empty());
+    assert!(result.diagnostics.iter().any(|diagnostic| {
+        diagnostic.kind == DiagnosticKind::Warning
+            && diagnostic.message.contains("depth budget exceeded")
     }));
 }
 

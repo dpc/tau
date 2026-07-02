@@ -693,6 +693,50 @@ pub fn load_skill_from_content(
 // Directory scanning
 // ---------------------------------------------------------------------------
 
+/// Maximum directories visited while discovering skills below a single root.
+const MAX_SKILL_DISCOVERY_DIRS_PER_ROOT: usize = 1024;
+/// Maximum entries inspected in a single directory before skipping it.
+const MAX_SKILL_DISCOVERY_ENTRIES_PER_DIR: usize = 1024;
+/// Maximum entries inspected while discovering skills below a single root.
+const MAX_SKILL_DISCOVERY_ENTRIES_PER_ROOT: usize = 8192;
+/// Maximum recursive directory depth below a skill root.
+const MAX_SKILL_DISCOVERY_DEPTH: usize = 32;
+
+/// Mutable traversal state for one skill discovery root.
+struct DiscoveryState {
+    /// Canonical directory paths already visited, used to avoid symlink cycles.
+    visited_dirs: BTreeSet<PathBuf>,
+    /// Number of unique directories visited below this root.
+    visited_dir_count: usize,
+    /// Number of directory entries inspected below this root.
+    inspected_entry_count: usize,
+    /// Diagnostics emitted while enforcing traversal budgets.
+    diagnostics: Vec<SkillDiagnostic>,
+    /// True when a per-root budget is exhausted and the caller should stop
+    /// traversing the rest of the root.
+    stop_root: bool,
+}
+
+impl DiscoveryState {
+    fn new() -> Self {
+        Self {
+            visited_dirs: BTreeSet::new(),
+            visited_dir_count: 0,
+            inspected_entry_count: 0,
+            diagnostics: Vec::new(),
+            stop_root: false,
+        }
+    }
+
+    fn push_warning(&mut self, path: &Path, message: impl Into<String>) {
+        self.diagnostics.push(SkillDiagnostic {
+            path: path.to_owned(),
+            kind: DiagnosticKind::Warning,
+            message: message.into(),
+        });
+    }
+}
+
 /// Discover skill file paths under `root` using Pi-style discovery rules:
 ///
 /// 1. If a directory contains `SKILL.md`, that file is the skill — stop
@@ -703,37 +747,88 @@ pub fn load_skill_from_content(
 /// 4. Skip dot-prefixed entries and `node_modules`.
 /// 5. Follow symlinked roots and entries while using canonical directory paths
 ///    to avoid recursing forever through symlink cycles.
+/// 6. Bound traversal by directory, entry, and depth budgets; diagnostics are
+///    available to loading callers when a budget is exceeded.
 pub fn discover_skill_paths(root: &Path) -> Vec<PathBuf> {
     discover_skill_paths_with_diagnostics(root).0
 }
 
 fn discover_skill_paths_with_diagnostics(root: &Path) -> (Vec<PathBuf>, Vec<SkillDiagnostic>) {
     let mut paths = Vec::new();
-    let diagnostics = Vec::new();
-    let mut visited = BTreeSet::new();
-    discover_skill_paths_inner(root, true, &mut paths, &mut visited);
-    (paths, diagnostics)
+    let mut state = DiscoveryState::new();
+    discover_skill_paths_inner(root, true, 0, &mut paths, &mut state);
+    (paths, state.diagnostics)
 }
 
 fn discover_skill_paths_inner(
     dir: &Path,
     is_root: bool,
+    depth: usize,
     out: &mut Vec<PathBuf>,
-    visited: &mut BTreeSet<PathBuf>,
+    state: &mut DiscoveryState,
 ) {
+    if state.stop_root {
+        return;
+    }
+
+    if depth > MAX_SKILL_DISCOVERY_DEPTH {
+        state.push_warning(
+            dir,
+            format!(
+                "skipping skill directory: discovery depth budget exceeded (max {MAX_SKILL_DISCOVERY_DEPTH})"
+            ),
+        );
+        return;
+    }
+
     if let Ok(canonical) = dir.canonicalize()
-        && !visited.insert(canonical)
+        && !state.visited_dirs.insert(canonical)
     {
         return;
     }
+
+    if state.visited_dir_count >= MAX_SKILL_DISCOVERY_DIRS_PER_ROOT {
+        state.push_warning(
+            dir,
+            format!(
+                "stopping skill discovery: directory budget exceeded (max {MAX_SKILL_DISCOVERY_DIRS_PER_ROOT} per root)"
+            ),
+        );
+        state.stop_root = true;
+        return;
+    }
+    state.visited_dir_count += 1;
 
     let entries = match fs::read_dir(dir) {
         Ok(e) => e,
         Err(_) => return,
     };
 
-    let mut children: Vec<fs::DirEntry> = entries.flatten().collect();
-    children.sort_by_key(|entry| entry.path());
+    let mut children = Vec::new();
+    for entry in entries.flatten() {
+        if children.len() >= MAX_SKILL_DISCOVERY_ENTRIES_PER_DIR {
+            state.push_warning(
+                dir,
+                format!(
+                    "skipping skill directory: entry budget exceeded (max {MAX_SKILL_DISCOVERY_ENTRIES_PER_DIR} per directory)"
+                ),
+            );
+            return;
+        }
+        if state.inspected_entry_count >= MAX_SKILL_DISCOVERY_ENTRIES_PER_ROOT {
+            state.push_warning(
+                dir,
+                format!(
+                    "stopping skill discovery: entry budget exceeded (max {MAX_SKILL_DISCOVERY_ENTRIES_PER_ROOT} per root)"
+                ),
+            );
+            state.stop_root = true;
+            return;
+        }
+        state.inspected_entry_count += 1;
+        children.push(entry);
+    }
+    children.sort_by_key(|entry: &fs::DirEntry| entry.path());
 
     // Single-pass search: if SKILL.md exists among the children as a regular
     // file, that's this directory's skill and we stop recursing here.
@@ -751,6 +846,10 @@ fn discover_skill_paths_inner(
     }
 
     for entry in &children {
+        if state.stop_root {
+            return;
+        }
+
         let name = entry.file_name();
         let Some(name_str) = name.to_str() else {
             continue;
@@ -766,7 +865,7 @@ fn discover_skill_paths_inner(
         };
 
         if metadata.is_dir() {
-            discover_skill_paths_inner(&path, false, out, visited);
+            discover_skill_paths_inner(&path, false, depth + 1, out, state);
         } else if metadata.is_file() && is_root && name_str.ends_with(".md") {
             out.push(path);
         }
