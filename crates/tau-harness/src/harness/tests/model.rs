@@ -25,6 +25,22 @@ fn find_mandatory_warning_notice(h: &Harness, needle: &str) -> Option<String> {
     None
 }
 
+fn find_mandatory_config_error_notice(h: &Harness, needle: &str) -> Option<String> {
+    let mut seq = crate::event_log::EventLogSeq::new(0);
+    while let Some(entry) = h.event_log.get_next_from(seq) {
+        seq = entry.seq.next();
+        if let Event::HarnessNotice(info) = &entry.event
+            && info.level == NoticeLevel::Warning
+            && info.always_show
+            && info.kind == tau_proto::notice_kind::HARNESS_CONFIG_ERROR
+            && info.message.contains(needle)
+        {
+            return Some(info.message.clone());
+        }
+    }
+    None
+}
+
 fn find_info(h: &Harness, needle: &str) -> Option<String> {
     let mut seq = crate::event_log::EventLogSeq::new(0);
     while let Some(entry) = h.event_log.get_next_from(seq) {
@@ -1172,6 +1188,95 @@ fn missing_required_skill_disables_role_and_emits_notice() {
         .expect("expected required-skill warning notice");
     assert!(message.contains("`missing-review-skill` is not discovered"));
     assert!(message.contains("required_skills"));
+}
+
+/// Ensures each documented required-skill disable reason is reported through a
+/// mandatory `harness.config_error` notice. These diagnostics are the user's
+/// actionable explanation for why a configured role disappeared.
+#[test]
+fn required_skill_disable_reasons_are_diagnostic() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path()).expect("harness");
+    h.available_roles.insert(
+        "invalid-required-skill".to_owned(),
+        tau_config::settings::AgentRole {
+            required_skills: vec![tau_proto::SkillName::from("Bad_Name")],
+            ..Default::default()
+        },
+    );
+
+    let hidden_path = td.path().join("hidden-skill.md");
+    std::fs::write(
+        &hidden_path,
+        "---\nname: hidden-required-skill\ndescription: Hidden\n---\nbody\n",
+    )
+    .expect("write hidden skill");
+    h.record_discovered_skill(
+        "test-skills",
+        &tau_proto::ExtSkillAvailable {
+            name: "hidden-required-skill".into(),
+            description: "Hidden".to_owned(),
+            file_path: hidden_path,
+            add_to_prompt: false,
+            user_invocable: true,
+            disable_model_invocation: true,
+            argument_hint: None,
+        },
+    );
+    h.available_roles.insert(
+        "hidden-required-skill".to_owned(),
+        tau_config::settings::AgentRole {
+            required_skills: vec![tau_proto::SkillName::from("hidden-required-skill")],
+            ..Default::default()
+        },
+    );
+
+    let unreadable_path = td.path().join("unreadable-required-skill.md");
+    std::fs::write(
+        &unreadable_path,
+        "---\nname: unreadable-required-skill\ndescription: Unreadable\n---\nbody\n",
+    )
+    .expect("write unreadable skill");
+    h.record_discovered_skill(
+        "test-skills",
+        &tau_proto::ExtSkillAvailable {
+            name: "unreadable-required-skill".into(),
+            description: "Unreadable".to_owned(),
+            file_path: unreadable_path.clone(),
+            add_to_prompt: false,
+            user_invocable: true,
+            disable_model_invocation: false,
+            argument_hint: None,
+        },
+    );
+    std::fs::remove_file(&unreadable_path).expect("remove unreadable skill source");
+    h.available_roles.insert(
+        "unreadable-required-skill".to_owned(),
+        tau_config::settings::AgentRole {
+            required_skills: vec![tau_proto::SkillName::from("unreadable-required-skill")],
+            ..Default::default()
+        },
+    );
+
+    h.enforce_required_role_skills().expect("validation");
+
+    assert!(!h.available_roles.contains_key("invalid-required-skill"));
+    let invalid = find_mandatory_config_error_notice(&h, "role `invalid-required-skill` disabled")
+        .expect("invalid skill diagnostic");
+    assert!(invalid.contains("`Bad_Name` has invalid skill name"));
+    assert!(invalid.contains("invalid characters"));
+
+    assert!(!h.available_roles.contains_key("hidden-required-skill"));
+    let hidden = find_mandatory_config_error_notice(&h, "role `hidden-required-skill` disabled")
+        .expect("hidden skill diagnostic");
+    assert!(hidden.contains("hidden from model-side skill loading"));
+
+    assert!(!h.available_roles.contains_key("unreadable-required-skill"));
+    let unreadable =
+        find_mandatory_config_error_notice(&h, "role `unreadable-required-skill` disabled")
+            .expect("unreadable skill diagnostic");
+    assert!(unreadable.contains("could not be loaded"));
+    assert!(unreadable.contains("No such file") || unreadable.contains("os error"));
 }
 
 /// Ensures an explicitly selected startup role cannot silently fall back when a

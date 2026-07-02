@@ -419,9 +419,13 @@ fn representative_events() -> Vec<Event> {
             content: "# Project instructions\n- Run tests".to_owned(),
         }),
         Event::ExtensionContextProviderRegister(ExtensionContextProviderRegister {}),
+        Event::ExtensionSessionContextProviderRegister(ExtensionSessionContextProviderRegister {}),
         Event::ExtensionContextReady(ExtensionContextReady {
             session_id: "s1".into(),
             agent_id: agent_id("agent-1"),
+        }),
+        Event::ExtensionSessionContextReady(ExtensionSessionContextReady {
+            session_id: "s1".into(),
         }),
         Event::ExtAgentContextPublish(ExtAgentContextPublish {
             agent_id: agent_id("agent-1"),
@@ -889,6 +893,7 @@ fn expected_default_transient(event: &Event) -> bool {
             | Event::ActionInvoke(_)
             | Event::ActionResult(_)
             | Event::ActionError(_)
+            | Event::ExtensionSessionContextReady(_)
             | Event::ShellCommandProgress(_)
             | Event::UiPromptSubmitted(_)
             | Event::AgentPromptQueued(_)
@@ -939,6 +944,8 @@ fn expected_first_party_event_names() -> std::collections::BTreeSet<String> {
         "extension.prompt_submit_request",
         "extension.ready",
         "extension.restarting",
+        "extension.session_context_provider_register",
+        "extension.session_context_ready",
         "extension.skill_available",
         "extension.starting",
         "extension.exited",

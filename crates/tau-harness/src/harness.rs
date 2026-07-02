@@ -4819,6 +4819,10 @@ impl Harness {
         source_id: &str,
         ready: tau_proto::ExtensionSessionContextReady,
     ) -> Result<(), HarnessError> {
+        self.publish_event(
+            Some(source_id),
+            Event::ExtensionSessionContextReady(ready.clone()),
+        );
         self.handle_extension_session_context_ready(source_id, ready)
     }
 

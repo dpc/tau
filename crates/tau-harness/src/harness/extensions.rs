@@ -49,7 +49,8 @@ pub(super) struct ExtensionActivationStage {
     /// Interceptor registration received before `Ready`. Registration is a
     /// replacement, so only the latest staged message matters.
     pub(super) intercept: Option<tau_proto::Intercept>,
-    /// Session-init acknowledgements received before `Ready`, in wire order.
+    /// Per-agent context acknowledgements received before `Ready`, in wire
+    /// order.
     pub(super) context_ready_events: Vec<tau_proto::ExtensionContextReady>,
     /// Session-wide context acknowledgements received before `Ready`, in wire
     /// order.

@@ -1528,6 +1528,71 @@ fn agents_context_ready_staged_until_ready_and_queue_waits() {
     h.shutdown().expect("shutdown");
 }
 
+/// Ensures session-wide context acknowledgements remain observable first-party
+/// protocol events, preventing the harness from treating them only as private
+/// wait-state signals.
+#[test]
+fn session_context_ready_is_published_live() {
+    // Session-wide context acknowledgements are first-party protocol events, not
+    // just private wait-state signals. Subscribers must observe them when an
+    // extension finishes session skill/AGENTS.md refresh.
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = quiet_provider_harness(&sp).expect("start");
+    let conn_id = "conn-session-context-ready";
+    let _extension_sink = connect_handshaking_tool(&mut h, conn_id);
+    h.handle_extension_message(
+        conn_id,
+        TestMessage::Ready(tau_proto::Ready {
+            message: Some("ready".to_owned()),
+        }),
+    )
+    .expect("ready");
+    h.handle_extension_event(
+        conn_id,
+        TestProtocolItem::Event(Event::ExtensionSessionContextProviderRegister(
+            tau_proto::ExtensionSessionContextProviderRegister {},
+        )),
+    )
+    .expect("register session context provider");
+
+    let observer = connect_test_client(
+        &mut h,
+        "session-context-ready-observer",
+        tau_proto::ClientKind::Ui,
+    );
+    h.bus
+        .set_subscriptions(
+            "session-context-ready-observer",
+            vec![tau_proto::EventSelector::Exact(
+                tau_proto::EventName::EXTENSION_SESSION_CONTEXT_READY,
+            )],
+        )
+        .expect("subscribe to session context ready");
+
+    h.handle_extension_event(
+        conn_id,
+        TestProtocolItem::Event(Event::ExtensionSessionContextReady(
+            tau_proto::ExtensionSessionContextReady {
+                session_id: "s1".into(),
+            },
+        )),
+    )
+    .expect("session context ready");
+
+    assert!(event_log_contains_source_event(&h, conn_id, |event| {
+        matches!(event, Event::ExtensionSessionContextReady(ready) if ready.session_id == "s1")
+    }));
+    assert!(observer.lock().expect("observer").iter().any(|routed| {
+        matches!(
+            peel_inner_event(&routed.frame),
+            Some(Event::ExtensionSessionContextReady(ready)) if ready.session_id == "s1"
+        )
+    }));
+
+    h.shutdown().expect("shutdown");
+}
+
 #[test]
 fn interceptor_registration_is_staged_until_ready() {
     // Interception is an extension capability: before Ready, matching events

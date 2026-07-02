@@ -29,9 +29,10 @@ for control of the emit/intercept pipeline.
   critical and `always_show` notices remain visible. Current first-party kinds
   include `extension.config_error`, `extension.optional_skipped`,
   `extension.notice` for sanitized extension-authored notices,
-  `harness.failure`, `harness.internal_warning`, `harness.notice`,
-  `harness.replay_error`, `model.selection`, `skill.collision`, and
-  `ui.command_error`. Expected skill-name collisions are trace-level notices.
+  `harness.config_error`, `harness.failure`, `harness.internal_warning`,
+  `harness.notice`, `harness.replay_error`, `model.selection`,
+  `skill.collision`, and `ui.command_error`. Expected skill-name collisions are
+  trace-level notices.
   Extension-authored skill diagnostics are sanitized to `extension.notice`; add a
   first-party kind here only when the harness owns and preserves it.
 - **`harness.session_dir`** — Announces the current session directory for UIs
@@ -68,8 +69,10 @@ membership journal, not a transcript.
 - **`session.started`** — Must-pass immutable runtime lifecycle fact: the
   harness created or switched to a session. Carries `session_id` and a reason
   (`initial` startup, `new` via `/session new`, `resume` of an existing session).
-  Extensions react with per-session setup and reply with
-  `extension.context_ready`. Interceptors cannot drop or rewrite it.
+  Registered session context providers react with per-session setup and reply
+  with `extension.session_context_ready`; per-agent context providers react to
+  `session.agent_loaded` and reply with `extension.context_ready`. Interceptors
+  cannot drop or rewrite it.
 - **`session.shutdown`** — Must-pass immutable runtime lifecycle fact: the
   harness is leaving the current session, emitted before `session.started` for
   the next one. Extensions flush or drop per-session state. Interceptors cannot
