@@ -906,6 +906,8 @@ struct RawRoleGroup {
     disable_tools: Option<Vec<ToolName>>,
     #[serde(alias = "enableTools")]
     enable_tools: Option<Vec<ToolName>>,
+    #[serde(alias = "requiredSkills")]
+    required_skills: Option<Vec<tau_proto::SkillName>>,
     roles: IndexMap<String, AgentRolePatch>,
 }
 
@@ -964,6 +966,8 @@ struct AgentRolePatch {
     disable_tools: Option<Vec<ToolName>>,
     #[serde(alias = "enableTools")]
     enable_tools: Option<Vec<ToolName>>,
+    #[serde(alias = "requiredSkills")]
+    required_skills: Option<Vec<tau_proto::SkillName>>,
 }
 
 impl RawRoleGroup {
@@ -987,6 +991,7 @@ impl RawRoleGroup {
             enable_tool_groups: self.enable_tool_groups.clone(),
             disable_tools: self.disable_tools.clone(),
             enable_tools: self.enable_tools.clone(),
+            required_skills: self.required_skills.clone(),
         }
     }
 }
@@ -1371,6 +1376,14 @@ pub struct AgentRole {
     /// Internal tool names enabled last for this role.
     #[serde(default, skip_serializing_if = "Vec::is_empty", alias = "enableTools")]
     pub enable_tools: Vec<ToolName>,
+    /// Exact skill names that must be model-loadable before this role is
+    /// available. Group and role requirements are additive and de-duplicated.
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        alias = "requiredSkills"
+    )]
+    pub required_skills: Vec<tau_proto::SkillName>,
 }
 
 /// Automatic provider-side compaction policy for a harness role.
@@ -1445,6 +1458,13 @@ impl AgentRole {
         }
         if let Some(enable_tools) = &patch.enable_tools {
             self.enable_tools = enable_tools.clone();
+        }
+        if let Some(required_skills) = &patch.required_skills {
+            for skill in required_skills {
+                if !self.required_skills.contains(skill) {
+                    self.required_skills.push(skill.clone());
+                }
+            }
         }
     }
 }
@@ -1832,6 +1852,7 @@ fn normalize_role_config_keys(
     normalize_alias_key(map, "enableToolGroups", "enable_tool_groups", source, path)?;
     normalize_alias_key(map, "disableTools", "disable_tools", source, path)?;
     normalize_alias_key(map, "enableTools", "enable_tools", source, path)?;
+    normalize_alias_key(map, "requiredSkills", "required_skills", source, path)?;
     Ok(())
 }
 
@@ -2084,6 +2105,7 @@ fn canonical_role_key(key: &str) -> &str {
         "disableToolTags" => "disable_tool_tags",
         "enableTools" => "enable_tools",
         "disableTools" => "disable_tools",
+        "requiredSkills" => "required_skills",
         _ => key,
     }
 }

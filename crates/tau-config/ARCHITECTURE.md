@@ -66,7 +66,7 @@ array replacement:
 - Per-role overrides are applied after group defaults.
 - Role `order` is ordinary role metadata: lower values sort first within a
   group, with role name as the stable tie-breaker.
-- Prompt fragments are additive and de-duplicated.
+- Prompt fragments and required skill names are additive and de-duplicated.
 - Patch fields distinguish absent, explicit `null`, and concrete values. `null`
   clears nullable/scalar fields; replacement lists can be cleared with `[]`.
   `tools` is a nullable replacement list: `tools: null` clears an inherited

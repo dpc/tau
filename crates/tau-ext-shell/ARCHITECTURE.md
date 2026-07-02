@@ -104,6 +104,10 @@ as `$HOME/.config/agents/skills`, `$HOME/.config/agents.local/skills`, legacy
 `$HOME/.agents/skills`, and legacy `$HOME/.agents.local/skills`. The shell
 extension marks XDG user skill roots with higher source precedence than legacy
 user skill roots so duplicate user skill names prefer XDG before modified time.
+Because the shell extension registers as a session context provider, after it
+has sent the session-wide skill and AGENTS.md announcements for a
+`session.started` event, it emits `extension.session_context_ready` so the
+harness can safely run startup role required-skill validation.
 `tau-skills` deduplicates files found by this extension before announcement; the
 harness still owns skill-name validation at the protocol boundary, canonical
 winner selection among announced candidates from all sources, model/user

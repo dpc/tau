@@ -21,6 +21,8 @@ A role can set:
 - `enable_tool_groups`: tool groups added after role group disables
 - `disable_tools`: internal tools removed after role group changes
 - `enable_tools`: internal tools added last
+- `required_skills` / `requiredSkills`: exact skill names that must be
+  discoverable and model-loadable before the role is available
 
 System prompt templates receive `agent_id` when Tau dispatches a prompt for a
 concrete agent. Tau's built-in templates render it at the end in an "Agent
@@ -69,6 +71,7 @@ Roles live in `harness.yaml` under globally unique `role_groups`. Each group has
           tools: ["read", "grep"],
           enable_tool_groups: ["calendar", "email"],
           disable_tools: ["email_trash"],
+          requiredSkills: ["project-review-process"],
         },
         "staff-engineer": {
           order: 30,
@@ -94,7 +97,7 @@ Roles live in `harness.yaml` under globally unique `role_groups`. Each group has
 }
 ```
 
-Missing fields use group defaults first, then provider-published fallback knobs for the role's resolved model. Tools start from extension default enablement, then harness `tool_policy.rules` apply by provider/tool tags. Role overrides run afterward in broad-to-specific order: `disable_tool_tags`, `enable_tool_tags`, `disable_tool_groups`, `enable_tool_groups`, `disable_tools`, then `enable_tools`. `tools` remains an explicit role allow-list base when set. This order lets a role disable `shell:*` and keep `shell:cd`, or disable a group and keep one named tool. When `compaction` is omitted, Tau asks supported providers to use their model-specific compaction default. Set `enable: false` on a role in a higher-precedence config layer to remove it from the effective role list and role-group cycling after all layers merge.
+Missing fields use group defaults first, then provider-published fallback knobs for the role's resolved model. `required_skills` from groups and roles are additive and de-duplicated. After startup skill discovery, Tau disables any role whose required skills cannot be found by exact name, are hidden from model-side skill loading, or cannot be read; this emits a mandatory `harness.config_error` notice and removes the role from selection and delegation. If the selected/default startup role is disabled this way, startup fails clearly instead of falling back to another role. Tools start from extension default enablement, then harness `tool_policy.rules` apply by provider/tool tags. Role overrides run afterward in broad-to-specific order: `disable_tool_tags`, `enable_tool_tags`, `disable_tool_groups`, `enable_tool_groups`, `disable_tools`, then `enable_tools`. `tools` remains an explicit role allow-list base when set. This order lets a role disable `shell:*` and keep `shell:cd`, or disable a group and keep one named tool. When `compaction` is omitted, Tau asks supported providers to use their model-specific compaction default. Set `enable: false` on a role in a higher-precedence config layer to remove it from the effective role list and role-group cycling after all layers merge.
 
 Global harness policy is configured under `tool_policy.rules` keyed by stable rule name. Rules default to `enable: true`, can be disabled with `enable: false`, match when all `when.model_tags` patterns match the selected model, then run `disable_tool_tags` before `enable_tool_tags`. Rules sort by `priority` (default `0`, lower runs first) and then by rule name for ties. Tag patterns are exact (`shell:cd`) or terminal prefix wildcards (`shell:*`, `shell:edit:*`). Built-in rule `builtin.chatgpt-shell` matches `shell:chatgpt`, disables `shell:*`, and re-enables `shell:edit:apply_patch`, `shell:exec:shell_command`, `shell:cd`, and `shell:lock`. Rule names may contain dots; for CLI overrides, prefer the whole-map form such as `--harness-config 'tool_policy={rules: {builtin.chatgpt-shell: {enable: false}}}'` rather than dotted paths through the rule name.
 

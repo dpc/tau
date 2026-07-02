@@ -206,6 +206,7 @@ fn deterministic_provider_and_tool_complete_one_vertical_slice() {
                 | Event::ExtensionReady(_)
                 | Event::ProviderModelsUpdated(_)
                 | Event::ExtensionContextProviderRegister(_)
+                | Event::ExtensionSessionContextProviderRegister(_)
                 | Event::ExtPromptFragmentPublish(_) => {}
                 other => panic!("unexpected tool startup event: {other:?}"),
             },

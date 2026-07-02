@@ -242,8 +242,14 @@ impl EventName {
         Self::from_static(EventCategory::Extension, "agents_md_available");
     pub const EXTENSION_CONTEXT_PROVIDER_REGISTER: Self =
         Self::from_static(EventCategory::Extension, "context_provider_register");
+    pub const EXTENSION_SESSION_CONTEXT_PROVIDER_REGISTER: Self = Self::from_static(
+        EventCategory::Extension,
+        "session_context_provider_register",
+    );
     pub const EXTENSION_CONTEXT_READY: Self =
         Self::from_static(EventCategory::Extension, "context_ready");
+    pub const EXTENSION_SESSION_CONTEXT_READY: Self =
+        Self::from_static(EventCategory::Extension, "session_context_ready");
     pub const EXTENSION_AGENT_CONTEXT_PUBLISH: Self =
         Self::from_static(EventCategory::Extension, "agent_context_publish");
     pub const EXTENSION_PROMPT_FRAGMENT_PUBLISH: Self =

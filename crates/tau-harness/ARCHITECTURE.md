@@ -175,6 +175,21 @@ The harness owns canonical discovered-skill state. Extensions such as `tau-ext-s
 
 User `/skill <name> [args]` and `/skill:<name> [args]` expansion is performed at harness prompt intake for both existing-agent prompts and new-agent initial prompts. Unknown, invalid, unreadable, or non-user-invocable commands emit `harness.notice` and are not submitted as model prompts. Successful invocations read a bounded skill-file prefix, strip frontmatter, and store the expanded Pi-style `<skill>` block in the normal prompt transcript.
 
+Extensions that register with `extension.session_context_provider_register`,
+subscribe to `session.started`, and publish session-wide prompt context such as
+skills and AGENTS.md files must acknowledge completion with
+`extension.session_context_ready`; eager startup waits for that acknowledgement
+before considering startup discovery complete. Plain `session.started`
+subscribers and per-agent-only context providers are not waited on unless they
+explicitly register as session context providers. Role `required_skills`
+validation runs after that startup/session skill discovery has completed. The
+harness checks exact skill names against the selected model-visible skill
+winners and verifies that the winning source is loadable with the same bounded
+read/frontmatter rules as the `skill` tool. Roles with missing, hidden, or
+unreadable required skills are removed from role selection/delegation and get a
+mandatory replayable `harness.config_error` notice; if the selected/default
+startup role is removed, startup fails rather than falling back silently.
+
 ## Tool prompt-surface policy
 
 Extensions and providers publish metadata only: tools declare neutral `ToolTag`s

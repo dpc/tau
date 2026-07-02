@@ -223,6 +223,7 @@ role_groups:
         tools: [read, grep]
         enable_tool_groups: [calendar, email]
         disable_tools: [email_trash]
+        required_skills: [project-review-process]
       staff-engineer:
         order: 30
         description: Maximum-reasoning engineer
@@ -249,6 +250,11 @@ group-level fields apply as defaults to that group's roles; per-role
 an explicit token threshold, and can also use `tools`, `disable_tool_tags`,
 `enable_tool_tags`, `disable_tool_groups`, `enable_tool_groups`,
 `disable_tools`, and `enable_tools` to customize internal tool availability.
+`required_skills` (also accepted as `requiredSkills`) declares exact skill names
+that must be discoverable and model-loadable for a role; group and role
+requirements are additive. Missing required skills emit a mandatory configuration
+notice and disable the affected role. If the startup/default role is disabled by
+missing required skills, startup fails instead of silently choosing another role.
 Tools start from extension defaults, matching `tool_policy.rules` apply by tag,
 then role overrides run broad-to-specific: disable tags, enable tags, disable
 groups, enable groups, disable tools, enable tools. `tools` remains an explicit

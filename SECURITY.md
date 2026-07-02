@@ -149,9 +149,16 @@ Skills are prompt instructions loaded from local/project Markdown files, not a s
 
 Skill discovery is best-effort and resource-bounded. It reads only a bounded
 frontmatter prefix during session startup, skips and diagnoses skills whose
-frontmatter does not close inside that prefix, and skips symlinked skill roots
-plus all symlink entries inside skill roots so project-controlled roots cannot
-expand discovery into arbitrary or huge filesystem trees.
+frontmatter does not close inside that prefix, and follows symlinked skill roots
+and entries while tracking canonical directories to avoid recursion cycles.
+Project-controlled skill roots can therefore point discovery at other local
+skill files reachable by the user; do not treat skill discovery as a sandbox.
+
+Role `required_skills` is a fail-closed availability check, not a permission
+boundary. It only requires that exact skill names are discoverable and
+model-loadable before a role may be selected or delegated; it does not make
+skill content trusted, restrict filesystem access to the skill file, or grant
+tools mentioned by skill frontmatter.
 
 User `/skill` invocation explicitly reads the selected skill file, strips frontmatter, and injects the skill body into the next model prompt along with any user arguments. Treat invoking a skill as intentionally adding that local file content to the conversation context.
 

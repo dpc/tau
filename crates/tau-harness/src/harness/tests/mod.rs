@@ -1127,9 +1127,15 @@ fn echo_harness_with_dirs_and_start_reason(
     )?;
     h.agent_id_rng = super::deterministic_agent_id_rng();
     h.enable_echo_tool_for_tests();
-    // not let its startup context-provider registration defer unrelated prompt
-    // dispatch assertions; readiness-specific tests register providers directly.
+    // Keep the generic echo helper independent from the repository AGENTS.md
+    // files discovered by ext-shell from the test process cwd. Readiness and
+    // AGENTS.md injection tests add their own deterministic context directly.
+    h.discovered_agents_files.clear();
+    // Do not let shell's startup context-provider registration defer unrelated
+    // prompt dispatch assertions; readiness-specific tests register providers
+    // directly.
     h.agent_context_providers.clear();
+    h.session_context_providers.clear();
     h.pending_agent_context_ready.clear();
     Ok(h)
 }

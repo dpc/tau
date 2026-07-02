@@ -309,20 +309,21 @@ fn action_invoke(invocation_id: &str, action_id: &str, directory: &str) -> Event
 /// messages are filtered out by the test-side `EventReader` wrapper.
 fn drain_startup(reader: &mut EventReader<BufReader<UnixStream>>) {
     for expected in [
-        EventName::TOOL_REGISTER,                       // echo
-        EventName::TOOL_REGISTER,                       // read
-        EventName::TOOL_REGISTER,                       // edit
-        EventName::TOOL_REGISTER,                       // apply_patch
-        EventName::TOOL_REGISTER,                       // dir_lock
-        EventName::TOOL_REGISTER,                       // grep
-        EventName::TOOL_REGISTER,                       // find
-        EventName::TOOL_REGISTER,                       // ls
-        EventName::TOOL_REGISTER,                       // cd
-        EventName::TOOL_REGISTER,                       // shell
-        EventName::TOOL_REGISTER,                       // gpt_shell
-        EventName::EXTENSION_CONTEXT_PROVIDER_REGISTER, // shell cwd context
-        EventName::EXTENSION_PROMPT_FRAGMENT_PUBLISH,   // shell.cwd
-        EventName::ACTION_SCHEMA_PUBLISHED,             // shell-dir-force-unlock
+        EventName::TOOL_REGISTER,                               // echo
+        EventName::TOOL_REGISTER,                               // read
+        EventName::TOOL_REGISTER,                               // edit
+        EventName::TOOL_REGISTER,                               // apply_patch
+        EventName::TOOL_REGISTER,                               // dir_lock
+        EventName::TOOL_REGISTER,                               // grep
+        EventName::TOOL_REGISTER,                               // find
+        EventName::TOOL_REGISTER,                               // ls
+        EventName::TOOL_REGISTER,                               // cd
+        EventName::TOOL_REGISTER,                               // shell
+        EventName::TOOL_REGISTER,                               // gpt_shell
+        EventName::EXTENSION_CONTEXT_PROVIDER_REGISTER,         // shell cwd context
+        EventName::EXTENSION_SESSION_CONTEXT_PROVIDER_REGISTER, // session skills/AGENTS.md
+        EventName::EXTENSION_PROMPT_FRAGMENT_PUBLISH,           // shell.cwd
+        EventName::ACTION_SCHEMA_PUBLISHED,                     // shell-dir-force-unlock
     ] {
         let event = reader
             .read_event()
@@ -568,7 +569,7 @@ fn startup_publishes_shell_dir_force_unlock_action() {
     let (mut reader, mut writer) = spawn_extension();
 
     let mut found_schema = false;
-    for _ in 0..14 {
+    for _ in 0..15 {
         let event = reader
             .read_event()
             .expect("read")

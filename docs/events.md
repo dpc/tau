@@ -274,11 +274,17 @@ harness/agent.
 - **`extension.agents_md_available`** — The extension discovered an
   AGENTS.md file and is shipping its contents eagerly so the harness
   can inject them without a tool round-trip.
-- **`extension.context_provider_register`** — The extension registers a named
-  context provider that can publish agent/session context updates.
+- **`extension.context_provider_register`** — The extension registers as a
+  per-agent context provider that can publish context after
+  `session.agent_loaded` and acknowledge with `extension.context_ready`.
+- **`extension.session_context_provider_register`** — The extension registers as
+  a session-wide context provider that can publish context after
+  `session.started` and acknowledge with `extension.session_context_ready`.
 - **`extension.context_ready`** — The extension finished publishing
-  refreshed prompt context for one session (the reply to
-  `session.started`).
+  refreshed prompt context for one loaded agent.
+- **`extension.session_context_ready`** — A registered session context provider
+  finished publishing refreshed session-wide context such as skills and
+  AGENTS.md files after `session.started`.
 - **`extension.agent_context_publish`** — The extension publishes context for a
   particular agent/session context provider slot.
 - **`extension.prompt_fragment_publish`** — The extension publishes a prompt

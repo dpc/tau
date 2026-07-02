@@ -16,9 +16,9 @@ use std::time::{Duration, Instant};
 use tau_proto::{
     ActionError, ActionInvoke, ActionOutput, ActionResult, AgentContextKey, AgentContextValue,
     CborValue, Event, ExtAgentContextPublish, ExtPromptFragmentPublish, ExtensionContextReady,
-    HarnessInputMessage, PeerInputReader, PeerOutputWriter, PromptContent, PromptFragment,
-    PromptPriority, SessionAgentLoaded, SessionStarted, ToolCancelled, ToolExample,
-    ToolExampleSelector, ToolResult, ToolResultKind, ToolSpec, ToolTag,
+    ExtensionSessionContextReady, HarnessInputMessage, PeerInputReader, PeerOutputWriter,
+    PromptContent, PromptFragment, PromptPriority, SessionAgentLoaded, SessionStarted,
+    ToolCancelled, ToolExample, ToolExampleSelector, ToolResult, ToolResultKind, ToolSpec, ToolTag,
 };
 use tracing::{debug, trace};
 
@@ -627,6 +627,9 @@ where
     }
     handshake = handshake.announce_event(Event::ExtensionContextProviderRegister(
         tau_proto::ExtensionContextProviderRegister {},
+    ));
+    handshake = handshake.announce_event(Event::ExtensionSessionContextProviderRegister(
+        tau_proto::ExtensionSessionContextProviderRegister {},
     ));
     handshake
         .announce_event(Event::ExtPromptFragmentPublish(ExtPromptFragmentPublish {
@@ -1606,9 +1609,13 @@ fn dispatch_cancellable_shell_tool(params: CancellableShellDispatch<'_>) {
 }
 
 fn dispatch_session_started(started: SessionStarted, tx: &mpsc::Sender<HarnessInputMessage>) {
+    let session_id = started.session_id.clone();
     for event in build_session_started_events(started) {
         let _ = tx.send(HarnessInputMessage::emit(event));
     }
+    let _ = tx.send(HarnessInputMessage::emit(
+        Event::ExtensionSessionContextReady(ExtensionSessionContextReady { session_id }),
+    ));
 }
 
 fn apply_started_cwd_metadata(

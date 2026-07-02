@@ -565,6 +565,14 @@ struct SourcedToolPromptFragment {
     fragment: PromptFragment,
 }
 
+/// User-facing explanation recorded for a configured role disabled because one
+/// or more required skills are not available.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct DisabledRoleReason {
+    /// Complete diagnostic message already suitable for a UI notice.
+    message: String,
+}
+
 fn sorted_tool_prompt_fragments(
     fragments: impl IntoIterator<Item = SourcedToolPromptFragment>,
 ) -> Vec<ToolPromptFragment> {
@@ -1477,6 +1485,8 @@ pub struct Harness {
     pub(crate) pending_provider_prompts: HashMap<AgentPromptId, tau_proto::ConnectionId>,
     /// Available agent roles.
     pub(crate) available_roles: std::collections::HashMap<String, tau_config::settings::AgentRole>,
+    /// Configured roles disabled because their required skills are unavailable.
+    disabled_role_reasons: HashMap<String, DisabledRoleReason>,
     /// Ordered role navigation groups for the currently available roles.
     pub(crate) available_role_groups: Vec<tau_proto::HarnessRoleGroup>,
     /// Reusable prompt templates from the effective startup harness settings.
@@ -1528,6 +1538,9 @@ pub struct Harness {
     /// Extensions that explicitly registered as per-agent prompt-context
     /// providers.
     pub(crate) agent_context_providers: HashSet<tau_proto::ConnectionId>,
+    /// Extensions that explicitly registered as session-wide prompt-context
+    /// providers.
+    pub(crate) session_context_providers: HashSet<tau_proto::ConnectionId>,
     /// Per-agent context providers still expected to acknowledge the latest
     /// `session.agent_loaded` before that agent's first prompt can dispatch.
     pub(crate) pending_agent_context_ready:
@@ -2018,6 +2031,7 @@ impl Harness {
             provider_model_routes: HashMap::new(),
             pending_provider_prompts: HashMap::new(),
             available_roles: parts.available_roles,
+            disabled_role_reasons: HashMap::new(),
             available_role_groups: parts.available_role_groups,
             custom_prompts: parts.custom_prompts,
             role_overrides: parts.role_overrides,
@@ -2036,6 +2050,7 @@ impl Harness {
             discovered_agents_files: Vec::new(),
             agent_context: AgentContextStore::default(),
             agent_context_providers: HashSet::new(),
+            session_context_providers: HashSet::new(),
             pending_agent_context_ready: HashMap::new(),
             extension_prompt_fragments: BTreeMap::new(),
             system_prompt_templates: parts.system_prompt_templates,
@@ -2249,6 +2264,7 @@ impl Harness {
         // init is wasted work. It isn't. Please resist the urge.
         harness.start_session_init(eager_session_id.into(), launch.reason);
         harness.wait_for_session_init()?;
+        harness.ensure_selected_role_available_after_required_skill_validation()?;
         Ok(harness)
     }
 
@@ -2329,6 +2345,11 @@ impl Harness {
         harness.start_session_init(eager_session_id.into(), launch.reason);
         tracing::debug!(target: "tau_harness::startup", elapsed_ms = startup.started_at.elapsed().as_millis(), "session init started");
         if let Err(error) = harness.wait_for_session_init() {
+            harness.send_startup_disconnect_to_initial_client(initial_client_id.as_ref(), &error);
+            return Err(error);
+        }
+        if let Err(error) = harness.ensure_selected_role_available_after_required_skill_validation()
+        {
             harness.send_startup_disconnect_to_initial_client(initial_client_id.as_ref(), &error);
             return Err(error);
         }
@@ -3870,6 +3891,24 @@ impl Harness {
         Ok(())
     }
 
+    fn ensure_selected_role_available_after_required_skill_validation(
+        &self,
+    ) -> Result<(), HarnessError> {
+        if self.available_roles.contains_key(&self.selected_role) {
+            return Ok(());
+        }
+        if let Some(reason) = self.disabled_role_reasons.get(&self.selected_role) {
+            return Err(HarnessError::Participant(format!(
+                "{}; selected/default role is unavailable",
+                reason.message
+            )));
+        }
+        Err(HarnessError::Participant(format!(
+            "selected/default role `{}` is unavailable",
+            self.selected_role
+        )))
+    }
+
     /// Drives the event loop until every configured extension reaches
     /// `ExtensionState::Ready`. Replaces the old `wait_for_startup(n)`:
     /// state transitions are tracked per-extension so the same predicate
@@ -4483,6 +4522,11 @@ impl Harness {
             .agent_context_provider_registered = true;
     }
 
+    fn stage_session_context_provider_register(&mut self, source_id: &str) {
+        self.extension_activation_stage_mut(source_id)
+            .session_context_provider_registered = true;
+    }
+
     fn stage_agent_context_publish(
         &mut self,
         source_id: &str,
@@ -4514,6 +4558,16 @@ impl Harness {
     ) {
         self.extension_activation_stage_mut(source_id)
             .context_ready_events
+            .push(ready);
+    }
+
+    fn stage_extension_session_context_ready(
+        &mut self,
+        source_id: &str,
+        ready: tau_proto::ExtensionSessionContextReady,
+    ) {
+        self.extension_activation_stage_mut(source_id)
+            .session_context_ready_events
             .push(ready);
     }
 
@@ -4718,6 +4772,17 @@ impl Harness {
         );
     }
 
+    fn register_session_context_provider(&mut self, source_id: &str) {
+        self.session_context_providers
+            .insert(tau_proto::ConnectionId::from(source_id));
+        self.publish_event(
+            Some(source_id),
+            Event::ExtensionSessionContextProviderRegister(
+                tau_proto::ExtensionSessionContextProviderRegister {},
+            ),
+        );
+    }
+
     fn publish_agent_context_publish(
         &mut self,
         source_id: &str,
@@ -4749,15 +4814,24 @@ impl Harness {
         self.handle_extension_context_ready(source_id, ready)
     }
 
+    fn publish_extension_session_context_ready(
+        &mut self,
+        source_id: &str,
+        ready: tau_proto::ExtensionSessionContextReady,
+    ) -> Result<(), HarnessError> {
+        self.handle_extension_session_context_ready(source_id, ready)
+    }
+
     fn activate_staged_extension_capabilities(
         &mut self,
         source_id: &str,
     ) -> (
         Vec<tau_proto::ExtensionContextReady>,
+        Vec<tau_proto::ExtensionSessionContextReady>,
         Vec<tau_proto::StartAgentRequest>,
     ) {
         let Some(stage) = self.extensions.activation_staging.remove(source_id) else {
-            return (Vec::new(), Vec::new());
+            return (Vec::new(), Vec::new(), Vec::new());
         };
         if let Some(intercept) = stage.intercept {
             self.register_extension_interceptor(source_id, intercept);
@@ -4780,6 +4854,9 @@ impl Harness {
         if stage.agent_context_provider_registered {
             self.register_agent_context_provider(source_id);
         }
+        if stage.session_context_provider_registered {
+            self.register_session_context_provider(source_id);
+        }
         for publish in stage.agent_context_publishes {
             self.publish_agent_context_publish(source_id, publish);
         }
@@ -4792,7 +4869,11 @@ impl Harness {
         for staged in stage.emitted_events {
             self.enqueue_publish(Some(source_id), staged.event, staged.transient, false, None);
         }
-        (stage.context_ready_events, stage.agent_queries)
+        (
+            stage.context_ready_events,
+            stage.session_context_ready_events,
+            stage.agent_queries,
+        )
     }
 
     fn handle_extension_message(
@@ -4864,12 +4945,15 @@ impl Harness {
                 }
             }
             HarnessInputMessage::Ready(_ready) => {
-                let (context_ready_events, agent_queries) =
+                let (context_ready_events, session_context_ready_events, agent_queries) =
                     self.activate_staged_extension_capabilities(source_id);
                 self.set_extension_state(source_id, ExtensionState::Ready);
                 self.emit_extension_ready(source_id);
                 for ready in context_ready_events {
                     self.publish_extension_context_ready(source_id, ready)?;
+                }
+                for ready in session_context_ready_events {
+                    self.publish_extension_session_context_ready(source_id, ready)?;
                 }
                 for query in agent_queries {
                     self.handle_start_agent_request(source_id, query)?;
@@ -5314,11 +5398,27 @@ impl Harness {
                 }
                 Ok(None)
             }
+            Event::ExtensionSessionContextProviderRegister(_) => {
+                if self.should_stage_extension_capabilities(source_id) {
+                    self.stage_session_context_provider_register(source_id);
+                } else {
+                    self.register_session_context_provider(source_id);
+                }
+                Ok(None)
+            }
             Event::ExtensionContextReady(ready) => {
                 if self.should_stage_extension_capabilities(source_id) {
                     self.stage_extension_context_ready(source_id, ready);
                 } else {
                     self.publish_extension_context_ready(source_id, ready)?;
+                }
+                Ok(None)
+            }
+            Event::ExtensionSessionContextReady(ready) => {
+                if self.should_stage_extension_capabilities(source_id) {
+                    self.stage_extension_session_context_ready(source_id, ready);
+                } else {
+                    self.publish_extension_session_context_ready(source_id, ready)?;
                 }
                 Ok(None)
             }
@@ -5702,11 +5802,16 @@ impl Harness {
         select: tau_proto::UiRoleSelect,
     ) -> Result<bool, HarnessError> {
         if !self.available_roles.contains_key(&select.role) {
+            let message = self
+                .disabled_role_reasons
+                .get(&select.role)
+                .map(|reason| reason.message.clone())
+                .unwrap_or_else(|| format!("unknown role: {}", select.role));
             self.publish_event(
                 None,
                 Event::HarnessNotice(tau_proto::HarnessNotice {
                     kind: tau_proto::notice_kind::UI_COMMAND_ERROR.to_owned(),
-                    message: format!("unknown role: {}", select.role),
+                    message,
                     level: tau_proto::NoticeLevel::Info,
                     always_show: false,
                 }),
@@ -5787,6 +5892,13 @@ impl Harness {
         &mut self,
         req: tau_proto::UiRoleUpdate,
     ) -> Result<bool, HarnessError> {
+        if let Some(reason) = self.disabled_role_reasons.get(&req.role) {
+            self.emit_info(&format!(
+                "/role: role `{}` is disabled by configuration: {}",
+                req.role, reason.message
+            ));
+            return Ok(true);
+        }
         let mut selected_role_changed = false;
         let selected_was_empty = self.selected_model.is_none();
         match req.action {
@@ -6016,7 +6128,12 @@ impl Harness {
             return Ok(true);
         }
         if !self.available_roles.contains_key(&req.role) {
-            self.emit_info(&format!("unknown role `{}`", req.role));
+            let message = self
+                .disabled_role_reasons
+                .get(&req.role)
+                .map(|reason| reason.message.clone())
+                .unwrap_or_else(|| format!("unknown role `{}`", req.role));
+            self.emit_info(&message);
             return Ok(true);
         }
         if let Err(error) = self.validate_initial_agent_metadata(&req.metadata) {
@@ -6617,6 +6734,7 @@ impl Harness {
         self.extension_prompt_fragments.remove(&disconnected);
         self.agent_context.remove_contributor(&disconnected);
         self.agent_context_providers.remove(&disconnected);
+        self.session_context_providers.remove(&disconnected);
         self.pending_agent_context_ready.retain(|_, waiting_on| {
             waiting_on.remove(&disconnected);
             !waiting_on.is_empty()
@@ -7710,7 +7828,14 @@ impl Harness {
     }
 
     fn session_init_provider_ids(&self) -> std::collections::HashSet<tau_proto::ConnectionId> {
-        HashSet::new()
+        let event = Event::SessionStarted(tau_proto::SessionStarted {
+            session_id: self.current_session_id.clone(),
+            reason: self.current_session_start_reason,
+        });
+        self.tool_connections_subscribed_to(&event)
+            .into_iter()
+            .filter(|connection_id| self.session_context_providers.contains(connection_id))
+            .collect()
     }
 
     fn agent_context_provider_ids(
@@ -7810,6 +7935,12 @@ impl Harness {
             "agent_start requires default role `senior-engineer`, but it is not available"
         } else if self.available_roles.contains_key(requested) {
             "requested role is not backed by an available model"
+        } else if let Some(reason) = self.disabled_role_reasons.get(requested) {
+            return Err(format!(
+                "requested role is disabled by configuration: {}; {}",
+                reason.message,
+                self.available_delegate_roles_message()
+            ));
         } else {
             "requested role does not exist"
         };
@@ -9581,6 +9712,36 @@ impl Harness {
         Ok(())
     }
 
+    fn handle_extension_session_context_ready(
+        &mut self,
+        source_id: &str,
+        ready: tau_proto::ExtensionSessionContextReady,
+    ) -> Result<(), HarnessError> {
+        if ready.session_id != self.current_session_id {
+            return Ok(());
+        }
+        let source_id = tau_proto::ConnectionId::from(source_id);
+        let completed_session = match &mut self.turn_state {
+            TurnState::InitializingSession {
+                session_id,
+                reason,
+                waiting_on,
+            } => {
+                let removed = waiting_on.remove(&source_id);
+                if removed && waiting_on.is_empty() {
+                    Some((session_id.clone(), *reason))
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        };
+        if let Some((session_id, reason)) = completed_session {
+            self.complete_session_init(session_id, reason)?;
+        }
+        Ok(())
+    }
+
     fn maybe_complete_session_init_for_disconnect(&mut self, connection_id: &str) {
         let completed_session = match &mut self.turn_state {
             TurnState::InitializingSession {
@@ -9606,6 +9767,110 @@ impl Harness {
         }
     }
 
+    fn required_skill_unavailable_reason(
+        &self,
+        skill_name: &tau_proto::SkillName,
+    ) -> Option<String> {
+        if let Some(message) = tau_skills::skill_name_validation_message(skill_name.as_str()) {
+            return Some(format!("`{skill_name}` has invalid skill name: {message}"));
+        }
+        let Some(skill) = self.discovered_skills.get(skill_name) else {
+            return Some(format!("`{skill_name}` is not discovered"));
+        };
+        if skill.disable_model_invocation {
+            return Some(format!(
+                "`{skill_name}` is hidden from model-side skill loading"
+            ));
+        }
+        if let Err(error) = user_skill_invocation::read_user_invoked_skill_body(&skill.source) {
+            return Some(format!(
+                "`{skill_name}` could not be loaded from {}: {error}",
+                skill.source.label()
+            ));
+        }
+        None
+    }
+
+    fn unavailable_required_skills(&self, role: &tau_config::settings::AgentRole) -> Vec<String> {
+        role.required_skills
+            .iter()
+            .filter_map(|skill| self.required_skill_unavailable_reason(skill))
+            .collect()
+    }
+
+    fn format_required_skill_role_notice(role_name: &str, reasons: &[String]) -> String {
+        let reason_text = reasons.join("; ");
+        format!(
+            "role `{role_name}` disabled: required skill(s) unavailable: {reason_text}; \
+             install/fix the required skill(s) or remove them from `required_skills`/`requiredSkills`"
+        )
+    }
+
+    fn enforce_required_role_skills(&mut self) -> Result<(), HarnessError> {
+        let disabled = self
+            .available_roles
+            .iter()
+            .filter_map(|(role_name, role)| {
+                let reasons = self.unavailable_required_skills(role);
+                (!reasons.is_empty()).then(|| {
+                    (
+                        role_name.clone(),
+                        Self::format_required_skill_role_notice(role_name, &reasons),
+                    )
+                })
+            })
+            .collect::<Vec<_>>();
+        if disabled.is_empty() {
+            return Ok(());
+        }
+
+        let selected_role = self.selected_role.clone();
+        let mut selected_role_error = None;
+        for (role_name, message) in disabled {
+            self.available_roles.remove(&role_name);
+            self.role_overrides.remove(&role_name);
+            self.disabled_role_reasons.insert(
+                role_name.clone(),
+                DisabledRoleReason {
+                    message: message.clone(),
+                },
+            );
+            self.emit_notice(
+                tau_proto::notice_kind::HARNESS_CONFIG_ERROR,
+                tau_proto::NoticeLevel::Warning,
+                true,
+                &message,
+            );
+            if role_name == selected_role {
+                selected_role_error = Some(message);
+            }
+        }
+        self.publish_event(
+            None,
+            Event::HarnessRolesAvailable(tau_proto::HarnessRolesAvailable {
+                roles: role_infos(
+                    &self.provider_model_info,
+                    &self.available_roles,
+                    &self.available_models,
+                ),
+                groups: self.current_role_groups(),
+                custom_prompts: self.custom_prompts.clone(),
+            }),
+        );
+        self.publish_delegate_roles_context();
+        if let Some(message) = selected_role_error {
+            return Err(HarnessError::Participant(format!(
+                "{message}; selected/default role is unavailable"
+            )));
+        }
+        if self.available_roles.is_empty() {
+            return Err(HarnessError::Participant(
+                "no roles remain enabled after required skill validation".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
     fn complete_session_init(
         &mut self,
         session_id: SessionId,
@@ -9614,6 +9879,7 @@ impl Harness {
         // AGENTS.md and skill context is agent-scoped. Session init only waits
         // for discovery; the discovered context is injected when a durable agent
         // is explicitly created from the UI's current role/cwd state.
+        self.enforce_required_role_skills()?;
         self.initialized_sessions.insert(session_id.clone());
         // Catch up before repair: repair appends its synthetic tool errors to
         // the durable log as it publishes them live, so running it first

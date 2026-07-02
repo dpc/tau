@@ -38,6 +38,9 @@ pub(super) struct ExtensionActivationStage {
     /// Whether the extension registered as an agent context provider before
     /// `Ready`.
     pub(super) agent_context_provider_registered: bool,
+    /// Whether the extension registered as a session context provider before
+    /// `Ready`.
+    pub(super) session_context_provider_registered: bool,
     /// Agent context publishes received before `Ready`, in wire order.
     pub(super) agent_context_publishes: Vec<tau_proto::ExtAgentContextPublish>,
     /// Extension-level prompt fragments received before `Ready`, keyed by name
@@ -48,6 +51,9 @@ pub(super) struct ExtensionActivationStage {
     pub(super) intercept: Option<tau_proto::Intercept>,
     /// Session-init acknowledgements received before `Ready`, in wire order.
     pub(super) context_ready_events: Vec<tau_proto::ExtensionContextReady>,
+    /// Session-wide context acknowledgements received before `Ready`, in wire
+    /// order.
+    pub(super) session_context_ready_events: Vec<tau_proto::ExtensionSessionContextReady>,
     /// Extension-started agent queries received before `Ready`, in wire order.
     pub(super) agent_queries: Vec<tau_proto::StartAgentRequest>,
     /// Generic extension emits/events withheld until `Ready`.

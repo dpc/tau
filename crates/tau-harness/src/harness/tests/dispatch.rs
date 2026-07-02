@@ -4693,7 +4693,7 @@ fn ui_tree_root_navigation_persists_across_resume() {
     let agent_id: tau_proto::AgentId;
 
     {
-        let mut h = echo_harness(&sp).expect("start");
+        let mut h = quiet_provider_harness(&sp).expect("start");
         append_user_message_via_event(&mut h, "s1", "first prompt");
         let cid = ensure_test_user_agent(&mut h);
         agent_id = durable_agent_id_for_conversation(&h, &cid);
@@ -4724,7 +4724,7 @@ fn ui_tree_root_navigation_persists_across_resume() {
 
     {
         let mut h =
-            echo_harness_with_start_reason("s1", &sp, tau_proto::SessionStartReason::Resume)
+            quiet_provider_harness_with_start_reason(&sp, tau_proto::SessionStartReason::Resume)
                 .expect("resume");
         let cid = ensure_test_user_agent(&mut h);
         assert_eq!(h.agents[&cid].head, None);
@@ -4750,7 +4750,7 @@ fn resume_keeps_prompt_appended_after_root_rewind_as_head() {
     let replacement_node: tau_core::NodeId;
 
     {
-        let mut h = echo_harness(&sp).expect("start");
+        let mut h = quiet_provider_harness(&sp).expect("start");
         append_user_message_via_event(&mut h, "s1", "first prompt");
         let cid = ensure_test_user_agent(&mut h);
         let agent_id = durable_agent_id_for_conversation(&h, &cid);
@@ -4773,7 +4773,7 @@ fn resume_keeps_prompt_appended_after_root_rewind_as_head() {
 
     {
         let mut h =
-            echo_harness_with_start_reason("s1", &sp, tau_proto::SessionStartReason::Resume)
+            quiet_provider_harness_with_start_reason(&sp, tau_proto::SessionStartReason::Resume)
                 .expect("resume");
         let cid = ensure_test_user_agent(&mut h);
         assert_eq!(h.agents[&cid].head, Some(replacement_node));
@@ -4798,7 +4798,7 @@ fn resume_keeps_prompt_appended_after_anchor_rewind_as_head() {
     let replacement_node: tau_core::NodeId;
 
     {
-        let mut h = echo_harness(&sp).expect("start");
+        let mut h = quiet_provider_harness(&sp).expect("start");
         let cid = ensure_test_user_agent(&mut h);
         let agent_id = durable_agent_id_for_conversation(&h, &cid);
 
@@ -4831,7 +4831,7 @@ fn resume_keeps_prompt_appended_after_anchor_rewind_as_head() {
 
     {
         let mut h =
-            echo_harness_with_start_reason("s1", &sp, tau_proto::SessionStartReason::Resume)
+            quiet_provider_harness_with_start_reason(&sp, tau_proto::SessionStartReason::Resume)
                 .expect("resume");
         let cid = ensure_test_user_agent(&mut h);
         assert_eq!(h.agents[&cid].head, Some(replacement_node));

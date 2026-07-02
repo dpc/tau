@@ -34,7 +34,9 @@
 # 200000 }` for an explicit token threshold.
 # Per-role `prompt_fragments` add instructions only for that role.
 # `prompt_override` selects a system prompt template. `tools` and `disable_tools`
-# customize internal tool availability for the role.
+# customize internal tool availability for the role. `required_skills` /
+# `requiredSkills` declares exact skills that must be model-loadable or the role
+# is disabled with a configuration notice.
 # role_groups:
 #   engineer:
 #     prompt_fragments:
@@ -52,6 +54,7 @@
 #         compaction: { threshold: 200000 }
 #         tools: [read, grep]
 #         disable_tools: [shell]
+#         required_skills: [project-review-process]
 #       staff-engineer:
 #         order: 30
 #         effort: xhigh

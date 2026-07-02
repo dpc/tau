@@ -599,6 +599,7 @@ fn harness_file_alias_table_normalizes_all_legacy_keys() {
                 "enableToolGroups": [],
                 "disableTools": [],
                 "enableTools": [],
+                "requiredSkills": [],
                 "roles": {
                     "senior-engineer": {
                         "enabled": true,
@@ -612,6 +613,7 @@ fn harness_file_alias_table_normalizes_all_legacy_keys() {
                         "enableToolGroups": [],
                         "disableTools": [],
                         "enableTools": [],
+                        "requiredSkills": [],
                     }
                 }
             }
@@ -644,6 +646,7 @@ fn harness_file_alias_table_normalizes_all_legacy_keys() {
         "enable_tool_groups",
         "disable_tools",
         "enable_tools",
+        "required_skills",
     ] {
         assert!(group.get(key).is_some(), "missing group key {key}");
         assert!(
@@ -712,6 +715,10 @@ fn harness_cli_alias_table_normalizes_all_legacy_keys() {
             "role_groups.engineer.disable_tools",
         ),
         (
+            "roleGroups.engineer.requiredSkills",
+            "role_groups.engineer.required_skills",
+        ),
+        (
             "roleGroups.engineer.roles.senior-engineer.enabled",
             "role_groups.engineer.roles.senior-engineer.enable",
         ),
@@ -754,6 +761,10 @@ fn harness_cli_alias_table_normalizes_all_legacy_keys() {
         (
             "roleGroups.engineer.roles.senior-engineer.disableTools",
             "role_groups.engineer.roles.senior-engineer.disable_tools",
+        ),
+        (
+            "roleGroups.engineer.roles.senior-engineer.requiredSkills",
+            "role_groups.engineer.roles.senior-engineer.required_skills",
         ),
     ];
 
@@ -1482,6 +1493,90 @@ fn harness_role_group_defaults_apply_to_existing_roles_when_adding_role() {
     assert_eq!(
         settings.roles["custom"].disable_tools,
         vec![tau_proto::ToolName::new("shell")]
+    );
+}
+
+/// Ensures required role skills are parsed from snake_case and camelCase,
+/// inherited from role groups, and de-duplicated so duplicate group/role
+/// requirements do not produce noisy repeated diagnostics later.
+#[test]
+fn harness_role_required_skills_are_additive_and_deduped() {
+    let td = TempDir::new().expect("tempdir");
+    let dir = td.path();
+    std::fs::write(
+        dir.join("harness.yaml"),
+        r#"
+        role_groups:
+          engineer:
+            required_skills: [group-skill, shared-skill]
+            roles:
+              reviewer:
+                requiredSkills: [role-skill, shared-skill]
+              implementer: {}
+        "#,
+    )
+    .expect("write");
+
+    let settings = load_harness_settings_in(&dirs_with_config(dir)).expect("load");
+
+    assert_eq!(
+        settings.roles["reviewer"].required_skills,
+        vec![
+            tau_proto::SkillName::from("group-skill"),
+            tau_proto::SkillName::from("shared-skill"),
+            tau_proto::SkillName::from("role-skill"),
+        ]
+    );
+    assert_eq!(
+        settings.roles["implementer"].required_skills,
+        vec![
+            tau_proto::SkillName::from("group-skill"),
+            tau_proto::SkillName::from("shared-skill"),
+        ]
+    );
+}
+
+/// Ensures higher-precedence layers add required skills instead of replacing
+/// lower-precedence requirements. Required skills are fail-closed role
+/// prerequisites, so partial overrides must not accidentally erase them.
+#[test]
+fn harness_role_required_skills_accumulate_across_layers() {
+    let td = TempDir::new().expect("tempdir");
+    let dir = td.path();
+    std::fs::write(
+        dir.join("harness.yaml"),
+        r#"
+        role_groups:
+          custom:
+            roles:
+              reviewer:
+                required_skills: [base-skill]
+        "#,
+    )
+    .expect("write base");
+    std::fs::create_dir_all(dir.join("harness.d")).expect("mkdir dropins");
+    std::fs::write(
+        dir.join("harness.d/10-extra.yaml"),
+        r#"
+        role_groups:
+          custom:
+            required_skills: [group-extra]
+            roles:
+              reviewer:
+                required_skills: [role-extra, base-skill]
+        "#,
+    )
+    .expect("write dropin");
+
+    let settings = load_harness_settings_in(&dirs_with_config(dir)).expect("load");
+
+    assert_eq!(
+        settings.roles["reviewer"].required_skills,
+        vec![
+            tau_proto::SkillName::from("base-skill"),
+            tau_proto::SkillName::from("group-extra"),
+            tau_proto::SkillName::from("role-extra"),
+        ]
     );
 }
 

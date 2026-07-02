@@ -1134,6 +1134,252 @@ fn harness_startup_errors_when_no_roles_are_enabled() {
     );
 }
 
+/// Ensures a non-selected role with a missing required skill is removed from
+/// selectable/delegatable role state and surfaced as a mandatory configuration
+/// notice instead of letting an agent best-effort without its role skill.
+#[test]
+fn missing_required_skill_disables_role_and_emits_notice() {
+    let td = TempDir::new().expect("tempdir");
+    let config_dir = td.path().join("config");
+    let state_dir = td.path().join("state");
+    std::fs::create_dir_all(&config_dir).expect("mkdir config");
+    std::fs::create_dir_all(&state_dir).expect("mkdir state");
+    let dirs = tau_config::settings::TauDirs {
+        config_dir: Some(config_dir.clone()),
+        state_dir: Some(state_dir.clone()),
+    };
+
+    std::fs::write(
+        config_dir.join("harness.yaml"),
+        r#"
+        role_groups:
+          custom:
+            roles:
+              reviewer:
+                required_skills: [missing-review-skill]
+        "#,
+    )
+    .expect("write harness config");
+
+    let h = echo_harness_with_dirs("s1", state_dir, dirs).expect("harness");
+
+    assert!(!h.available_roles.contains_key("reviewer"));
+    assert!(
+        h.disabled_role_reasons.contains_key("reviewer"),
+        "disabled role reason should be retained for later UI/delegation errors"
+    );
+    let message = find_mandatory_warning_notice(&h, "role `reviewer` disabled")
+        .expect("expected required-skill warning notice");
+    assert!(message.contains("`missing-review-skill` is not discovered"));
+    assert!(message.contains("required_skills"));
+}
+
+/// Ensures an explicitly selected startup role cannot silently fall back when a
+/// required skill is missing. This protects specialized roles such as reviewers
+/// from continuing without their mandatory review-process skill.
+#[test]
+fn selected_role_missing_required_skill_fails_startup() {
+    let td = TempDir::new().expect("tempdir");
+    let config_dir = td.path().join("config");
+    let state_dir = td.path().join("state");
+    std::fs::create_dir_all(&config_dir).expect("mkdir config");
+    std::fs::create_dir_all(&state_dir).expect("mkdir state");
+    let dirs = tau_config::settings::TauDirs {
+        config_dir: Some(config_dir.clone()),
+        state_dir: Some(state_dir.clone()),
+    };
+
+    std::fs::write(
+        config_dir.join("harness.yaml"),
+        r#"
+        default_role: reviewer
+        role_groups:
+          custom:
+            roles:
+              reviewer:
+                requiredSkills: [missing-review-skill]
+        "#,
+    )
+    .expect("write harness config");
+
+    let error = match echo_harness_with_dirs("s1", state_dir, dirs) {
+        Ok(_) => panic!("selected role with missing skill should fail startup"),
+        Err(error) => error,
+    };
+
+    assert!(
+        error.to_string().contains("role `reviewer` disabled")
+            && error
+                .to_string()
+                .contains("selected/default role is unavailable"),
+        "error should explain the disabled selected role, got: {error}"
+    );
+}
+
+/// Ensures exact-name required skills accept model-loadable built-in skills so
+/// startup validation does not depend on project skill discovery when the
+/// requirement is already available in the harness.
+#[test]
+fn available_required_skill_keeps_role_enabled() {
+    let td = TempDir::new().expect("tempdir");
+    let config_dir = td.path().join("config");
+    let state_dir = td.path().join("state");
+    std::fs::create_dir_all(&config_dir).expect("mkdir config");
+    std::fs::create_dir_all(&state_dir).expect("mkdir state");
+    let dirs = tau_config::settings::TauDirs {
+        config_dir: Some(config_dir.clone()),
+        state_dir: Some(state_dir.clone()),
+    };
+
+    std::fs::write(
+        config_dir.join("harness.yaml"),
+        r#"
+        role_groups:
+          custom:
+            roles:
+              reviewer:
+                required_skills: [tau-self-knowledge-config]
+        "#,
+    )
+    .expect("write harness config");
+
+    let h = echo_harness_with_dirs("s1", state_dir, dirs).expect("harness");
+
+    assert!(h.available_roles.contains_key("reviewer"));
+    assert!(!h.disabled_role_reasons.contains_key("reviewer"));
+}
+
+fn delayed_skill_runner(
+    reader: std::os::unix::net::UnixStream,
+    writer: std::os::unix::net::UnixStream,
+) -> Result<(), String> {
+    let mut reader = tau_proto::PeerInputReader::new(std::io::BufReader::new(reader));
+    let mut writer = tau_proto::PeerOutputWriter::new(std::io::BufWriter::new(writer));
+    writer
+        .write_message(&tau_proto::HarnessInputMessage::Hello(tau_proto::Hello {
+            protocol_version: tau_proto::PROTOCOL_VERSION,
+            client_name: "delayed-skill".into(),
+            client_kind: tau_proto::ClientKind::Tool,
+        }))
+        .map_err(|error| error.to_string())?;
+    writer
+        .write_message(&tau_proto::HarnessInputMessage::Subscribe(
+            tau_proto::Subscribe {
+                selectors: vec![tau_proto::EventSelector::Exact(
+                    tau_proto::EventName::SESSION_STARTED,
+                )],
+            },
+        ))
+        .map_err(|error| error.to_string())?;
+    writer
+        .write_message(&tau_proto::HarnessInputMessage::emit(
+            Event::ExtensionContextProviderRegister(tau_proto::ExtensionContextProviderRegister {}),
+        ))
+        .map_err(|error| error.to_string())?;
+    writer
+        .write_message(&tau_proto::HarnessInputMessage::emit(
+            Event::ExtensionSessionContextProviderRegister(
+                tau_proto::ExtensionSessionContextProviderRegister {},
+            ),
+        ))
+        .map_err(|error| error.to_string())?;
+    writer
+        .write_message(&tau_proto::HarnessInputMessage::Ready(tau_proto::Ready {
+            message: None,
+        }))
+        .map_err(|error| error.to_string())?;
+    writer.flush().map_err(|error| error.to_string())?;
+
+    while let Some(message) = reader.read_message().map_err(|error| error.to_string())? {
+        let tau_proto::HarnessOutputMessage::Deliver(delivery) = message else {
+            continue;
+        };
+        let Event::SessionStarted(started) = *delivery.event else {
+            continue;
+        };
+        let skill_path = std::env::temp_dir().join(format!(
+            "tau-delayed-required-skill-{}-{}.md",
+            std::process::id(),
+            started.session_id.as_str()
+        ));
+        std::fs::write(
+            &skill_path,
+            "---\nname: delayed-required-skill\ndescription: Delayed required skill\n---\nbody\n",
+        )
+        .map_err(|error| error.to_string())?;
+        writer
+            .write_message(&tau_proto::HarnessInputMessage::emit(
+                Event::ExtSkillAvailable(tau_proto::ExtSkillAvailable {
+                    name: "delayed-required-skill".into(),
+                    description: "Delayed required skill".to_owned(),
+                    file_path: skill_path,
+                    add_to_prompt: false,
+                    user_invocable: true,
+                    disable_model_invocation: false,
+                    argument_hint: None,
+                }),
+            ))
+            .map_err(|error| error.to_string())?;
+        writer
+            .write_message(&tau_proto::HarnessInputMessage::emit(
+                Event::ExtensionSessionContextReady(tau_proto::ExtensionSessionContextReady {
+                    session_id: started.session_id,
+                }),
+            ))
+            .map_err(|error| error.to_string())?;
+        writer.flush().map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
+/// Ensures startup waits for registered context providers to acknowledge
+/// session-wide skill discovery before validating required skills. Without
+/// this, ordinary extension-discovered filesystem skills would be reported
+/// missing because validation would run immediately after publishing
+/// `session.started`.
+#[test]
+fn required_skill_validation_waits_for_session_skill_discovery() {
+    let td = TempDir::new().expect("tempdir");
+    let config_dir = td.path().join("config");
+    let state_dir = td.path().join("state");
+    std::fs::create_dir_all(&config_dir).expect("mkdir config");
+    std::fs::create_dir_all(&state_dir).expect("mkdir state");
+    let dirs = tau_config::settings::TauDirs {
+        config_dir: Some(config_dir.clone()),
+        state_dir: Some(state_dir.join("runtime")),
+    };
+
+    std::fs::write(
+        config_dir.join("harness.yaml"),
+        r#"
+        default_role: reviewer
+        role_groups:
+          custom:
+            roles:
+              reviewer:
+                required_skills: [delayed-required-skill]
+        "#,
+    )
+    .expect("write harness config");
+
+    let h = Harness::new_with_provider(
+        state_dir,
+        dirs,
+        echo_runner,
+        vec![crate::harness::InProcessTool {
+            name: "delayed-skill",
+            runner: delayed_skill_runner,
+        }],
+        "s1",
+        tau_proto::SessionStartReason::Initial,
+        tau_core::SessionPersistenceMode::Durable,
+    )
+    .expect("harness should wait for delayed skill and keep reviewer enabled");
+
+    assert!(h.available_roles.contains_key("reviewer"));
+    assert_eq!(h.selected_role, "reviewer");
+}
+
 /// A misspelled startup default must be visible instead of silently selecting a
 /// different role. The harness falls back to the first configured role so users
 /// still get a usable session.

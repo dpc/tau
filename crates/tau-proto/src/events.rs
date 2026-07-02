@@ -1746,6 +1746,12 @@ pub struct ExtAgentsMdAvailable {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ExtensionContextProviderRegister {}
 
+/// An extension declares that it will publish session-wide prompt context after
+/// each matching `session.started` event and acknowledge completion with
+/// `extension.session_context_ready`.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ExtensionSessionContextProviderRegister {}
+
 /// An extension finished broadcasting refreshed prompt context for one agent.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ExtensionContextReady {
@@ -1753,6 +1759,14 @@ pub struct ExtensionContextReady {
     pub session_id: SessionId,
     /// Agent whose context contributions are complete for now.
     pub agent_id: AgentId,
+}
+
+/// An extension finished broadcasting refreshed session-wide context such as
+/// skills and AGENTS.md files after a `session.started` notification.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ExtensionSessionContextReady {
+    /// Session whose session-wide context is complete for now.
+    pub session_id: SessionId,
 }
 
 /// Arbitrary JSON value published by an extension for one agent context key.
@@ -3372,8 +3386,12 @@ pub enum Event {
     ExtAgentsMdAvailable(ExtAgentsMdAvailable),
     #[serde(rename = "extension.context_provider_register")]
     ExtensionContextProviderRegister(ExtensionContextProviderRegister),
+    #[serde(rename = "extension.session_context_provider_register")]
+    ExtensionSessionContextProviderRegister(ExtensionSessionContextProviderRegister),
     #[serde(rename = "extension.context_ready")]
     ExtensionContextReady(ExtensionContextReady),
+    #[serde(rename = "extension.session_context_ready")]
+    ExtensionSessionContextReady(ExtensionSessionContextReady),
     #[serde(rename = "extension.agent_context_publish")]
     ExtAgentContextPublish(ExtAgentContextPublish),
     #[serde(rename = "extension.prompt_fragment_publish")]
@@ -3604,7 +3622,11 @@ impl Event {
             Self::ExtensionContextProviderRegister(_) => {
                 EventName::EXTENSION_CONTEXT_PROVIDER_REGISTER
             }
+            Self::ExtensionSessionContextProviderRegister(_) => {
+                EventName::EXTENSION_SESSION_CONTEXT_PROVIDER_REGISTER
+            }
             Self::ExtensionContextReady(_) => EventName::EXTENSION_CONTEXT_READY,
+            Self::ExtensionSessionContextReady(_) => EventName::EXTENSION_SESSION_CONTEXT_READY,
             Self::ExtAgentContextPublish(_) => EventName::EXTENSION_AGENT_CONTEXT_PUBLISH,
             Self::ExtPromptFragmentPublish(_) => EventName::EXTENSION_PROMPT_FRAGMENT_PUBLISH,
             Self::ExtPromptSubmitRequest(_) => EventName::EXTENSION_PROMPT_SUBMIT_REQUEST,
@@ -3744,6 +3766,7 @@ impl Event {
                 | Self::ActionInvoke(_)
                 | Self::ActionResult(_)
                 | Self::ActionError(_)
+                | Self::ExtensionSessionContextReady(_)
                 | Self::ShellCommandProgress(_)
                 | Self::UiPromptSubmitted(_)
                 | Self::AgentPromptQueued(_)
