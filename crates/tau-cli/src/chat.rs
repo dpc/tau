@@ -754,10 +754,10 @@ fn cycle_role_in_groups(
     groups: &[tau_proto::HarnessRoleGroup],
     alternate: bool,
     print_local: &impl Fn(&str),
-) {
+) -> Option<String> {
     if groups.is_empty() {
         print_local("cycle-role: no agent roles are available yet");
-        return;
+        return None;
     }
     let current = current_role_state.lock().ok().and_then(|role| role.clone());
     let mut memory = role_group_memory
@@ -767,16 +767,18 @@ fn cycle_role_in_groups(
     remember_group_role(&mut memory, groups, current.as_deref());
     let Some(next) = next_role_in_groups(current.as_deref(), groups, alternate, &memory) else {
         print_local("cycle-role: no agent roles are available yet");
-        return;
+        return None;
     };
     remember_group_role(&mut memory, groups, Some(&next));
     if let Ok(mut shared_memory) = role_group_memory.lock() {
         *shared_memory = memory;
     }
+    let selected = next.clone();
     let _ = send_event(
         writer,
         &Event::UiRoleSelect(tau_proto::UiRoleSelect { role: next }),
     );
+    Some(selected)
 }
 
 fn remember_group_role(
@@ -829,14 +831,14 @@ fn cycle_role(
     current_role_state: &Arc<Mutex<Option<String>>>,
     roles_available: &Arc<Mutex<Vec<String>>>,
     print_local: &impl Fn(&str),
-) {
+) -> Option<String> {
     let roles = match roles_available.lock() {
         Ok(roles) => roles.clone(),
         Err(_) => Vec::new(),
     };
     if roles.is_empty() {
         print_local("cycle-role: no agent roles are available yet");
-        return;
+        return None;
     }
     let current = current_role_state.lock().ok().and_then(|role| role.clone());
     let next = match current
@@ -846,10 +848,12 @@ fn cycle_role(
         Some(index) => roles[(index + 1) % roles.len()].clone(),
         None => roles[0].clone(),
     };
+    let selected = next.clone();
     let _ = send_event(
         writer,
         &Event::UiRoleSelect(tau_proto::UiRoleSelect { role: next }),
     );
+    Some(selected)
 }
 
 /// Debounce period for `UiPromptDraft` emission while the user is
@@ -874,7 +878,10 @@ const BUILTIN_SLASH_COMMANDS: &[(&str, &str)] = &[
         "Switch selected agent model (e.g. /model openai/gpt-5)",
     ),
     ("/agent", "Manage visible/suspended agent transcripts"),
-    ("/new", "Alias for /agent new"),
+    (
+        "/new",
+        "Start a new agent, optionally with a role (`/new reviewer`)",
+    ),
     ("/name", "Alias for /agent name on the selected agent"),
     (
         "/ephemeral",
@@ -1828,6 +1835,11 @@ enum CommandOutcome {
     Exit(InputLoopExit),
 }
 
+enum NewAliasCommandEffect<'a> {
+    StartNewAgent { role: Option<&'a str> },
+    Usage(&'static str),
+}
+
 trait RecordedLineHandlers {
     fn handle_known_command(&mut self, text: &str) -> Result<CommandOutcome, CliError>;
     fn handle_dynamic_action(&mut self, text: &str) -> CommandOutcome;
@@ -1852,6 +1864,8 @@ struct TerminalInputSession<'a> {
 /// One-shot options staged while the UI is in new-agent mode.
 #[derive(Default)]
 struct PendingNewAgentOptions {
+    /// Optional role override for the next created agent.
+    role: Option<String>,
     /// Optional model override for the next created agent.
     model: Option<tau_proto::ModelId>,
     /// Whether the next created agent should be memory-only.
@@ -1859,6 +1873,18 @@ struct PendingNewAgentOptions {
 }
 
 impl PendingNewAgentOptions {
+    fn stage_role(&mut self, role: impl Into<String>) {
+        self.role = Some(role.into());
+    }
+
+    fn take_role(&mut self) -> Option<String> {
+        self.role.take()
+    }
+
+    fn clear_role(&mut self) {
+        self.role = None;
+    }
+
     fn apply_model_selection(
         &mut self,
         session_id: &str,
@@ -1872,12 +1898,12 @@ impl PendingNewAgentOptions {
                 model,
             ))
         } else {
-            self.stage(model);
+            self.stage_model(model);
             None
         }
     }
 
-    fn stage(&mut self, model: tau_proto::ModelId) {
+    fn stage_model(&mut self, model: tau_proto::ModelId) {
         self.model = Some(model);
     }
 
@@ -1898,9 +1924,44 @@ impl PendingNewAgentOptions {
     }
 
     fn clear(&mut self) {
+        self.role = None;
         self.model = None;
         self.ephemeral = false;
     }
+}
+
+fn new_alias_role(text: &str) -> Result<Option<&str>, &'static str> {
+    let rest = text.strip_prefix("/new").unwrap_or("").trim();
+    let mut parts = rest.split_whitespace();
+    let role = parts.next();
+    if parts.next().is_some() {
+        return Err("/new [role]");
+    }
+    Ok(role)
+}
+
+fn new_alias_command_effect(text: &str) -> NewAliasCommandEffect<'_> {
+    match new_alias_role(text) {
+        Ok(role) => NewAliasCommandEffect::StartNewAgent { role },
+        Err(usage) => NewAliasCommandEffect::Usage(usage),
+    }
+}
+
+fn stage_role_selection_for_new_agent(
+    pending: &mut PendingNewAgentOptions,
+    has_selected_agent: bool,
+    event: &Event,
+) {
+    if has_selected_agent {
+        return;
+    }
+    if let Event::UiRoleSelect(select) = event {
+        pending.stage_role(select.role.clone());
+    }
+}
+
+fn take_new_agent_role(pending: &mut PendingNewAgentOptions, current_role: String) -> String {
+    pending.take_role().unwrap_or(current_role)
 }
 
 fn tree_command_event(
@@ -2489,7 +2550,13 @@ impl<'a> TerminalInputSession<'a> {
             return;
         }
         match subcommand {
-            "new" => self.handle_agent_new(target),
+            "new" => {
+                if target.is_some() {
+                    self.output.system_info("/agent new");
+                } else {
+                    self.handle_agent_new(None);
+                }
+            }
             "switch" => self.handle_agent_switch(target),
             "suspend" => self.handle_agent_suspend(target),
             "resume" => self.handle_agent_resume(target),
@@ -2550,11 +2617,10 @@ impl<'a> TerminalInputSession<'a> {
     }
 
     fn handle_new_alias(&mut self, text: &str) {
-        if text.trim() != "/new" {
-            self.output.system_info("/new");
-            return;
+        match new_alias_command_effect(text) {
+            NewAliasCommandEffect::StartNewAgent { role } => self.handle_agent_new(role),
+            NewAliasCommandEffect::Usage(usage) => self.output.system_info(usage),
         }
-        self.handle_agent_new(None);
     }
 
     fn handle_suspend_alias(&self, text: &str) {
@@ -2577,10 +2643,17 @@ impl<'a> TerminalInputSession<'a> {
         self.ctx.routing.selected_agent_id()
     }
 
-    fn handle_agent_new(&mut self, target: Option<&str>) {
-        if target.is_some() {
-            self.output.system_info("/agent new");
-            return;
+    fn handle_agent_new(&mut self, role: Option<&str>) {
+        if let Some(role) = role {
+            self.pending_new_agent_options.stage_role(role);
+            let _ = send_event(
+                self.writer,
+                &Event::UiRoleSelect(tau_proto::UiRoleSelect {
+                    role: role.to_owned(),
+                }),
+            );
+        } else {
+            self.pending_new_agent_options.clear_role();
         }
         self.clear_selected_agent();
     }
@@ -2642,8 +2715,7 @@ impl<'a> TerminalInputSession<'a> {
 
     fn handle_role_selection_command(&mut self, text: &str) -> bool {
         if text == "/role" || text.starts_with("/role ") {
-            let output = &self.output;
-            handle_role_command(text, self.writer, &|message| output.system_info(message));
+            self.handle_role_command(text);
             return true;
         }
         if let Some(model) = text.strip_prefix("/model ") {
@@ -2673,6 +2745,25 @@ impl<'a> TerminalInputSession<'a> {
         }
 
         false
+    }
+
+    fn handle_role_command(&mut self, text: &str) {
+        let rest = text.strip_prefix("/role").unwrap_or("").trim();
+        match crate::ui_commands::parse_role_command(rest) {
+            Ok(Some(event)) => {
+                let has_selected_agent = self.selected_agent_id().is_some();
+                stage_role_selection_for_new_agent(
+                    &mut self.pending_new_agent_options,
+                    has_selected_agent,
+                    &event,
+                );
+                let _ = send_event(self.writer, &event);
+            }
+            Ok(None) => self.output.system_info(
+                "/role <role> [delete|model|effort|verbosity|thinking-summary|service-tier|compaction-threshold|tools|enable-tool-groups|disable-tool-groups|enable-tools|disable-tools] [value]",
+            ),
+            Err(error) => self.output.system_info(&error),
+        }
     }
 
     fn handle_dynamic_action(&self, text: &str) -> CommandOutcome {
@@ -2765,13 +2856,14 @@ impl<'a> TerminalInputSession<'a> {
                 ctx_id: None,
             })
         } else {
-            let role = self
+            let current_role = self
                 .ctx
                 .current_role_state
                 .lock()
                 .ok()
                 .and_then(|role| role.clone())
                 .unwrap_or_else(|| DEFAULT_AGENT_ROLE.to_owned());
+            let role = take_new_agent_role(&mut self.pending_new_agent_options, current_role);
             let model_override = self.pending_new_agent_options.take_model();
             let ephemeral = self.pending_new_agent_options.take_ephemeral();
             create_user_agent_prompt(
@@ -2890,7 +2982,7 @@ impl<'a> TerminalInputSession<'a> {
         }
     }
 
-    fn cycle_role_group(&self) {
+    fn cycle_role_group(&mut self) {
         if self.agent_is_selected() {
             return;
         }
@@ -2901,13 +2993,13 @@ impl<'a> TerminalInputSession<'a> {
             .lock()
             .map(|groups| groups.clone())
             .unwrap_or_default();
-        if groups.is_empty() {
+        let selected = if groups.is_empty() {
             cycle_role(
                 self.writer,
                 &self.ctx.current_role_state,
                 &self.ctx.roles_available,
                 &|message| output.system_info(message),
-            );
+            )
         } else {
             cycle_role_in_groups(
                 self.writer,
@@ -2916,7 +3008,10 @@ impl<'a> TerminalInputSession<'a> {
                 &groups,
                 false,
                 &|message| output.system_info(message),
-            );
+            )
+        };
+        if let Some(role) = selected {
+            self.pending_new_agent_options.stage_role(role);
         }
     }
 
@@ -2924,7 +3019,7 @@ impl<'a> TerminalInputSession<'a> {
         !self.ctx.routing.role_cycling_enabled()
     }
 
-    fn cycle_role_inner(&self) {
+    fn cycle_role_inner(&mut self) {
         if self.agent_is_selected() {
             return;
         }
@@ -2938,14 +3033,16 @@ impl<'a> TerminalInputSession<'a> {
         if groups.is_empty() {
             return;
         }
-        cycle_role_in_groups(
+        if let Some(role) = cycle_role_in_groups(
             self.writer,
             &self.ctx.current_role_state,
             &self.ctx.role_group_memory,
             &groups,
             true,
             &|message| output.system_info(message),
-        );
+        ) {
+            self.pending_new_agent_options.stage_role(role);
+        }
     }
 }
 
@@ -3479,21 +3576,6 @@ fn handle_set_command(
         name: name.to_owned(),
         value: value.to_owned(),
     });
-}
-
-fn handle_role_command(text: &str, writer: &WriterHandle, print_local: &impl Fn(&str)) {
-    let rest = text.strip_prefix("/role").unwrap_or("").trim();
-    match crate::ui_commands::parse_role_command(rest) {
-        Ok(None) => {
-            print_local(
-                "/role <role> [delete|model|effort|verbosity|thinking-summary|service-tier|compaction-threshold|tools|enable-tool-groups|disable-tool-groups|enable-tools|disable-tools] [value]",
-            );
-        }
-        Ok(Some(event)) => {
-            let _ = send_event(writer, &event);
-        }
-        Err(error) => print_local(&error),
-    }
 }
 
 fn run_provider_auth(provider: &str, print_local: &impl Fn(&str)) {

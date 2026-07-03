@@ -277,8 +277,10 @@ settings for the current process only. See
 [`docs/agent-roles.md`](docs/agent-roles.md).
 
 In the UI: `/role engineer effort medium`, `/role engineer verbosity low`,
-`/role engineer thinking-summary concise`. Tab cycles roles within the current
-group; Shift-Tab cycles to the next configured role group.
+`/role engineer thinking-summary concise`. Use `/new reviewer` to clear the
+current agent selection and have the next new agent start with `reviewer`. Tab
+cycles roles within the current group; Shift-Tab cycles to the next configured
+role group.
 Model knobs are slash-command-only today. Asking for an unsupported
 level (e.g. `effort xhigh` on a mini model, `verbosity high` on a provider
 that doesn't support it) degrades and surfaces a `harness.notice` diagnostic rather
@@ -589,6 +591,7 @@ Type `/` for menu autocompletion. The built-in set:
 | `/detach`           | Leave the UI, keep the harness running for reattach  |
 | `/session new`      | Close the current session and start a fresh session |
 | `/agent new`        | Clear this UI's selected agent; next untargeted prompt mints a new agent |
+| `/new [role]`       | Shortcut for new-agent mode; optional role selects the next new agent role |
 | `/ephemeral [on\|off]` | After `/new`, toggle or set whether the next new agent is memory-only |
 | `/agent switch <id>` | Switch this UI to a known loaded-agent transcript (`none` clears selection) |
 | `/agent suspend [id]` | Hide a loaded agent from this UI's active choices until resumed |
@@ -612,10 +615,10 @@ the selected agent normally.
 A session is an agent-membership container backed by a durable membership log.
 Starting a new session resets harness/UI session state; prompts create/load
 agents whose transcripts are stored under `<state_dir>/agents/<agent_id>/`. The
-"current agent" selection is local to each attached UI: `/agent new`, `/agent
-switch`, `/agent suspend`, `/agent resume`, `/agent name`, `/name`, `/suspend`,
-and `/resume` do not synchronize selection or hidden-agent preferences to other
-UIs.
+"current agent" selection is local to each attached UI: `/new`, `/agent new`,
+`/agent switch`, `/agent suspend`, `/agent resume`, `/agent name`, `/name`,
+`/suspend`, and `/resume` do not synchronize selection or hidden-agent
+preferences to other UIs.
 
 `/agent switch` completion lists active agents so suspended transcripts stay out
 of normal prompt-routing choices. If you explicitly type a known suspended agent
@@ -881,8 +884,8 @@ Use `tau --ephemeral` for a non-resumable live session that does not leave
 session directories or session logs behind. Agent histories are still durable,
 so use a separate agent mode (not this flag) if you need non-persistent agents.
 
-Use `/new` followed by `/ephemeral on` (or bare `/ephemeral` to toggle) before
-the first prompt to create an
+Use `/new` (optionally `/new <role>`) followed by `/ephemeral on` (or bare
+`/ephemeral` to toggle) before the first prompt to create an
 ephemeral agent. Ephemeral agents keep normal live behavior, can be reattached to
 while the same daemon is running, and compose with staged `/model`, but their
 agent transcript and session membership are memory-only and disappear on daemon

@@ -111,7 +111,17 @@ Tau ships built-in `junior-engineer`, `senior-engineer`, `staff-engineer`, and `
 
 Use `/role <role>`.
 
-`/role` completion lists roles. Each completion description shows the currently resolved model and role settings, and appends the configured role `description` when present. `/model <provider>/<model>` switches the model for the currently selected agent without changing the role. After `/new`, when no current agent is selected yet, `/model <provider>/<model>` stages a one-shot override for the next agent created by the first prompt.
+`/role` completion lists roles. Each completion description shows the currently
+resolved model and role settings, and appends the configured role `description`
+when present. `/new <role>` also completes roles; it clears the current agent
+selection and makes the next prompt create a new agent with that role. Later
+no-agent role selections such as `/role <role>` or role cycling supersede the
+role named in `/new <role>`.
+
+`/model <provider>/<model>` switches the model for the currently selected agent
+without changing the role. After `/new`, when no current agent is selected yet,
+`/model <provider>/<model>` stages a one-shot override for the next agent
+created by the first prompt.
 
 
 ## Editing roles

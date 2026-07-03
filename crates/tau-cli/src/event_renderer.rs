@@ -5221,6 +5221,12 @@ impl EventRenderer {
             .collect();
         self.completion_data
             .set_arg_completions(tau_cli_term::CommandName::new("/prompt"), prompt_items);
+        let new_agent_role_items = role_items
+            .iter()
+            .map(|(item, _)| item.clone())
+            .collect::<Vec<_>>();
+        self.completion_data
+            .set_arg_completions(tau_cli_term::CommandName::new("/new"), new_agent_role_items);
         self.role_defaults = role_defaults;
         if self.current_role.is_some() && self.model_status_block.is_some() {
             self.render_model_status();

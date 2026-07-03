@@ -4096,6 +4096,46 @@ fn role_default_knobs_are_hidden_and_overrides_follow_role() {
     assert!(vt.screen_contains(80, "&s2 +engineer ~high"));
 }
 
+/// Role availability should feed `/new` argument completion as well as
+/// `/role`, because `/new <role>` is the fast path for opening a fresh
+/// no-agent input target that will create the next agent with that role.
+#[test]
+fn new_command_completes_available_roles() {
+    let (_term, handle, _vt) = setup(80, 24);
+    let completion_data = tau_cli_term::CompletionData::new();
+    let mut renderer = EventRenderer::new(handle, completion_data.clone(), cli_test_theme());
+
+    renderer.handle(&Event::HarnessRolesAvailable(HarnessRolesAvailable {
+        roles: vec![
+            HarnessRoleInfo {
+                name: "engineer".to_owned(),
+                description: "write production code".to_owned(),
+                role_description: None,
+                details: None,
+            },
+            HarnessRoleInfo {
+                name: "reviewer".to_owned(),
+                description: "review code changes".to_owned(),
+                role_description: None,
+                details: None,
+            },
+        ],
+        groups: Vec::new(),
+        custom_prompts: Vec::new(),
+    }));
+
+    let candidates = tau_cli_term::completion::build_candidates(
+        &[tau_cli_term::SlashCommand::new("/new", "new agent")],
+        &completion_data,
+        "/new rev",
+        "/new rev".len(),
+    );
+
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(candidates[0].label, "reviewer");
+    assert_eq!(candidates[0].replacement, "/new reviewer");
+}
+
 #[test]
 fn role_state_overrides_are_compared_to_role_baseline() {
     let (_term, handle, vt) = setup(80, 24);
