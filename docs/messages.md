@@ -35,7 +35,9 @@ is done.
   connection.
 - **`subscribe`** *(peer → harness)* — A peer declares which delivered events it
   wants to receive, as a list of selectors (exact name or prefix). Without a
-  subscription, only directed traffic reaches the peer.
+  subscription, only directed traffic reaches the peer. Prefer exact selectors
+  listing the concrete events the peer handles; prefix selectors should be used
+  only for intentionally generic observers that really need the whole category.
 - **`intercept`** *(peer → harness)* — A peer asks to receive matching event
   emissions before they hit the event log, with a priority. Lower priority runs
   first; each interceptor replies with `intercept_reply` to pass, rewrite, or

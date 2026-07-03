@@ -15,6 +15,14 @@ private file and directory permissions where supported, and enforces per-file an
 per-directory-list quotas. Quota failures are returned to extensions as
 `quota_exceeded` extension-data errors.
 
+Event subscriptions are also a data-exposure and resource boundary. Peers should
+subscribe to exact event names by default so new protocol events do not
+silently expand live delivery, replay catch-up, high-volume traffic, or access to
+sensitive/contentful payloads. Prefix/category subscriptions should be reserved
+for intentionally generic observers that truly need the entire category; changes
+to subscribers must consider replay behavior, payload size/frequency, and whether
+the selected events carry prompt, tool, provider, or extension-provided content.
+
 These quotas bound individual file writes, file reads, and directory listing
 work performed by the harness. They do not bound aggregate per-extension disk
 usage across many files, sandbox arbitrary extension code, or prevent protocol

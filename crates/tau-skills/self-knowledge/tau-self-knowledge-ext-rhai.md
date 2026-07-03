@@ -68,7 +68,7 @@ fn on_intercept(event, transient) {
 }
 ```
 
-`init(config)` is optional. Missing `init` or unit/no-op return means no subscriptions, no intercepts, and the default ready message. `subscribe` uses selector maps with `kind: "exact"` or `kind: "prefix"`. Multiple `intercept` entries are allowed only when they share the same priority; their selectors are merged into one registration because the harness supports one interceptor registration per extension connection.
+`init(config)` is optional. Missing `init` or unit/no-op return means no subscriptions, no intercepts, and the default ready message. `subscribe` uses selector maps with `kind: "exact"` or `kind: "prefix"`. Prefer exact subscription selectors that list the events the script actually handles; prefix subscriptions are only for scripts intentionally observing a whole event category and can increase replay catch-up, traffic, and data exposure. Multiple `intercept` entries are allowed only when they share the same priority; their selectors are merged into one registration because the harness supports one interceptor registration per extension connection.
 
 `start(config)` is optional and runs once after `init` succeeds, subscriptions/intercepts are sent, `Ready` is sent, and host functions are registered. Use it for startup side effects such as `tau_info`; callback errors are reported as transient warning `harness.notice` diagnostics without disabling the extension.
 

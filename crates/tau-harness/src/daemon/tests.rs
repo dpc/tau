@@ -8,6 +8,31 @@ use tempfile::TempDir;
 use super::*;
 use crate::harness::Harness;
 
+/// Ensures the synchronous daemon-message helper subscribes only to the
+/// concrete trace events it consumes, instead of receiving every future event
+/// in broad protocol categories.
+#[test]
+fn daemon_message_trace_subscription_uses_no_prefix_selectors() {
+    let selectors = daemon_message_event_selectors();
+
+    let expected = [
+        EventName::AGENT_PROMPT_CREATED,
+        EventName::PROVIDER_RESPONSE_FINISHED,
+        EventName::TOOL_PROGRESS,
+        EventName::SHELL_COMMAND_PROGRESS,
+        EventName::HARNESS_NOTICE,
+        EventName::EXTENSION_STARTING,
+        EventName::EXTENSION_READY,
+        EventName::EXTENSION_EXITED,
+        EventName::EXTENSION_RESTARTING,
+    ]
+    .into_iter()
+    .map(EventSelector::Exact)
+    .collect::<Vec<_>>();
+
+    assert_eq!(selectors, expected);
+}
+
 /// Ensures startup failures are reported to the initial UI through the Tau
 /// protocol, rather than requiring the UI to scrape harness stderr logs.
 #[test]

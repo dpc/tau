@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use std::{fmt, io, thread};
 
 use tau_proto::{
-    ClientKind, ConnectionId, Disconnect, Event, EventSelector, HarnessInputMessage,
+    ClientKind, ConnectionId, Disconnect, Event, EventName, EventSelector, HarnessInputMessage,
     HarnessOutputMessage, HarnessOutputWriter, Hello, PROTOCOL_VERSION, Subscribe, UiCreateAgent,
 };
 use tau_socket::{SocketListener, SocketPeer, SocketReceive};
@@ -536,14 +536,18 @@ fn connect_daemon_message_peer(
 }
 
 fn daemon_message_event_selectors() -> Vec<EventSelector> {
+    use EventName as E;
+
     vec![
-        EventSelector::Prefix("agent.".to_owned()),
-        EventSelector::Prefix("provider.".to_owned()),
-        EventSelector::Prefix("session.".to_owned()),
-        EventSelector::Prefix("tool.".to_owned()),
-        EventSelector::Prefix("shell.".to_owned()),
-        EventSelector::Prefix("extension.".to_owned()),
-        EventSelector::Prefix("harness.".to_owned()),
+        EventSelector::Exact(E::AGENT_PROMPT_CREATED),
+        EventSelector::Exact(E::PROVIDER_RESPONSE_FINISHED),
+        EventSelector::Exact(E::TOOL_PROGRESS),
+        EventSelector::Exact(E::SHELL_COMMAND_PROGRESS),
+        EventSelector::Exact(E::HARNESS_NOTICE),
+        EventSelector::Exact(E::EXTENSION_STARTING),
+        EventSelector::Exact(E::EXTENSION_READY),
+        EventSelector::Exact(E::EXTENSION_EXITED),
+        EventSelector::Exact(E::EXTENSION_RESTARTING),
     ]
 }
 

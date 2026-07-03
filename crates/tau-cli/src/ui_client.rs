@@ -75,15 +75,25 @@ pub(crate) fn hello_message(
 pub(crate) fn chat_subscription_selectors() -> Vec<EventSelector> {
     use EventName as E;
 
+    // Keep this as an exact allow-list. See the repository-root `design.md`
+    // event subscription policy before adding broad prefix selectors.
     vec![
-        EventSelector::Prefix("ui.".to_owned()),
-        EventSelector::Prefix("action.".to_owned()),
+        // Locally-originated UI echoes rendered by the transcript and activity
+        // state.
+        EventSelector::Exact(E::UI_PROMPT_SUBMITTED),
+        EventSelector::Exact(E::UI_SHELL_COMMAND),
+        EventSelector::Exact(E::UI_CANCEL_PROMPT),
+        // Dynamic action menus and command results.
+        EventSelector::Exact(E::ACTION_SCHEMA_PUBLISHED),
+        EventSelector::Exact(E::ACTION_RESULT),
+        EventSelector::Exact(E::ACTION_ERROR),
+        // Agent and sub-agent lifecycle/rendering. The chat UI intentionally
+        // consumes `agent.prompt_started`, not the heavier `agent.prompt_created`.
         EventSelector::Exact(E::AGENT_START_REQUEST),
         EventSelector::Exact(E::AGENT_START_ACCEPTED),
         EventSelector::Exact(E::AGENT_START_RESULT),
         EventSelector::Exact(E::AGENT_MESSAGE_SENT),
         EventSelector::Exact(E::AGENT_MESSAGE_RECEIVED),
-        EventSelector::Exact(E::AGENT_STATE),
         EventSelector::Exact(E::AGENT_PROMPT_SUBMITTED),
         EventSelector::Exact(E::AGENT_PROMPT_QUEUED),
         EventSelector::Exact(E::AGENT_PROMPT_RECALLED),
@@ -91,17 +101,54 @@ pub(crate) fn chat_subscription_selectors() -> Vec<EventSelector> {
         EventSelector::Exact(E::AGENT_COMPACTION_TRIGGERED),
         EventSelector::Exact(E::AGENT_PROMPT_STARTED),
         EventSelector::Exact(E::AGENT_PROMPT_TERMINATED),
-        EventSelector::Exact(E::AGENT_USER_MESSAGE_INJECTED),
-        EventSelector::Exact(E::AGENT_HEAD_MOVED),
         EventSelector::Exact(E::AGENT_STARTED),
         EventSelector::Exact(E::AGENT_DISPLAY_NAME_SET),
-        EventSelector::Prefix("session.".to_owned()),
-        EventSelector::Prefix("provider.".to_owned()),
-        EventSelector::Prefix("tool.".to_owned()),
-        EventSelector::Prefix("extension.".to_owned()),
-        EventSelector::Prefix("harness.".to_owned()),
-        EventSelector::Prefix("shell.".to_owned()),
-        EventSelector::Prefix("term.".to_owned()),
+        // Session and provider state rendered by the UI. Provider prompt
+        // submitted/updated/finished events drive streamed assistant output.
+        EventSelector::Exact(E::SESSION_STARTED),
+        EventSelector::Exact(E::SESSION_SHUTDOWN),
+        EventSelector::Exact(E::SESSION_AGENT_UNLOADED),
+        EventSelector::Exact(E::PROVIDER_TOOL_RESULT),
+        EventSelector::Exact(E::PROVIDER_TOOL_ERROR),
+        EventSelector::Exact(E::PROVIDER_PROMPT_SUBMITTED),
+        EventSelector::Exact(E::PROVIDER_RESPONSE_UPDATED),
+        EventSelector::Exact(E::PROVIDER_RESPONSE_FINISHED),
+        // Tool and shell progress shown in generic ToolUseState blocks.
+        EventSelector::Exact(E::TOOL_REQUEST),
+        EventSelector::Exact(E::TOOL_STARTED),
+        EventSelector::Exact(E::TOOL_REJECTED),
+        EventSelector::Exact(E::TOOL_RESULT),
+        EventSelector::Exact(E::TOOL_ERROR),
+        EventSelector::Exact(E::TOOL_BACKGROUND_RESULT),
+        EventSelector::Exact(E::TOOL_BACKGROUND_ERROR),
+        EventSelector::Exact(E::TOOL_PROGRESS),
+        EventSelector::Exact(E::TOOL_CANCELLED),
+        EventSelector::Exact(E::TOOL_DELEGATE_PROGRESS),
+        EventSelector::Exact(E::SHELL_COMMAND_PROGRESS),
+        EventSelector::Exact(E::SHELL_COMMAND_FINISHED),
+        // Extension/context/status events rendered in the transcript or used to
+        // update available actions/skills/instructions.
+        EventSelector::Exact(E::EXTENSION_STARTING),
+        EventSelector::Exact(E::EXTENSION_READY),
+        EventSelector::Exact(E::EXTENSION_EXITED),
+        EventSelector::Exact(E::EXTENSION_SKILL_AVAILABLE),
+        EventSelector::Exact(E::EXTENSION_AGENTS_MD_AVAILABLE),
+        EventSelector::Exact(E::EXTENSION_CONTEXT_READY),
+        // Harness UI state, status, prompt/context accounting, and terminal
+        // side-effect events.
+        EventSelector::Exact(E::HARNESS_NOTICE),
+        EventSelector::Exact(E::HARNESS_SESSION_DIR),
+        EventSelector::Exact(E::HARNESS_UI_DIR),
+        EventSelector::Exact(E::HARNESS_MODELS_AVAILABLE),
+        EventSelector::Exact(E::HARNESS_ROLES_AVAILABLE),
+        EventSelector::Exact(E::HARNESS_ROLE_SELECTED),
+        EventSelector::Exact(E::HARNESS_CONTEXT_USAGE_CHANGED),
+        EventSelector::Exact(E::HARNESS_AGENT_CONTEXT_USAGE_CHANGED),
+        EventSelector::Exact(E::HARNESS_EFFORTS_AVAILABLE),
+        EventSelector::Exact(E::HARNESS_VERBOSITIES_AVAILABLE),
+        EventSelector::Exact(E::HARNESS_THINKING_SUMMARIES_AVAILABLE),
+        EventSelector::Exact(E::TERM_OSC1337_SET_USER_VAR),
+        EventSelector::Exact(E::TERM_BELL),
     ]
 }
 
