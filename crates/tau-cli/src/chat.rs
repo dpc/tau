@@ -477,9 +477,8 @@ fn format_ui_io_event_stats_section(stats: &BTreeMap<String, UiIoEventStats>) ->
         .into_iter()
         .map(|(name, stats)| {
             format!(
-                "  {name}: {} bytes={} count={}",
+                "  {name}: {} count={}",
                 format_ui_io_bytes(stats.bytes),
-                stats.bytes,
                 stats.count
             )
         })
@@ -606,8 +605,8 @@ mod ui_io_tests {
     }
 
     /// The human-readable debug dump should sort event types by descending
-    /// bytes and include both exact byte totals and frame counts for
-    /// diagnosis.
+    /// total size and report each event size once, using the same humanized
+    /// byte format shown elsewhere in the UI I/O diagnostics.
     #[test]
     fn ui_io_cumulative_stats_format_lists_largest_events_first() {
         let mut stats = UiIoCumulativeStats::default();
@@ -636,7 +635,8 @@ mod ui_io_tests {
         let formatted = format_ui_io_cumulative_stats(&stats);
 
         assert!(formatted.contains("uplink: 50B in 1 frame(s)"));
-        assert!(formatted.contains("  message.hello: 50B bytes=50 count=1"));
+        assert!(formatted.contains("  message.hello: 50B count=1"));
+        assert!(!formatted.contains("bytes="));
         assert!(formatted.contains("downlink: 12K in 5 frame(s)"));
         assert!(
             formatted.find("large.event").expect("large event line")
@@ -666,7 +666,8 @@ mod ui_io_tests {
         assert!(handled);
         assert_eq!(output.len(), 1);
         assert!(output[0].contains("UI event I/O cumulative stats"));
-        assert!(output[0].contains("ui.prompt_draft: 42B bytes=42 count=1"));
+        assert!(output[0].contains("ui.prompt_draft: 42B count=1"));
+        assert!(!output[0].contains("bytes="));
     }
 
     /// A mistyped debug stats invocation with arguments should be consumed with
