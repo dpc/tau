@@ -267,22 +267,14 @@ fn agent_prompt_terminated(agent_id: &str, agent_prompt_id: &str) -> Event {
     })
 }
 
-fn agent_prompt_created_for_agent(agent_id: &str, agent_prompt_id: &str) -> Event {
-    Event::AgentPromptCreated(tau_proto::AgentPromptCreated {
+fn agent_prompt_started_for_agent(agent_id: &str, agent_prompt_id: &str) -> Event {
+    Event::AgentPromptStarted(tau_proto::AgentPromptStarted {
         agent_prompt_id: agent_prompt_id.into(),
         agent_id: tau_proto::AgentId::parse(agent_id).expect("agent id"),
         session_id: "s1".into(),
-        system_prompt: String::new(),
-        context: tau_proto::PromptContext::default(),
-        tools: Vec::new(),
-        tools_ref: None,
         model: "test/model".parse().expect("model id"),
-        model_params: tau_proto::ModelParams::default(),
-        tool_choice: Default::default(),
         originator: tau_proto::PromptOriginator::User,
-        share_user_cache_key: false,
         ctx_id: None,
-        compaction: None,
     })
 }
 
@@ -2749,8 +2741,8 @@ fn stale_completion_after_non_current_termination_is_ignored() {
         .write_frame(&default_notifications_config_frame())
         .expect("write config");
     writer
-        .write_event(&agent_prompt_created_for_agent("main", "sp-current"))
-        .expect("current prompt created");
+        .write_event(&agent_prompt_started_for_agent("main", "sp-current"))
+        .expect("current prompt started");
     writer
         .write_event(&agent_prompt_terminated("main", "sp-old"))
         .expect("old terminated");

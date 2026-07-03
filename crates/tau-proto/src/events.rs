@@ -2956,6 +2956,48 @@ pub struct AgentPromptCreated {
     pub compaction: Option<PromptCompactionContext>,
 }
 
+/// Lightweight prompt lifecycle fact for UIs and observers.
+///
+/// This mirrors the routing and provenance metadata from
+/// [`AgentPromptCreated`] without carrying the materialized provider prompt
+/// (`system_prompt`, context, or tool definitions). Consumers that only need to
+/// track in-flight prompt state should subscribe to this event instead of
+/// `agent.prompt_created`.
+///
+/// The harness emits this transient, non-replayed event immediately before the
+/// matching [`AgentPromptCreated`] provider work request.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AgentPromptStarted {
+    /// Prompt that just started provider dispatch.
+    pub agent_prompt_id: AgentPromptId,
+    /// Agent transcript this prompt belongs to.
+    pub agent_id: AgentId,
+    /// Session where this request was first made.
+    pub session_id: SessionId,
+    /// Currently selected model as `"provider/model_id"`.
+    pub model: ModelId,
+    /// Who asked for this prompt.
+    #[serde(default)]
+    pub originator: PromptOriginator,
+    /// Echo of [`UiPromptSubmitted::ctx_id`] when this prompt was initiated by
+    /// a UI submission.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ctx_id: Option<String>,
+}
+
+impl From<&AgentPromptCreated> for AgentPromptStarted {
+    fn from(prompt: &AgentPromptCreated) -> Self {
+        Self {
+            agent_prompt_id: prompt.agent_prompt_id.clone(),
+            agent_id: prompt.agent_id.clone(),
+            session_id: prompt.session_id.clone(),
+            model: prompt.model.clone(),
+            originator: prompt.originator.clone(),
+            ctx_id: prompt.ctx_id.clone(),
+        }
+    }
+}
+
 /// Request metadata for provider/server-side context compaction.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct PromptCompactionContext {
@@ -3502,6 +3544,8 @@ pub enum Event {
     AgentCompactionTriggered(AgentCompactionTriggered),
     #[serde(rename = "agent.prompt_created")]
     AgentPromptCreated(AgentPromptCreated),
+    #[serde(rename = "agent.prompt_started")]
+    AgentPromptStarted(AgentPromptStarted),
     #[serde(rename = "agent.prompt_terminated")]
     AgentPromptTerminated(AgentPromptTerminated),
     #[serde(rename = "agent.prompt_prewarm_requested")]
@@ -3715,6 +3759,7 @@ impl Event {
             Self::AgentPromptSteered(_) => EventName::AGENT_PROMPT_STEERED,
             Self::AgentCompactionTriggered(_) => EventName::AGENT_COMPACTION_TRIGGERED,
             Self::AgentPromptCreated(_) => EventName::AGENT_PROMPT_CREATED,
+            Self::AgentPromptStarted(_) => EventName::AGENT_PROMPT_STARTED,
             Self::AgentPromptTerminated(_) => EventName::AGENT_PROMPT_TERMINATED,
             Self::AgentPromptPrewarmRequested(_) => EventName::AGENT_PROMPT_PREWARM_REQUESTED,
             Self::AgentUserMessageInjected(_) => EventName::AGENT_USER_MESSAGE_INJECTED,
@@ -3772,6 +3817,7 @@ impl Event {
                 | Self::AgentPromptQueued(_)
                 | Self::AgentPromptRecalled(_)
                 | Self::AgentPromptCreated(_)
+                | Self::AgentPromptStarted(_)
                 | Self::AgentPromptTerminated(_)
                 | Self::AgentPromptPrewarmRequested(_)
                 | Self::AgentState(_)

@@ -6,8 +6,8 @@ use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use tau_proto::{
-    ClientKind, EventSelector, HarnessInputMessage, Hello, PROTOCOL_VERSION, PeerInputReader,
-    PeerOutputWriter, Subscribe,
+    ClientKind, EventName, EventSelector, HarnessInputMessage, Hello, PROTOCOL_VERSION,
+    PeerInputReader, PeerOutputWriter, Subscribe,
 };
 
 use crate::daemon::DaemonHandle;
@@ -73,10 +73,28 @@ pub(crate) fn hello_message(
 }
 
 pub(crate) fn chat_subscription_selectors() -> Vec<EventSelector> {
+    use EventName as E;
+
     vec![
         EventSelector::Prefix("ui.".to_owned()),
         EventSelector::Prefix("action.".to_owned()),
-        EventSelector::Prefix("agent.".to_owned()),
+        EventSelector::Exact(E::AGENT_START_REQUEST),
+        EventSelector::Exact(E::AGENT_START_ACCEPTED),
+        EventSelector::Exact(E::AGENT_START_RESULT),
+        EventSelector::Exact(E::AGENT_MESSAGE_SENT),
+        EventSelector::Exact(E::AGENT_MESSAGE_RECEIVED),
+        EventSelector::Exact(E::AGENT_STATE),
+        EventSelector::Exact(E::AGENT_PROMPT_SUBMITTED),
+        EventSelector::Exact(E::AGENT_PROMPT_QUEUED),
+        EventSelector::Exact(E::AGENT_PROMPT_RECALLED),
+        EventSelector::Exact(E::AGENT_PROMPT_STEERED),
+        EventSelector::Exact(E::AGENT_COMPACTION_TRIGGERED),
+        EventSelector::Exact(E::AGENT_PROMPT_STARTED),
+        EventSelector::Exact(E::AGENT_PROMPT_TERMINATED),
+        EventSelector::Exact(E::AGENT_USER_MESSAGE_INJECTED),
+        EventSelector::Exact(E::AGENT_HEAD_MOVED),
+        EventSelector::Exact(E::AGENT_STARTED),
+        EventSelector::Exact(E::AGENT_DISPLAY_NAME_SET),
         EventSelector::Prefix("session.".to_owned()),
         EventSelector::Prefix("provider.".to_owned()),
         EventSelector::Prefix("tool.".to_owned()),
@@ -122,3 +140,6 @@ pub(crate) fn next_request_id(prefix: &str) -> String {
         COUNTER.fetch_add(1, Ordering::Relaxed)
     )
 }
+
+#[cfg(test)]
+mod tests;

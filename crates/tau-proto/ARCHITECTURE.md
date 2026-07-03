@@ -79,3 +79,10 @@ Prefer additive optional fields with serde defaults for backward compatibility. 
 ## Provider response streaming updates
 
 `provider.response_updated` is transient append-delta protocol surface for visible assistant/reasoning progress. Providers must send newly appended text in `deltas`, not full accumulated message snapshots; retry/status diagnostics belong in the separate `status` field because they are provider-authored, not assistant-authored. `provider.response_finished.output_items` remains the complete durable response and replay source.
+
+## Prompt lifecycle versus provider prompt payloads
+
+`agent.prompt_created` is the full provider work request and may carry large
+system prompts, context, and tool definitions. UI and observer lifecycle
+tracking should use the transient `agent.prompt_started` companion instead of
+subscribing to the full provider payload.

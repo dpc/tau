@@ -851,6 +851,17 @@ fn agent_prompt_created(agent_prompt_id: &str, session_id: &str) -> AgentPromptC
     }
 }
 
+fn agent_prompt_started(agent_prompt_id: &str, session_id: &str) -> tau_proto::AgentPromptStarted {
+    tau_proto::AgentPromptStarted {
+        agent_prompt_id: agent_prompt_id.into(),
+        agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
+        session_id: session_id.into(),
+        model: "test/model".parse().expect("model id"),
+        originator: tau_proto::PromptOriginator::User,
+        ctx_id: None,
+    }
+}
+
 #[test]
 fn renderer_starts_without_selected_or_default_agent() {
     // Regression: the UI opens in the start-new-agent state instead of
@@ -959,6 +970,46 @@ fn first_agent_prompt_created_selects_new_agent_and_new_session_clears_it() {
             .lock()
             .expect("current agent"),
         None
+    );
+}
+
+#[test]
+fn delayed_prompt_started_does_not_duplicate_live_response_block() {
+    // Regression: provider updates can arrive before a delayed
+    // `agent.prompt_started` if an interceptor parks that lifecycle event. The
+    // delayed start must not create a second live response block alongside the
+    // provider-update fallback block.
+    let (_term, handle, vt) = setup(80, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        cli_test_theme(),
+    );
+
+    renderer.handle(&Event::ProviderResponseUpdated(
+        provider_response_delta_update("sp-0", "hello", None, tau_proto::PromptOriginator::User),
+    ));
+    renderer.handle(&Event::AgentPromptStarted(agent_prompt_started(
+        "sp-0", "s1",
+    )));
+    renderer.handle(&Event::ProviderResponseUpdated(
+        provider_response_delta_update("sp-0", " world", None, tau_proto::PromptOriginator::User),
+    ));
+    sync(&handle);
+
+    let lines = visible_lines(&vt, 80);
+    let response_lines = lines
+        .iter()
+        .filter(|line| line.contains("hello"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        response_lines.len(),
+        1,
+        "delayed prompt_started must not leave duplicate live response blocks: {lines:?}"
+    );
+    assert!(
+        response_lines[0].contains("hello world"),
+        "response should keep accumulating in the single live block: {lines:?}"
     );
 }
 

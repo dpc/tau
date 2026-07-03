@@ -91,8 +91,8 @@ pub(crate) struct EventRenderer {
     /// Shared current visible agent mirror for prompt submission.
     current_agent_state: std::sync::Arc<std::sync::Mutex<Option<String>>>,
     /// Per-`agent_prompt_id` UI state. An entry is created on
-    /// `AgentPromptCreated` (or `ProviderPromptSubmitted` for prompts
-    /// without an explicit creation event) and torn down on
+    /// `AgentPromptStarted` (or `ProviderPromptSubmitted` for prompts
+    /// without an explicit start event) and torn down on
     /// `ProviderResponseFinished` or `AgentPromptTerminated`. Storing the
     /// response block id, thinking block id/text, and dispatch timestamp in one
     /// place means every
@@ -104,7 +104,7 @@ pub(crate) struct EventRenderer {
     /// echo when the harness reports that prompt as queued.
     last_user_block: Option<(tau_cli_term::BlockId, String)>,
     /// Queued user-message blocks (in above_sticky zone).
-    /// When `AgentPromptCreated` fires for a dequeued prompt,
+    /// When `AgentPromptStarted` fires for a dequeued prompt,
     /// the first entry is popped and moved back to history.
     queued_user_blocks: VecDeque<(tau_cli_term::BlockId, String)>,
     /// Per-`call_id` UI state. Tracks the live block (if any), the
@@ -764,12 +764,13 @@ struct TurnStatsBlockEntry {
 }
 
 /// Per-prompt UI state held by [`EventRenderer`]. Lives from the first
-/// event observed for the prompt (`AgentPromptCreated` or
+/// event observed for the prompt (`AgentPromptStarted`,
+/// fallback `AgentPromptCreated`, or
 /// `ProviderPromptSubmitted`) through `ProviderResponseFinished` or
 /// `AgentPromptTerminated`.
 #[derive(Default)]
 struct PromptState {
-    /// Live agent-response block. `None` until `AgentPromptCreated` or a
+    /// Live agent-response block. `None` until `AgentPromptStarted` or a
     /// late/mid-stream provider update allocates it.
     response_block_id: Option<tau_cli_term::BlockId>,
     /// Live thinking block. Lazy-created the first time the agent emits
@@ -2420,6 +2421,9 @@ impl EventRenderer {
             Event::AgentPromptCreated(prompt) => {
                 self.agent_activity.start_prompt(&prompt.agent_prompt_id);
             }
+            Event::AgentPromptStarted(prompt) => {
+                self.agent_activity.start_prompt(&prompt.agent_prompt_id);
+            }
             Event::ProviderPromptSubmitted(submitted) => {
                 self.agent_activity.start_prompt(&submitted.agent_prompt_id);
             }
@@ -2468,6 +2472,11 @@ impl EventRenderer {
     fn sync_main_tools_visibility_for_prompt_lifecycle(&mut self, event: &Event) {
         match event {
             Event::AgentPromptCreated(prompt) => {
+                if prompt.originator.is_user() || !self.has_live_main_delegate_tool_call() {
+                    self.set_main_agent_turn_active(prompt.originator.is_user());
+                }
+            }
+            Event::AgentPromptStarted(prompt) => {
                 if prompt.originator.is_user() || !self.has_live_main_delegate_tool_call() {
                     self.set_main_agent_turn_active(prompt.originator.is_user());
                 }
@@ -2735,6 +2744,9 @@ impl EventRenderer {
             Event::AgentPromptCreated(prompt) => {
                 prompt.originator.is_user() && self.can_select_target_from_empty(target_agent_id)
             }
+            Event::AgentPromptStarted(prompt) => {
+                prompt.originator.is_user() && self.can_select_target_from_empty(target_agent_id)
+            }
             Event::AgentCompactionTriggered(triggered) => {
                 triggered.originator.is_user() && self.can_select_target_from_empty(target_agent_id)
             }
@@ -2770,6 +2782,7 @@ impl EventRenderer {
             Event::AgentPromptSubmitted(prompt) => !prompt.originator.is_user(),
             Event::AgentCompactionTriggered(triggered) => !triggered.originator.is_user(),
             Event::AgentPromptCreated(prompt) => !prompt.originator.is_user(),
+            Event::AgentPromptStarted(prompt) => !prompt.originator.is_user(),
             Event::AgentPromptTerminated(terminated) => !terminated.originator.is_user(),
             Event::ProviderPromptSubmitted(submitted) => !submitted.originator.is_user(),
             Event::ProviderResponseUpdated(update) => !update.originator.is_user(),
@@ -2914,6 +2927,13 @@ impl EventRenderer {
                 true
             }
             Event::AgentPromptCreated(prompt) => {
+                let agent_id = prompt.agent_id.to_string();
+                self.mark_agent_live(agent_id.clone());
+                self.prompt_agents
+                    .insert(prompt.agent_prompt_id.to_string(), agent_id);
+                true
+            }
+            Event::AgentPromptStarted(prompt) => {
                 let agent_id = prompt.agent_id.to_string();
                 self.mark_agent_live(agent_id.clone());
                 self.prompt_agents
@@ -3151,6 +3171,9 @@ impl EventRenderer {
     fn prompt_event_agent_id(&self, event: &Event) -> EventAgentIdResolution {
         match event {
             Event::AgentPromptCreated(prompt) => {
+                EventAgentIdResolution::Agent(prompt.agent_id.to_string())
+            }
+            Event::AgentPromptStarted(prompt) => {
                 EventAgentIdResolution::Agent(prompt.agent_id.to_string())
             }
             Event::AgentPromptTerminated(terminated) => {
@@ -3435,6 +3458,10 @@ impl EventRenderer {
                 self.handle_agent_prompt_created(prompt);
                 true
             }
+            Event::AgentPromptStarted(prompt) => {
+                self.handle_agent_prompt_started(prompt);
+                true
+            }
             Event::AgentPromptTerminated(terminated) => {
                 self.handle_agent_prompt_terminated(terminated);
                 true
@@ -3552,14 +3579,25 @@ impl EventRenderer {
     }
 
     fn handle_agent_prompt_created(&mut self, prompt: &tau_proto::AgentPromptCreated) {
+        self.handle_agent_prompt_started(&prompt.into());
+    }
+
+    fn handle_agent_prompt_started(&mut self, prompt: &tau_proto::AgentPromptStarted) {
+        let state = self
+            .prompts
+            .entry(prompt.agent_prompt_id.to_string())
+            .or_default();
+        if state.started_at.is_some() {
+            return;
+        }
+        state.started_at = Some(Instant::now());
+        let has_response_block = state.response_block_id.is_some();
         self.clear_editor_current_response_for_user_prompt(prompt.originator.is_user());
         self.last_user_block = None;
-        self.prompts
-            .entry(prompt.agent_prompt_id.to_string())
-            .or_default()
-            .started_at = Some(Instant::now());
         self.promote_next_queued_prompt("user-prompt-created");
-        self.create_live_response_block(prompt);
+        if !has_response_block {
+            self.create_live_response_block(prompt);
+        }
     }
 
     fn clear_editor_current_response_for_user_prompt(&mut self, is_user_prompt: bool) {
@@ -3595,7 +3633,7 @@ impl EventRenderer {
         }
     }
 
-    fn create_live_response_block(&mut self, prompt: &tau_proto::AgentPromptCreated) {
+    fn create_live_response_block(&mut self, prompt: &tau_proto::AgentPromptStarted) {
         use tau_themes::names;
 
         let block = streaming_block(&self.theme, names::AGENT_PENDING, "");
@@ -3796,10 +3834,10 @@ impl EventRenderer {
     fn insert_live_thinking_block(&mut self, spid: &str, block: tau_cli_term::StyledBlock) {
         // Insert the thinking block ABOVE the pending response block in
         // `above_active`. The response block was pushed first (in
-        // AgentPromptCreated), so a plain push would land below it. Briefly
-        // remove the response, push thinking, re-push response — net effect:
-        // thinking is at the response's old position and the response moves
-        // down by one.
+        // the prompt-start handler for AgentPromptStarted, or by the provider
+        // update fallback), so a plain push would land below it. Briefly remove
+        // the response, push thinking, re-push response — net effect: thinking
+        // is at the response's old position and the response moves down by one.
         let tbid = self
             .handle
             .new_block(format!("agent-thinking-live:{spid}"), block);

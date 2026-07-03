@@ -124,6 +124,9 @@ const MUST_PASS_BY_DEFAULT: &[EventName] = &[
     // `AgentPromptCreated` turns to know when to talk to the LLM. Dropping
     // one wedges the conversation.
     EventName::AGENT_PROMPT_CREATED,
+    // Lightweight prompt lifecycle: UIs and notification extensions use this
+    // instead of the full provider prompt payload.
+    EventName::AGENT_PROMPT_STARTED,
     // Agent response: dropping this would wedge `c.head` /
     // `prompt_agents` bookkeeping and the conversation
     // would never advance.
@@ -174,6 +177,7 @@ fn immutable_protected_fact_was_modified(original: &Event, replacement: &Event) 
             | Event::SessionAgentUnloaded(_)
             | Event::AgentCompactionTriggered(_)
             | Event::AgentPromptCreated(_)
+            | Event::AgentPromptStarted(_)
             | Event::ProviderResponseFinished(_)
             | Event::ToolResult(_)
             | Event::ToolError(_)

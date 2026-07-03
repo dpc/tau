@@ -3735,6 +3735,7 @@ impl Harness {
             Event::ShellCommandProgress(progress) => progress.target_agent_id.as_ref(),
             Event::ShellCommandFinished(finished) => finished.target_agent_id.as_ref(),
             Event::AgentPromptCreated(prompt) => Some(&prompt.agent_id),
+            Event::AgentPromptStarted(prompt) => Some(&prompt.agent_id),
             Event::AgentPromptQueued(prompt) => Some(&prompt.agent_id),
             Event::AgentPromptRecalled(prompt) => Some(&prompt.agent_id),
             Event::AgentPromptTerminated(prompt) => Some(&prompt.agent_id),
@@ -3807,6 +3808,7 @@ impl Harness {
             Event::AgentMetadataUnset(unset) => Some(unset.agent_id.clone()),
             Event::AgentPromptSubmitted(prompt) => Some(prompt.agent_id.clone()),
             Event::AgentPromptSteered(prompt) => Some(prompt.agent_id.clone()),
+            Event::AgentPromptStarted(prompt) => Some(prompt.agent_id.clone()),
             Event::AgentCompactionTriggered(triggered) => Some(triggered.agent_id.clone()),
             Event::AgentUserMessageInjected(injected) => Some(injected.agent_id.clone()),
             Event::AgentMessageSent(message) => Some(message.sender_id.clone()),
@@ -10447,10 +10449,10 @@ impl Harness {
         }
     }
 
-    /// Mints a new `AgentPromptId`, registers it with `cid`'s
-    /// conversation, and dispatches `AgentPromptCreated` to the agent. Reads
-    /// `system_prompt` / `messages` / `tools` from the
-    /// agent's agent tree.
+    /// Mints a new `AgentPromptId`, registers it with `cid`'s conversation,
+    /// publishes lightweight `AgentPromptStarted`, then dispatches full
+    /// `AgentPromptCreated` to the provider. Reads `system_prompt` / `messages`
+    /// / `tools` from the agent's agent tree.
     ///
     /// Linear-prefix invariant: each subsequent prompt for the same
     /// agent branch must be a strict byte-prefix extension of the prior
@@ -10461,6 +10463,7 @@ impl Harness {
     pub(crate) fn send_prompt_to_agent_for(&mut self, cid: &AgentId) -> Option<AgentPromptId> {
         let prompt = self.prepare_agent_prompt_for_dispatch(cid)?;
         let agent_prompt_id = prompt.agent_prompt_id.clone();
+        self.publish_event(None, Event::AgentPromptStarted((&prompt).into()));
         self.publish_event(None, Event::AgentPromptCreated(prompt));
         Some(agent_prompt_id)
     }

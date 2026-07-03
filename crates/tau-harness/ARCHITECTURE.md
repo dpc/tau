@@ -269,3 +269,11 @@ call-site policy says otherwise.
 ## Provider response update routing
 
 The harness treats `provider.response_updated` as non-durable live progress. It validates that the publishing connection owns the in-flight provider prompt, overwrites the update `agent_id` from harness prompt ownership, enriches best-effort compaction metadata, and does not include these transient deltas in durable replay.
+
+## Prompt dispatch lifecycle split
+
+Prompt dispatch emits a lightweight transient `agent.prompt_started` lifecycle
+fact immediately before the full `agent.prompt_created` provider work request.
+Providers consume `agent.prompt_created`; UIs and side-effect observers should
+subscribe to `agent.prompt_started` so materialized prompt context and tool
+schemas are not sent over UI/control channels unnecessarily.

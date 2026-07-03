@@ -120,6 +120,12 @@ but keep it in memory only; `agent.started.ephemeral` marks that boundary.
   operational delivery state for the provider; transcript truth is still the
   accepted prompt, provider response, terminal tool results, and compaction
   facts.
+- **`agent.prompt_started`** — Lightweight runtime lifecycle companion to
+  `agent.prompt_created`. Carries the prompt id, agent id, session id, model,
+  originator, and optional UI correlation id, but omits provider prompt content.
+  It is emitted immediately before the matching `agent.prompt_created`, is
+  transient, and is not replayed from durable agent logs. UIs and observers
+  should use this when they only need to track in-flight prompt state.
 - **`agent.state`** — Transient live runtime snapshot for one agent. Carries
   `agent_id` plus `idle`/`running` state so UIs can show work in progress
   without treating it as transcript history.

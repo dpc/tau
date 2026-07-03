@@ -320,6 +320,17 @@ fn ephemeral_agent_create_request_is_suppressed_from_debug_log() {
             message_class: tau_proto::PromptMessageClass::User,
         }),
     );
+    h.publish_for_agent(
+        &cid,
+        Event::AgentPromptStarted(tau_proto::AgentPromptStarted {
+            agent_prompt_id: "ephemeral-debug-prompt".into(),
+            agent_id: agent_id.clone(),
+            session_id: "s1".into(),
+            model: "test/model".parse().expect("model id"),
+            originator: tau_proto::PromptOriginator::User,
+            ctx_id: Some("ephemeral-debug-ctx".to_owned()),
+        }),
+    );
     let tool_call_id = ToolCallId::from("ephemeral-debug-tool-call");
     h.tool_agents.insert(tool_call_id.clone(), cid);
     h.publish_event(
@@ -348,6 +359,10 @@ fn ephemeral_agent_create_request_is_suppressed_from_debug_log() {
     assert!(
         !jsonl.contains("published-debug-secret"),
         "published ephemeral agent content must not be mirrored into debug JSONL"
+    );
+    assert!(
+        !jsonl.contains("agent.prompt_started") && !jsonl.contains("ephemeral-debug-prompt"),
+        "ephemeral prompt lifecycle metadata must not be mirrored into debug JSONL"
     );
     assert!(
         !jsonl.contains("tool-result-debug-secret"),

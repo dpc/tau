@@ -278,7 +278,7 @@ impl AgentTurnState {
         true
     }
 
-    fn record_prompt_created(&mut self, prompt_id: tau_proto::AgentPromptId) {
+    fn record_prompt_started(&mut self, prompt_id: tau_proto::AgentPromptId) {
         self.current_agent_prompt_id = Some(prompt_id);
     }
 
@@ -623,7 +623,7 @@ fn write_handshake<W: Write>(
             tau_proto::EventName::PROVIDER_PROMPT_SUBMITTED,
             tau_proto::EventName::PROVIDER_RESPONSE_FINISHED,
             tau_proto::EventName::AGENT_PROMPT_SUBMITTED,
-            tau_proto::EventName::AGENT_PROMPT_CREATED,
+            tau_proto::EventName::AGENT_PROMPT_STARTED,
             tau_proto::EventName::AGENT_PROMPT_TERMINATED,
             tau_proto::EventName::AGENT_STARTED,
             tau_proto::EventName::AGENT_DISPLAY_NAME_SET,
@@ -1038,7 +1038,7 @@ impl<W: Write> NotificationLoop<W> {
                 self.handle_provider_prompt_submitted(prompt);
             }
             Event::AgentPromptSubmitted(prompt) => self.handle_agent_prompt(prompt)?,
-            Event::AgentPromptCreated(created) => self.handle_agent_prompt_created(created),
+            Event::AgentPromptStarted(started) => self.handle_agent_prompt_started(started),
             Event::AgentPromptTerminated(terminated) => {
                 self.handle_agent_prompt_terminated(terminated);
             }
@@ -1125,16 +1125,16 @@ impl<W: Write> NotificationLoop<W> {
         }
     }
 
-    fn handle_agent_prompt_created(&mut self, created: tau_proto::AgentPromptCreated) {
-        if !created.originator.is_user() {
+    fn handle_agent_prompt_started(&mut self, started: tau_proto::AgentPromptStarted) {
+        if !started.originator.is_user() {
             return;
         }
         self.agent_prompt_agents
-            .insert(created.agent_prompt_id.clone(), created.agent_id.clone());
+            .insert(started.agent_prompt_id.clone(), started.agent_id.clone());
         self.agent_turns
-            .entry(created.agent_id)
+            .entry(started.agent_id)
             .or_default()
-            .record_prompt_created(created.agent_prompt_id);
+            .record_prompt_started(started.agent_prompt_id);
     }
 
     fn handle_agent_prompt_terminated(&mut self, terminated: tau_proto::AgentPromptTerminated) {
@@ -1241,7 +1241,7 @@ impl<W: Write> NotificationLoop<W> {
         let agent_name = display_name_for_agent(&self.agent_display_names, &agent_id);
         let agent_response = response_text(&finished.output_items);
         let turn = self.agent_turns.entry(agent_id.clone()).or_default();
-        turn.record_prompt_created(finished.agent_prompt_id.clone());
+        turn.record_prompt_started(finished.agent_prompt_id.clone());
         emit_agent_end(
             &mut self.writer,
             turn,
@@ -1898,6 +1898,7 @@ fn is_sub_agent_event(event: &Event) -> bool {
         Event::ProviderResponseFinished(f) => !f.originator.is_user(),
         Event::AgentPromptSubmitted(p) => !p.originator.is_user(),
         Event::AgentPromptCreated(p) => !p.originator.is_user(),
+        Event::AgentPromptStarted(p) => !p.originator.is_user(),
         _ => false,
     }
 }

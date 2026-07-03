@@ -350,6 +350,8 @@ impl EventName {
         Self::from_static(EventCategory::Session, "agent_unloaded");
     pub const AGENT_PROMPT_CREATED: Self =
         Self::from_static(EventCategory::Agent, "prompt_created");
+    pub const AGENT_PROMPT_STARTED: Self =
+        Self::from_static(EventCategory::Agent, "prompt_started");
     pub const AGENT_PROMPT_TERMINATED: Self =
         Self::from_static(EventCategory::Agent, "prompt_terminated");
     pub const AGENT_PROMPT_PREWARM_REQUESTED: Self =

@@ -283,6 +283,14 @@ fn representative_events() -> Vec<Event> {
             compaction: None,
             share_user_cache_key: false,
         }),
+        Event::AgentPromptStarted(AgentPromptStarted {
+            agent_prompt_id: "sp-1".into(),
+            agent_id: agent_id("engineer_abcd1234"),
+            session_id: "session_123".into(),
+            model: "test/model".parse().expect("model id"),
+            originator: PromptOriginator::User,
+            ctx_id: None,
+        }),
         Event::AgentPromptTerminated(AgentPromptTerminated {
             agent_id: agent_id("engineer_abcd1234"),
             agent_prompt_id: "sp-stale".into(),
@@ -899,6 +907,7 @@ fn expected_default_transient(event: &Event) -> bool {
             | Event::AgentPromptQueued(_)
             | Event::AgentPromptRecalled(_)
             | Event::AgentPromptCreated(_)
+            | Event::AgentPromptStarted(_)
             | Event::AgentPromptTerminated(_)
             | Event::AgentPromptPrewarmRequested(_)
             | Event::AgentState(_)
@@ -927,6 +936,7 @@ fn expected_first_party_event_names() -> std::collections::BTreeSet<String> {
         "agent.prompt_prewarm_requested",
         "agent.prompt_queued",
         "agent.prompt_recalled",
+        "agent.prompt_started",
         "agent.prompt_steered",
         "agent.prompt_submitted",
         "agent.prompt_terminated",

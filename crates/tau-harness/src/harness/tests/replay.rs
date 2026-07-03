@@ -794,6 +794,7 @@ fn late_joining_ui_client_replays_final_but_not_stale_queued_session_events() {
     assert!(replayed.contains(&tau_proto::EventName::AGENT_COMPACTION_TRIGGERED));
     assert!(!replayed.contains(&tau_proto::EventName::AGENT_PROMPT_QUEUED));
     assert!(!replayed.contains(&tau_proto::EventName::AGENT_PROMPT_CREATED));
+    assert!(!replayed.contains(&tau_proto::EventName::AGENT_PROMPT_STARTED));
     assert!(!replayed.contains(&tau_proto::EventName::PROVIDER_RESPONSE_UPDATED));
 
     h.shutdown().expect("shutdown");

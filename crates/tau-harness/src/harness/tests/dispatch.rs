@@ -41,9 +41,11 @@ fn publish_pending_agent_context_ready(h: &mut Harness, agent_id: &str) {
 
 /// Regression: startup has no implicit `main` agent. The first interactive
 /// prompt claims the default conversation by minting a durable role-prefixed
-/// hex agent id, publishes that id on `AgentPromptCreated` for UI routing, and
-/// includes the same id in the actual provider-bound default system prompt so
-/// the agent knows its own identity without relying only on event metadata.
+/// hex agent id, publishes that id on `AgentPromptStarted`/`AgentPromptCreated`
+/// for UI/provider routing, and includes the same id in the actual
+/// provider-bound default system prompt so the agent knows its own identity
+/// without relying only on event metadata. It also locks in that the
+/// lightweight lifecycle event immediately precedes the full provider prompt.
 #[test]
 fn user_prompt_mints_first_agent_for_empty_startup() {
     let td = TempDir::new().expect("tempdir");
@@ -82,6 +84,23 @@ fn user_prompt_mints_first_agent_for_empty_startup() {
             if created.agent_id.as_str() == agent_id
     )));
     let prompt = read_nth_prompt_created(&h, 0);
+    let events = event_log_events(&h);
+    let prompt_pair = events
+        .windows(2)
+        .find_map(|window| match (&window[0], &window[1]) {
+            (Event::AgentPromptStarted(started), Event::AgentPromptCreated(created))
+                if started.agent_prompt_id == created.agent_prompt_id =>
+            {
+                Some((started, created))
+            }
+            _ => None,
+        })
+        .expect("prompt_started immediately precedes matching prompt_created");
+    assert_eq!(prompt_pair.0.agent_id, prompt_pair.1.agent_id);
+    assert_eq!(prompt_pair.0.session_id, prompt_pair.1.session_id);
+    assert_eq!(prompt_pair.0.model, prompt_pair.1.model);
+    assert_eq!(prompt_pair.0.originator, prompt_pair.1.originator);
+    assert_eq!(prompt_pair.0.ctx_id, prompt_pair.1.ctx_id);
     let identity_section = format!("## Agent identity\n\nYour agent id is `{agent_id}`.");
     assert_eq!(prompt.agent_id.as_str(), agent_id);
     assert!(prompt.system_prompt.trim_end().ends_with(&identity_section));
