@@ -61,6 +61,10 @@ Inferred read-only shell mode is advisory unless `config.dir_lock.enforce_ro_bin
 
 `.local` locations are intended for machine- or user-specific instructions and are usually gitignored.
 
+AGENTS.md files and skills are trusted prompt input. Tau follows symlinks during
+discovery; do not run Tau in projects whose instruction files or skill files you
+do not trust.
+
 
 ## Configuration
 

@@ -2075,22 +2075,44 @@ fn discover_agents_files_walks_ancestor_chain_in_order() {
 }
 
 #[test]
-fn discover_agents_files_skips_symlinked_candidates() {
-    // AGENTS files are loaded implicitly on session start, so discovery must not
-    // follow repository-controlled symlinks into arbitrary readable files.
+fn discover_agents_files_follows_symlinked_candidates() {
+    // AGENTS.md files are trusted prompt input. Tau follows symlinks here so
+    // project-local and dotfile-managed instruction layouts behave like ordinary
+    // filesystem reads.
     let tempdir = TempDir::new().expect("tempdir");
     let root = tempdir.path().join("repo");
     fs::create_dir_all(&root).expect("mkdir");
-    let secret = tempdir.path().join("secret.txt");
-    fs::write(&secret, "private material\n").expect("write secret");
+    let shared = tempdir.path().join("shared.AGENTS.md");
+    fs::write(&shared, "# Shared\n- linked rule\n").expect("write shared agents");
     fs::write(root.join("AGENTS.good.md"), "# Good\n").expect("write good agents");
-    symlink(&secret, root.join("AGENTS.md")).expect("symlink agents");
-    symlink(&secret, root.join("AGENTS.secret.md")).expect("symlink extra agents");
+    symlink(&shared, root.join("AGENTS.md")).expect("symlink agents");
 
     let discovered = discover_agents_files_from_roots(vec![root]);
+    assert_eq!(discovered.len(), 2);
+    assert_eq!(
+        discovered[0].file_path,
+        shared.canonicalize().expect("canonical shared")
+    );
+    assert!(discovered[0].content.contains("linked rule"));
+    assert!(discovered[1].file_path.ends_with("AGENTS.good.md"));
+}
+
+/// Ensures symlinked project `.agents.local` roots are followed like normal
+/// trusted instruction directories.
+#[test]
+fn discover_agents_files_follows_symlinked_agent_roots() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let repo = tempdir.path().join("repo");
+    let shared = tempdir.path().join("shared-agents");
+    fs::create_dir_all(&repo).expect("mkdir repo");
+    fs::create_dir_all(&shared).expect("mkdir shared");
+    fs::write(shared.join("AGENTS.md"), "# Shared root\n- linked root\n")
+        .expect("write shared agents");
+    symlink(&shared, repo.join(".agents.local")).expect("symlink agents local");
+
+    let discovered = discover_agents_files_from_roots(vec![repo.join(".agents.local")]);
     assert_eq!(discovered.len(), 1);
-    assert!(discovered[0].file_path.ends_with("AGENTS.good.md"));
-    assert!(!discovered[0].content.contains("private material"));
+    assert!(discovered[0].content.contains("linked root"));
 }
 
 #[test]

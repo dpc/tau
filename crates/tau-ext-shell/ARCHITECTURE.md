@@ -96,7 +96,9 @@ canonicalizes file paths, and announces candidates to the harness. User
 AGENTS.md roots are scanned before project roots in this order:
 `$HOME/.config/agents`, `$HOME/.config/agents.local`, legacy `$HOME/.agents`,
 and legacy `$HOME/.agents.local`. All readable, non-empty files from those roots
-are stacked; the XDG roots do not suppress legacy roots.
+are stacked; the XDG roots do not suppress legacy roots. AGENTS.md roots and
+candidates are trusted prompt input, and discovery follows symlinks in both user
+and project roots.
 
 Project skill roots stay first and are discovered from ancestor
 `.agents/skills` and `.agents.local/skills` directories. User skill roots follow

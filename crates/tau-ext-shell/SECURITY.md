@@ -26,3 +26,7 @@ The filesystem backend remains advisory. If ext-shell exits while a spawned shel
 descendant deliberately detaches and keeps mutating files, the lease is released
 and another Tau instance may proceed while that detached process is still
 running.
+
+AGENTS.md discovery is trusted implicit prompt input. The shell extension follows
+AGENTS.md and `.agents.local` symlinks in both user and project roots; do not run
+Tau in repositories whose AGENTS.md files or skills you do not trust.

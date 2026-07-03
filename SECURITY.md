@@ -127,6 +127,11 @@ schema validation, and path suggestion text deterministic and bounded so
 extension-provided schemas, filesystem names, or model arguments cannot amplify
 unbounded work or prompt content.
 
+AGENTS.md files are trusted implicit prompt input loaded during session startup.
+Tau follows AGENTS.md symlinks in both user and project roots. Do not run Tau in
+repositories whose instructions you do not trust; a malicious AGENTS.md or skill
+can steer the agent just like any other trusted prompt input.
+
 Failure-triggered tool examples are diagnostic metadata in the same prompt-surface
 class. Providers may attach compact examples to tool registrations, but the
 harness must validate them at registration, reject invalid examples visibly, omit

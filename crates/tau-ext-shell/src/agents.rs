@@ -34,10 +34,10 @@ pub(crate) fn discover_agents_files_from_roots(
     let mut discovered = Vec::new();
     for dir in roots {
         for candidate in agents_file_candidates(&dir) {
-            let Ok(metadata) = fs::symlink_metadata(&candidate) else {
+            let Ok(metadata) = fs::metadata(&candidate) else {
                 continue;
             };
-            if !metadata.is_file() || metadata.file_type().is_symlink() {
+            if !metadata.is_file() {
                 continue;
             }
             if MAX_AGENTS_FILE_BYTES < metadata.len() {

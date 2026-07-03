@@ -66,10 +66,11 @@ after `grep` / `find` work has started.
 ## Discovery coverage
 
 AGENTS.md discovery tests should cover ancestor ordering, `.agents.local`
-ordering, symlink and size-cap skips, and user-root ordering. User-root coverage
-must include `$HOME/.config/agents`, `$HOME/.config/agents.local`, legacy
-`$HOME/.agents`, and legacy `$HOME/.agents.local`, with all user roots preceding
-project roots.
+ordering, size-cap skips, and user-root ordering. User-root coverage must include
+`$HOME/.config/agents`, `$HOME/.config/agents.local`, legacy `$HOME/.agents`,
+and legacy `$HOME/.agents.local`, with all user roots preceding project roots.
+Symlink coverage must prove AGENTS.md candidates and `.agents.local` roots are
+followed because AGENTS.md is trusted prompt input.
 
 Skill discovery tests should cover project roots before user roots and XDG user
 skill roots before legacy user skill roots. Collision tests must exercise the
