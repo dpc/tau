@@ -18,18 +18,19 @@ Templates are plain prompt text, not HTML. Tau disables default HTML escaping so
 `~/.config/tau/harness.yaml` and `harness.d/*.yaml` can define prompt fragments:
 
 ```yaml
-role_groups:
-  engineer:
-    prompt_fragments:
-      - name: engineers.review-requirement
-        priority: 65
-        text: |-
-          ### Code review
+agents:
+  role_groups:
+    engineer:
+      prompt_fragments:
+        - name: engineers.review-requirement
+          priority: 65
+          text: |-
+            ### Code review
 
-          If your task involved code changes to a larger project, consider them work in progress until they pass review.
+            If your task involved code changes to a larger project, consider them work in progress until they pass review.
 ```
 
-Top-level `prompt_fragments` apply to every role in every role group, including fragments supplied by one-shot harness config overrides. Role-level `prompt_fragments` apply only to that role or role group. Group-level fragments without `roles:` are mainly useful for overriding an existing built-in group; new groups should define roles. Fragments are sorted by ascending `priority`; priorities below `100` render before later generated system-prompt sections such as skills.
+`agents.prompt_fragments` apply to every role in every role group, including fragments supplied by one-shot harness config overrides. Role-level `prompt_fragments` apply only to that role or role group. Group-level fragments without `roles:` are mainly useful for overriding an existing built-in group; new groups should define roles. Fragments are sorted by ascending `priority`; priorities below `100` render before later generated system-prompt sections such as skills.
 
 Roles can also choose a full system prompt template with `prompt_override`; custom templates live under `~/.config/tau/prompts/<name>.hbs`.
 
@@ -63,56 +64,60 @@ Tau registers these helpers:
 Project-specific prompt fragment:
 
 ```yaml
-prompt_fragments:
-  - name: project.rust-extra
-    priority: 80
-    text: |-
-      {{#each working_directory.ancestors}}
-      {{#if (eq this "/home/dpc/lab/tau-agent")}}
-      ### Tau project rules
+agents:
+  prompt_fragments:
+    - name: project.rust-extra
+      priority: 80
+      text: |-
+        {{#each working_directory.ancestors}}
+        {{#if (eq this "/home/dpc/lab/tau-agent")}}
+        ### Tau project rules
 
-      Prefer `jj` change IDs when referring to commits.
-      {{/if}}
-      {{/each}}
+        Prefer `jj` change IDs when referring to commits.
+        {{/if}}
+        {{/each}}
 ```
 
 Exact-directory conditional:
 
 ```yaml
-prompt_fragments:
-  - name: project.root-only
-    priority: 80
-    text: |-
-      {{#if (eq working_directory.path "/home/dpc/lab/tau-agent")}}
-      You are at the Tau repository root.
-      {{/if}}
+agents:
+  prompt_fragments:
+    - name: project.root-only
+      priority: 80
+      text: |-
+        {{#if (eq working_directory.path "/home/dpc/lab/tau-agent")}}
+        You are at the Tau repository root.
+        {{/if}}
 ```
 
 Role-specific style fragment:
 
 ```yaml
-role_groups:
-  user:
-    roles:
-      assistant:
-        prompt_fragments:
-          - name: assistant.personal
-            priority: 65
-            text: |-
-              You are a personal assistant.
+agents:
+  role_groups:
+    user:
+      roles:
+        assistant:
+          prompt_fragments:
+            - name: assistant.personal
+              priority: 65
+              text: |-
+                You are a personal assistant.
 
-              Help the user manage email, calendars, TODO lists, and approved actions.
+                Help the user manage email, calendars, TODO lists, and approved actions.
 ```
 
 Skill listing fragment:
 
 ```yaml
-prompt_fragments:
-  - name: debug.skills
-    priority: 110
-    text: |-
-      Available prompt skills:
-      {{#each (sort skills by="name")}}
-      - {{name}}: {{description}}
-      {{/each}}
+agents:
+  prompt_fragments:
+    - name: debug.skills
+      priority: 110
+      text: |-
+        Available prompt skills:
+        {{#each (sort skills by="name")}}
+        - {{name}}: {{description}}
+        {{/each}}
 ```

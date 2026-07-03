@@ -97,16 +97,17 @@ extensions:
           write:
             require_approval: true
             max_attendees: 50
-role_groups:
-  user:
-    roles:
-      assistant:
-        enable_tools:
-          - email_list_folders
-          - email_list_recent
-          - email_read
-          - email_request_access
-          - email_send
-          - calendar_list_calendars
-          - calendar_search
-          - calendar_get
+agents:
+  role_groups:
+    user:
+      roles:
+        assistant:
+          enable_tools:
+            - email_list_folders
+            - email_list_recent
+            - email_read
+            - email_request_access
+            - email_send
+            - calendar_list_calendars
+            - calendar_search
+            - calendar_get

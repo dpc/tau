@@ -3,6 +3,8 @@
 # Use `/model <provider>/<model>` to switch the selected agent model and
 # `/role ...` to edit persisted role overrides.
 
+# Agent settings, role defaults, and role groups live under `agents:`.
+#
 # Optional prompt fragments applied to every role. Fragments are rendered as
 # Handlebars templates and sorted by priority together with role-, tool-, and
 # extension-provided fragments. Templates can use `agent_id` when rendering a
@@ -12,16 +14,19 @@
 # `dev-preview-agent` id, but reusable agent-id text should still be guarded
 # with `{{#if agent_id}}`. Priorities below
 # 100 render before generated context such as skills and AGENTS.md.
-# prompt_fragments:
-#   - name: user.short-plain-style
-#     priority: 65
-#     text: Keep answers short and plain, using only simple words.
+# agents:
+#   prompt_fragments:
+#     - name: user.short-plain-style
+#       priority: 65
+#       text: Keep answers short and plain, using only simple words.
+#   # Optional exact skill names required by every role.
+#   required_skills: [company-policy]
 
 # Optional startup role. If omitted, Tau starts on the first role in
-# `role_groups` order after roles inside that group are sorted by `order` and
+# `agents.role_groups` order after roles inside that group are sorted by `order` and
 # then role name. If the named role is missing, Tau warns and falls back to that
 # first role.
-# default_role: senior-engineer
+#   default_role: senior-engineer
 
 # Optional grouped role defaults. Role names are globally unique across all
 # groups. Tab cycles roles within the current group; Shift-Tab cycles to the
@@ -37,29 +42,29 @@
 # customize internal tool availability for the role. `required_skills` /
 # `requiredSkills` declares exact skills that must be model-loadable or the role
 # is disabled with a configuration notice.
-# role_groups:
-#   engineer:
-#     prompt_fragments:
-#       - name: engineer.careful
-#         priority: 80
-#         text: You are a careful coding agent.
-#     roles:
-#       junior-engineer:
-#         order: 10
-#         effort: low
-#       senior-engineer:
-#         order: 20
-#         description: Balanced coding engineer.
-#         model: chatgpt/gpt-5.5
-#         compaction: { threshold: 200000 }
-#         tools: [read, grep]
-#         disable_tools: [shell]
-#         required_skills: [project-review-process]
-#       staff-engineer:
-#         order: 30
-#         effort: xhigh
-#       old-role:
-#         enable: false  # hide a lower-layer or built-in role
+#   role_groups:
+#     engineer:
+#       prompt_fragments:
+#         - name: engineer.careful
+#           priority: 80
+#           text: You are a careful coding agent.
+#       roles:
+#         junior-engineer:
+#           order: 10
+#           effort: low
+#         senior-engineer:
+#           order: 20
+#           description: Balanced coding engineer.
+#           model: chatgpt/gpt-5.5
+#           compaction: { threshold: 200000 }
+#           tools: [read, grep]
+#           disable_tools: [shell]
+#           required_skills: [project-review-process]
+#         staff-engineer:
+#           order: 30
+#           effort: xhigh
+#         old-role:
+#           enable: false  # hide a lower-layer or built-in role
 
 # Optional built-in extension overrides. Extension names may contain only ASCII
 # letters, digits, `_`, and `-` so they are safe for state paths and dotted

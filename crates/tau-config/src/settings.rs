@@ -559,8 +559,8 @@ pub struct HarnessSettings {
 
     /// Role selected on startup when no explicit runtime selection has been
     /// made. If the configured role is missing, Tau warns and falls back to
-    /// the first role from the first non-empty `role_groups` entry after roles
-    /// inside that group are sorted by role `order` and then role name.
+    /// the first role from the first non-empty `agents.role_groups` entry after
+    /// roles inside that group are sorted by role `order` and then role name.
     pub default_role: Option<String>,
 
     /// Harness-owned role defaults. Each role is a partial set of model
@@ -575,10 +575,13 @@ pub struct HarnessSettings {
     /// is sorted later by each role's `order` and then role name.
     pub role_groups: Vec<RoleGroup>,
 
-    /// Top-level prompt fragments from harness config. Loaded settings also
+    /// Agent-global prompt fragments from harness config. Loaded settings also
     /// fold these into every role's prompt fragments; this field preserves the
     /// global source list for inspection and future config tooling.
     pub prompt_fragments: Vec<RolePromptFragment>,
+
+    /// Agent-global required skill names applied to every role.
+    pub required_skills: Vec<tau_proto::SkillName>,
 
     /// User-configured prompt templates exposed in the CLI as `/prompt <id>`.
     /// Map keys are non-empty ids with no whitespace so they can be addressed
@@ -601,25 +604,27 @@ pub struct HarnessSettings {
 struct HarnessSettingsWire {
     session_retention_days: u64,
     extensions: HashMap<String, ExtensionEntry>,
-    #[serde(default, alias = "defaultRole")]
-    default_role: Option<String>,
-    #[serde(default, alias = "roleGroups")]
-    role_groups: RawRoleGroups,
-    #[serde(default, alias = "promptFragments")]
-    prompt_fragments: Vec<RolePromptFragment>,
     #[serde(default, alias = "customPrompts")]
     custom_prompts: BTreeMap<String, String>,
     #[serde(default)]
     tool_policy: ToolPolicy,
     agents: AgentsSettings,
 }
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct AgentsSettings {
+    #[serde(default, alias = "defaultRole")]
+    default_role: Option<String>,
     #[serde(alias = "idTemplate")]
     id_template: String,
     #[serde(default, alias = "displayNameTemplate")]
     display_name_template: Option<String>,
+    #[serde(default, alias = "promptFragments")]
+    prompt_fragments: Vec<RolePromptFragment>,
+    #[serde(default, alias = "requiredSkills")]
+    required_skills: Vec<tau_proto::SkillName>,
+    #[serde(default, alias = "roleGroups")]
+    role_groups: RawRoleGroups,
 }
 
 impl<'de> Deserialize<'de> for HarnessSettings {
@@ -634,17 +639,18 @@ impl<'de> Deserialize<'de> for HarnessSettings {
         let mut settings = Self {
             session_retention_days: wire.session_retention_days,
             extensions: wire.extensions,
-            default_role: wire.default_role,
+            default_role: wire.agents.default_role,
             roles: HashMap::new(),
             role_groups: Vec::new(),
-            prompt_fragments: wire.prompt_fragments,
+            prompt_fragments: wire.agents.prompt_fragments,
+            required_skills: wire.agents.required_skills,
             custom_prompts: custom_prompt_map_to_vec(wire.custom_prompts),
             tool_policy: wire.tool_policy,
             agent_id_template: wire.agents.id_template,
             agent_display_name_template: wire.agents.display_name_template,
         };
         settings
-            .apply_role_group_overrides(wire.role_groups)
+            .apply_role_group_overrides(wire.agents.role_groups)
             .map_err(D::Error::custom)?;
         validate_custom_prompts(&settings.custom_prompts).map_err(D::Error::custom)?;
         settings.remove_disabled_roles();
@@ -805,14 +811,24 @@ impl Serialize for TagPattern {
 
 #[derive(Deserialize)]
 struct HarnessRoleOverrides {
-    // This narrower pass extracts only role and prompt-fragment metadata after
-    // the main harness settings layer has already validated the full schema.
-    // Leave unrelated top-level fields permissive so future harness settings do
-    // not need duplicate ignore entries here.
-    #[serde(default, alias = "roleGroups")]
+    // This narrower pass extracts only agent role metadata after the main
+    // harness settings layer has already validated the full schema. Leave
+    // unrelated fields permissive here so `agents.id_template`, future
+    // non-role agent settings, and unrelated top-level fields do not need
+    // duplicate ignore entries in this replay-only wire type.
+    #[serde(default)]
+    agents: HarnessAgentRoleOverrides,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct HarnessAgentRoleOverrides {
+    #[serde(alias = "roleGroups")]
     role_groups: RawRoleGroups,
-    #[serde(default, alias = "promptFragments")]
+    #[serde(alias = "promptFragments")]
     prompt_fragments: Vec<RolePromptFragment>,
+    #[serde(alias = "requiredSkills")]
+    required_skills: Vec<tau_proto::SkillName>,
 }
 
 /// One saved prompt template exposed through the CLI `/prompt <id>` command.
@@ -857,7 +873,7 @@ fn validate_custom_prompts(prompts: &[CustomPrompt]) -> Result<(), String> {
 /// One ordered group in the role navigation palette.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RoleGroup {
-    /// Stable group name from `role_groups.<name>`.
+    /// Stable group name from `agents.role_groups.<name>`.
     pub name: String,
     /// Globally unique role names in this group, in config declaration order.
     pub roles: Vec<String>,
@@ -917,8 +933,8 @@ struct RawRoleGroup {
 // absent field inherits while an explicit `[]` clears the list. `tools` is a
 // nullable replacement list: `tools: null` clears an inherited allow-list back
 // to default tool behavior, while `tools: []` sets an explicit empty
-// allow-list. Prompt fragments are the exception and remain additive when
-// present.
+// allow-list. Prompt fragments and required skills are the exceptions and
+// remain additive when present.
 fn present_option<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -1029,7 +1045,7 @@ impl HarnessSettings {
     pub fn built_in() -> Self {
         let mut s: Self = parse_built_in_yaml("built-in.harness.yaml", BUILT_IN_HARNESS_YAML);
         s.remove_disabled_roles();
-        s.apply_global_prompt_fragments_to_roles();
+        s.apply_agent_globals_to_roles();
         s
     }
 
@@ -1156,6 +1172,14 @@ impl HarnessSettings {
         }
     }
 
+    fn apply_required_skill_overrides(&mut self, skills: Vec<tau_proto::SkillName>) {
+        for skill in skills {
+            if !self.required_skills.contains(&skill) {
+                self.required_skills.push(skill);
+            }
+        }
+    }
+
     fn apply_global_prompt_fragments_to_roles(&mut self) {
         for role in self.roles.values_mut() {
             for prompt_fragment in &self.prompt_fragments {
@@ -1164,6 +1188,21 @@ impl HarnessSettings {
                 }
             }
         }
+    }
+
+    fn apply_global_required_skills_to_roles(&mut self) {
+        for role in self.roles.values_mut() {
+            for skill in &self.required_skills {
+                if !role.required_skills.contains(skill) {
+                    role.required_skills.push(skill.clone());
+                }
+            }
+        }
+    }
+
+    fn apply_agent_globals_to_roles(&mut self) {
+        self.apply_global_prompt_fragments_to_roles();
+        self.apply_global_required_skills_to_roles();
     }
 
     /// Returns the configured session retention duration.
@@ -1377,7 +1416,8 @@ pub struct AgentRole {
     #[serde(default, skip_serializing_if = "Vec::is_empty", alias = "enableTools")]
     pub enable_tools: Vec<ToolName>,
     /// Exact skill names that must be model-loadable before this role is
-    /// available. Group and role requirements are additive and de-duplicated.
+    /// available. Agent-global, group, and role requirements are additive and
+    /// de-duplicated.
     #[serde(
         default,
         skip_serializing_if = "Vec::is_empty",
@@ -1778,25 +1818,28 @@ pub fn load_harness_settings_with_cli_overrides_in(
         harness_config_overrides,
     )?;
 
-    // Generic YAML layering replaces arrays, but prompt fragments are additive
-    // metadata. Recompute roles and top-level prompt fragments through the
-    // domain merge path; all other harness fields keep normal config-layer
-    // semantics.
+    // Generic YAML layering replaces arrays, but `agents.prompt_fragments`,
+    // `agents.required_skills`, and role-group metadata are additive. Recompute
+    // them through the domain merge path; all other harness fields keep normal
+    // config-layer semantics.
     let mut role_settings = HarnessSettings::built_in();
     for overrides in
         load_yaml_layer_files::<HarnessRoleOverrides>(dirs.config_dir.as_deref(), "harness")?
     {
-        role_settings.apply_prompt_fragment_overrides(overrides.prompt_fragments);
-        role_settings.apply_role_group_overrides(overrides.role_groups)?;
+        role_settings.apply_prompt_fragment_overrides(overrides.agents.prompt_fragments);
+        role_settings.apply_required_skill_overrides(overrides.agents.required_skills);
+        role_settings.apply_role_group_overrides(overrides.agents.role_groups)?;
     }
     for overrides in harness_role_cli_override_layers(harness_config_overrides)? {
-        role_settings.apply_prompt_fragment_overrides(overrides.prompt_fragments);
-        role_settings.apply_role_group_overrides(overrides.role_groups)?;
+        role_settings.apply_prompt_fragment_overrides(overrides.agents.prompt_fragments);
+        role_settings.apply_required_skill_overrides(overrides.agents.required_skills);
+        role_settings.apply_role_group_overrides(overrides.agents.role_groups)?;
     }
     role_settings.apply_role_cli_overrides(role_overrides)?;
     role_settings.remove_disabled_roles();
-    role_settings.apply_global_prompt_fragments_to_roles();
+    role_settings.apply_agent_globals_to_roles();
     settings.prompt_fragments = role_settings.prompt_fragments;
+    settings.required_skills = role_settings.required_skills;
     settings.roles = role_settings.roles;
     settings.role_groups = role_settings.role_groups;
     Ok(settings)
@@ -1889,15 +1932,13 @@ fn normalize_harness_config_value(
     let serde_json::Value::Object(map) = value else {
         return Ok(());
     };
-    normalize_alias_key(map, "defaultRole", "default_role", source, "root")?;
-    normalize_alias_key(map, "roleGroups", "role_groups", source, "root")?;
-    normalize_alias_key(map, "promptFragments", "prompt_fragments", source, "root")?;
     normalize_alias_key(map, "customPrompts", "custom_prompts", source, "root")?;
     normalize_alias_key(map, "toolPolicy", "tool_policy", source, "root")?;
     if let Some(tool_policy) = map.get_mut("tool_policy") {
         normalize_tool_policy_config_keys(tool_policy, source, "tool_policy")?;
     }
     if let Some(serde_json::Value::Object(agents)) = map.get_mut("agents") {
+        normalize_alias_key(agents, "defaultRole", "default_role", source, "agents")?;
         normalize_alias_key(agents, "idTemplate", "id_template", source, "agents")?;
         normalize_alias_key(
             agents,
@@ -1906,10 +1947,28 @@ fn normalize_harness_config_value(
             source,
             "agents",
         )?;
+        normalize_alias_key(
+            agents,
+            "promptFragments",
+            "prompt_fragments",
+            source,
+            "agents",
+        )?;
+        normalize_alias_key(
+            agents,
+            "requiredSkills",
+            "required_skills",
+            source,
+            "agents",
+        )?;
+        normalize_alias_key(agents, "roleGroups", "role_groups", source, "agents")?;
     }
-    if let Some(serde_json::Value::Object(role_groups)) = map.get_mut("role_groups") {
+    let Some(serde_json::Value::Object(agents)) = map.get_mut("agents") else {
+        return Ok(());
+    };
+    if let Some(serde_json::Value::Object(role_groups)) = agents.get_mut("role_groups") {
         for (group_name, group) in role_groups {
-            let group_path = format!("role_groups.{group_name}");
+            let group_path = format!("agents.role_groups.{group_name}");
             normalize_role_config_keys(group, source, &group_path)?;
             if let serde_json::Value::Object(group_map) = group
                 && let Some(serde_json::Value::Object(roles)) = group_map.get_mut("roles")
@@ -2057,14 +2116,14 @@ fn normalize_harness_config_override_key(key: &str) -> String {
     parts[0] = canonical_top_level_key(parts[0]);
     if parts[0] == "agents" && parts.len() > 1 {
         parts[1] = canonical_agents_key(parts[1]);
-    }
-    if parts[0] == "role_groups" && parts.len() > 2 {
-        if parts[2] == "roles" {
-            if parts.len() > 4 {
-                parts[4] = canonical_role_key(parts[4]);
+        if parts[1] == "role_groups" && parts.len() > 3 {
+            if parts[3] == "roles" {
+                if parts.len() > 5 {
+                    parts[5] = canonical_role_key(parts[5]);
+                }
+            } else {
+                parts[3] = canonical_role_key(parts[3]);
             }
-        } else {
-            parts[2] = canonical_role_key(parts[2]);
         }
     }
     if parts[0] == "tool_policy" && parts.len() > 3 && parts[1] == "rules" {
@@ -2075,9 +2134,6 @@ fn normalize_harness_config_override_key(key: &str) -> String {
 
 fn canonical_top_level_key(key: &str) -> &str {
     match key {
-        "defaultRole" => "default_role",
-        "roleGroups" => "role_groups",
-        "promptFragments" => "prompt_fragments",
         "customPrompts" => "custom_prompts",
         "toolPolicy" => "tool_policy",
         _ => key,
@@ -2086,8 +2142,12 @@ fn canonical_top_level_key(key: &str) -> &str {
 
 fn canonical_agents_key(key: &str) -> &str {
     match key {
+        "defaultRole" => "default_role",
         "idTemplate" => "id_template",
         "displayNameTemplate" => "display_name_template",
+        "roleGroups" => "role_groups",
+        "promptFragments" => "prompt_fragments",
+        "requiredSkills" => "required_skills",
         _ => key,
     }
 }

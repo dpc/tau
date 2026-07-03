@@ -198,51 +198,52 @@ backends thread through to the provider request:
 Defaults are normally selected through agent roles in `harness.yaml`:
 
 ```yaml
-prompt_fragments:
-  - name: user.short-plain-style
-    priority: 65
-    text: Keep answers short and plain, using only simple words.
+agents:
+  prompt_fragments:
+    - name: user.short-plain-style
+      priority: 65
+      text: Keep answers short and plain, using only simple words.
 
-default_role: senior-engineer
-role_groups:
-  engineer:
-    prompt_fragments:
-      - name: engineer.workflow
-        priority: 66
-        text: Focus on implementation details.
-    roles:
-      junior-engineer:
-        order: 10
-        description: Lower-reasoning engineer
-        effort: low
-      senior-engineer:
-        order: 20
-        description: Balanced coding engineer
-        model: chatgpt/gpt-5.5
-        effort: medium
-        tools: [read, grep]
-        enable_tool_groups: [calendar, email]
-        disable_tools: [email_trash]
-        required_skills: [project-review-process]
-      staff-engineer:
-        order: 30
-        description: Maximum-reasoning engineer
-        effort: xhigh
-      legacy-role:
-        enable: false  # hide a lower-layer or built-in role without deleting it
-  manager:
-    roles:
-      micro-manager:
-        order: 10
-        prompt_fragments:
-          - name: manager.workflow
-            priority: 66
-            text: Delegate non-trivial work.
+  default_role: senior-engineer
+  role_groups:
+    engineer:
+      prompt_fragments:
+        - name: engineer.workflow
+          priority: 66
+          text: Focus on implementation details.
+      roles:
+        junior-engineer:
+          order: 10
+          description: Lower-reasoning engineer
+          effort: low
+        senior-engineer:
+          order: 20
+          description: Balanced coding engineer
+          model: chatgpt/gpt-5.5
+          effort: medium
+          tools: [read, grep]
+          enable_tool_groups: [calendar, email]
+          disable_tools: [email_trash]
+          required_skills: [project-review-process]
+        staff-engineer:
+          order: 30
+          description: Maximum-reasoning engineer
+          effort: xhigh
+        legacy-role:
+          enable: false  # hide a lower-layer or built-in role without deleting it
+    manager:
+      roles:
+        micro-manager:
+          order: 10
+          prompt_fragments:
+            - name: manager.workflow
+              priority: 66
+              text: Delegate non-trivial work.
 ```
 
 Roles can include an `order` for role cycling within a group and a
 `description` shown after the model/knob summary in
-`/role ...` completions. Top-level `prompt_fragments` apply to every role in
+`/role ...` completions. `agents.prompt_fragments` apply to every role in
 every role group, including when supplied by one-shot harness config overrides;
 group-level fields apply as defaults to that group's roles; per-role
 `prompt_fragments` apply only to that role. Roles can set
@@ -251,7 +252,7 @@ an explicit token threshold, and can also use `tools`, `disable_tool_tags`,
 `enable_tool_tags`, `disable_tool_groups`, `enable_tool_groups`,
 `disable_tools`, and `enable_tools` to customize internal tool availability.
 `required_skills` (also accepted as `requiredSkills`) declares exact skill names
-that must be discoverable and model-loadable for a role; group and role
+that must be discoverable and model-loadable for a role; `agents`, group, and role
 requirements are additive. Missing required skills emit a mandatory configuration
 notice and disable the affected role. If the startup/default role is disabled by
 missing required skills, startup fails instead of silently choosing another role.
@@ -267,8 +268,8 @@ built-in `builtin.chatgpt-shell` rule matches `shell:chatgpt` models, disables
 keyed rule in `tool_policy.rules`; policy rules sort by `priority` (default `0`,
 lower first) and then rule name. Tools and models only publish tags.
 
-`default_role` selects the startup role; if it is omitted Tau starts on the
-first role in `role_groups` order. Within a group, roles sort by `order` first
+`agents.default_role` selects the startup role; if it is omitted Tau starts on the
+first role in `agents.role_groups` order. Within a group, roles sort by `order` first
 and role name second. `tau --role <role>` overrides the startup role
 for one newly spawned session. `/model <provider>/<model>` switches the model
 for the currently selected agent; `/role <role> <setting> <value>` edits role
@@ -409,8 +410,8 @@ checked in. Skill frontmatter can make skills manual-only with
 `disable-model-invocation` and can add `/skill` completion
 argument hints with `argument-hint`.
 
-Prompt fragments are composable too: top-level `harness.yaml`
-`prompt_fragments` apply to every role in every role group, while
+Prompt fragments are composable too: `harness.yaml`
+`agents.prompt_fragments` apply to every role in every role group, while
 `roles.<name>.prompt_fragments` apply only to that role. Fragments are ordered
 by priority with extension- and tool-provided fragments, so global style
 instructions, role guidance, and

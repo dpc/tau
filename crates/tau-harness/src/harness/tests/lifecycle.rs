@@ -2582,12 +2582,14 @@ fn role_disabled_tool_is_reported_without_dispatch() {
     std::fs::write(
         config_dir.join("harness.yaml"),
         r#"{
-            role_groups: {
+            agents: {
+                role_groups: {
                 engineer: {
                     roles: {
                         engineer: { disable_tools: ["shell"] },
                     },
                 },
+            },
             },
         }"#,
     )

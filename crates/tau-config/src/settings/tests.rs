@@ -494,11 +494,12 @@ fn cli_state_loads_legacy_show_tools_on_as_full() {
 fn harness_canonical_drop_in_wins_over_legacy_alias() {
     let td = TempDir::new().expect("tempdir");
     let dir = td.path();
-    std::fs::write(dir.join("harness.yaml"), "defaultRole: legacy\n").expect("write base");
+    std::fs::write(dir.join("harness.yaml"), "agents:\n  defaultRole: legacy\n")
+        .expect("write base");
     std::fs::create_dir_all(dir.join("harness.d")).expect("mkdir dropins");
     std::fs::write(
         dir.join("harness.d").join("10-role.yaml"),
-        "default_role: canonical\n",
+        "agents:\n  default_role: canonical\n",
     )
     .expect("write dropin");
 
@@ -513,8 +514,10 @@ fn harness_canonical_drop_in_wins_over_legacy_alias() {
 fn harness_canonical_cli_override_wins_over_legacy_alias() {
     let td = TempDir::new().expect("tempdir");
     let dir = td.path();
-    std::fs::write(dir.join("harness.yaml"), "defaultRole: legacy\n").expect("write base");
-    let override_ = HarnessConfigCliOverride::from_str("default_role=cli").expect("override");
+    std::fs::write(dir.join("harness.yaml"), "agents:\n  defaultRole: legacy\n")
+        .expect("write base");
+    let override_ =
+        HarnessConfigCliOverride::from_str("agents.default_role=cli").expect("override");
 
     let settings =
         load_harness_settings_with_cli_overrides_in(&dirs_with_config(dir), &[], &[override_])
@@ -523,15 +526,15 @@ fn harness_canonical_cli_override_wins_over_legacy_alias() {
     assert_eq!(settings.default_role.as_deref(), Some("cli"));
 }
 
-/// Ensures a single source cannot specify both top-level legacy and canonical
-/// keys.
+/// Ensures a single source cannot specify both nested agent legacy and
+/// canonical keys.
 #[test]
-fn harness_rejects_same_layer_top_level_alias_conflict() {
+fn harness_rejects_same_layer_agents_alias_conflict() {
     let td = TempDir::new().expect("tempdir");
     let dir = td.path();
     std::fs::write(
         dir.join("harness.yaml"),
-        "defaultRole: legacy\ndefault_role: canonical\n",
+        "agents:\n  defaultRole: legacy\n  default_role: canonical\n",
     )
     .expect("write");
 
@@ -572,8 +575,6 @@ fn harness_rejects_same_layer_nested_alias_conflict() {
 #[test]
 fn harness_file_alias_table_normalizes_all_legacy_keys() {
     let mut value = serde_json::json!({
-        "defaultRole": "manager",
-        "promptFragments": [],
         "customPrompts": [],
         "toolPolicy": {
             "rules": {
@@ -583,37 +584,40 @@ fn harness_file_alias_table_normalizes_all_legacy_keys() {
             }
         },
         "agents": {
+            "defaultRole": "manager",
             "idTemplate": "agent-{{random_alphanumeric 4}}",
             "displayNameTemplate": "Agent {{n}}",
-        },
-        "roleGroups": {
-            "engineer": {
-                "enabled": true,
-                "thinkingSummary": "auto",
-                "serviceTier": "default",
-                "promptFragments": [],
-                "promptOverride": "built-in",
-                "disableToolTags": [],
-                "enableToolTags": [],
-                "disableToolGroups": [],
-                "enableToolGroups": [],
-                "disableTools": [],
-                "enableTools": [],
-                "requiredSkills": [],
-                "roles": {
-                    "senior-engineer": {
-                        "enabled": true,
-                        "thinkingSummary": "auto",
-                        "serviceTier": "default",
-                        "promptFragments": [],
-                        "promptOverride": "built-in",
-                        "disableToolTags": [],
-                        "enableToolTags": [],
-                        "disableToolGroups": [],
-                        "enableToolGroups": [],
-                        "disableTools": [],
-                        "enableTools": [],
-                        "requiredSkills": [],
+            "promptFragments": [],
+            "requiredSkills": [],
+            "roleGroups": {
+                "engineer": {
+                    "enabled": true,
+                    "thinkingSummary": "auto",
+                    "serviceTier": "default",
+                    "promptFragments": [],
+                    "promptOverride": "built-in",
+                    "disableToolTags": [],
+                    "enableToolTags": [],
+                    "disableToolGroups": [],
+                    "enableToolGroups": [],
+                    "disableTools": [],
+                    "enableTools": [],
+                    "requiredSkills": [],
+                    "roles": {
+                        "senior-engineer": {
+                            "enabled": true,
+                            "thinkingSummary": "auto",
+                            "serviceTier": "default",
+                            "promptFragments": [],
+                            "promptOverride": "built-in",
+                            "disableToolTags": [],
+                            "enableToolTags": [],
+                            "disableToolGroups": [],
+                            "enableToolGroups": [],
+                            "disableTools": [],
+                            "enableTools": [],
+                            "requiredSkills": [],
+                        }
                     }
                 }
             }
@@ -622,8 +626,6 @@ fn harness_file_alias_table_normalizes_all_legacy_keys() {
 
     normalize_harness_config_value(&mut value, "test").expect("normalize");
 
-    assert!(value.get("default_role").is_some());
-    assert!(value.get("prompt_fragments").is_some());
     assert!(value.get("custom_prompts").is_some());
     assert!(value.get("tool_policy").is_some());
     assert!(
@@ -631,9 +633,14 @@ fn harness_file_alias_table_normalizes_all_legacy_keys() {
             .pointer("/tool_policy/rules/builtin.chatgpt-shell/enable")
             .is_some()
     );
+    assert!(value.pointer("/agents/default_role").is_some());
     assert!(value.pointer("/agents/id_template").is_some());
     assert!(value.pointer("/agents/display_name_template").is_some());
-    let group = value.pointer("/role_groups/engineer").expect("group");
+    assert!(value.pointer("/agents/prompt_fragments").is_some());
+    assert!(value.pointer("/agents/required_skills").is_some());
+    let group = value
+        .pointer("/agents/role_groups/engineer")
+        .expect("group");
     for key in [
         "enable",
         "thinking_summary",
@@ -663,108 +670,112 @@ fn harness_file_alias_table_normalizes_all_legacy_keys() {
 #[test]
 fn harness_cli_alias_table_normalizes_all_legacy_keys() {
     let cases = [
-        ("defaultRole", "default_role"),
-        ("promptFragments", "prompt_fragments"),
         ("customPrompts", "custom_prompts"),
         ("toolPolicy", "tool_policy"),
+        ("agents.defaultRole", "agents.default_role"),
+        ("agents.promptFragments", "agents.prompt_fragments"),
+        ("agents.requiredSkills", "agents.required_skills"),
         ("agents.idTemplate", "agents.id_template"),
         ("agents.displayNameTemplate", "agents.display_name_template"),
         (
             "toolPolicy.rules.local.enabled",
             "tool_policy.rules.local.enable",
         ),
-        ("roleGroups.engineer.enabled", "role_groups.engineer.enable"),
         (
-            "roleGroups.engineer.thinkingSummary",
-            "role_groups.engineer.thinking_summary",
+            "agents.roleGroups.engineer.enabled",
+            "agents.role_groups.engineer.enable",
         ),
         (
-            "roleGroups.engineer.serviceTier",
-            "role_groups.engineer.service_tier",
+            "agents.roleGroups.engineer.thinkingSummary",
+            "agents.role_groups.engineer.thinking_summary",
         ),
         (
-            "roleGroups.engineer.promptFragments",
-            "role_groups.engineer.prompt_fragments",
+            "agents.roleGroups.engineer.serviceTier",
+            "agents.role_groups.engineer.service_tier",
         ),
         (
-            "roleGroups.engineer.promptOverride",
-            "role_groups.engineer.prompt_override",
+            "agents.roleGroups.engineer.promptFragments",
+            "agents.role_groups.engineer.prompt_fragments",
         ),
         (
-            "roleGroups.engineer.disableToolTags",
-            "role_groups.engineer.disable_tool_tags",
+            "agents.roleGroups.engineer.promptOverride",
+            "agents.role_groups.engineer.prompt_override",
         ),
         (
-            "roleGroups.engineer.enableToolTags",
-            "role_groups.engineer.enable_tool_tags",
+            "agents.roleGroups.engineer.disableToolTags",
+            "agents.role_groups.engineer.disable_tool_tags",
         ),
         (
-            "roleGroups.engineer.enableToolGroups",
-            "role_groups.engineer.enable_tool_groups",
+            "agents.roleGroups.engineer.enableToolTags",
+            "agents.role_groups.engineer.enable_tool_tags",
         ),
         (
-            "roleGroups.engineer.disableToolGroups",
-            "role_groups.engineer.disable_tool_groups",
+            "agents.roleGroups.engineer.enableToolGroups",
+            "agents.role_groups.engineer.enable_tool_groups",
         ),
         (
-            "roleGroups.engineer.enableTools",
-            "role_groups.engineer.enable_tools",
+            "agents.roleGroups.engineer.disableToolGroups",
+            "agents.role_groups.engineer.disable_tool_groups",
         ),
         (
-            "roleGroups.engineer.disableTools",
-            "role_groups.engineer.disable_tools",
+            "agents.roleGroups.engineer.enableTools",
+            "agents.role_groups.engineer.enable_tools",
         ),
         (
-            "roleGroups.engineer.requiredSkills",
-            "role_groups.engineer.required_skills",
+            "agents.roleGroups.engineer.disableTools",
+            "agents.role_groups.engineer.disable_tools",
         ),
         (
-            "roleGroups.engineer.roles.senior-engineer.enabled",
-            "role_groups.engineer.roles.senior-engineer.enable",
+            "agents.roleGroups.engineer.requiredSkills",
+            "agents.role_groups.engineer.required_skills",
         ),
         (
-            "roleGroups.engineer.roles.senior-engineer.thinkingSummary",
-            "role_groups.engineer.roles.senior-engineer.thinking_summary",
+            "agents.roleGroups.engineer.roles.senior-engineer.enabled",
+            "agents.role_groups.engineer.roles.senior-engineer.enable",
         ),
         (
-            "roleGroups.engineer.roles.senior-engineer.serviceTier",
-            "role_groups.engineer.roles.senior-engineer.service_tier",
+            "agents.roleGroups.engineer.roles.senior-engineer.thinkingSummary",
+            "agents.role_groups.engineer.roles.senior-engineer.thinking_summary",
         ),
         (
-            "roleGroups.engineer.roles.senior-engineer.promptFragments",
-            "role_groups.engineer.roles.senior-engineer.prompt_fragments",
+            "agents.roleGroups.engineer.roles.senior-engineer.serviceTier",
+            "agents.role_groups.engineer.roles.senior-engineer.service_tier",
         ),
         (
-            "roleGroups.engineer.roles.senior-engineer.promptOverride",
-            "role_groups.engineer.roles.senior-engineer.prompt_override",
+            "agents.roleGroups.engineer.roles.senior-engineer.promptFragments",
+            "agents.role_groups.engineer.roles.senior-engineer.prompt_fragments",
         ),
         (
-            "roleGroups.engineer.roles.senior-engineer.disableToolTags",
-            "role_groups.engineer.roles.senior-engineer.disable_tool_tags",
+            "agents.roleGroups.engineer.roles.senior-engineer.promptOverride",
+            "agents.role_groups.engineer.roles.senior-engineer.prompt_override",
         ),
         (
-            "roleGroups.engineer.roles.senior-engineer.enableToolTags",
-            "role_groups.engineer.roles.senior-engineer.enable_tool_tags",
+            "agents.roleGroups.engineer.roles.senior-engineer.disableToolTags",
+            "agents.role_groups.engineer.roles.senior-engineer.disable_tool_tags",
         ),
         (
-            "roleGroups.engineer.roles.senior-engineer.enableToolGroups",
-            "role_groups.engineer.roles.senior-engineer.enable_tool_groups",
+            "agents.roleGroups.engineer.roles.senior-engineer.enableToolTags",
+            "agents.role_groups.engineer.roles.senior-engineer.enable_tool_tags",
         ),
         (
-            "roleGroups.engineer.roles.senior-engineer.disableToolGroups",
-            "role_groups.engineer.roles.senior-engineer.disable_tool_groups",
+            "agents.roleGroups.engineer.roles.senior-engineer.enableToolGroups",
+            "agents.role_groups.engineer.roles.senior-engineer.enable_tool_groups",
         ),
         (
-            "roleGroups.engineer.roles.senior-engineer.enableTools",
-            "role_groups.engineer.roles.senior-engineer.enable_tools",
+            "agents.roleGroups.engineer.roles.senior-engineer.disableToolGroups",
+            "agents.role_groups.engineer.roles.senior-engineer.disable_tool_groups",
         ),
         (
-            "roleGroups.engineer.roles.senior-engineer.disableTools",
-            "role_groups.engineer.roles.senior-engineer.disable_tools",
+            "agents.roleGroups.engineer.roles.senior-engineer.enableTools",
+            "agents.role_groups.engineer.roles.senior-engineer.enable_tools",
         ),
         (
-            "roleGroups.engineer.roles.senior-engineer.requiredSkills",
-            "role_groups.engineer.roles.senior-engineer.required_skills",
+            "agents.roleGroups.engineer.roles.senior-engineer.disableTools",
+            "agents.role_groups.engineer.roles.senior-engineer.disable_tools",
+        ),
+        (
+            "agents.roleGroups.engineer.roles.senior-engineer.requiredSkills",
+            "agents.role_groups.engineer.roles.senior-engineer.required_skills",
         ),
     ];
 
@@ -782,12 +793,13 @@ fn harness_rejects_same_layer_role_alias_conflict() {
     std::fs::write(
         dir.join("harness.yaml"),
         r#"
-        role_groups:
-          engineer:
-            roles:
-              senior-engineer:
-                enabled: false
-                enable: true
+        agents:
+          role_groups:
+                engineer:
+                  roles:
+                    senior-engineer:
+                      enabled: false
+                      enable: true
         "#,
     )
     .expect("write");
@@ -1005,15 +1017,17 @@ fn harness_settings_accept_legacy_camel_case_overrides_over_snake_case_builtins(
     std::fs::write(
         dir.join("harness.yaml"),
         r#"{
-            defaultRole: "manager",
-            agents: { idTemplate: "legacy-{{random_alphanumeric 4}}" },
-            roleGroups: {
-                engineer: {
-                    promptFragments: [{ name: "legacy.group", priority: 80, text: "group" }],
-                    roles: {
-                        "senior-engineer": {
-                            enableTools: ["web_search"],
-                            promptFragments: [{ name: "legacy.role", priority: 90, text: "role" }],
+            agents: {
+                defaultRole: "manager",
+                idTemplate: "legacy-{{random_alphanumeric 4}}",
+                roleGroups: {
+                    engineer: {
+                        promptFragments: [{ name: "legacy.group", priority: 80, text: "group" }],
+                        roles: {
+                            "senior-engineer": {
+                                enableTools: ["web_search"],
+                                promptFragments: [{ name: "legacy.role", priority: 90, text: "role" }],
+                            },
                         },
                     },
                 },
@@ -1153,7 +1167,7 @@ fn harness_config_cli_overrides_can_update_roles() {
     let td = TempDir::new().expect("tempdir");
     let dir = td.path();
     let overrides = [HarnessConfigCliOverride::from_str(
-        "role_groups.engineer.roles.senior-engineer.effort=low",
+        "agents.role_groups.engineer.roles.senior-engineer.effort=low",
     )
     .expect("override")];
 
@@ -1180,7 +1194,7 @@ fn harness_config_cli_overrides_normalize_legacy_role_aliases() {
     let td = TempDir::new().expect("tempdir");
     let dir = td.path();
     let overrides = [HarnessConfigCliOverride::from_str(
-        "role_groups.engineer.roles.senior-engineer.enabled=false",
+        "agents.role_groups.engineer.roles.senior-engineer.enabled=false",
     )
     .expect("override")];
 
@@ -1191,14 +1205,14 @@ fn harness_config_cli_overrides_normalize_legacy_role_aliases() {
     assert!(!settings.roles.contains_key("senior-engineer"));
 }
 
-/// Ensures CLI overrides using legacy top-level aliases still target canonical
-/// settings.
+/// Ensures CLI overrides using legacy nested `agents.roleGroups` aliases still
+/// target canonical role settings.
 #[test]
-fn harness_config_cli_overrides_normalize_legacy_top_level_aliases() {
+fn harness_config_cli_overrides_normalize_legacy_agents_role_aliases() {
     let td = TempDir::new().expect("tempdir");
     let dir = td.path();
     let overrides = [HarnessConfigCliOverride::from_str(
-        "roleGroups.engineer.roles.senior-engineer.effort=low",
+        "agents.roleGroups.engineer.roles.senior-engineer.effort=low",
     )
     .expect("override")];
 
@@ -1218,8 +1232,8 @@ fn harness_config_cli_overrides_normalize_legacy_top_level_aliases() {
 fn harness_config_cli_overrides_reject_alias_conflicts() {
     let td = TempDir::new().expect("tempdir");
     let overrides = [
-        HarnessConfigCliOverride::from_str("defaultRole=manager").expect("legacy override"),
-        HarnessConfigCliOverride::from_str("default_role=senior-engineer")
+        HarnessConfigCliOverride::from_str("agents.defaultRole=manager").expect("legacy override"),
+        HarnessConfigCliOverride::from_str("agents.default_role=senior-engineer")
             .expect("canonical override"),
     ];
 
@@ -1240,7 +1254,7 @@ fn harness_config_cli_overrides_normalize_map_value_aliases() {
     let td = TempDir::new().expect("tempdir");
     let dir = td.path();
     let overrides = [HarnessConfigCliOverride::from_str(
-        "role_groups.engineer.roles.senior-engineer={enabled: false}",
+        "agents.role_groups.engineer.roles.senior-engineer={enabled: false}",
     )
     .expect("override")];
 
@@ -1258,7 +1272,7 @@ fn harness_config_cli_overrides_reject_map_value_alias_conflicts() {
     let td = TempDir::new().expect("tempdir");
     let dir = td.path();
     let overrides = [HarnessConfigCliOverride::from_str(
-        "role_groups.engineer.roles.senior-engineer={enabled: false, enable: true}",
+        "agents.role_groups.engineer.roles.senior-engineer={enabled: false, enable: true}",
     )
     .expect("override")];
 
@@ -1323,7 +1337,8 @@ fn harness_settings_load_role_tool_lists() {
     std::fs::write(
         dir.join("harness.yaml"),
         r#"{
-            role_groups: {
+            agents: {
+                role_groups: {
                 engineer: {
                     roles: {
                         engineer: {
@@ -1337,6 +1352,7 @@ fn harness_settings_load_role_tool_lists() {
                         },
                     },
                 },
+            },
             },
         }"#,
     )
@@ -1381,18 +1397,19 @@ fn harness_role_drop_in_can_clear_inherited_scalar_and_tool_lists() {
     std::fs::write(
         dir.join("harness.yaml"),
         r#"
-        role_groups:
-          custom:
-            roles:
-              reviewer:
-                enable: false
-                description: Base description
-                model: openai/gpt-5
-                compaction: disabled
-                prompt_override: built-in
-                tools: [read]
-                enable_tools: [grep]
-                disable_tools: [shell]
+        agents:
+          role_groups:
+            custom:
+              roles:
+                reviewer:
+                  enable: false
+                  description: Base description
+                  model: openai/gpt-5
+                  compaction: disabled
+                  prompt_override: built-in
+                  tools: [read]
+                  enable_tools: [grep]
+                  disable_tools: [shell]
         "#,
     )
     .expect("write base");
@@ -1400,18 +1417,19 @@ fn harness_role_drop_in_can_clear_inherited_scalar_and_tool_lists() {
     std::fs::write(
         dir.join("harness.d/10-clear.yaml"),
         r#"
-        role_groups:
-          custom:
-            roles:
-              reviewer:
-                enable: null
-                description: null
-                model: null
-                compaction: null
-                prompt_override: null
-                tools: null
-                enable_tools: []
-                disable_tools: []
+        agents:
+          role_groups:
+            custom:
+              roles:
+                reviewer:
+                  enable: null
+                  description: null
+                  model: null
+                  compaction: null
+                  prompt_override: null
+                  tools: null
+                  enable_tools: []
+                  disable_tools: []
         "#,
     )
     .expect("write dropin");
@@ -1438,12 +1456,13 @@ fn harness_role_group_defaults_can_clear_existing_role_fields() {
     std::fs::write(
         dir.join("harness.yaml"),
         r#"
-        role_groups:
-          custom:
-            roles:
-              reviewer:
-                description: Base description
-                prompt_override: built-in
+        agents:
+          role_groups:
+            custom:
+              roles:
+                reviewer:
+                  description: Base description
+                  prompt_override: built-in
         "#,
     )
     .expect("write base");
@@ -1451,10 +1470,11 @@ fn harness_role_group_defaults_can_clear_existing_role_fields() {
     std::fs::write(
         dir.join("harness.d/10-group-clear.yaml"),
         r#"
-        role_groups:
-          custom:
-            description: null
-            prompt_override: null
+        agents:
+          role_groups:
+            custom:
+              description: null
+              prompt_override: null
         "#,
     )
     .expect("write dropin");
@@ -1475,11 +1495,12 @@ fn harness_role_group_defaults_apply_to_existing_roles_when_adding_role() {
     std::fs::write(
         dir.join("harness.yaml"),
         r#"
-        role_groups:
-          engineer:
-            disable_tools: [shell]
-            roles:
-              custom: {}
+        agents:
+          role_groups:
+            engineer:
+              disable_tools: [shell]
+              roles:
+                custom: {}
         "#,
     )
     .expect("write");
@@ -1506,13 +1527,15 @@ fn harness_role_required_skills_are_additive_and_deduped() {
     std::fs::write(
         dir.join("harness.yaml"),
         r#"
-        role_groups:
-          engineer:
-            required_skills: [group-skill, shared-skill]
-            roles:
-              reviewer:
-                requiredSkills: [role-skill, shared-skill]
-              implementer: {}
+        agents:
+          required_skills: [global-skill]
+          role_groups:
+            engineer:
+              required_skills: [group-skill, shared-skill]
+              roles:
+                reviewer:
+                  requiredSkills: [role-skill, shared-skill]
+                implementer: {}
         "#,
     )
     .expect("write");
@@ -1525,6 +1548,7 @@ fn harness_role_required_skills_are_additive_and_deduped() {
             tau_proto::SkillName::from("group-skill"),
             tau_proto::SkillName::from("shared-skill"),
             tau_proto::SkillName::from("role-skill"),
+            tau_proto::SkillName::from("global-skill"),
         ]
     );
     assert_eq!(
@@ -1532,6 +1556,7 @@ fn harness_role_required_skills_are_additive_and_deduped() {
         vec![
             tau_proto::SkillName::from("group-skill"),
             tau_proto::SkillName::from("shared-skill"),
+            tau_proto::SkillName::from("global-skill"),
         ]
     );
 }
@@ -1546,11 +1571,12 @@ fn harness_role_required_skills_accumulate_across_layers() {
     std::fs::write(
         dir.join("harness.yaml"),
         r#"
-        role_groups:
-          custom:
-            roles:
-              reviewer:
-                required_skills: [base-skill]
+        agents:
+          role_groups:
+            custom:
+              roles:
+                reviewer:
+                  required_skills: [base-skill]
         "#,
     )
     .expect("write base");
@@ -1558,12 +1584,13 @@ fn harness_role_required_skills_accumulate_across_layers() {
     std::fs::write(
         dir.join("harness.d/10-extra.yaml"),
         r#"
-        role_groups:
-          custom:
-            required_skills: [group-extra]
-            roles:
-              reviewer:
-                required_skills: [role-extra, base-skill]
+        agents:
+          role_groups:
+            custom:
+              required_skills: [group-extra]
+              roles:
+                reviewer:
+                  required_skills: [role-extra, base-skill]
         "#,
     )
     .expect("write dropin");
@@ -1588,7 +1615,8 @@ fn harness_settings_load_role_compaction() {
     std::fs::write(
         dir.join("harness.yaml"),
         r#"{
-            role_groups: {
+            agents: {
+                role_groups: {
                 engineer: {
                     compaction: { threshold: 70000 },
                     roles: {
@@ -1597,6 +1625,7 @@ fn harness_settings_load_role_compaction() {
                         disabled: { compaction: "disabled" },
                     },
                 },
+            },
             },
         }"#,
     )
@@ -1626,8 +1655,10 @@ fn harness_settings_load_role_group_default_tool_overrides_without_relisting_rol
     std::fs::write(
         dir.join("harness.yaml"),
         r#"{
-            role_groups: {
+            agents: {
+                role_groups: {
                 engineer: { enable_tools: ["email_list_recent"], disable_tools: ["email"] },
+            },
             },
         }"#,
     )
@@ -1654,13 +1685,15 @@ fn harness_settings_allow_new_role_group() {
     std::fs::write(
         dir.join("harness.yaml"),
         r#"{
-            role_groups: {
+            agents: {
+                role_groups: {
                 reviewers: {
                     disable_tools: ["email"],
                     roles: {
                         reviewer: { effort: "high" },
                     },
                 },
+            },
             },
         }"#,
     )
@@ -1683,12 +1716,14 @@ fn harness_settings_rejects_role_in_multiple_groups() {
     std::fs::write(
         dir.join("harness.yaml"),
         r#"{
-            role_groups: {
+            agents: {
+                role_groups: {
                 reviewers: {
                     roles: {
                         senior-engineer: { effort: "high" },
                     },
                 },
+            },
             },
         }"#,
     )
@@ -1721,6 +1756,73 @@ fn harness_settings_rejects_unknown_top_level_fields() {
     );
 }
 
+/// Ensures pre-`agents` role-setting locations are rejected instead of silently
+/// accepted after the schema move.
+#[test]
+fn harness_settings_rejects_root_agent_role_settings() {
+    let file_cases = [
+        ("default_role", r#"{ default_role: stale }"#),
+        ("defaultRole", r#"{ defaultRole: stale }"#),
+        (
+            "role_groups",
+            r#"{ role_groups: { stale: { roles: { stale: {} } } } }"#,
+        ),
+        (
+            "roleGroups",
+            r#"{ roleGroups: { stale: { roles: { stale: {} } } } }"#,
+        ),
+        (
+            "prompt_fragments",
+            r#"{ prompt_fragments: [{ name: stale, priority: 1, text: stale }] }"#,
+        ),
+        (
+            "promptFragments",
+            r#"{ promptFragments: [{ name: stale, priority: 1, text: stale }] }"#,
+        ),
+        ("required_skills", r#"{ required_skills: [stale] }"#),
+        ("requiredSkills", r#"{ requiredSkills: [stale] }"#),
+    ];
+    for (key, yaml) in file_cases {
+        let td = TempDir::new().expect("tempdir");
+        let dir = td.path();
+        std::fs::write(dir.join("harness.yaml"), yaml).expect("write");
+
+        let error = load_harness_settings_in(&dirs_with_config(dir))
+            .expect_err("reject misplaced agent role config");
+        assert!(
+            error.to_string().contains(key),
+            "error should mention misplaced {key}: {error}"
+        );
+    }
+
+    let cli_cases = [
+        "default_role=stale",
+        "defaultRole=stale",
+        "role_groups={stale: {roles: {stale: {}}}}",
+        "roleGroups={stale: {roles: {stale: {}}}}",
+        "prompt_fragments=[{ name: stale, priority: 1, text: stale }]",
+        "promptFragments=[{ name: stale, priority: 1, text: stale }]",
+        "required_skills=[stale]",
+        "requiredSkills=[stale]",
+    ];
+    for override_text in cli_cases {
+        let td = TempDir::new().expect("tempdir");
+        let override_ = HarnessConfigCliOverride::from_str(override_text).expect("override");
+
+        let error = load_harness_settings_with_cli_overrides_in(
+            &dirs_with_config(td.path()),
+            &[],
+            &[override_],
+        )
+        .expect_err("reject misplaced agent role CLI override");
+        let key = override_text.split('=').next().expect("key");
+        assert!(
+            error.to_string().contains(key),
+            "error should mention misplaced {key}: {error}"
+        );
+    }
+}
+
 /// Ensures unknown role fields fail so role-setting typos are visible.
 #[test]
 fn harness_settings_rejects_unknown_role_fields() {
@@ -1731,12 +1833,14 @@ fn harness_settings_rejects_unknown_role_fields() {
     std::fs::write(
         dir.join("harness.yaml"),
         r#"{
-            role_groups: {
+            agents: {
+                role_groups: {
                 engineer: {
                     roles: {
                         senior-engineer: { staleRoleField: true },
                     },
                 },
+            },
             },
         }"#,
     )
@@ -1761,9 +1865,11 @@ fn harness_settings_rejects_unknown_prompt_fragment_fields() {
     std::fs::write(
         dir.join("harness.yaml"),
         r#"{
-            prompt_fragments: [
+            agents: {
+                prompt_fragments: [
                 { name: "global.typo", priority: 50, text: "x", staleFragmentField: true },
             ],
+            },
         }"#,
     )
     .expect("write");
@@ -1785,12 +1891,14 @@ fn harness_settings_role_cli_overrides_apply_in_order_after_config() {
     std::fs::write(
         dir.join("harness.yaml"),
         r#"{
-            role_groups: {
+            agents: {
+                role_groups: {
                 manager: {
                     roles: {
                         manager: { enable: false },
                     },
                 },
+            },
             },
         }"#,
     )
@@ -1905,15 +2013,17 @@ fn harness_drop_in_layers_merge_through_domain_overrides() {
             extensions: {
                 mything: { command: ["mything"] },
             },
-            prompt_fragments: [
+            agents: {
+                prompt_fragments: [
                 { name: "global.local", priority: 60, text: "Local global instruction." },
             ],
-            role_groups: {
+                role_groups: {
                 manager: {
                     roles: {
                         "micro-manager": { prompt_fragments: [{ name: "manager.local", priority: 170, text: "Local manager instruction." }] },
                     },
                 },
+            },
             },
         }"#,
     )
@@ -1926,15 +2036,17 @@ fn harness_drop_in_layers_merge_through_domain_overrides() {
             extensions: {
                 mything: { suffix: ["--flag"] },
             },
-            prompt_fragments: [
+            agents: {
+                prompt_fragments: [
                 { name: "global.drop-in", priority: 70, text: "Drop-in global instruction." },
             ],
-            role_groups: {
+                role_groups: {
                 manager: {
                     roles: {
                         "micro-manager": { prompt_fragments: [{ name: "manager.drop-in", priority: 180, text: "Drop-in manager instruction." }] },
                     },
                 },
+            },
             },
         }"#,
     )
@@ -1993,10 +2105,11 @@ fn harness_drop_in_layers_merge_through_domain_overrides() {
     );
 }
 
-/// Ensures global prompt fragments are appended to every effective role prompt.
+/// Ensures agent-global prompt fragments are appended to every effective role
+/// prompt.
 #[test]
 fn harness_global_prompt_fragments_apply_to_all_roles() {
-    // Top-level prompt fragments are role-independent style/context hooks. They
+    // `agents.prompt_fragments` are role-independent style/context hooks. They
     // must apply to built-in roles and roles created by user config without
     // duplicating the same fragment when a drop-in repeats it exactly.
     let td = TempDir::new().expect("tempdir");
@@ -2004,15 +2117,17 @@ fn harness_global_prompt_fragments_apply_to_all_roles() {
     std::fs::write(
         dir.join("harness.yaml"),
         r#"{
-            prompt_fragments: [
+            agents: {
+                prompt_fragments: [
                 { name: "global.simple", priority: 65, text: "Use simple words." },
             ],
-            role_groups: {
+                role_groups: {
                 custom: {
                     roles: {
                         custom: { model: "openai/custom" },
                     },
                 },
+            },
             },
         }"#,
     )
@@ -2021,9 +2136,11 @@ fn harness_global_prompt_fragments_apply_to_all_roles() {
     std::fs::write(
         dir.join("harness.d").join("01-repeat.yaml"),
         r#"{
-            prompt_fragments: [
+            agents: {
+                prompt_fragments: [
                 { name: "global.simple", priority: 65, text: "Use simple words." },
             ],
+            },
         }"#,
     )
     .expect("write drop-in");
@@ -2049,24 +2166,27 @@ fn harness_global_prompt_fragments_apply_to_all_roles() {
     }
 }
 
-/// Ensures command-line global prompt fragments are folded into every role.
+/// Ensures command-line agent-global prompt fragments are folded into every
+/// role.
 #[test]
 fn harness_config_cli_global_prompt_fragments_apply_to_all_roles() {
     // One-shot harness config overrides are a convenient way to inject shared
     // run-specific instructions. They must take the same domain-specific merge
-    // path as file-based top-level prompt fragments so every effective role sees
+    // path as file-based `agents.prompt_fragments` so every effective role sees
     // the fragment exactly once.
     let td = TempDir::new().expect("tempdir");
     let dir = td.path();
     std::fs::write(
         dir.join("harness.yaml"),
         r#"{
-            role_groups: {
+            agents: {
+                role_groups: {
                 custom: {
                     roles: {
                         custom: { model: "openai/custom" },
                     },
                 },
+            },
             },
         }"#,
     )
@@ -2076,7 +2196,7 @@ fn harness_config_cli_global_prompt_fragments_apply_to_all_roles() {
         &dirs_with_config(dir),
         &[],
         &[HarnessConfigCliOverride::from_str(
-            "promptFragments=[{ name: \"global.cli\", priority: 64, text: \"Follow the run policy.\" }]",
+            "agents.promptFragments=[{ name: \"global.cli\", priority: 64, text: \"Follow the run policy.\" }]",
         )
         .expect("parse override")],
     )
@@ -2113,7 +2233,8 @@ fn harness_roles_merge_with_built_ins() {
     std::fs::write(
         dir.join("harness.yaml"),
         r#"{
-            role_groups: {
+            agents: {
+                role_groups: {
                 engineer: {
                     roles: {
                         engineer: { model: "openai/gpt-5.5", tools: ["read"] },
@@ -2125,6 +2246,7 @@ fn harness_roles_merge_with_built_ins() {
                         "micro-manager": { model: "openai/gpt-5.5" },
                     },
                 },
+            },
             },
         }"#,
     )
@@ -2187,12 +2309,14 @@ fn harness_manager_partial_override_keeps_built_in_prompt_fragments() {
     std::fs::write(
         dir.join("harness.yaml"),
         r#"{
-            role_groups: {
+            agents: {
+                role_groups: {
                 manager: {
                     roles: {
                         "micro-manager": { model: "openai/gpt-5.5" },
                     },
                 },
+            },
             },
         }"#,
     )
@@ -2224,12 +2348,14 @@ fn harness_manager_prompt_fragments_extend_built_in_prompt_fragments() {
     std::fs::write(
         dir.join("harness.yaml"),
         r#"{
-            role_groups: {
+            agents: {
+                role_groups: {
                 manager: {
                     roles: {
                         "micro-manager": { prompt_fragments: [{ name: "manager.custom", priority: 100, text: "Custom manager prompt." }] },
                     },
                 },
+            },
             },
         }"#,
     )
@@ -2261,7 +2387,8 @@ fn harness_role_group_fields_apply_as_role_defaults() {
     std::fs::write(
         dir.join("harness.yaml"),
         r#"{
-            role_groups: {
+            agents: {
+                role_groups: {
                 review: {
                     effort: "low",
                     tools: ["read"],
@@ -2279,6 +2406,7 @@ fn harness_role_group_fields_apply_as_role_defaults() {
                         },
                     },
                 },
+            },
             },
         }"#,
     )
@@ -2320,7 +2448,8 @@ fn harness_role_prompt_fragments_parse_as_plain_strings() {
     std::fs::write(
         dir.join("harness.yaml"),
         r#"{
-            role_groups: {
+            agents: {
+                role_groups: {
                 review: {
                     roles: {
                         custom: {
@@ -2331,6 +2460,7 @@ fn harness_role_prompt_fragments_parse_as_plain_strings() {
                         },
                     },
                 },
+            },
             },
         }"#,
     )
@@ -2422,7 +2552,8 @@ fn harness_role_groups_load_custom_roles() {
     std::fs::write(
         dir.join("harness.yaml"),
         r#"{
-            role_groups: {
+            agents: {
+                role_groups: {
                 coding: {
                     roles: {
                         custom: { effort: "medium", tools: ["read"] },
@@ -2433,6 +2564,7 @@ fn harness_role_groups_load_custom_roles() {
                         "micro-manager": { model: "openai/gpt-5.5" },
                     },
                 },
+            },
             },
         }"#,
     )
@@ -2467,7 +2599,8 @@ fn harness_role_groups_load_role_order() {
     std::fs::write(
         dir.join("harness.yaml"),
         r#"{
-            role_groups: {
+            agents: {
+                role_groups: {
                 engineer: {
                     order: 40,
                     roles: {
@@ -2477,6 +2610,7 @@ fn harness_role_groups_load_role_order() {
                         "custom-engineer": {},
                     },
                 },
+            },
             },
         }"#,
     )
@@ -2573,9 +2707,11 @@ fn harness_role_groups_reject_duplicate_role_names() {
     std::fs::write(
         dir.join("harness.yaml"),
         r#"{
-            role_groups: {
+            agents: {
+                role_groups: {
                 coding: { roles: { engineer: {} } },
                 review: { roles: { engineer: {} } },
+            },
             },
         }"#,
     )
@@ -2622,8 +2758,9 @@ fn harness_role_enable_false_filters_built_in_roles_after_merging() {
     std::fs::write(
         dir.join("harness.yaml"),
         r#"{
-            default_role: "senior-engineer",
-            role_groups: {
+            agents: {
+                default_role: "senior-engineer",
+                role_groups: {
                 engineer: {
                     roles: {
                         "junior-engineer": { enable: false },
@@ -2631,6 +2768,7 @@ fn harness_role_enable_false_filters_built_in_roles_after_merging() {
                         "staff-engineer": { enable: false },
                     },
                 },
+            },
             },
         }"#,
     )
@@ -2662,7 +2800,8 @@ fn harness_role_enabled_alias_is_kept_for_old_config() {
     std::fs::write(
         dir.join("harness.yaml"),
         r#"{
-            role_groups: {
+            agents: {
+                role_groups: {
                 legacy: {
                     enabled: false,
                     roles: {
@@ -2670,6 +2809,7 @@ fn harness_role_enabled_alias_is_kept_for_old_config() {
                         old_off: {},
                     },
                 },
+            },
             },
         }"#,
     )
@@ -2696,11 +2836,12 @@ fn harness_legacy_enabled_alias_overrides_built_in_enable() {
     std::fs::write(
         dir.join("harness.yaml"),
         r#"
-        role_groups:
-          engineer:
-            roles:
-              senior-engineer:
-                enabled: false
+        agents:
+          role_groups:
+            engineer:
+              roles:
+                senior-engineer:
+                  enabled: false
         "#,
     )
     .expect("write");
@@ -2721,12 +2862,12 @@ fn harness_role_enable_can_be_reenabled_by_later_layers() {
     std::fs::create_dir_all(dir.join("harness.d")).expect("mkdir drop-ins");
     std::fs::write(
         dir.join("harness.yaml"),
-        r#"{ role_groups: { engineer: { roles: { "staff-engineer": { enable: false } } } } }"#,
+        r#"{ agents: { role_groups: { engineer: { roles: { "staff-engineer": { enable: false } } } } } }"#,
     )
     .expect("write base");
     std::fs::write(
         dir.join("harness.d/10-enable.yaml"),
-        r#"{ role_groups: { engineer: { roles: { "staff-engineer": { enable: true, effort: "xhigh" } } } } }"#,
+        r#"{ agents: { role_groups: { engineer: { roles: { "staff-engineer": { enable: true, effort: "xhigh" } } } } } }"#,
     )
     .expect("write drop-in");
 

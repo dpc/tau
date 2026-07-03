@@ -61,7 +61,7 @@ can collide with a lower-precedence canonical key instead of overriding it.
 Role metadata is merged through domain-specific logic rather than generic YAML
 array replacement:
 
-- `role_groups.<group>` defaults apply to all existing members of that group and
+- `agents.role_groups.<group>` defaults apply to all existing members of that group and
   to roles listed in the same layer.
 - Per-role overrides are applied after group defaults.
 - Role `order` is ordinary role metadata: lower values sort first within a

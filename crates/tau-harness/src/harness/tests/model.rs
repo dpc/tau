@@ -797,13 +797,15 @@ fn load_roles_ignores_stale_harness_state() {
     std::fs::write(
         config_dir.join("harness.yaml"),
         r#"{
-            default_role: "engineer",
-            role_groups: {
+            agents: {
+                default_role: "engineer",
+                role_groups: {
                 engineer: {
                     roles: {
                         engineer: { model: "openai/gpt-4.1", effort: "high", verbosity: "medium" },
                     },
                 },
+            },
             },
         }"#,
     )
@@ -907,8 +909,9 @@ fn load_roles_falls_back_to_engineer_role_while_models_are_provider_owned() {
     std::fs::write(
         config_dir.join("harness.yaml"),
         r#"{
-            default_role: "engineer",
-            role_groups: {
+            agents: {
+                default_role: "engineer",
+                role_groups: {
                 engineer: {
                     roles: {
                         engineer: { model: "local/engineer" },
@@ -919,6 +922,7 @@ fn load_roles_falls_back_to_engineer_role_while_models_are_provider_owned() {
                         manager: { model: "local/deep" },
                     },
                 },
+            },
             },
         }"#,
     )
@@ -980,14 +984,16 @@ fn role_missing_fields_use_model_defaults() {
     std::fs::write(
         config_dir.join("harness.yaml"),
         r#"{
-            default_role: "plain",
-            role_groups: {
+            agents: {
+                default_role: "plain",
+                role_groups: {
                 engineer: {
                     roles: {
                         engineer: { model: "local/engineer", effort: "high" },
                         plain: {},
                     },
                 },
+            },
             },
         }"#,
     )
@@ -1122,7 +1128,8 @@ fn harness_startup_errors_when_no_roles_are_enabled() {
     std::fs::write(
         config_dir.join("harness.yaml"),
         r#"{
-            role_groups: {
+            agents: {
+                role_groups: {
                 engineer: {
                     roles: {
                         "senior-engineer": { enable: false },
@@ -1135,6 +1142,7 @@ fn harness_startup_errors_when_no_roles_are_enabled() {
                         "micro-manager": { enable: false },
                     },
                 },
+            },
             },
         }"#,
     )
@@ -1168,11 +1176,12 @@ fn missing_required_skill_disables_role_and_emits_notice() {
     std::fs::write(
         config_dir.join("harness.yaml"),
         r#"
-        role_groups:
-          custom:
-            roles:
-              reviewer:
-                required_skills: [missing-review-skill]
+        agents:
+          role_groups:
+            custom:
+              roles:
+                reviewer:
+                  required_skills: [missing-review-skill]
         "#,
     )
     .expect("write harness config");
@@ -1297,12 +1306,13 @@ fn selected_role_missing_required_skill_fails_startup() {
     std::fs::write(
         config_dir.join("harness.yaml"),
         r#"
-        default_role: reviewer
-        role_groups:
-          custom:
-            roles:
-              reviewer:
-                requiredSkills: [missing-review-skill]
+        agents:
+          default_role: reviewer
+          role_groups:
+            custom:
+              roles:
+                reviewer:
+                  requiredSkills: [missing-review-skill]
         "#,
     )
     .expect("write harness config");
@@ -1339,11 +1349,12 @@ fn available_required_skill_keeps_role_enabled() {
     std::fs::write(
         config_dir.join("harness.yaml"),
         r#"
-        role_groups:
-          custom:
-            roles:
-              reviewer:
-                required_skills: [tau-self-knowledge-config]
+        agents:
+          role_groups:
+            custom:
+              roles:
+                reviewer:
+                  required_skills: [tau-self-knowledge-config]
         "#,
     )
     .expect("write harness config");
@@ -1457,12 +1468,13 @@ fn required_skill_validation_waits_for_session_skill_discovery() {
     std::fs::write(
         config_dir.join("harness.yaml"),
         r#"
-        default_role: reviewer
-        role_groups:
-          custom:
-            roles:
-              reviewer:
-                required_skills: [delayed-required-skill]
+        agents:
+          default_role: reviewer
+          role_groups:
+            custom:
+              roles:
+                reviewer:
+                  required_skills: [delayed-required-skill]
         "#,
     )
     .expect("write harness config");
@@ -1503,7 +1515,9 @@ fn missing_default_role_emits_mandatory_warning_notice_and_falls_back() {
     std::fs::write(
         config_dir.join("harness.yaml"),
         r#"{
-            default_role: "ghost",
+            agents: {
+                default_role: "ghost",
+            },
         }"#,
     )
     .expect("write harness config");

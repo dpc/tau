@@ -283,7 +283,7 @@ impl HarnessRoleDetails {
 /// One ordered role group used for keyboard navigation and grouped menus.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct HarnessRoleGroup {
-    /// Stable group name from harness `role_groups` configuration.
+    /// Stable group name from harness `agents.role_groups` configuration.
     pub name: String,
     /// Role names in navigation order. Names are accepted by `ui.role_select`.
     pub roles: Vec<String>,
