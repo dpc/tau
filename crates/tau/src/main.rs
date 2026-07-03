@@ -31,6 +31,11 @@ fn main() -> std::process::ExitCode {
             logging: tau_cli::ComponentLogging::RunnerManaged,
         },
         tau_cli::Component {
+            name: "ext-slack",
+            runner: tau_ext_slack::run_stdio,
+            logging: tau_cli::ComponentLogging::RunnerManaged,
+        },
+        tau_cli::Component {
             name: "ext-std-notifications",
             runner: tau_ext_std_notifications::run_stdio,
             logging: tau_cli::ComponentLogging::RunnerManaged,

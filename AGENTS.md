@@ -13,6 +13,7 @@
 - `crates/tau-ext-std-notifications` — built-in notification extension
 - `crates/tau-ext-telegram` — disabled-by-default Telegram text bridge extension
 - `crates/tau-ext-shell` — shell- and filesystem-oriented extension
+- `crates/tau-ext-slack` — disabled-by-default Slack Socket Mode text bridge extension
 - `crates/tau-ext-rhai` — disabled-by-default trusted local Rhai scripting extension for event hooks, tool registration, and direct shell automation
 - `crates/tau-ext-test-dummy` — test-only dummy extension
 - `crates/tau-ext-websearch` — built-in generic web search extension (Exa default plus opt-in Parallel.ai tools)

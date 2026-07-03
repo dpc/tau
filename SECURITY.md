@@ -180,6 +180,24 @@ the skill file, or grant tools mentioned by skill frontmatter.
 
 User `/skill` invocation explicitly reads the selected skill file, strips frontmatter, and injects the skill body into the next model prompt along with any user arguments. Treat invoking a skill as intentionally adding that local file content to the conversation context.
 
+## Slack extension
+
+`std-slack` / `tau-ext-slack` is disabled by default because it bridges untrusted
+external Slack text into Tau prompts. When enabled, it requires explicit Slack
+app-token and bot-token secrets plus a non-empty allowlist of Slack user ids. The
+model cannot provide arbitrary channel, user, or thread destinations:
+`slack_send` uses only the configured Slack conversation or a single allowlisted
+DM linked with `start`, and only after the calling agent registered. Slack
+workspace admins, Slack itself, channel members, and Slack Connect participants
+with access to a channel may be able to read messages; this MVP makes no E2EE
+claim. Runtime registrations, selected agents, learned DM, duplicate-event
+cache, and websocket state are in-memory only. Endpoint overrides must reject
+userinfo/query/fragment, production Web API calls must use HTTPS, production
+Socket Mode URLs must use WSS, and returned websocket URLs must not be logged.
+Avoid logs that include Slack tokens, Socket Mode URLs, or unexpected private
+Slack content. Config parse/apply failures must emit `ConfigError`; pre-start
+failures clear inactive config instead of silently keeping stale credentials.
+
 ## Telegram extension
 
 `std-telegram` / `tau-ext-telegram` is disabled by default because it bridges

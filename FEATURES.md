@@ -324,6 +324,7 @@ such as `agent_start`,
 ```json5
 extensions: {
   "core-shell":         { enable: false },                       // disable
+  "std-slack":          { enable: true, require: false },        // skip visibly if unavailable
   "std-telegram":       { enable: true, require: false },        // skip visibly if unavailable
   "provider-builtin":   { prefix: ["ssh", "user@host"] },        // run remotely
   "custom-tool":        { command: ["./tool"], cwd: "/srv/tool" }, // run from cwd
@@ -561,6 +562,17 @@ explicitly registered Tau agents and lets those agents reply with
 outgoing messages use only a configured or linked chat id, never a model-chosen
 destination. Runtime registrations and Telegram update offsets are in-memory,
 and unconfigured group chats are refused.
+
+### `std-slack` — personal Slack Socket Mode text bridge
+
+Disabled by default, `std-slack` lets allowlisted Slack users send text to
+explicitly registered Tau agents and lets those agents reply with `slack_send`.
+It uses Slack Socket Mode with an app-token secret (`xapp-...`), a bot-token
+secret (`xoxb-...`), and a non-empty `allowed_user_ids` allowlist. Outgoing
+messages use only a configured `channel_id` or a single allowlisted DM linked at
+runtime with `start`; the model cannot choose channel, user, or thread
+destinations. Runtime registrations, selected agents, learned DM link, duplicate
+event cache, and websocket state are in-memory only.
 
 ### Web search extensions
 

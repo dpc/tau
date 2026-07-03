@@ -21,6 +21,7 @@ tau-ext-pim.workspace = true
 tau-ext-provider-builtin.workspace = true
 tau-ext-rhai.workspace = true
 tau-ext-shell.workspace = true
+tau-ext-slack.workspace = true
 tau-ext-std-notifications.workspace = true
 tau-ext-telegram.workspace = true
 tau-ext-test-dummy.workspace = true

@@ -1,0 +1,30 @@
+[package]
+name = "tau-ext-slack"
+version.workspace = true
+edition.workspace = true
+description.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+futures-util.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tau-extension.workspace = true
+tau-proto.workspace = true
+tokio.workspace = true
+tokio-tungstenite.workspace = true
+tracing.workspace = true
+ureq.workspace = true
+url.workspace = true
+
+[dev-dependencies]
+tau-core.workspace = true

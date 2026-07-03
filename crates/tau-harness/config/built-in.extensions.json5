@@ -39,6 +39,13 @@
         config: { "agent_start": [], "agent_end": [], "agent_idle": [], "agent_idle_all": [] },
     },
     {
+        name: "std-slack",
+        suffix: ["component", "ext-slack"],
+        role: "tool",
+        enable: false,
+        config: {},
+    },
+    {
         name: "std-telegram",
         suffix: ["component", "ext-telegram"],
         role: "tool",

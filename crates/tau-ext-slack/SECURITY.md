@@ -1,0 +1,28 @@
+# tau-ext-slack security notes
+
+- The built-in extension is disabled by default and requires explicit app-token
+  and bot-token secrets plus a non-empty `allowed_user_ids` allowlist.
+- Slack app tokens (`xapp-...`), bot tokens (`xoxb-...`), and Socket Mode
+  websocket URLs are secrets. Do not derive `Debug` for structs containing token
+  text and never log websocket URLs.
+- The model cannot choose arbitrary Slack destinations. `slack_send` uses only
+  the configured `channel_id` or the single allowlisted DM that linked itself
+  with `start`, and only after the calling agent has registered.
+- Messages from users outside `allowed_user_ids` are ignored before any routing
+  or Slack reply side effects.
+- Slack text is untrusted prompt input and can contain prompt injection. Tau
+  prefixes it with compact Slack source context before submitting it as a normal
+  prompt request.
+- Slack workspace admins, Slack itself, channel members, and Slack Connect
+  participants with access to a channel may be able to read messages. This MVP
+  does not provide end-to-end encryption.
+- Reconfiguration fails closed. Before worker startup, parse/validation errors
+  are reported as `ConfigError` and clear inactive config, registrations,
+  selected agents, and learned DM state. After worker startup, config changes are
+  rejected with `ConfigError`; restart Tau to apply them.
+- If `api_base` is overridden for tests, production endpoints must use HTTPS.
+  Plaintext HTTP is accepted only for loopback hosts, and userinfo, query, and
+  fragment components are rejected.
+- Returned Socket Mode websocket URLs are validated and never logged. Production
+  websocket URLs must use WSS; plaintext WS is accepted only for loopback tests.
+- All model-visible and log-visible diagnostics are bounded and token-redacted.

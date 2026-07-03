@@ -3124,6 +3124,7 @@ dependencies = [
  "tau-ext-provider-builtin",
  "tau-ext-rhai",
  "tau-ext-shell",
+ "tau-ext-slack",
  "tau-ext-std-notifications",
  "tau-ext-telegram",
  "tau-ext-test-dummy",
@@ -3354,6 +3355,23 @@ dependencies = [
  "tau-vcr",
  "tempfile",
  "tracing",
+]
+
+[[package]]
+name = "tau-ext-slack"
+version = "0.1.0"
+dependencies = [
+ "futures-util",
+ "serde",
+ "serde_json",
+ "tau-core",
+ "tau-extension",
+ "tau-proto",
+ "tokio",
+ "tokio-tungstenite",
+ "tracing",
+ "ureq",
+ "url",
 ]
 
 [[package]]

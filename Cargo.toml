@@ -15,6 +15,7 @@ members = [
   "crates/tau-ext-provider-builtin",
   "crates/tau-ext-rhai",
   "crates/tau-ext-shell",
+  "crates/tau-ext-slack",
   "crates/tau-ext-std-notifications",
   "crates/tau-ext-telegram",
   "crates/tau-ext-test-dummy",
@@ -74,6 +75,7 @@ tau-ext-pim = { path = "crates/tau-ext-pim" }
 tau-ext-provider-builtin = { path = "crates/tau-ext-provider-builtin" }
 tau-ext-rhai = { path = "crates/tau-ext-rhai" }
 tau-ext-shell = { path = "crates/tau-ext-shell" }
+tau-ext-slack = { path = "crates/tau-ext-slack" }
 tau-ext-std-notifications = { path = "crates/tau-ext-std-notifications" }
 tau-ext-telegram = { path = "crates/tau-ext-telegram" }
 tau-ext-test-dummy = { path = "crates/tau-ext-test-dummy" }
