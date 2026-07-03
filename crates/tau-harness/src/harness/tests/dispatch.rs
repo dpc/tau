@@ -9669,8 +9669,9 @@ fn mutating_tools_in_distinct_side_conversations_dispatch_concurrently() {
 
 /// Sub-agent state changes (tool start, response usage, tool finish)
 /// must surface to the user as `DelegateProgress` events keyed on the
-/// parent's `agent_start` tool call_id. The CLI uses these to repaint
-/// the running tool block as `delegate [task] %a/b #… …`.
+/// parent's `agent_start` tool call_id. The side agent's display name
+/// includes the starting parent's id/name snapshot so UI agent chips stay
+/// understandable when multiple children have similar task names.
 #[test]
 fn delegate_emits_progress_as_sub_agent_makes_progress() {
     let td = TempDir::new().expect("tempdir");
@@ -9712,6 +9713,12 @@ fn delegate_emits_progress_as_sub_agent_makes_progress() {
     );
 
     let cid = ensure_test_user_agent(&mut h);
+    let parent_agent_id = h
+        .agents
+        .get(&cid)
+        .and_then(|conversation| conversation.agent_id.as_deref())
+        .expect("parent agent id")
+        .to_owned();
     let main_spid: AgentPromptId = "sp-main".into();
     seed_agent_thinking(&mut h, &cid, "sp-main");
     h.prompt_agents.insert(main_spid.clone(), cid.clone());
@@ -9793,13 +9800,14 @@ fn delegate_emits_progress_as_sub_agent_makes_progress() {
         .agent_store
         .agent_events(side_agent_id)
         .expect("side agent events");
+    let expected_display_name = format!("look it up; child of {parent_agent_id} senior-engineer");
     assert!(side_events.iter().any(|record| matches!(
         &record.event,
-        Event::AgentDisplayNameSet(name) if name.display_name == "senior-engineer: look it up"
+        Event::AgentDisplayNameSet(name) if name.display_name == expected_display_name
     )));
     assert!(sink.lock().expect("sink").iter().any(|routed| matches!(
         peel_inner_event(&routed.frame),
-        Some(Event::AgentDisplayNameSet(name)) if name.display_name == "senior-engineer: look it up"
+        Some(Event::AgentDisplayNameSet(name)) if name.display_name == expected_display_name
     )));
     assert_eq!(initial.role.as_deref(), Some("senior-engineer"));
     assert_eq!(initial.tools_in_flight, 0);

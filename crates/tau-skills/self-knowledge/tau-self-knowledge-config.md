@@ -102,6 +102,13 @@ Display-name templates additionally receive:
 - `task_name_present` — true when `task_name` is available. `taskNamePresent` is also available as a camelCase alias.
 Rendered IDs must use only ASCII letters, digits, `_`, or `-`, and must fit Tau's agent ID length limit. If a configured ID template fails to render, renders an invalid ID, or keeps colliding, Tau warns and falls back to the built-in random template. If a configured display-name template fails to render or renders empty, Tau warns when appropriate and falls back to the request display name when one exists.
 
+Delegated children started through the built-in `agent_start` tool use the task
+title as their leading display label. When the parent agent is known, Tau appends
+a creation-time parent snapshot in the form
+`<task title>; child of <parent-agent-id> <parent-display-name>`. The configured
+display-name template is used as the fallback label only when the request has no
+task title.
+
 ## Providers
 
 Use `tau provider add` for the interactive provider setup wizard. It prompts for provider kind, provider namespace, auth, and model details as needed.

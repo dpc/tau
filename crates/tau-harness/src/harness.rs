@@ -8338,6 +8338,15 @@ impl Harness {
                 .contains_key(parent_cid)
                 .then(|| parent_cid.clone())
         });
+        let display_name = if is_tool_backed {
+            self.display_name_for_tool_backed_child(
+                task_name.as_deref(),
+                display_name,
+                parent_agent_id.as_ref(),
+            )
+        } else {
+            display_name
+        };
         let session_id = parent_agent_id
             .as_ref()
             .and_then(|parent_cid| self.agents.get(parent_cid))
@@ -10186,6 +10195,27 @@ impl Harness {
                 fallback
             }
         }
+    }
+
+    fn display_name_for_tool_backed_child(
+        &self,
+        task_name: Option<&str>,
+        fallback_display_name: Option<String>,
+        parent_cid: Option<&AgentId>,
+    ) -> Option<String> {
+        let title = normalize_display_name(task_name).or(fallback_display_name)?;
+        let Some(parent) = parent_cid.and_then(|parent_cid| self.agents.get(parent_cid)) else {
+            return Some(title);
+        };
+        let Some(parent_agent_id) = parent.agent_id.as_deref() else {
+            return Some(title);
+        };
+        let parent_display_name = normalize_display_name(parent.display_name.as_deref())
+            .map(|display_name| format!(" {display_name}"))
+            .unwrap_or_default();
+        Some(format!(
+            "{title}; child of {parent_agent_id}{parent_display_name}"
+        ))
     }
 
     pub(crate) fn mint_available_agent_id_for_role(&mut self, role: &str) -> String {
