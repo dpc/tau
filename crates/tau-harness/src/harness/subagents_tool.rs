@@ -456,6 +456,25 @@ impl Harness {
     ) -> Result<(), HarnessError> {
         let call_id: ToolCallId = call.id.clone();
         self.ensure_harness_owned_tool_tracking(agent_id, call, &visible_tool_name);
+        if self.has_pending_wait_preempting_prompt(agent_id) {
+            let reply = match parse_wait_args(&call.arguments) {
+                Ok(WaitTarget::Exact(target)) => {
+                    let source_tool_name = self
+                        .subagents
+                        .wait_tracker
+                        .call_tool_names
+                        .get(&target)
+                        .cloned();
+                    wait_interrupted_reply(call_id, visible_tool_name, source_tool_name, &target)
+                }
+                Ok(WaitTarget::AnyBackground) => {
+                    wait_interrupted_any_reply(call_id, visible_tool_name)
+                }
+                Err(message) => wait_error_reply(call_id, visible_tool_name, message, None),
+            };
+            self.publish_wait_replies(vec![reply]);
+            return Ok(());
+        }
         let start = self.subagents.wait_tracker.handle_wait_invoke(
             agent_id,
             call_id,
@@ -467,6 +486,20 @@ impl Harness {
         }
         self.publish_wait_replies(start.reply.into_iter().collect());
         Ok(())
+    }
+
+    fn has_pending_wait_preempting_prompt(&self, agent_id: &AgentId) -> bool {
+        self.agents.get(agent_id).is_some_and(|agent| {
+            // `submit_prompt_to_agent` and `handle_agent_message_received` both
+            // interrupt waits that are active at queue time. This start-time
+            // guard closes the converse race where the prompt/message queued
+            // first and a later provider tool call tries to start a passive
+            // wait behind that already-pending input.
+            agent
+                .pending_prompts
+                .iter()
+                .any(|prompt| !prompt.is_internal() || prompt.is_agent_message_received())
+        })
     }
 
     pub(crate) fn ensure_harness_owned_tool_tracking(

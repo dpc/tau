@@ -780,6 +780,13 @@ fn background_result_count(h: &Harness, call_id: &str) -> usize {
     )
 }
 
+fn tool_result_count(h: &Harness, call_id: &str) -> usize {
+    event_log_count(
+        h,
+        |event| matches!(event, Event::ToolResult(result) if result.call_id.as_str() == call_id),
+    )
+}
+
 fn background_placeholder_count(h: &Harness, call_id: &str) -> usize {
     agent_event_count(h, |event| {
         matches!(
@@ -837,6 +844,18 @@ fn event_log_contains_any_source(h: &Harness, matches_event: impl Fn(&Event) -> 
         }
     }
     false
+}
+
+fn event_log_count(h: &Harness, matches_event: impl Fn(&Event) -> bool) -> usize {
+    let mut count = 0;
+    let mut seq = crate::event_log::EventLogSeq::new(0);
+    while let Some(entry) = h.event_log.get_next_from(seq) {
+        seq = entry.seq.next();
+        if matches_event(&entry.event) {
+            count += 1;
+        }
+    }
+    count
 }
 
 fn shared_test_tool_spec(name: &str) -> ToolSpec {
@@ -6809,6 +6828,153 @@ fn agent_message_interrupts_recipient_active_wait() {
             if steered.agent_id.as_str() == recipient_id.as_str()
                 && steered.text.contains("please stop waiting")
     )));
+
+    h.shutdown().expect("shutdown");
+}
+
+/// Regression: a user prompt can queue while another foreground tool from the
+/// same provider turn is still running, before the model's later `wait` call is
+/// dispatched. Starting that `wait` must notice the already-queued user input
+/// and complete immediately instead of parking the agent behind background
+/// work.
+#[test]
+fn wait_start_is_interrupted_by_already_queued_user_prompt() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    h.selected_model = Some("test/model".into());
+
+    let _tool_events = connect_test_tool(&mut h, "conn-queued-wait");
+    h.registry.register(
+        "conn-queued-wait",
+        instant_background_test_tool_spec("slow_queued_wait"),
+    );
+
+    let cid = ensure_test_user_agent(&mut h);
+    let background_call_id: ToolCallId = "bg-queued-wait".into();
+    start_background_tool_and_finish_placeholder_turn(
+        &mut h,
+        &cid,
+        background_call_id.as_str(),
+        "slow_queued_wait",
+    );
+    h.agents
+        .get_mut(&cid)
+        .expect("agent")
+        .pending_prompts
+        .push_back(PendingPrompt::user("user input already queued".to_owned()));
+
+    let wait_call_id: ToolCallId = "wait-queued-input".into();
+    let wait_call = wait_no_args_call(wait_call_id.as_str());
+    seed_tools_running(&mut h, &cid, vec![wait_call_id.clone()]);
+    h.handle_wait_tool_call(&cid, &wait_call, ToolName::new("wait"))
+        .expect("wait interrupted by queued user input");
+
+    assert_eq!(
+        tool_result_count(&h, wait_call_id.as_str()),
+        1,
+        "wait should complete exactly once when queued user input preempts it"
+    );
+    assert!(event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::ToolResult(result)
+            if result.call_id.as_str() == wait_call_id.as_str()
+                && matches!(&result.result, CborValue::Text(text) if text.contains("interrupted because new input is queued"))
+    )));
+    assert!(event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::AgentPromptSteered(steered)
+            if steered.text == "user input already queued"
+    )));
+
+    h.handle_extension_event_inner(
+        "conn-queued-wait",
+        Event::ToolResult(final_tool_result(
+            background_call_id.as_str(),
+            "slow_queued_wait",
+            "background done after interrupt",
+        )),
+    )
+    .expect("background result after interrupted wait");
+    assert_eq!(
+        tool_result_count(&h, wait_call_id.as_str()),
+        1,
+        "the later background result must not resume a wait that never started"
+    );
+
+    h.shutdown().expect("shutdown");
+}
+
+/// Regression companion to the user-prompt queued-before-wait race: inbound
+/// `agent.message_received` prompts are hidden/internal in transcript terms,
+/// but active waits already treat them as input that must interrupt waiting.
+/// The same preemption must apply when the message is queued before `wait`
+/// starts.
+#[test]
+fn wait_start_is_interrupted_by_already_queued_agent_message() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    h.selected_model = Some("test/model".into());
+
+    let _tool_events = connect_test_tool(&mut h, "conn-queued-message-wait");
+    h.registry.register(
+        "conn-queued-message-wait",
+        instant_background_test_tool_spec("slow_queued_message_wait"),
+    );
+
+    let cid = ensure_test_user_agent(&mut h);
+    let background_call_id: ToolCallId = "bg-queued-message-wait".into();
+    start_background_tool_and_finish_placeholder_turn(
+        &mut h,
+        &cid,
+        background_call_id.as_str(),
+        "slow_queued_message_wait",
+    );
+    h.agents
+        .get_mut(&cid)
+        .expect("agent")
+        .pending_prompts
+        .push_back(PendingPrompt::agent_message_received(
+            "queued manager message".to_owned(),
+        ));
+
+    let wait_call_id: ToolCallId = "wait-queued-message".into();
+    let wait_call = wait_no_args_call(wait_call_id.as_str());
+    seed_tools_running(&mut h, &cid, vec![wait_call_id.clone()]);
+    h.handle_wait_tool_call(&cid, &wait_call, ToolName::new("wait"))
+        .expect("wait interrupted by queued agent message");
+
+    assert_eq!(
+        tool_result_count(&h, wait_call_id.as_str()),
+        1,
+        "wait should complete exactly once when queued agent input preempts it"
+    );
+    assert!(event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::ToolResult(result)
+            if result.call_id.as_str() == wait_call_id.as_str()
+                && matches!(&result.result, CborValue::Text(text) if text.contains("interrupted because new input is queued"))
+    )));
+    assert!(event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::AgentPromptSteered(steered) if steered.text == "queued manager message"
+    )));
+
+    h.handle_extension_event_inner(
+        "conn-queued-message-wait",
+        Event::ToolResult(final_tool_result(
+            background_call_id.as_str(),
+            "slow_queued_message_wait",
+            "background done after message interrupt",
+        )),
+    )
+    .expect("background result after interrupted wait");
+    assert_eq!(
+        tool_result_count(&h, wait_call_id.as_str()),
+        1,
+        "the later background result must not resume a wait that never started"
+    );
 
     h.shutdown().expect("shutdown");
 }
