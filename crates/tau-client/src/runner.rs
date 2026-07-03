@@ -57,13 +57,74 @@ where
                 .and_then(|result| result);
 
             match (run_result, shutdown_result, writer_result) {
-                (Ok(state), Ok(()), Ok(())) => Ok(state),
+                (Ok((state, _)), Ok(()), Ok(())) => Ok(state),
                 (Err(error), _, _) => Err(error),
                 (_, Err(error), _) => Err(error),
                 (_, _, Err(error)) => Err(error),
             }
         })
     }
+
+    /// Runs the extension without joining the writer after harness disconnect.
+    ///
+    /// This is intended for extensions that intentionally keep detached
+    /// background workers alive after a harness `Disconnect`, where joining the
+    /// writer would make disconnect latency depend on queued background output
+    /// or pipe backpressure. Non-disconnect exits still flush and join the
+    /// writer so ordinary EOF and handler-stop paths keep normal error
+    /// reporting.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when builder validation fails, protocol input cannot be
+    /// decoded, startup output cannot be encoded or flushed, or a handler
+    /// returns an error that should stop the extension.
+    pub fn run_detached_writer<R, W>(
+        self,
+        reader: R,
+        writer: W,
+        state: Extension::State,
+    ) -> ClientResult<Extension::State>
+    where
+        R: Read,
+        W: Write + Send + 'static,
+    {
+        let mut builder = ExtensionBuilder::new(self.extension.name(), self.extension.kind());
+        self.extension.register(&mut builder);
+        builder.validate()?;
+
+        let (sender, receiver) = mpsc::channel::<WriterCommand>();
+        let handle = ClientHandle::new(sender);
+
+        let writer_thread = std::thread::spawn(move || run_writer(writer, receiver));
+        let run_result = run_client_loop(reader, state, builder, handle.clone());
+        if let Ok((state, LoopExit::Disconnect)) = run_result {
+            return Ok(state);
+        }
+
+        let shutdown_result = handle.shutdown();
+        let writer_result = writer_thread
+            .join()
+            .map_err(|_| ClientError::WriterPanicked)
+            .and_then(|result| result);
+        match (run_result, shutdown_result, writer_result) {
+            (Ok((state, _)), Ok(()), Ok(())) => Ok(state),
+            (Err(error), _, _) => Err(error),
+            (_, Err(error), _) => Err(error),
+            (_, _, Err(error)) => Err(error),
+        }
+    }
+}
+
+/// Reason the reader loop stopped.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LoopExit {
+    /// Harness input reached EOF.
+    InputClosed,
+    /// Harness sent an explicit disconnect frame.
+    Disconnect,
+    /// A handler requested the extension stop.
+    StopRequested,
 }
 
 /// Runs startup and harness message dispatch on the reader thread.
@@ -72,7 +133,7 @@ fn run_client_loop<R, State>(
     mut state: State,
     mut builder: ExtensionBuilder<State>,
     handle: ClientHandle,
-) -> ClientResult<State>
+) -> ClientResult<(State, LoopExit)>
 where
     R: Read,
 {
@@ -80,12 +141,11 @@ where
 
     let mut reader = tau_proto::PeerInputReader::new(reader);
     while let Some(message) = reader.read_message()? {
-        let stop = dispatch_message(message, &mut state, &mut builder, &handle)?;
-        if stop {
-            break;
+        if let Some(exit) = dispatch_message(message, &mut state, &mut builder, &handle)? {
+            return Ok((state, exit));
         }
     }
-    Ok(state)
+    Ok((state, LoopExit::InputClosed))
 }
 
 /// Writes the startup prelude in harness-defined order.
@@ -117,35 +177,35 @@ fn write_startup<State>(
     Ok(())
 }
 
-/// Dispatches one harness-to-peer message and returns whether the loop should
-/// stop.
+/// Dispatches one harness-to-peer message and returns why the loop should stop,
+/// if this message ended the run.
 fn dispatch_message<State>(
     message: tau_proto::HarnessOutputMessage,
     state: &mut State,
     builder: &mut ExtensionBuilder<State>,
     handle: &ClientHandle,
-) -> ClientResult<bool> {
+) -> ClientResult<Option<LoopExit>> {
     match message {
         tau_proto::HarnessOutputMessage::Configure(configure) => {
             for handler in &mut builder.configure_handlers {
                 handler.handle(&configure, state, handle)?;
             }
-            Ok(false)
+            Ok(None)
         }
         tau_proto::HarnessOutputMessage::Deliver(delivery) => {
             dispatch_delivery(&delivery, state, builder, handle)
         }
         tau_proto::HarnessOutputMessage::InterceptRequest(request) => {
             dispatch_intercept(&request, state, builder, handle)?;
-            Ok(false)
+            Ok(None)
         }
-        tau_proto::HarnessOutputMessage::Disconnect(_) => Ok(true),
+        tau_proto::HarnessOutputMessage::Disconnect(_) => Ok(Some(LoopExit::Disconnect)),
         tau_proto::HarnessOutputMessage::AgentPromptCreatedResult(_)
         | tau_proto::HarnessOutputMessage::RenderedSystemPromptResult(_)
         | tau_proto::HarnessOutputMessage::RenderedPromptResult(_)
         | tau_proto::HarnessOutputMessage::RenderedToolDefinitionsResult(_)
         | tau_proto::HarnessOutputMessage::ExtensionDataResult(_)
-        | tau_proto::HarnessOutputMessage::ExternalAgentMessageResult(_) => Ok(false),
+        | tau_proto::HarnessOutputMessage::ExternalAgentMessageResult(_) => Ok(None),
     }
 }
 
@@ -156,7 +216,7 @@ fn dispatch_delivery<State>(
     state: &mut State,
     builder: &mut ExtensionBuilder<State>,
     handle: &ClientHandle,
-) -> ClientResult<bool> {
+) -> ClientResult<Option<LoopExit>> {
     let mut stop_requested = false;
     if !delivery.is_replay()
         && let tau_proto::Event::ToolStarted(invoke) = delivery.event.as_ref()
@@ -171,7 +231,7 @@ fn dispatch_delivery<State>(
     for handler in &mut builder.event_handlers {
         handler.handle(delivery, state, handle)?;
     }
-    Ok(stop_requested)
+    Ok(stop_requested.then_some(LoopExit::StopRequested))
 }
 
 /// Dispatches one intercept request and sends exactly one protocol reply.

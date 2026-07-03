@@ -3225,6 +3225,8 @@ dependencies = [
  "serde",
  "serde_json",
  "tau-proto",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -3420,7 +3422,7 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
- "tau-extension",
+ "tau-client",
  "tau-proto",
  "tracing",
  "ureq",

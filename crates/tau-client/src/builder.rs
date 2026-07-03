@@ -68,14 +68,15 @@ impl<State> ExtensionBuilder<State> {
         &mut self,
         names: impl IntoIterator<Item = tau_proto::EventName>,
     ) -> &mut Self {
-        self.selectors
-            .extend(names.into_iter().map(tau_proto::EventSelector::Exact));
+        for name in names {
+            self.add_selector(tau_proto::EventSelector::Exact(name));
+        }
         self
     }
 
     /// Adds one custom event selector to the startup `Subscribe` frame.
     pub fn subscribe_selector(&mut self, selector: tau_proto::EventSelector) -> &mut Self {
-        self.selectors.push(selector);
+        self.add_selector(selector);
         self
     }
 
@@ -268,6 +269,13 @@ impl<State> ExtensionBuilder<State> {
         match self.error.take() {
             Some(error) => Err(error),
             None => Ok(()),
+        }
+    }
+
+    /// Adds one startup subscription selector unless it is already present.
+    fn add_selector(&mut self, selector: tau_proto::EventSelector) {
+        if !self.selectors.contains(&selector) {
+            self.selectors.push(selector);
         }
     }
 }

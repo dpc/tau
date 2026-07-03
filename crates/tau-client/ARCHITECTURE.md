@@ -10,10 +10,22 @@ The runner writes startup frames in harness-defined order: `Hello`, optional
 startup it reads harness messages and dispatches configuration, deliveries,
 intercept requests, and disconnects.
 
+The builder preserves the first-seen order of startup subscription selectors
+while coalescing exact structural duplicates. It does not collapse logical
+overlaps such as `Prefix("tool.")` plus an exact `tool.started` selector.
+
 Outbound frames go through a writer thread owned by `TauExtensionRunner`.
 `ClientHandle` is cloneable, serializes writes through that thread, and waits for
 each frame to be encoded and flushed before returning. A closed or panicked
-writer is reported as `ClientError`.
+writer is reported as `ClientError`. Detached enqueue helpers are also available
+for background workers that must not block the protocol reader on output
+backpressure; those helpers report only queue-closed failures to the caller, then
+let the writer thread own any later encode/flush error.
+
+Extensions that intentionally leave background workers running after disconnect
+can opt into a detached-writer run mode. That mode preserves startup and handler
+error reporting but does not join the writer at shutdown, so harness
+`Disconnect` latency does not depend on queued background output.
 
 Event handlers are either typed payload handlers or raw delivery handlers. Typed
 handlers cover the built-in `EventPayload` variants; raw handlers are available
@@ -29,7 +41,13 @@ Intercept handlers always produce exactly one `InterceptReply` for each request.
 If the handler fails, the runner sends a pass-through reply first, then returns
 the handler error so the extension run stops without leaving the harness waiting.
 
-Tests in `src/tests.rs` cover startup ordering, config errors, replay/live event
-dispatch, raw event dispatch, tool-name matching, intercept reply guarantees,
-disconnect behavior, builder validation, empty subscriptions, and plugin
-composition.
+## Testing strategy
+
+Tests in `src/tests.rs` are protocol contract tests for the reusable runtime.
+They should cover startup frame ordering, subscription selector semantics,
+writer-thread behavior, configuration errors, replay/live dispatch boundaries,
+raw event dispatch, tool-name matching, intercept reply guarantees, disconnect
+behavior, builder validation, empty subscriptions, and plugin composition. Add
+focused coverage when changing lifecycle, writer shutdown, replay filtering,
+configuration, intercept, or startup declaration behavior so migrated
+extensions do not need to rediscover runtime regressions independently.

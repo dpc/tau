@@ -31,6 +31,22 @@ impl ClientHandle {
         ack_receiver.recv().map_err(|_| ClientError::WriterClosed)?
     }
 
+    /// Enqueues one peer-to-harness message without waiting for it to flush.
+    ///
+    /// This is intended for detached background workers whose result should not
+    /// block the protocol reader. Use [`Self::send`] when the caller must know
+    /// whether the frame was encoded and flushed before it continues.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error only when the writer thread has already stopped before
+    /// the frame can be queued.
+    pub fn send_detached(&self, message: tau_proto::HarnessInputMessage) -> ClientResult<()> {
+        self.sender
+            .send(WriterCommand::SendDetached(message))
+            .map_err(|_| ClientError::WriterClosed)
+    }
+
     /// Emits a durable event through the harness.
     ///
     /// # Errors
@@ -40,6 +56,16 @@ impl ClientHandle {
         self.send(tau_proto::HarnessInputMessage::emit(event))
     }
 
+    /// Enqueues a durable event through the harness without waiting for flush.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error only when the writer thread has already stopped before
+    /// the frame can be queued.
+    pub fn emit_detached(&self, event: tau_proto::Event) -> ClientResult<()> {
+        self.send_detached(tau_proto::HarnessInputMessage::emit(event))
+    }
+
     /// Emits an event with transient delivery metadata through the harness.
     ///
     /// # Errors
@@ -47,6 +73,19 @@ impl ClientHandle {
     /// Returns an error when sending the underlying protocol frame fails.
     pub fn emit_transient(&self, event: tau_proto::Event) -> ClientResult<()> {
         self.send(tau_proto::HarnessInputMessage::emit_with_transient(
+            event, true,
+        ))
+    }
+
+    /// Enqueues a transient event through the harness without waiting for
+    /// flush.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error only when the writer thread has already stopped before
+    /// the frame can be queued.
+    pub fn emit_transient_detached(&self, event: tau_proto::Event) -> ClientResult<()> {
+        self.send_detached(tau_proto::HarnessInputMessage::emit_with_transient(
             event, true,
         ))
     }

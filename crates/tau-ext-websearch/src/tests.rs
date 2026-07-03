@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use std::io::{BufRead, BufReader as IoBufReader, Read as _};
+use std::io::{BufRead, BufReader, BufReader as IoBufReader, BufWriter, Read as _};
 use std::net::TcpListener;
 use std::os::unix::net::UnixStream;
 use std::sync::{Condvar, Mutex, mpsc};
@@ -389,6 +389,36 @@ fn defaults_num_results_when_omitted() {
         searcher.calls.lock().expect("lock")[0].1,
         DEFAULT_NUM_RESULTS,
     );
+}
+
+/// Ensures replayed tool-start deliveries do not rerun historical provider
+/// requests or emit stale tool replies.
+#[test]
+fn replayed_tool_started_is_ignored_before_live_search() {
+    let searcher = StubSearcher::ok("ok");
+    let (mut reader, mut writer) = spawn_with_searcher(searcher.clone());
+    drain_startup(&mut reader);
+
+    writer
+        .write_message(&HarnessOutputMessage::deliver_replay(
+            tau_proto::UnixMicros::new(1_700_000_000_000_000),
+            exa_started("replayed-call", "historical query"),
+        ))
+        .expect("write replay");
+    writer
+        .write_event(&exa_started("live-call", "live query"))
+        .expect("write live");
+    writer.flush().expect("flush");
+
+    let event = reader.read_event().expect("read").expect("event");
+    let Event::ToolResult(result) = event else {
+        panic!("expected live ToolResult, got {event:?}");
+    };
+    assert_eq!(result.call_id.as_str(), "live-call");
+
+    let calls = searcher.calls.lock().expect("lock");
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].0, "live query");
 }
 
 /// Ensures invalid Exa calls fail as tool errors instead of reaching the

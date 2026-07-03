@@ -17,10 +17,10 @@
 //! of relying on history being withheld.
 //!
 //! ```ignore
-//! tau_extension::Handshake::tool("tau-ext-websearch")
+//! tau_extension::Handshake::tool("tau-ext-example")
 //!     .subscribe([EventName::TOOL_STARTED])
 //!     .register_tool(tool_spec())
-//!     .ready_message("websearch ready")
+//!     .ready_message("example tools ready")
 //!     .run(&mut writer)?;
 //! ```
 //!

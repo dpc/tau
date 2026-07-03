@@ -55,4 +55,6 @@ Coverage should include:
 - HTTP header/body behavior without live network calls;
 - SSE/JSON MCP decoding;
 - response-size and tool-output limits;
-- concurrency saturation and prompt disconnect handling.
+- concurrency saturation and prompt disconnect handling;
+- replay-marked tool deliveries being ignored so historical tool calls cannot
+  rerun provider requests.

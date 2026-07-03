@@ -1,5 +1,6 @@
 use std::io::{Cursor, Write};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex, mpsc};
+use std::time::Duration;
 
 use tau_proto::{
     AgentPromptSubmitted, CborValue, Configure, Event, EventSelector, HarnessInputMessage,
@@ -167,6 +168,132 @@ impl TauExtension for ToolExtension {
     }
 }
 
+struct MultiToolExtension;
+
+impl TauExtension for MultiToolExtension {
+    type State = Counts;
+
+    fn name(&self) -> &'static str {
+        "multi-tool"
+    }
+
+    fn register(self, builder: &mut ExtensionBuilder<Self::State>) {
+        builder
+            .tool(tool_spec("first_tool"), |_| Ok(()))
+            .tool(tool_spec("second_tool"), |_| Ok(()))
+            .tool(tool_spec("third_tool"), |_| Ok(()));
+    }
+}
+
+struct DetachedEmitExtension;
+
+impl TauExtension for DetachedEmitExtension {
+    type State = Counts;
+
+    fn name(&self) -> &'static str {
+        "detached-emit"
+    }
+
+    fn register(self, builder: &mut ExtensionBuilder<Self::State>) {
+        builder.tool(tool_spec("detached_tool"), |cx| {
+            cx.handle().emit_detached(notice("detached"))?;
+            Ok(())
+        });
+    }
+}
+
+struct BlockingDetachedWriter {
+    /// Shared flag that makes post-startup writes block until the test
+    /// releases.
+    blocked: Arc<(Mutex<bool>, Condvar)>,
+}
+
+impl Write for BlockingDetachedWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let (lock, condvar) = &*self.blocked;
+        let mut blocked = lock.lock().expect("lock block flag");
+        while *blocked {
+            blocked = condvar.wait(blocked).expect("wait block flag");
+        }
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+struct BlockingDetachedState {
+    /// Shared flag used by the tool handler to block detached writer output.
+    blocked: Arc<(Mutex<bool>, Condvar)>,
+}
+
+struct BlockingDetachedExtension;
+
+impl TauExtension for BlockingDetachedExtension {
+    type State = BlockingDetachedState;
+
+    fn name(&self) -> &'static str {
+        "blocking-detached"
+    }
+
+    fn register(self, builder: &mut ExtensionBuilder<Self::State>) {
+        builder.tool(tool_spec("blocking_detached_tool"), |cx| {
+            let (lock, _condvar) = &*cx.state.blocked;
+            *lock.lock().expect("lock block flag") = true;
+            cx.handle().emit_detached(notice("queued detached"))?;
+            Ok(())
+        });
+    }
+}
+
+struct DropSignalWriter {
+    /// Signal sent when the writer thread exits and drops its writer.
+    dropped: mpsc::Sender<()>,
+}
+
+impl Write for DropSignalWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl Drop for DropSignalWriter {
+    fn drop(&mut self) {
+        let _ = self.dropped.send(());
+    }
+}
+
+struct HandlerErrorState {
+    /// Sends a cloned handle out to the test so the writer channel remains
+    /// open.
+    leak_tx: mpsc::Sender<ClientHandle>,
+}
+
+struct HandlerErrorExtension;
+
+impl TauExtension for HandlerErrorExtension {
+    type State = HandlerErrorState;
+
+    fn name(&self) -> &'static str {
+        "handler-error"
+    }
+
+    fn register(self, builder: &mut ExtensionBuilder<Self::State>) {
+        builder.tool(tool_spec("handler_error_tool"), |cx| {
+            cx.state
+                .leak_tx
+                .send(cx.handle())
+                .expect("send leaked handle");
+            Err(ClientError::handler("boom"))
+        });
+    }
+}
+
 struct RawEventExtension;
 
 impl TauExtension for RawEventExtension {
@@ -239,6 +366,16 @@ where
         frames.push(frame);
     }
     (state, frames)
+}
+
+fn encode_output_messages(input: &[HarnessOutputMessage]) -> Vec<u8> {
+    let mut input_bytes = Vec::new();
+    let mut input_writer = HarnessOutputWriter::new(&mut input_bytes);
+    for message in input {
+        input_writer.write_message(message).expect("write input");
+    }
+    input_writer.flush().expect("flush input");
+    input_bytes
 }
 
 fn run_error<E>(extension: E, state: E::State) -> ClientError
@@ -392,6 +529,109 @@ fn tool_handler_matches_only_registered_tool_name() {
     );
 
     assert_eq!(state.tool_matches, 1);
+}
+
+/// Ensures repeated helper-added subscriptions are coalesced without changing
+/// the order of first-seen startup selectors.
+#[test]
+fn multi_tool_registration_subscribes_to_tool_started_once() {
+    let (_, frames) = run_messages(MultiToolExtension, Counts::default(), &[]);
+
+    let subscribe = frames
+        .iter()
+        .find_map(|frame| match frame {
+            HarnessInputMessage::Subscribe(subscribe) => Some(subscribe),
+            _ => None,
+        })
+        .expect("subscribe frame");
+    assert_eq!(
+        subscribe.selectors,
+        [EventSelector::Exact(tau_proto::EventName::TOOL_STARTED)]
+    );
+}
+
+/// Ensures detached sends still flow through the writer before runner
+/// shutdown, covering background-worker style output that must not wait for
+/// flush before the handler returns.
+#[test]
+fn detached_emit_is_written_before_shutdown() {
+    let (_, frames) = run_messages(
+        DetachedEmitExtension,
+        Counts::default(),
+        &[tool_started("detached_tool")],
+    );
+
+    assert!(frames.iter().any(|frame| matches!(
+        frame,
+        HarnessInputMessage::Emit(emit)
+            if matches!(emit.event.as_ref(), Event::HarnessNotice(notice) if notice.message == "detached")
+    )));
+}
+
+/// Ensures the detached-writer run mode returns on harness `Disconnect` even
+/// when a background-style detached write is blocked behind output
+/// backpressure.
+#[test]
+fn detached_writer_disconnect_does_not_wait_for_blocked_detached_output() {
+    let blocked = Arc::new((Mutex::new(false), Condvar::new()));
+    let writer = BlockingDetachedWriter {
+        blocked: Arc::clone(&blocked),
+    };
+    let state = BlockingDetachedState {
+        blocked: Arc::clone(&blocked),
+    };
+    let input = encode_output_messages(&[
+        tool_started("blocking_detached_tool"),
+        HarnessOutputMessage::Disconnect(tau_proto::Disconnect {
+            reason: Some("test".to_owned()),
+        }),
+    ]);
+    let (done_tx, done_rx) = mpsc::channel();
+
+    std::thread::spawn(move || {
+        let result = TauExtensionRunner::new(BlockingDetachedExtension).run_detached_writer(
+            Cursor::new(input),
+            writer,
+            state,
+        );
+        done_tx.send(result.is_ok()).expect("send done");
+    });
+
+    let result = done_rx.recv_timeout(Duration::from_secs(1));
+    let (lock, condvar) = &*blocked;
+    *lock.lock().expect("lock block flag") = false;
+    condvar.notify_all();
+    assert!(
+        result.expect("disconnect should not wait for blocked detached output"),
+        "extension should exit cleanly"
+    );
+}
+
+/// Ensures non-disconnect errors in detached-writer mode still shut down and
+/// join the writer instead of returning early while cloned handles keep it
+/// live.
+#[test]
+fn detached_writer_handler_error_still_shuts_down_writer() {
+    let (leak_tx, leak_rx) = mpsc::channel();
+    let (dropped_tx, dropped_rx) = mpsc::channel();
+    let input = encode_output_messages(&[tool_started("handler_error_tool")]);
+
+    let error = match TauExtensionRunner::new(HandlerErrorExtension).run_detached_writer(
+        Cursor::new(input),
+        DropSignalWriter {
+            dropped: dropped_tx,
+        },
+        HandlerErrorState { leak_tx },
+    ) {
+        Ok(_) => panic!("handler error should stop runner"),
+        Err(error) => error,
+    };
+
+    let _leaked_handle = leak_rx.recv().expect("leaked handle");
+    assert!(error.to_string().contains("boom"));
+    dropped_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("writer should be shut down and dropped despite leaked handle");
 }
 
 /// Ensures raw event handlers can select a family of event names while still

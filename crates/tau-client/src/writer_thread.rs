@@ -10,6 +10,8 @@ pub(crate) enum WriterCommand {
         tau_proto::HarnessInputMessage,
         mpsc::Sender<ClientResult<()>>,
     ),
+    /// Write and flush a protocol frame without reporting the result.
+    SendDetached(tau_proto::HarnessInputMessage),
     /// Flush any pending writer state and terminate the writer thread.
     Shutdown(mpsc::Sender<ClientResult<()>>),
 }
@@ -33,6 +35,12 @@ where
                 if should_stop {
                     return result;
                 }
+            }
+            WriterCommand::SendDetached(message) => {
+                writer
+                    .write_message(&message)
+                    .map_err(ClientError::from)
+                    .and_then(|()| writer.flush().map_err(ClientError::from))?;
             }
             WriterCommand::Shutdown(ack) => {
                 let result = writer.flush().map_err(ClientError::from);

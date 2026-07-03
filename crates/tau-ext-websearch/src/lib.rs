@@ -6,13 +6,13 @@
 //! opt into them without creating a duplicate model-visible `web_search`.
 
 use std::error::Error;
-use std::io::{BufReader, BufWriter, Read, Write};
-use std::sync::{Arc, Mutex, mpsc};
+use std::io::{Read, Write};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use tau_client::{ClientError, ClientHandle, ClientResult, ExtensionBuilder, TauExtension};
 use tau_proto::{
-    CborValue, ConfigError, Event, HarnessInputMessage, HarnessOutputMessage, PeerInputReader,
-    PeerOutputWriter, ToolError, ToolProgress, ToolResult, ToolSpec, ToolStarted, ToolUseState,
+    CborValue, Event, ToolError, ToolProgress, ToolResult, ToolSpec, ToolStarted, ToolUseState,
     ToolUseStats, ToolUseStatus,
 };
 use url::Url;
@@ -71,7 +71,7 @@ const REDACTED_COMPONENT: &str = "…";
 /// Returns an error if the Tau handshake, message decoding, or message encoding
 /// fails while the extension is connected to the harness.
 pub fn run_stdio() -> Result<(), Box<dyn Error>> {
-    tau_extension::init_logging_for(LOG_TARGET);
+    tau_client::init_logging_for(LOG_TARGET);
     run(std::io::stdin(), std::io::stdout())
 }
 
@@ -158,96 +158,55 @@ where
     R: Read,
     W: Write + Send + 'static,
 {
-    let mut reader = PeerInputReader::new(BufReader::new(reader));
-    let mut writer = PeerOutputWriter::new(BufWriter::new(writer));
+    let state = WebsearchState {
+        searcher,
+        parallel_client,
+        sem: Arc::new(Semaphore::new(MAX_IN_FLIGHT)),
+    };
+    tau_client::TauExtensionRunner::new(WebsearchExtension)
+        .run_detached_writer(reader, writer, state)?;
+    Ok(())
+}
 
-    tau_extension::Handshake::tool("tau-ext-websearch")
-        .subscribe([tau_proto::EventName::TOOL_STARTED])
-        .register_tool(exa_tool_spec())
-        .register_tool(parallel_search_tool_spec())
-        .register_tool(parallel_fetch_tool_spec())
-        .ready_message("websearch ready")
-        .run(&mut writer)?;
+/// Tau-client declaration for the websearch extension.
+struct WebsearchExtension;
 
-    let (tx, rx) = mpsc::channel::<HarnessInputMessage>();
-    let sem = Arc::new(Semaphore::new(MAX_IN_FLIGHT));
+impl TauExtension for WebsearchExtension {
+    type State = WebsearchState;
 
-    let writer_handle = std::thread::spawn(move || -> Result<(), Box<dyn Error + Send>> {
-        for message in rx {
-            writer
-                .write_message(&message)
-                .map_err(|e| -> Box<dyn Error + Send> { Box::new(e) })?;
-            writer
-                .flush()
-                .map_err(|e| -> Box<dyn Error + Send> { Box::new(e) })?;
-        }
-        Ok(())
-    });
-
-    while let Some(message) = reader.read_message()? {
-        match message {
-            HarnessOutputMessage::Configure(msg) => {
-                match tau_extension::parse_config::<ExtConfig>(&msg.config)
-                    .and_then(ExtConfig::validate)
-                {
-                    Ok(cfg) => {
-                        if let Some(endpoint) = cfg.endpoint.or(cfg.exa_endpoint) {
-                            tracing::info!(target: LOG_TARGET, provider = "exa", "applying endpoint override");
-                            searcher.set_endpoint(endpoint);
-                        }
-                        if let Some(endpoint) = cfg.parallel_endpoint {
-                            tracing::info!(target: LOG_TARGET, provider = "parallel", "applying endpoint override");
-                            parallel_client.set_endpoint(endpoint);
-                        }
-                    }
-                    Err(message) => {
-                        tracing::warn!(target: LOG_TARGET, error = %message, "rejecting config");
-                        let _ = tx.send(HarnessInputMessage::ConfigError(ConfigError { message }));
-                    }
-                }
-            }
-            HarnessOutputMessage::Deliver(delivery) => {
-                // Tool invocations are execution triggers; replay-marked
-                // frames re-send history and must not re-run searches.
-                if delivery.is_replay() {
-                    continue;
-                }
-                if let Event::ToolStarted(invoke) = delivery.into_event() {
-                    if !is_websearch_tool(invoke.tool_name.as_str()) {
-                        continue;
-                    }
-                    let tx = tx.clone();
-                    let searcher = Arc::clone(&searcher);
-                    let parallel_client = Arc::clone(&parallel_client);
-                    if let Some(permit) = sem.try_acquire() {
-                        std::thread::spawn(move || {
-                            let _permit = permit;
-                            dispatch_tool_invoke(
-                                invoke,
-                                searcher.as_ref(),
-                                parallel_client.as_ref(),
-                                &tx,
-                            );
-                        });
-                    } else {
-                        let _ = tx.send(HarnessInputMessage::emit(tool_error(
-                            invoke,
-                            "websearch is busy; too many searches are already running".to_owned(),
-                        )));
-                    }
-                }
-            }
-            HarnessOutputMessage::Disconnect(_) => return Ok(()),
-            _ => {}
-        }
+    fn name(&self) -> &'static str {
+        "tau-ext-websearch"
     }
 
-    drop(tx);
-    writer_handle
-        .join()
-        .map_err(|e| -> Box<dyn Error> { format!("writer thread panicked: {e:?}").into() })?
-        .map_err(|e| -> Box<dyn Error> { e })?;
-    Ok(())
+    fn register(self, builder: &mut ExtensionBuilder<Self::State>) {
+        builder
+            .configure::<ExtConfig>(|cx| {
+                let cfg = cx.config.validate().map_err(ClientError::handler)?;
+                if let Some(endpoint) = cfg.endpoint.or(cfg.exa_endpoint) {
+                    tracing::info!(target: LOG_TARGET, provider = "exa", "applying endpoint override");
+                    cx.state.searcher.set_endpoint(endpoint);
+                }
+                if let Some(endpoint) = cfg.parallel_endpoint {
+                    tracing::info!(target: LOG_TARGET, provider = "parallel", "applying endpoint override");
+                    cx.state.parallel_client.set_endpoint(endpoint);
+                }
+                Ok(())
+            })
+            .tool(exa_tool_spec(), handle_tool_invocation)
+            .tool(parallel_search_tool_spec(), handle_tool_invocation)
+            .tool(parallel_fetch_tool_spec(), handle_tool_invocation)
+            .ready_message("websearch ready");
+    }
+}
+
+/// Runtime state shared by websearch handlers.
+struct WebsearchState {
+    /// Exa-backed search implementation.
+    searcher: Arc<dyn Searcher>,
+    /// Parallel MCP client implementation.
+    parallel_client: Arc<dyn ParallelClient>,
+    /// In-flight provider call limiter.
+    sem: Arc<Semaphore>,
 }
 
 fn validate_endpoint(name: &str, endpoint: &str) -> Result<(), String> {
@@ -278,13 +237,6 @@ fn is_loopback_url(url: &Url) -> bool {
     host.parse::<std::net::IpAddr>()
         .map(|addr| addr.is_loopback())
         .unwrap_or(false)
-}
-
-fn is_websearch_tool(name: &str) -> bool {
-    matches!(
-        name,
-        EXA_TOOL_NAME | PARALLEL_SEARCH_TOOL_NAME | PARALLEL_FETCH_TOOL_NAME
-    )
 }
 
 fn exa_tool_spec() -> ToolSpec {
@@ -384,22 +336,39 @@ fn parallel_fetch_tool_spec() -> ToolSpec {
     }
 }
 
+fn handle_tool_invocation(cx: tau_client::ToolContext<'_, WebsearchState>) -> ClientResult<()> {
+    let invoke = cx.invoke().clone();
+    let handle = cx.handle();
+    let searcher = Arc::clone(&cx.state.searcher);
+    let parallel_client = Arc::clone(&cx.state.parallel_client);
+    if let Some(permit) = cx.state.sem.try_acquire() {
+        std::thread::spawn(move || {
+            let _permit = permit;
+            dispatch_tool_invoke(invoke, searcher.as_ref(), parallel_client.as_ref(), &handle);
+        });
+    } else {
+        cx.handle().emit_detached(tool_error(
+            invoke,
+            "websearch is busy; too many searches are already running".to_owned(),
+        ))?;
+    }
+    Ok(())
+}
+
 fn dispatch_tool_invoke(
     invoke: ToolStarted,
     searcher: &dyn Searcher,
     parallel_client: &dyn ParallelClient,
-    tx: &mpsc::Sender<HarnessInputMessage>,
+    handle: &ClientHandle,
 ) {
     if let Some(display) = initial_display(&invoke) {
-        let _ = tx.send(HarnessInputMessage::emit(Event::ToolProgress(
-            ToolProgress {
-                call_id: invoke.call_id.clone(),
-                tool_name: invoke.tool_name.clone(),
-                message: None,
-                progress: None,
-                display: Some(display),
-            },
-        )));
+        let _ = handle.emit_detached(Event::ToolProgress(ToolProgress {
+            call_id: invoke.call_id.clone(),
+            tool_name: invoke.tool_name.clone(),
+            message: None,
+            progress: None,
+            display: Some(display),
+        }));
     }
     let event = match invoke.tool_name.as_str() {
         EXA_TOOL_NAME => dispatch_exa(invoke, searcher),
@@ -422,7 +391,7 @@ fn dispatch_tool_invoke(
             originator: invoke.originator,
         }),
     };
-    let _ = tx.send(HarnessInputMessage::emit(event));
+    let _ = handle.emit_detached(event);
 }
 
 fn initial_display(invoke: &ToolStarted) -> Option<ToolUseState> {
