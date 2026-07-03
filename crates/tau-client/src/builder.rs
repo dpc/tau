@@ -29,7 +29,7 @@ pub struct ExtensionBuilder<State> {
     pub(crate) startup_events: Vec<tau_proto::Event>,
     /// Human-readable message attached to `Ready`.
     pub(crate) ready_message: Option<String>,
-    /// Typed configuration handlers.
+    /// Typed and raw configuration handlers.
     pub(crate) configure_handlers: Vec<Box<dyn ConfigureHandler<State>>>,
     /// Typed event handlers.
     pub(crate) event_handlers: Vec<Box<dyn EventHandler<State>>>,

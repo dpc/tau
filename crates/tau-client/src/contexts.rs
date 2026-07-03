@@ -77,6 +77,11 @@ pub struct ConfigureErrorContext<'a, State> {
 
 impl<'a, State> RawConfigureContext<'a, State> {
     /// Parses the raw config payload as the requested typed config.
+    ///
+    /// # Errors
+    ///
+    /// Returns a handler error containing the configuration decode diagnostic
+    /// when the CBOR payload cannot be deserialized as `Config`.
     pub fn parse_config<Config: DeserializeOwned>(&self) -> Result<Config, ClientError> {
         crate::config::parse_config(&self.configure.config).map_err(ClientError::handler)
     }

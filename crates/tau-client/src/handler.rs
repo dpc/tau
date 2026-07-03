@@ -7,7 +7,7 @@ use crate::contexts::{
 use crate::event_payload::EventPayload;
 use crate::{ClientHandle, ClientResult, InterceptDecision};
 
-/// Runtime handler for one typed configuration declaration.
+/// Runtime handler for one configuration declaration.
 pub(crate) trait ConfigureHandler<State> {
     /// Parses and applies one configure message, emitting `ConfigError` on
     /// failure.
@@ -100,7 +100,7 @@ pub(crate) trait InterceptHandler<State> {
     ) -> ClientResult<InterceptDecision>;
 }
 
-/// Optional callback invoked when typed configuration fails.
+/// Callback invoked when typed configuration fails.
 type ConfigureErrorHandler<State> =
     Box<dyn for<'a> FnMut(ConfigureErrorContext<'a, State>) + 'static>;
 
@@ -158,7 +158,7 @@ where
 pub(crate) struct TypedConfigureWithErrorHandler<State, Config, F> {
     /// User-provided configuration handler.
     handler: F,
-    /// Optional hook run before `ConfigError` is emitted.
+    /// Hook run before `ConfigError` is emitted.
     error_handler: ConfigureErrorHandler<State>,
     /// Marker for the typed config payload.
     _config: std::marker::PhantomData<fn() -> Config>,

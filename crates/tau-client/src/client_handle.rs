@@ -1,4 +1,4 @@
-use std::sync::mpsc;
+use std::sync::{Arc, Mutex, mpsc};
 
 use crate::writer_thread::WriterCommand;
 use crate::{ClientError, ClientResult};
@@ -7,14 +7,16 @@ use crate::{ClientError, ClientResult};
 #[derive(Clone)]
 pub struct ClientHandle {
     /// Channel to the serialized writer thread.
-    sender: mpsc::Sender<WriterCommand>,
+    sender: Arc<Mutex<Option<mpsc::Sender<WriterCommand>>>>,
 }
 
 impl ClientHandle {
     /// Creates a handle around a writer command channel.
     #[must_use]
     pub(crate) fn new(sender: mpsc::Sender<WriterCommand>) -> Self {
-        Self { sender }
+        Self {
+            sender: Arc::new(Mutex::new(Some(sender))),
+        }
     }
 
     /// Sends one raw peer-to-harness message and waits until it is flushed.
@@ -25,9 +27,7 @@ impl ClientHandle {
     /// encoded or flushed, or the writer reports an I/O failure.
     pub fn send(&self, message: tau_proto::HarnessInputMessage) -> ClientResult<()> {
         let (ack_sender, ack_receiver) = mpsc::channel();
-        self.sender
-            .send(WriterCommand::Send(message, ack_sender))
-            .map_err(|_| ClientError::WriterClosed)?;
+        self.enqueue(WriterCommand::Send(message, ack_sender))?;
         ack_receiver.recv().map_err(|_| ClientError::WriterClosed)?
     }
 
@@ -42,9 +42,7 @@ impl ClientHandle {
     /// Returns an error only when the writer thread has already stopped before
     /// the frame can be queued.
     pub fn send_detached(&self, message: tau_proto::HarnessInputMessage) -> ClientResult<()> {
-        self.sender
-            .send(WriterCommand::SendDetached(message))
-            .map_err(|_| ClientError::WriterClosed)
+        self.enqueue(WriterCommand::SendDetached(message))
     }
 
     /// Emits a durable event through the harness.
@@ -119,9 +117,21 @@ impl ClientHandle {
     /// Stops the writer thread after flushing any pending state.
     pub(crate) fn shutdown(&self) -> ClientResult<()> {
         let (ack_sender, ack_receiver) = mpsc::channel();
-        self.sender
+        let sender = self
+            .sender
+            .lock()
+            .expect("lock client handle sender")
+            .take()
+            .ok_or(ClientError::WriterClosed)?;
+        sender
             .send(WriterCommand::Shutdown(ack_sender))
             .map_err(|_| ClientError::WriterClosed)?;
         ack_receiver.recv().map_err(|_| ClientError::WriterClosed)?
+    }
+
+    fn enqueue(&self, command: WriterCommand) -> ClientResult<()> {
+        let sender = self.sender.lock().expect("lock client handle sender");
+        let sender = sender.as_ref().ok_or(ClientError::WriterClosed)?;
+        sender.send(command).map_err(|_| ClientError::WriterClosed)
     }
 }

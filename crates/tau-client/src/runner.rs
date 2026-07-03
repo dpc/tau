@@ -2,13 +2,14 @@ use std::io::{Read, Write};
 use std::sync::mpsc;
 
 use crate::builder::ExtensionBuilder;
+use crate::manual_runtime::DispatchOutcome;
 use crate::writer_thread::{WriterCommand, run_writer};
 use crate::{ClientError, ClientHandle, ClientResult, TauExtension};
 
 /// Runtime that performs the Tau protocol lifecycle for one extension.
 pub struct TauExtensionRunner<Extension> {
     /// Extension declaration consumed when the runner starts.
-    extension: Extension,
+    pub(crate) extension: Extension,
 }
 
 impl<Extension> TauExtensionRunner<Extension>
@@ -185,15 +186,17 @@ where
 {
     let mut reader = tau_proto::PeerInputReader::new(reader);
     while let Some(message) = reader.read_message()? {
-        if let Some(exit) = dispatch_message(message, &mut state, &mut builder, &handle)? {
-            return Ok((state, exit));
+        match dispatch_message(message, &mut state, &mut builder, &handle)? {
+            DispatchOutcome::Continue => {}
+            DispatchOutcome::Disconnect(_) => return Ok((state, LoopExit::Disconnect)),
+            DispatchOutcome::StopRequested => return Ok((state, LoopExit::StopRequested)),
         }
     }
     Ok((state, LoopExit::InputClosed))
 }
 
 /// Writes the startup prelude in harness-defined order.
-fn write_startup<State>(
+pub(crate) fn write_startup<State>(
     builder: &ExtensionBuilder<State>,
     handle: &ClientHandle,
 ) -> ClientResult<()> {
@@ -221,35 +224,39 @@ fn write_startup<State>(
     Ok(())
 }
 
-/// Dispatches one harness-to-peer message and returns why the loop should stop,
-/// if this message ended the run.
-fn dispatch_message<State>(
+/// Dispatches one harness-to-peer message and reports whether the caller should
+/// continue or stop its loop.
+pub(crate) fn dispatch_message<State>(
     message: tau_proto::HarnessOutputMessage,
     state: &mut State,
     builder: &mut ExtensionBuilder<State>,
     handle: &ClientHandle,
-) -> ClientResult<Option<LoopExit>> {
+) -> ClientResult<DispatchOutcome> {
     match message {
         tau_proto::HarnessOutputMessage::Configure(configure) => {
             for handler in &mut builder.configure_handlers {
                 handler.handle(&configure, state, handle)?;
             }
-            Ok(None)
+            Ok(DispatchOutcome::Continue)
         }
         tau_proto::HarnessOutputMessage::Deliver(delivery) => {
             dispatch_delivery(&delivery, state, builder, handle)
         }
         tau_proto::HarnessOutputMessage::InterceptRequest(request) => {
             dispatch_intercept(&request, state, builder, handle)?;
-            Ok(None)
+            Ok(DispatchOutcome::Continue)
         }
-        tau_proto::HarnessOutputMessage::Disconnect(_) => Ok(Some(LoopExit::Disconnect)),
+        tau_proto::HarnessOutputMessage::Disconnect(disconnect) => {
+            Ok(DispatchOutcome::Disconnect(disconnect))
+        }
         tau_proto::HarnessOutputMessage::AgentPromptCreatedResult(_)
         | tau_proto::HarnessOutputMessage::RenderedSystemPromptResult(_)
         | tau_proto::HarnessOutputMessage::RenderedPromptResult(_)
         | tau_proto::HarnessOutputMessage::RenderedToolDefinitionsResult(_)
         | tau_proto::HarnessOutputMessage::ExtensionDataResult(_)
-        | tau_proto::HarnessOutputMessage::ExternalAgentMessageResult(_) => Ok(None),
+        | tau_proto::HarnessOutputMessage::ExternalAgentMessageResult(_) => {
+            Ok(DispatchOutcome::Continue)
+        }
     }
 }
 
@@ -260,7 +267,7 @@ fn dispatch_delivery<State>(
     state: &mut State,
     builder: &mut ExtensionBuilder<State>,
     handle: &ClientHandle,
-) -> ClientResult<Option<LoopExit>> {
+) -> ClientResult<DispatchOutcome> {
     let mut stop_requested = false;
     if !delivery.is_replay()
         && let tau_proto::Event::ToolStarted(invoke) = delivery.event.as_ref()
@@ -275,7 +282,11 @@ fn dispatch_delivery<State>(
     for handler in &mut builder.event_handlers {
         handler.handle(delivery, state, handle)?;
     }
-    Ok(stop_requested.then_some(LoopExit::StopRequested))
+    if stop_requested {
+        Ok(DispatchOutcome::StopRequested)
+    } else {
+        Ok(DispatchOutcome::Continue)
+    }
 }
 
 /// Dispatches one intercept request and sends exactly one protocol reply.

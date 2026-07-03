@@ -10,6 +10,13 @@ The runner writes startup frames in harness-defined order: `Hello`, optional
 startup it reads harness messages and dispatches configuration, deliveries,
 intercept requests, and disconnects.
 
+The manual-loop runtime uses the same startup writer and dispatch machinery, but
+hands receive-loop ownership to the extension. It starts a reader thread, exposes
+`recv`/`recv_timeout` so extensions can select between harness input and local
+timers, and exposes `dispatch_one` for decoded messages. Extension state and
+handlers stay on the caller thread; only the protocol reader and writer need to
+move to background threads.
+
 The builder preserves the first-seen order of startup subscription selectors
 while coalescing exact structural duplicates. It does not collapse logical
 overlaps such as `Prefix("tool.")` plus an exact `tool.started` selector.
@@ -33,6 +40,11 @@ startup prelude through `Ready` before invoking the factory with a cloneable
 `ClientHandle`, preserving startup staging while letting runtime state retain a
 handle for later worker output.
 
+Manual-loop extensions use the same startup staging. Their state factory also
+runs only after `Ready`, and timer branches can use `ManualExtensionRuntime`'s
+separate `handle()` method to emit output without storing a handle in every
+state type.
+
 Event handlers are either typed payload handlers or raw delivery handlers. Typed
 handlers cover the built-in `EventPayload` variants; raw handlers are available
 for unsupported first-party or custom extension events. Replay-aware handlers
@@ -51,6 +63,17 @@ raw configuration handler. Raw handlers receive the original `Configure` message
 and can parse it explicitly after checking runtime state; returned errors still
 emit one `ConfigError` and do not stop the message loop.
 
+Manual-loop receive results distinguish timeout, clean input EOF, and protocol
+`Disconnect`. Clean input EOF allows the caller to keep running local timers and
+emit post-EOF output before graceful writer shutdown. `finish()` always shuts
+down and joins the writer; it joins the reader only after EOF or another already
+finished reader state, because arbitrary blocking `Read` implementations cannot
+be cancelled portably. If a caller stops before EOF, the blocked reader is
+detached and exits after its next read completes. Protocol `Disconnect` is a
+dispatch outcome; callers that may have blocked or long-lived background output,
+or a still-open input stream during disconnect, can choose detached finish, which
+returns state without shutting down or joining protocol threads.
+
 Intercept handlers always produce exactly one `InterceptReply` for each request.
 If the handler fails, the runner sends a pass-through reply first, then returns
 the handler error so the extension run stops without leaving the harness waiting.
@@ -61,7 +84,8 @@ Tests in `src/tests.rs` are protocol contract tests for the reusable runtime.
 They should cover startup frame ordering, subscription selector semantics,
 writer-thread behavior, configuration errors, replay/live dispatch boundaries,
 raw event dispatch, tool-name matching, intercept reply guarantees, disconnect
-behavior, builder validation, empty subscriptions, and plugin composition. Add
-focused coverage when changing lifecycle, writer shutdown, replay filtering,
-configuration, intercept, or startup declaration behavior so migrated
-extensions do not need to rediscover runtime regressions independently.
+behavior, manual-loop receive/dispatch/shutdown contracts, builder validation,
+empty subscriptions, and plugin composition. Add focused coverage when changing
+lifecycle, writer shutdown, replay filtering, configuration, intercept, manual
+receive loops, or startup declaration behavior so migrated extensions do not
+need to rediscover runtime regressions independently.

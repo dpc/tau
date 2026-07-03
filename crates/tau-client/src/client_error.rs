@@ -16,6 +16,10 @@ pub enum ClientError {
     Handler(String),
     /// The writer thread stopped before accepting the outbound frame.
     WriterClosed,
+    /// The reader thread stopped before reporting input EOF or decode failure.
+    ReaderClosed,
+    /// The reader thread panicked while decoding inbound frames.
+    ReaderPanicked,
     /// The writer thread panicked while processing outbound frames.
     WriterPanicked,
     /// The extension builder recorded an invalid startup declaration.
@@ -44,6 +48,8 @@ impl fmt::Display for ClientError {
             Self::Io(error) => write!(f, "{error}"),
             Self::Handler(message) | Self::Builder(message) => f.write_str(message),
             Self::WriterClosed => f.write_str("tau client writer thread is closed"),
+            Self::ReaderClosed => f.write_str("tau client reader thread is closed"),
+            Self::ReaderPanicked => f.write_str("tau client reader thread panicked"),
             Self::WriterPanicked => f.write_str("tau client writer thread panicked"),
         }
     }
@@ -55,7 +61,12 @@ impl std::error::Error for ClientError {
             Self::Decode(error) => Some(error),
             Self::Encode(error) => Some(error),
             Self::Io(error) => Some(error),
-            Self::Handler(_) | Self::Builder(_) | Self::WriterClosed | Self::WriterPanicked => None,
+            Self::Handler(_)
+            | Self::Builder(_)
+            | Self::WriterClosed
+            | Self::ReaderClosed
+            | Self::ReaderPanicked
+            | Self::WriterPanicked => None,
         }
     }
 }

@@ -3,7 +3,10 @@
 //! This crate owns the first reusable slice of extension runtime behavior: the
 //! startup prelude, typed configuration handling, replay-aware typed and raw
 //! event dispatch, live tool dispatch, prompt interception replies, and a
-//! cloneable outbound [`ClientHandle`]. It also provides the standard
+//! cloneable outbound [`ClientHandle`]. Extensions with timers or other custom
+//! scheduling needs can use [`ManualExtensionRuntime`] to receive with timeouts
+//! and dispatch messages one at a time while preserving the same protocol
+//! semantics. It also provides the standard
 //! extension `TAU_LOG` subscriber helpers so migrated extension binaries do not
 //! need the legacy startup helper crate just for logging. It intentionally
 //! keeps the existing Tau wire protocol and `tau_extension::Handshake` intact
@@ -18,6 +21,7 @@ mod event_payload;
 mod handler;
 mod intercept_decision;
 mod logging;
+mod manual_runtime;
 mod runner;
 mod tau_extension_trait;
 mod writer_thread;
@@ -32,6 +36,7 @@ pub use contexts::{
 pub use event_payload::EventPayload;
 pub use intercept_decision::InterceptDecision;
 pub use logging::{DEFAULT_FILTER, ENV_VAR, init_logging, init_logging_for};
+pub use manual_runtime::{DispatchOutcome, ManualExtensionRuntime, ManualRuntimeInput};
 pub use runner::TauExtensionRunner;
 pub use tau_extension_trait::{ExtensionPlugin, TauExtension};
 

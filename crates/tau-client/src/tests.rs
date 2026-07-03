@@ -1,4 +1,6 @@
 use std::io::{Cursor, Write};
+use std::os::unix::net::UnixStream;
+use std::rc::Rc;
 use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::time::Duration;
 
@@ -252,6 +254,24 @@ impl TauExtension for ToolExtension {
     }
 }
 
+struct StopToolExtension;
+
+impl TauExtension for StopToolExtension {
+    type State = Counts;
+
+    fn name(&self) -> &'static str {
+        "stop-tool"
+    }
+
+    fn register(self, builder: &mut ExtensionBuilder<Self::State>) {
+        builder.tool(tool_spec("stop_tool"), |mut cx| {
+            cx.state.tool_matches += 1;
+            cx.request_stop();
+            Ok(())
+        });
+    }
+}
+
 struct MultiToolExtension;
 
 impl TauExtension for MultiToolExtension {
@@ -294,6 +314,29 @@ struct BlockingDetachedWriter {
 
 impl Write for BlockingDetachedWriter {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let (lock, condvar) = &*self.blocked;
+        let mut blocked = lock.lock().expect("lock block flag");
+        while *blocked {
+            blocked = condvar.wait(blocked).expect("wait block flag");
+        }
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+struct BlockingSignalWriter {
+    /// Shared flag that makes writes block until the test releases them.
+    blocked: Arc<(Mutex<bool>, Condvar)>,
+    /// Signal sent when the writer enters its blocking write path.
+    entered: mpsc::Sender<()>,
+}
+
+impl Write for BlockingSignalWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let _ = self.entered.send(());
         let (lock, condvar) = &*self.blocked;
         let mut blocked = lock.lock().expect("lock block flag");
         while *blocked {
@@ -445,6 +488,38 @@ impl TauExtension for InterceptExtension {
     }
 }
 
+struct InterceptErrorExtension;
+
+impl TauExtension for InterceptErrorExtension {
+    type State = Counts;
+
+    fn name(&self) -> &'static str {
+        "intercept-error"
+    }
+
+    fn register(self, builder: &mut ExtensionBuilder<Self::State>) {
+        builder.intercept(
+            EventSelector::Exact(tau_proto::EventName::AGENT_PROMPT_SUBMITTED),
+            InterceptionPriority::new(0),
+            |_cx| Err(ClientError::handler("intercept failed")),
+        );
+    }
+}
+
+struct NonSendStateExtension;
+
+impl TauExtension for NonSendStateExtension {
+    type State = Rc<()>;
+
+    fn name(&self) -> &'static str {
+        "non-send-state"
+    }
+
+    fn register(self, builder: &mut ExtensionBuilder<Self::State>) {
+        builder.on_live::<HarnessNotice>(|_cx| Ok(()));
+    }
+}
+
 fn run_messages<E>(
     extension: E,
     state: E::State,
@@ -482,6 +557,15 @@ fn encode_output_messages(input: &[HarnessOutputMessage]) -> Vec<u8> {
     }
     input_writer.flush().expect("flush input");
     input_bytes
+}
+
+fn frames_from_writer(writer: &SharedWriter) -> Vec<HarnessInputMessage> {
+    let mut reader = HarnessInputReader::new(Cursor::new(writer.bytes()));
+    let mut frames = Vec::new();
+    while let Some(frame) = reader.read_message().expect("read output") {
+        frames.push(frame);
+    }
+    frames
 }
 
 fn run_error<E>(extension: E, state: E::State) -> ClientError
@@ -541,6 +625,19 @@ fn config_error_frame_index(frames: &[HarnessInputMessage]) -> usize {
         .iter()
         .position(|frame| matches!(frame, HarnessInputMessage::ConfigError(_)))
         .expect("ConfigError frame")
+}
+
+fn ready_frame_index(frames: &[HarnessInputMessage]) -> usize {
+    frames
+        .iter()
+        .position(|frame| matches!(frame, HarnessInputMessage::Ready(_)))
+        .expect("Ready frame")
+}
+
+fn disconnect(reason: &str) -> HarnessOutputMessage {
+    HarnessOutputMessage::Disconnect(tau_proto::Disconnect {
+        reason: Some(reason.to_owned()),
+    })
 }
 
 fn tool_started(name: &str) -> HarnessOutputMessage {
@@ -763,6 +860,66 @@ fn detached_emit_is_written_before_shutdown() {
     )));
 }
 
+/// Ensures writer shutdown closes all handle clones before queuing `Shutdown`,
+/// so synchronous sends cannot enqueue behind shutdown and wait forever for an
+/// acknowledgement the writer will never send.
+#[test]
+fn client_handle_send_after_queued_shutdown_fails_promptly() {
+    let blocked = Arc::new((Mutex::new(true), Condvar::new()));
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (sender, receiver) = mpsc::channel();
+    let handle = ClientHandle::new(sender);
+    let cloned = handle.clone();
+    let writer_thread = std::thread::spawn({
+        let blocked = Arc::clone(&blocked);
+        move || {
+            crate::writer_thread::run_writer(
+                BlockingSignalWriter {
+                    blocked,
+                    entered: entered_tx,
+                },
+                receiver,
+            )
+        }
+    });
+
+    handle
+        .emit_detached(notice("blocked before shutdown"))
+        .expect("queue blocked write");
+    entered_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("writer entered blocked write");
+
+    let shutdown_thread = std::thread::spawn(move || handle.shutdown());
+    let start = std::time::Instant::now();
+    loop {
+        match cloned.emit_detached(notice("probe after shutdown")) {
+            Ok(()) if start.elapsed() < Duration::from_secs(1) => {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            Ok(()) => panic!("shutdown did not close cloned handles promptly"),
+            Err(ClientError::WriterClosed) => break,
+            Err(error) => panic!("unexpected detached send error: {error}"),
+        }
+    }
+    assert!(matches!(
+        cloned.emit(notice("sync after shutdown")),
+        Err(ClientError::WriterClosed)
+    ));
+
+    let (lock, condvar) = &*blocked;
+    *lock.lock().expect("lock block flag") = false;
+    condvar.notify_all();
+    shutdown_thread
+        .join()
+        .expect("shutdown thread")
+        .expect("shutdown result");
+    writer_thread
+        .join()
+        .expect("writer thread")
+        .expect("writer result");
+}
+
 /// Ensures the detached-writer run mode returns on harness `Disconnect` even
 /// when a background-style detached write is blocked behind output
 /// backpressure.
@@ -878,6 +1035,294 @@ fn detached_writer_state_factory_can_store_client_handle() {
         HarnessInputMessage::Emit(emit)
             if matches!(emit.event.as_ref(), Event::HarnessNotice(notice) if notice.message == "factory handle")
     )));
+}
+
+/// Ensures manual-loop startup reaches `Ready` before the state factory can use
+/// its handle, preserving startup staging for custom loops with background
+/// workers.
+#[test]
+fn manual_loop_startup_ready_precedes_state_factory_handle_output() {
+    let writer = SharedWriter::default();
+    let written = writer.clone();
+    let runtime = TauExtensionRunner::new(FactoryHandleExtension)
+        .start_manual_loop_with_state(Cursor::new(Vec::new()), writer, |handle| {
+            handle
+                .emit_detached(notice("manual factory initialized"))
+                .expect("factory emit");
+            FactoryHandleState { handle }
+        })
+        .expect("start manual loop");
+
+    runtime.finish().expect("finish");
+
+    let frames = frames_from_writer(&written);
+    let ready_index = frames
+        .iter()
+        .position(|frame| matches!(frame, HarnessInputMessage::Ready(_)))
+        .expect("ready frame");
+    let factory_emit_index = notice_frame_index(&frames, "manual factory initialized");
+    assert!(ready_index < factory_emit_index);
+}
+
+/// Ensures manual-loop receive distinguishes no-input timeouts, decoded
+/// messages, and clean input EOF so callers can interleave timers with harness
+/// dispatch.
+#[test]
+fn manual_loop_recv_timeout_distinguishes_timeout_message_and_input_closed() {
+    let (reader, writer_stream) = UnixStream::pair().expect("unix stream pair");
+    let writer = SharedWriter::default();
+    let mut runtime = TauExtensionRunner::new(ReplayExtension)
+        .start_manual_loop(reader, writer, Counts::default())
+        .expect("start manual loop");
+
+    assert!(matches!(
+        runtime
+            .recv_timeout(Duration::from_millis(10))
+            .expect("timeout receive"),
+        ManualRuntimeInput::Timeout
+    ));
+
+    let mut input_writer = HarnessOutputWriter::new(writer_stream);
+    input_writer
+        .write_message(&HarnessOutputMessage::deliver_live(
+            UnixMicros::new(30),
+            notice("manual"),
+        ))
+        .expect("write input");
+    input_writer.flush().expect("flush input");
+    drop(input_writer);
+
+    let message = match runtime
+        .recv_timeout(Duration::from_secs(1))
+        .expect("message")
+    {
+        ManualRuntimeInput::Message(message) => message,
+        ManualRuntimeInput::Timeout => panic!("expected message before timeout"),
+        ManualRuntimeInput::InputClosed => panic!("expected message before input closed"),
+    };
+    assert_eq!(
+        runtime.dispatch_one(message).expect("dispatch"),
+        DispatchOutcome::Continue
+    );
+    assert!(matches!(
+        runtime.recv().expect("input closed"),
+        ManualRuntimeInput::InputClosed
+    ));
+    assert_eq!(runtime.finish().expect("finish").replay_aware, 1);
+}
+
+/// Ensures graceful manual-loop finish is explicitly writer-focused when input
+/// is still open: it must not wait forever for an arbitrary blocking reader to
+/// reach EOF.
+#[test]
+fn manual_loop_finish_before_input_close_detaches_reader() {
+    let (reader, writer_stream) = UnixStream::pair().expect("unix stream pair");
+    let writer = SharedWriter::default();
+    let runtime = TauExtensionRunner::new(ReplayExtension)
+        .start_manual_loop(reader, writer, Counts::default())
+        .expect("start manual loop");
+    let start = std::time::Instant::now();
+
+    let state = runtime.finish().expect("finish before EOF");
+
+    assert!(start.elapsed() < Duration::from_secs(1));
+    assert_eq!(state.replay_aware, 0);
+    drop(writer_stream);
+}
+
+/// Ensures manual-loop callers can keep emitting after input EOF and flush that
+/// post-EOF work during graceful finish.
+#[test]
+fn manual_loop_allows_post_eof_output_before_finish() {
+    let writer = SharedWriter::default();
+    let written = writer.clone();
+    let mut runtime = TauExtensionRunner::new(ReplayExtension)
+        .start_manual_loop(Cursor::new(Vec::new()), writer, Counts::default())
+        .expect("start manual loop");
+
+    assert!(matches!(
+        runtime.recv().expect("input closed"),
+        ManualRuntimeInput::InputClosed
+    ));
+    runtime.state_mut().live_only = 5;
+    assert_eq!(runtime.state().live_only, 5);
+    runtime
+        .handle()
+        .emit(notice("post-eof"))
+        .expect("post EOF emit");
+    runtime.finish().expect("finish");
+
+    let frames = frames_from_writer(&written);
+    assert!(notice_frame_index(&frames, "post-eof") > ready_frame_index(&frames));
+}
+
+/// Ensures manual-loop dispatch preserves config-error emission and continues
+/// to process later messages after the caller feeds them one at a time.
+#[test]
+fn manual_loop_dispatch_config_error_continues() {
+    let writer = SharedWriter::default();
+    let written = writer.clone();
+    let mut runtime = TauExtensionRunner::new(RawConfigureExtension)
+        .start_manual_loop(Cursor::new(Vec::new()), writer, RawConfigState::default())
+        .expect("start manual loop");
+
+    assert_eq!(
+        runtime
+            .dispatch_one(HarnessOutputMessage::Configure(Configure {
+                config: tau_proto::json_to_cbor(&serde_json::json!({ "value": 7 })),
+                instance_name: None,
+                state_dir: None,
+                secrets: std::collections::BTreeMap::new(),
+            }))
+            .expect("valid config"),
+        DispatchOutcome::Continue
+    );
+    assert_eq!(
+        runtime
+            .dispatch_one(config_with_unknown_field())
+            .expect("config error"),
+        DispatchOutcome::Continue
+    );
+    assert_eq!(
+        runtime
+            .dispatch_one(HarnessOutputMessage::deliver_live(
+                UnixMicros::new(31),
+                notice("after manual config error"),
+            ))
+            .expect("event after error"),
+        DispatchOutcome::Continue
+    );
+
+    let state = runtime.finish().expect("finish");
+    assert_eq!(state.applied_value, Some(7));
+    assert_eq!(state.live_events, 1);
+    let errors = frames_from_writer(&written)
+        .into_iter()
+        .filter_map(|frame| match frame {
+            HarnessInputMessage::ConfigError(error) => Some(error.message),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(errors, vec!["configuration is locked"]);
+}
+
+/// Ensures manual-loop dispatch uses the same replay-aware and live-only event
+/// filtering as the owned runner.
+#[test]
+fn manual_loop_dispatch_preserves_replay_filtering() {
+    let writer = SharedWriter::default();
+    let mut runtime = TauExtensionRunner::new(ReplayExtension)
+        .start_manual_loop(Cursor::new(Vec::new()), writer, Counts::default())
+        .expect("start manual loop");
+
+    runtime
+        .dispatch_one(HarnessOutputMessage::deliver_replay(
+            UnixMicros::new(32),
+            notice("old manual"),
+        ))
+        .expect("dispatch replay");
+    runtime
+        .dispatch_one(HarnessOutputMessage::deliver_live(
+            UnixMicros::new(33),
+            notice("new manual"),
+        ))
+        .expect("dispatch live");
+
+    let state = runtime.finish().expect("finish");
+    assert_eq!(state.replay_aware, 2);
+    assert_eq!(state.live_only, 1);
+}
+
+/// Ensures manual-loop dispatch reports tool-requested stops to the caller
+/// without turning them into fatal handler errors.
+#[test]
+fn manual_loop_dispatch_reports_stop_requested() {
+    let writer = SharedWriter::default();
+    let mut runtime = TauExtensionRunner::new(StopToolExtension)
+        .start_manual_loop(Cursor::new(Vec::new()), writer, Counts::default())
+        .expect("start manual loop");
+
+    assert_eq!(
+        runtime
+            .dispatch_one(tool_started("stop_tool"))
+            .expect("dispatch stop tool"),
+        DispatchOutcome::StopRequested
+    );
+
+    let state = runtime.finish().expect("finish");
+    assert_eq!(state.tool_matches, 1);
+}
+
+/// Ensures manual-loop intercept dispatch still sends exactly one pass-through
+/// reply before surfacing a handler error.
+#[test]
+fn manual_loop_intercept_error_sends_one_reply() {
+    let writer = SharedWriter::default();
+    let written = writer.clone();
+    let mut runtime = TauExtensionRunner::new(InterceptErrorExtension)
+        .start_manual_loop(Cursor::new(Vec::new()), writer, Counts::default())
+        .expect("start manual loop");
+
+    let error = runtime
+        .dispatch_one(HarnessOutputMessage::InterceptRequest(InterceptRequest {
+            event: Box::new(Event::AgentPromptSubmitted(test_prompt("original"))),
+            transient: false,
+        }))
+        .expect_err("intercept error");
+    assert_eq!(error.to_string(), "intercept failed");
+    runtime.finish().expect("finish");
+
+    let replies = frames_from_writer(&written)
+        .into_iter()
+        .filter_map(|frame| match frame {
+            HarnessInputMessage::InterceptReply(reply) => Some(reply),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(replies.len(), 1);
+    assert!(matches!(&replies[0].action, InterceptAction::Pass(None)));
+}
+
+/// Ensures manual-loop detached finish does not wait on blocked background
+/// output after the caller has observed a protocol disconnect.
+#[test]
+fn manual_loop_detached_finish_does_not_wait_for_blocked_output() {
+    let blocked = Arc::new((Mutex::new(false), Condvar::new()));
+    let writer = BlockingDetachedWriter {
+        blocked: Arc::clone(&blocked),
+    };
+    let state = BlockingDetachedState {
+        blocked: Arc::clone(&blocked),
+    };
+    let mut runtime = TauExtensionRunner::new(BlockingDetachedExtension)
+        .start_manual_loop(Cursor::new(Vec::new()), writer, state)
+        .expect("start manual loop");
+
+    runtime
+        .dispatch_one(tool_started("blocking_detached_tool"))
+        .expect("dispatch tool");
+    assert!(matches!(
+        runtime.dispatch_one(disconnect("done")).expect("disconnect"),
+        DispatchOutcome::Disconnect(disconnect) if disconnect.reason.as_deref() == Some("done")
+    ));
+    let _state = runtime.finish_detached();
+
+    let (lock, condvar) = &*blocked;
+    *lock.lock().expect("lock block flag") = false;
+    condvar.notify_all();
+}
+
+/// Ensures the manual-loop API keeps extension state caller-thread-local
+/// instead of requiring `State: Send` merely because reader and writer run on
+/// threads.
+#[test]
+fn manual_loop_state_does_not_need_to_be_send() {
+    let writer = SharedWriter::default();
+    let runtime = TauExtensionRunner::new(NonSendStateExtension)
+        .start_manual_loop(Cursor::new(Vec::new()), writer, Rc::new(()))
+        .expect("start manual loop");
+
+    let _state = runtime.finish().expect("finish");
 }
 
 /// Ensures raw event handlers can select a family of event names while still
