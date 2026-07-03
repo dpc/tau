@@ -1,0 +1,14 @@
+# tau-client
+
+This crate contains shared client-side runtime helpers for Tau extension and UI
+protocol peers. Keep public APIs conservative and document protocol guarantees
+in rustdoc because downstream extension crates are expected to build on them.
+
+When changing this crate:
+
+- preserve the existing `tau-proto` wire format;
+- keep startup frame ordering stable (`Hello`, optional `Subscribe`, optional
+  `Intercept`, startup events, `Ready`);
+- add focused unit tests for new handler or protocol lifecycle behavior;
+- update `ARCHITECTURE.md` when changing lifecycle, replay, writer-thread,
+  config, or intercept semantics.

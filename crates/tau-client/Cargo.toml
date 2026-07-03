@@ -1,5 +1,5 @@
 [package]
-name = "tau-ext-test-dummy"
+name = "tau-client"
 version.workspace = true
 edition.workspace = true
 description.workspace = true
@@ -15,8 +15,9 @@ license.workspace = true
 workspace = true
 
 [dependencies]
-rand.workspace = true
+ciborium.workspace = true
 serde.workspace = true
-serde_json.workspace = true
-tau-client.workspace = true
 tau-proto.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

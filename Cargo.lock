@@ -3217,6 +3217,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "tau-client"
+version = "0.1.0"
+dependencies = [
+ "ciborium",
+ "serde",
+ "serde_json",
+ "tau-proto",
+]
+
+[[package]]
 name = "tau-config"
 version = "0.1.0"
 dependencies = [
@@ -3382,7 +3392,7 @@ dependencies = [
  "rand 0.8.6",
  "serde",
  "serde_json",
- "tau-extension",
+ "tau-client",
  "tau-proto",
 ]
 

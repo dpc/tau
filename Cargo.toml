@@ -7,6 +7,7 @@ members = [
   "crates/tau-cli-picker",
   "crates/tau-cli-term",
   "crates/tau-cli-term-raw",
+  "crates/tau-client",
   "crates/tau-config",
   "crates/tau-core",
   "crates/tau-e2e-tests",
@@ -66,6 +67,7 @@ tau-cli = { path = "crates/tau-cli" }
 tau-cli-picker = { path = "crates/tau-cli-picker" }
 tau-cli-term = { path = "crates/tau-cli-term" }
 tau-cli-term-raw = { path = "crates/tau-cli-term-raw" }
+tau-client = { path = "crates/tau-client" }
 tau-config = { path = "crates/tau-config" }
 tau-core = { path = "crates/tau-core" }
 tau-ext-pim = { path = "crates/tau-ext-pim" }
