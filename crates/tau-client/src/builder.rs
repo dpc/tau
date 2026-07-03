@@ -1,14 +1,14 @@
 use serde::de::DeserializeOwned;
 
 use crate::contexts::{
-    ConfigureContext, ConfigureErrorContext, EventContext, InterceptContext, RawEventContext,
-    ToolContext,
+    ConfigureContext, ConfigureErrorContext, EventContext, InterceptContext, RawConfigureContext,
+    RawEventContext, ToolContext,
 };
 use crate::event_payload::EventPayload;
 use crate::handler::{
-    ConfigureHandler, EventHandler, InterceptHandler, NamedToolHandler, RawEventHandler,
-    ToolHandler, TypedConfigureHandler, TypedConfigureWithErrorHandler, TypedEventHandler,
-    TypedInterceptHandler, TypedRawEventHandler,
+    ConfigureHandler, EventHandler, InterceptHandler, NamedToolHandler, RawConfigureHandler,
+    RawEventHandler, ToolHandler, TypedConfigureHandler, TypedConfigureWithErrorHandler,
+    TypedEventHandler, TypedInterceptHandler, TypedRawEventHandler,
 };
 use crate::{ClientError, ClientResult, ExtensionPlugin, InterceptDecision};
 
@@ -124,6 +124,21 @@ impl<State> ExtensionBuilder<State> {
     {
         self.configure_handlers
             .push(Box::new(TypedConfigureHandler::<Config, _>::new(handler)));
+        self
+    }
+
+    /// Registers an untyped configuration handler.
+    ///
+    /// Use this when extension lifecycle policy must inspect state before typed
+    /// decoding. Returning an error emits exactly one `ConfigError` frame and
+    /// the runner continues processing later messages, matching typed
+    /// configuration application-error behavior.
+    pub fn configure_raw(
+        &mut self,
+        handler: impl for<'a> FnMut(RawConfigureContext<'a, State>) -> ClientResult<()> + 'static,
+    ) -> &mut Self {
+        self.configure_handlers
+            .push(Box::new(RawConfigureHandler::new(handler)));
         self
     }
 

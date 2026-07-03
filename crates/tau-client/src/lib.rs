@@ -12,6 +12,7 @@
 mod builder;
 mod client_error;
 mod client_handle;
+mod config;
 mod contexts;
 mod event_payload;
 mod handler;
@@ -25,8 +26,8 @@ pub use builder::ExtensionBuilder;
 pub use client_error::{ClientError, ClientResult};
 pub use client_handle::ClientHandle;
 pub use contexts::{
-    ConfigureContext, ConfigureErrorContext, EventContext, InterceptContext, RawEventContext,
-    ToolContext,
+    ConfigureContext, ConfigureErrorContext, EventContext, InterceptContext, RawConfigureContext,
+    RawEventContext, ToolContext,
 };
 pub use event_payload::EventPayload;
 pub use intercept_decision::InterceptDecision;

@@ -1,7 +1,9 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use crate::{ClientHandle, ClientResult};
+use serde::de::DeserializeOwned;
+
+use crate::{ClientError, ClientHandle, ClientResult};
 
 /// Context passed to a live tool dispatch handler.
 pub struct ToolContext<'a, State> {
@@ -51,6 +53,16 @@ pub struct ConfigureContext<'a, State, Config> {
     pub handle: ClientHandle,
 }
 
+/// Context passed to an untyped configuration handler.
+pub struct RawConfigureContext<'a, State> {
+    /// Mutable extension state shared by handlers.
+    pub state: &'a mut State,
+    /// Original configure message from the harness.
+    pub configure: &'a tau_proto::Configure,
+    /// Cloneable handle for sending frames to the harness.
+    pub handle: ClientHandle,
+}
+
 /// Context passed to a configuration error hook.
 pub struct ConfigureErrorContext<'a, State> {
     /// Mutable extension state shared by handlers.
@@ -61,6 +73,37 @@ pub struct ConfigureErrorContext<'a, State> {
     pub message: &'a str,
     /// Cloneable handle for sending frames to the harness.
     pub handle: ClientHandle,
+}
+
+impl<'a, State> RawConfigureContext<'a, State> {
+    /// Parses the raw config payload as the requested typed config.
+    pub fn parse_config<Config: DeserializeOwned>(&self) -> Result<Config, ClientError> {
+        crate::config::parse_config(&self.configure.config).map_err(ClientError::handler)
+    }
+
+    /// Returns the configured extension instance name, if any.
+    #[must_use]
+    pub fn instance_name(&self) -> Option<&tau_proto::ExtensionName> {
+        self.configure.instance_name.as_ref()
+    }
+
+    /// Returns the harness-assigned extension state directory, if any.
+    #[must_use]
+    pub fn state_dir(&self) -> Option<&Path> {
+        self.configure.state_dir.as_deref()
+    }
+
+    /// Returns the secrets authorized for this extension instance.
+    #[must_use]
+    pub fn secrets(&self) -> &BTreeMap<String, tau_proto::SecretValue> {
+        &self.configure.secrets
+    }
+
+    /// Returns a cloneable handle for sending frames to the harness.
+    #[must_use]
+    pub fn handle(&self) -> ClientHandle {
+        self.handle.clone()
+    }
 }
 
 impl<'a, State> ConfigureErrorContext<'a, State> {

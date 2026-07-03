@@ -174,6 +174,43 @@ impl TauExtension for ConfigApplyErrorHookExtension {
     }
 }
 
+#[derive(Default)]
+struct RawConfigState {
+    /// True once the extension refuses further config without parsing it.
+    locked: bool,
+    /// Last typed config value applied by the raw handler.
+    applied_value: Option<u32>,
+    /// Number of later event deliveries observed after a config error.
+    live_events: usize,
+}
+
+struct RawConfigureExtension;
+
+impl TauExtension for RawConfigureExtension {
+    type State = RawConfigState;
+
+    fn name(&self) -> &'static str {
+        "raw-config"
+    }
+
+    fn register(self, builder: &mut ExtensionBuilder<Self::State>) {
+        builder
+            .configure_raw(|cx| {
+                if cx.state.locked {
+                    return Err(ClientError::handler("configuration is locked"));
+                }
+                let config: DemoConfig = cx.parse_config()?;
+                cx.state.applied_value = Some(config.value);
+                cx.state.locked = true;
+                Ok(())
+            })
+            .on::<HarnessNotice>(|cx| {
+                cx.state.live_events += 1;
+                Ok(())
+            });
+    }
+}
+
 struct ReplayExtension;
 
 impl TauExtension for ReplayExtension {
@@ -621,6 +658,38 @@ fn configure_application_failure_runs_error_hook() {
         })
         .expect("ConfigError frame");
     assert_eq!(error.message, "apply failed");
+}
+
+/// Ensures raw configuration handlers can run state-dependent policy before
+/// parsing and that returned errors emit one `ConfigError` without stopping the
+/// message loop.
+#[test]
+fn raw_configure_error_emits_config_error_and_continues() {
+    let (state, frames) = run_messages(
+        RawConfigureExtension,
+        RawConfigState::default(),
+        &[
+            HarnessOutputMessage::Configure(Configure {
+                config: tau_proto::json_to_cbor(&serde_json::json!({ "value": 9 })),
+                instance_name: None,
+                state_dir: None,
+                secrets: std::collections::BTreeMap::new(),
+            }),
+            config_with_unknown_field(),
+            HarnessOutputMessage::deliver_live(UnixMicros::new(21), notice("after-error")),
+        ],
+    );
+
+    assert_eq!(state.applied_value, Some(9));
+    assert_eq!(state.live_events, 1);
+    let errors = frames
+        .iter()
+        .filter_map(|frame| match frame {
+            HarnessInputMessage::ConfigError(error) => Some(error.message.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(errors, vec!["configuration is locked"]);
 }
 
 /// Ensures replay-aware handlers see metadata while live-only handlers skip

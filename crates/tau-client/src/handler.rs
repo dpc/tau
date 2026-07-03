@@ -1,8 +1,8 @@
 use serde::de::DeserializeOwned;
 
 use crate::contexts::{
-    ConfigureContext, ConfigureErrorContext, EventContext, InterceptContext, RawEventContext,
-    ToolContext,
+    ConfigureContext, ConfigureErrorContext, EventContext, InterceptContext, RawConfigureContext,
+    RawEventContext, ToolContext,
 };
 use crate::event_payload::EventPayload;
 use crate::{ClientHandle, ClientResult, InterceptDecision};
@@ -17,6 +17,42 @@ pub(crate) trait ConfigureHandler<State> {
         state: &mut State,
         handle: &ClientHandle,
     ) -> ClientResult<()>;
+}
+
+/// Raw configuration handler implementation.
+pub(crate) struct RawConfigureHandler<F> {
+    /// User-provided raw configuration handler.
+    handler: F,
+}
+
+impl<F> RawConfigureHandler<F> {
+    /// Creates an untyped configuration handler wrapper.
+    #[must_use]
+    pub(crate) fn new(handler: F) -> Self {
+        Self { handler }
+    }
+}
+
+impl<State, F> ConfigureHandler<State> for RawConfigureHandler<F>
+where
+    F: for<'a> FnMut(RawConfigureContext<'a, State>) -> ClientResult<()>,
+{
+    fn handle(
+        &mut self,
+        configure: &tau_proto::Configure,
+        state: &mut State,
+        handle: &ClientHandle,
+    ) -> ClientResult<()> {
+        let cx = RawConfigureContext {
+            state,
+            configure,
+            handle: handle.clone(),
+        };
+        if let Err(error) = (self.handler)(cx) {
+            handle.config_error(error.to_string())?;
+        }
+        Ok(())
+    }
 }
 
 /// Runtime handler for one delivered event declaration.
@@ -98,7 +134,7 @@ where
         state: &mut State,
         handle: &ClientHandle,
     ) -> ClientResult<()> {
-        let config = match parse_config::<Config>(&configure.config) {
+        let config = match crate::config::parse_config::<Config>(&configure.config) {
             Ok(config) => config,
             Err(message) => {
                 handle.config_error(message)?;
@@ -168,7 +204,7 @@ where
         state: &mut State,
         handle: &ClientHandle,
     ) -> ClientResult<()> {
-        let config = match parse_config::<Config>(&configure.config) {
+        let config = match crate::config::parse_config::<Config>(&configure.config) {
             Ok(config) => config,
             Err(message) => {
                 self.handle_error(configure, state, handle, message)?;
@@ -361,11 +397,4 @@ where
         };
         (self.handler)(cx)
     }
-}
-
-/// Decode a CBOR value into a typed configuration value.
-fn parse_config<C: DeserializeOwned>(value: &tau_proto::CborValue) -> Result<C, String> {
-    value.deserialized().map_err(|e| match e {
-        ciborium::value::Error::Custom(msg) => msg,
-    })
 }

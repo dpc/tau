@@ -1,8 +1,33 @@
+use std::io::Write;
 use std::sync::Mutex;
 
-use tau_proto::{HarnessInputMessage, ToolStarted};
+use tau_proto::{HarnessInputMessage, HarnessOutputMessage, ToolStarted};
 
 use super::*;
+
+#[derive(Clone, Default)]
+struct SharedWriter {
+    /// Shared byte buffer written by the runner's writer thread.
+    bytes: Arc<Mutex<Vec<u8>>>,
+}
+
+impl SharedWriter {
+    /// Returns a snapshot of bytes written so far.
+    fn bytes(&self) -> Vec<u8> {
+        self.bytes.lock().expect("lock shared writer").clone()
+    }
+}
+
+impl Write for SharedWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.bytes.lock().expect("lock shared writer").extend(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
 
 struct FakeClient {
     sent: Mutex<Vec<(String, String)>>,
@@ -110,6 +135,59 @@ fn message_args(value: &str) -> CborValue {
         CborValue::Text("message".to_owned()),
         CborValue::Text(value.to_owned()),
     )])
+}
+
+fn valid_config_message() -> HarnessOutputMessage {
+    let mut secrets = BTreeMap::new();
+    secrets.insert("app".to_owned(), tau_proto::SecretValue::new("xapp-test"));
+    secrets.insert("bot".to_owned(), tau_proto::SecretValue::new("xoxb-test"));
+    HarnessOutputMessage::Configure(tau_proto::Configure {
+        instance_name: None,
+        config: tau_proto::json_to_cbor(&serde_json::json!({
+            "app_token_secret": "app",
+            "bot_token_secret": "bot",
+            "allowed_user_ids": ["U123"],
+            "channel_id": "C123",
+            "api_base": "http://127.0.0.1:8080/api",
+            "max_message_bytes": 16384,
+        })),
+        state_dir: None,
+        secrets,
+    })
+}
+
+fn malformed_config_message() -> HarnessOutputMessage {
+    HarnessOutputMessage::Configure(tau_proto::Configure {
+        instance_name: None,
+        config: tau_proto::json_to_cbor(&serde_json::json!({
+            "unknown_field": true,
+        })),
+        state_dir: None,
+        secrets: BTreeMap::new(),
+    })
+}
+
+fn run_protocol_messages(
+    messages: &[HarnessOutputMessage],
+    client: Arc<FakeClient>,
+) -> Vec<HarnessInputMessage> {
+    let mut input = Vec::new();
+    let mut writer = tau_proto::HarnessOutputWriter::new(&mut input);
+    for message in messages {
+        writer.write_message(message).expect("write input");
+    }
+    writer.flush().expect("flush input");
+
+    let output = SharedWriter::default();
+    let written = output.clone();
+    run_with_client(std::io::Cursor::new(input), output, client).expect("run");
+
+    let mut frames = Vec::new();
+    let mut reader = tau_proto::HarnessInputReader::new(std::io::Cursor::new(written.bytes()));
+    while let Some(frame) = reader.read_message().expect("read output") {
+        frames.push(frame);
+    }
+    frames
 }
 
 fn extension() -> (
@@ -328,7 +406,10 @@ fn config_rejects_unknown_fields() {
         "allowed_user_ids": ["U123"],
         "destination": "C123"
     }));
-    let err = tau_extension::parse_config::<ExtConfig>(&value).expect_err("unknown field");
+    let err = value
+        .deserialized::<ExtConfig>()
+        .map_err(|error| format!("{error:?}"))
+        .expect_err("unknown field");
     assert!(err.contains("unknown field"));
     assert!(err.contains("destination"));
 }
@@ -404,6 +485,183 @@ fn invalid_pre_start_reconfiguration_clears_inactive_state() {
     let state = ext.state.lock().expect("lock");
     assert!(state.config.is_none());
     assert!(state.registered_agents.is_empty());
+}
+
+/// Protocol migration regression: a malformed pre-start config must emit a
+/// parse `ConfigError`, clear inactive config, and prevent a later registration
+/// from starting Slack with stale credentials.
+#[test]
+fn run_malformed_pre_start_config_clears_inactive_state() {
+    let client = FakeClient::new();
+    let frames = run_protocol_messages(
+        &[
+            valid_config_message(),
+            malformed_config_message(),
+            HarnessOutputMessage::deliver(Event::ToolStarted(tool(
+                REGISTER_TOOL_NAME,
+                "agent-a",
+                bool_args(true),
+            ))),
+        ],
+        client.clone(),
+    );
+
+    assert!(
+        frames.iter().any(|frame| matches!(
+            frame,
+            HarnessInputMessage::ConfigError(error)
+                if error.message.contains("unknown_field")
+        )),
+        "malformed config should be reported"
+    );
+    assert!(
+        frames.iter().any(|frame| matches!(
+            frame,
+            HarnessInputMessage::Emit(emit)
+                if matches!(
+                    emit.event.as_ref(),
+                    Event::ToolError(error)
+                        if error.tool_name.as_str() == REGISTER_TOOL_NAME
+                            && error.message.contains("not configured")
+                )
+        )),
+        "register should fail after malformed config clears active config"
+    );
+    assert_eq!(*client.auth_count.lock().expect("lock"), 0);
+    assert_eq!(*client.open_count.lock().expect("lock"), 0);
+}
+
+/// Protocol migration regression: once Socket Mode has started, even malformed
+/// config must return the immutable/restart-required error without clearing
+/// active registration or Slack routing state.
+#[test]
+fn run_malformed_post_start_config_preserves_active_state() {
+    let client = FakeClient::new();
+    let frames = run_protocol_messages(
+        &[
+            valid_config_message(),
+            HarnessOutputMessage::deliver(Event::ToolStarted(tool(
+                REGISTER_TOOL_NAME,
+                "agent-a",
+                bool_args(true),
+            ))),
+            malformed_config_message(),
+            HarnessOutputMessage::deliver(Event::ToolStarted(tool(
+                SEND_TOOL_NAME,
+                "agent-a",
+                message_args("reply"),
+            ))),
+        ],
+        client.clone(),
+    );
+
+    assert!(
+        frames.iter().any(|frame| matches!(
+            frame,
+            HarnessInputMessage::ConfigError(error)
+                if error.message.contains("cannot be changed after Socket Mode")
+        )),
+        "post-start malformed config should report immutable config"
+    );
+    assert!(
+        !frames.iter().any(|frame| matches!(
+            frame,
+            HarnessInputMessage::ConfigError(error)
+                if error.message.contains("unknown_field")
+        )),
+        "post-start config should not be parsed after worker startup"
+    );
+    assert_eq!(
+        *client.sent.lock().expect("lock"),
+        vec![("C123".to_owned(), "[agent-a] reply".to_owned())]
+    );
+}
+
+/// Replayed lifecycle events are ignored wholesale by the tau-client migration,
+/// so historical session shutdown cannot clear a live Slack registration.
+#[test]
+fn run_replayed_lifecycle_event_does_not_clear_registration() {
+    let client = FakeClient::new();
+    run_protocol_messages(
+        &[
+            valid_config_message(),
+            HarnessOutputMessage::deliver(Event::ToolStarted(tool(
+                REGISTER_TOOL_NAME,
+                "agent-a",
+                bool_args(true),
+            ))),
+            HarnessOutputMessage::deliver_replay(
+                tau_proto::UnixMicros::new(1_700_000_000_000_000),
+                Event::SessionShutdown(tau_proto::SessionShutdown {
+                    session_id: "s1".into(),
+                }),
+            ),
+            HarnessOutputMessage::deliver(Event::ToolStarted(tool(
+                SEND_TOOL_NAME,
+                "agent-a",
+                message_args("after replay"),
+            ))),
+        ],
+        client.clone(),
+    );
+
+    assert_eq!(
+        *client.sent.lock().expect("lock"),
+        vec![("C123".to_owned(), "[agent-a] after replay".to_owned())]
+    );
+}
+
+/// Bad tool arguments should emit a tool error and return `Ok(())` from the
+/// tau-client handler so the runner continues to handle subsequent Slack tools.
+#[test]
+fn run_bad_tool_args_do_not_stop_runner() {
+    let client = FakeClient::new();
+    let frames = run_protocol_messages(
+        &[
+            valid_config_message(),
+            HarnessOutputMessage::deliver(Event::ToolStarted(tool(
+                SEND_TOOL_NAME,
+                "agent-a",
+                CborValue::Map(vec![(
+                    CborValue::Text("channel_id".to_owned()),
+                    CborValue::Text("C999".to_owned()),
+                )]),
+            ))),
+            HarnessOutputMessage::deliver(Event::ToolStarted(tool(
+                REGISTER_TOOL_NAME,
+                "agent-a",
+                bool_args(true),
+            ))),
+        ],
+        client.clone(),
+    );
+
+    assert!(
+        frames.iter().any(|frame| matches!(
+            frame,
+            HarnessInputMessage::Emit(emit)
+                if matches!(
+                    emit.event.as_ref(),
+                    Event::ToolError(error)
+                        if error.tool_name.as_str() == SEND_TOOL_NAME
+                            && error.message.contains("unknown argument")
+                )
+        )),
+        "bad send args should emit ToolError"
+    );
+    assert!(
+        frames.iter().any(|frame| matches!(
+            frame,
+            HarnessInputMessage::Emit(emit)
+                if matches!(
+                    emit.event.as_ref(),
+                    Event::ToolResult(result)
+                        if result.tool_name.as_str() == REGISTER_TOOL_NAME
+                )
+        )),
+        "runner should continue to later register tool"
+    );
+    assert_eq!(*client.auth_count.lock().expect("lock"), 1);
 }
 
 /// `slack_send` is available only after the calling agent registers, preventing

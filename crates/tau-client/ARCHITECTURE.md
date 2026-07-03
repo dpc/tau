@@ -46,6 +46,11 @@ configuration-error hook for fail-closed cleanup; that hook runs before
 `ConfigError` is emitted for both typed decode failures and application
 failures.
 
+Extensions whose lifecycle policy must run before typed decoding can register a
+raw configuration handler. Raw handlers receive the original `Configure` message
+and can parse it explicitly after checking runtime state; returned errors still
+emit one `ConfigError` and do not stop the message loop.
+
 Intercept handlers always produce exactly one `InterceptReply` for each request.
 If the handler fails, the runner sends a pass-through reply first, then returns
 the handler error so the extension run stops without leaving the harness waiting.
