@@ -33,7 +33,7 @@ const UI_IO_SAMPLE_WINDOW_SECS: usize = 30;
 
 #[derive(Clone, Default)]
 struct UiIoMeter {
-    buckets: Arc<Mutex<UiIoBuckets>>,
+    state: Arc<Mutex<UiIoState>>,
 }
 
 impl UiIoMeter {
@@ -57,24 +57,82 @@ impl UiIoMeter {
         let Some(bytes) = bytes else {
             return;
         };
-        let mut buckets = locked(&self.buckets);
-        let entries = match direction {
-            UiIoDirection::Uplink => &mut buckets.uplink,
-            UiIoDirection::Downlink => &mut buckets.downlink,
+        let mut state = locked(&self.state);
+        let (bucket_entries, cumulative_entries): (
+            &mut BTreeMap<String, u64>,
+            &mut BTreeMap<String, UiIoEventStats>,
+        ) = match direction {
+            UiIoDirection::Uplink => {
+                let UiIoState {
+                    buckets,
+                    cumulative,
+                } = &mut *state;
+                (&mut buckets.uplink, &mut cumulative.uplink)
+            }
+            UiIoDirection::Downlink => {
+                let UiIoState {
+                    buckets,
+                    cumulative,
+                } = &mut *state;
+                (&mut buckets.downlink, &mut cumulative.downlink)
+            }
         };
-        *entries.entry(key).or_insert(0) += bytes;
+        *bucket_entries.entry(key.clone()).or_insert(0) += bytes;
+        cumulative_entries
+            .entry(key)
+            .or_default()
+            .record_bytes(bytes);
     }
 
     fn take_sample(&self) -> UiIoSample {
-        let buckets = std::mem::take(&mut *locked(&self.buckets));
+        let buckets = std::mem::take(&mut locked(&self.state).buckets);
         UiIoSample::from_buckets(buckets)
+    }
+
+    fn cumulative_stats(&self) -> UiIoCumulativeStats {
+        locked(&self.state).cumulative.clone()
     }
 }
 
 #[derive(Default)]
+struct UiIoState {
+    /// Resettable buckets drained once per second for `/set show-ui-io` status
+    /// bar rates and threshold logging.
+    buckets: UiIoBuckets,
+    /// Lifetime counters for this UI client, exposed by
+    /// `/debug-show-ui-event-stats` and reset when the client exits.
+    cumulative: UiIoCumulativeStats,
+}
+
+#[derive(Clone, Default)]
 struct UiIoBuckets {
     uplink: BTreeMap<String, u64>,
     downlink: BTreeMap<String, u64>,
+}
+
+/// Cumulative UI transport payload totals grouped by direction and event type.
+#[derive(Clone, Default)]
+struct UiIoCumulativeStats {
+    /// Bytes and counts for messages sent from this UI to the harness.
+    uplink: BTreeMap<String, UiIoEventStats>,
+    /// Bytes and counts for messages received by this UI from the harness.
+    downlink: BTreeMap<String, UiIoEventStats>,
+}
+
+/// Cumulative payload accounting for one UI message or delivered event type.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct UiIoEventStats {
+    /// Number of UI frames observed for this type.
+    count: u64,
+    /// Encoded bytes observed for this type.
+    bytes: u64,
+}
+
+impl UiIoEventStats {
+    fn record_bytes(&mut self, bytes: u64) {
+        self.count += 1;
+        self.bytes += bytes;
+    }
 }
 
 struct UiIoSample {
@@ -309,6 +367,9 @@ fn ui_io_message_len<M: serde::Serialize>(message: &M) -> Option<u64> {
 }
 
 fn ui_io_input_message_key(message: &HarnessInputMessage) -> String {
+    if let HarnessInputMessage::Emit(emit) = message {
+        return emit.event.name().to_string();
+    }
     format!("message.{}", ui_io_harness_input_message_name(message))
 }
 
@@ -374,6 +435,91 @@ fn format_ui_io_breakdown(breakdown: &BTreeMap<String, u64>) -> String {
         .join(", ")
 }
 
+fn format_ui_io_cumulative_stats(stats: &UiIoCumulativeStats) -> String {
+    let uplink_total = total_ui_io_event_stats(&stats.uplink);
+    let downlink_total = total_ui_io_event_stats(&stats.downlink);
+    let mut lines = vec![
+        "UI event I/O cumulative stats".to_owned(),
+        format!(
+            "uplink: {} in {} frame(s)",
+            format_ui_io_bytes(uplink_total.bytes),
+            uplink_total.count
+        ),
+        format_ui_io_event_stats_section(&stats.uplink),
+        format!(
+            "downlink: {} in {} frame(s)",
+            format_ui_io_bytes(downlink_total.bytes),
+            downlink_total.count
+        ),
+        format_ui_io_event_stats_section(&stats.downlink),
+    ];
+    if uplink_total.count == 0 && downlink_total.count == 0 {
+        lines.push("no UI frames recorded yet".to_owned());
+    }
+    lines.join("\n")
+}
+
+fn total_ui_io_event_stats(stats: &BTreeMap<String, UiIoEventStats>) -> UiIoEventStats {
+    stats
+        .values()
+        .fold(UiIoEventStats::default(), |mut total, stats| {
+            total.count += stats.count;
+            total.bytes += stats.bytes;
+            total
+        })
+}
+
+fn format_ui_io_event_stats_section(stats: &BTreeMap<String, UiIoEventStats>) -> String {
+    if stats.is_empty() {
+        return "  (none)".to_owned();
+    }
+    sorted_ui_io_event_stats(stats)
+        .into_iter()
+        .map(|(name, stats)| {
+            format!(
+                "  {name}: {} bytes={} count={}",
+                format_ui_io_bytes(stats.bytes),
+                stats.bytes,
+                stats.count
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn sorted_ui_io_event_stats(
+    stats: &BTreeMap<String, UiIoEventStats>,
+) -> Vec<(&str, UiIoEventStats)> {
+    let mut entries = stats
+        .iter()
+        .map(|(name, stats)| (name.as_str(), *stats))
+        .collect::<Vec<_>>();
+    entries.sort_by(|(left_name, left_stats), (right_name, right_stats)| {
+        right_stats
+            .bytes
+            .cmp(&left_stats.bytes)
+            .then_with(|| right_stats.count.cmp(&left_stats.count))
+            .then_with(|| left_name.cmp(right_name))
+    });
+    entries
+}
+
+fn handle_debug_show_ui_event_stats_command_text(
+    text: &str,
+    meter: &UiIoMeter,
+    mut system_info: impl FnMut(&str),
+) -> bool {
+    if text == "/debug-show-ui-event-stats" {
+        system_info(&format_ui_io_cumulative_stats(&meter.cumulative_stats()));
+        return true;
+    }
+    if text.starts_with("/debug-show-ui-event-stats ") {
+        system_info("/debug-show-ui-event-stats takes no arguments");
+        return true;
+    }
+    false
+}
+
 fn format_ui_io_bytes(bytes: u64) -> String {
     if bytes < 1024 {
         return format!("{bytes}B");
@@ -412,6 +558,16 @@ mod ui_io_tests {
         assert_eq!(ui_io_output_message_key(&message), "term.bell");
     }
 
+    /// Uplink event emissions should be grouped by the inner event name, not
+    /// the generic transport envelope, so the debug dump can identify noisy
+    /// UI-originated event types such as prompt drafts.
+    #[test]
+    fn ui_io_input_message_key_uses_emitted_event_name() {
+        let message = HarnessInputMessage::emit(Event::TermBell(tau_proto::TermBell {}));
+
+        assert_eq!(ui_io_input_message_key(&message), "term.bell");
+    }
+
     /// Breakdown logging should put the largest contributors first so a noisy
     /// one-second sample immediately shows the best optimization target.
     #[test]
@@ -423,6 +579,114 @@ mod ui_io_tests {
         assert_eq!(
             format_ui_io_breakdown(&breakdown),
             "large.event=12K, small.event=512B"
+        );
+    }
+
+    /// The debug stats command uses cumulative counters, so sampling the
+    /// one-second status buckets must not clear per-event totals or counts.
+    #[test]
+    fn ui_io_meter_keeps_cumulative_event_stats_after_sampling() {
+        let meter = UiIoMeter::default();
+        meter.record_bytes(UiIoDirection::Downlink, "small.event".to_owned(), Some(10));
+        meter.record_bytes(UiIoDirection::Downlink, "small.event".to_owned(), Some(15));
+
+        let sample = meter.take_sample();
+        assert_eq!(sample.downlink_bytes, 25);
+        assert_eq!(
+            meter
+                .cumulative_stats()
+                .downlink
+                .get("small.event")
+                .copied(),
+            Some(UiIoEventStats {
+                count: 2,
+                bytes: 25
+            })
+        );
+    }
+
+    /// The human-readable debug dump should sort event types by descending
+    /// bytes and include both exact byte totals and frame counts for
+    /// diagnosis.
+    #[test]
+    fn ui_io_cumulative_stats_format_lists_largest_events_first() {
+        let mut stats = UiIoCumulativeStats::default();
+        stats.uplink.insert(
+            "message.hello".to_owned(),
+            UiIoEventStats {
+                count: 1,
+                bytes: 50,
+            },
+        );
+        stats.downlink.insert(
+            "small.event".to_owned(),
+            UiIoEventStats {
+                count: 3,
+                bytes: 512,
+            },
+        );
+        stats.downlink.insert(
+            "large.event".to_owned(),
+            UiIoEventStats {
+                count: 2,
+                bytes: 12 * 1024,
+            },
+        );
+
+        let formatted = format_ui_io_cumulative_stats(&stats);
+
+        assert!(formatted.contains("uplink: 50B in 1 frame(s)"));
+        assert!(formatted.contains("  message.hello: 50B bytes=50 count=1"));
+        assert!(formatted.contains("downlink: 12K in 5 frame(s)"));
+        assert!(
+            formatted.find("large.event").expect("large event line")
+                < formatted.find("small.event").expect("small event line")
+        );
+    }
+
+    /// The slash-command handler should print the same cumulative dump users
+    /// get interactively and consume the command locally instead of letting it
+    /// fall through to prompt submission.
+    #[test]
+    fn debug_show_ui_event_stats_command_prints_current_counters() {
+        let meter = UiIoMeter::default();
+        meter.record_bytes(
+            UiIoDirection::Uplink,
+            "ui.prompt_draft".to_owned(),
+            Some(42),
+        );
+        let mut output = Vec::new();
+
+        let handled = handle_debug_show_ui_event_stats_command_text(
+            "/debug-show-ui-event-stats",
+            &meter,
+            |message| output.push(message.to_owned()),
+        );
+
+        assert!(handled);
+        assert_eq!(output.len(), 1);
+        assert!(output[0].contains("UI event I/O cumulative stats"));
+        assert!(output[0].contains("ui.prompt_draft: 42B bytes=42 count=1"));
+    }
+
+    /// A mistyped debug stats invocation with arguments should be consumed with
+    /// a local usage notice rather than becoming an unknown slash action or
+    /// prompt text.
+    #[test]
+    fn debug_show_ui_event_stats_command_rejects_arguments() {
+        let meter = UiIoMeter::default();
+        let mut output = Vec::new();
+
+        let handled = handle_debug_show_ui_event_stats_command_text(
+            "/debug-show-ui-event-stats now",
+            &meter,
+            |message| output.push(message.to_owned()),
+        );
+
+        assert!(handled);
+        assert_eq!(
+            output,
+            vec!["/debug-show-ui-event-stats takes no arguments".to_owned()]
         );
     }
 
@@ -651,6 +915,10 @@ const BUILTIN_SLASH_COMMANDS: &[(&str, &str)] = &[
     (
         "/provider-auth",
         "Add or replace a provider profile (runs `tau provider add [kind]`)",
+    ),
+    (
+        "/debug-show-ui-event-stats",
+        "Print cumulative UI event byte/count counters for this client",
     ),
 ];
 
@@ -1095,6 +1363,7 @@ pub(crate) fn run_chat(
             draft_handle: draft_handle.clone(),
             prompt_history,
             custom_prompts,
+            ui_io_meter: ui_io_meter.clone(),
         },
     )?;
 
@@ -1283,6 +1552,7 @@ struct TerminalInputLoopCtx {
     draft_handle: DraftHandle,
     prompt_history: PromptHistoryStore,
     custom_prompts: Arc<Mutex<Vec<tau_proto::HarnessCustomPrompt>>>,
+    ui_io_meter: UiIoMeter,
 }
 
 #[derive(Clone)]
@@ -2071,6 +2341,9 @@ impl<'a> TerminalInputSession<'a> {
     }
 
     fn handle_utility_command(&mut self, text: &str) -> bool {
+        if self.handle_debug_show_ui_event_stats_command(text) {
+            return true;
+        }
         if text == "/version" {
             self.output.system_info(&crate::version_label());
             return true;
@@ -2125,6 +2398,12 @@ impl<'a> TerminalInputSession<'a> {
         }
 
         false
+    }
+
+    fn handle_debug_show_ui_event_stats_command(&self, text: &str) -> bool {
+        handle_debug_show_ui_event_stats_command_text(text, &self.ctx.ui_io_meter, |message| {
+            self.output.system_info(message);
+        })
     }
 
     fn handle_theme_command(&mut self, text: &str) {
@@ -3148,6 +3427,7 @@ pub(crate) fn is_local_slash_command(text: &str) -> bool {
             | "/prompt"
             | "/model"
             | "/version"
+            | "/debug-show-ui-event-stats"
     )
 }
 

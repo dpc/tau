@@ -601,6 +601,7 @@ Type `/` for menu autocompletion. The built-in set:
 | `/tree [anchor]`    | Print prompt rewind anchors; with `anchor`, rewind before that prompt |
 | `/set <name> <val>` | Set a UI setting (Tab cycles names + values)         |
 | `/skill <name> [args]` | Invoke a user-invocable skill; `/skill:<name>` is also accepted |
+| `/debug-show-ui-event-stats` | Dump cumulative UI event byte/count counters sorted by bytes |
 
 Unknown leading slash roots are treated as local CLI notices instead of being
 submitted as prompt text. This catches mistyped commands like `/modle` early,
@@ -629,6 +630,8 @@ token usage below responses), `redraw-counter` (debug redraw counter),
 `show-prompt-scroll-indicator` (hidden-row indicator for capped prompt input).
 The boolean settings take `true` / `false`; `redraw-history-size` takes a
 non-negative line count and defaults from `cli.yaml`.
+Use `/debug-show-ui-event-stats` alongside `show-ui-io` to dump this UI
+client's cumulative per-event byte/count counters; they reset when the UI exits.
 
 Prompt input is capped to `floor(33% of terminal height)` with a minimum of
 one editable row. Long drafts scroll inside this prompt-local viewport instead
