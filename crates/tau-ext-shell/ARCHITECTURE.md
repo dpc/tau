@@ -106,6 +106,10 @@ as `$HOME/.config/agents/skills`, `$HOME/.config/agents.local/skills`, legacy
 `$HOME/.agents/skills`, and legacy `$HOME/.agents.local/skills`. The shell
 extension marks XDG user skill roots with higher source precedence than legacy
 user skill roots so duplicate user skill names prefer XDG before modified time.
+Skill roots, nested skill directories, root-level Markdown skill files, and
+directory-level `SKILL.md` files are followed through symlinks; `tau-skills`
+tracks canonical directories during traversal so symlink cycles stop at the first
+already-seen directory.
 Because the shell extension registers as a session context provider, after it
 has sent the session-wide skill and AGENTS.md announcements for a
 `session.started` event, it emits `extension.session_context_ready` so the

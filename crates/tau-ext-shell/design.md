@@ -76,4 +76,7 @@ Skill discovery tests should cover project roots before user roots and XDG user
 skill roots before legacy user skill roots. Collision tests must exercise the
 `tau-skills` source-precedence path so duplicate user skills from
 `$HOME/.config/agents*` beat duplicate legacy `$HOME/.agents*` skills before
-modified-time comparison.
+modified-time comparison. Symlink coverage must prove skill roots, nested skill
+directories, root-level Markdown skill files, and directory-level `SKILL.md`
+files are followed, while canonical-directory cycle detection keeps symlink
+loops bounded.

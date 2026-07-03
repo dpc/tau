@@ -27,6 +27,9 @@ descendant deliberately detaches and keeps mutating files, the lease is released
 and another Tau instance may proceed while that detached process is still
 running.
 
-AGENTS.md discovery is trusted implicit prompt input. The shell extension follows
-AGENTS.md and `.agents.local` symlinks in both user and project roots; do not run
-Tau in repositories whose AGENTS.md files or skills you do not trust.
+AGENTS.md discovery and skill discovery are trusted implicit prompt input. The
+shell extension intentionally follows AGENTS.md, `.agents.local`, skill-root,
+skill-directory, and Markdown skill-file symlinks in both user and project
+locations. This is an accepted prompt trust-boundary choice, not a filesystem
+sandbox: do not run Tau in repositories whose AGENTS.md files or skills you do
+not trust.
