@@ -1,9 +1,34 @@
+use std::io::Write;
 use std::sync::{Condvar, Mutex};
 use std::time::Duration;
 
 use tau_proto::{HarnessInputMessage, HarnessOutputMessage, ToolStarted};
 
 use super::*;
+
+#[derive(Clone, Default)]
+struct SharedWriter {
+    /// Shared byte buffer written by the runner's writer thread.
+    bytes: Arc<Mutex<Vec<u8>>>,
+}
+
+impl SharedWriter {
+    /// Returns a snapshot of bytes written so far.
+    fn bytes(&self) -> Vec<u8> {
+        self.bytes.lock().expect("lock shared writer").clone()
+    }
+}
+
+impl Write for SharedWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.bytes.lock().expect("lock shared writer").extend(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
 
 #[derive(Default)]
 struct FakeBridge {
@@ -50,7 +75,7 @@ impl XmppBridge for FakeBridge {
     fn ensure_started(
         &self,
         _cfg: RuntimeConfig,
-        _tx: mpsc::Sender<HarnessInputMessage>,
+        _output: Output,
         _shutdown: Arc<AtomicBool>,
     ) -> Result<(), String> {
         *self.started.lock().expect("lock") += 1;
@@ -221,13 +246,60 @@ fn secrets() -> BTreeMap<String, tau_proto::SecretValue> {
     secrets
 }
 
-fn configure_from_json(config: serde_json::Value) -> Configure {
-    Configure {
+fn configure_from_json(config: serde_json::Value) -> tau_proto::Configure {
+    tau_proto::Configure {
         config: tau_proto::json_to_cbor(&config),
         instance_name: Some(tau_proto::ExtensionName::new("std-xmpp")),
         state_dir: None,
         secrets: secrets(),
     }
+}
+
+fn valid_config_message() -> HarnessOutputMessage {
+    HarnessOutputMessage::Configure(configure_from_json(serde_json::json!({
+        "jid": "tau@example.org",
+        "password_secret": "xmpp_password",
+        "allowed_jids": ["me@example.org"],
+        "default_recipient": "me@example.org",
+        "routing": { "mode": "muc" },
+        "muc": { "service": "conference.example.org" },
+    })))
+}
+
+fn malformed_config_message() -> HarnessOutputMessage {
+    HarnessOutputMessage::Configure(configure_from_json(serde_json::json!({
+        "unknown_field": true,
+    })))
+}
+
+fn session_started_message(session_id: &str) -> HarnessOutputMessage {
+    HarnessOutputMessage::deliver(Event::SessionStarted(tau_proto::SessionStarted {
+        session_id: session_id.into(),
+        reason: tau_proto::SessionStartReason::Initial,
+    }))
+}
+
+fn run_protocol_messages(
+    messages: &[HarnessOutputMessage],
+    bridge: Arc<FakeBridge>,
+) -> Vec<HarnessInputMessage> {
+    let mut input = Vec::new();
+    let mut writer = tau_proto::HarnessOutputWriter::new(&mut input);
+    for message in messages {
+        writer.write_message(message).expect("write input");
+    }
+    writer.flush().expect("flush input");
+
+    let output = SharedWriter::default();
+    let written = output.clone();
+    run_with_bridge(std::io::Cursor::new(input), output, bridge).expect("run");
+
+    let mut frames = Vec::new();
+    let mut reader = tau_proto::HarnessInputReader::new(std::io::Cursor::new(written.bytes()));
+    while let Some(frame) = reader.read_message().expect("read output") {
+        frames.push(frame);
+    }
+    frames
 }
 
 fn empty_password_secrets() -> BTreeMap<String, tau_proto::SecretValue> {
@@ -477,38 +549,41 @@ fn xmpp_register_true_registers_agent_and_starts_bridge() {
 /// allowlists, or routing policy.
 #[test]
 fn invalid_configure_before_start_clears_stale_config() {
-    let (tx, rx) = mpsc::channel();
     let bridge = FakeBridge::new();
-    let ext = Extension::new(bridge.clone(), tx.clone());
-    ext.apply_config(cfg()).expect("apply config");
-    ext.state.lock().expect("lock").current_session_id = Some("session-1".into());
-
-    handle_configure(
-        &ext,
-        &tx,
-        configure_from_json(serde_json::json!({
-            "jid": "tau@example.org",
-            "password_secret": "xmpp_password",
-            "default_recipient": "me@example.org",
-            "routing": { "mode": "direct_resource" }
-        })),
+    bridge.set_ready(true);
+    let frames = run_protocol_messages(
+        &[
+            valid_config_message(),
+            HarnessOutputMessage::Configure(configure_from_json(serde_json::json!({
+                "jid": "tau@example.org",
+                "password_secret": "xmpp_password",
+                "default_recipient": "me@example.org",
+                "routing": { "mode": "direct_resource" }
+            }))),
+            session_started_message("session-1"),
+            HarnessOutputMessage::deliver(Event::ToolStarted(tool(
+                REGISTER_TOOL_NAME,
+                "agent-1",
+                bool_args(true),
+            ))),
+        ],
+        bridge.clone(),
     );
 
-    let HarnessInputMessage::ConfigError(error) = rx.recv().expect("config error") else {
-        panic!("config error")
-    };
-    assert!(error.message.contains("allowed_jids"));
-    assert!(ext.state.lock().expect("lock").config.is_none());
-
-    ext.dispatch_tool(tool(REGISTER_TOOL_NAME, "agent-1", bool_args(true)));
-    let _progress = rx.recv().expect("progress");
-    let HarnessInputMessage::Emit(emit) = rx.recv().expect("result") else {
-        panic!("emit")
-    };
-    let Event::ToolError(error) = *emit.event else {
-        panic!("tool error")
-    };
-    assert!(error.message.contains("not configured"));
+    assert!(frames.iter().any(|frame| matches!(
+        frame,
+        HarnessInputMessage::ConfigError(error) if error.message.contains("allowed_jids")
+    )));
+    assert!(frames.iter().any(|frame| matches!(
+        frame,
+        HarnessInputMessage::Emit(emit)
+            if matches!(
+                emit.event.as_ref(),
+                Event::ToolError(error)
+                    if error.tool_name.as_str() == REGISTER_TOOL_NAME
+                        && error.message.contains("not configured")
+            )
+    )));
     assert_eq!(*bridge.started.lock().expect("lock"), 0);
 }
 
@@ -518,33 +593,120 @@ fn invalid_configure_before_start_clears_stale_config() {
 /// routing mode.
 #[test]
 fn configure_after_bridge_start_reports_config_error() {
-    let (ext, rx, bridge) = extension();
-    let (tx, config_rx) = mpsc::channel();
-    ext.dispatch_tool(tool(REGISTER_TOOL_NAME, "agent-1", bool_args(true)));
-    let _progress = rx.recv().expect("progress");
-    let _result = rx.recv().expect("result");
-
-    handle_configure(
-        &ext,
-        &tx,
-        configure_from_json(serde_json::json!({
-            "jid": "tau@example.org",
-            "password_secret": "xmpp_password",
-            "default_recipient": "me@example.org",
-            "routing": { "mode": "direct_resource" }
-        })),
+    let bridge = FakeBridge::new();
+    bridge.set_ready(true);
+    let frames = run_protocol_messages(
+        &[
+            valid_config_message(),
+            session_started_message("session-1"),
+            HarnessOutputMessage::deliver(Event::ToolStarted(tool(
+                REGISTER_TOOL_NAME,
+                "agent-1",
+                bool_args(true),
+            ))),
+            malformed_config_message(),
+            HarnessOutputMessage::deliver(Event::ToolStarted(tool(
+                SEND_TOOL_NAME,
+                "agent-1",
+                message_args("reply"),
+            ))),
+        ],
+        bridge.clone(),
     );
 
-    let HarnessInputMessage::ConfigError(error) = config_rx.recv().expect("config error") else {
-        panic!("config error")
-    };
-    assert!(error.message.contains("cannot be changed"));
-    assert!(!error.message.contains("allowed_jids"));
+    assert!(frames.iter().any(|frame| matches!(
+        frame,
+        HarnessInputMessage::ConfigError(error) if error.message.contains("cannot be changed")
+    )));
+    assert!(!frames.iter().any(|frame| matches!(
+        frame,
+        HarnessInputMessage::ConfigError(error) if error.message.contains("unknown_field")
+    )));
     assert_eq!(*bridge.started.lock().expect("lock"), 1);
-    let state = ext.state.lock().expect("lock");
     assert_eq!(
-        state.config.as_ref().map(|cfg| cfg.routing_mode),
-        Some(RoutingMode::Muc)
+        *bridge.sent.lock().expect("lock"),
+        vec![(agent_id("agent-1"), "[agent-1] reply".to_owned())]
+    );
+}
+
+/// Replayed `session.started` events are intentionally accepted so a resumed
+/// session id can seed stable MUC room identity before the next live
+/// registration.
+#[test]
+fn run_replayed_session_started_enables_later_register() {
+    let bridge = FakeBridge::new();
+    bridge.set_ready(true);
+    let frames = run_protocol_messages(
+        &[
+            valid_config_message(),
+            HarnessOutputMessage::deliver_replay(
+                tau_proto::UnixMicros::new(1_700_000_000_000_000),
+                Event::SessionStarted(tau_proto::SessionStarted {
+                    session_id: "session-1".into(),
+                    reason: tau_proto::SessionStartReason::Resume,
+                }),
+            ),
+            HarnessOutputMessage::deliver(Event::ToolStarted(tool(
+                REGISTER_TOOL_NAME,
+                "agent-1",
+                bool_args(true),
+            ))),
+        ],
+        bridge.clone(),
+    );
+
+    assert!(frames.iter().any(|frame| matches!(
+        frame,
+        HarnessInputMessage::Emit(emit)
+            if matches!(
+                emit.event.as_ref(),
+                Event::ToolResult(result)
+                    if result.tool_name.as_str() == REGISTER_TOOL_NAME
+            )
+    )));
+    assert_eq!(*bridge.started.lock().expect("lock"), 1);
+}
+
+/// Replayed unload/shutdown lifecycle facts are ignored so historical session
+/// cleanup cannot clear a live registration restored by subsequent activity.
+#[test]
+fn run_replayed_unload_and_shutdown_do_not_clear_registration() {
+    let bridge = FakeBridge::new();
+    bridge.set_ready(true);
+    run_protocol_messages(
+        &[
+            valid_config_message(),
+            session_started_message("session-1"),
+            HarnessOutputMessage::deliver(Event::ToolStarted(tool(
+                REGISTER_TOOL_NAME,
+                "agent-1",
+                bool_args(true),
+            ))),
+            HarnessOutputMessage::deliver_replay(
+                tau_proto::UnixMicros::new(1_700_000_000_000_000),
+                Event::SessionAgentUnloaded(tau_proto::SessionAgentUnloaded {
+                    session_id: "session-1".into(),
+                    agent_id: agent_id("agent-1"),
+                }),
+            ),
+            HarnessOutputMessage::deliver_replay(
+                tau_proto::UnixMicros::new(1_700_000_000_000_001),
+                Event::SessionShutdown(tau_proto::SessionShutdown {
+                    session_id: "session-1".into(),
+                }),
+            ),
+            HarnessOutputMessage::deliver(Event::ToolStarted(tool(
+                SEND_TOOL_NAME,
+                "agent-1",
+                message_args("after replay"),
+            ))),
+        ],
+        bridge.clone(),
+    );
+
+    assert_eq!(
+        *bridge.sent.lock().expect("lock"),
+        vec![(agent_id("agent-1"), "[agent-1] after replay".to_owned())]
     );
 }
 
@@ -742,20 +904,14 @@ fn online_readiness_wait_is_bounded_to_thirty_seconds() {
 /// stop processing further input and ask the XMPP bridge to clean up rooms.
 #[test]
 fn harness_disconnect_stops_extension_and_shuts_down_bridge() {
-    let (tx, _rx) = mpsc::channel();
     let bridge = FakeBridge::new();
-    let ext = Extension::new(bridge.clone(), tx.clone());
-
-    let keep_running = handle_output_message(
-        &ext,
-        &tx,
-        HarnessOutputMessage::Disconnect(tau_proto::Disconnect {
+    run_protocol_messages(
+        &[HarnessOutputMessage::Disconnect(tau_proto::Disconnect {
             reason: Some("test shutdown".to_owned()),
-        }),
+        })],
+        bridge.clone(),
     );
 
-    assert!(!keep_running);
-    assert!(ext.shutdown.load(Ordering::Relaxed));
     assert_eq!(*bridge.shutdowns.lock().expect("lock"), 1);
 }
 

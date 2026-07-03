@@ -6,7 +6,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::error::Error;
-use std::io::{BufReader, BufWriter, Read, Write};
+use std::io::{Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread::JoinHandle;
@@ -14,11 +14,10 @@ use std::time::Duration;
 
 use futures_util::StreamExt;
 use rand::RngCore;
+use tau_client::{ClientError, ClientHandle, ClientResult, ExtensionBuilder, TauExtension};
 use tau_proto::{
-    AgentId, CborValue, ConfigError, Configure, Event, EventDelivery, ExtPromptSubmitRequest,
-    HarnessInputMessage, HarnessOutputMessage, PeerInputReader, PeerOutputWriter, SessionId,
-    ToolError, ToolExample, ToolProgress, ToolResult, ToolSpec, ToolStarted, ToolUseState,
-    ToolUseStatus,
+    AgentId, CborValue, Event, ExtPromptSubmitRequest, HarnessInputMessage, SessionId, ToolError,
+    ToolExample, ToolProgress, ToolResult, ToolSpec, ToolStarted, ToolUseState, ToolUseStatus,
 };
 use tokio_xmpp::{Client, IqRequest, IqResponse};
 use xmpp_parsers::delay::Delay;
@@ -70,7 +69,7 @@ const MUC_AGENT_SLUG_MAX_CHARS: usize = 18;
 
 /// Run the XMPP extension over stdio.
 pub fn run_stdio() -> Result<(), Box<dyn Error>> {
-    tau_extension::init_logging_for(LOG_TARGET);
+    tau_client::init_logging_for(LOG_TARGET);
     run(std::io::stdin(), std::io::stdout())
 }
 
@@ -83,13 +82,55 @@ where
     run_with_bridge(reader, writer, Arc::new(LiveXmppBridge::default()))
 }
 
+#[derive(Clone)]
+enum Output {
+    /// Test-side output channel preserving existing direct unit-test helpers.
+    Channel(mpsc::Sender<HarnessInputMessage>),
+    /// Tau-client output handle used by the protocol runtime.
+    Client(ClientHandle),
+}
+
+impl From<mpsc::Sender<HarnessInputMessage>> for Output {
+    fn from(tx: mpsc::Sender<HarnessInputMessage>) -> Self {
+        Self::Channel(tx)
+    }
+}
+
+impl From<ClientHandle> for Output {
+    fn from(handle: ClientHandle) -> Self {
+        Self::Client(handle)
+    }
+}
+
+impl Output {
+    /// Sends one protocol frame, intentionally ignoring closed-writer failures.
+    ///
+    /// XMPP worker and tool output is best-effort once the harness has
+    /// disconnected or the tau-client writer has shut down.
+    fn send(&self, message: HarnessInputMessage) {
+        match self {
+            Self::Channel(tx) => {
+                let _ = tx.send(message);
+            }
+            Self::Client(handle) => {
+                let _ = handle.send_detached(message);
+            }
+        }
+    }
+
+    /// Emits one event through the harness output channel.
+    fn emit(&self, event: Event) {
+        self.send(HarnessInputMessage::emit(event));
+    }
+}
+
 /// Small bridge surface used by the extension and faked by unit tests.
 trait XmppBridge: Send + Sync + 'static {
     /// Ensure the underlying XMPP task is started.
     fn ensure_started(
         &self,
         cfg: RuntimeConfig,
-        tx: mpsc::Sender<HarnessInputMessage>,
+        output: Output,
         shutdown: Arc<AtomicBool>,
     ) -> Result<(), String>;
 
@@ -416,18 +457,18 @@ struct Extension {
     state: Arc<Mutex<State>>,
     /// XMPP bridge implementation.
     bridge: Arc<dyn XmppBridge>,
-    /// Writer channel toward the harness.
-    tx: mpsc::Sender<HarnessInputMessage>,
+    /// Output channel toward the harness.
+    output: Output,
     /// Shared shutdown flag.
     shutdown: Arc<AtomicBool>,
 }
 
 impl Extension {
-    fn new(bridge: Arc<dyn XmppBridge>, tx: mpsc::Sender<HarnessInputMessage>) -> Self {
+    fn new(bridge: Arc<dyn XmppBridge>, output: impl Into<Output>) -> Self {
         Self {
             state: Arc::new(Mutex::new(State::default())),
             bridge,
-            tx,
+            output: output.into(),
             shutdown: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -458,25 +499,23 @@ impl Extension {
     }
 
     fn dispatch_tool(&self, invoke: ToolStarted) {
-        let _ = self.tx.send(HarnessInputMessage::emit(Event::ToolProgress(
-            ToolProgress {
-                call_id: invoke.call_id.clone(),
-                tool_name: invoke.tool_name.clone(),
-                message: Some("xmpp tool started".to_owned()),
-                progress: None,
-                display: Some(ToolUseState {
-                    status: ToolUseStatus::InProgress,
-                    status_text: tau_proto::PROGRESS_INDICATOR_TEXT.to_owned(),
-                    ..Default::default()
-                }),
-            },
-        )));
+        self.output.emit(Event::ToolProgress(ToolProgress {
+            call_id: invoke.call_id.clone(),
+            tool_name: invoke.tool_name.clone(),
+            message: Some("xmpp tool started".to_owned()),
+            progress: None,
+            display: Some(ToolUseState {
+                status: ToolUseStatus::InProgress,
+                status_text: tau_proto::PROGRESS_INDICATOR_TEXT.to_owned(),
+                ..Default::default()
+            }),
+        }));
         let event = match invoke.tool_name.as_str() {
             REGISTER_TOOL_NAME => self.handle_register(invoke),
             SEND_TOOL_NAME => self.handle_send(invoke),
             _ => tool_error(invoke, "unknown xmpp tool".to_owned()),
         };
-        let _ = self.tx.send(HarnessInputMessage::emit(event));
+        self.output.emit(event);
     }
 
     fn handle_register(&self, invoke: ToolStarted) -> Event {
@@ -502,7 +541,7 @@ impl Extension {
                 if !state.bridge_started {
                     if let Err(message) = self.bridge.ensure_started(
                         cfg.clone(),
-                        self.tx.clone(),
+                        self.output.clone(),
                         Arc::clone(&self.shutdown),
                     ) {
                         return tool_error(invoke, message);
@@ -665,7 +704,7 @@ impl XmppBridge for LiveXmppBridge {
     fn ensure_started(
         &self,
         cfg: RuntimeConfig,
-        tx: mpsc::Sender<HarnessInputMessage>,
+        output: Output,
         shutdown: Arc<AtomicBool>,
     ) -> Result<(), String> {
         let mut guard = self.command_tx.lock().unwrap_or_else(|e| e.into_inner());
@@ -679,7 +718,7 @@ impl XmppBridge for LiveXmppBridge {
         let join = std::thread::Builder::new()
             .name("tau-ext-xmpp".to_owned())
             .spawn(move || {
-                xmpp_thread(cfg, command_rx, tx, worker_shutdown);
+                xmpp_thread(cfg, command_rx, output, worker_shutdown);
                 let _ = done_tx.send(());
             })
             .map_err(|e| format!("failed to spawn xmpp worker: {e}"))?;
@@ -792,14 +831,14 @@ impl LiveXmppBridge {
 fn xmpp_thread(
     cfg: RuntimeConfig,
     command_rx: mpsc::Receiver<XmppCommand>,
-    tx: mpsc::Sender<HarnessInputMessage>,
+    output: Output,
     shutdown: Arc<AtomicBool>,
 ) {
     match tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
     {
-        Ok(runtime) => runtime.block_on(xmpp_worker(cfg, command_rx, tx, shutdown)),
+        Ok(runtime) => runtime.block_on(xmpp_worker(cfg, command_rx, output, shutdown)),
         Err(error) => tracing::warn!(target: LOG_TARGET, %error, "failed to create xmpp runtime"),
     }
 }
@@ -807,7 +846,7 @@ fn xmpp_thread(
 async fn xmpp_worker(
     cfg: RuntimeConfig,
     command_rx: mpsc::Receiver<XmppCommand>,
-    tx: mpsc::Sender<HarnessInputMessage>,
+    output: Output,
     shutdown: Arc<AtomicBool>,
 ) {
     if let Err(error) = tokio_xmpp::rustls::crypto::ring::default_provider().install_default() {
@@ -823,7 +862,7 @@ async fn xmpp_worker(
     };
     let mut client = Client::new(login_jid, cfg.password.clone());
     let mut command_rx = std_to_tokio(command_rx);
-    let mut worker = WorkerState::new(cfg, tx, Arc::clone(&shutdown));
+    let mut worker = WorkerState::new(cfg, output, Arc::clone(&shutdown));
     loop {
         if shutdown.load(Ordering::Relaxed) {
             worker
@@ -927,8 +966,8 @@ where
 struct WorkerState {
     /// Runtime config.
     cfg: RuntimeConfig,
-    /// Writer channel toward the harness.
-    tx: mpsc::Sender<HarnessInputMessage>,
+    /// Output channel toward the harness.
+    output: Output,
     /// Shared shutdown flag used to cancel long best-effort operations.
     shutdown: Arc<AtomicBool>,
     /// Server-returned bound JID.
@@ -945,14 +984,10 @@ struct WorkerState {
 
 impl WorkerState {
     /// Create a worker state.
-    fn new(
-        cfg: RuntimeConfig,
-        tx: mpsc::Sender<HarnessInputMessage>,
-        shutdown: Arc<AtomicBool>,
-    ) -> Self {
+    fn new(cfg: RuntimeConfig, output: impl Into<Output>, shutdown: Arc<AtomicBool>) -> Self {
         Self {
             cfg,
-            tx,
+            output: output.into(),
             shutdown,
             bound_jid: None,
             conversations: HashMap::new(),
@@ -1680,15 +1715,12 @@ impl WorkerState {
 
     /// Submit text to the harness prompt boundary.
     fn route(&self, agent_id: AgentId, text: String) {
-        let _ = self
-            .tx
-            .send(HarnessInputMessage::emit(Event::ExtPromptSubmitRequest(
-                ExtPromptSubmitRequest {
-                    agent_id,
-                    text,
-                    ctx_id: None,
-                },
-            )));
+        self.output
+            .emit(Event::ExtPromptSubmitRequest(ExtPromptSubmitRequest {
+                agent_id,
+                text,
+                ctx_id: None,
+            }));
     }
 }
 
@@ -1981,139 +2013,117 @@ where
     R: Read,
     W: Write + Send + 'static,
 {
-    let mut reader = PeerInputReader::new(BufReader::new(reader));
-    let mut writer = PeerOutputWriter::new(BufWriter::new(writer));
-    tau_extension::Handshake::tool("tau-ext-xmpp")
-        .subscribe([
-            tau_proto::EventName::TOOL_STARTED,
-            tau_proto::EventName::SESSION_STARTED,
-            tau_proto::EventName::SESSION_AGENT_UNLOADED,
-            tau_proto::EventName::SESSION_SHUTDOWN,
-        ])
-        .register_tool_with_group_and_prompt_fragment(
-            register_tool_spec(),
-            Some(xmpp_tool_group()),
-            None,
-        )
-        .register_tool_with_group_and_prompt_fragment(
-            send_tool_spec(),
-            Some(xmpp_tool_group()),
-            None,
-        )
-        .ready_message("xmpp ready")
-        .run(&mut writer)?;
+    let state = tau_client::TauExtensionRunner::new(XmppExtension).run_detached_writer_with_state(
+        reader,
+        writer,
+        move |handle| XmppRuntime {
+            ext: Extension::new(bridge, handle),
+        },
+    )?;
+    state.ext.shutdown.store(true, Ordering::Relaxed);
+    Ok(())
+}
 
-    let (tx, rx) = mpsc::channel::<HarnessInputMessage>();
-    let ext = Extension::new(bridge, tx.clone());
-    let (writer_done_tx, writer_done_rx) = mpsc::channel();
-    let writer_handle = std::thread::spawn(move || {
-        let result = (|| -> Result<(), Box<dyn Error + Send>> {
-            for msg in rx {
-                writer
-                    .write_message(&msg)
-                    .map_err(|e| -> Box<dyn Error + Send> { Box::new(e) })?;
-                writer
-                    .flush()
-                    .map_err(|e| -> Box<dyn Error + Send> { Box::new(e) })?;
-            }
-            Ok(())
-        })();
-        let _ = writer_done_tx.send(result);
-    });
+struct XmppExtension;
 
-    while let Some(message) = reader.read_message()? {
-        if !handle_output_message(&ext, &tx, message) {
-            break;
-        }
+impl TauExtension for XmppExtension {
+    type State = XmppRuntime;
+
+    fn name(&self) -> &'static str {
+        "tau-ext-xmpp"
     }
-    ext.shutdown.store(true, Ordering::Relaxed);
-    drop(ext);
-    drop(tx);
-    match writer_done_rx.recv_timeout(SHUTDOWN_TIMEOUT) {
-        Ok(Ok(())) => writer_handle
-            .join()
-            .map_err(|_| "xmpp writer thread panicked".into()),
-        Ok(Err(error)) => Err(error),
-        Err(mpsc::RecvTimeoutError::Timeout) => {
-            tracing::warn!(target: LOG_TARGET, "timed out waiting for xmpp writer thread shutdown");
-            Ok(())
-        }
-        Err(mpsc::RecvTimeoutError::Disconnected) => writer_handle
-            .join()
-            .map_err(|_| "xmpp writer thread panicked".into()),
+
+    fn register(self, builder: &mut ExtensionBuilder<Self::State>) {
+        builder
+            .configure_raw(handle_configure)
+            .tool_with_group_and_prompt_fragment(
+                register_tool_spec(),
+                Some(xmpp_tool_group()),
+                None,
+                handle_tool_invocation,
+            )
+            .tool_with_group_and_prompt_fragment(
+                send_tool_spec(),
+                Some(xmpp_tool_group()),
+                None,
+                handle_tool_invocation,
+            )
+            .on_raw(
+                tau_proto::EventSelector::Exact(tau_proto::EventName::SESSION_STARTED),
+                handle_session_started,
+            )
+            .on_raw_live(
+                tau_proto::EventSelector::Exact(tau_proto::EventName::SESSION_AGENT_UNLOADED),
+                handle_live_event,
+            )
+            .on_raw_live(
+                tau_proto::EventSelector::Exact(tau_proto::EventName::SESSION_SHUTDOWN),
+                handle_live_event,
+            )
+            .ready_message("xmpp ready");
     }
 }
 
-fn handle_output_message(
-    ext: &Extension,
-    tx: &mpsc::Sender<HarnessInputMessage>,
-    message: HarnessOutputMessage,
-) -> bool {
-    match message {
-        HarnessOutputMessage::Configure(msg) => handle_configure(ext, tx, msg),
-        HarnessOutputMessage::Deliver(delivery) => handle_delivery(ext, delivery),
-        HarnessOutputMessage::Disconnect(_) => {
-            ext.shutdown.store(true, Ordering::Relaxed);
-            if let Err(error) = ext.bridge.shutdown(SHUTDOWN_TIMEOUT) {
-                tracing::warn!(target: LOG_TARGET, %error, "xmpp bridge shutdown did not finish cleanly after harness disconnect");
-            }
-            return false;
+struct XmppRuntime {
+    /// Shared XMPP bridge state and background-worker coordination.
+    ext: Extension,
+}
+
+fn handle_configure(cx: tau_client::RawConfigureContext<'_, XmppRuntime>) -> ClientResult<()> {
+    if cx.state.ext.config_is_locked() {
+        return Err(ClientError::handler(immutable_config_error()));
+    }
+    let cfg = match cx.parse_config::<ExtConfig>() {
+        Ok(cfg) => cfg,
+        Err(error) => {
+            cx.state.ext.clear_config_before_start();
+            return Err(error);
+        }
+    };
+    let instance_name = cx.instance_name().map(ToString::to_string);
+    let cfg = match cfg.validate(cx.secrets(), instance_name) {
+        Ok(cfg) => cfg,
+        Err(message) => {
+            cx.state.ext.clear_config_before_start();
+            return Err(ClientError::handler(message));
+        }
+    };
+    if let Err(message) = cx.state.ext.apply_config(cfg) {
+        cx.state.ext.clear_config_before_start();
+        return Err(ClientError::handler(message));
+    }
+    Ok(())
+}
+
+fn handle_tool_invocation(cx: tau_client::ToolContext<'_, XmppRuntime>) -> ClientResult<()> {
+    cx.state.ext.dispatch_tool(cx.invoke().clone());
+    Ok(())
+}
+
+fn handle_session_started(cx: tau_client::RawEventContext<'_, XmppRuntime>) -> ClientResult<()> {
+    if let Event::SessionStarted(started) = cx.event() {
+        let mut state = cx.state.ext.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.current_session_id = Some(started.session_id.clone());
+    }
+    Ok(())
+}
+
+fn handle_live_event(cx: tau_client::RawEventContext<'_, XmppRuntime>) -> ClientResult<()> {
+    match cx.event() {
+        Event::SessionAgentUnloaded(unloaded) => {
+            unload_agent(&cx.state.ext, unloaded.agent_id.clone());
+        }
+        Event::SessionShutdown(shutdown) => {
+            shutdown_session(&cx.state.ext, shutdown.session_id.clone());
         }
         _ => {}
     }
-    true
-}
-
-fn handle_configure(ext: &Extension, tx: &mpsc::Sender<HarnessInputMessage>, msg: Configure) {
-    if ext.config_is_locked() {
-        let _ = tx.send(HarnessInputMessage::ConfigError(ConfigError {
-            message: immutable_config_error(),
-        }));
-        return;
-    }
-    match tau_extension::parse_config::<ExtConfig>(&msg.config)
-        .and_then(|cfg| cfg.validate(&msg.secrets, msg.instance_name.map(|name| name.to_string())))
-    {
-        Ok(cfg) => {
-            if let Err(message) = ext.apply_config(cfg) {
-                let _ = tx.send(HarnessInputMessage::ConfigError(ConfigError { message }));
-            }
-        }
-        Err(message) => {
-            ext.clear_config_before_start();
-            let _ = tx.send(HarnessInputMessage::ConfigError(ConfigError { message }));
-        }
-    }
+    Ok(())
 }
 
 fn immutable_config_error() -> String {
     "xmpp configuration cannot be changed after the bridge has started; restart Tau to apply new XMPP settings"
         .to_owned()
-}
-
-fn handle_delivery(ext: &Extension, delivery: EventDelivery) {
-    let is_replay = delivery.is_replay();
-    match delivery.into_event() {
-        Event::SessionStarted(started) => {
-            let mut state = ext.state.lock().unwrap_or_else(|e| e.into_inner());
-            state.current_session_id = Some(started.session_id);
-        }
-        Event::ToolStarted(invoke)
-            if matches!(
-                invoke.tool_name.as_str(),
-                REGISTER_TOOL_NAME | SEND_TOOL_NAME
-            ) && !is_replay =>
-        {
-            ext.dispatch_tool(invoke);
-        }
-        Event::SessionAgentUnloaded(unloaded) if !is_replay => {
-            unload_agent(ext, unloaded.agent_id);
-        }
-        Event::SessionShutdown(shutdown) if !is_replay => {
-            shutdown_session(ext, shutdown.session_id);
-        }
-        _ => {}
-    }
 }
 
 fn unload_agent(ext: &Extension, agent_id: AgentId) {
