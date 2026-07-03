@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">Tau full logo</title>
+  <desc id="desc">White Tau mark on a Solarized dark background.</desc>
+  <rect width="512" height="512" rx="64" fill="#002b36"/>
+  <path fill="#ffffff" d="M124.56 105.79H387.44V180.90H274.78V331.11H349.89V406.22H199.67V180.90H124.56Z"/>
+</svg>
