@@ -27,6 +27,12 @@ can opt into a detached-writer run mode. That mode preserves startup and handler
 error reporting but does not join the writer at shutdown, so harness
 `Disconnect` latency does not depend on queued background output.
 
+Extensions whose background workers need a persistent outbound handle can use
+the detached-writer state-factory entry point. The runner writes the complete
+startup prelude through `Ready` before invoking the factory with a cloneable
+`ClientHandle`, preserving startup staging while letting runtime state retain a
+handle for later worker output.
+
 Event handlers are either typed payload handlers or raw delivery handlers. Typed
 handlers cover the built-in `EventPayload` variants; raw handlers are available
 for unsupported first-party or custom extension events. Replay-aware handlers
@@ -35,7 +41,10 @@ replay-marked deliveries.
 
 Configuration handlers deserialize the CBOR configuration into the requested
 type. Decode failures and handler application errors emit `ConfigError` frames
-and the runner continues processing later messages.
+and the runner continues processing later messages. Handlers can register a
+configuration-error hook for fail-closed cleanup; that hook runs before
+`ConfigError` is emitted for both typed decode failures and application
+failures.
 
 Intercept handlers always produce exactly one `InterceptReply` for each request.
 If the handler fails, the runner sends a pass-through reply first, then returns

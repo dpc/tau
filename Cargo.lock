@@ -3397,8 +3397,8 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+ "tau-client",
  "tau-core",
- "tau-extension",
  "tau-proto",
  "tracing",
  "ureq",

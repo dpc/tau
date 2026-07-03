@@ -1,8 +1,31 @@
 use std::sync::{Condvar, Mutex};
 
-use tau_proto::{HarnessInputMessage, ToolStarted};
+use tau_proto::{HarnessInputMessage, HarnessInputReader, HarnessOutputMessage, ToolStarted};
 
 use super::*;
+
+#[derive(Clone, Default)]
+struct SharedWriter {
+    /// Shared byte buffer written by the tau-client writer thread.
+    bytes: Arc<Mutex<Vec<u8>>>,
+}
+
+impl SharedWriter {
+    fn bytes(&self) -> Vec<u8> {
+        self.bytes.lock().expect("lock shared writer").clone()
+    }
+}
+
+impl std::io::Write for SharedWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.bytes.lock().expect("lock shared writer").extend(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
 
 struct FakeClient {
     sent: Mutex<Vec<(i64, String)>>,
@@ -1084,6 +1107,145 @@ fn run_exits_promptly_when_disconnect_races_long_poll() {
     )
     .expect("run");
     assert!(start.elapsed() < Duration::from_secs(1));
+}
+
+/// Replayed tool deliveries must be skipped so historical registrations do not
+/// restart the Telegram bridge or authorize later live sends.
+#[test]
+fn run_ignores_replayed_tool_delivery_before_live_send() {
+    let mut input = Vec::new();
+    let mut writer = tau_proto::HarnessOutputWriter::new(&mut input);
+    let mut secrets = BTreeMap::new();
+    secrets.insert("bot".to_owned(), tau_proto::SecretValue::new("token"));
+    writer
+        .write_message(&HarnessOutputMessage::Configure(tau_proto::Configure {
+            instance_name: None,
+            config: tau_proto::json_to_cbor(&serde_json::json!({
+                "bot_token_secret": "bot",
+                "allowed_user_ids": [123],
+                "chat_id": 123,
+                "poll_timeout_seconds": 1,
+            })),
+            state_dir: None,
+            secrets,
+        }))
+        .expect("config");
+    writer
+        .write_message(&HarnessOutputMessage::deliver_replay(
+            tau_proto::UnixMicros::new(1_700_000_000_000_000),
+            Event::ToolStarted(tool(REGISTER_TOOL_NAME, "agent-1", bool_args(true))),
+        ))
+        .expect("replay register");
+    writer
+        .write_message(&HarnessOutputMessage::deliver(Event::ToolStarted(tool(
+            SEND_TOOL_NAME,
+            "agent-1",
+            message_args("reply"),
+        ))))
+        .expect("live send");
+    writer.flush().expect("flush");
+
+    let output = SharedWriter::default();
+    let written = output.clone();
+    let client = FakeClient::new();
+    run_with_client(std::io::Cursor::new(input), output, client.clone()).expect("run");
+
+    let mut reader = HarnessInputReader::new(std::io::Cursor::new(written.bytes()));
+    let mut saw_unregistered_error = false;
+    while let Some(frame) = reader.read_message().expect("read output") {
+        if let HarnessInputMessage::Emit(emit) = frame
+            && let Event::ToolError(error) = emit.event.as_ref()
+            && error.tool_name.as_str() == SEND_TOOL_NAME
+            && error.message.contains("telegram_register")
+        {
+            saw_unregistered_error = true;
+        }
+    }
+    assert!(
+        saw_unregistered_error,
+        "live send should fail without live registration"
+    );
+    assert!(client.sent.lock().expect("lock").is_empty());
+}
+
+/// Malformed reconfiguration that fails typed deserialization must fail closed:
+/// emit `ConfigError`, clear registrations/config, and prevent later sends from
+/// using stale Telegram routing state.
+#[test]
+fn run_malformed_reconfiguration_clears_active_bridge_state() {
+    let mut input = Vec::new();
+    let mut writer = tau_proto::HarnessOutputWriter::new(&mut input);
+    let mut secrets = BTreeMap::new();
+    secrets.insert("bot".to_owned(), tau_proto::SecretValue::new("token"));
+    writer
+        .write_message(&HarnessOutputMessage::Configure(tau_proto::Configure {
+            instance_name: None,
+            config: tau_proto::json_to_cbor(&serde_json::json!({
+                "bot_token_secret": "bot",
+                "allowed_user_ids": [123],
+                "chat_id": 123,
+                "poll_timeout_seconds": 1,
+            })),
+            state_dir: None,
+            secrets,
+        }))
+        .expect("valid config");
+    writer
+        .write_message(&HarnessOutputMessage::deliver(Event::ToolStarted(tool(
+            REGISTER_TOOL_NAME,
+            "agent-1",
+            bool_args(true),
+        ))))
+        .expect("live register");
+    writer
+        .write_message(&HarnessOutputMessage::Configure(tau_proto::Configure {
+            instance_name: None,
+            config: tau_proto::json_to_cbor(&serde_json::json!({
+                "unknown_field": true,
+            })),
+            state_dir: None,
+            secrets: BTreeMap::new(),
+        }))
+        .expect("invalid config");
+    writer
+        .write_message(&HarnessOutputMessage::deliver(Event::ToolStarted(tool(
+            SEND_TOOL_NAME,
+            "agent-1",
+            message_args("reply"),
+        ))))
+        .expect("live send");
+    writer.flush().expect("flush");
+
+    let output = SharedWriter::default();
+    let written = output.clone();
+    let client = FakeClient::new();
+    run_with_client(std::io::Cursor::new(input), output, client.clone()).expect("run");
+
+    let mut reader = HarnessInputReader::new(std::io::Cursor::new(written.bytes()));
+    let mut saw_config_error = false;
+    let mut saw_unregistered_error = false;
+    while let Some(frame) = reader.read_message().expect("read output") {
+        match frame {
+            HarnessInputMessage::ConfigError(error) if error.message.contains("unknown_field") => {
+                saw_config_error = true;
+            }
+            HarnessInputMessage::Emit(emit) => {
+                if let Event::ToolError(error) = emit.event.as_ref()
+                    && error.tool_name.as_str() == SEND_TOOL_NAME
+                    && error.message.contains("telegram_register")
+                {
+                    saw_unregistered_error = true;
+                }
+            }
+            _ => {}
+        }
+    }
+    assert!(saw_config_error, "malformed config should emit ConfigError");
+    assert!(
+        saw_unregistered_error,
+        "send should fail after malformed config clears registration"
+    );
+    assert!(client.sent.lock().expect("lock").is_empty());
 }
 
 /// Initial backlog drain must be a non-long-poll request. Otherwise a fresh

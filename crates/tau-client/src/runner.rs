@@ -89,6 +89,35 @@ where
         R: Read,
         W: Write + Send + 'static,
     {
+        self.run_detached_writer_with_state(reader, writer, |_| state)
+    }
+
+    /// Runs the extension without joining the writer after harness disconnect,
+    /// constructing state after startup frames are written.
+    ///
+    /// The supplied factory receives a cloneable [`ClientHandle`] that can be
+    /// stored in runtime state for background workers. The runner writes
+    /// `Hello`/subscriptions/startup events/`Ready` before calling the factory,
+    /// so stored handles cannot accidentally send frames before the startup
+    /// prelude.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when builder validation fails, startup output cannot be
+    /// encoded or flushed, protocol input cannot be decoded, a handler returns
+    /// an error that should stop the extension, or non-disconnect writer
+    /// shutdown fails.
+    pub fn run_detached_writer_with_state<R, W, MakeState>(
+        self,
+        reader: R,
+        writer: W,
+        make_state: MakeState,
+    ) -> ClientResult<Extension::State>
+    where
+        R: Read,
+        W: Write + Send + 'static,
+        MakeState: FnOnce(ClientHandle) -> Extension::State,
+    {
         let mut builder = ExtensionBuilder::new(self.extension.name(), self.extension.kind());
         self.extension.register(&mut builder);
         builder.validate()?;
@@ -97,7 +126,10 @@ where
         let handle = ClientHandle::new(sender);
 
         let writer_thread = std::thread::spawn(move || run_writer(writer, receiver));
-        let run_result = run_client_loop(reader, state, builder, handle.clone());
+        let run_result = write_startup(&builder, &handle).and_then(|()| {
+            let state = make_state(handle.clone());
+            run_message_loop(reader, state, builder, handle.clone())
+        });
         if let Ok((state, LoopExit::Disconnect)) = run_result {
             return Ok(state);
         }
@@ -130,6 +162,20 @@ enum LoopExit {
 /// Runs startup and harness message dispatch on the reader thread.
 fn run_client_loop<R, State>(
     reader: R,
+    state: State,
+    builder: ExtensionBuilder<State>,
+    handle: ClientHandle,
+) -> ClientResult<(State, LoopExit)>
+where
+    R: Read,
+{
+    write_startup(&builder, &handle)?;
+    run_message_loop(reader, state, builder, handle)
+}
+
+/// Runs harness message dispatch after startup frames have been written.
+fn run_message_loop<R, State>(
+    reader: R,
     mut state: State,
     mut builder: ExtensionBuilder<State>,
     handle: ClientHandle,
@@ -137,8 +183,6 @@ fn run_client_loop<R, State>(
 where
     R: Read,
 {
-    write_startup(&builder, &handle)?;
-
     let mut reader = tau_proto::PeerInputReader::new(reader);
     while let Some(message) = reader.read_message()? {
         if let Some(exit) = dispatch_message(message, &mut state, &mut builder, &handle)? {

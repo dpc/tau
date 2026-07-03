@@ -25,7 +25,8 @@ pub use builder::ExtensionBuilder;
 pub use client_error::{ClientError, ClientResult};
 pub use client_handle::ClientHandle;
 pub use contexts::{
-    ConfigureContext, EventContext, InterceptContext, RawEventContext, ToolContext,
+    ConfigureContext, ConfigureErrorContext, EventContext, InterceptContext, RawEventContext,
+    ToolContext,
 };
 pub use event_payload::EventPayload;
 pub use intercept_decision::InterceptDecision;

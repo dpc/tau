@@ -127,6 +127,53 @@ impl TauExtension for ConfigApplyErrorExtension {
     }
 }
 
+struct ConfigErrorHookExtension;
+
+impl TauExtension for ConfigErrorHookExtension {
+    type State = usize;
+
+    fn name(&self) -> &'static str {
+        "config-error-hook"
+    }
+
+    fn register(self, builder: &mut ExtensionBuilder<Self::State>) {
+        builder.configure_with_error::<DemoConfig>(
+            |cx| {
+                *cx.state = cx.config().value as usize;
+                Ok(())
+            },
+            |cx| {
+                *cx.state += 1;
+                cx.handle
+                    .emit_transient(notice("parse-error-hook"))
+                    .expect("emit parse error hook notice");
+            },
+        );
+    }
+}
+
+struct ConfigApplyErrorHookExtension;
+
+impl TauExtension for ConfigApplyErrorHookExtension {
+    type State = usize;
+
+    fn name(&self) -> &'static str {
+        "config-apply-error-hook"
+    }
+
+    fn register(self, builder: &mut ExtensionBuilder<Self::State>) {
+        builder.configure_with_error::<DemoConfig>(
+            |_cx| Err(ClientError::handler("apply failed")),
+            |cx| {
+                *cx.state += 1;
+                cx.handle
+                    .emit_transient(notice("apply-error-hook"))
+                    .expect("emit apply error hook notice");
+            },
+        );
+    }
+}
+
 struct ReplayExtension;
 
 impl TauExtension for ReplayExtension {
@@ -294,6 +341,28 @@ impl TauExtension for HandlerErrorExtension {
     }
 }
 
+struct FactoryHandleState {
+    /// Handle installed by the detached-writer state factory.
+    handle: ClientHandle,
+}
+
+struct FactoryHandleExtension;
+
+impl TauExtension for FactoryHandleExtension {
+    type State = FactoryHandleState;
+
+    fn name(&self) -> &'static str {
+        "factory-handle"
+    }
+
+    fn register(self, builder: &mut ExtensionBuilder<Self::State>) {
+        builder.tool(tool_spec("factory_handle_tool"), |cx| {
+            cx.state.handle.emit_detached(notice("factory handle"))?;
+            Ok(())
+        });
+    }
+}
+
 struct RawEventExtension;
 
 impl TauExtension for RawEventExtension {
@@ -417,6 +486,26 @@ fn notice(text: &str) -> Event {
     Event::HarnessNotice(HarnessNotice::new("test", text, NoticeLevel::Info))
 }
 
+fn notice_frame_index(frames: &[HarnessInputMessage], message: &str) -> usize {
+    frames
+        .iter()
+        .position(|frame| match frame {
+            HarnessInputMessage::Emit(emit) => match emit.event.as_ref() {
+                Event::HarnessNotice(notice) => notice.message == message,
+                _ => false,
+            },
+            _ => false,
+        })
+        .expect("notice frame")
+}
+
+fn config_error_frame_index(frames: &[HarnessInputMessage]) -> usize {
+    frames
+        .iter()
+        .position(|frame| matches!(frame, HarnessInputMessage::ConfigError(_)))
+        .expect("ConfigError frame")
+}
+
 fn tool_started(name: &str) -> HarnessOutputMessage {
     HarnessOutputMessage::deliver(Event::ToolStarted(ToolStarted {
         call_id: format!("call-{name}").into(),
@@ -495,6 +584,43 @@ fn configure_application_failure_sends_config_error() {
         .expect("ConfigError frame");
     assert_eq!(error.message, "apply failed");
     assert_eq!(state.replay_aware, 1);
+}
+
+/// Ensures typed configuration decode failures can run extension cleanup before
+/// the runner emits `ConfigError`.
+#[test]
+fn configure_parse_failure_runs_error_hook() {
+    let (state, frames) = run_messages(ConfigErrorHookExtension, 0, &[config_with_unknown_field()]);
+
+    assert_eq!(state, 1);
+    assert!(notice_frame_index(&frames, "parse-error-hook") < config_error_frame_index(&frames));
+}
+
+/// Ensures configuration application failures run the error hook before the
+/// runner emits `ConfigError`.
+#[test]
+fn configure_application_failure_runs_error_hook() {
+    let (state, frames) = run_messages(
+        ConfigApplyErrorHookExtension,
+        0,
+        &[HarnessOutputMessage::Configure(Configure {
+            config: tau_proto::json_to_cbor(&serde_json::json!({ "value": 9 })),
+            instance_name: None,
+            state_dir: None,
+            secrets: std::collections::BTreeMap::new(),
+        })],
+    );
+
+    assert_eq!(state, 1);
+    assert!(notice_frame_index(&frames, "apply-error-hook") < config_error_frame_index(&frames));
+    let error = frames
+        .iter()
+        .find_map(|frame| match frame {
+            HarnessInputMessage::ConfigError(error) => Some(error),
+            _ => None,
+        })
+        .expect("ConfigError frame");
+    assert_eq!(error.message, "apply failed");
 }
 
 /// Ensures replay-aware handlers see metadata while live-only handlers skip
@@ -632,6 +758,57 @@ fn detached_writer_handler_error_still_shuts_down_writer() {
     dropped_rx
         .recv_timeout(Duration::from_secs(1))
         .expect("writer should be shut down and dropped despite leaked handle");
+}
+
+/// Ensures detached-writer state factories can retain a handle for later
+/// background-style output without bypassing startup ordering.
+#[test]
+fn detached_writer_state_factory_can_store_client_handle() {
+    let input = encode_output_messages(&[tool_started("factory_handle_tool")]);
+    let writer = SharedWriter::default();
+    let written = writer.clone();
+
+    TauExtensionRunner::new(FactoryHandleExtension)
+        .run_detached_writer_with_state(Cursor::new(input), writer, |handle| {
+            handle
+                .emit_detached(notice("factory initialized"))
+                .expect("factory emit");
+            FactoryHandleState { handle }
+        })
+        .expect("run");
+
+    let mut reader = HarnessInputReader::new(Cursor::new(written.bytes()));
+    let mut frames = Vec::new();
+    while let Some(frame) = reader.read_message().expect("read output") {
+        frames.push(frame);
+    }
+    assert!(matches!(frames[0], HarnessInputMessage::Hello(_)));
+    assert!(
+        frames
+            .iter()
+            .position(|frame| matches!(frame, HarnessInputMessage::Ready(_)))
+            .is_some_and(|ready_index| frames[..ready_index]
+                .iter()
+                .any(|frame| matches!(frame, HarnessInputMessage::Subscribe(_))))
+    );
+    let ready_index = frames
+        .iter()
+        .position(|frame| matches!(frame, HarnessInputMessage::Ready(_)))
+        .expect("ready frame");
+    let factory_emit_index = frames
+        .iter()
+        .position(|frame| matches!(
+            frame,
+            HarnessInputMessage::Emit(emit)
+                if matches!(emit.event.as_ref(), Event::HarnessNotice(notice) if notice.message == "factory initialized")
+        ))
+        .expect("factory emit");
+    assert!(ready_index < factory_emit_index);
+    assert!(frames.iter().any(|frame| matches!(
+        frame,
+        HarnessInputMessage::Emit(emit)
+            if matches!(emit.event.as_ref(), Event::HarnessNotice(notice) if notice.message == "factory handle")
+    )));
 }
 
 /// Ensures raw event handlers can select a family of event names while still

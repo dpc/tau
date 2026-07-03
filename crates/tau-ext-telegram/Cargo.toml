@@ -17,7 +17,7 @@ workspace = true
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
-tau-extension.workspace = true
+tau-client.workspace = true
 tau-proto.workspace = true
 tracing.workspace = true
 ureq.workspace = true

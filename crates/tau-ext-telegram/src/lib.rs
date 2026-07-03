@@ -6,15 +6,15 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::error::Error;
-use std::io::{BufReader, BufWriter, Read, Write};
+use std::io::{Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
 
+use tau_client::{ClientError, ClientHandle, ClientResult, ExtensionBuilder, TauExtension};
 use tau_proto::{
-    AgentId, CborValue, ConfigError, Event, ExtPromptSubmitRequest, HarnessInputMessage,
-    HarnessOutputMessage, PeerInputReader, PeerOutputWriter, ToolError, ToolExample, ToolProgress,
-    ToolResult, ToolSpec, ToolStarted, ToolUseState, ToolUseStatus,
+    AgentId, CborValue, Event, ExtPromptSubmitRequest, HarnessInputMessage, ToolError, ToolExample,
+    ToolProgress, ToolResult, ToolSpec, ToolStarted, ToolUseState, ToolUseStatus,
 };
 
 /// Tracing target used by this extension.
@@ -41,7 +41,7 @@ const HTTP_TIMEOUT: Duration = Duration::from_secs(35);
 
 /// Run the Telegram extension over stdio.
 pub fn run_stdio() -> Result<(), Box<dyn Error>> {
-    tau_extension::init_logging_for(LOG_TARGET);
+    tau_client::init_logging_for(LOG_TARGET);
     run(std::io::stdin(), std::io::stdout())
 }
 
@@ -196,19 +196,60 @@ struct State {
     next_update_offset: Option<i64>,
 }
 
+#[derive(Clone)]
+enum Output {
+    /// Test-side output channel preserving existing direct unit-test helpers.
+    Channel(mpsc::Sender<HarnessInputMessage>),
+    /// Tau-client output handle used by the protocol runtime.
+    Client(ClientHandle),
+}
+
+impl From<mpsc::Sender<HarnessInputMessage>> for Output {
+    fn from(tx: mpsc::Sender<HarnessInputMessage>) -> Self {
+        Self::Channel(tx)
+    }
+}
+
+impl From<ClientHandle> for Output {
+    fn from(handle: ClientHandle) -> Self {
+        Self::Client(handle)
+    }
+}
+
+impl Output {
+    /// Sends one protocol frame, intentionally ignoring closed-writer failures.
+    ///
+    /// Telegram poller and tool output is best-effort once the harness has
+    /// disconnected or the tau-client writer has shut down.
+    fn send(&self, message: HarnessInputMessage) {
+        match self {
+            Self::Channel(tx) => {
+                let _ = tx.send(message);
+            }
+            Self::Client(handle) => {
+                let _ = handle.send_detached(message);
+            }
+        }
+    }
+
+    fn emit(&self, event: Event) {
+        self.send(HarnessInputMessage::emit(event));
+    }
+}
+
 struct Extension {
     state: Arc<Mutex<State>>,
     client: Arc<dyn TelegramClient>,
-    tx: mpsc::Sender<HarnessInputMessage>,
+    output: Output,
     shutdown: Arc<AtomicBool>,
 }
 
 impl Extension {
-    fn new(client: Arc<dyn TelegramClient>, tx: mpsc::Sender<HarnessInputMessage>) -> Self {
+    fn new(client: Arc<dyn TelegramClient>, output: impl Into<Output>) -> Self {
         Self {
             state: Arc::new(Mutex::new(State::default())),
             client,
-            tx,
+            output: output.into(),
             shutdown: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -263,25 +304,23 @@ impl Extension {
     }
 
     fn dispatch_tool(&self, invoke: ToolStarted) {
-        let _ = self.tx.send(HarnessInputMessage::emit(Event::ToolProgress(
-            ToolProgress {
-                call_id: invoke.call_id.clone(),
-                tool_name: invoke.tool_name.clone(),
-                message: Some("telegram tool started".to_owned()),
-                progress: None,
-                display: Some(ToolUseState {
-                    status: ToolUseStatus::InProgress,
-                    status_text: tau_proto::PROGRESS_INDICATOR_TEXT.to_owned(),
-                    ..Default::default()
-                }),
-            },
-        )));
+        self.output.emit(Event::ToolProgress(ToolProgress {
+            call_id: invoke.call_id.clone(),
+            tool_name: invoke.tool_name.clone(),
+            message: Some("telegram tool started".to_owned()),
+            progress: None,
+            display: Some(ToolUseState {
+                status: ToolUseStatus::InProgress,
+                status_text: tau_proto::PROGRESS_INDICATOR_TEXT.to_owned(),
+                ..Default::default()
+            }),
+        }));
         let event = match invoke.tool_name.as_str() {
             REGISTER_TOOL_NAME => self.handle_register(invoke),
             SEND_TOOL_NAME => self.handle_send(invoke),
             _ => tool_error(invoke, "unknown telegram tool".to_owned()),
         };
-        let _ = self.tx.send(HarnessInputMessage::emit(event));
+        self.output.emit(event);
     }
 
     fn handle_register(&self, invoke: ToolStarted) -> Event {
@@ -327,10 +366,10 @@ impl Extension {
         }
         state.poller_started = true;
         let state_arc = Arc::clone(&self.state);
-        let tx = self.tx.clone();
+        let output = self.output.clone();
         let client = Arc::clone(&self.client);
         let shutdown = Arc::clone(&self.shutdown);
-        std::thread::spawn(move || poll_loop(state_arc, client, tx, shutdown));
+        std::thread::spawn(move || poll_loop(state_arc, client, output, shutdown));
         Ok(())
     }
 
@@ -740,15 +779,12 @@ impl Extension {
             .map(str::to_owned)
             .unwrap_or_else(|| message.user_id.to_string());
         let prompt = format!("[telegram from {source}] {text}");
-        let _ = self
-            .tx
-            .send(HarnessInputMessage::emit(Event::ExtPromptSubmitRequest(
-                ExtPromptSubmitRequest {
-                    agent_id,
-                    text: prompt,
-                    ctx_id: None,
-                },
-            )));
+        self.output
+            .emit(Event::ExtPromptSubmitRequest(ExtPromptSubmitRequest {
+                agent_id,
+                text: prompt,
+                ctx_id: None,
+            }));
     }
 }
 
@@ -805,13 +841,13 @@ impl Drop for Extension {
 fn poll_loop(
     state: Arc<Mutex<State>>,
     client: Arc<dyn TelegramClient>,
-    tx: mpsc::Sender<HarnessInputMessage>,
+    output: Output,
     shutdown: Arc<AtomicBool>,
 ) {
     let ext = Extension {
         state,
         client,
-        tx,
+        output,
         shutdown: Arc::clone(&shutdown),
     };
     loop {
@@ -901,125 +937,111 @@ where
     R: Read,
     W: Write + Send + 'static,
 {
-    let mut reader = PeerInputReader::new(BufReader::new(reader));
-    let mut writer = PeerOutputWriter::new(BufWriter::new(writer));
-    tau_extension::Handshake::tool("tau-ext-telegram")
-        .subscribe([
-            tau_proto::EventName::TOOL_STARTED,
-            tau_proto::EventName::AGENT_DISPLAY_NAME_SET,
-            tau_proto::EventName::AGENT_STARTED,
-            tau_proto::EventName::SESSION_AGENT_UNLOADED,
-            tau_proto::EventName::SESSION_SHUTDOWN,
-        ])
-        .register_tool_with_group_and_prompt_fragment(
-            register_tool_spec(),
-            Some(telegram_tool_group()),
-            None,
-        )
-        .register_tool_with_group_and_prompt_fragment(
-            send_tool_spec(),
-            Some(telegram_tool_group()),
-            None,
-        )
-        .ready_message("telegram ready")
-        .run(&mut writer)?;
+    let state = tau_client::TauExtensionRunner::new(TelegramExtension)
+        .run_detached_writer_with_state(reader, writer, move |handle| TelegramRuntime {
+            ext: Extension::new(client, handle),
+        })?;
+    state.ext.shutdown.store(true, Ordering::Relaxed);
+    Ok(())
+}
 
-    let (tx, rx) = mpsc::channel::<HarnessInputMessage>();
-    let ext = Extension::new(client, tx.clone());
-    let writer_shutdown = Arc::new(AtomicBool::new(false));
-    let writer_shutdown_thread = Arc::clone(&writer_shutdown);
-    let writer_handle = std::thread::spawn(move || -> Result<(), Box<dyn Error + Send>> {
-        loop {
-            match rx.recv_timeout(Duration::from_millis(50)) {
-                Ok(msg) => {
-                    writer
-                        .write_message(&msg)
-                        .map_err(|e| -> Box<dyn Error + Send> { Box::new(e) })?;
-                    writer
-                        .flush()
-                        .map_err(|e| -> Box<dyn Error + Send> { Box::new(e) })?;
-                }
-                Err(mpsc::RecvTimeoutError::Timeout)
-                    if writer_shutdown_thread.load(Ordering::Relaxed) =>
-                {
-                    break;
-                }
-                Err(mpsc::RecvTimeoutError::Timeout) => {}
-                Err(mpsc::RecvTimeoutError::Disconnected) => break,
-            }
-        }
-        Ok(())
-    });
+struct TelegramExtension;
 
-    while let Some(message) = reader.read_message()? {
-        match message {
-            HarnessOutputMessage::Configure(msg) => {
-                match tau_extension::parse_config::<ExtConfig>(&msg.config)
-                    .and_then(|cfg| cfg.validate(&msg.secrets))
-                {
-                    Ok(cfg) => ext.apply_config(cfg, msg.state_dir),
-                    Err(message) => {
-                        ext.clear_config_after_error();
-                        let _ = tx.send(HarnessInputMessage::ConfigError(ConfigError { message }));
-                    }
-                }
-            }
-            HarnessOutputMessage::Deliver(delivery) => {
-                if delivery.is_replay() {
-                    continue;
-                }
-                match delivery.into_event() {
-                    Event::ToolStarted(invoke)
-                        if matches!(
-                            invoke.tool_name.as_str(),
-                            REGISTER_TOOL_NAME | SEND_TOOL_NAME
-                        ) =>
-                    {
-                        ext.dispatch_tool(invoke);
-                    }
-                    Event::AgentDisplayNameSet(name) => {
-                        let mut state = ext.state.lock().unwrap_or_else(|e| e.into_inner());
-                        state.agent_labels.insert(name.agent_id, name.display_name);
-                    }
-                    Event::AgentStarted(started) => {
-                        if let Some(display_name) = started.display_name {
-                            let mut state = ext.state.lock().unwrap_or_else(|e| e.into_inner());
-                            state.agent_labels.insert(started.agent_id, display_name);
-                        }
-                    }
-                    Event::SessionAgentUnloaded(unloaded) => {
-                        let mut state = ext.state.lock().unwrap_or_else(|e| e.into_inner());
-                        state.registered_agents.remove(&unloaded.agent_id);
-                        state.agent_labels.remove(&unloaded.agent_id);
-                        state
-                            .selected_agent_by_chat
-                            .retain(|_, agent_id| agent_id != &unloaded.agent_id);
-                    }
-                    Event::SessionShutdown(_) => {
-                        let mut state = ext.state.lock().unwrap_or_else(|e| e.into_inner());
-                        state.registered_agents.clear();
-                        state.agent_labels.clear();
-                        state.selected_agent_by_chat.clear();
-                    }
-                    _ => {}
-                }
-            }
-            HarnessOutputMessage::Disconnect(_) => {
-                ext.shutdown.store(true, Ordering::Relaxed);
-                writer_shutdown.store(true, Ordering::Relaxed);
-                break;
-            }
-            _ => {}
-        }
+impl TauExtension for TelegramExtension {
+    type State = TelegramRuntime;
+
+    fn name(&self) -> &'static str {
+        "tau-ext-telegram"
     }
-    ext.shutdown.store(true, Ordering::Relaxed);
-    writer_shutdown.store(true, Ordering::Relaxed);
-    drop(ext);
-    drop(tx);
-    writer_handle
-        .join()
-        .map_err(|e| -> Box<dyn Error> { format!("writer thread panicked: {e:?}").into() })?
-        .map_err(|e| -> Box<dyn Error> { e })?;
+
+    fn register(self, builder: &mut ExtensionBuilder<Self::State>) {
+        builder
+            .configure_with_error::<ExtConfig>(
+                |cx| {
+                    let secrets = cx.secrets().clone();
+                    let state_dir = cx.state_dir().map(std::path::Path::to_path_buf);
+                    let cfg = cx.config.validate(&secrets).map_err(ClientError::handler)?;
+                    cx.state.ext.apply_config(cfg, state_dir);
+                    Ok(())
+                },
+                |cx| {
+                    cx.state.ext.clear_config_after_error();
+                },
+            )
+            .tool_with_group_and_prompt_fragment(
+                register_tool_spec(),
+                Some(telegram_tool_group()),
+                None,
+                handle_tool_invocation,
+            )
+            .tool_with_group_and_prompt_fragment(
+                send_tool_spec(),
+                Some(telegram_tool_group()),
+                None,
+                handle_tool_invocation,
+            )
+            .on_raw_live(
+                tau_proto::EventSelector::Exact(tau_proto::EventName::AGENT_DISPLAY_NAME_SET),
+                handle_live_event,
+            )
+            .on_raw_live(
+                tau_proto::EventSelector::Exact(tau_proto::EventName::AGENT_STARTED),
+                handle_live_event,
+            )
+            .on_raw_live(
+                tau_proto::EventSelector::Exact(tau_proto::EventName::SESSION_AGENT_UNLOADED),
+                handle_live_event,
+            )
+            .on_raw_live(
+                tau_proto::EventSelector::Exact(tau_proto::EventName::SESSION_SHUTDOWN),
+                handle_live_event,
+            )
+            .ready_message("telegram ready");
+    }
+}
+
+struct TelegramRuntime {
+    /// Shared Telegram bridge state and background-worker coordination.
+    ext: Extension,
+}
+
+fn handle_tool_invocation(cx: tau_client::ToolContext<'_, TelegramRuntime>) -> ClientResult<()> {
+    cx.state.ext.dispatch_tool(cx.invoke().clone());
+    Ok(())
+}
+
+fn handle_live_event(cx: tau_client::RawEventContext<'_, TelegramRuntime>) -> ClientResult<()> {
+    match cx.event() {
+        Event::AgentDisplayNameSet(name) => {
+            let mut state = cx.state.ext.state.lock().unwrap_or_else(|e| e.into_inner());
+            state
+                .agent_labels
+                .insert(name.agent_id.clone(), name.display_name.clone());
+        }
+        Event::AgentStarted(started) => {
+            if let Some(display_name) = started.display_name.clone() {
+                let mut state = cx.state.ext.state.lock().unwrap_or_else(|e| e.into_inner());
+                state
+                    .agent_labels
+                    .insert(started.agent_id.clone(), display_name);
+            }
+        }
+        Event::SessionAgentUnloaded(unloaded) => {
+            let mut state = cx.state.ext.state.lock().unwrap_or_else(|e| e.into_inner());
+            state.registered_agents.remove(&unloaded.agent_id);
+            state.agent_labels.remove(&unloaded.agent_id);
+            state
+                .selected_agent_by_chat
+                .retain(|_, agent_id| agent_id != &unloaded.agent_id);
+        }
+        Event::SessionShutdown(_) => {
+            let mut state = cx.state.ext.state.lock().unwrap_or_else(|e| e.into_inner());
+            state.registered_agents.clear();
+            state.agent_labels.clear();
+            state.selected_agent_by_chat.clear();
+        }
+        _ => {}
+    }
     Ok(())
 }
 

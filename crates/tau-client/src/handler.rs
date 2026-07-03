@@ -1,7 +1,8 @@
 use serde::de::DeserializeOwned;
 
 use crate::contexts::{
-    ConfigureContext, EventContext, InterceptContext, RawEventContext, ToolContext,
+    ConfigureContext, ConfigureErrorContext, EventContext, InterceptContext, RawEventContext,
+    ToolContext,
 };
 use crate::event_payload::EventPayload;
 use crate::{ClientHandle, ClientResult, InterceptDecision};
@@ -63,6 +64,10 @@ pub(crate) trait InterceptHandler<State> {
     ) -> ClientResult<InterceptDecision>;
 }
 
+/// Optional callback invoked when typed configuration fails.
+type ConfigureErrorHandler<State> =
+    Box<dyn for<'a> FnMut(ConfigureErrorContext<'a, State>) + 'static>;
+
 /// Typed configuration handler implementation.
 pub(crate) struct TypedConfigureHandler<Config, F> {
     /// User-provided configuration handler.
@@ -108,6 +113,76 @@ where
         };
         if let Err(error) = (self.handler)(cx) {
             handle.config_error(error.to_string())?;
+        }
+        Ok(())
+    }
+}
+
+/// Typed configuration handler implementation with an error hook.
+pub(crate) struct TypedConfigureWithErrorHandler<State, Config, F> {
+    /// User-provided configuration handler.
+    handler: F,
+    /// Optional hook run before `ConfigError` is emitted.
+    error_handler: ConfigureErrorHandler<State>,
+    /// Marker for the typed config payload.
+    _config: std::marker::PhantomData<fn() -> Config>,
+}
+
+impl<State, Config, F> TypedConfigureWithErrorHandler<State, Config, F> {
+    /// Creates a typed configuration handler wrapper.
+    #[must_use]
+    pub(crate) fn new(handler: F, error_handler: ConfigureErrorHandler<State>) -> Self {
+        Self {
+            handler,
+            error_handler,
+            _config: std::marker::PhantomData,
+        }
+    }
+
+    /// Emits a config error after running any registered error hook.
+    fn handle_error(
+        &mut self,
+        configure: &tau_proto::Configure,
+        state: &mut State,
+        handle: &ClientHandle,
+        message: String,
+    ) -> ClientResult<()> {
+        (self.error_handler)(ConfigureErrorContext {
+            state,
+            configure,
+            message: &message,
+            handle: handle.clone(),
+        });
+        handle.config_error(message)
+    }
+}
+
+impl<State, Config, F> ConfigureHandler<State> for TypedConfigureWithErrorHandler<State, Config, F>
+where
+    Config: DeserializeOwned,
+    F: for<'a> FnMut(ConfigureContext<'a, State, Config>) -> ClientResult<()>,
+{
+    fn handle(
+        &mut self,
+        configure: &tau_proto::Configure,
+        state: &mut State,
+        handle: &ClientHandle,
+    ) -> ClientResult<()> {
+        let config = match parse_config::<Config>(&configure.config) {
+            Ok(config) => config,
+            Err(message) => {
+                self.handle_error(configure, state, handle, message)?;
+                return Ok(());
+            }
+        };
+        let cx = ConfigureContext {
+            state,
+            config,
+            configure,
+            handle: handle.clone(),
+        };
+        if let Err(error) = (self.handler)(cx) {
+            self.handle_error(configure, state, handle, error.to_string())?;
         }
         Ok(())
     }

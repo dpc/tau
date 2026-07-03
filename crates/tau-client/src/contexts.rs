@@ -51,6 +51,44 @@ pub struct ConfigureContext<'a, State, Config> {
     pub handle: ClientHandle,
 }
 
+/// Context passed to a configuration error hook.
+pub struct ConfigureErrorContext<'a, State> {
+    /// Mutable extension state shared by handlers.
+    pub state: &'a mut State,
+    /// Original configure message metadata from the harness.
+    pub configure: &'a tau_proto::Configure,
+    /// Human-readable error message that will be reported as `ConfigError`.
+    pub message: &'a str,
+    /// Cloneable handle for sending frames to the harness.
+    pub handle: ClientHandle,
+}
+
+impl<'a, State> ConfigureErrorContext<'a, State> {
+    /// Returns the configured extension instance name, if any.
+    #[must_use]
+    pub fn instance_name(&self) -> Option<&tau_proto::ExtensionName> {
+        self.configure.instance_name.as_ref()
+    }
+
+    /// Returns the harness-assigned extension state directory, if any.
+    #[must_use]
+    pub fn state_dir(&self) -> Option<&Path> {
+        self.configure.state_dir.as_deref()
+    }
+
+    /// Returns the human-readable error message that will be reported.
+    #[must_use]
+    pub fn message(&self) -> &str {
+        self.message
+    }
+
+    /// Returns a cloneable handle for sending frames to the harness.
+    #[must_use]
+    pub fn handle(&self) -> ClientHandle {
+        self.handle.clone()
+    }
+}
+
 impl<'a, State, Config> ConfigureContext<'a, State, Config> {
     /// Returns the parsed typed configuration value.
     #[must_use]

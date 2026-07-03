@@ -1,13 +1,14 @@
 use serde::de::DeserializeOwned;
 
 use crate::contexts::{
-    ConfigureContext, EventContext, InterceptContext, RawEventContext, ToolContext,
+    ConfigureContext, ConfigureErrorContext, EventContext, InterceptContext, RawEventContext,
+    ToolContext,
 };
 use crate::event_payload::EventPayload;
 use crate::handler::{
     ConfigureHandler, EventHandler, InterceptHandler, NamedToolHandler, RawEventHandler,
-    ToolHandler, TypedConfigureHandler, TypedEventHandler, TypedInterceptHandler,
-    TypedRawEventHandler,
+    ToolHandler, TypedConfigureHandler, TypedConfigureWithErrorHandler, TypedEventHandler,
+    TypedInterceptHandler, TypedRawEventHandler,
 };
 use crate::{ClientError, ClientResult, ExtensionPlugin, InterceptDecision};
 
@@ -123,6 +124,30 @@ impl<State> ExtensionBuilder<State> {
     {
         self.configure_handlers
             .push(Box::new(TypedConfigureHandler::<Config, _>::new(handler)));
+        self
+    }
+
+    /// Registers a typed configuration handler with an error hook.
+    ///
+    /// The error hook runs before the runner emits `ConfigError` for either
+    /// typed decode failures or handler application failures. Use it for
+    /// fail-closed extensions that must clear active runtime state whenever a
+    /// new configuration cannot be parsed or applied.
+    pub fn configure_with_error<Config>(
+        &mut self,
+        handler: impl for<'a> FnMut(ConfigureContext<'a, State, Config>) -> ClientResult<()> + 'static,
+        error_handler: impl for<'a> FnMut(ConfigureErrorContext<'a, State>) + 'static,
+    ) -> &mut Self
+    where
+        Config: DeserializeOwned + 'static,
+        State: 'static,
+    {
+        self.configure_handlers.push(Box::new(
+            TypedConfigureWithErrorHandler::<State, Config, _>::new(
+                handler,
+                Box::new(error_handler),
+            ),
+        ));
         self
     }
 
