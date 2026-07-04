@@ -8,7 +8,8 @@ use tau_proto::{
     ActionOutput, ActionSchema, AgentPromptSubmitted, CborValue, Configure, Event, EventSelector,
     HarnessInputMessage, HarnessInputReader, HarnessNotice, HarnessOutputMessage,
     HarnessOutputWriter, InterceptAction, InterceptRequest, InterceptionPriority, NoticeLevel,
-    PromptMessageClass, PromptOriginator, ToolName, ToolSpec, ToolStarted, ToolType, UnixMicros,
+    PromptFragment, PromptMessageClass, PromptOriginator, PromptPriority, ToolName, ToolSpec,
+    ToolStarted, ToolType, UnixMicros,
 };
 
 use super::*;
@@ -313,6 +314,28 @@ impl TauExtension for ActionExtension {
                     },
                 }))
             });
+    }
+}
+
+struct ContextStartupExtension;
+
+impl TauExtension for ContextStartupExtension {
+    type State = ();
+
+    fn name(&self) -> &'static str {
+        "context-startup"
+    }
+
+    fn register(self, builder: &mut ExtensionBuilder<Self::State>) {
+        builder
+            .register_context_provider()
+            .register_session_context_provider()
+            .publish_prompt_fragment(PromptFragment {
+                name: "shell.cwd".to_owned(),
+                priority: PromptPriority::new(900),
+                template: "cwd: {{agent_context.cwd}}".to_owned().into(),
+            })
+            .ready_message("context ready");
     }
 }
 
@@ -973,6 +996,43 @@ fn action_schema_and_live_dispatch_match_action_after_harness_routing() {
         })
         .count();
     assert_eq!(action_results, 1);
+}
+
+/// Ensures context-provider startup helpers emit the existing protocol DTOs in
+/// startup-event order before `Ready` without taking ownership of runtime
+/// context-ready or session-ready behavior.
+#[test]
+fn context_provider_helpers_publish_startup_events_before_ready() {
+    let (_, frames) = run_messages(ContextStartupExtension, (), &[]);
+
+    assert!(matches!(frames[0], HarnessInputMessage::Hello(_)));
+    assert!(matches!(
+        frames[1],
+        HarnessInputMessage::Emit(ref emit)
+            if matches!(emit.event.as_ref(), Event::ExtensionContextProviderRegister(_))
+    ));
+    assert!(matches!(
+        frames[2],
+        HarnessInputMessage::Emit(ref emit)
+            if matches!(
+                emit.event.as_ref(),
+                Event::ExtensionSessionContextProviderRegister(_)
+            )
+    ));
+    let HarnessInputMessage::Emit(prompt_fragment_emit) = &frames[3] else {
+        panic!("expected prompt fragment publish before Ready: {frames:?}");
+    };
+    let Event::ExtPromptFragmentPublish(publish) = prompt_fragment_emit.event.as_ref() else {
+        panic!("expected prompt fragment publish before Ready: {frames:?}");
+    };
+    assert_eq!(publish.fragment.name, "shell.cwd");
+    assert_eq!(publish.fragment.priority, PromptPriority::new(900));
+    assert!(
+        publish.fragment.template.contains("agent_context.cwd"),
+        "prompt fragment should carry shell cwd context template",
+    );
+    assert!(matches!(frames[4], HarnessInputMessage::Ready(_)));
+    assert_eq!(frames.len(), 5);
 }
 
 /// Ensures detached sends still flow through the writer before runner

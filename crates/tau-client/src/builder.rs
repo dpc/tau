@@ -112,6 +112,40 @@ impl<State> ExtensionBuilder<State> {
         ))
     }
 
+    /// Declares that this extension will publish per-agent context and later
+    /// emit `extension.context_ready` at runtime.
+    ///
+    /// This is a startup publication helper only. The extension remains
+    /// responsible for subscribing to lifecycle events, publishing context, and
+    /// emitting runtime readiness events.
+    pub fn register_context_provider(&mut self) -> &mut Self {
+        self.startup_event(tau_proto::Event::ExtensionContextProviderRegister(
+            tau_proto::ExtensionContextProviderRegister {},
+        ))
+    }
+
+    /// Declares that this extension will publish session-wide context and later
+    /// emit `extension.session_context_ready` at runtime.
+    ///
+    /// This is a startup publication helper only. Runtime session folding,
+    /// context publication, and readiness events remain extension-owned.
+    pub fn register_session_context_provider(&mut self) -> &mut Self {
+        self.startup_event(tau_proto::Event::ExtensionSessionContextProviderRegister(
+            tau_proto::ExtensionSessionContextProviderRegister {},
+        ))
+    }
+
+    /// Publishes or replaces one extension-level prompt fragment during
+    /// startup.
+    ///
+    /// This helper preserves normal tau-client startup staging: the fragment is
+    /// emitted before `Ready`, alongside other startup events.
+    pub fn publish_prompt_fragment(&mut self, fragment: tau_proto::PromptFragment) -> &mut Self {
+        self.startup_event(tau_proto::Event::ExtPromptFragmentPublish(
+            tau_proto::ExtPromptFragmentPublish { fragment },
+        ))
+    }
+
     /// Attaches a human-readable message to the terminal `Ready` frame.
     pub fn ready_message(&mut self, message: impl Into<String>) -> &mut Self {
         self.ready_message = Some(message.into());

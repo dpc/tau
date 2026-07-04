@@ -77,6 +77,14 @@ remains a harness responsibility because configured instance names can differ fr
 protocol `Hello` names; tau-client does not broaden subscriptions or process
 replay-marked action invocations.
 
+Context-provider helpers are startup publication helpers only. They emit the
+existing `extension.context_provider_register`,
+`extension.session_context_provider_register`, and
+`extension.prompt_fragment_publish` DTOs before `Ready` without owning the
+runtime lifecycle: extensions still subscribe to session/agent events, fold any
+state they need, publish context values, and emit `extension.context_ready` or
+`extension.session_context_ready` themselves.
+
 Manual-loop receive results distinguish timeout, clean input EOF, and protocol
 `Disconnect`. Clean input EOF allows the caller to keep running local timers and
 emit post-EOF output before graceful writer shutdown. `finish()` always shuts
@@ -97,9 +105,10 @@ the handler error so the extension run stops without leaving the harness waiting
 Tests in `src/tests.rs` are protocol contract tests for the reusable runtime.
 They should cover startup frame ordering, subscription selector semantics,
 writer-thread behavior, configuration errors, replay/live dispatch boundaries,
-raw event dispatch, tool/action matching, intercept reply guarantees, disconnect
-behavior, manual-loop receive/dispatch/shutdown contracts, builder validation,
-empty subscriptions, and plugin composition. Add focused coverage when changing
-lifecycle, writer shutdown, replay filtering, configuration, intercept, action
-dispatch, manual receive loops, or startup declaration behavior so migrated
-extensions do not need to rediscover runtime regressions independently.
+raw event dispatch, tool/action matching, intercept reply guarantees, context
+provider startup publication, disconnect behavior, manual-loop
+receive/dispatch/shutdown contracts, builder validation, empty subscriptions,
+and plugin composition. Add focused coverage when changing lifecycle, writer
+shutdown, replay filtering, configuration, intercept, action dispatch, manual
+receive loops, or startup declaration behavior so migrated extensions do not
+need to rediscover runtime regressions independently.
