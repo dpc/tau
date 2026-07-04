@@ -10,7 +10,22 @@ Tool and group names are validated with Tau protocol newtypes. Tool groups use e
 
 ## Runtime loop
 
-The main Rhai interpreter stays single-threaded. A reader thread converts harness frames into an internal queue, shell worker threads send completions to the same queue, and a writer thread serializes outbound harness messages. This lets shell jobs run without blocking harness message handling.
+The main Rhai interpreter stays single-threaded. The extension uses
+`tau-client`'s deferred manual startup mode so it can send `Hello`, wait for the
+initial `Configure`, run trusted `init(config)`, and only then emit the
+script-computed `Subscribe`, `Intercept`, tool registrations, and terminal
+`Ready`. If configuration or init fails, the deferred startup path emits one
+`ConfigError` followed by an inert `Ready`.
+
+After startup, `tau-client` owns protocol decoding and serialized writing while
+the Rhai runtime owns the policy loop. The loop polls harness input through
+`ManualExtensionRuntime::recv_timeout` and drains shell worker completions from a
+crate-local channel. This keeps script execution non-concurrent while still
+allowing host shell commands to run without blocking harness frame handling.
+The polling interval is currently fixed at 50 ms: this deliberately avoids
+adding another custom select/demux API to tau-client for the migration, at the
+cost of idle wakeups and up to 50 ms latency before a shell completion callback
+runs while the loop is otherwise waiting for harness input.
 
 ## Tool dispatch
 

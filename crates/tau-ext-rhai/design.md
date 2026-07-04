@@ -6,11 +6,12 @@ This file records major design decisions currently embodied by this directory's 
 
 Status: unconfirmed
 
-The Rhai interpreter runs on one main runtime thread, while harness reading,
-harness writing, and shell execution use helper threads. Shell workers are owned
-by runtime state through cancellation/process-group handles and join handles, so
-disconnect and runtime drop synchronously cancel, kill, and reap pending shell
-work before `run` returns, subject to a bounded shutdown join timeout.
+The Rhai interpreter runs on one main runtime thread, while tau-client-owned
+harness reading/writing and crate-owned shell execution use helper threads.
+Shell workers are owned by runtime state through cancellation/process-group
+handles and join handles, so disconnect and runtime drop synchronously cancel,
+kill, and reap pending shell work before `run` returns, subject to a bounded
+shutdown join timeout.
 
 This keeps script execution non-concurrent while still allowing host shell
 commands to run without blocking harness frame handling.
@@ -28,8 +29,8 @@ Status: unconfirmed
 Behavior tests for this crate should prefer serialized Tau protocol frames sent
 through `run` and assertions on outbound frames. Shell behavior should be tested
 through Rhai tools returning `ShellJob` when possible, so tests cover script API
-admission, deferred tool result/error emission, and shell process supervision
-together.
+admission, deferred tool result/error emission, tau-client startup staging, and
+shell process supervision together.
 
 ## Rhai tools are currently untagged
 

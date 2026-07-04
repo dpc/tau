@@ -160,6 +160,17 @@ fn setsid_available() -> bool {
 }
 
 #[test]
+fn no_configure_exits_after_hello_only() {
+    // Rhai uses tau-client deferred startup: before the first Configure, it must
+    // send only Hello and must not leak script-dependent startup declarations or
+    // inert Ready frames.
+    let frames = run_frames(&[]);
+
+    assert!(matches!(frames[0], HarnessInputMessage::Hello(_)));
+    assert_eq!(frames.len(), 1);
+}
+
+#[test]
 fn bootstrap_waits_for_configure_then_uses_init_plan() {
     // The Rhai extension must not send subscriptions until it has the
     // configured script, because the script decides its own event interest.
@@ -648,10 +659,15 @@ fn intercept_callback_can_drop_event() {
     });
 
     let frames = run_frames(&[configure_with_script(&script), req]);
-    assert!(frames.iter().any(|frame| matches!(
-        frame,
-        HarnessInputMessage::InterceptReply(reply) if matches!(reply.action, InterceptAction::Drop)
-    )));
+    let replies = frames
+        .iter()
+        .filter_map(|frame| match frame {
+            HarnessInputMessage::InterceptReply(reply) => Some(reply),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(replies.len(), 1);
+    assert!(matches!(replies[0].action, InterceptAction::Drop));
 }
 
 #[test]
@@ -683,13 +699,18 @@ fn intercept_callback_can_return_replacement_event() {
 
     let frames = run_frames(&[configure_with_script(&script), req]);
 
-    let replacement = frames.iter().find_map(|frame| match frame {
-        HarnessInputMessage::InterceptReply(reply) => match &reply.action {
-            InterceptAction::Pass(Some(event)) => Some(event.as_ref()),
+    let replies = frames
+        .iter()
+        .filter_map(|frame| match frame {
+            HarnessInputMessage::InterceptReply(reply) => Some(reply),
             _ => None,
-        },
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(replies.len(), 1);
+    let replacement = match &replies[0].action {
+        InterceptAction::Pass(Some(event)) => Some(event.as_ref()),
         _ => None,
-    });
+    };
     assert!(matches!(
         replacement,
         Some(Event::AgentPromptSubmitted(prompt)) if prompt.text == "changed"

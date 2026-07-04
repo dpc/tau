@@ -15,11 +15,12 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+ciborium.workspace = true
 libc.workspace = true
 rhai.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-tau-extension.workspace = true
+tau-client.workspace = true
 tau-proto.workspace = true
 tracing.workspace = true
 

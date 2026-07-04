@@ -12,7 +12,7 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
 use std::error::Error;
 use std::fs;
-use std::io::{BufReader, BufWriter, Read, Write};
+use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -20,12 +20,16 @@ use std::time::{Duration, Instant};
 
 use rhai::{Array, Dynamic, Engine, EvalAltResult, FnPtr, ImmutableString, Map, Scope};
 use serde::Deserialize;
+use serde::de::DeserializeOwned;
+use tau_client::{
+    ClientHandle, ExtensionBuilder, ManualExtensionRuntime, ManualRuntimeInput, TauExtension,
+    TauExtensionRunner,
+};
 use tau_proto::{
-    CborValue, ClientKind, ConfigError, Configure, Event, EventSelector, HarnessInputMessage,
-    HarnessNotice, HarnessOutputMessage, Hello, Intercept, InterceptAction, InterceptReply,
-    InterceptionPriority, NoticeLevel, PROTOCOL_VERSION, PeerInputReader, PeerOutputWriter,
-    PromptOriginator, Ready, Subscribe, ToolError, ToolGroup, ToolGroupName, ToolName,
-    ToolRegister, ToolResult, ToolResultKind, ToolSpec, ToolStarted, ToolType, UnixMicros,
+    CborValue, Configure, Event, EventSelector, HarnessInputMessage, HarnessNotice,
+    HarnessOutputMessage, InterceptAction, InterceptionPriority, NoticeLevel, PromptOriginator,
+    ToolError, ToolGroup, ToolGroupName, ToolName, ToolRegister, ToolResult, ToolResultKind,
+    ToolSpec, ToolStarted, ToolType, UnixMicros,
 };
 
 /// `tracing` target for events emitted from this extension.
@@ -39,6 +43,10 @@ const MAX_SHELL_TIMEOUT_SECS: i64 = 24 * 60 * 60;
 
 /// Maximum time to wait for a canceled shell worker to finish shutdown.
 const SHELL_SHUTDOWN_JOIN_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Maximum time the Rhai policy loop waits for harness input before checking
+/// shell completions.
+const RUNTIME_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -81,12 +89,15 @@ struct InitIntercept {
 
 /// Runtime events consumed by the single-threaded Rhai interpreter loop.
 enum RuntimeInput {
-    /// A message read from the Tau harness connection.
-    Harness(HarnessOutputMessage),
     /// Completion of an asynchronously spawned shell job.
     ShellComplete(ShellCompletion),
-    /// The harness input stream reached EOF without an explicit disconnect.
-    ReaderClosed,
+}
+
+/// Outbound protocol adapter used by Rhai host callbacks and shell completions.
+#[derive(Clone)]
+struct Output {
+    /// Cloneable tau-client writer handle.
+    handle: ClientHandle,
 }
 
 /// Phase-sensitive host state shared with Rhai host-function closures.
@@ -171,7 +182,6 @@ struct ShellCompletion {
 }
 
 type HostStateRef = Rc<RefCell<HostState>>;
-type ThreadError = Box<dyn Error + Send>;
 
 struct ScriptRuntime {
     engine: Engine,
@@ -181,13 +191,50 @@ struct ScriptRuntime {
     tools: HashMap<ToolName, FnPtr>,
 }
 
+/// Tau-client declaration for the config-gated Rhai runtime.
+struct RhaiExtension;
+
+impl TauExtension for RhaiExtension {
+    type State = ();
+
+    fn name(&self) -> &'static str {
+        "tau-ext-rhai"
+    }
+
+    fn register(self, _builder: &mut ExtensionBuilder<Self::State>) {}
+}
+
+impl Output {
+    /// Creates an outbound adapter around a tau-client handle.
+    fn new(handle: ClientHandle) -> Self {
+        Self { handle }
+    }
+
+    /// Enqueues one outbound protocol frame without waiting for writer flush.
+    fn send(&self, message: HarnessInputMessage) {
+        let _ = self.handle.send_detached(message);
+    }
+
+    /// Enqueues one durable or transient event frame.
+    fn emit(&self, event: Event, transient: bool) {
+        self.send(HarnessInputMessage::emit_with_transient(event, transient));
+    }
+
+    /// Sends one intercept reply frame.
+    fn intercept_reply(&self, action: InterceptAction) {
+        self.send(HarnessInputMessage::InterceptReply(
+            tau_proto::InterceptReply { action },
+        ));
+    }
+}
+
 /// Run the extension over stdio.
 ///
 /// # Errors
 ///
 /// Returns protocol I/O and worker-thread failures from the extension run.
 pub fn run_stdio() -> Result<(), Box<dyn Error>> {
-    tau_extension::init_logging_for(LOG_TARGET);
+    tau_client::init_logging_for(LOG_TARGET);
     run(std::io::stdin(), std::io::stdout())
 }
 
@@ -202,93 +249,60 @@ where
     R: Read + Send + 'static,
     W: Write + Send + 'static,
 {
-    let mut reader = PeerInputReader::new(BufReader::new(reader));
-    let mut writer = PeerOutputWriter::new(BufWriter::new(writer));
-
-    writer.write_message(&HarnessInputMessage::Hello(Hello {
-        protocol_version: PROTOCOL_VERSION,
-        client_name: tau_proto::ExtensionName::new("tau-ext-rhai"),
-        client_kind: ClientKind::Tool,
-    }))?;
-    writer.flush()?;
-
-    let Some(configure) = read_initial_config(&mut reader)? else {
-        return Ok(());
+    let mut manual = TauExtensionRunner::new(RhaiExtension).start_manual_loop_deferred_startup(
+        reader,
+        writer,
+        (),
+    )?;
+    let configure = match read_initial_config(&mut manual) {
+        Ok(Some(configure)) => configure,
+        Ok(None) => {
+            manual.finish()?;
+            return Ok(());
+        }
+        Err(error) => {
+            let _ = manual.finish();
+            return Err(error);
+        }
     };
 
-    let (tx, rx) = mpsc::channel::<HarnessInputMessage>();
-    let writer_handle = spawn_writer_thread(writer, rx);
-
     let (runtime_tx, runtime_rx) = mpsc::channel::<RuntimeInput>();
-    let reader_handle = spawn_reader_thread(reader, runtime_tx.clone());
-
-    let runtime = load_initial_runtime(&configure, &tx, runtime_tx.clone())?;
-    drive_runtime_loop(runtime, runtime_rx, &tx);
+    let output = Output::new(manual.handle());
+    let runtime =
+        match load_initial_runtime(&configure, &mut manual, output.clone(), runtime_tx.clone()) {
+            Ok(runtime) => runtime,
+            Err(error) => {
+                let _ = manual.finish();
+                return Err(error);
+            }
+        };
+    let loop_result = drive_runtime_loop(runtime, &mut manual, runtime_rx, &output);
 
     drop(runtime_tx);
-    drop(tx);
-    join_thread(reader_handle, "reader")?;
-    join_thread(writer_handle, "writer")?;
-    Ok(())
-}
-
-fn spawn_writer_thread<W>(
-    mut writer: PeerOutputWriter<BufWriter<W>>,
-    rx: Receiver<HarnessInputMessage>,
-) -> std::thread::JoinHandle<Result<(), ThreadError>>
-where
-    W: Write + Send + 'static,
-{
-    std::thread::spawn(move || -> Result<(), ThreadError> {
-        for message in rx {
-            writer
-                .write_message(&message)
-                .map_err(|e| -> ThreadError { Box::new(e) })?;
-            writer.flush().map_err(|e| -> ThreadError { Box::new(e) })?;
-        }
-        Ok(())
-    })
-}
-
-fn spawn_reader_thread<R>(
-    mut reader: PeerInputReader<BufReader<R>>,
-    runtime_tx: Sender<RuntimeInput>,
-) -> std::thread::JoinHandle<Result<(), ThreadError>>
-where
-    R: Read + Send + 'static,
-{
-    std::thread::spawn(move || -> Result<(), ThreadError> {
-        while let Some(message) = reader
-            .read_message()
-            .map_err(|e| -> ThreadError { Box::new(e) })?
-        {
-            let disconnected = matches!(message, HarnessOutputMessage::Disconnect(_));
-            if runtime_tx.send(RuntimeInput::Harness(message)).is_err() {
-                return Ok(());
-            }
-            if disconnected {
-                return Ok(());
-            }
-        }
-        let _ = runtime_tx.send(RuntimeInput::ReaderClosed);
-        Ok(())
-    })
+    drop(output);
+    let finish_result = manual.finish();
+    match (loop_result, finish_result) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), _) => Err(error),
+        (_, Err(error)) => Err(Box::new(error)),
+    }
 }
 
 fn load_initial_runtime(
     configure: &Configure,
-    tx: &Sender<HarnessInputMessage>,
+    manual: &mut ManualExtensionRuntime<()>,
+    output: Output,
     runtime_tx: Sender<RuntimeInput>,
 ) -> Result<Option<ScriptRuntime>, Box<dyn Error>> {
-    match load_runtime(configure, tx.clone(), runtime_tx) {
+    match load_runtime(configure, output.clone(), runtime_tx) {
         Ok((mut runtime, init, config_json)) => {
-            send_init_messages(tx, &runtime, init)?;
-            runtime.start(config_json, tx);
+            send_init_messages(manual, &runtime, init)?;
+            runtime.start(config_json, &output);
             Ok(Some(runtime))
         }
         Err(message) => {
             tracing::warn!(target: LOG_TARGET, error = %message, "rhai disabled");
-            send_config_error_ready(tx, message)?;
+            send_config_error_ready(manual, message)?;
             Ok(None)
         }
     }
@@ -296,86 +310,121 @@ fn load_initial_runtime(
 
 fn drive_runtime_loop(
     mut runtime: Option<ScriptRuntime>,
+    manual: &mut ManualExtensionRuntime<()>,
     runtime_rx: Receiver<RuntimeInput>,
-    tx: &Sender<HarnessInputMessage>,
-) {
+    output: &Output,
+) -> Result<(), Box<dyn Error>> {
     let mut reader_closed = false;
-    while let Ok(input) = runtime_rx.recv() {
-        match input {
-            RuntimeInput::Harness(HarnessOutputMessage::Deliver(delivery)) => {
-                let (event, replay, recorded_at) = delivery.into_parts();
-                if let Some(runtime) = runtime.as_mut() {
-                    runtime.on_delivered_event(event, replay, recorded_at, tx);
+    loop {
+        drain_shell_completions(runtime.as_mut(), &runtime_rx, output);
+        if reader_closed
+            && runtime
+                .as_ref()
+                .is_none_or(|runtime| !runtime.has_pending_shell_jobs())
+        {
+            break;
+        }
+
+        if reader_closed {
+            match runtime_rx.recv() {
+                Ok(RuntimeInput::ShellComplete(completion)) => {
+                    if let Some(runtime) = runtime.as_mut() {
+                        runtime.on_shell_complete(completion, output);
+                    }
                 }
+                Err(_) => break,
             }
-            RuntimeInput::Harness(HarnessOutputMessage::InterceptRequest(req)) => {
-                let action = runtime
-                    .as_mut()
-                    .map(|runtime| runtime.on_intercept(*req.event, req.transient, tx))
-                    .unwrap_or_else(|| InterceptAction::Pass(None));
-                let _ = tx.send(HarnessInputMessage::InterceptReply(InterceptReply {
-                    action,
-                }));
-            }
-            RuntimeInput::Harness(HarnessOutputMessage::Disconnect(_)) => {
-                if let Some(runtime) = runtime.as_mut() {
-                    runtime.cancel_and_join_pending_shell_jobs();
-                }
-                break;
-            }
-            RuntimeInput::ReaderClosed => {
-                reader_closed = true;
-                if runtime
-                    .as_ref()
-                    .is_none_or(|runtime| !runtime.has_pending_shell_jobs())
-                {
+            continue;
+        }
+
+        match manual.recv_timeout(RUNTIME_POLL_INTERVAL)? {
+            ManualRuntimeInput::Message(message) => {
+                if handle_harness_message(&mut runtime, message, output) {
                     break;
                 }
             }
-            RuntimeInput::Harness(HarnessOutputMessage::Configure(_)) => {}
-            RuntimeInput::Harness(_) => {}
-            RuntimeInput::ShellComplete(completion) => {
-                if let Some(runtime) = runtime.as_mut() {
-                    runtime.on_shell_complete(completion, tx);
-                    if reader_closed && !runtime.has_pending_shell_jobs() {
-                        break;
-                    }
-                }
+            ManualRuntimeInput::Timeout => {}
+            ManualRuntimeInput::InputClosed => {
+                reader_closed = true;
             }
         }
     }
-}
-
-fn join_thread(
-    handle: std::thread::JoinHandle<Result<(), ThreadError>>,
-    name: &str,
-) -> Result<(), Box<dyn Error>> {
-    handle
-        .join()
-        .map_err(|e| -> Box<dyn Error> { format!("{name} thread panicked: {e:?}").into() })?
-        .map_err(|e| -> Box<dyn Error> { e })?;
     Ok(())
 }
 
-fn read_initial_config<R: Read>(
-    reader: &mut PeerInputReader<BufReader<R>>,
+fn drain_shell_completions(
+    runtime: Option<&mut ScriptRuntime>,
+    runtime_rx: &Receiver<RuntimeInput>,
+    output: &Output,
+) {
+    let Some(runtime) = runtime else {
+        while runtime_rx.try_recv().is_ok() {}
+        return;
+    };
+    while let Ok(RuntimeInput::ShellComplete(completion)) = runtime_rx.try_recv() {
+        runtime.on_shell_complete(completion, output);
+    }
+}
+
+fn handle_harness_message(
+    runtime: &mut Option<ScriptRuntime>,
+    message: HarnessOutputMessage,
+    output: &Output,
+) -> bool {
+    match message {
+        HarnessOutputMessage::Deliver(delivery) => {
+            let (event, replay, recorded_at) = delivery.into_parts();
+            if let Some(runtime) = runtime.as_mut() {
+                runtime.on_delivered_event(event, replay, recorded_at, output);
+            }
+            false
+        }
+        HarnessOutputMessage::InterceptRequest(req) => {
+            let action = runtime
+                .as_mut()
+                .map(|runtime| runtime.on_intercept(*req.event, req.transient, output))
+                .unwrap_or_else(|| InterceptAction::Pass(None));
+            output.intercept_reply(action);
+            false
+        }
+        HarnessOutputMessage::Disconnect(_) => {
+            if let Some(runtime) = runtime.as_mut() {
+                runtime.cancel_and_join_pending_shell_jobs();
+            }
+            true
+        }
+        HarnessOutputMessage::Configure(_)
+        | HarnessOutputMessage::AgentPromptCreatedResult(_)
+        | HarnessOutputMessage::RenderedSystemPromptResult(_)
+        | HarnessOutputMessage::RenderedPromptResult(_)
+        | HarnessOutputMessage::RenderedToolDefinitionsResult(_)
+        | HarnessOutputMessage::ExtensionDataResult(_)
+        | HarnessOutputMessage::ExternalAgentMessageResult(_) => false,
+    }
+}
+
+fn read_initial_config(
+    manual: &mut ManualExtensionRuntime<()>,
 ) -> Result<Option<Configure>, Box<dyn Error>> {
-    while let Some(message) = reader.read_message()? {
-        match message {
-            HarnessOutputMessage::Configure(configure) => return Ok(Some(configure)),
-            HarnessOutputMessage::Disconnect(_) => return Ok(None),
-            _ => {}
+    loop {
+        match manual.recv()? {
+            ManualRuntimeInput::Message(message) => match message {
+                HarnessOutputMessage::Configure(configure) => return Ok(Some(configure)),
+                HarnessOutputMessage::Disconnect(_) => return Ok(None),
+                _ => {}
+            },
+            ManualRuntimeInput::InputClosed => return Ok(None),
+            ManualRuntimeInput::Timeout => {}
         }
     }
-    Ok(None)
 }
 
 fn load_runtime(
     configure: &Configure,
-    tx: mpsc::Sender<HarnessInputMessage>,
+    output: Output,
     runtime_tx: mpsc::Sender<RuntimeInput>,
 ) -> Result<(ScriptRuntime, InitOutput, serde_json::Value), String> {
-    let cfg = tau_extension::parse_config::<ExtConfig>(&configure.config)?;
+    let cfg = parse_config::<ExtConfig>(&configure.config)?;
     let script = cfg
         .script
         .ok_or_else(|| "rhai script config field is required".to_owned())?;
@@ -384,7 +433,7 @@ fn load_runtime(
 
     let mut engine = Engine::new();
     let host_state = Rc::new(RefCell::new(HostState::default()));
-    register_host_functions(&mut engine, tx, runtime_tx, host_state.clone());
+    register_host_functions(&mut engine, output, runtime_tx, host_state.clone());
     let max_expr_depth = cfg.limits.max_expr_depth.unwrap_or(64);
     engine.set_max_expr_depths(max_expr_depth, max_expr_depth);
     if let Some(max) = cfg.limits.max_operations {
@@ -416,35 +465,35 @@ fn init_config_json(vars: &serde_json::Value, state_dir: Option<&PathBuf>) -> se
     })
 }
 
+/// Decode harness-provided configuration CBOR into a typed config shape.
+///
+/// The error text preserves the human-readable serde diagnostic used in
+/// `ConfigError` output, matching the former startup-helper parse behavior
+/// without keeping that helper crate as a dependency.
+fn parse_config<C: DeserializeOwned>(value: &CborValue) -> Result<C, String> {
+    value.deserialized().map_err(|e| match e {
+        ciborium::value::Error::Custom(message) => message,
+    })
+}
+
 fn send_init_messages(
-    tx: &mpsc::Sender<HarnessInputMessage>,
+    manual: &mut ManualExtensionRuntime<()>,
     runtime: &ScriptRuntime,
     init: InitOutput,
-) -> Result<(), Box<mpsc::SendError<HarnessInputMessage>>> {
+) -> Result<(), Box<dyn Error>> {
     if !init.subscribe.is_empty() {
-        tx.send(HarnessInputMessage::Subscribe(Subscribe {
-            selectors: init.subscribe,
-        }))
-        .map_err(Box::new)?;
+        manual.startup_subscribe(init.subscribe)?;
     }
     for intercept in init.intercept {
-        tx.send(HarnessInputMessage::Intercept(Intercept {
-            selectors: intercept.selectors,
-            priority: intercept.priority,
-        }))
-        .map_err(Box::new)?;
+        manual.startup_intercept(intercept.selectors, intercept.priority)?;
     }
     for registration in runtime.tool_register_events() {
-        tx.send(HarnessInputMessage::emit(Event::ToolRegister(registration)))
-            .map_err(Box::new)?;
+        manual.startup_event(Event::ToolRegister(registration))?;
     }
-    tx.send(HarnessInputMessage::Ready(Ready {
-        message: Some(
-            init.ready_message
-                .unwrap_or_else(|| "rhai ready".to_owned()),
-        ),
-    }))
-    .map_err(Box::new)?;
+    manual.startup_ready(Some(
+        init.ready_message
+            .unwrap_or_else(|| "rhai ready".to_owned()),
+    ))?;
     Ok(())
 }
 
@@ -467,23 +516,17 @@ fn normalize_init_output(mut init: InitOutput) -> Result<InitOutput, String> {
     Ok(init)
 }
 fn send_config_error_ready(
-    tx: &mpsc::Sender<HarnessInputMessage>,
+    manual: &mut ManualExtensionRuntime<()>,
     message: String,
-) -> Result<(), Box<mpsc::SendError<HarnessInputMessage>>> {
-    tx.send(HarnessInputMessage::ConfigError(ConfigError {
-        message: message.clone(),
-    }))
-    .map_err(Box::new)?;
-    tx.send(HarnessInputMessage::Ready(Ready {
-        message: Some(format!("rhai disabled: {message}")),
-    }))
-    .map_err(Box::new)?;
+) -> Result<(), Box<dyn Error>> {
+    manual.handle().config_error(message.clone())?;
+    manual.startup_ready(Some(format!("rhai disabled: {message}")))?;
     Ok(())
 }
 
 fn register_host_functions(
     engine: &mut Engine,
-    tx: mpsc::Sender<HarnessInputMessage>,
+    output: Output,
     runtime_tx: mpsc::Sender<RuntimeInput>,
     host_state: HostStateRef,
 ) {
@@ -505,47 +548,47 @@ fn register_host_functions(
         },
     );
 
-    let emit_tx = tx.clone();
+    let emit_output = output.clone();
     let emit_state = host_state.clone();
     engine.register_fn(
         "tau_emit",
         move |event: Dynamic| -> Result<(), Box<EvalAltResult>> {
             ensure_not_init(&emit_state, "tau_emit")?;
-            enqueue_event(&emit_tx, event, false);
+            enqueue_event(&emit_output, event, false);
             Ok(())
         },
     );
 
-    let emit_tx = tx.clone();
+    let emit_output = output.clone();
     let emit_state = host_state.clone();
     engine.register_fn(
         "tau_emit_transient",
         move |event: Dynamic| -> Result<(), Box<EvalAltResult>> {
             ensure_not_init(&emit_state, "tau_emit_transient")?;
-            enqueue_event(&emit_tx, event, true);
+            enqueue_event(&emit_output, event, true);
             Ok(())
         },
     );
 
-    let info_tx = tx.clone();
+    let info_output = output.clone();
     let info_state = host_state.clone();
     engine.register_fn(
         "tau_info",
         move |message: ImmutableString| -> Result<(), Box<EvalAltResult>> {
             ensure_not_init(&info_state, "tau_info")?;
-            enqueue_info(&info_tx, message.as_str(), NoticeLevel::Info, true);
+            enqueue_info(&info_output, message.as_str(), NoticeLevel::Info, true);
             Ok(())
         },
     );
 
-    let info_tx = tx.clone();
+    let info_output = output.clone();
     let info_state = host_state.clone();
     engine.register_fn(
         "tau_info",
         move |message: ImmutableString, level: ImmutableString| -> Result<(), Box<EvalAltResult>> {
             ensure_not_init(&info_state, "tau_info")?;
             enqueue_info(
-                &info_tx,
+                &info_output,
                 message.as_str(),
                 parse_info_level(level.as_str()),
                 true,
@@ -773,17 +816,17 @@ fn optional_int_field(map: &Map, key: &str) -> Result<Option<i64>, String> {
         .transpose()
 }
 
-fn enqueue_event(tx: &mpsc::Sender<HarnessInputMessage>, event: Dynamic, transient: bool) {
+fn enqueue_event(output: &Output, event: Dynamic, transient: bool) {
     match dynamic_to_json(&event)
         .and_then(|value| serde_json::from_value::<Event>(value).map_err(|e| e.to_string()))
     {
         Ok(event) => {
-            let _ = tx.send(HarnessInputMessage::emit_with_transient(event, transient));
+            output.emit(event, transient);
         }
         Err(message) => {
             tracing::warn!(target: LOG_TARGET, error = %message, "script emitted invalid event");
             enqueue_info(
-                tx,
+                output,
                 &format!("rhai invalid event: {message}"),
                 NoticeLevel::Warning,
                 true,
@@ -792,13 +835,8 @@ fn enqueue_event(tx: &mpsc::Sender<HarnessInputMessage>, event: Dynamic, transie
     }
 }
 
-fn enqueue_info(
-    tx: &mpsc::Sender<HarnessInputMessage>,
-    message: &str,
-    level: NoticeLevel,
-    transient: bool,
-) {
-    let _ = tx.send(HarnessInputMessage::emit_with_transient(
+fn enqueue_info(output: &Output, message: &str, level: NoticeLevel, transient: bool) {
+    output.emit(
         Event::HarnessNotice(HarnessNotice {
             kind: tau_proto::notice_kind::EXTENSION_NOTICE.to_owned(),
             message: message.to_owned(),
@@ -806,7 +844,7 @@ fn enqueue_info(
             always_show: false,
         }),
         transient,
-    ));
+    );
 }
 
 fn parse_info_level(level: &str) -> NoticeLevel {
@@ -883,12 +921,12 @@ impl ScriptRuntime {
             .collect()
     }
 
-    fn start(&mut self, config: serde_json::Value, tx: &mpsc::Sender<HarnessInputMessage>) {
+    fn start(&mut self, config: serde_json::Value, output: &Output) {
         if self.has_function("start", 1) {
             let config = match json_to_dynamic(&config) {
                 Ok(config) => config,
                 Err(message) => {
-                    report_callback_error(tx, format!("preparing start config: {message}"));
+                    report_callback_error(output, format!("preparing start config: {message}"));
                     return;
                 }
             };
@@ -897,7 +935,7 @@ impl ScriptRuntime {
                 .call_fn::<Dynamic>(&mut self.scope, &self.ast, "start", (config,))
             {
                 Ok(_) => {}
-                Err(err) => report_callback_error(tx, format!("rhai start failed: {err}")),
+                Err(err) => report_callback_error(output, format!("rhai start failed: {err}")),
             }
             return;
         }
@@ -910,7 +948,7 @@ impl ScriptRuntime {
             .call_fn::<Dynamic>(&mut self.scope, &self.ast, "start", ())
         {
             Ok(_) => {}
-            Err(err) => report_callback_error(tx, format!("rhai start failed: {err}")),
+            Err(err) => report_callback_error(output, format!("rhai start failed: {err}")),
         }
     }
 
@@ -919,7 +957,7 @@ impl ScriptRuntime {
         event: Event,
         replay: bool,
         recorded_at: Option<UnixMicros>,
-        tx: &mpsc::Sender<HarnessInputMessage>,
+        output: &Output,
     ) {
         // ToolStarted currently carries no provider/extension identity; the
         // harness-routed globally visible tool name is the only ownership
@@ -929,7 +967,7 @@ impl ScriptRuntime {
             && self.tools.contains_key(&started.tool_name)
         {
             if !replay {
-                self.on_tool_started(started.clone(), tx);
+                self.on_tool_started(started.clone(), output);
             }
             return;
         }
@@ -939,14 +977,14 @@ impl ScriptRuntime {
         {
             Ok(event) => event,
             Err(message) => {
-                report_callback_error(tx, format!("preparing on_event: {message}"));
+                report_callback_error(output, format!("preparing on_event: {message}"));
                 return;
             }
         };
         let meta = match json_to_dynamic(&meta_json(replay, recorded_at)) {
             Ok(meta) => meta,
             Err(message) => {
-                report_callback_error(tx, format!("preparing on_event metadata: {message}"));
+                report_callback_error(output, format!("preparing on_event metadata: {message}"));
                 return;
             }
         };
@@ -958,23 +996,18 @@ impl ScriptRuntime {
             .call_fn::<Dynamic>(&mut self.scope, &self.ast, "on_event", (event, meta))
         {
             Ok(_) => {}
-            Err(err) => report_callback_error(tx, format!("rhai on_event failed: {err}")),
+            Err(err) => report_callback_error(output, format!("rhai on_event failed: {err}")),
         }
     }
 
-    fn on_intercept(
-        &mut self,
-        event: Event,
-        transient: bool,
-        tx: &mpsc::Sender<HarnessInputMessage>,
-    ) -> InterceptAction {
+    fn on_intercept(&mut self, event: Event, transient: bool, output: &Output) -> InterceptAction {
         let event = match serde_json::to_value(event)
             .map_err(|e| e.to_string())
             .and_then(|v| json_to_dynamic(&v))
         {
             Ok(event) => event,
             Err(message) => {
-                report_callback_error(tx, format!("preparing on_intercept: {message}"));
+                report_callback_error(output, format!("preparing on_intercept: {message}"));
                 return InterceptAction::Pass(None);
             }
         };
@@ -988,24 +1021,28 @@ impl ScriptRuntime {
             (event, transient),
         ) {
             Ok(value) => parse_intercept_action(value).unwrap_or_else(|message| {
-                report_callback_error(tx, format!("invalid on_intercept result: {message}"));
+                report_callback_error(output, format!("invalid on_intercept result: {message}"));
                 InterceptAction::Pass(None)
             }),
             Err(err) => {
-                report_callback_error(tx, format!("rhai on_intercept failed: {err}"));
+                report_callback_error(output, format!("rhai on_intercept failed: {err}"));
                 InterceptAction::Pass(None)
             }
         }
     }
 
-    fn on_tool_started(&mut self, started: ToolStarted, tx: &mpsc::Sender<HarnessInputMessage>) {
+    fn on_tool_started(&mut self, started: ToolStarted, output: &Output) {
         let Some(handler) = self.tools.get(&started.tool_name).cloned() else {
             return;
         };
         let args = match cbor_to_json(&started.arguments).and_then(|json| json_to_dynamic(&json)) {
             Ok(args) => args,
             Err(message) => {
-                self.emit_tool_error(&started, format!("preparing tool arguments: {message}"), tx);
+                self.emit_tool_error(
+                    &started,
+                    format!("preparing tool arguments: {message}"),
+                    output,
+                );
                 return;
             }
         };
@@ -1015,25 +1052,20 @@ impl ScriptRuntime {
                 self.emit_tool_error(
                     &started,
                     format!("preparing tool call metadata: {message}"),
-                    tx,
+                    output,
                 );
                 return;
             }
         };
         match handler.call::<Dynamic>(&self.engine, &self.ast, (args, call)) {
-            Ok(value) => self.handle_tool_value(value, started, tx),
+            Ok(value) => self.handle_tool_value(value, started, output),
             Err(err) => {
-                self.emit_tool_error(&started, format!("rhai tool handler failed: {err}"), tx)
+                self.emit_tool_error(&started, format!("rhai tool handler failed: {err}"), output)
             }
         }
     }
 
-    fn handle_tool_value(
-        &mut self,
-        value: Dynamic,
-        started: ToolStarted,
-        tx: &mpsc::Sender<HarnessInputMessage>,
-    ) {
+    fn handle_tool_value(&mut self, value: Dynamic, started: ToolStarted, output: &Output) {
         if let Some(job) = value.clone().try_cast::<ShellJob>() {
             let mut state = self.host_state.borrow_mut();
             if let Some(pending) = state.shell_jobs.get_mut(&job.id) {
@@ -1042,7 +1074,7 @@ impl ScriptRuntime {
                     self.emit_tool_error(
                         &started,
                         format!("shell job {} was already returned by a tool call", job.id),
-                        tx,
+                        output,
                     );
                     return;
                 }
@@ -1056,22 +1088,18 @@ impl ScriptRuntime {
                 return;
             }
             drop(state);
-            self.emit_tool_error(&started, format!("unknown shell job {}", job.id), tx);
+            self.emit_tool_error(&started, format!("unknown shell job {}", job.id), output);
             return;
         }
         match dynamic_to_json(&value) {
-            Ok(json) => self.emit_tool_result(&started, tau_proto::json_to_cbor(&json), tx),
+            Ok(json) => self.emit_tool_result(&started, tau_proto::json_to_cbor(&json), output),
             Err(message) => {
-                self.emit_tool_error(&started, format!("invalid tool result: {message}"), tx)
+                self.emit_tool_error(&started, format!("invalid tool result: {message}"), output)
             }
         }
     }
 
-    fn on_shell_complete(
-        &mut self,
-        completion: ShellCompletion,
-        tx: &mpsc::Sender<HarnessInputMessage>,
-    ) {
+    fn on_shell_complete(&mut self, completion: ShellCompletion, output: &Output) {
         let Some(job) = self
             .host_state
             .borrow_mut()
@@ -1085,7 +1113,7 @@ impl ScriptRuntime {
             Err(message) => {
                 if let Some(call) = job.tool_call {
                     emit_pending_tool_error(
-                        tx,
+                        output,
                         &call,
                         format!("preparing shell result: {message}"),
                     );
@@ -1097,7 +1125,11 @@ impl ScriptRuntime {
             Ok(value) => value,
             Err(message) => {
                 if let Some(call) = job.tool_call {
-                    emit_pending_tool_error(tx, &call, format!("preparing shell job: {message}"));
+                    emit_pending_tool_error(
+                        output,
+                        &call,
+                        format!("preparing shell job: {message}"),
+                    );
                 }
                 return;
             }
@@ -1115,7 +1147,7 @@ impl ScriptRuntime {
                 {
                     if pending.tool_claimed {
                         emit_pending_tool_error(
-                            tx,
+                            output,
                             &call,
                             format!(
                                 "chained shell job {} was already returned by a tool call",
@@ -1128,7 +1160,7 @@ impl ScriptRuntime {
                     }
                 } else {
                     emit_pending_tool_error(
-                        tx,
+                        output,
                         &call,
                         format!("unknown chained shell job {}", chained.id),
                     );
@@ -1142,7 +1174,7 @@ impl ScriptRuntime {
                         Ok(json) => json,
                         Err(message) => {
                             emit_pending_tool_error(
-                                tx,
+                                output,
                                 &call,
                                 format!("invalid shell callback result: {message}"),
                             );
@@ -1150,36 +1182,26 @@ impl ScriptRuntime {
                         }
                     }
                 };
-                emit_pending_tool_result(tx, &call, tau_proto::json_to_cbor(&json));
+                emit_pending_tool_result(output, &call, tau_proto::json_to_cbor(&json));
             }
             (Ok(_), None) => {}
             (Err(err), Some(call)) => {
-                emit_pending_tool_error(tx, &call, format!("rhai shell callback failed: {err}"))
+                emit_pending_tool_error(output, &call, format!("rhai shell callback failed: {err}"))
             }
             (Err(err), None) => {
-                report_callback_error(tx, format!("rhai shell callback failed: {err}"))
+                report_callback_error(output, format!("rhai shell callback failed: {err}"))
             }
         }
     }
 
-    fn emit_tool_result(
-        &self,
-        started: &ToolStarted,
-        result: CborValue,
-        tx: &mpsc::Sender<HarnessInputMessage>,
-    ) {
+    fn emit_tool_result(&self, started: &ToolStarted, result: CborValue, output: &Output) {
         let call = pending_call_from_started(started);
-        emit_pending_tool_result(tx, &call, result);
+        emit_pending_tool_result(output, &call, result);
     }
 
-    fn emit_tool_error(
-        &self,
-        started: &ToolStarted,
-        message: String,
-        tx: &mpsc::Sender<HarnessInputMessage>,
-    ) {
+    fn emit_tool_error(&self, started: &ToolStarted, message: String, output: &Output) {
         let call = pending_call_from_started(started);
-        emit_pending_tool_error(tx, &call, message);
+        emit_pending_tool_error(output, &call, message);
     }
 
     fn has_function(&self, name: &str, params: usize) -> bool {
@@ -1234,9 +1256,9 @@ fn join_shell_worker_bounded(job: PendingShellJob) {
     }
 }
 
-fn report_callback_error(tx: &mpsc::Sender<HarnessInputMessage>, message: String) {
+fn report_callback_error(output: &Output, message: String) {
     tracing::warn!(target: LOG_TARGET, error = %message, "rhai callback failed");
-    enqueue_info(tx, &message, NoticeLevel::Warning, true);
+    enqueue_info(output, &message, NoticeLevel::Warning, true);
 }
 
 fn meta_json(replay: bool, recorded_at: Option<UnixMicros>) -> serde_json::Value {
@@ -1265,36 +1287,34 @@ fn pending_call_from_started(started: &ToolStarted) -> PendingToolCall {
     }
 }
 
-fn emit_pending_tool_result(
-    tx: &mpsc::Sender<HarnessInputMessage>,
-    call: &PendingToolCall,
-    result: CborValue,
-) {
-    let _ = tx.send(HarnessInputMessage::emit(Event::ToolResult(ToolResult {
-        call_id: call.call_id.clone(),
-        tool_name: call.tool_name.clone(),
-        tool_type: call.tool_type,
-        result,
-        kind: ToolResultKind::Final,
-        display: None,
-        originator: call.originator.clone(),
-    })));
+fn emit_pending_tool_result(output: &Output, call: &PendingToolCall, result: CborValue) {
+    output.emit(
+        Event::ToolResult(ToolResult {
+            call_id: call.call_id.clone(),
+            tool_name: call.tool_name.clone(),
+            tool_type: call.tool_type,
+            result,
+            kind: ToolResultKind::Final,
+            display: None,
+            originator: call.originator.clone(),
+        }),
+        false,
+    );
 }
 
-fn emit_pending_tool_error(
-    tx: &mpsc::Sender<HarnessInputMessage>,
-    call: &PendingToolCall,
-    message: String,
-) {
-    let _ = tx.send(HarnessInputMessage::emit(Event::ToolError(ToolError {
-        call_id: call.call_id.clone(),
-        tool_name: call.tool_name.clone(),
-        tool_type: call.tool_type,
-        message,
-        details: None,
-        display: None,
-        originator: call.originator.clone(),
-    })));
+fn emit_pending_tool_error(output: &Output, call: &PendingToolCall, message: String) {
+    output.emit(
+        Event::ToolError(ToolError {
+            call_id: call.call_id.clone(),
+            tool_name: call.tool_name.clone(),
+            tool_type: call.tool_type,
+            message,
+            details: None,
+            display: None,
+            originator: call.originator.clone(),
+        }),
+        false,
+    );
 }
 
 fn tool_call_json(started: &ToolStarted) -> serde_json::Value {

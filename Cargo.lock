@@ -3326,11 +3326,12 @@ dependencies = [
 name = "tau-ext-rhai"
 version = "0.1.0"
 dependencies = [
+ "ciborium",
  "libc",
  "rhai",
  "serde",
  "serde_json",
- "tau-extension",
+ "tau-client",
  "tau-proto",
  "tempfile",
  "tracing",
