@@ -6,7 +6,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::error::Error;
-use std::io::{BufRead, BufReader, BufWriter, Read, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -52,10 +52,9 @@ const MAX_GOOGLE_AUTH_FIELD_CHARS: usize = 4096;
 
 use tau_proto::{
     ACTION_SCHEMA_VERSION, ActionArg, ActionArgKind, ActionChoice, ActionCommand, ActionError,
-    ActionInvoke, ActionOutput, ActionResult, ActionSchema, CborValue, ConfigError, Configure,
-    Event, EventDelivery, HarnessInputMessage, HarnessOutputMessage, PeerInputReader,
-    PeerOutputWriter, PromptFragment, PromptPriority, ToolError, ToolExample, ToolExampleSelector,
-    ToolProgress, ToolResult, ToolSpec, ToolStarted, ToolUseState, ToolUseStats, ToolUseStatus,
+    ActionInvoke, ActionOutput, ActionResult, ActionSchema, CborValue, Event, PromptFragment,
+    PromptPriority, ToolError, ToolExample, ToolExampleSelector, ToolProgress, ToolResult,
+    ToolSpec, ToolStarted, ToolUseState, ToolUseStats, ToolUseStatus,
 };
 
 /// `tracing` target for events emitted from this extension.
@@ -81,162 +80,98 @@ const EMAIL_COMMANDS: &[&str] = &[
 ];
 /// Run the extension over stdio.
 pub fn run_stdio() -> Result<(), Box<dyn Error>> {
-    tau_extension::init_logging_for(LOG_TARGET);
+    tau_client::init_logging_for(LOG_TARGET);
     run(std::io::stdin(), std::io::stdout())
 }
 
 /// Run the extension over the supplied reader/writer pair.
 pub fn run<R, W>(reader: R, writer: W) -> Result<(), Box<dyn Error>>
 where
-    R: Read,
-    W: Write,
+    R: Read + Send + 'static,
+    W: Write + Send + 'static,
 {
-    let mut reader = PeerInputReader::new(BufReader::new(reader));
-    let mut writer = PeerOutputWriter::new(BufWriter::new(writer));
-    let mut runtime = RuntimeState::default();
+    tau_client::TauExtensionRunner::new(EmailExtension).run(
+        reader,
+        writer,
+        RuntimeState::default(),
+    )?;
+    Ok(())
+}
 
-    write_startup_handshake(&mut writer)?;
+/// Tau-client declaration for the legacy email-only PIM runner.
+struct EmailExtension;
 
-    while let Some(message) = reader.read_message()? {
-        if handle_runtime_message(message, &mut runtime, &mut writer)? {
-            break;
-        }
+impl tau_client::TauExtension for EmailExtension {
+    type State = RuntimeState;
+
+    fn name(&self) -> &'static str {
+        "tau-ext-pim"
     }
 
-    Ok(())
-}
-
-fn write_startup_handshake<W: Write>(
-    writer: &mut PeerOutputWriter<BufWriter<W>>,
-) -> Result<(), Box<dyn Error>> {
-    let handshake = tau_extension::Handshake::tool("tau-ext-pim").subscribe([
-        tau_proto::EventName::TOOL_STARTED,
-        tau_proto::EventName::ACTION_INVOKE,
-    ]);
-    let handshake = register_tools_with_prompt_fragment(
-        handshake,
-        email_tool_specs(),
-        "email_read",
-        email_prompt_fragment(),
-    );
-    handshake
-        .publish_actions(email_action_schema())
-        .ready_message("email extension ready")
-        .run(writer)?;
-    Ok(())
-}
-
-fn handle_runtime_message<W: Write>(
-    message: HarnessOutputMessage,
-    runtime: &mut RuntimeState,
-    writer: &mut PeerOutputWriter<BufWriter<W>>,
-) -> Result<bool, Box<dyn Error>> {
-    match message {
-        HarnessOutputMessage::Configure(configure) => {
-            handle_configure(configure, runtime, writer)?;
-            Ok(false)
-        }
-        HarnessOutputMessage::Deliver(delivery) => {
-            handle_delivery(delivery, runtime, writer)?;
-            Ok(false)
-        }
-        HarnessOutputMessage::Disconnect(_) => Ok(true),
-        _ => Ok(false),
+    fn register(self, builder: &mut tau_client::ExtensionBuilder<Self::State>) {
+        register_tools_with_prompt_fragment(
+            builder,
+            email_tool_specs(),
+            "email_read",
+            email_prompt_fragment(),
+        );
+        builder
+            .publish_actions(email_action_schema())
+            .ready_message("email extension ready")
+            .configure_raw(|cx| {
+                let Some(state_dir) = cx.configure.state_dir.clone() else {
+                    return Err(tau_client::ClientError::handler(
+                        "email extension requires Configure.state_dir",
+                    ));
+                };
+                let cfg = match crate::parse_config::<EmailExtensionConfig>(&cx.configure.config) {
+                    Ok(cfg) => cfg,
+                    Err(message) => {
+                        cx.state.reject(message.clone());
+                        return Err(tau_client::ClientError::handler(message));
+                    }
+                };
+                let storage = Rc::new(FsStorage::new(state_dir)) as SharedStorage;
+                cx.state
+                    .configure_with_config(
+                        cfg,
+                        cx.configure.state_dir.clone(),
+                        cx.configure.secrets.clone(),
+                        storage,
+                    )
+                    .map_err(tau_client::ClientError::handler)
+            })
+            .on_raw_live(
+                tau_proto::EventSelector::Exact(tau_proto::EventName::ACTION_INVOKE),
+                |cx| {
+                    let Event::ActionInvoke(invoke) = cx.event().clone() else {
+                        return Ok(());
+                    };
+                    let event = cx.state.dispatch_action(invoke);
+                    cx.handle.emit(event)
+                },
+            );
     }
-}
-
-fn handle_configure<W: Write>(
-    configure: Configure,
-    runtime: &mut RuntimeState,
-    writer: &mut PeerOutputWriter<BufWriter<W>>,
-) -> Result<(), Box<dyn Error>> {
-    let Some(state_dir) = configure.state_dir.clone() else {
-        write_config_error(
-            writer,
-            "email extension requires Configure.state_dir".to_owned(),
-        )?;
-        return Ok(());
-    };
-
-    let storage = Rc::new(FsStorage::new(state_dir)) as SharedStorage;
-    if let Err(message) = runtime.configure(configure, storage) {
-        write_config_error(writer, message)?;
-    }
-
-    Ok(())
-}
-
-fn write_config_error<W: Write>(
-    writer: &mut PeerOutputWriter<BufWriter<W>>,
-    message: String,
-) -> Result<(), Box<dyn Error>> {
-    writer.write_message(&HarnessInputMessage::ConfigError(ConfigError { message }))?;
-    writer.flush()?;
-    Ok(())
-}
-
-fn handle_delivery<W: Write>(
-    delivery: EventDelivery,
-    runtime: &mut RuntimeState,
-    writer: &mut PeerOutputWriter<BufWriter<W>>,
-) -> Result<(), Box<dyn Error>> {
-    // Tool/action invocations are execution triggers; replay-marked frames
-    // re-send history and must not re-run them.
-    if delivery.is_replay() {
-        return Ok(());
-    }
-
-    match delivery.into_event() {
-        Event::ToolStarted(invoke) if is_tool_name(invoke.tool_name.as_str()) => {
-            handle_tool_started(invoke, runtime, writer)?;
-        }
-        Event::ActionInvoke(invoke) => {
-            handle_action_invoke(invoke, runtime, writer)?;
-        }
-        _ => {}
-    }
-
-    Ok(())
-}
-
-fn handle_tool_started<W: Write>(
-    invoke: ToolStarted,
-    runtime: &mut RuntimeState,
-    writer: &mut PeerOutputWriter<BufWriter<W>>,
-) -> Result<(), Box<dyn Error>> {
-    writer.write_message(&HarnessInputMessage::emit(initial_progress(&invoke)))?;
-    let event = runtime.dispatch(invoke);
-    writer.write_message(&HarnessInputMessage::emit(event))?;
-    writer.flush()?;
-    Ok(())
-}
-
-fn handle_action_invoke<W: Write>(
-    invoke: ActionInvoke,
-    runtime: &mut RuntimeState,
-    writer: &mut PeerOutputWriter<BufWriter<W>>,
-) -> Result<(), Box<dyn Error>> {
-    let event = runtime.dispatch_action(invoke);
-    writer.write_message(&HarnessInputMessage::emit(event))?;
-    writer.flush()?;
-    Ok(())
 }
 
 fn register_tools_with_prompt_fragment(
-    mut handshake: tau_extension::Handshake,
+    builder: &mut tau_client::ExtensionBuilder<RuntimeState>,
     tools: Vec<ToolSpec>,
     prompt_tool_name: &str,
     prompt_fragment: PromptFragment,
-) -> tau_extension::Handshake {
+) {
     for tool in tools {
         let prompt_fragment = if tool.name.as_str() == prompt_tool_name {
             Some(prompt_fragment.clone())
         } else {
             None
         };
-        handshake = handshake.register_tool_with_prompt_fragment(tool, prompt_fragment);
+        builder.tool_with_group_and_prompt_fragment(tool, None, prompt_fragment, |cx| {
+            cx.handle.emit(initial_progress(cx.invoke))?;
+            let event = cx.state.dispatch(cx.invoke.clone());
+            cx.handle.emit(event)
+        });
     }
-    handshake
 }
 
 /// Top-level email extension configuration.
@@ -5331,7 +5266,7 @@ impl RuntimeState {
         configure: tau_proto::Configure,
         storage: SharedStorage,
     ) -> Result<Engine<RealEmailBackend>, String> {
-        let cfg: EmailExtensionConfig = tau_extension::parse_config(&configure.config)?;
+        let cfg: EmailExtensionConfig = crate::parse_config(&configure.config)?;
         self.try_configure_with_config(cfg, configure.state_dir, configure.secrets, storage)
     }
 

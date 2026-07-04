@@ -8,6 +8,7 @@ use std::io::{Read, Write};
 use std::rc::Rc;
 
 use serde::Deserialize;
+use serde::de::DeserializeOwned;
 use tau_proto::{ActionSchema, CborValue, Event};
 
 pub mod calendar;
@@ -88,7 +89,7 @@ impl RuntimeState {
         configure: tau_proto::Configure,
         storage: storage::SharedStorage,
     ) -> Result<(), String> {
-        let result = match tau_extension::parse_config::<PimExtensionConfig>(&configure.config) {
+        let result = match parse_config::<PimExtensionConfig>(&configure.config) {
             Ok(pim) => self.configure_pim(pim, configure, storage),
             Err(message) if has_pim_module_keys(&configure.config) => Err(message),
             Err(_) => {
@@ -189,6 +190,17 @@ fn has_pim_module_keys(config: &CborValue) -> bool {
     entries.iter().any(|(key, _)| match key {
         CborValue::Text(key) => key == "email" || key == "calendar",
         _ => false,
+    })
+}
+
+/// Decode harness-provided configuration CBOR into a typed config shape.
+///
+/// The error text preserves the human-readable serde diagnostic used in
+/// `ConfigError` output, matching the former startup-helper parse behavior
+/// without keeping that helper crate as a dependency.
+pub(crate) fn parse_config<C: DeserializeOwned>(value: &CborValue) -> Result<C, String> {
+    value.deserialized().map_err(|e| match e {
+        ciborium::value::Error::Custom(message) => message,
     })
 }
 

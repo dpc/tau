@@ -21,10 +21,11 @@ loop instead of reading the protocol transport directly. PIM still owns storage
 schema, feature policy, and conversion of harness storage errors into
 email/calendar behavior.
 
-The crate still contains a legacy email-only runner path used by email-module
-tests and local helpers. That path keeps the `tau-extension` dependency and
-`FsStorage` test/local storage backend isolated from the top-level PIM runtime
-until a separate email-specific cleanup slice removes it.
+The crate still contains an email-only runner path used by email-module tests and
+local helpers. It now uses tau-client for protocol startup/dispatch like the
+top-level PIM runtime, but it intentionally keeps using `FsStorage` rooted at
+`Configure.state_dir` so email-module tests and local helpers do not depend on
+harness extension-data storage.
 
 Each feature validates its raw config before becoming operational:
 

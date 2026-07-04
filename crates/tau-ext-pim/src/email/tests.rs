@@ -381,6 +381,17 @@ fn drain_action_schema(reader: &mut HarnessInputReader<BufReader<UnixStream>>) -
     }
 }
 
+fn drain_ready(reader: &mut HarnessInputReader<BufReader<UnixStream>>) {
+    loop {
+        if matches!(
+            reader.read_message().expect("read").expect("frame"),
+            HarnessInputMessage::Ready(_)
+        ) {
+            return;
+        }
+    }
+}
+
 fn trusted_dmarc_pass(domain: &str) -> AuthenticationResultsEvidence {
     AuthenticationResultsEvidence {
         authserv_id: "mx.company.com".to_owned(),
@@ -519,6 +530,20 @@ fn split_tool_started(tool_name: &str, args: Vec<(&str, CborValue)>) -> ToolStar
         originator: tau_proto::PromptOriginator::User,
     }
 }
+
+fn email_action_invoke(invocation_id: &str) -> ActionInvoke {
+    ActionInvoke {
+        invocation_id: tau_proto::ActionInvocationId::new(invocation_id),
+        session_id: tau_proto::SessionId::new("session-1"),
+        extension_name: tau_proto::ExtensionName::new("tau-ext-pim"),
+        instance_id: tau_proto::ExtensionInstanceId::from(1),
+        action_id: "email.in.list".to_owned(),
+        raw_line: "/email in list".to_owned(),
+        argv: Vec::new(),
+        arguments: CborValue::Map(Vec::new()),
+    }
+}
+
 fn data_field<'a>(value: &'a CborValue, name: &str) -> &'a CborValue {
     let data = map_get(value, "data").expect("data");
     map_get(data, name).expect("field")
@@ -594,6 +619,52 @@ fn registers_split_email_tools() {
     );
 }
 
+/// The legacy email-only public runner still declares the same startup prelude
+/// after migrating from its old startup helper to `tau-client`.
+#[test]
+fn email_run_startup_order_and_subscriptions_are_stable() {
+    let mut pair = spawn_extension();
+    let mut frames = Vec::new();
+    loop {
+        let frame = pair.reader.read_message().expect("read").expect("frame");
+        let ready = matches!(frame, HarnessInputMessage::Ready(_));
+        frames.push(frame);
+        if ready {
+            break;
+        }
+    }
+
+    assert!(matches!(
+        &frames[0],
+        HarnessInputMessage::Hello(hello)
+            if hello.client_name.as_str() == "tau-ext-pim"
+                && hello.client_kind == tau_proto::ClientKind::Tool
+    ));
+    assert!(matches!(
+        &frames[1],
+        HarnessInputMessage::Subscribe(subscribe)
+            if subscribe.selectors == vec![
+                tau_proto::EventSelector::Exact(tau_proto::EventName::TOOL_STARTED),
+                tau_proto::EventSelector::Exact(tau_proto::EventName::ACTION_INVOKE),
+            ]
+    ));
+    let tool_frames = &frames[2..12];
+    assert_eq!(tool_frames.len(), 10);
+    assert!(tool_frames.iter().all(|frame| {
+        matches!(
+            frame,
+            HarnessInputMessage::Emit(emit)
+                if matches!(emit.event.as_ref(), Event::ToolRegister(_))
+        )
+    }));
+    assert!(matches!(
+        &frames[12],
+        HarnessInputMessage::Emit(emit)
+            if matches!(emit.event.as_ref(), Event::ActionSchemaPublished(_))
+    ));
+    assert!(matches!(frames[13], HarnessInputMessage::Ready(_)));
+}
+
 #[test]
 fn registers_email_read_tool_prompt_fragment() {
     // Email read can expose hostile message content. Keep the safety notice on
@@ -623,6 +694,165 @@ fn registers_email_read_tool_prompt_fragment() {
     assert!(saw_read_prompt);
     assert!(!saw_send_prompt);
 }
+
+/// Public `email::run` configures local `FsStorage`, ignores replayed tool
+/// deliveries, and still dispatches later live tool calls after migration to
+/// tau-client.
+#[test]
+fn email_run_configures_storage_and_skips_replayed_tools() {
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let mut pair = spawn_extension();
+    drain_ready(&mut pair.reader);
+
+    pair.writer
+        .write_message(&HarnessOutputMessage::Configure(tau_proto::Configure {
+            instance_name: None,
+            config: CborValue::Map(Vec::new()),
+            state_dir: Some(temp.path().join("state")),
+            secrets: BTreeMap::new(),
+        }))
+        .expect("write configure");
+    pair.writer
+        .write_message(&HarnessOutputMessage::deliver_replay(
+            tau_proto::UnixMicros::new(1),
+            Event::ToolStarted(split_tool_started("email_list_folders", Vec::new())),
+        ))
+        .expect("write replayed tool");
+    pair.writer
+        .write_message(&HarnessOutputMessage::deliver_live(
+            tau_proto::UnixMicros::new(2),
+            Event::ToolStarted(split_tool_started("email_list_folders", Vec::new())),
+        ))
+        .expect("write live tool");
+    pair.writer.flush().expect("flush input");
+
+    let mut progress = 0;
+    let terminal = loop {
+        match pair.reader.read_message().expect("read").expect("frame") {
+            HarnessInputMessage::ConfigError(error) => {
+                panic!(
+                    "valid config should not emit ConfigError: {}",
+                    error.message
+                )
+            }
+            HarnessInputMessage::Emit(emit) => match *emit.event {
+                Event::ToolProgress(_) => progress += 1,
+                Event::ToolResult(result) => break Event::ToolResult(result),
+                Event::ToolError(error) => break Event::ToolError(error),
+                _ => {}
+            },
+            _ => {}
+        }
+    };
+
+    assert_eq!(progress, 1);
+    assert!(temp.path().join("state/state-v1.json").exists());
+    match terminal {
+        Event::ToolError(error) => {
+            assert_eq!(error.call_id.as_str(), "call-1");
+            assert!(error.message.contains("disabled"));
+        }
+        Event::ToolResult(result) => {
+            assert_eq!(result.call_id.as_str(), "call-1");
+        }
+        _ => unreachable!(),
+    }
+}
+
+/// Malformed email-only configuration must emit exactly one `ConfigError`,
+/// clear stale runtime state, and leave the tau-client dispatch loop alive.
+#[test]
+fn email_run_malformed_config_emits_config_error_and_continues() {
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let mut pair = spawn_extension();
+    drain_ready(&mut pair.reader);
+
+    pair.writer
+        .write_message(&HarnessOutputMessage::Configure(tau_proto::Configure {
+            instance_name: None,
+            config: CborValue::Map(vec![(
+                CborValue::Text("unknown".to_owned()),
+                CborValue::Bool(true),
+            )]),
+            state_dir: Some(temp.path().join("state")),
+            secrets: BTreeMap::new(),
+        }))
+        .expect("write malformed configure");
+    pair.writer
+        .write_message(&HarnessOutputMessage::deliver_live(
+            tau_proto::UnixMicros::new(3),
+            Event::ToolStarted(split_tool_started("email_list_folders", Vec::new())),
+        ))
+        .expect("write live tool");
+    pair.writer.flush().expect("flush input");
+
+    let mut config_errors = Vec::new();
+    let terminal = loop {
+        match pair.reader.read_message().expect("read").expect("frame") {
+            HarnessInputMessage::ConfigError(error) => config_errors.push(error.message),
+            HarnessInputMessage::Emit(emit) => match *emit.event {
+                Event::ToolResult(result) => break Event::ToolResult(result),
+                Event::ToolError(error) => break Event::ToolError(error),
+                _ => {}
+            },
+            _ => {}
+        }
+    };
+
+    assert_eq!(config_errors.len(), 1);
+    assert!(config_errors[0].contains("unknown"));
+    let Event::ToolError(error) = terminal else {
+        panic!("rejected config should make live tool fail")
+    };
+    assert!(error.message.contains("configuration was rejected"));
+}
+
+/// Public `email::run` must treat action invokes as live-only execution
+/// triggers just like tools: replayed action deliveries are ignored, while a
+/// later live action is dispatched and emits exactly one terminal action event.
+#[test]
+fn email_run_skips_replayed_actions_and_dispatches_live_action() {
+    let mut pair = spawn_extension();
+    drain_ready(&mut pair.reader);
+
+    pair.writer
+        .write_message(&HarnessOutputMessage::deliver_replay(
+            tau_proto::UnixMicros::new(4),
+            Event::ActionInvoke(email_action_invoke("replayed-action")),
+        ))
+        .expect("write replayed action");
+    pair.writer
+        .write_message(&HarnessOutputMessage::deliver_live(
+            tau_proto::UnixMicros::new(5),
+            Event::ActionInvoke(email_action_invoke("live-action")),
+        ))
+        .expect("write live action");
+    pair.writer.flush().expect("flush input");
+
+    let action_error = loop {
+        match pair.reader.read_message().expect("read").expect("frame") {
+            HarnessInputMessage::Emit(emit) => {
+                if let Event::ActionError(error) = *emit.event {
+                    break error;
+                }
+            }
+            HarnessInputMessage::ConfigError(error) => {
+                panic!(
+                    "action dispatch should not emit ConfigError: {}",
+                    error.message
+                )
+            }
+            _ => {}
+        }
+    };
+
+    assert_eq!(
+        action_error.invocation_id,
+        tau_proto::ActionInvocationId::new("live-action")
+    );
+    assert_eq!(action_error.action_id, "email.in.list");
+}
+
 #[test]
 fn publishes_email_action_schema_at_startup() {
     let mut pair = spawn_extension();

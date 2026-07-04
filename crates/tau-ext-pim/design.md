@@ -22,6 +22,10 @@ boundary over live provider integration tests.
   selection without requiring live accounts.
 - Runtime/action tests cover user-visible command behavior, approval queues,
   no-token output, sanitized logs, and policy gates using fake backends.
+- Public `run` protocol tests cover startup ordering, exact subscriptions,
+  `ConfigError` emission and loop continuation, live-only replay filtering,
+  dispatch boundaries, and storage backend selection for migrated tau-client
+  runtimes.
 - Shared provider helpers, such as Google OAuth parsing and token caching, keep
   tests close to the helper so email and calendar behavior cannot drift.
 
