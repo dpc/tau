@@ -51,6 +51,12 @@ for unsupported first-party or custom extension events. Replay-aware handlers
 receive both historical and live deliveries, while live-only handlers skip
 replay-marked deliveries.
 
+Raw handlers normally add their selector to the startup subscription set. For
+deliveries that the harness routes through another protocol contract, such as
+provider-kind prompt deliveries, routed raw handlers reuse the same dispatch and
+replay filtering without adding a startup subscription. This keeps provider
+direct-routing support from broadening replay or broadcast event access.
+
 Configuration handlers deserialize the CBOR configuration into the requested
 type. Decode failures and handler application errors emit `ConfigError` frames
 and the runner continues processing later messages. Handlers can register a

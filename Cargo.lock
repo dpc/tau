@@ -3313,7 +3313,7 @@ dependencies = [
  "dialoguer",
  "serde",
  "serde_json",
- "tau-extension",
+ "tau-client",
  "tau-proto",
  "tau-provider",
  "tau-provider-chat-completions",

@@ -465,6 +465,35 @@ impl TauExtension for RawEventExtension {
     }
 }
 
+struct RoutedRawEventExtension;
+
+impl TauExtension for RoutedRawEventExtension {
+    type State = Counts;
+
+    fn name(&self) -> &'static str {
+        "routed-raw-event"
+    }
+
+    fn register(self, builder: &mut ExtensionBuilder<Self::State>) {
+        builder
+            .on_raw_routed(
+                EventSelector::Exact(tau_proto::EventName::HARNESS_NOTICE),
+                |cx: RawEventContext<'_, Counts>| {
+                    cx.state.replay_aware += 1;
+                    cx.state.last_replay = Some(cx.is_replay());
+                    Ok(())
+                },
+            )
+            .on_raw_routed_live(
+                EventSelector::Exact(tau_proto::EventName::HARNESS_NOTICE),
+                |cx: RawEventContext<'_, Counts>| {
+                    cx.state.live_only += 1;
+                    Ok(())
+                },
+            );
+    }
+}
+
 struct InterceptExtension;
 
 impl TauExtension for InterceptExtension {
@@ -1344,6 +1373,32 @@ fn raw_event_handler_matches_prefix_and_skips_replay() {
         HarnessInputMessage::Subscribe(sub)
             if sub.selectors == [EventSelector::Prefix("harness.".to_owned())]
     ));
+}
+
+/// Ensures routed raw handlers do not add startup subscriptions while still
+/// preserving replay-aware and live-only dispatch policy for direct deliveries.
+#[test]
+fn routed_raw_event_handler_does_not_subscribe() {
+    let (state, frames) = run_messages(
+        RoutedRawEventExtension,
+        Counts::default(),
+        &[
+            HarnessOutputMessage::deliver_replay(UnixMicros::new(8), notice("old")),
+            HarnessOutputMessage::deliver_live(UnixMicros::new(9), notice("new")),
+        ],
+    );
+
+    assert_eq!(state.replay_aware, 2);
+    assert_eq!(state.live_only, 1);
+    assert_eq!(state.last_replay, Some(false));
+    assert!(matches!(frames[0], HarnessInputMessage::Hello(_)));
+    assert!(
+        frames
+            .iter()
+            .all(|frame| !matches!(frame, HarnessInputMessage::Subscribe(_))),
+        "routed handlers must not broaden startup subscriptions: {frames:?}",
+    );
+    assert!(matches!(frames[1], HarnessInputMessage::Ready(_)));
 }
 
 /// Ensures the intercept abstraction sends exactly one reply per request.

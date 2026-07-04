@@ -6,8 +6,9 @@
 
 use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::error::Error;
-use std::io::{BufReader, BufWriter, Read, Write};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, TryRecvError};
+use std::io::{BufWriter, Cursor, Read, Write};
+use std::marker::PhantomData;
+use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -15,12 +16,16 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use backon::BackoffBuilder;
 use dialoguer::Input;
 use serde::{Deserialize, Serialize};
+use tau_client::{
+    ClientError, ClientHandle, ClientResult, DispatchOutcome, ExtensionBuilder,
+    ManualExtensionRuntime, ManualRuntimeInput, RawEventContext, TauExtension, TauExtensionRunner,
+};
 use tau_proto::{
-    ClientKind, ContextItem, Event, EventDelivery, EventName, HarnessInputMessage,
-    HarnessOutputMessage, ModelId, ModelName, PeerInputReader, PeerOutputWriter, ProviderBackend,
-    ProviderBackendKind, ProviderBackendTransport, ProviderCacheMissDiagnostic, ProviderModelInfo,
-    ProviderModelsUpdated, ProviderName, ProviderPromptSubmitted, ProviderResponseFinished,
-    ProviderResponseStatusUpdate, ProviderResponseUpdated, ProviderStopReason,
+    ClientKind, ContextItem, Event, EventName, HarnessInputMessage, HarnessInputReader, ModelId,
+    ModelName, PeerOutputWriter, ProviderBackend, ProviderBackendKind, ProviderBackendTransport,
+    ProviderCacheMissDiagnostic, ProviderModelInfo, ProviderModelsUpdated, ProviderName,
+    ProviderPromptSubmitted, ProviderResponseFinished, ProviderResponseStatusUpdate,
+    ProviderResponseUpdated, ProviderStopReason,
 };
 use tau_provider::storage::{AuthFile, ProviderStore};
 use tau_provider_chat_completions::openrouter::{OpenRouterProfile, fetch_openrouter_models};
@@ -364,7 +369,7 @@ fn run_openai_codex_login() -> Result<OpenAiAuth, Box<dyn Error>> {
 
 /// Runs the extension on stdin/stdout.
 pub fn run_stdio() -> Result<(), Box<dyn Error>> {
-    tau_extension::init_logging_for(LOG_TARGET);
+    tau_client::init_logging_for(LOG_TARGET);
     run(std::io::stdin(), std::io::stdout())
 }
 
@@ -375,7 +380,7 @@ pub fn run_stdio() -> Result<(), Box<dyn Error>> {
 pub fn run<R, W>(reader: R, writer: W) -> Result<(), Box<dyn Error>>
 where
     R: Read + Send + 'static,
-    W: Write,
+    W: Write + Send + 'static,
 {
     let startup_profiles = load_profiles();
     run_inner(reader, writer, startup_profiles, load_profiles)
@@ -441,7 +446,7 @@ fn load_profiles_result() -> std::io::Result<BuiltinProviderProfiles> {
 fn run_with_auth<R, W>(reader: R, writer: W, auth: OpenAiAuth) -> Result<(), Box<dyn Error>>
 where
     R: Read + Send + 'static,
-    W: Write,
+    W: Write + Send + 'static,
 {
     let profiles = profiles_with_chatgpt_auth(auth);
     let prompt_profiles = profiles.clone();
@@ -466,8 +471,8 @@ fn run_inner<R, W, F>(
 ) -> Result<(), Box<dyn Error>>
 where
     R: Read + Send + 'static,
-    W: Write,
-    F: FnMut() -> BuiltinProviderProfiles,
+    W: Write + Send + 'static,
+    F: FnMut() -> BuiltinProviderProfiles + 'static,
 {
     run_inner_with_prompt_executor(
         reader,
@@ -489,18 +494,14 @@ fn run_inner_with_prompt_executor<R, W, F>(
 ) -> Result<(), Box<dyn Error>>
 where
     R: Read + Send + 'static,
-    W: Write,
-    F: FnMut() -> BuiltinProviderProfiles,
+    W: Write + Send + 'static,
+    F: FnMut() -> BuiltinProviderProfiles + 'static,
 {
-    let writer = handshake_provider(writer, &startup_profiles)?;
-    let frame_rx = spawn_reader_pump(reader);
     let (worker_tx, worker_rx) = mpsc::channel::<WorkerMessage>();
-    ProviderRuntime {
-        writer,
+    let runtime = ProviderRuntime {
         load_prompt_profiles,
         prompt_concurrency_limit,
         prompt_executor,
-        frame_rx,
         worker_tx,
         worker_rx,
         chatgpt_runtime: Arc::new(ChatGptRuntime::new()),
@@ -509,67 +510,146 @@ where
         session_debug_allowed: BTreeMap::new(),
         active_prompts: 0,
         input_closed: false,
+    };
+    let runtime = TauExtensionRunner::new(ProviderExtension::<F>::new(startup_profiles))
+        .start_manual_loop(reader, writer, runtime)?;
+    run_provider_loop(runtime)
+}
+
+/// Tau-client declaration for the built-in provider peer.
+struct ProviderExtension<F> {
+    /// Provider profiles used to publish startup model availability.
+    startup_profiles: BuiltinProviderProfiles,
+    /// Marker tying the declaration to the runtime state's profile loader type.
+    _load_prompt_profiles: PhantomData<fn() -> F>,
+}
+
+impl<F> ProviderExtension<F> {
+    /// Creates a provider declaration for the supplied startup profiles.
+    fn new(startup_profiles: BuiltinProviderProfiles) -> Self {
+        Self {
+            startup_profiles,
+            _load_prompt_profiles: PhantomData,
+        }
     }
-    .run()
 }
 
-fn handshake_provider<W: Write>(
-    writer: W,
-    startup_profiles: &BuiltinProviderProfiles,
-) -> Result<BufWriter<W>, Box<dyn Error>> {
-    let mut handshake_writer = PeerOutputWriter::new(BufWriter::new(writer));
+impl<F> TauExtension for ProviderExtension<F>
+where
+    F: FnMut() -> BuiltinProviderProfiles + 'static,
+{
+    type State = ProviderRuntime<F>;
 
-    // No past events requested: provider work starts from fresh live state.
-    // Models are announced from current auth below; replaying old prompt,
-    // prewarm, or cancel events would rerun or cancel completed turns.
-    tau_extension::Handshake::with_kind(EXTENSION_NAME, ClientKind::Provider)
-        .subscribe([
-            EventName::AGENT_PROMPT_PREWARM_REQUESTED,
-            EventName::HARNESS_SESSION_DIR,
-            EventName::UI_CANCEL_PROMPT,
-        ])
-        .announce_event(Event::ProviderModelsUpdated(ProviderModelsUpdated {
-            models: models_for_profiles(startup_profiles),
-        }))
-        .ready_message("builtin provider ready")
-        .run(&mut handshake_writer)?;
-    Ok(handshake_writer.into_inner())
+    fn name(&self) -> &'static str {
+        EXTENSION_NAME
+    }
+
+    fn kind(&self) -> ClientKind {
+        ClientKind::Provider
+    }
+
+    fn register(self, builder: &mut ExtensionBuilder<Self::State>) {
+        // No past effectful provider events requested: provider work starts from
+        // fresh live state. Harness session directory announcements are
+        // current-state facts, so replay catch-up is allowed for diagnostics
+        // policy only.
+        builder
+            .on_raw_live(
+                tau_proto::EventSelector::Exact(EventName::AGENT_PROMPT_PREWARM_REQUESTED),
+                handle_provider_delivery::<F>,
+            )
+            .on_raw(
+                tau_proto::EventSelector::Exact(EventName::HARNESS_SESSION_DIR),
+                handle_provider_delivery::<F>,
+            )
+            .on_raw_live(
+                tau_proto::EventSelector::Exact(EventName::UI_CANCEL_PROMPT),
+                handle_provider_delivery::<F>,
+            )
+            .on_raw_routed_live(
+                tau_proto::EventSelector::Exact(EventName::AGENT_PROMPT_CREATED),
+                handle_provider_delivery::<F>,
+            )
+            .startup_event(Event::ProviderModelsUpdated(ProviderModelsUpdated {
+                models: models_for_profiles(&self.startup_profiles),
+            }))
+            .ready_message("builtin provider ready");
+    }
 }
 
-fn spawn_reader_pump<R: Read + Send + 'static>(reader: R) -> Receiver<HarnessOutputMessage> {
-    let (frame_tx, frame_rx) = mpsc::channel::<HarnessOutputMessage>();
-    thread::spawn(move || {
-        let mut reader = PeerInputReader::new(BufReader::new(reader));
-        loop {
-            match reader.read_message() {
-                Ok(Some(frame)) => {
-                    if frame_tx.send(frame).is_err() {
-                        return;
-                    }
+fn handle_provider_delivery<F>(cx: RawEventContext<'_, ProviderRuntime<F>>) -> ClientResult<()>
+where
+    F: FnMut() -> BuiltinProviderProfiles + 'static,
+{
+    cx.state.handle_event(cx.event().clone(), &cx.handle())
+}
+
+fn run_provider_loop<F>(
+    mut runtime: ManualExtensionRuntime<ProviderRuntime<F>>,
+) -> Result<(), Box<dyn Error>>
+where
+    F: FnMut() -> BuiltinProviderProfiles + 'static,
+{
+    loop {
+        let handle = runtime.handle();
+        runtime
+            .state_mut()
+            .drain_workers_and_start_prompts(&handle)?;
+        if runtime.state().is_finished() {
+            runtime.finish()?;
+            return Ok(());
+        }
+
+        match next_provider_input(&mut runtime) {
+            Ok(ManualRuntimeInput::Message(frame)) => match runtime.dispatch_one(frame)? {
+                DispatchOutcome::Continue => {}
+                DispatchOutcome::Disconnect(_) => {
+                    runtime.state_mut().cancellation.shutdown();
+                    let _state = runtime.finish_detached();
+                    return Ok(());
                 }
-                Ok(None) => return,
-                Err(error) => {
-                    tracing::warn!(target: LOG_TARGET, "reader pump failed: {error}");
-                    return;
+                DispatchOutcome::StopRequested => {
+                    runtime.finish()?;
+                    return Ok(());
                 }
+            },
+            Ok(ManualRuntimeInput::Timeout) => {}
+            Ok(ManualRuntimeInput::InputClosed) => {
+                runtime.state_mut().input_closed = true;
+            }
+            Err(error) => {
+                tracing::warn!(target: LOG_TARGET, "provider input reader failed: {error}");
+                runtime.state_mut().input_closed = true;
             }
         }
-    });
-    frame_rx
+    }
+}
+
+fn next_provider_input<F>(
+    runtime: &mut ManualExtensionRuntime<ProviderRuntime<F>>,
+) -> ClientResult<ManualRuntimeInput>
+where
+    F: FnMut() -> BuiltinProviderProfiles + 'static,
+{
+    if runtime.state().input_closed {
+        thread::sleep(Duration::from_millis(10));
+        return Ok(ManualRuntimeInput::Timeout);
+    }
+    if runtime.state().active_prompts == 0 && runtime.state().prompt_queue.is_empty() {
+        runtime.recv()
+    } else {
+        runtime.recv_timeout(Duration::from_millis(10))
+    }
 }
 
 /// Live provider event loop state after the Tau extension handshake completes.
-struct ProviderRuntime<W: Write, F> {
-    /// Framed protocol writer back to the harness.
-    writer: BufWriter<W>,
+struct ProviderRuntime<F> {
     /// Reloads provider profiles for prompt-time auth/model resolution.
     load_prompt_profiles: F,
     /// Maximum number of prompt workers that may run at once.
     prompt_concurrency_limit: usize,
     /// Starts provider backend execution for one prompt job.
     prompt_executor: PromptExecutor,
-    /// Frames read by the background input pump.
-    frame_rx: Receiver<HarnessOutputMessage>,
     /// Sender used by prompt workers to return frames and completion notices.
     worker_tx: Sender<WorkerMessage>,
     /// Receiver used by the runtime loop to drain worker output.
@@ -588,28 +668,12 @@ struct ProviderRuntime<W: Write, F> {
     input_closed: bool,
 }
 
-impl<W, F> ProviderRuntime<W, F>
+impl<F> ProviderRuntime<F>
 where
-    W: Write,
-    F: FnMut() -> BuiltinProviderProfiles,
+    F: FnMut() -> BuiltinProviderProfiles + 'static,
 {
-    fn run(&mut self) -> Result<(), Box<dyn Error>> {
-        loop {
-            self.drain_workers_and_start_prompts()?;
-            if self.is_finished() {
-                return Ok(());
-            }
-            let Some(frame) = self.next_frame() else {
-                continue;
-            };
-            if self.handle_frame(frame)? == RunDecision::Stop {
-                return Ok(());
-            }
-        }
-    }
-
-    fn drain_workers_and_start_prompts(&mut self) -> Result<(), Box<dyn Error>> {
-        drain_worker_messages(&self.worker_rx, &mut self.writer, &mut self.active_prompts)?;
+    fn drain_workers_and_start_prompts(&mut self, handle: &ClientHandle) -> ClientResult<()> {
+        drain_worker_messages(&self.worker_rx, handle, &mut self.active_prompts)?;
         let prompt_worker_context = PromptWorkerContext {
             worker_tx: &self.worker_tx,
             prompt_executor: &self.prompt_executor,
@@ -621,7 +685,7 @@ where
             &mut self.active_prompts,
             self.prompt_concurrency_limit,
             &prompt_worker_context,
-            &mut self.writer,
+            handle,
         )
     }
 
@@ -629,72 +693,12 @@ where
         self.input_closed && self.active_prompts == 0 && self.prompt_queue.is_empty()
     }
 
-    fn next_frame(&mut self) -> Option<HarnessOutputMessage> {
-        if self.input_closed {
-            return None;
-        }
-        if self.active_prompts == 0 && self.prompt_queue.is_empty() {
-            self.recv_blocking()
-        } else {
-            self.recv_while_workers_run()
-        }
-    }
-
-    fn recv_blocking(&mut self) -> Option<HarnessOutputMessage> {
-        match self.frame_rx.recv() {
-            Ok(frame) => Some(frame),
-            Err(_) => {
-                self.input_closed = true;
-                None
-            }
-        }
-    }
-
-    fn recv_while_workers_run(&mut self) -> Option<HarnessOutputMessage> {
-        match self.frame_rx.recv_timeout(Duration::from_millis(10)) {
-            Ok(frame) => Some(frame),
-            Err(RecvTimeoutError::Timeout) => None,
-            Err(RecvTimeoutError::Disconnected) => {
-                self.input_closed = true;
-                None
-            }
-        }
-    }
-
-    fn handle_frame(&mut self, frame: HarnessOutputMessage) -> Result<RunDecision, Box<dyn Error>> {
-        match frame {
-            HarnessOutputMessage::Deliver(delivery) => {
-                self.process_delivery(delivery)?;
-                Ok(RunDecision::Continue)
-            }
-            HarnessOutputMessage::Disconnect(_) => {
-                self.cancellation.shutdown();
-                Ok(RunDecision::Stop)
-            }
-            _ => Ok(RunDecision::Continue),
-        }
-    }
-
-    fn process_delivery(&mut self, delivery: EventDelivery) -> Result<(), Box<dyn Error>> {
-        let is_replay = delivery.is_replay();
-        let event = delivery.into_event();
-        // Prompt execution is an effect; replay-marked frames re-send history
-        // and must never start a provider call. Harness session directory
-        // announcements are current-state facts, so replay catch-up is allowed
-        // to update the diagnostics policy.
-        if is_replay && !matches!(event, Event::HarnessSessionDir(_)) {
-            return Ok(());
-        }
-        self.handle_event(event)?;
-        Ok(())
-    }
-
-    fn handle_event(&mut self, event: Event) -> Result<(), Box<dyn Error>> {
+    fn handle_event(&mut self, event: Event, handle: &ClientHandle) -> ClientResult<()> {
         match event {
             Event::HarnessSessionDir(session_dir) => self.record_session_debug_policy(session_dir),
             Event::AgentPromptPrewarmRequested(prewarm) => self.prewarm_backend(prewarm),
-            Event::AgentPromptCreated(prompt) => self.handle_prompt_created(prompt)?,
-            Event::UiCancelPrompt(cancel) => self.handle_cancel_prompt(cancel)?,
+            Event::AgentPromptCreated(prompt) => self.handle_prompt_created(prompt, handle)?,
+            Event::UiCancelPrompt(cancel) => self.handle_cancel_prompt(cancel, handle)?,
             _ => {}
         }
         Ok(())
@@ -720,33 +724,37 @@ where
     fn handle_prompt_created(
         &mut self,
         prompt: tau_proto::AgentPromptCreated,
-    ) -> Result<(), Box<dyn Error>> {
+        handle: &ClientHandle,
+    ) -> ClientResult<()> {
         let agent_prompt_id = prompt.agent_prompt_id.clone();
         let prompt = materialize_prompt(&prompt);
         if self.cancellation.take_canceled(&agent_prompt_id) {
-            return self.finish_canceled_prompt(&agent_prompt_id, &prompt);
+            return self.finish_canceled_prompt(&agent_prompt_id, &prompt, handle);
         }
         trace_prompt_like("provider prompt", &prompt, &agent_prompt_id);
-        self.start_or_reject_prompt(agent_prompt_id, prompt)
+        self.start_or_reject_prompt(agent_prompt_id, prompt, handle)
     }
 
     fn finish_canceled_prompt(
         &mut self,
         agent_prompt_id: &tau_proto::AgentPromptId,
         prompt: &tau_proto::AgentPromptCreated,
-    ) -> Result<(), Box<dyn Error>> {
-        let mut frame_writer = PeerOutputWriter::new(&mut self.writer);
+        handle: &ClientHandle,
+    ) -> ClientResult<()> {
+        let mut frame_writer = handle_frame_writer(handle);
         finish_canceled(agent_prompt_id, prompt, &mut frame_writer)
+            .map_err(|error| ClientError::handler(error.to_string()))
     }
 
     fn start_or_reject_prompt(
         &mut self,
         agent_prompt_id: tau_proto::AgentPromptId,
         prompt: tau_proto::AgentPromptCreated,
-    ) -> Result<(), Box<dyn Error>> {
+        handle: &ClientHandle,
+    ) -> ClientResult<()> {
         let mut profiles = (self.load_prompt_profiles)();
         let Some(backend) = resolve_prompt_backend(&prompt.model, &mut profiles) else {
-            return self.finish_prompt_with_missing_backend(&prompt, &agent_prompt_id);
+            return self.finish_prompt_with_missing_backend(&prompt, &agent_prompt_id, handle);
         };
         self.enqueue_or_start_prompt(PromptJob {
             agent_prompt_id,
@@ -764,10 +772,13 @@ where
         &mut self,
         prompt: &tau_proto::AgentPromptCreated,
         agent_prompt_id: &tau_proto::AgentPromptId,
-    ) -> Result<(), Box<dyn Error>> {
-        let mut frame_writer = PeerOutputWriter::new(&mut self.writer);
-        write_prompt_submitted(agent_prompt_id, &prompt.originator, &mut frame_writer)?;
+        handle: &ClientHandle,
+    ) -> ClientResult<()> {
+        let mut frame_writer = handle_frame_writer(handle);
+        write_prompt_submitted(agent_prompt_id, &prompt.originator, &mut frame_writer)
+            .map_err(|error| ClientError::handler(error.to_string()))?;
         finish_missing_backend(prompt, agent_prompt_id, &mut frame_writer)
+            .map_err(|error| ClientError::handler(error.to_string()))
     }
 
     fn enqueue_or_start_prompt(&mut self, job: PromptJob) {
@@ -787,23 +798,15 @@ where
     fn handle_cancel_prompt(
         &mut self,
         cancel: tau_proto::UiCancelPrompt,
-    ) -> Result<(), Box<dyn Error>> {
+        handle: &ClientHandle,
+    ) -> ClientResult<()> {
         let Some(apid) = cancel.agent_prompt_id else {
             self.cancellation.cancel_retry_sleeps();
             return Ok(());
         };
         self.cancellation.cancel(apid.clone());
-        finish_queued_canceled(&apid, &mut self.prompt_queue, &mut self.writer)
+        finish_queued_canceled(&apid, &mut self.prompt_queue, handle)
     }
-}
-
-/// Control-flow result for handling one harness frame.
-#[derive(Clone, Copy, Eq, PartialEq)]
-enum RunDecision {
-    /// Continue processing frames and worker output.
-    Continue,
-    /// Stop the provider runtime cleanly.
-    Stop,
 }
 
 type PromptExecutor = Arc<dyn Fn(PromptExecution) + Send + Sync + 'static>;
@@ -839,31 +842,70 @@ struct PromptWorkerContext<'a> {
 }
 
 impl PromptExecution {
-    fn frame_writer(&self) -> PeerOutputWriter<BufWriter<ChannelWrite>> {
-        PeerOutputWriter::new(BufWriter::new(ChannelWrite::new(self.output_tx.clone())))
+    fn frame_writer(&self) -> PeerOutputWriter<BufWriter<HarnessInputMessageWrite>> {
+        PeerOutputWriter::new(BufWriter::new(HarnessInputMessageWrite::worker(
+            self.output_tx.clone(),
+        )))
     }
 }
 
 enum WorkerMessage {
-    Output(Vec<u8>),
+    /// One typed provider frame produced by a prompt worker and awaiting main
+    /// loop serialization.
+    Output(HarnessInputMessage),
+    /// Marker that one prompt worker finished and freed a concurrency slot.
     PromptDone,
 }
 
-struct ChannelWrite {
-    tx: Sender<WorkerMessage>,
+/// Destination for decoded provider output frames.
+enum HarnessInputMessageTarget {
+    /// Synchronous output path used by main-loop helper code.
+    Handle(ClientHandle),
+    /// Worker-to-main-loop path used by prompt workers.
+    Worker(Sender<WorkerMessage>),
+}
+
+/// `Write` adapter that preserves existing `PeerOutputWriter` call sites while
+/// converting completed frame bytes back into typed `HarnessInputMessage`s.
+///
+/// Bytes are buffered until `flush`, decoded FIFO, and forwarded either to the
+/// main-loop client handle or the worker output channel. Partial or invalid
+/// frames become `InvalidData` so the caller observes a normal output failure.
+struct HarnessInputMessageWrite {
+    /// Destination that receives decoded frames on flush.
+    target: HarnessInputMessageTarget,
+    /// Encoded bytes accumulated since the previous flush.
     buf: Vec<u8>,
 }
 
-impl ChannelWrite {
-    fn new(tx: Sender<WorkerMessage>) -> Self {
+impl HarnessInputMessageWrite {
+    fn handle(handle: ClientHandle) -> Self {
         Self {
-            tx,
+            target: HarnessInputMessageTarget::Handle(handle),
             buf: Vec::new(),
+        }
+    }
+
+    fn worker(tx: Sender<WorkerMessage>) -> Self {
+        Self {
+            target: HarnessInputMessageTarget::Worker(tx),
+            buf: Vec::new(),
+        }
+    }
+
+    fn send_decoded(&self, message: HarnessInputMessage) -> std::io::Result<()> {
+        match &self.target {
+            HarnessInputMessageTarget::Handle(handle) => handle
+                .send(message)
+                .map_err(|error| std::io::Error::new(std::io::ErrorKind::BrokenPipe, error)),
+            HarnessInputMessageTarget::Worker(tx) => tx
+                .send(WorkerMessage::Output(message))
+                .map_err(|_| std::io::Error::new(std::io::ErrorKind::BrokenPipe, "writer closed")),
         }
     }
 }
 
-impl Write for ChannelWrite {
+impl Write for HarnessInputMessageWrite {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         self.buf.extend_from_slice(buf);
         Ok(buf.len())
@@ -874,10 +916,23 @@ impl Write for ChannelWrite {
             return Ok(());
         }
         let bytes = std::mem::take(&mut self.buf);
-        self.tx
-            .send(WorkerMessage::Output(bytes))
-            .map_err(|_| std::io::Error::new(std::io::ErrorKind::BrokenPipe, "writer closed"))
+        let mut reader = HarnessInputReader::new(Cursor::new(bytes));
+        while let Some(message) = reader
+            .read_message()
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?
+        {
+            self.send_decoded(message)?;
+        }
+        Ok(())
     }
+}
+
+fn handle_frame_writer(
+    handle: &ClientHandle,
+) -> PeerOutputWriter<BufWriter<HarnessInputMessageWrite>> {
+    PeerOutputWriter::new(BufWriter::new(HarnessInputMessageWrite::handle(
+        handle.clone(),
+    )))
 }
 
 #[derive(Default)]
@@ -1018,20 +1073,21 @@ fn start_prompt_job(job: PromptJob, active_prompts: &mut usize, context: &Prompt
     });
 }
 
-fn start_queued_prompts<W: Write>(
+fn start_queued_prompts(
     prompt_queue: &mut VecDeque<PromptJob>,
     active_prompts: &mut usize,
     prompt_concurrency_limit: usize,
     context: &PromptWorkerContext<'_>,
-    writer: &mut BufWriter<W>,
-) -> Result<(), Box<dyn Error>> {
+    handle: &ClientHandle,
+) -> ClientResult<()> {
     while *active_prompts < prompt_concurrency_limit {
         let Some(job) = prompt_queue.pop_front() else {
             return Ok(());
         };
         if context.cancellation.take_canceled(&job.agent_prompt_id) {
-            let mut frame_writer = PeerOutputWriter::new(&mut *writer);
-            finish_canceled(&job.agent_prompt_id, &job.prompt, &mut frame_writer)?;
+            let mut frame_writer = handle_frame_writer(handle);
+            finish_canceled(&job.agent_prompt_id, &job.prompt, &mut frame_writer)
+                .map_err(|error| ClientError::handler(error.to_string()))?;
             continue;
         }
         start_prompt_job(job, active_prompts, context);
@@ -1039,11 +1095,11 @@ fn start_queued_prompts<W: Write>(
     Ok(())
 }
 
-fn finish_queued_canceled<W: Write>(
+fn finish_queued_canceled(
     apid: &tau_proto::AgentPromptId,
     prompt_queue: &mut VecDeque<PromptJob>,
-    writer: &mut BufWriter<W>,
-) -> Result<(), Box<dyn Error>> {
+    handle: &ClientHandle,
+) -> ClientResult<()> {
     let Some(index) = prompt_queue
         .iter()
         .position(|job| job.agent_prompt_id.as_str() == apid.as_str())
@@ -1053,21 +1109,21 @@ fn finish_queued_canceled<W: Write>(
     let Some(job) = prompt_queue.remove(index) else {
         return Ok(());
     };
-    let mut frame_writer = PeerOutputWriter::new(writer);
-    finish_canceled(&job.agent_prompt_id, &job.prompt, &mut frame_writer)?;
+    let mut frame_writer = handle_frame_writer(handle);
+    finish_canceled(&job.agent_prompt_id, &job.prompt, &mut frame_writer)
+        .map_err(|error| ClientError::handler(error.to_string()))?;
     Ok(())
 }
 
-fn drain_worker_messages<W: Write>(
+fn drain_worker_messages(
     worker_rx: &Receiver<WorkerMessage>,
-    writer: &mut BufWriter<W>,
+    handle: &ClientHandle,
     active_prompts: &mut usize,
-) -> Result<(), Box<dyn Error>> {
+) -> ClientResult<()> {
     loop {
         match worker_rx.try_recv() {
-            Ok(WorkerMessage::Output(bytes)) => {
-                writer.write_all(&bytes)?;
-                writer.flush()?;
+            Ok(WorkerMessage::Output(message)) => {
+                handle.send(message)?;
             }
             Ok(WorkerMessage::PromptDone) => {
                 *active_prompts = active_prompts.saturating_sub(1);

@@ -29,6 +29,15 @@ The runtime loop reads harness events, resolves prompt backends, and runs prompt
 jobs on a bounded worker pool. `TAU_BUILTIN_PROVIDER_PROMPT_CONCURRENCY`
 overrides the default concurrency of four workers.
 
+Protocol startup and harness input dispatch run through `tau-client`'s manual
+loop runtime. Startup publishes `ClientKind::Provider`, exact subscriptions for
+prewarm/session-dir/cancel events, the current `ProviderModelsUpdated` snapshot,
+and then `Ready`. Direct `agent.prompt.created` deliveries are handled as routed
+live provider events without adding a subscription, so prompt execution does not
+request replay catch-up. Worker-produced provider progress/result frames return
+to the main provider loop as typed protocol messages and are serialized through
+the normal tau-client writer path.
+
 Cancellation state is shared between the event loop and workers. Targeted
 cancels remove queued prompts immediately and abort retry sleeps for matching
 active prompts; disconnect/shutdown aborts all retry sleeps. Network reads are

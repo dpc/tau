@@ -1,4 +1,4 @@
-use std::io::{BufReader, Cursor};
+use std::io::{BufReader, Cursor, Write};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
@@ -9,6 +9,31 @@ use tau_proto::{
 };
 
 use super::*;
+
+/// Shared byte sink used by tests that run tau-client's writer thread.
+#[derive(Clone, Default)]
+struct SharedWriter {
+    /// Shared byte buffer written by the provider runtime.
+    bytes: Arc<Mutex<Vec<u8>>>,
+}
+
+impl SharedWriter {
+    /// Returns a snapshot of bytes written so far.
+    fn bytes(&self) -> Vec<u8> {
+        self.bytes.lock().expect("lock shared writer").clone()
+    }
+}
+
+impl Write for SharedWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.bytes.lock().expect("lock shared writer").extend(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
 
 fn chatgpt_auth() -> OpenAiAuth {
     OpenAiAuth {
@@ -296,10 +321,11 @@ fn prompt_workers_start_concurrently() {
 
     let profiles = profiles_with_chatgpt_auth(chatgpt_auth());
     let prompt_profiles = profiles.clone();
-    let mut output = Vec::new();
+    let writer = SharedWriter::default();
+    let output = writer.clone();
     run_inner_with_prompt_executor(
         Cursor::new(input),
-        &mut output,
+        writer,
         profiles,
         move || prompt_profiles.clone(),
         2,
@@ -309,7 +335,7 @@ fn prompt_workers_start_concurrently() {
 
     let max_started = started.0.lock().expect("started lock").1;
     assert_eq!(max_started, 2, "both prompt workers should overlap");
-    let frames = decode_frames(&output);
+    let frames = decode_frames(&output.bytes());
     let finished_count = frames
         .iter()
         .filter(|frame| matches!(input_event(frame), Some(Event::ProviderResponseFinished(_))))
@@ -335,10 +361,11 @@ fn replayed_prompt_creation_does_not_start_executor_or_emit_prompt_events() {
 
     let profiles = profiles_with_chatgpt_auth(chatgpt_auth());
     let prompt_profiles = profiles.clone();
-    let mut output = Vec::new();
+    let writer = SharedWriter::default();
+    let output = writer.clone();
     run_inner_with_prompt_executor(
         Cursor::new(input),
-        &mut output,
+        writer,
         profiles,
         move || prompt_profiles.clone(),
         1,
@@ -347,7 +374,7 @@ fn replayed_prompt_creation_does_not_start_executor_or_emit_prompt_events() {
     .expect("run provider extension");
 
     assert_eq!(executor_calls.load(Ordering::SeqCst), 0);
-    let frames = decode_frames(&output);
+    let frames = decode_frames(&output.bytes());
     assert!(
         frames.iter().all(|frame| {
             !matches!(
@@ -385,10 +412,10 @@ fn replayed_session_dir_controls_live_prompt_debug_policy() {
 
         let profiles = profiles_with_chatgpt_auth(chatgpt_auth());
         let prompt_profiles = profiles.clone();
-        let mut output = Vec::new();
+        let writer = SharedWriter::default();
         run_inner_with_prompt_executor(
             Cursor::new(input),
-            &mut output,
+            writer,
             profiles,
             move || prompt_profiles.clone(),
             1,
@@ -405,14 +432,15 @@ fn replayed_session_dir_controls_live_prompt_debug_policy() {
 }
 
 #[test]
-fn run_announces_provider_models_before_ready() {
+fn provider_startup_declares_exact_subscriptions_and_models_before_ready() {
     // Provider model snapshots need to reach the harness during startup so
     // model/role UI state is available immediately after all extensions are
     // ready.
-    let mut output = Vec::new();
-    run_with_auth(std::io::empty(), &mut output, chatgpt_auth()).expect("run provider extension");
+    let writer = SharedWriter::default();
+    let output = writer.clone();
+    run_with_auth(std::io::empty(), writer, chatgpt_auth()).expect("run provider extension");
 
-    let frames = decode_frames(&output);
+    let frames = decode_frames(&output.bytes());
     assert!(
         matches!(
             &frames[0],
@@ -422,21 +450,46 @@ fn run_announces_provider_models_before_ready() {
         ),
         "first frame should be provider hello: {frames:?}"
     );
-    assert!(
-        frames
-            .iter()
-            .any(|frame| matches!(frame, HarnessInputMessage::Subscribe(_))),
-        "provider should subscribe for prewarm/cancel events: {frames:?}"
+    let subscribe_frames = frames
+        .iter()
+        .filter_map(|frame| match frame {
+            HarnessInputMessage::Subscribe(subscribe) => Some(subscribe),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        subscribe_frames.len(),
+        1,
+        "provider should emit one startup Subscribe frame: {frames:?}",
     );
-    assert!(
-        frames.iter().any(|frame| matches!(
-            input_event(frame),
-            Some(Event::ProviderModelsUpdated(updated))
-                if model_ids(&updated.models).starts_with(&["chatgpt/gpt-5.5".to_owned()])
-        )),
-        "startup frames should announce provider models: {frames:?}"
+    assert_eq!(
+        subscribe_frames[0].selectors,
+        [
+            tau_proto::EventSelector::Exact(EventName::AGENT_PROMPT_PREWARM_REQUESTED),
+            tau_proto::EventSelector::Exact(EventName::HARNESS_SESSION_DIR),
+            tau_proto::EventSelector::Exact(EventName::UI_CANCEL_PROMPT),
+        ],
+        "provider startup subscriptions must stay exact and must not include direct prompt routing",
     );
-    assert!(matches!(frames.last(), Some(HarnessInputMessage::Ready(_))),);
+
+    let models_index = frames
+        .iter()
+        .position(|frame| {
+            matches!(
+                input_event(frame),
+                Some(Event::ProviderModelsUpdated(updated))
+                    if model_ids(&updated.models).starts_with(&["chatgpt/gpt-5.5".to_owned()])
+            )
+        })
+        .unwrap_or_else(|| panic!("startup frames should announce provider models: {frames:?}"));
+    let ready_index = frames
+        .iter()
+        .position(|frame| matches!(frame, HarnessInputMessage::Ready(_)))
+        .unwrap_or_else(|| panic!("startup frames should end with Ready: {frames:?}"));
+    assert!(
+        models_index < ready_index,
+        "provider models must be announced before Ready: {frames:?}",
+    );
 }
 
 #[test]
@@ -449,11 +502,12 @@ fn direct_prompt_request_with_missing_backend_is_closed_with_error() {
             reason: Some("done".to_owned()),
         }),
     ]);
-    let mut output = Vec::new();
-    run_with_auth(Cursor::new(input), &mut output, OpenAiAuth::default())
+    let writer = SharedWriter::default();
+    let output = writer.clone();
+    run_with_auth(Cursor::new(input), writer, OpenAiAuth::default())
         .expect("run provider extension");
 
-    let frames = decode_frames(&output);
+    let frames = decode_frames(&output.bytes());
     let submitted = frames.iter().position(|frame| {
         matches!(
             input_event(frame),

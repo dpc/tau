@@ -227,6 +227,39 @@ impl<State> ExtensionBuilder<State> {
         handler: impl for<'a> FnMut(RawEventContext<'a, State>) -> ClientResult<()> + 'static,
     ) -> &mut Self {
         self.subscribe_selector(selector.clone());
+        self.on_raw_routed_live(selector, handler)
+    }
+
+    /// Registers a replay-aware raw event handler without adding a startup
+    /// subscription selector.
+    ///
+    /// Use this only for deliveries the harness routes to this peer because of
+    /// some other protocol contract, such as provider-owned prompt deliveries.
+    /// This avoids broadening startup subscriptions while still reusing
+    /// tau-client's dispatch/replay machinery for routed events.
+    pub fn on_raw_routed(
+        &mut self,
+        selector: tau_proto::EventSelector,
+        handler: impl for<'a> FnMut(RawEventContext<'a, State>) -> ClientResult<()> + 'static,
+    ) -> &mut Self {
+        self.raw_event_handlers
+            .push(Box::new(TypedRawEventHandler::new(
+                selector, false, handler,
+            )));
+        self
+    }
+
+    /// Registers a live-only raw event handler without adding a startup
+    /// subscription selector.
+    ///
+    /// Replay-marked routed deliveries are skipped before the selector is
+    /// evaluated. Use this for direct/routed effectful events where subscribing
+    /// would request extra replay or broadcast traffic.
+    pub fn on_raw_routed_live(
+        &mut self,
+        selector: tau_proto::EventSelector,
+        handler: impl for<'a> FnMut(RawEventContext<'a, State>) -> ClientResult<()> + 'static,
+    ) -> &mut Self {
         self.raw_event_handlers
             .push(Box::new(TypedRawEventHandler::new(selector, true, handler)));
         self
