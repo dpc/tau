@@ -1,6 +1,8 @@
-use std::io::{BufReader, Cursor, Write};
+use std::collections::VecDeque;
+use std::io::{BufReader, Cursor, Read, Write};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, mpsc};
+use std::thread;
 use std::time::{Duration, Instant};
 
 use tau_proto::{
@@ -32,6 +34,88 @@ impl Write for SharedWriter {
 
     fn flush(&mut self) -> std::io::Result<()> {
         Ok(())
+    }
+}
+
+/// Blocking byte source used by tests that need to delay harness EOF.
+#[derive(Clone, Default)]
+struct BlockingInput {
+    /// Shared input bytes, EOF flag, and reader-waiting observation.
+    state: Arc<(Mutex<BlockingInputState>, Condvar)>,
+}
+
+/// Mutable state protected by [`BlockingInput`].
+#[derive(Default)]
+struct BlockingInputState {
+    /// Bytes still available to the runtime reader.
+    bytes: VecDeque<u8>,
+    /// True once reads should return EOF after buffered bytes are consumed.
+    closed: bool,
+    /// True after the runtime reader blocks waiting for more bytes.
+    waiting_for_more: bool,
+}
+
+impl BlockingInput {
+    /// Appends encoded harness bytes for the runtime reader.
+    fn push(&self, bytes: impl IntoIterator<Item = u8>) {
+        let (lock, cv) = &*self.state;
+        let mut state = lock.lock().expect("blocking input lock");
+        state.bytes.extend(bytes);
+        state.waiting_for_more = false;
+        cv.notify_all();
+    }
+
+    /// Makes the reader return EOF after currently buffered bytes are consumed.
+    fn close(&self) {
+        let (lock, cv) = &*self.state;
+        lock.lock().expect("blocking input lock").closed = true;
+        cv.notify_all();
+    }
+
+    /// Waits until the runtime reader is parked for more harness input.
+    fn wait_for_reader_waiting(&self, timeout: Duration) {
+        let (lock, cv) = &*self.state;
+        let deadline = Instant::now() + timeout;
+        let mut state = lock.lock().expect("blocking input lock");
+        while !state.waiting_for_more {
+            let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+                panic!("runtime reader did not block for more input before timeout");
+            };
+            let (next, wait) = cv
+                .wait_timeout(state, remaining)
+                .expect("wait for input read");
+            state = next;
+            if wait.timed_out() && !state.waiting_for_more {
+                panic!("runtime reader did not block for more input before timeout");
+            }
+        }
+    }
+}
+
+impl Read for BlockingInput {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let (lock, cv) = &*self.state;
+        let mut state = lock.lock().expect("blocking input lock");
+        loop {
+            if !state.bytes.is_empty() {
+                let mut read = 0;
+                while read < buf.len() {
+                    let Some(byte) = state.bytes.pop_front() else {
+                        break;
+                    };
+                    buf[read] = byte;
+                    read += 1;
+                }
+                state.waiting_for_more = false;
+                return Ok(read);
+            }
+            if state.closed {
+                return Ok(0);
+            }
+            state.waiting_for_more = true;
+            cv.notify_all();
+            state = cv.wait(state).expect("wait for blocking input");
+        }
     }
 }
 
@@ -341,6 +425,112 @@ fn prompt_workers_start_concurrently() {
         .filter(|frame| matches!(input_event(frame), Some(Event::ProviderResponseFinished(_))))
         .count();
     assert_eq!(finished_count, 2);
+}
+
+/// Ensures worker output wakes the provider loop without waiting for worker
+/// completion.
+#[test]
+fn worker_output_wakes_loop_before_prompt_done() {
+    // Regression coverage for the event-driven provider loop: a worker output
+    // frame must wake the main loop as soon as it is enqueued. If the loop only
+    // woke for `PromptDone`, this test would time out while the fake worker is
+    // deliberately blocked after flushing its output.
+    let input = BlockingInput::default();
+    input.push(encode_frames(&[live_event(
+        11,
+        Event::AgentPromptCreated(prompt()),
+    )]));
+    let input_control = input.clone();
+    let executor_started = Arc::new((Mutex::new(false), Condvar::new()));
+    let executor_emit = Arc::new((Mutex::new(false), Condvar::new()));
+    let release_worker = Arc::new((Mutex::new(false), Condvar::new()));
+    let executor_started_worker = executor_started.clone();
+    let executor_emit_worker = executor_emit.clone();
+    let executor_release = release_worker.clone();
+    let executor: PromptExecutor = Arc::new(move |execution| {
+        let (lock, cv) = &*executor_started_worker;
+        *lock.lock().expect("started lock") = true;
+        cv.notify_all();
+
+        let (lock, cv) = &*executor_emit_worker;
+        let mut emit = lock.lock().expect("emit lock");
+        while !*emit {
+            emit = cv.wait(emit).expect("wait to emit");
+        }
+        drop(emit);
+
+        let mut writer = execution.frame_writer();
+        write_prompt_submitted(
+            &execution.job.agent_prompt_id,
+            &execution.job.prompt.originator,
+            &mut writer,
+        )
+        .expect("submitted");
+        writer.flush().expect("flush submitted");
+
+        let (lock, cv) = &*executor_release;
+        let mut released = lock.lock().expect("release lock");
+        while !*released {
+            released = cv.wait(released).expect("wait for release");
+        }
+    });
+
+    let profiles = profiles_with_chatgpt_auth(chatgpt_auth());
+    let prompt_profiles = profiles.clone();
+    let writer = SharedWriter::default();
+    let output = writer.clone();
+    let (result_tx, result_rx) = mpsc::channel();
+    let runner = thread::spawn(move || {
+        let result = run_inner_with_prompt_executor(
+            input,
+            writer,
+            profiles,
+            move || prompt_profiles.clone(),
+            1,
+            executor,
+        )
+        .map_err(|error| error.to_string());
+        let _ = result_tx.send(result);
+    });
+
+    let (lock, cv) = &*executor_started;
+    let mut started = lock.lock().expect("started lock");
+    while !*started {
+        started = cv.wait(started).expect("wait for worker start");
+    }
+    drop(started);
+    input_control.wait_for_reader_waiting(Duration::from_secs(1));
+    thread::sleep(Duration::from_millis(25));
+
+    let (lock, cv) = &*executor_emit;
+    *lock.lock().expect("emit lock") = true;
+    cv.notify_all();
+
+    let deadline = Instant::now() + Duration::from_secs(1);
+    loop {
+        let frames = decode_frames(&output.bytes());
+        if frames
+            .iter()
+            .any(|frame| matches!(input_event(frame), Some(Event::ProviderPromptSubmitted(_))))
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "worker output did not wake provider loop before PromptDone; frames: {frames:?}"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+
+    let (lock, cv) = &*release_worker;
+    *lock.lock().expect("release lock") = true;
+    cv.notify_all();
+    input_control.close();
+    result_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("provider runner result before timeout")
+        .expect("run provider extension");
+    runner.join().expect("provider runner thread");
 }
 
 /// Replayed prompt creation is historical state and must not repeat provider

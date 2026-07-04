@@ -36,7 +36,11 @@ and then `Ready`. Direct `agent.prompt.created` deliveries are handled as routed
 live provider events without adding a subscription, so prompt execution does not
 request replay catch-up. Worker-produced provider progress/result frames return
 to the main provider loop as typed protocol messages and are serialized through
-the normal tau-client writer path.
+the normal tau-client writer path. The worker side channel is event-driven:
+each worker message must be enqueued before calling `ManualRuntimeWaker::wake`.
+Wakes are coalesced and payload-free, so the main loop must drain harness input
+and worker messages until both are empty before blocking in
+`ManualExtensionRuntime::wait_for_wake`.
 
 Cancellation state is shared between the event loop and workers. Targeted
 cancels remove queued prompts immediately and abort retry sleeps for matching

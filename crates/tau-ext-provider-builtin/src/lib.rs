@@ -18,7 +18,8 @@ use dialoguer::Input;
 use serde::{Deserialize, Serialize};
 use tau_client::{
     ClientError, ClientHandle, ClientResult, DispatchOutcome, ExtensionBuilder,
-    ManualExtensionRuntime, ManualRuntimeInput, RawEventContext, TauExtension, TauExtensionRunner,
+    ManualExtensionRuntime, ManualRuntimePoll, ManualRuntimeWaker, RawEventContext, TauExtension,
+    TauExtensionRunner,
 };
 use tau_proto::{
     ClientKind, ContextItem, Event, EventName, HarnessInputMessage, HarnessInputReader, ModelId,
@@ -504,6 +505,7 @@ where
         prompt_executor,
         worker_tx,
         worker_rx,
+        worker_waker: None,
         chatgpt_runtime: Arc::new(ChatGptRuntime::new()),
         cancellation: Arc::new(CancellationState::default()),
         prompt_queue: VecDeque::new(),
@@ -511,8 +513,10 @@ where
         active_prompts: 0,
         input_closed: false,
     };
-    let runtime = TauExtensionRunner::new(ProviderExtension::<F>::new(startup_profiles))
+    let mut runtime = TauExtensionRunner::new(ProviderExtension::<F>::new(startup_profiles))
         .start_manual_loop(reader, writer, runtime)?;
+    let worker_waker = runtime.waker();
+    runtime.state_mut().set_worker_waker(worker_waker);
     run_provider_loop(runtime)
 }
 
@@ -600,45 +604,44 @@ where
             return Ok(());
         }
 
-        match next_provider_input(&mut runtime) {
-            Ok(ManualRuntimeInput::Message(frame)) => match runtime.dispatch_one(frame)? {
-                DispatchOutcome::Continue => {}
-                DispatchOutcome::Disconnect(_) => {
-                    runtime.state_mut().cancellation.shutdown();
-                    let _state = runtime.finish_detached();
-                    return Ok(());
+        let mut handled_input = false;
+        if !runtime.state().input_closed {
+            loop {
+                match runtime.try_recv() {
+                    Ok(ManualRuntimePoll::Message(frame)) => {
+                        handled_input = true;
+                        match runtime.dispatch_one(frame)? {
+                            DispatchOutcome::Continue => {}
+                            DispatchOutcome::Disconnect(_) => {
+                                runtime.state_mut().cancellation.shutdown();
+                                let _state = runtime.finish_detached();
+                                return Ok(());
+                            }
+                            DispatchOutcome::StopRequested => {
+                                runtime.finish()?;
+                                return Ok(());
+                            }
+                        }
+                    }
+                    Ok(ManualRuntimePoll::InputClosed) => {
+                        handled_input = true;
+                        runtime.state_mut().input_closed = true;
+                        break;
+                    }
+                    Ok(ManualRuntimePoll::Empty) => break,
+                    Err(error) => {
+                        handled_input = true;
+                        tracing::warn!(target: LOG_TARGET, "provider input reader failed: {error}");
+                        runtime.state_mut().input_closed = true;
+                        break;
+                    }
                 }
-                DispatchOutcome::StopRequested => {
-                    runtime.finish()?;
-                    return Ok(());
-                }
-            },
-            Ok(ManualRuntimeInput::Timeout) => {}
-            Ok(ManualRuntimeInput::InputClosed) => {
-                runtime.state_mut().input_closed = true;
-            }
-            Err(error) => {
-                tracing::warn!(target: LOG_TARGET, "provider input reader failed: {error}");
-                runtime.state_mut().input_closed = true;
             }
         }
-    }
-}
 
-fn next_provider_input<F>(
-    runtime: &mut ManualExtensionRuntime<ProviderRuntime<F>>,
-) -> ClientResult<ManualRuntimeInput>
-where
-    F: FnMut() -> BuiltinProviderProfiles + 'static,
-{
-    if runtime.state().input_closed {
-        thread::sleep(Duration::from_millis(10));
-        return Ok(ManualRuntimeInput::Timeout);
-    }
-    if runtime.state().active_prompts == 0 && runtime.state().prompt_queue.is_empty() {
-        runtime.recv()
-    } else {
-        runtime.recv_timeout(Duration::from_millis(10))
+        if !handled_input {
+            runtime.wait_for_wake();
+        }
     }
 }
 
@@ -654,6 +657,8 @@ struct ProviderRuntime<F> {
     worker_tx: Sender<WorkerMessage>,
     /// Receiver used by the runtime loop to drain worker output.
     worker_rx: Receiver<WorkerMessage>,
+    /// Wake handle signaled after workers enqueue output or completion.
+    worker_waker: Option<ManualRuntimeWaker>,
     /// Shared ChatGPT backend runtime for prewarm and prompt execution.
     chatgpt_runtime: Arc<ChatGptRuntime>,
     /// Cooperative cancellation state shared with prompt workers.
@@ -672,14 +677,13 @@ impl<F> ProviderRuntime<F>
 where
     F: FnMut() -> BuiltinProviderProfiles + 'static,
 {
+    fn set_worker_waker(&mut self, waker: ManualRuntimeWaker) {
+        self.worker_waker = Some(waker);
+    }
+
     fn drain_workers_and_start_prompts(&mut self, handle: &ClientHandle) -> ClientResult<()> {
         drain_worker_messages(&self.worker_rx, handle, &mut self.active_prompts)?;
-        let prompt_worker_context = PromptWorkerContext {
-            worker_tx: &self.worker_tx,
-            prompt_executor: &self.prompt_executor,
-            cancellation: &self.cancellation,
-            chatgpt_runtime: &self.chatgpt_runtime,
-        };
+        let prompt_worker_context = self.prompt_worker_context();
         start_queued_prompts(
             &mut self.prompt_queue,
             &mut self.active_prompts,
@@ -786,12 +790,7 @@ where
             self.prompt_queue.push_back(job);
             return;
         }
-        let prompt_worker_context = PromptWorkerContext {
-            worker_tx: &self.worker_tx,
-            prompt_executor: &self.prompt_executor,
-            cancellation: &self.cancellation,
-            chatgpt_runtime: &self.chatgpt_runtime,
-        };
+        let prompt_worker_context = self.prompt_worker_context();
         start_prompt_job(job, &mut self.active_prompts, &prompt_worker_context);
     }
 
@@ -806,6 +805,20 @@ where
         };
         self.cancellation.cancel(apid.clone());
         finish_queued_canceled(&apid, &mut self.prompt_queue, handle)
+    }
+
+    fn prompt_worker_context(&self) -> PromptWorkerContext {
+        PromptWorkerContext {
+            worker_tx: self.worker_tx.clone(),
+            worker_waker: self
+                .worker_waker
+                .as_ref()
+                .expect("provider runtime worker waker is installed before dispatch")
+                .clone(),
+            prompt_executor: self.prompt_executor.clone(),
+            cancellation: self.cancellation.clone(),
+            chatgpt_runtime: self.chatgpt_runtime.clone(),
+        }
     }
 }
 
@@ -830,21 +843,24 @@ enum PromptBackend {
 struct PromptExecution {
     job: PromptJob,
     output_tx: Sender<WorkerMessage>,
+    output_waker: ManualRuntimeWaker,
     cancellation: Arc<CancellationState>,
     chatgpt_runtime: Arc<ChatGptRuntime>,
 }
 
-struct PromptWorkerContext<'a> {
-    worker_tx: &'a Sender<WorkerMessage>,
-    prompt_executor: &'a PromptExecutor,
-    cancellation: &'a Arc<CancellationState>,
-    chatgpt_runtime: &'a Arc<ChatGptRuntime>,
+struct PromptWorkerContext {
+    worker_tx: Sender<WorkerMessage>,
+    worker_waker: ManualRuntimeWaker,
+    prompt_executor: PromptExecutor,
+    cancellation: Arc<CancellationState>,
+    chatgpt_runtime: Arc<ChatGptRuntime>,
 }
 
 impl PromptExecution {
     fn frame_writer(&self) -> PeerOutputWriter<BufWriter<HarnessInputMessageWrite>> {
         PeerOutputWriter::new(BufWriter::new(HarnessInputMessageWrite::worker(
             self.output_tx.clone(),
+            self.output_waker.clone(),
         )))
     }
 }
@@ -862,7 +878,12 @@ enum HarnessInputMessageTarget {
     /// Synchronous output path used by main-loop helper code.
     Handle(ClientHandle),
     /// Worker-to-main-loop path used by prompt workers.
-    Worker(Sender<WorkerMessage>),
+    Worker {
+        /// Channel that carries decoded worker messages to the main loop.
+        tx: Sender<WorkerMessage>,
+        /// Wake handle signaled after the worker message is queued.
+        waker: ManualRuntimeWaker,
+    },
 }
 
 /// `Write` adapter that preserves existing `PeerOutputWriter` call sites while
@@ -886,9 +907,9 @@ impl HarnessInputMessageWrite {
         }
     }
 
-    fn worker(tx: Sender<WorkerMessage>) -> Self {
+    fn worker(tx: Sender<WorkerMessage>, waker: ManualRuntimeWaker) -> Self {
         Self {
-            target: HarnessInputMessageTarget::Worker(tx),
+            target: HarnessInputMessageTarget::Worker { tx, waker },
             buf: Vec::new(),
         }
     }
@@ -898,9 +919,11 @@ impl HarnessInputMessageWrite {
             HarnessInputMessageTarget::Handle(handle) => handle
                 .send(message)
                 .map_err(|error| std::io::Error::new(std::io::ErrorKind::BrokenPipe, error)),
-            HarnessInputMessageTarget::Worker(tx) => tx
-                .send(WorkerMessage::Output(message))
-                .map_err(|_| std::io::Error::new(std::io::ErrorKind::BrokenPipe, "writer closed")),
+            HarnessInputMessageTarget::Worker { tx, waker } => {
+                send_worker_message(tx, waker, WorkerMessage::Output(message)).map_err(|_| {
+                    std::io::Error::new(std::io::ErrorKind::BrokenPipe, "writer closed")
+                })
+            }
         }
     }
 }
@@ -1057,27 +1080,42 @@ fn production_prompt_executor() -> PromptExecutor {
     })
 }
 
-fn start_prompt_job(job: PromptJob, active_prompts: &mut usize, context: &PromptWorkerContext<'_>) {
+fn start_prompt_job(job: PromptJob, active_prompts: &mut usize, context: &PromptWorkerContext) {
     *active_prompts += 1;
     let execution = PromptExecution {
         job,
         output_tx: context.worker_tx.clone(),
+        output_waker: context.worker_waker.clone(),
         cancellation: context.cancellation.clone(),
         chatgpt_runtime: context.chatgpt_runtime.clone(),
     };
     let executor = context.prompt_executor.clone();
     let done_tx = context.worker_tx.clone();
+    let done_waker = context.worker_waker.clone();
     thread::spawn(move || {
         executor(execution);
-        let _ = done_tx.send(WorkerMessage::PromptDone);
+        let _ = send_worker_message(&done_tx, &done_waker, WorkerMessage::PromptDone);
     });
+}
+
+fn send_worker_message(
+    tx: &Sender<WorkerMessage>,
+    waker: &ManualRuntimeWaker,
+    message: WorkerMessage,
+) -> Result<(), ()> {
+    // All worker-to-loop messages must be enqueued through this helper so the
+    // main loop can rely on enqueue-before-wake ordering before blocking in
+    // `ManualExtensionRuntime::wait_for_wake`.
+    tx.send(message).map_err(|_| ())?;
+    waker.wake();
+    Ok(())
 }
 
 fn start_queued_prompts(
     prompt_queue: &mut VecDeque<PromptJob>,
     active_prompts: &mut usize,
     prompt_concurrency_limit: usize,
-    context: &PromptWorkerContext<'_>,
+    context: &PromptWorkerContext,
     handle: &ClientHandle,
 ) -> ClientResult<()> {
     while *active_prompts < prompt_concurrency_limit {
