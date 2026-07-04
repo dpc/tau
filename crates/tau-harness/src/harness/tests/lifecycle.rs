@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::io::ErrorKind;
 
 use super::*;
 use crate::agent::PendingPrompt;
@@ -176,6 +177,7 @@ fn connect_handshaking_extension(
             secrets: BTreeMap::new(),
             restart_attempt: 0,
             state: ExtensionState::Handshaking,
+            protocol_io: tau_client::ProtocolIoMeter::default(),
         },
     );
     h.extensions.order.push(connection_id);
@@ -184,6 +186,293 @@ fn connect_handshaking_extension(
 
 fn connect_handshaking_tool(h: &mut Harness, conn_id: &str) -> Arc<Mutex<Vec<RoutedFrame>>> {
     connect_handshaking_extension(h, conn_id, tau_proto::ClientKind::Tool)
+}
+
+fn insert_extension_entry_with_meter(
+    h: &mut Harness,
+    connection_id: &str,
+    name: &str,
+    state: ExtensionState,
+    protocol_io: tau_client::ProtocolIoMeter,
+) {
+    let connection_id: tau_proto::ConnectionId = connection_id.into();
+    h.extensions.entries.insert(
+        connection_id.clone(),
+        ExtensionEntry {
+            name: name.to_owned(),
+            instance_id: 42.into(),
+            connection_id: connection_id.clone(),
+            kind: tau_proto::ClientKind::Tool,
+            require: true,
+            respawn_allowed: true,
+            pid: None,
+            in_process_thread: None,
+            supervised_config: None,
+            secrets: BTreeMap::new(),
+            restart_attempt: 0,
+            state,
+            protocol_io,
+        },
+    );
+    h.extensions.order.push(connection_id);
+}
+
+fn first_notice(sink: &Arc<Mutex<Vec<RoutedFrame>>>) -> tau_proto::HarnessNotice {
+    let frames = sink.lock().expect("sink");
+    for routed in frames.iter() {
+        if let Some(Event::HarnessNotice(notice)) = peel_inner_event(&routed.frame) {
+            return notice.clone();
+        }
+    }
+    panic!("missing harness notice in frames: {frames:?}");
+}
+
+fn connect_socket_ui(
+    h: &mut Harness,
+) -> (
+    tau_proto::ConnectionId,
+    HarnessOutputReader<BufReader<UnixStream>>,
+) {
+    let (server_end, client_end) = UnixStream::pair().expect("pair");
+    client_end
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .expect("read timeout");
+    let client_id = h.accept_client(server_end).expect("accept client");
+    (
+        client_id,
+        HarnessOutputReader::new(BufReader::new(client_end)),
+    )
+}
+
+fn read_notice<R: std::io::Read>(reader: &mut HarnessOutputReader<R>) -> tau_proto::HarnessNotice {
+    let message = reader
+        .read_message()
+        .expect("read notice")
+        .expect("notice frame");
+    let Some(Event::HarnessNotice(notice)) = peel_inner_event(&message) else {
+        panic!("expected harness notice, got {message:?}");
+    };
+    notice.clone()
+}
+
+fn assert_no_message<R: std::io::Read>(reader: &mut HarnessOutputReader<R>) {
+    match reader.read_message() {
+        Err(tau_proto::DecodeError::Io(error)) if error.kind() == ErrorKind::WouldBlock => {}
+        Ok(None) => {}
+        other => panic!("unexpected routed frame: {other:?}"),
+    }
+}
+
+/// A UI debug event-stats request should receive a directed, non-persisted
+/// notice for the requested live extension only; other UIs must not see the
+/// response merely because they are connected.
+#[test]
+fn debug_event_stats_request_is_directed_to_requesting_ui() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = quiet_provider_harness(&sp).expect("harness");
+    let (requesting_ui_id, mut requesting_ui) = connect_socket_ui(&mut h);
+    let (_other_ui_id, mut other_ui) = connect_socket_ui(&mut h);
+    let meter = tau_client::ProtocolIoMeter::default();
+    meter.record_bytes(
+        tau_client::ProtocolIoDirection::Uplink,
+        "tool.started".to_owned(),
+        Some(42),
+    );
+    insert_extension_entry_with_meter(
+        &mut h,
+        "ext-shell",
+        "std-shell",
+        ExtensionState::Ready,
+        meter,
+    );
+
+    h.handle_client_event_inner(
+        requesting_ui_id.as_str(),
+        Event::UiDebugEventStatsRequest(tau_proto::UiDebugEventStatsRequest {
+            extension_name: "std-shell".to_owned(),
+        }),
+    )
+    .expect("request stats");
+
+    let notice = read_notice(&mut requesting_ui);
+    assert!(notice.always_show);
+    assert!(
+        notice
+            .message
+            .contains("Extension `std-shell` protocol I/O cumulative stats")
+    );
+    assert!(
+        notice
+            .message
+            .contains("extension -> harness: 42B in 1 frame(s)")
+    );
+    assert!(notice.message.contains("tool.started: 42B count=1"));
+    assert_no_message(&mut other_ui);
+}
+
+/// Extension input frames should be counted through the normal harness message
+/// intake path before the debug command reads the live extension's meter.
+#[test]
+fn debug_event_stats_request_reports_recorded_extension_input() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = quiet_provider_harness(&sp).expect("harness");
+    let (ui_id, mut ui) = connect_socket_ui(&mut h);
+    connect_handshaking_tool(&mut h, "std-shell");
+
+    h.handle_extension_event(
+        "std-shell",
+        TestProtocolItem::Message(TestMessage::Hello(tau_proto::Hello {
+            protocol_version: tau_proto::PROTOCOL_VERSION,
+            client_name: "std-shell".into(),
+            client_kind: tau_proto::ClientKind::Tool,
+        })),
+    )
+    .expect("extension hello");
+    h.handle_client_event_inner(
+        ui_id.as_str(),
+        Event::UiDebugEventStatsRequest(tau_proto::UiDebugEventStatsRequest {
+            extension_name: "std-shell".to_owned(),
+        }),
+    )
+    .expect("request stats");
+
+    let notice = read_notice(&mut ui);
+    assert!(notice.always_show);
+    assert!(notice.message.contains("message.hello:"));
+    assert!(notice.message.contains("extension -> harness:"));
+}
+
+/// Non-socket test/embedded connections are not authorized for extension
+/// protocol stats because those counters expose privileged operational
+/// metadata outside normal subscription visibility.
+#[test]
+fn debug_event_stats_request_rejects_unauthorized_ui_origin() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = quiet_provider_harness(&sp).expect("harness");
+    let ui = connect_test_client(&mut h, "ui", tau_proto::ClientKind::Ui);
+    let meter = tau_client::ProtocolIoMeter::default();
+    meter.record_bytes(
+        tau_client::ProtocolIoDirection::Uplink,
+        "secret.extension_event".to_owned(),
+        Some(128),
+    );
+    insert_extension_entry_with_meter(
+        &mut h,
+        "ext-secret",
+        "secret-ext",
+        ExtensionState::Ready,
+        meter,
+    );
+
+    h.handle_client_event_inner(
+        "ui",
+        Event::UiDebugEventStatsRequest(tau_proto::UiDebugEventStatsRequest {
+            extension_name: "secret-ext".to_owned(),
+        }),
+    )
+    .expect("request stats");
+
+    let notice = first_notice(&ui);
+    assert!(notice.always_show);
+    assert!(
+        notice
+            .message
+            .contains("only available to local socket clients")
+    );
+    assert!(!notice.message.contains("secret.extension_event"));
+}
+
+/// A disconnected extension entry should not satisfy a debug stats request when
+/// a newer live entry with the same configured name exists; this prevents
+/// respawn/disconnect churn from reporting stale meters as current.
+#[test]
+fn debug_event_stats_request_ignores_disconnected_extension_entry() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = quiet_provider_harness(&sp).expect("harness");
+    let (ui_id, mut ui) = connect_socket_ui(&mut h);
+    let stale_meter = tau_client::ProtocolIoMeter::default();
+    stale_meter.record_bytes(
+        tau_client::ProtocolIoDirection::Uplink,
+        "stale.event".to_owned(),
+        Some(999),
+    );
+    let live_meter = tau_client::ProtocolIoMeter::default();
+    live_meter.record_bytes(
+        tau_client::ProtocolIoDirection::Downlink,
+        "live.event".to_owned(),
+        Some(64),
+    );
+    insert_extension_entry_with_meter(
+        &mut h,
+        "old-shell",
+        "std-shell",
+        ExtensionState::Disconnected,
+        stale_meter,
+    );
+    insert_extension_entry_with_meter(
+        &mut h,
+        "new-shell",
+        "std-shell",
+        ExtensionState::Ready,
+        live_meter,
+    );
+
+    h.handle_client_event_inner(
+        ui_id.as_str(),
+        Event::UiDebugEventStatsRequest(tau_proto::UiDebugEventStatsRequest {
+            extension_name: "std-shell".to_owned(),
+        }),
+    )
+    .expect("request stats");
+
+    let notice = read_notice(&mut ui);
+    assert!(notice.always_show);
+    assert!(notice.message.contains("live.event: 64B count=1"));
+    assert!(!notice.message.contains("stale.event"));
+}
+
+/// Ambiguous live configured extension names should produce a directed error
+/// instead of choosing one meter arbitrarily.
+#[test]
+fn debug_event_stats_request_rejects_ambiguous_live_extension_name() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = quiet_provider_harness(&sp).expect("harness");
+    let (ui_id, mut ui) = connect_socket_ui(&mut h);
+    insert_extension_entry_with_meter(
+        &mut h,
+        "std-shell-a",
+        "std-shell",
+        ExtensionState::Ready,
+        tau_client::ProtocolIoMeter::default(),
+    );
+    insert_extension_entry_with_meter(
+        &mut h,
+        "std-shell-b",
+        "std-shell",
+        ExtensionState::Ready,
+        tau_client::ProtocolIoMeter::default(),
+    );
+
+    h.handle_client_event_inner(
+        ui_id.as_str(),
+        Event::UiDebugEventStatsRequest(tau_proto::UiDebugEventStatsRequest {
+            extension_name: "std-shell".to_owned(),
+        }),
+    )
+    .expect("request stats");
+
+    let notice = read_notice(&mut ui);
+    assert!(notice.always_show);
+    assert!(
+        notice
+            .message
+            .contains("extension name `std-shell` matched 2 live connections")
+    );
 }
 
 fn sink_has_tool_invoke(sink: &Arc<Mutex<Vec<RoutedFrame>>>, call_id: &str) -> bool {
@@ -2524,6 +2813,7 @@ fn extension_connect_command_installs_state_before_reader_ack() {
             respawn_allowed: true,
             restart_attempt: 0,
             state: ExtensionState::Spawning,
+            protocol_io: spawned.protocol_io,
         },
         origin: ConnectionOrigin::Supervised,
         writer_tx: spawned.writer_tx,

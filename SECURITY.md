@@ -354,6 +354,14 @@ Future event kinds that carry agent prompts, provider output, tool payloads, or
 extension-observed content must update the durable debug-log suppression rules
 and regression tests before they are emitted for ephemeral agents.
 
+Protocol-I/O debug counters are diagnostic metadata. They may reveal configured
+extension names, message/event names, activity rates, frame counts, and encoded
+byte sizes even when the requesting UI did not subscribe to the underlying
+events. Per-extension stats therefore require the local socket control path, are
+returned only as a directed non-persisted notice, and must remain bounded by
+key-cardinality caps with overflow buckets so a noisy peer cannot grow daemon
+memory by emitting many unique custom event names.
+
 ## Reporting guidance
 
 When reporting a vulnerability, include:

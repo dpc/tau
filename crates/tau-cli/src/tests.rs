@@ -657,6 +657,7 @@ fn local_slash_commands_are_identified_for_history_rendering() {
     assert!(is_local_slash_command("/set show-tools compact"));
     assert!(is_local_slash_command("/theme dpc"));
     assert!(is_local_slash_command("/debug-show-ui-event-stats"));
+    assert!(is_local_slash_command("/debug-show-event-stats std-shell"));
     assert!(is_local_slash_command("/quit"));
     assert!(is_local_slash_command("/agent"));
     assert!(is_local_slash_command("/agent switch worker-1"));

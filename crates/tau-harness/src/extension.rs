@@ -8,6 +8,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::thread::{self, JoinHandle};
 
+use tau_client::ProtocolIoMeter;
 use tau_config::settings::InvalidExtensionName;
 use tau_core::ConnectionOrigin;
 use tau_proto::ClientKind;
@@ -62,6 +63,8 @@ pub(crate) struct ExtensionEntry {
     /// Current lifecycle state. See `extensions_all_ready` for how this
     /// gates dispatch.
     pub(crate) state: ExtensionState,
+    /// Protocol frame byte/count counters for this extension connection.
+    pub(crate) protocol_io: ProtocolIoMeter,
 }
 
 /// Private one-shot ack that lets an extension reader start forwarding frames
@@ -93,6 +96,8 @@ pub(crate) struct InProcessSpawn {
     pub(crate) thread: JoinHandle<Result<(), String>>,
     /// Ack that releases the reader after state installation completes.
     pub(crate) initialized_ack: ExtensionInitializedAck,
+    /// Protocol frame byte/count counters shared by this extension connection.
+    pub(crate) protocol_io: ProtocolIoMeter,
 }
 
 /// Result of spawning a supervised extension transport.
@@ -105,6 +110,8 @@ pub(crate) struct SupervisedSpawn {
     pub(crate) child_pid: u32,
     /// Ack that releases the reader after state installation completes.
     pub(crate) initialized_ack: ExtensionInitializedAck,
+    /// Protocol frame byte/count counters shared by this extension connection.
+    pub(crate) protocol_io: ProtocolIoMeter,
 }
 
 static NEXT_EXTENSION_CONNECTION_ID: AtomicU64 = AtomicU64::new(0);
@@ -130,7 +137,12 @@ where
     let (harness_read, ext_write) = UnixStream::pair()?; // extension → harness
 
     let connection_id = next_extension_connection_id();
-    let writer_tx = spawn_writer_thread(harness_write, WriterShutdown::CloseStream);
+    let protocol_io = ProtocolIoMeter::default();
+    let writer_tx = spawn_writer_thread(
+        harness_write,
+        WriterShutdown::CloseStream,
+        Some(protocol_io.clone()),
+    );
 
     let (initialized_tx, initialized_rx) = mpsc::channel();
     spawn_reader_thread_after_initialized(
@@ -146,6 +158,7 @@ where
         writer_tx,
         thread,
         initialized_ack: initialized_tx,
+        protocol_io,
     })
 }
 
@@ -227,7 +240,12 @@ pub(crate) fn spawn_supervised(
     }
 
     let connection_id = next_extension_connection_id();
-    let writer_tx = spawn_writer_thread(stdin, WriterShutdown::KillChild(child));
+    let protocol_io = ProtocolIoMeter::default();
+    let writer_tx = spawn_writer_thread(
+        stdin,
+        WriterShutdown::KillChild(child),
+        Some(protocol_io.clone()),
+    );
 
     let (initialized_tx, initialized_rx) = mpsc::channel();
     spawn_reader_thread_after_initialized(
@@ -242,6 +260,7 @@ pub(crate) fn spawn_supervised(
         writer_tx,
         child_pid,
         initialized_ack: initialized_tx,
+        protocol_io,
     })
 }
 

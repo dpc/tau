@@ -23,6 +23,7 @@ mod handler;
 mod intercept_decision;
 mod logging;
 mod manual_runtime;
+mod protocol_io;
 mod runner;
 mod writer_thread;
 
@@ -40,6 +41,13 @@ pub use logging::{DEFAULT_FILTER, ENV_VAR, init_logging, init_logging_for};
 pub use manual_runtime::{
     DispatchOutcome, ExtensionDataClient, ExtensionDataRpcError, ManualExtensionRuntime,
     ManualRuntimeInput,
+};
+pub use protocol_io::{
+    PROTOCOL_IO_MAX_KEYS_PER_DIRECTION, PROTOCOL_IO_OVERFLOW_KEY, ProtocolIoCumulativeStats,
+    ProtocolIoDirection, ProtocolIoFrameStats, ProtocolIoMeter, ProtocolIoRollingStats,
+    ProtocolIoSample, ProtocolIoTracker, format_protocol_io_breakdown, format_protocol_io_bytes,
+    format_protocol_io_cumulative_stats, harness_input_message_name, input_message_key,
+    output_message_key, sorted_protocol_io_frame_stats, total_protocol_io_frame_stats,
 };
 pub use runner::TauExtensionRunner;
 

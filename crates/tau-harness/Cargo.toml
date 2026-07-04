@@ -36,6 +36,7 @@ rand.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tau-actions.workspace = true
+tau-client.workspace = true
 tau-config.workspace = true
 tau-core.workspace = true
 tau-ext-shell = { workspace = true, optional = true, features = ["echo-agent"] }

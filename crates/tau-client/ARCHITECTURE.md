@@ -29,6 +29,16 @@ for background workers that must not block the protocol reader on output
 backpressure; those helpers report only queue-closed failures to the caller, then
 let the writer thread own any later encode/flush error.
 
+`ProtocolIoMeter` is a protocol-mechanical frame counter shared by UI and
+extension transports. It groups already-decoded/encoded frames by delivered or
+emitted event name, or by `message.*` for non-event protocol frames, and records
+encoded byte counts. It does not subscribe to events, affect replay/live
+filtering, own lifecycle policy, or call back into the harness. The harness may
+depend on this protocol-I/O utility surface without depending on tau-client
+runner or extension lifecycle abstractions. Per-direction keys are capped and
+overflow into an `other` bucket so extension-owned custom event names cannot grow
+the harness's debug accounting state without bound.
+
 Extensions that intentionally leave background workers running after disconnect
 can opt into a detached-writer run mode. That mode preserves startup and handler
 error reporting but does not join the writer at shutdown, so harness

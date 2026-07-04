@@ -372,6 +372,9 @@ intent.
   their corresponding lists, including with empty lists.
 - **`ui.detach_request`** — UI is detaching but wants the daemon to keep
   running so a later `tau --attach` can reconnect.
+- **`ui.debug_event_stats_request`** — UI debug request for one extension's
+  protocol frame I/O counters. The harness consumes it directly and replies only
+  to the requesting UI; it is not a durable session fact.
 - **`ui.shell_command`** — User submitted a `!` (in-context) or `!!`
   (UI-only) shell command. Carries command id, command, session id,
   `include_in_context` flag.

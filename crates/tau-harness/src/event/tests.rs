@@ -78,7 +78,7 @@ fn writer_failure_still_reaps_supervised_child() {
         .spawn()
         .expect("spawn child");
     let pid = child.id();
-    let tx = spawn_writer_thread(FailingWriter, WriterShutdown::KillChild(child));
+    let tx = spawn_writer_thread(FailingWriter, WriterShutdown::KillChild(child), None);
 
     tx.send(WriterCommand::Message(
         tau_proto::HarnessOutputMessage::Disconnect(tau_proto::Disconnect { reason: None }),
@@ -95,4 +95,32 @@ fn writer_failure_still_reaps_supervised_child() {
     }
 
     panic!("supervised child was not reaped after writer failure");
+}
+
+/// The writer thread should count only output frames it successfully encodes
+/// and flushes, so per-extension protocol stats reflect delivered harness
+/// traffic instead of merely queued frames.
+#[test]
+fn writer_records_protocol_io_after_successful_flush() {
+    let (reader_stream, writer_stream) = UnixStream::pair().expect("stream pair");
+    let meter = tau_client::ProtocolIoMeter::default();
+    let tx = spawn_writer_thread(
+        writer_stream,
+        WriterShutdown::CloseStream,
+        Some(meter.clone()),
+    );
+    tx.send(WriterCommand::Message(
+        tau_proto::HarnessOutputMessage::deliver(tau_proto::Event::TermBell(
+            tau_proto::TermBell {},
+        )),
+    ))
+    .expect("queue output");
+
+    let mut reader = tau_proto::HarnessOutputReader::new(BufReader::new(reader_stream));
+    let _ = reader.read_message().expect("read output");
+
+    let stats = meter.cumulative_stats();
+    let event_stats = stats.downlink.get("term.bell").expect("term bell stats");
+    assert_eq!(event_stats.count, 1);
+    assert!(0 < event_stats.bytes);
 }

@@ -92,6 +92,12 @@ or the event default. Tool lifecycle/terminal facts and harness-owned lifecycle,
 membership, transcript, and status facts must not be accepted through client
 fallback.
 
+UI debug/status commands that inspect local transport counters are direct live
+responses to the requesting UI, not ordinary publish/replay traffic. Extension
+protocol-I/O stats are exposed only through the `ui.debug_event_stats_request`
+control path, answered with a directed non-persisted notice, and must not add
+subscriptions or synthetic replay events.
+
 ## Extension boundary
 
 Extensions are less-trusted peers connected over the Tau protocol. They may

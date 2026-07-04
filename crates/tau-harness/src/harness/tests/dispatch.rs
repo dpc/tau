@@ -7566,6 +7566,7 @@ fn start_agent_request_conversation_id_is_public_agent_id() {
                 secrets: std::collections::BTreeMap::new(),
                 restart_attempt: 0,
                 state: crate::extension::ExtensionState::Ready,
+                protocol_io: tau_client::ProtocolIoMeter::default(),
             },
         );
         h.extensions.order.push(connection_id);

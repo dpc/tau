@@ -658,6 +658,9 @@ fn representative_events() -> Vec<Event> {
             agent_id: agent_id("agent-1"),
             display_name: "Main".to_owned(),
         }),
+        Event::UiDebugEventStatsRequest(UiDebugEventStatsRequest {
+            extension_name: "std-shell".to_owned(),
+        }),
         Event::Osc1337SetUserVar(Osc1337SetUserVar {
             name: "tau_status".to_owned(),
             value: "ready".to_owned(),
@@ -916,6 +919,7 @@ fn expected_default_transient(event: &Event) -> bool {
             | Event::UiPromptDraft(_)
             | Event::UiFocusChanged(_)
             | Event::UiSetAgentDisplayName(_)
+            | Event::UiDebugEventStatsRequest(_)
     )
 }
 
@@ -1002,6 +1006,7 @@ fn expected_first_party_event_names() -> std::collections::BTreeSet<String> {
         "ui.cancel_prompt",
         "ui.compact_request",
         "ui.create_agent",
+        "ui.debug_event_stats_request",
         "ui.detach_request",
         "ui.focus_changed",
         "ui.navigate_tree",

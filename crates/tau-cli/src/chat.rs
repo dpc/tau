@@ -4,7 +4,7 @@
 #[cfg(test)]
 mod recorded_line_routing_tests;
 
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::HashMap;
 use std::io::{self, BufReader, BufWriter, Read, Write};
 use std::net::Shutdown;
 use std::os::unix::net::UnixStream;
@@ -29,226 +29,66 @@ use crate::ui_prompt::{
 };
 use crate::{CliError, MUTEX_POISONED, build_banner, locked, ui_logging};
 
-const UI_IO_SAMPLE_WINDOW_SECS: usize = 30;
-
-#[derive(Clone, Default)]
-struct UiIoMeter {
-    state: Arc<Mutex<UiIoState>>,
-}
-
-impl UiIoMeter {
-    fn record_uplink_frame(&self, message: &HarnessInputMessage) {
-        self.record_bytes(
-            UiIoDirection::Uplink,
-            ui_io_input_message_key(message),
-            ui_io_message_len(message),
-        );
-    }
-
-    fn record_downlink_frame(&self, message: &HarnessOutputMessage) {
-        self.record_bytes(
-            UiIoDirection::Downlink,
-            ui_io_output_message_key(message),
-            ui_io_message_len(message),
-        );
-    }
-
-    fn record_bytes(&self, direction: UiIoDirection, key: String, bytes: Option<u64>) {
-        let Some(bytes) = bytes else {
-            return;
-        };
-        let mut state = locked(&self.state);
-        let (bucket_entries, cumulative_entries): (
-            &mut BTreeMap<String, u64>,
-            &mut BTreeMap<String, UiIoEventStats>,
-        ) = match direction {
-            UiIoDirection::Uplink => {
-                let UiIoState {
-                    buckets,
-                    cumulative,
-                } = &mut *state;
-                (&mut buckets.uplink, &mut cumulative.uplink)
-            }
-            UiIoDirection::Downlink => {
-                let UiIoState {
-                    buckets,
-                    cumulative,
-                } = &mut *state;
-                (&mut buckets.downlink, &mut cumulative.downlink)
-            }
-        };
-        *bucket_entries.entry(key.clone()).or_insert(0) += bytes;
-        cumulative_entries
-            .entry(key)
-            .or_default()
-            .record_bytes(bytes);
-    }
-
-    fn take_sample(&self) -> UiIoSample {
-        let buckets = std::mem::take(&mut locked(&self.state).buckets);
-        UiIoSample::from_buckets(buckets)
-    }
-
-    fn cumulative_stats(&self) -> UiIoCumulativeStats {
-        locked(&self.state).cumulative.clone()
-    }
-}
-
-#[derive(Default)]
-struct UiIoState {
-    /// Resettable buckets drained once per second for `/set show-ui-io` status
-    /// bar rates and threshold logging.
-    buckets: UiIoBuckets,
-    /// Lifetime counters for this UI client, exposed by
-    /// `/debug-show-ui-event-stats` and reset when the client exits.
-    cumulative: UiIoCumulativeStats,
-}
-
-#[derive(Clone, Default)]
-struct UiIoBuckets {
-    uplink: BTreeMap<String, u64>,
-    downlink: BTreeMap<String, u64>,
-}
-
-/// Cumulative UI transport payload totals grouped by direction and event type.
-#[derive(Clone, Default)]
-struct UiIoCumulativeStats {
-    /// Bytes and counts for messages sent from this UI to the harness.
-    uplink: BTreeMap<String, UiIoEventStats>,
-    /// Bytes and counts for messages received by this UI from the harness.
-    downlink: BTreeMap<String, UiIoEventStats>,
-}
-
-/// Cumulative payload accounting for one UI message or delivered event type.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-struct UiIoEventStats {
-    /// Number of UI frames observed for this type.
-    count: u64,
-    /// Encoded bytes observed for this type.
-    bytes: u64,
-}
-
-impl UiIoEventStats {
-    fn record_bytes(&mut self, bytes: u64) {
-        self.count += 1;
-        self.bytes += bytes;
-    }
-}
-
-struct UiIoSample {
-    uplink_bytes: u64,
-    downlink_bytes: u64,
-    uplink_breakdown: BTreeMap<String, u64>,
-    downlink_breakdown: BTreeMap<String, u64>,
-}
-
-impl UiIoSample {
-    fn from_buckets(buckets: UiIoBuckets) -> Self {
-        Self {
-            uplink_bytes: buckets.uplink.values().sum(),
-            downlink_bytes: buckets.downlink.values().sum(),
-            uplink_breakdown: buckets.uplink,
-            downlink_breakdown: buckets.downlink,
-        }
-    }
-
-    fn status_pair(&self) -> (u64, u64) {
-        (self.uplink_bytes, self.downlink_bytes)
-    }
-
-    fn exceeds_yellow(&self) -> bool {
-        self.uplink_bytes >= crate::event_renderer::UI_IO_MEDIUM_BYTES_PER_SEC
-            || self.downlink_bytes >= crate::event_renderer::UI_IO_MEDIUM_BYTES_PER_SEC
-    }
-
-    fn exceeded_direction(&self) -> &'static str {
-        match (
-            self.uplink_bytes >= crate::event_renderer::UI_IO_MEDIUM_BYTES_PER_SEC,
-            self.downlink_bytes >= crate::event_renderer::UI_IO_MEDIUM_BYTES_PER_SEC,
-        ) {
-            (true, true) => "both",
-            (true, false) => "uplink",
-            (false, true) => "downlink",
-            (false, false) => "none",
-        }
-    }
-
-    fn log_if_yellow(&self) {
-        if !self.exceeds_yellow() {
-            return;
-        }
-        tracing::info!(
-            target: "tau_cli::ui_io",
-            direction = self.exceeded_direction(),
-            uplink_bytes = self.uplink_bytes,
-            downlink_bytes = self.downlink_bytes,
-            uplink_breakdown = %format_ui_io_breakdown(&self.uplink_breakdown),
-            downlink_breakdown = %format_ui_io_breakdown(&self.downlink_breakdown),
-            "ui io exceeded yellow threshold"
-        );
-    }
-}
-
-#[derive(Clone, Copy)]
-enum UiIoDirection {
-    Uplink,
-    Downlink,
-}
+type UiIoMeter = tau_client::ProtocolIoMeter;
+type UiIoCumulativeStats = tau_client::ProtocolIoCumulativeStats;
 
 struct UiIoTracker {
-    meter: UiIoMeter,
-    samples: VecDeque<(u64, u64)>,
-    next_sample_at: Instant,
+    inner: tau_client::ProtocolIoTracker,
 }
 
 impl UiIoTracker {
     fn new(meter: UiIoMeter) -> Self {
         Self {
-            meter,
-            samples: VecDeque::with_capacity(UI_IO_SAMPLE_WINDOW_SECS),
-            next_sample_at: Instant::now() + Duration::from_secs(1),
+            inner: tau_client::ProtocolIoTracker::new(meter),
         }
     }
 
     fn recv_timeout(&self) -> Duration {
-        self.next_sample_at
-            .saturating_duration_since(Instant::now())
+        self.inner.recv_timeout()
     }
 
     fn sample_if_due(&mut self, renderer: &mut EventRenderer) {
-        let now = Instant::now();
-        if now < self.next_sample_at {
-            return;
+        if let Some(stats) = self.inner.sample_if_due() {
+            handle_ui_io_sample(stats, renderer);
         }
-        self.sample_at(renderer, now);
     }
 
     fn sample_now(&mut self, renderer: &mut EventRenderer) {
-        self.sample_at(renderer, Instant::now());
+        let stats = self.inner.sample_now();
+        handle_ui_io_sample(stats, renderer);
     }
+}
 
-    fn sample_at(&mut self, renderer: &mut EventRenderer, now: Instant) {
-        let sample = self.meter.take_sample();
-        let status_pair = sample.status_pair();
-        sample.log_if_yellow();
+fn handle_ui_io_sample(stats: tau_client::ProtocolIoRollingStats, renderer: &mut EventRenderer) {
+    log_ui_io_sample_if_yellow(&stats.sample);
+    renderer.handle_ui_io_sample(UiIoStats {
+        uplink_max_bytes_per_sec: stats.uplink_max_bytes_per_sec,
+        downlink_max_bytes_per_sec: stats.downlink_max_bytes_per_sec,
+    });
+}
 
-        if self.samples.len() == UI_IO_SAMPLE_WINDOW_SECS {
-            self.samples.pop_front();
-        }
-        self.samples.push_back(status_pair);
-        self.next_sample_at = now + Duration::from_secs(1);
-
-        renderer.handle_ui_io_sample(self.rolling_max());
+fn log_ui_io_sample_if_yellow(sample: &tau_client::ProtocolIoSample) {
+    let uplink_yellow = sample.uplink_bytes >= crate::event_renderer::UI_IO_MEDIUM_BYTES_PER_SEC;
+    let downlink_yellow =
+        sample.downlink_bytes >= crate::event_renderer::UI_IO_MEDIUM_BYTES_PER_SEC;
+    if !uplink_yellow && !downlink_yellow {
+        return;
     }
-
-    fn rolling_max(&self) -> UiIoStats {
-        let mut stats = UiIoStats::default();
-        for &(uplink, downlink) in &self.samples {
-            stats.uplink_max_bytes_per_sec = stats.uplink_max_bytes_per_sec.max(uplink);
-            stats.downlink_max_bytes_per_sec = stats.downlink_max_bytes_per_sec.max(downlink);
-        }
-        stats
-    }
+    let direction = match (uplink_yellow, downlink_yellow) {
+        (true, true) => "both",
+        (true, false) => "uplink",
+        (false, true) => "downlink",
+        (false, false) => "none",
+    };
+    tracing::info!(
+        target: "tau_cli::ui_io",
+        direction,
+        uplink_bytes = sample.uplink_bytes,
+        downlink_bytes = sample.downlink_bytes,
+        uplink_breakdown = %tau_client::format_protocol_io_breakdown(&sample.uplink_breakdown),
+        downlink_breakdown = %tau_client::format_protocol_io_breakdown(&sample.downlink_breakdown),
+        "ui io exceeded yellow threshold"
+    );
 }
 
 struct UiWriter {
@@ -360,147 +200,14 @@ fn send_event(writer: &WriterHandle, event: &Event) -> io::Result<()> {
     send_frame(writer, &HarnessInputMessage::emit(event.clone()))
 }
 
-fn ui_io_message_len<M: serde::Serialize>(message: &M) -> Option<u64> {
-    tau_proto::encode_message_to_vec(message)
-        .ok()
-        .map(|bytes| bytes.len() as u64)
-}
-
-fn ui_io_input_message_key(message: &HarnessInputMessage) -> String {
-    if let HarnessInputMessage::Emit(emit) = message {
-        return emit.event.name().to_string();
-    }
-    format!("message.{}", ui_io_harness_input_message_name(message))
-}
-
-fn ui_io_output_message_key(message: &HarnessOutputMessage) -> String {
-    match message {
-        HarnessOutputMessage::Deliver(delivery) => delivery.event().name().to_string(),
-        HarnessOutputMessage::Disconnect(_) => "message.disconnect".to_owned(),
-        HarnessOutputMessage::Configure(_) => "message.configure".to_owned(),
-        HarnessOutputMessage::InterceptRequest(_) => "message.intercept_request".to_owned(),
-        HarnessOutputMessage::AgentPromptCreatedResult(_) => {
-            "message.agent_prompt_created_result".to_owned()
-        }
-        HarnessOutputMessage::RenderedSystemPromptResult(_) => {
-            "message.rendered_system_prompt_result".to_owned()
-        }
-        HarnessOutputMessage::RenderedPromptResult(_) => {
-            "message.rendered_prompt_result".to_owned()
-        }
-        HarnessOutputMessage::RenderedToolDefinitionsResult(_) => {
-            "message.rendered_tool_definitions_result".to_owned()
-        }
-        HarnessOutputMessage::ExtensionDataResult(_) => "message.extension_data_result".to_owned(),
-        HarnessOutputMessage::ExternalAgentMessageResult(_) => {
-            "message.external_agent_message_result".to_owned()
-        }
-    }
-}
-
-fn ui_io_harness_input_message_name(message: &HarnessInputMessage) -> &'static str {
-    match message {
-        HarnessInputMessage::Hello(_) => "hello",
-        HarnessInputMessage::Subscribe(_) => "subscribe",
-        HarnessInputMessage::Intercept(_) => "intercept",
-        HarnessInputMessage::Ready(_) => "ready",
-        HarnessInputMessage::Disconnect(_) => "disconnect",
-        HarnessInputMessage::ConfigError(_) => "config_error",
-        HarnessInputMessage::Emit(_) => "emit",
-        HarnessInputMessage::InterceptReply(_) => "intercept_reply",
-        HarnessInputMessage::GetAgentPromptCreated(_) => "get_agent_prompt_created",
-        HarnessInputMessage::GetRenderedSystemPrompt(_) => "get_rendered_system_prompt",
-        HarnessInputMessage::GetRenderedPrompt(_) => "get_rendered_prompt",
-        HarnessInputMessage::GetRenderedToolDefinitions(_) => "get_rendered_tool_definitions",
-        HarnessInputMessage::ExtensionDataRequest(_) => "extension_data_request",
-        HarnessInputMessage::ExternalAgentMessage(_) => "external_agent_message",
-    }
-}
-
-fn format_ui_io_breakdown(breakdown: &BTreeMap<String, u64>) -> String {
-    if breakdown.is_empty() {
-        return "none".to_owned();
-    }
-
-    let mut entries = breakdown.iter().collect::<Vec<_>>();
-    entries.sort_by(|(left_name, left_bytes), (right_name, right_bytes)| {
-        right_bytes
-            .cmp(left_bytes)
-            .then_with(|| left_name.cmp(right_name))
-    });
-    entries
-        .into_iter()
-        .map(|(name, bytes)| format!("{name}={}", format_ui_io_bytes(*bytes)))
-        .collect::<Vec<_>>()
-        .join(", ")
-}
-
 fn format_ui_io_cumulative_stats(stats: &UiIoCumulativeStats) -> String {
-    let uplink_total = total_ui_io_event_stats(&stats.uplink);
-    let downlink_total = total_ui_io_event_stats(&stats.downlink);
-    let mut lines = vec![
-        "UI event I/O cumulative stats".to_owned(),
-        format!(
-            "uplink: {} in {} frame(s)",
-            format_ui_io_bytes(uplink_total.bytes),
-            uplink_total.count
-        ),
-        format_ui_io_event_stats_section(&stats.uplink),
-        format!(
-            "downlink: {} in {} frame(s)",
-            format_ui_io_bytes(downlink_total.bytes),
-            downlink_total.count
-        ),
-        format_ui_io_event_stats_section(&stats.downlink),
-    ];
-    if uplink_total.count == 0 && downlink_total.count == 0 {
-        lines.push("no UI frames recorded yet".to_owned());
-    }
-    lines.join("\n")
-}
-
-fn total_ui_io_event_stats(stats: &BTreeMap<String, UiIoEventStats>) -> UiIoEventStats {
-    stats
-        .values()
-        .fold(UiIoEventStats::default(), |mut total, stats| {
-            total.count += stats.count;
-            total.bytes += stats.bytes;
-            total
-        })
-}
-
-fn format_ui_io_event_stats_section(stats: &BTreeMap<String, UiIoEventStats>) -> String {
-    if stats.is_empty() {
-        return "  (none)".to_owned();
-    }
-    sorted_ui_io_event_stats(stats)
-        .into_iter()
-        .map(|(name, stats)| {
-            format!(
-                "  {name}: {} count={}",
-                format_ui_io_bytes(stats.bytes),
-                stats.count
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-fn sorted_ui_io_event_stats(
-    stats: &BTreeMap<String, UiIoEventStats>,
-) -> Vec<(&str, UiIoEventStats)> {
-    let mut entries = stats
-        .iter()
-        .map(|(name, stats)| (name.as_str(), *stats))
-        .collect::<Vec<_>>();
-    entries.sort_by(|(left_name, left_stats), (right_name, right_stats)| {
-        right_stats
-            .bytes
-            .cmp(&left_stats.bytes)
-            .then_with(|| right_stats.count.cmp(&left_stats.count))
-            .then_with(|| left_name.cmp(right_name))
-    });
-    entries
+    tau_client::format_protocol_io_cumulative_stats(
+        "UI event I/O cumulative stats",
+        "uplink",
+        "downlink",
+        "no UI frames recorded yet",
+        stats,
+    )
 }
 
 fn handle_debug_show_ui_event_stats_command_text(
@@ -519,28 +226,32 @@ fn handle_debug_show_ui_event_stats_command_text(
     false
 }
 
-fn format_ui_io_bytes(bytes: u64) -> String {
-    if bytes < 1024 {
-        return format!("{bytes}B");
-    }
-    if bytes < 1024 * 1024 {
-        return format_ui_io_scaled_bytes(bytes, 1024, "K");
-    }
-    format_ui_io_scaled_bytes(bytes, 1024 * 1024, "M")
-}
+const DEBUG_SHOW_EVENT_STATS_USAGE: &str = "/debug-show-event-stats <extension>";
 
-fn format_ui_io_scaled_bytes(bytes: u64, divisor: u64, suffix: &str) -> String {
-    let whole = bytes / divisor;
-    let tenth = bytes % divisor * 10 / divisor;
-    if whole < 10 && tenth != 0 {
-        format!("{whole}.{tenth}{suffix}")
-    } else {
-        format!("{whole}{suffix}")
+fn debug_show_event_stats_request_event(text: &str) -> Result<Option<Event>, &'static str> {
+    let mut parts = text.split_whitespace();
+    let Some(command) = parts.next() else {
+        return Ok(None);
+    };
+    if command != "/debug-show-event-stats" {
+        return Ok(None);
     }
+    let Some(extension_name) = parts.next() else {
+        return Err(DEBUG_SHOW_EVENT_STATS_USAGE);
+    };
+    if parts.next().is_some() {
+        return Err(DEBUG_SHOW_EVENT_STATS_USAGE);
+    }
+    Ok(Some(Event::UiDebugEventStatsRequest(
+        tau_proto::UiDebugEventStatsRequest {
+            extension_name: extension_name.to_owned(),
+        },
+    )))
 }
 
 #[cfg(test)]
 mod ui_io_tests {
+    use std::collections::BTreeMap;
     use std::os::unix::net::UnixStream;
 
     use tau_proto::HarnessOutputWriter;
@@ -554,7 +265,7 @@ mod ui_io_tests {
     fn ui_io_output_message_key_uses_delivered_event_name() {
         let message = HarnessOutputMessage::deliver(Event::TermBell(tau_proto::TermBell {}));
 
-        assert_eq!(ui_io_output_message_key(&message), "term.bell");
+        assert_eq!(tau_client::output_message_key(&message), "term.bell");
     }
 
     /// Uplink event emissions should be grouped by the inner event name, not
@@ -564,7 +275,7 @@ mod ui_io_tests {
     fn ui_io_input_message_key_uses_emitted_event_name() {
         let message = HarnessInputMessage::emit(Event::TermBell(tau_proto::TermBell {}));
 
-        assert_eq!(ui_io_input_message_key(&message), "term.bell");
+        assert_eq!(tau_client::input_message_key(&message), "term.bell");
     }
 
     /// Breakdown logging should put the largest contributors first so a noisy
@@ -576,7 +287,7 @@ mod ui_io_tests {
         breakdown.insert("large.event".to_owned(), 12 * 1024);
 
         assert_eq!(
-            format_ui_io_breakdown(&breakdown),
+            tau_client::format_protocol_io_breakdown(&breakdown),
             "large.event=12K, small.event=512B"
         );
     }
@@ -586,8 +297,16 @@ mod ui_io_tests {
     #[test]
     fn ui_io_meter_keeps_cumulative_event_stats_after_sampling() {
         let meter = UiIoMeter::default();
-        meter.record_bytes(UiIoDirection::Downlink, "small.event".to_owned(), Some(10));
-        meter.record_bytes(UiIoDirection::Downlink, "small.event".to_owned(), Some(15));
+        meter.record_bytes(
+            tau_client::ProtocolIoDirection::Downlink,
+            "small.event".to_owned(),
+            Some(10),
+        );
+        meter.record_bytes(
+            tau_client::ProtocolIoDirection::Downlink,
+            "small.event".to_owned(),
+            Some(15),
+        );
 
         let sample = meter.take_sample();
         assert_eq!(sample.downlink_bytes, 25);
@@ -597,7 +316,7 @@ mod ui_io_tests {
                 .downlink
                 .get("small.event")
                 .copied(),
-            Some(UiIoEventStats {
+            Some(tau_client::ProtocolIoFrameStats {
                 count: 2,
                 bytes: 25
             })
@@ -612,21 +331,21 @@ mod ui_io_tests {
         let mut stats = UiIoCumulativeStats::default();
         stats.uplink.insert(
             "message.hello".to_owned(),
-            UiIoEventStats {
+            tau_client::ProtocolIoFrameStats {
                 count: 1,
                 bytes: 50,
             },
         );
         stats.downlink.insert(
             "small.event".to_owned(),
-            UiIoEventStats {
+            tau_client::ProtocolIoFrameStats {
                 count: 3,
                 bytes: 512,
             },
         );
         stats.downlink.insert(
             "large.event".to_owned(),
-            UiIoEventStats {
+            tau_client::ProtocolIoFrameStats {
                 count: 2,
                 bytes: 12 * 1024,
             },
@@ -634,13 +353,19 @@ mod ui_io_tests {
 
         let formatted = format_ui_io_cumulative_stats(&stats);
 
-        assert!(formatted.contains("uplink: 50B in 1 frame(s)"));
-        assert!(formatted.contains("  message.hello: 50B count=1"));
-        assert!(!formatted.contains("bytes="));
-        assert!(formatted.contains("downlink: 12K in 5 frame(s)"));
-        assert!(
-            formatted.find("large.event").expect("large event line")
-                < formatted.find("small.event").expect("small event line")
+        assert_eq!(
+            formatted,
+            "UI event I/O cumulative stats\nuplink: 50B in 1 frame(s)\n  message.hello: 50B count=1\ndownlink: 12K in 5 frame(s)\n  large.event: 12K count=2\n  small.event: 512B count=3"
+        );
+    }
+
+    /// The legacy empty UI event stats output is an explicit compatibility
+    /// contract for the local debug command.
+    #[test]
+    fn ui_io_cumulative_stats_format_empty_output_is_stable() {
+        assert_eq!(
+            format_ui_io_cumulative_stats(&UiIoCumulativeStats::default()),
+            "UI event I/O cumulative stats\nuplink: 0B in 0 frame(s)\n  (none)\ndownlink: 0B in 0 frame(s)\n  (none)\nno UI frames recorded yet"
         );
     }
 
@@ -651,7 +376,7 @@ mod ui_io_tests {
     fn debug_show_ui_event_stats_command_prints_current_counters() {
         let meter = UiIoMeter::default();
         meter.record_bytes(
-            UiIoDirection::Uplink,
+            tau_client::ProtocolIoDirection::Uplink,
             "ui.prompt_draft".to_owned(),
             Some(42),
         );
@@ -664,10 +389,13 @@ mod ui_io_tests {
         );
 
         assert!(handled);
-        assert_eq!(output.len(), 1);
-        assert!(output[0].contains("UI event I/O cumulative stats"));
-        assert!(output[0].contains("ui.prompt_draft: 42B count=1"));
-        assert!(!output[0].contains("bytes="));
+        assert_eq!(
+            output,
+            vec![
+                "UI event I/O cumulative stats\nuplink: 42B in 1 frame(s)\n  ui.prompt_draft: 42B count=1\ndownlink: 0B in 0 frame(s)\n  (none)"
+                    .to_owned()
+            ]
+        );
     }
 
     /// A mistyped debug stats invocation with arguments should be consumed with
@@ -688,6 +416,33 @@ mod ui_io_tests {
         assert_eq!(
             output,
             vec!["/debug-show-ui-event-stats takes no arguments".to_owned()]
+        );
+    }
+
+    /// The extension stats command should build a targeted harness debug
+    /// request instead of falling through to prompt submission, while keeping
+    /// usage errors local to the UI.
+    #[test]
+    fn debug_show_event_stats_command_builds_request_event() {
+        let event = debug_show_event_stats_request_event("/debug-show-event-stats std-shell")
+            .expect("parse command")
+            .expect("request event");
+
+        assert_eq!(
+            event,
+            Event::UiDebugEventStatsRequest(tau_proto::UiDebugEventStatsRequest {
+                extension_name: "std-shell".to_owned()
+            })
+        );
+        assert_eq!(
+            debug_show_event_stats_request_event("/debug-show-event-stats")
+                .expect_err("missing extension"),
+            DEBUG_SHOW_EVENT_STATS_USAGE
+        );
+        assert_eq!(
+            debug_show_event_stats_request_event("/debug-show-event-stats std-shell extra")
+                .expect_err("extra argument"),
+            DEBUG_SHOW_EVENT_STATS_USAGE
         );
     }
 
@@ -927,6 +682,10 @@ const BUILTIN_SLASH_COMMANDS: &[(&str, &str)] = &[
     (
         "/debug-show-ui-event-stats",
         "Print cumulative UI event byte/count counters for this client",
+    ),
+    (
+        "/debug-show-event-stats",
+        "Request cumulative protocol byte/count counters for an extension",
     ),
 ];
 
@@ -2403,7 +2162,7 @@ impl<'a> TerminalInputSession<'a> {
     }
 
     fn handle_utility_command(&mut self, text: &str) -> bool {
-        if self.handle_debug_show_ui_event_stats_command(text) {
+        if self.handle_debug_utility_command(text) {
             return true;
         }
         if text == "/version" {
@@ -2462,10 +2221,29 @@ impl<'a> TerminalInputSession<'a> {
         false
     }
 
+    fn handle_debug_utility_command(&self, text: &str) -> bool {
+        self.handle_debug_show_ui_event_stats_command(text)
+            || self.handle_debug_show_event_stats_command(text)
+    }
+
     fn handle_debug_show_ui_event_stats_command(&self, text: &str) -> bool {
         handle_debug_show_ui_event_stats_command_text(text, &self.ctx.ui_io_meter, |message| {
             self.output.system_info(message);
         })
+    }
+
+    fn handle_debug_show_event_stats_command(&self, text: &str) -> bool {
+        match debug_show_event_stats_request_event(text) {
+            Ok(Some(event)) => {
+                let _ = send_event(self.writer, &event);
+                true
+            }
+            Ok(None) => false,
+            Err(usage) => {
+                self.output.system_info(usage);
+                true
+            }
+        }
     }
 
     fn handle_theme_command(&mut self, text: &str) {
@@ -3526,6 +3304,7 @@ pub(crate) fn is_local_slash_command(text: &str) -> bool {
             | "/model"
             | "/version"
             | "/debug-show-ui-event-stats"
+            | "/debug-show-event-stats"
     )
 }
 

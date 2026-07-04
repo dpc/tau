@@ -8,6 +8,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 use std::time::Duration;
 
+use tau_client::ProtocolIoMeter;
 use tau_core::{ConnectionSendError, ConnectionSink};
 use tau_proto::{
     Disconnect, HarnessInputMessage, HarnessInputReader, HarnessOutputMessage, HarnessOutputWriter,
@@ -154,6 +155,7 @@ pub(crate) enum WriterShutdown {
 pub(crate) fn spawn_writer_thread(
     writer: impl Write + Send + 'static,
     shutdown: WriterShutdown,
+    protocol_io: Option<ProtocolIoMeter>,
 ) -> Sender<WriterCommand> {
     let (tx, rx) = mpsc::channel::<WriterCommand>();
     thread::spawn(move || {
@@ -168,6 +170,9 @@ pub(crate) fn spawn_writer_thread(
                     if w.write_message(&message).is_err() || w.flush().is_err() {
                         can_write_disconnect = false;
                         break;
+                    }
+                    if let Some(protocol_io) = &protocol_io {
+                        protocol_io.record_downlink_frame(&message);
                     }
                 }
                 WriterCommand::Flush(ack) => {
@@ -185,10 +190,15 @@ pub(crate) fn spawn_writer_thread(
             WriterShutdown::KillChild(child) => {
                 if can_write_disconnect {
                     // Best-effort disconnect message.
-                    let _ = w.write_message(&HarnessOutputMessage::Disconnect(Disconnect {
+                    let disconnect = HarnessOutputMessage::Disconnect(Disconnect {
                         reason: Some("shutdown".to_owned()),
-                    }));
-                    let _ = w.flush();
+                    });
+                    if w.write_message(&disconnect).is_ok()
+                        && w.flush().is_ok()
+                        && let Some(protocol_io) = &protocol_io
+                    {
+                        protocol_io.record_downlink_frame(&disconnect);
+                    }
                 }
                 // Drop the writer → closes stdin → extension sees EOF.
                 drop(w);

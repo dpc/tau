@@ -618,6 +618,7 @@ Type `/` for menu autocompletion. The built-in set:
 | `/set <name> <val>` | Set a UI setting (Tab cycles names + values)         |
 | `/skill <name> [args]` | Invoke a user-invocable skill; `/skill:<name>` is also accepted |
 | `/debug-show-ui-event-stats` | Dump cumulative UI event byte/count counters sorted by bytes |
+| `/debug-show-event-stats <extension>` | Dump cumulative protocol byte/count counters for a live configured extension |
 
 Unknown leading slash roots are treated as local CLI notices instead of being
 submitted as prompt text. This catches mistyped commands like `/modle` early,
@@ -648,6 +649,12 @@ The boolean settings take `true` / `false`; `redraw-history-size` takes a
 non-negative line count and defaults from `cli.yaml`.
 Use `/debug-show-ui-event-stats` alongside `show-ui-io` to dump this UI
 client's cumulative per-event byte/count counters; they reset when the UI exits.
+Use `/debug-show-event-stats <extension>` to inspect a live configured
+extension's cumulative protocol counters. The lookup uses the configured
+extension name, ignores disconnected/stale entries, and reports an error instead
+of choosing arbitrarily if multiple live connections have the same name. This is
+a local debug command: responses are directed to the requesting UI and are not
+published as session events.
 
 Prompt input is capped to `floor(33% of terminal height)` with a minimum of
 one editable row. Long drafts scroll inside this prompt-local viewport instead

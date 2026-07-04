@@ -2123,6 +2123,7 @@ impl Harness {
                 secrets: BTreeMap::new(),
                 restart_attempt: 0,
                 state: ExtensionState::Spawning,
+                protocol_io: provider_spawn.protocol_io,
             },
             origin: ConnectionOrigin::Supervised,
             writer_tx: provider_spawn.writer_tx,
@@ -2148,6 +2149,7 @@ impl Harness {
                     secrets: BTreeMap::new(),
                     restart_attempt: 0,
                     state: ExtensionState::Spawning,
+                    protocol_io: tool_spawn.protocol_io,
                 },
                 origin: ConnectionOrigin::Supervised,
                 writer_tx: tool_spawn.writer_tx,
@@ -2661,6 +2663,7 @@ impl Harness {
                         .unwrap_or_default(),
                     restart_attempt: 0,
                     state: ExtensionState::Spawning,
+                    protocol_io: spawned.protocol_io,
                 },
                 origin: ConnectionOrigin::Supervised,
                 writer_tx: spawned.writer_tx,
@@ -4185,7 +4188,7 @@ impl Harness {
         R: io::Read + Send + 'static,
         W: io::Write + Send + 'static,
     {
-        let writer_tx = spawn_writer_thread(write, WriterShutdown::CloseStream);
+        let writer_tx = spawn_writer_thread(write, WriterShutdown::CloseStream, None);
         let writer_tx_for_follower = writer_tx.clone();
         let conn_id = self.bus.connect(Connection::new(
             ConnectionMetadata {
@@ -4888,6 +4891,9 @@ impl Harness {
         message: impl Into<HarnessInputMessage>,
     ) -> Result<(), HarnessError> {
         let message = message.into();
+        if let Some(entry) = self.extensions.entries.get(source_id) {
+            entry.protocol_io.record_uplink_frame(&message);
+        }
         match message {
             HarnessInputMessage::Hello(hello) => {
                 validate_protocol_version(&hello)?;
@@ -5732,6 +5738,10 @@ impl Harness {
             Event::UiSetAgentDisplayName(req) => self
                 .handle_ui_set_agent_display_name(req)
                 .map(|keep_going| (keep_going, None)),
+            Event::UiDebugEventStatsRequest(req) => {
+                self.handle_ui_debug_event_stats_request(client_id, req);
+                Ok((true, None))
+            }
             Event::UiTreeRequest(req) => self
                 .handle_ui_tree_request(client_id, req)
                 .map(|keep_going| (keep_going, None)),
@@ -5751,6 +5761,92 @@ impl Harness {
             }
             other => Ok((true, Some(other))),
         }
+    }
+
+    fn handle_ui_debug_event_stats_request(
+        &mut self,
+        client_id: &str,
+        request: tau_proto::UiDebugEventStatsRequest,
+    ) {
+        if !self.is_authorized_debug_event_stats_client(client_id) {
+            self.send_direct_harness_notice(
+                client_id,
+                tau_proto::notice_kind::UI_COMMAND_ERROR,
+                tau_proto::NoticeLevel::Info,
+                true,
+                "extension event stats are only available to local socket clients".to_owned(),
+            );
+            return;
+        }
+        let live_matches = self
+            .extensions
+            .entries
+            .values()
+            .filter(|entry| {
+                entry.name == request.extension_name && entry.state != ExtensionState::Disconnected
+            })
+            .collect::<Vec<_>>();
+        let (kind, message) = match live_matches.as_slice() {
+            [] => (
+                tau_proto::notice_kind::UI_COMMAND_ERROR,
+                format!("no live extension named `{}`", request.extension_name),
+            ),
+            [entry] => {
+                let stats = entry.protocol_io.cumulative_stats();
+                (
+                    tau_proto::notice_kind::HARNESS_NOTICE,
+                    tau_client::format_protocol_io_cumulative_stats(
+                        &format!(
+                            "Extension `{}` protocol I/O cumulative stats",
+                            request.extension_name
+                        ),
+                        "extension -> harness",
+                        "harness -> extension",
+                        "no extension frames recorded yet",
+                        &stats,
+                    ),
+                )
+            }
+            _ => (
+                tau_proto::notice_kind::UI_COMMAND_ERROR,
+                format!(
+                    "extension name `{}` matched {} live connections",
+                    request.extension_name,
+                    live_matches.len()
+                ),
+            ),
+        };
+        self.send_direct_harness_notice(
+            client_id,
+            kind,
+            tau_proto::NoticeLevel::Info,
+            true,
+            message,
+        );
+    }
+
+    fn is_authorized_debug_event_stats_client(&self, client_id: &str) -> bool {
+        self.bus
+            .connection(client_id)
+            .is_some_and(|metadata| metadata.origin == ConnectionOrigin::Socket)
+    }
+
+    fn send_direct_harness_notice(
+        &mut self,
+        client_id: &str,
+        kind: &str,
+        level: tau_proto::NoticeLevel,
+        always_show: bool,
+        message: String,
+    ) {
+        let event = Event::HarnessNotice(tau_proto::HarnessNotice {
+            kind: kind.to_owned(),
+            message,
+            level,
+            always_show,
+        });
+        let frame = HarnessOutputMessage::deliver_live(tau_proto::UnixMicros::now(), event);
+        let _ = self.bus.send_to(client_id, None, frame);
     }
 
     fn handle_client_agent_metadata_event(
@@ -7282,6 +7378,7 @@ impl Harness {
                 secrets,
                 restart_attempt: attempt,
                 state: ExtensionState::Spawning,
+                protocol_io: spawned.protocol_io,
             },
             origin: ConnectionOrigin::Supervised,
             writer_tx: spawned.writer_tx,
