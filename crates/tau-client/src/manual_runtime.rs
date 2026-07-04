@@ -9,7 +9,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use crate::builder::ExtensionBuilder;
-use crate::runner::{dispatch_message, write_startup};
+use crate::runner::{dispatch_message, write_hello, write_ready, write_startup};
 use crate::writer_thread::{WriterCommand, run_writer};
 use crate::{ClientError, ClientHandle, ClientResult, TauExtension};
 
@@ -34,6 +34,8 @@ pub struct ManualExtensionRuntime<State> {
     reader_thread: JoinHandle<()>,
     /// Writer thread that serializes outbound protocol frames.
     writer_thread: JoinHandle<ClientResult<()>>,
+    /// Whether startup has completed through the terminal `Ready` frame.
+    startup: ManualStartupState,
 }
 
 /// Shared manual-loop input queue used by receive calls and correlated helpers.
@@ -75,6 +77,17 @@ enum ReaderMessage {
     InputClosed,
     /// Decode or read failure from the reader thread.
     Error(ClientError),
+}
+
+/// Startup phase tracked by manual runtimes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ManualStartupState {
+    /// The runtime has written only `Hello`; the caller must send dynamic
+    /// startup frames and exactly one `Ready` before entering steady-state
+    /// dispatch.
+    Deferred,
+    /// Startup has completed through `Ready`.
+    Complete,
 }
 
 /// Correlated extension-data RPC helper for manual-loop extensions.
@@ -244,6 +257,93 @@ impl<State> ManualExtensionRuntime<State> {
             handle: self.handle.clone(),
             input: Rc::clone(&self.input),
         }
+    }
+
+    /// Sends a dynamic startup `Subscribe` frame before `Ready`.
+    ///
+    /// This is available only for runtimes started with
+    /// [`crate::TauExtensionRunner::start_manual_loop_deferred_startup`]. It
+    /// lets config-gated extensions compute their subscription set after
+    /// reading initial harness configuration while preserving normal
+    /// startup staging: `Hello`, zero or more dynamic startup frames, then
+    /// exactly one `Ready`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when startup has already completed or the frame cannot
+    /// be queued and flushed.
+    pub fn startup_subscribe(
+        &mut self,
+        selectors: impl IntoIterator<Item = tau_proto::EventSelector>,
+    ) -> ClientResult<()> {
+        self.ensure_deferred_startup()?;
+        self.handle.send(tau_proto::HarnessInputMessage::Subscribe(
+            tau_proto::Subscribe {
+                selectors: selectors.into_iter().collect(),
+            },
+        ))
+    }
+
+    /// Sends a dynamic startup `Intercept` frame before `Ready`.
+    ///
+    /// Use this for extensions whose interception selectors are known only
+    /// after config-gated initialization. The runtime does not install an
+    /// intercept handler; callers remain responsible for replying to each
+    /// later `InterceptRequest`, for example with
+    /// [`ClientHandle::intercept_reply`]. Dynamic intercept registration should
+    /// normally be sent once with the complete selector set because harness
+    /// interceptor registration is a connection-level declaration rather than
+    /// an additive list of independent handlers.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when startup has already completed or the frame cannot
+    /// be queued and flushed.
+    pub fn startup_intercept(
+        &mut self,
+        selectors: impl IntoIterator<Item = tau_proto::EventSelector>,
+        priority: tau_proto::InterceptionPriority,
+    ) -> ClientResult<()> {
+        self.ensure_deferred_startup()?;
+        self.handle.send(tau_proto::HarnessInputMessage::Intercept(
+            tau_proto::Intercept {
+                selectors: selectors.into_iter().collect(),
+                priority,
+            },
+        ))
+    }
+
+    /// Emits one dynamic startup event before `Ready`.
+    ///
+    /// This is intended for declarations such as tool registrations or action
+    /// schemas that are computed after initial configuration. Runtime events
+    /// after `Ready` should use [`Self::handle`] and [`ClientHandle::emit`]
+    /// instead.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when startup has already completed or the event cannot
+    /// be queued and flushed.
+    pub fn startup_event(&mut self, event: tau_proto::Event) -> ClientResult<()> {
+        self.ensure_deferred_startup()?;
+        self.handle.emit(event)
+    }
+
+    /// Sends the terminal startup `Ready` frame for a deferred manual runtime.
+    ///
+    /// After this succeeds, subsequent dynamic startup helpers return an error.
+    /// Callers should then enter their normal manual receive loop with
+    /// [`Self::recv`], [`Self::recv_timeout`], and [`Self::dispatch_one`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when startup already completed or the `Ready` frame
+    /// cannot be queued and flushed.
+    pub fn startup_ready(&mut self, message: Option<String>) -> ClientResult<()> {
+        self.ensure_deferred_startup()?;
+        write_ready(&self.handle, message)?;
+        self.startup = ManualStartupState::Complete;
+        Ok(())
     }
 
     /// Waits until the next harness message or input EOF is available.
@@ -420,6 +520,15 @@ impl<State> ManualExtensionRuntime<State> {
     #[must_use]
     pub fn finish_detached(self) -> State {
         self.state
+    }
+
+    fn ensure_deferred_startup(&self) -> ClientResult<()> {
+        match self.startup {
+            ManualStartupState::Deferred => Ok(()),
+            ManualStartupState::Complete => Err(ClientError::handler(
+                "deferred manual startup has already completed",
+            )),
+        }
     }
 }
 
@@ -633,6 +742,99 @@ where
             })),
             reader_thread,
             writer_thread,
+            startup: ManualStartupState::Complete,
+        })
+    }
+
+    /// Starts a manual runtime in config-gated deferred-startup mode.
+    ///
+    /// This writes and flushes only the initial `Hello` frame, starts the
+    /// reader and writer threads, constructs state, and returns before any
+    /// `Subscribe`, `Intercept`, startup `Emit`, or `Ready` frames are sent.
+    /// Callers can then receive initial configuration, compute dynamic startup
+    /// declarations, send them with
+    /// [`ManualExtensionRuntime::startup_subscribe`],
+    /// [`ManualExtensionRuntime::startup_intercept`], and
+    /// [`ManualExtensionRuntime::startup_event`], and finish exactly once with
+    /// [`ManualExtensionRuntime::startup_ready`].
+    ///
+    /// Builders used with this mode may register dispatch handlers, but must
+    /// not declare static startup frames such as subscriptions, intercepts,
+    /// startup events, tools, actions, or a ready message. Dynamic startup
+    /// declarations are intentionally explicit so config-gated extensions
+    /// cannot accidentally leak pre-configuration startup state.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when builder validation fails, static startup
+    /// declarations are present, or the initial `Hello` frame cannot be encoded
+    /// and flushed.
+    pub fn start_manual_loop_deferred_startup<R, W>(
+        self,
+        reader: R,
+        writer: W,
+        state: Extension::State,
+    ) -> ClientResult<ManualExtensionRuntime<Extension::State>>
+    where
+        R: Read + Send + 'static,
+        W: Write + Send + 'static,
+    {
+        self.start_manual_loop_deferred_startup_with_state(reader, writer, |_| state)
+    }
+
+    /// Starts a deferred-startup manual runtime and constructs state after
+    /// `Hello` is written.
+    ///
+    /// The supplied factory receives a cloneable [`ClientHandle`] immediately
+    /// after `Hello` is flushed, before dynamic startup declarations and
+    /// `Ready`. The caller is responsible for preserving the one-way startup
+    /// contract documented on [`Self::start_manual_loop_deferred_startup`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when builder validation fails, static startup
+    /// declarations are present, or the initial `Hello` frame cannot be encoded
+    /// and flushed.
+    pub fn start_manual_loop_deferred_startup_with_state<R, W, MakeState>(
+        self,
+        reader: R,
+        writer: W,
+        make_state: MakeState,
+    ) -> ClientResult<ManualExtensionRuntime<Extension::State>>
+    where
+        R: Read + Send + 'static,
+        W: Write + Send + 'static,
+        MakeState: FnOnce(ClientHandle) -> Extension::State,
+    {
+        let mut builder = ExtensionBuilder::new(self.extension.name(), self.extension.kind());
+        self.extension.register(&mut builder);
+        builder.validate()?;
+        builder.validate_deferred_startup()?;
+
+        let (sender, receiver) = mpsc::channel::<WriterCommand>();
+        let handle = ClientHandle::new(sender);
+        let writer_thread = std::thread::spawn(move || run_writer(writer, receiver));
+
+        if let Err(error) = write_hello(&builder, &handle) {
+            let _ = handle.shutdown();
+            let _ = writer_thread.join();
+            return Err(error);
+        }
+
+        let state = make_state(handle.clone());
+        let (input, reader_thread) = spawn_reader_thread(reader);
+        Ok(ManualExtensionRuntime {
+            state,
+            builder,
+            handle,
+            input: Rc::new(RefCell::new(ManualInput {
+                receiver: input,
+                pending: VecDeque::new(),
+                input_closed: false,
+            })),
+            reader_thread,
+            writer_thread,
+            startup: ManualStartupState::Deferred,
         })
     }
 }

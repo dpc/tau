@@ -681,6 +681,42 @@ impl TauExtension for NonSendStateExtension {
     }
 }
 
+struct DeferredStartupExtension;
+
+impl TauExtension for DeferredStartupExtension {
+    type State = Counts;
+
+    fn name(&self) -> &'static str {
+        "deferred-startup"
+    }
+
+    fn register(self, builder: &mut ExtensionBuilder<Self::State>) {
+        builder.on_raw_routed(
+            EventSelector::Exact(tau_proto::EventName::HARNESS_NOTICE),
+            |cx: RawEventContext<'_, Counts>| {
+                if matches!(cx.event(), Event::HarnessNotice(_)) {
+                    cx.state.replay_aware += 1;
+                }
+                Ok(())
+            },
+        );
+    }
+}
+
+struct StaticStartupDeclarationExtension;
+
+impl TauExtension for StaticStartupDeclarationExtension {
+    type State = ();
+
+    fn name(&self) -> &'static str {
+        "static-startup-declaration"
+    }
+
+    fn register(self, builder: &mut ExtensionBuilder<Self::State>) {
+        builder.subscribe([tau_proto::EventName::HARNESS_NOTICE]);
+    }
+}
+
 fn run_messages<E>(
     extension: E,
     state: E::State,
@@ -793,6 +829,15 @@ fn ready_frame_index(frames: &[HarnessInputMessage]) -> usize {
         .iter()
         .position(|frame| matches!(frame, HarnessInputMessage::Ready(_)))
         .expect("Ready frame")
+}
+
+fn configure_message() -> HarnessOutputMessage {
+    HarnessOutputMessage::Configure(Configure {
+        config: tau_proto::json_to_cbor(&serde_json::json!({ "value": 3 })),
+        instance_name: None,
+        state_dir: None,
+        secrets: std::collections::BTreeMap::new(),
+    })
 }
 
 fn disconnect(reason: &str) -> HarnessOutputMessage {
@@ -1564,6 +1609,167 @@ fn manual_loop_startup_ready_precedes_state_factory_handle_output() {
         .expect("ready frame");
     let factory_emit_index = notice_frame_index(&frames, "manual factory initialized");
     assert!(ready_index < factory_emit_index);
+}
+
+/// Ensures deferred manual startup writes only `Hello`, lets the caller receive
+/// initial configuration, and then preserves explicit dynamic startup order
+/// before `Ready`.
+#[test]
+fn manual_loop_deferred_startup_writes_hello_then_dynamic_startup() {
+    let input = encode_output_messages(&[configure_message()]);
+    let writer = SharedWriter::default();
+    let written = writer.clone();
+    let mut runtime = TauExtensionRunner::new(DeferredStartupExtension)
+        .start_manual_loop_deferred_startup(Cursor::new(input), writer, Counts::default())
+        .expect("start deferred manual loop");
+
+    let initial_frames = frames_from_writer(&written);
+    assert_eq!(initial_frames.len(), 1);
+    assert!(matches!(initial_frames[0], HarnessInputMessage::Hello(_)));
+    assert!(matches!(
+        runtime.recv().expect("receive initial configure"),
+        ManualRuntimeInput::Message(HarnessOutputMessage::Configure(_))
+    ));
+
+    runtime
+        .startup_subscribe([EventSelector::Exact(tau_proto::EventName::HARNESS_NOTICE)])
+        .expect("dynamic subscribe");
+    runtime
+        .startup_intercept(
+            [EventSelector::Exact(
+                tau_proto::EventName::AGENT_PROMPT_SUBMITTED,
+            )],
+            InterceptionPriority::new(0),
+        )
+        .expect("dynamic intercept");
+    runtime
+        .startup_event(notice("dynamic startup event"))
+        .expect("dynamic startup event");
+    runtime
+        .startup_ready(Some("dynamic ready".to_owned()))
+        .expect("dynamic ready");
+    runtime.finish().expect("finish");
+
+    let frames = frames_from_writer(&written);
+    assert!(matches!(frames[0], HarnessInputMessage::Hello(_)));
+    assert!(matches!(frames[1], HarnessInputMessage::Subscribe(_)));
+    assert!(matches!(frames[2], HarnessInputMessage::Intercept(_)));
+    assert!(matches!(
+        &frames[3],
+        HarnessInputMessage::Emit(emit)
+            if matches!(emit.event.as_ref(), Event::HarnessNotice(notice) if notice.message == "dynamic startup event")
+    ));
+    assert!(matches!(
+        &frames[4],
+        HarnessInputMessage::Ready(ready) if ready.message.as_deref() == Some("dynamic ready")
+    ));
+    assert_eq!(frames.len(), 5);
+}
+
+/// Ensures config-gated extensions can report a startup configuration failure
+/// and then send one inert `Ready` frame without leaking other declarations.
+#[test]
+fn manual_loop_deferred_startup_config_error_then_inert_ready() {
+    let writer = SharedWriter::default();
+    let written = writer.clone();
+    let mut runtime = TauExtensionRunner::new(DeferredStartupExtension)
+        .start_manual_loop_deferred_startup(Cursor::new(Vec::new()), writer, Counts::default())
+        .expect("start deferred manual loop");
+
+    runtime
+        .handle()
+        .config_error("dynamic config failed")
+        .expect("config error");
+    runtime
+        .startup_ready(Some("disabled".to_owned()))
+        .expect("inert ready");
+    runtime.finish().expect("finish");
+
+    let frames = frames_from_writer(&written);
+    assert!(matches!(frames[0], HarnessInputMessage::Hello(_)));
+    assert!(matches!(
+        &frames[1],
+        HarnessInputMessage::ConfigError(error) if error.message == "dynamic config failed"
+    ));
+    assert!(matches!(
+        &frames[2],
+        HarnessInputMessage::Ready(ready) if ready.message.as_deref() == Some("disabled")
+    ));
+    assert_eq!(frames.len(), 3);
+}
+
+/// Ensures deferred startup helpers enforce the one-way startup lifecycle and
+/// reject duplicate `Ready` or late startup declarations.
+#[test]
+fn manual_loop_deferred_startup_rejects_duplicate_ready() {
+    let writer = SharedWriter::default();
+    let written = writer.clone();
+    let mut runtime = TauExtensionRunner::new(DeferredStartupExtension)
+        .start_manual_loop_deferred_startup(Cursor::new(Vec::new()), writer, Counts::default())
+        .expect("start deferred manual loop");
+
+    runtime.startup_ready(None).expect("first ready");
+    let duplicate_ready = runtime
+        .startup_ready(None)
+        .expect_err("duplicate ready rejected");
+    let late_event = runtime
+        .startup_event(notice("too late"))
+        .expect_err("late startup event rejected");
+    runtime.finish().expect("finish");
+
+    assert!(duplicate_ready.to_string().contains("already completed"));
+    assert!(late_event.to_string().contains("already completed"));
+    let frames = frames_from_writer(&written);
+    assert_eq!(
+        frames
+            .iter()
+            .filter(|frame| matches!(frame, HarnessInputMessage::Ready(_)))
+            .count(),
+        1
+    );
+}
+
+/// Ensures deferred startup mode cannot accidentally drop static declarations
+/// from ordinary tau-client builder helpers.
+#[test]
+fn manual_loop_deferred_startup_rejects_static_declarations() {
+    let writer = SharedWriter::default();
+    let error = match TauExtensionRunner::new(StaticStartupDeclarationExtension)
+        .start_manual_loop_deferred_startup(Cursor::new(Vec::new()), writer, ())
+    {
+        Ok(_) => panic!("static startup declarations should be rejected"),
+        Err(error) => error,
+    };
+
+    assert!(error.to_string().contains("static startup declarations"));
+}
+
+/// Ensures the intercept-reply convenience helper emits the existing protocol
+/// frame shape for custom-loop extensions that own dynamic interception policy.
+#[test]
+fn client_handle_intercept_reply_helper_emits_reply() {
+    let writer = SharedWriter::default();
+    let written = writer.clone();
+    let mut runtime = TauExtensionRunner::new(DeferredStartupExtension)
+        .start_manual_loop_deferred_startup(Cursor::new(Vec::new()), writer, Counts::default())
+        .expect("start deferred manual loop");
+
+    runtime
+        .handle()
+        .intercept_reply(InterceptAction::Drop)
+        .expect("intercept reply");
+    runtime.startup_ready(None).expect("ready");
+    runtime.finish().expect("finish");
+
+    let replies = frames_from_writer(&written)
+        .into_iter()
+        .filter_map(|frame| match frame {
+            HarnessInputMessage::InterceptReply(reply) => Some(reply),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(replies.len(), 1);
+    assert!(matches!(replies[0].action, InterceptAction::Drop));
 }
 
 /// Ensures manual-loop receive distinguishes no-input timeouts, decoded

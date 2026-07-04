@@ -200,11 +200,7 @@ pub(crate) fn write_startup<State>(
     builder: &ExtensionBuilder<State>,
     handle: &ClientHandle,
 ) -> ClientResult<()> {
-    handle.send(tau_proto::HarnessInputMessage::Hello(tau_proto::Hello {
-        protocol_version: tau_proto::PROTOCOL_VERSION,
-        client_name: builder.name.clone(),
-        client_kind: builder.kind.clone(),
-    }))?;
+    write_hello(builder, handle)?;
     if builder.force_subscribe || !builder.selectors.is_empty() {
         handle.send(tau_proto::HarnessInputMessage::Subscribe(
             tau_proto::Subscribe {
@@ -218,10 +214,27 @@ pub(crate) fn write_startup<State>(
     for event in &builder.startup_events {
         handle.emit(event.clone())?;
     }
-    handle.send(tau_proto::HarnessInputMessage::Ready(tau_proto::Ready {
-        message: builder.ready_message.clone(),
-    }))?;
+    write_ready(handle, builder.ready_message.clone())?;
     Ok(())
+}
+
+/// Writes the initial `Hello` frame for one client connection.
+pub(crate) fn write_hello<State>(
+    builder: &ExtensionBuilder<State>,
+    handle: &ClientHandle,
+) -> ClientResult<()> {
+    handle.send(tau_proto::HarnessInputMessage::Hello(tau_proto::Hello {
+        protocol_version: tau_proto::PROTOCOL_VERSION,
+        client_name: builder.name.clone(),
+        client_kind: builder.kind.clone(),
+    }))
+}
+
+/// Writes the terminal startup `Ready` frame.
+pub(crate) fn write_ready(handle: &ClientHandle, message: Option<String>) -> ClientResult<()> {
+    handle.send(tau_proto::HarnessInputMessage::Ready(tau_proto::Ready {
+        message,
+    }))
 }
 
 /// Dispatches one harness-to-peer message and reports whether the caller should

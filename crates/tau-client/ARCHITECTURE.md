@@ -45,6 +45,18 @@ runs only after `Ready`, and timer branches can use `ManualExtensionRuntime`'s
 separate `handle()` method to emit output without storing a handle in every
 state type.
 
+Config-gated extensions that cannot know their startup declarations until after
+an initial `Configure` can use the deferred manual-startup entry point. That
+mode writes and flushes only `Hello`, starts the reader/writer threads, and
+returns before any `Subscribe`, `Intercept`, startup `Emit`, or `Ready` frames.
+The caller then receives configuration, sends explicit dynamic startup frames
+through `ManualExtensionRuntime` helpers, and completes startup exactly once
+with `startup_ready`. Static builder declarations are rejected in this mode so a
+config-gated extension cannot accidentally leak pre-configuration subscriptions,
+intercepts, tool registrations, action schemas, or ready text. After `Ready`,
+the runtime has the same receive, dispatch, finish, and detached-finish
+contracts as other manual-loop users.
+
 Event handlers are either typed payload handlers or raw delivery handlers. Typed
 handlers cover the built-in `EventPayload` variants, including common runtime
 events needed by extensions that fold session, agent metadata, cancellation, and
@@ -119,9 +131,9 @@ They should cover startup frame ordering, subscription selector semantics,
 writer-thread behavior, configuration errors, replay/live dispatch boundaries,
 raw event dispatch, tool/action matching, intercept reply guarantees, context
 provider startup publication, disconnect behavior, manual-loop
-receive/dispatch/shutdown contracts, extension-data RPC demux, builder
-validation, empty subscriptions, and plugin composition. Add focused coverage
-when changing lifecycle, writer shutdown, replay filtering, configuration,
-intercept, action dispatch, manual receive loops, extension-data request
-correlation, or startup declaration behavior so migrated extensions do not need
-to rediscover runtime regressions independently.
+receive/dispatch/shutdown contracts, deferred manual startup, extension-data RPC
+demux, builder validation, empty subscriptions, and plugin composition. Add
+focused coverage when changing lifecycle, writer shutdown, replay filtering,
+configuration, intercept, action dispatch, manual receive loops, extension-data
+request correlation, or startup declaration behavior so migrated extensions do
+not need to rediscover runtime regressions independently.

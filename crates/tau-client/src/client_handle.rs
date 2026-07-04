@@ -154,6 +154,21 @@ impl ClientHandle {
         ))
     }
 
+    /// Sends one prompt-interception reply to the harness.
+    ///
+    /// This is a protocol convenience for custom-loop extensions that own
+    /// dynamic interception policy. The caller is still responsible for sending
+    /// exactly one reply for each received `InterceptRequest`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when sending the underlying protocol frame fails.
+    pub fn intercept_reply(&self, action: tau_proto::InterceptAction) -> ClientResult<()> {
+        self.send(tau_proto::HarnessInputMessage::InterceptReply(
+            tau_proto::InterceptReply { action },
+        ))
+    }
+
     /// Stops the writer thread after flushing any pending state.
     pub(crate) fn shutdown(&self) -> ClientResult<()> {
         let (ack_sender, ack_receiver) = mpsc::channel();

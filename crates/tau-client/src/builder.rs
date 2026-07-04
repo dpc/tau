@@ -417,6 +417,21 @@ impl<State> ExtensionBuilder<State> {
         }
     }
 
+    /// Validates that this builder can be used with deferred manual startup.
+    pub(crate) fn validate_deferred_startup(&self) -> ClientResult<()> {
+        if self.force_subscribe
+            || !self.selectors.is_empty()
+            || self.intercept.is_some()
+            || !self.startup_events.is_empty()
+            || self.ready_message.is_some()
+        {
+            return Err(ClientError::builder(
+                "deferred manual startup cannot use static startup declarations; send dynamic startup frames explicitly before Ready",
+            ));
+        }
+        Ok(())
+    }
+
     /// Adds one startup subscription selector unless it is already present.
     fn add_selector(&mut self, selector: tau_proto::EventSelector) {
         if !self.selectors.contains(&selector) {
