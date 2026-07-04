@@ -1,14 +1,14 @@
 use serde::de::DeserializeOwned;
 
 use crate::contexts::{
-    ConfigureContext, ConfigureErrorContext, EventContext, InterceptContext, RawConfigureContext,
-    RawEventContext, ToolContext,
+    ActionContext, ConfigureContext, ConfigureErrorContext, EventContext, InterceptContext,
+    RawConfigureContext, RawEventContext, ToolContext,
 };
 use crate::event_payload::EventPayload;
 use crate::handler::{
-    ConfigureHandler, EventHandler, InterceptHandler, NamedToolHandler, RawConfigureHandler,
-    RawEventHandler, ToolHandler, TypedConfigureHandler, TypedConfigureWithErrorHandler,
-    TypedEventHandler, TypedInterceptHandler, TypedRawEventHandler,
+    ActionHandler, ConfigureHandler, EventHandler, InterceptHandler, NamedActionHandler,
+    NamedToolHandler, RawConfigureHandler, RawEventHandler, ToolHandler, TypedConfigureHandler,
+    TypedConfigureWithErrorHandler, TypedEventHandler, TypedInterceptHandler, TypedRawEventHandler,
 };
 use crate::{ClientError, ClientResult, ExtensionPlugin, InterceptDecision};
 
@@ -37,6 +37,8 @@ pub struct ExtensionBuilder<State> {
     pub(crate) raw_event_handlers: Vec<Box<dyn RawEventHandler<State>>>,
     /// Live tool handlers.
     pub(crate) tool_handlers: Vec<Box<dyn ToolHandler<State>>>,
+    /// Live action handlers.
+    pub(crate) action_handlers: Vec<Box<dyn ActionHandler<State>>>,
     /// Intercept handler used for every intercept request.
     pub(crate) intercept_handler: Option<Box<dyn InterceptHandler<State>>>,
     /// Builder validation error detected during declaration.
@@ -59,6 +61,7 @@ impl<State> ExtensionBuilder<State> {
             event_handlers: Vec::new(),
             raw_event_handlers: Vec::new(),
             tool_handlers: Vec::new(),
+            action_handlers: Vec::new(),
             intercept_handler: None,
             error: None,
         }
@@ -92,6 +95,21 @@ impl<State> ExtensionBuilder<State> {
     pub fn startup_event(&mut self, event: tau_proto::Event) -> &mut Self {
         self.startup_events.push(event);
         self
+    }
+
+    /// Publishes an extension-provided action schema during startup.
+    ///
+    /// The owner fields in the startup event are placeholders; the harness
+    /// stamps the real extension name and instance id before broadcasting the
+    /// schema.
+    pub fn publish_actions(&mut self, schema: tau_proto::ActionSchema) -> &mut Self {
+        self.startup_event(tau_proto::Event::ActionSchemaPublished(
+            tau_proto::ActionSchemaPublished {
+                extension_name: tau_proto::ExtensionName::default(),
+                instance_id: 0.into(),
+                schema,
+            },
+        ))
     }
 
     /// Attaches a human-readable message to the terminal `Ready` frame.
@@ -334,6 +352,26 @@ impl<State> ExtensionBuilder<State> {
         } else {
             self.intercept_handler = Some(Box::new(TypedInterceptHandler::new(handler)));
         }
+        self
+    }
+
+    /// Registers one live action handler and subscribes to `action.invoke`.
+    ///
+    /// Replay-marked action deliveries are skipped before dispatch. The handler
+    /// only runs when the action id matches this declaration; the harness owns
+    /// extension/instance-level routing for action invocations.
+    ///
+    /// If the handler returns an error, the runner treats it as a fatal
+    /// extension error. Action-domain failures should emit `ActionError` or
+    /// `ActionResult` and return `Ok(())`.
+    pub fn action(
+        &mut self,
+        action_id: impl Into<String>,
+        handler: impl for<'a> FnMut(ActionContext<'a, State>) -> ClientResult<()> + 'static,
+    ) -> &mut Self {
+        self.subscribe([tau_proto::EventName::ACTION_INVOKE]);
+        self.action_handlers
+            .push(Box::new(NamedActionHandler::new(action_id.into(), handler)));
         self
     }
 

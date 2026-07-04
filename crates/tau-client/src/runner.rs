@@ -260,8 +260,8 @@ pub(crate) fn dispatch_message<State>(
     }
 }
 
-/// Dispatches one event delivery to matching live tool, raw event, and typed
-/// event handlers.
+/// Dispatches one event delivery to matching live tool/action, raw event, and
+/// typed event handlers.
 fn dispatch_delivery<State>(
     delivery: &tau_proto::EventDelivery,
     state: &mut State,
@@ -274,6 +274,13 @@ fn dispatch_delivery<State>(
     {
         for handler in &mut builder.tool_handlers {
             handler.handle(invoke, state, handle, &mut stop_requested)?;
+        }
+    }
+    if !delivery.is_replay()
+        && let tau_proto::Event::ActionInvoke(invoke) = delivery.event.as_ref()
+    {
+        for handler in &mut builder.action_handlers {
+            handler.handle(invoke, state, handle)?;
         }
     }
     for handler in &mut builder.raw_event_handlers {

@@ -5,10 +5,10 @@ use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::time::Duration;
 
 use tau_proto::{
-    AgentPromptSubmitted, CborValue, Configure, Event, EventSelector, HarnessInputMessage,
-    HarnessInputReader, HarnessNotice, HarnessOutputMessage, HarnessOutputWriter, InterceptAction,
-    InterceptRequest, InterceptionPriority, NoticeLevel, PromptMessageClass, PromptOriginator,
-    ToolName, ToolSpec, ToolStarted, ToolType, UnixMicros,
+    ActionOutput, ActionSchema, AgentPromptSubmitted, CborValue, Configure, Event, EventSelector,
+    HarnessInputMessage, HarnessInputReader, HarnessNotice, HarnessOutputMessage,
+    HarnessOutputWriter, InterceptAction, InterceptRequest, InterceptionPriority, NoticeLevel,
+    PromptMessageClass, PromptOriginator, ToolName, ToolSpec, ToolStarted, ToolType, UnixMicros,
 };
 
 use super::*;
@@ -49,6 +49,8 @@ struct Counts {
     last_recorded_at: Option<UnixMicros>,
     /// Number of matching tool handler invocations.
     tool_matches: usize,
+    /// Number of matching action handler invocations.
+    action_matches: usize,
     /// Number of intercept handler invocations.
     intercepts: usize,
 }
@@ -286,6 +288,31 @@ impl TauExtension for MultiToolExtension {
             .tool(tool_spec("first_tool"), |_| Ok(()))
             .tool(tool_spec("second_tool"), |_| Ok(()))
             .tool(tool_spec("third_tool"), |_| Ok(()));
+    }
+}
+
+struct ActionExtension;
+
+impl TauExtension for ActionExtension {
+    type State = Counts;
+
+    fn name(&self) -> &'static str {
+        "action-owner"
+    }
+
+    fn register(self, builder: &mut ExtensionBuilder<Self::State>) {
+        builder
+            .publish_actions(ActionSchema::default())
+            .action("demo.run", |cx| {
+                cx.state.action_matches += 1;
+                cx.emit(Event::ActionResult(tau_proto::ActionResult {
+                    invocation_id: cx.invoke.invocation_id.clone(),
+                    action_id: cx.invoke.action_id.clone(),
+                    output: ActionOutput::Text {
+                        text: "action complete".to_owned(),
+                    },
+                }))
+            });
     }
 }
 
@@ -679,6 +706,19 @@ fn tool_started(name: &str) -> HarnessOutputMessage {
     }))
 }
 
+fn action_invoke(extension_name: &str, action_id: &str) -> Event {
+    Event::ActionInvoke(tau_proto::ActionInvoke {
+        invocation_id: format!("invoke-{extension_name}-{action_id}").into(),
+        session_id: "session-1".into(),
+        extension_name: extension_name.into(),
+        instance_id: 0.into(),
+        action_id: action_id.to_owned(),
+        raw_line: format!("/{action_id}"),
+        argv: Vec::new(),
+        arguments: CborValue::Map(Vec::new()),
+    })
+}
+
 fn test_prompt(text: &str) -> AgentPromptSubmitted {
     AgentPromptSubmitted {
         agent_id: tau_proto::AgentId::parse("agent-1").expect("agent id"),
@@ -869,6 +909,70 @@ fn multi_tool_registration_subscribes_to_tool_started_once() {
         subscribe.selectors,
         [EventSelector::Exact(tau_proto::EventName::TOOL_STARTED)]
     );
+}
+
+/// Ensures action schemas are published before `Ready`, `action.invoke` is
+/// subscribed exactly once, replayed invocations are skipped, and live action
+/// handlers match declared action ids while leaving extension/instance routing
+/// to the harness.
+#[test]
+fn action_schema_and_live_dispatch_match_action_after_harness_routing() {
+    let (state, frames) = run_messages(
+        ActionExtension,
+        Counts::default(),
+        &[
+            HarnessOutputMessage::deliver_replay(
+                UnixMicros::new(1),
+                action_invoke("action-owner", "demo.run"),
+            ),
+            HarnessOutputMessage::deliver_live(
+                UnixMicros::new(2),
+                action_invoke("action-owner", "other.run"),
+            ),
+            HarnessOutputMessage::deliver_live(
+                UnixMicros::new(3),
+                action_invoke("configured-action-instance", "demo.run"),
+            ),
+        ],
+    );
+
+    assert_eq!(state.action_matches, 1);
+    assert!(matches!(
+        &frames[1],
+        HarnessInputMessage::Subscribe(sub)
+            if sub.selectors == [EventSelector::Exact(tau_proto::EventName::ACTION_INVOKE)]
+    ));
+    let (schema_index, published_schema) = frames
+        .iter()
+        .enumerate()
+        .find_map(|(index, frame)| {
+            let HarnessInputMessage::Emit(emit) = frame else {
+                return None;
+            };
+            let Event::ActionSchemaPublished(published) = emit.event.as_ref() else {
+                return None;
+            };
+            Some((index, published))
+        })
+        .expect("action schema published");
+    assert_eq!(
+        published_schema.extension_name,
+        tau_proto::ExtensionName::default()
+    );
+    assert_eq!(published_schema.instance_id, 0.into());
+    assert!(schema_index < ready_frame_index(&frames));
+    let action_results = frames
+        .iter()
+        .filter(|frame| {
+            matches!(
+                frame,
+                HarnessInputMessage::Emit(emit)
+                    if matches!(emit.event.as_ref(), Event::ActionResult(result)
+                        if result.action_id == "demo.run")
+            )
+        })
+        .count();
+    assert_eq!(action_results, 1);
 }
 
 /// Ensures detached sends still flow through the writer before runner

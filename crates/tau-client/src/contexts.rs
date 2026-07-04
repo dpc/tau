@@ -41,6 +41,37 @@ impl<'a, State> ToolContext<'a, State> {
     }
 }
 
+/// Context passed to a live action dispatch handler.
+pub struct ActionContext<'a, State> {
+    /// Mutable extension state shared by handlers.
+    pub state: &'a mut State,
+    /// Live `action.invoke` payload routed by the harness and selected by
+    /// action id.
+    pub invoke: &'a tau_proto::ActionInvoke,
+    /// Cloneable handle for sending frames to the harness.
+    pub handle: ClientHandle,
+}
+
+impl<'a, State> ActionContext<'a, State> {
+    /// Returns the live `action.invoke` payload routed by the harness and
+    /// selected by action id.
+    #[must_use]
+    pub fn invoke(&self) -> &tau_proto::ActionInvoke {
+        self.invoke
+    }
+
+    /// Returns a cloneable handle for sending frames to the harness.
+    #[must_use]
+    pub fn handle(&self) -> ClientHandle {
+        self.handle.clone()
+    }
+
+    /// Emits a durable event through the harness.
+    pub fn emit(&self, event: tau_proto::Event) -> ClientResult<()> {
+        self.handle.emit(event)
+    }
+}
+
 /// Context passed to a typed configuration handler.
 pub struct ConfigureContext<'a, State, Config> {
     /// Mutable extension state shared by handlers.

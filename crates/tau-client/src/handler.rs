@@ -1,8 +1,8 @@
 use serde::de::DeserializeOwned;
 
 use crate::contexts::{
-    ConfigureContext, ConfigureErrorContext, EventContext, InterceptContext, RawConfigureContext,
-    RawEventContext, ToolContext,
+    ActionContext, ConfigureContext, ConfigureErrorContext, EventContext, InterceptContext,
+    RawConfigureContext, RawEventContext, ToolContext,
 };
 use crate::event_payload::EventPayload;
 use crate::{ClientHandle, ClientResult, InterceptDecision};
@@ -86,6 +86,17 @@ pub(crate) trait ToolHandler<State> {
         state: &mut State,
         handle: &ClientHandle,
         stop_requested: &mut bool,
+    ) -> ClientResult<()>;
+}
+
+/// Runtime handler for one live action declaration.
+pub(crate) trait ActionHandler<State> {
+    /// Dispatches one live `action.invoke` payload when its action id matches.
+    fn handle(
+        &mut self,
+        invoke: &tau_proto::ActionInvoke,
+        state: &mut State,
+        handle: &ClientHandle,
     ) -> ClientResult<()>;
 }
 
@@ -361,6 +372,44 @@ where
             invoke,
             handle: handle.clone(),
             stop_requested,
+        };
+        (self.handler)(cx)
+    }
+}
+
+/// Live action handler implementation.
+pub(crate) struct NamedActionHandler<F> {
+    /// Action id this handler owns.
+    action_id: String,
+    /// User-provided action handler.
+    handler: F,
+}
+
+impl<F> NamedActionHandler<F> {
+    /// Creates a live action handler wrapper.
+    #[must_use]
+    pub(crate) fn new(action_id: String, handler: F) -> Self {
+        Self { action_id, handler }
+    }
+}
+
+impl<State, F> ActionHandler<State> for NamedActionHandler<F>
+where
+    F: for<'a> FnMut(ActionContext<'a, State>) -> ClientResult<()>,
+{
+    fn handle(
+        &mut self,
+        invoke: &tau_proto::ActionInvoke,
+        state: &mut State,
+        handle: &ClientHandle,
+    ) -> ClientResult<()> {
+        if invoke.action_id != self.action_id {
+            return Ok(());
+        }
+        let cx = ActionContext {
+            state,
+            invoke,
+            handle: handle.clone(),
         };
         (self.handler)(cx)
     }
