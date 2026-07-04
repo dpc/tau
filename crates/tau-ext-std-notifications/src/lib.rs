@@ -27,19 +27,21 @@
 
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
-use std::io::{BufReader, BufWriter, Read, Write};
+use std::io::{Read, Write};
 use std::process::{Command, Stdio};
-use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
+use tau_client::{
+    ClientError, ClientHandle, DispatchOutcome, ExtensionBuilder, ManualExtensionRuntime,
+    ManualRuntimeInput, RawConfigureContext, RawEventContext, TauExtension, TauExtensionRunner,
+};
 use tau_proto::{
-    ConfigError, Event, HarnessInputMessage, HarnessOutputMessage, Osc1337SetUserVar,
-    PeerInputReader, PeerOutputWriter, StartAgentRequest, TermBell,
+    Event, EventSelector, HarnessOutputMessage, Osc1337SetUserVar, StartAgentRequest, TermBell,
 };
 
 /// `tracing` target for events emitted from this extension. Matches
-/// the convention described in [`tau_extension`]: a short identifier
+/// the convention described in [`tau_client`]: a short identifier
 /// the user can name in `TAU_LOG=std-notifications=trace`.
 pub const LOG_TARGET: &str = "std-notifications";
 
@@ -524,7 +526,7 @@ impl IdleHookConfig {
 /// validation failures are reported to the harness as `ConfigError` frames and
 /// are not returned from this function.
 pub fn run_stdio() -> Result<(), Box<dyn Error>> {
-    tau_extension::init_logging_for(LOG_TARGET);
+    tau_client::init_logging_for(LOG_TARGET);
     run(std::io::stdin(), std::io::stdout())
 }
 
@@ -542,17 +544,9 @@ pub fn run_stdio() -> Result<(), Box<dyn Error>> {
 pub fn run<R, W>(reader: R, writer: W) -> Result<(), Box<dyn Error>>
 where
     R: Read + Send + 'static,
-    W: Write,
+    W: Write + Send + 'static,
 {
     run_with_idle(reader, writer, Duration::from_secs(DEFAULT_IDLE_SECONDS))
-}
-
-/// Inbound message on the main thread's channel: either a decoded harness
-/// output message from the reader thread, or a terminal condition that ends the
-/// loop.
-enum InMsg {
-    Message(Box<HarnessOutputMessage>),
-    EndOfStream,
 }
 
 /// Test-friendly entry point. Lets unit tests drop the idle window
@@ -575,7 +569,7 @@ pub fn run_with_idle<R, W>(
 ) -> Result<(), Box<dyn Error>>
 where
     R: Read + Send + 'static,
-    W: Write,
+    W: Write + Send + 'static,
 {
     run_with_idle_and_summary_timeout(
         reader,
@@ -603,84 +597,75 @@ pub fn run_with_idle_and_summary_timeout<R, W>(
 ) -> Result<(), Box<dyn Error>>
 where
     R: Read + Send + 'static,
-    W: Write,
+    W: Write + Send + 'static,
 {
-    let mut writer = PeerOutputWriter::new(BufWriter::new(writer));
-    write_handshake(&mut writer)?;
-
-    let rx = spawn_reader_thread(reader);
-    NotificationLoop::new(writer, rx).run(idle_duration, summary_timeout)
+    let runtime = TauExtensionRunner::new(StdNotificationsExtension).start_manual_loop(
+        reader,
+        writer,
+        NotificationLoop::new(idle_duration),
+    )?;
+    NotificationLoop::run(runtime, summary_timeout)
 }
 
-fn write_handshake<W: Write>(
-    writer: &mut PeerOutputWriter<BufWriter<W>>,
-) -> Result<(), Box<dyn Error>> {
-    // Subscribe-time catch-up delivers prior prompts/results as replay-marked
-    // frames; the receive loop skips those so sounds and idle nudges only
-    // fire for live activity.
-    tau_extension::Handshake::tool("tau-ext-std-notifications")
-        .subscribe([
-            tau_proto::EventName::PROVIDER_PROMPT_SUBMITTED,
-            tau_proto::EventName::PROVIDER_RESPONSE_FINISHED,
-            tau_proto::EventName::AGENT_PROMPT_SUBMITTED,
-            tau_proto::EventName::AGENT_PROMPT_STARTED,
-            tau_proto::EventName::AGENT_PROMPT_TERMINATED,
-            tau_proto::EventName::AGENT_STARTED,
-            tau_proto::EventName::AGENT_DISPLAY_NAME_SET,
-            tau_proto::EventName::AGENT_STATE,
-            tau_proto::EventName::SESSION_AGENT_LOADED,
-            tau_proto::EventName::SESSION_AGENT_UNLOADED,
-            tau_proto::EventName::AGENT_START_ACCEPTED,
-            // Trailing-edge debounced typing pings from the UI bump the idle
-            // deadline so the desktop notification doesn't fire mid-sentence.
-            tau_proto::EventName::UI_PROMPT_DRAFT,
-            tau_proto::EventName::TOOL_RESULT,
-            tau_proto::EventName::TOOL_ERROR,
-            tau_proto::EventName::PROVIDER_TOOL_RESULT,
-            tau_proto::EventName::PROVIDER_TOOL_ERROR,
-            tau_proto::EventName::TOOL_BACKGROUND_RESULT,
-            tau_proto::EventName::TOOL_BACKGROUND_ERROR,
-            // Side-query results come back point-to-point from the harness, but
-            // subscribe defensively in case the broadcast form ever appears.
-            tau_proto::EventName::AGENT_START_RESULT,
-        ])
-        .ready_message("std-notifications ready")
-        .run(writer)?;
-    Ok(())
-}
+/// Tau-client declaration for the std-notifications protocol peer.
+struct StdNotificationsExtension;
 
-fn spawn_reader_thread<R>(reader: R) -> mpsc::Receiver<InMsg>
-where
-    R: Read + Send + 'static,
-{
-    // Spawn a reader thread so the main loop can wait on either an incoming
-    // message or an idle deadline via `recv_timeout`. The reader exits
-    // naturally when stdin closes, then the channel disconnects and the main
-    // loop sees EndOfStream.
-    let (tx, rx) = mpsc::channel::<InMsg>();
-    let _reader_handle = thread::spawn(move || {
-        let mut reader = PeerInputReader::new(BufReader::new(reader));
-        loop {
-            match reader.read_message() {
-                Ok(Some(message)) => {
-                    if tx.send(InMsg::Message(Box::new(message))).is_err() {
-                        break;
-                    }
-                }
-                Ok(None) => {
-                    let _ = tx.send(InMsg::EndOfStream);
-                    break;
-                }
-                Err(_) => {
-                    // Treat decode errors as end-of-stream. The socket layer
-                    // above will surface the failure through its own channels.
-                    let _ = tx.send(InMsg::EndOfStream);
-                    break;
-                }
-            }
+impl TauExtension for StdNotificationsExtension {
+    type State = NotificationLoop;
+
+    fn name(&self) -> &'static str {
+        "tau-ext-std-notifications"
+    }
+
+    fn register(self, builder: &mut ExtensionBuilder<Self::State>) {
+        builder
+            .ready_message("std-notifications ready")
+            .configure_raw(handle_configure);
+        // Subscribe-time catch-up delivers prior prompts/results as replay-marked
+        // frames; every delivery handler is live-only so sounds and idle nudges
+        // only fire for live activity.
+        for event_name in subscribed_events() {
+            builder.on_raw_live(EventSelector::Exact(event_name), handle_live_delivery);
         }
-    });
-    rx
+    }
+}
+
+fn subscribed_events() -> [tau_proto::EventName; 19] {
+    [
+        tau_proto::EventName::PROVIDER_PROMPT_SUBMITTED,
+        tau_proto::EventName::PROVIDER_RESPONSE_FINISHED,
+        tau_proto::EventName::AGENT_PROMPT_SUBMITTED,
+        tau_proto::EventName::AGENT_PROMPT_STARTED,
+        tau_proto::EventName::AGENT_PROMPT_TERMINATED,
+        tau_proto::EventName::AGENT_STARTED,
+        tau_proto::EventName::AGENT_DISPLAY_NAME_SET,
+        tau_proto::EventName::AGENT_STATE,
+        tau_proto::EventName::SESSION_AGENT_LOADED,
+        tau_proto::EventName::SESSION_AGENT_UNLOADED,
+        tau_proto::EventName::AGENT_START_ACCEPTED,
+        // Trailing-edge debounced typing pings from the UI bump the idle
+        // deadline so the desktop notification doesn't fire mid-sentence.
+        tau_proto::EventName::UI_PROMPT_DRAFT,
+        tau_proto::EventName::TOOL_RESULT,
+        tau_proto::EventName::TOOL_ERROR,
+        tau_proto::EventName::PROVIDER_TOOL_RESULT,
+        tau_proto::EventName::PROVIDER_TOOL_ERROR,
+        tau_proto::EventName::TOOL_BACKGROUND_RESULT,
+        tau_proto::EventName::TOOL_BACKGROUND_ERROR,
+        // Side-query results come back point-to-point from the harness, but
+        // subscribe defensively in case the broadcast form ever appears.
+        tau_proto::EventName::AGENT_START_RESULT,
+    ]
+}
+
+fn handle_configure(cx: RawConfigureContext<'_, NotificationLoop>) -> tau_client::ClientResult<()> {
+    let cfg: ExtConfig = cx.parse_config()?;
+    cx.state.apply_config(cfg)
+}
+
+fn handle_live_delivery(cx: RawEventContext<'_, NotificationLoop>) -> tau_client::ClientResult<()> {
+    let event = cx.event().clone();
+    cx.state.handle_live_event(event, &cx.handle())
 }
 
 /// Mutable state for the std-notifications protocol loop.
@@ -692,13 +677,9 @@ where
 /// harness-owned `agent.state` and session membership are the source of truth,
 /// while user-visible prompt/end hooks must ignore extension side
 /// conversations.
-struct NotificationLoop<W: Write> {
-    /// Protocol writer used for config errors, emitted events, and side-agent
-    /// requests.
-    writer: PeerOutputWriter<BufWriter<W>>,
-    /// Reader-thread channel that supplies decoded harness messages and EOF
-    /// markers.
-    rx: mpsc::Receiver<InMsg>,
+struct NotificationLoop {
+    /// Default idle window used for hooks without an explicit delay.
+    idle_duration: Duration,
     /// Last valid live extension configuration accepted from the harness.
     /// Reloading this clears pending idle hooks so stale hook indices cannot
     /// render against a new configuration.
@@ -736,19 +717,20 @@ struct NotificationLoop<W: Write> {
     next_query_id: u64,
 }
 
-/// Action requested by a protocol-loop message handler.
-enum LoopControl {
-    /// Continue processing subsequent harness input or idle deadlines.
-    Continue,
-    /// Exit the protocol loop without waiting for pending idle deadlines.
-    Break,
+/// Input selected by the notification policy loop.
+enum LoopInput {
+    /// A harness message should be dispatched through tau-client handlers.
+    Message(HarnessOutputMessage),
+    /// The harness input stream reached clean EOF.
+    InputClosed,
+    /// The next idle or summary deadline elapsed.
+    Timeout,
 }
 
-impl<W: Write> NotificationLoop<W> {
-    fn new(writer: PeerOutputWriter<BufWriter<W>>, rx: mpsc::Receiver<InMsg>) -> Self {
+impl NotificationLoop {
+    fn new(idle_duration: Duration) -> Self {
         Self {
-            writer,
-            rx,
+            idle_duration,
             config: ExtConfig::default(),
             idle: Vec::new(),
             idle_all: Vec::new(),
@@ -766,58 +748,57 @@ impl<W: Write> NotificationLoop<W> {
     }
 
     fn run(
-        mut self,
-        idle_duration: Duration,
+        mut runtime: ManualExtensionRuntime<Self>,
         summary_timeout: Duration,
     ) -> Result<(), Box<dyn Error>> {
         loop {
-            match self.recv_next_idle_or_message() {
-                Ok(InMsg::Message(message)) => {
-                    if let LoopControl::Break = self.handle_message(*message, idle_duration)? {
+            let input = match recv_next_idle_or_message(&mut runtime) {
+                Ok(input) => input,
+                Err(error) => {
+                    let _ = runtime.finish();
+                    return Err(Box::new(error));
+                }
+            };
+            match input {
+                LoopInput::Message(message) => match runtime.dispatch_one(message) {
+                    Ok(DispatchOutcome::Continue) => {}
+                    Ok(DispatchOutcome::Disconnect(_)) => {
+                        let _state = runtime.finish_detached();
+                        return Ok(());
+                    }
+                    Ok(DispatchOutcome::StopRequested) => break,
+                    Err(error) => {
+                        let _ = runtime.finish();
+                        return Err(Box::new(error));
+                    }
+                },
+                LoopInput::InputClosed => {
+                    runtime.state_mut().input_closed = true;
+                    if runtime.state().no_pending_idle_hooks() {
                         break;
                     }
                 }
-                Ok(InMsg::EndOfStream) | Err(mpsc::RecvTimeoutError::Disconnected) => {
-                    self.input_closed = true;
-                    if self.no_pending_idle_hooks() {
-                        break;
+                LoopInput::Timeout => {
+                    let handle = runtime.handle();
+                    if let Err(error) = runtime
+                        .state_mut()
+                        .process_timeout(&handle, summary_timeout)
+                    {
+                        let _ = runtime.finish();
+                        return Err(error);
                     }
-                }
-                Err(mpsc::RecvTimeoutError::Timeout) => {
-                    self.process_timeout(summary_timeout)?;
-                    if self.input_closed && self.no_pending_idle_hooks() {
+                    if runtime.state().input_closed && runtime.state().no_pending_idle_hooks() {
                         break;
                     }
                 }
             }
         }
+        runtime.finish()?;
         Ok(())
     }
 
     fn no_pending_idle_hooks(&self) -> bool {
         self.idle.is_empty() && self.idle_all.is_empty()
-    }
-
-    fn recv_next_idle_or_message(&self) -> Result<InMsg, mpsc::RecvTimeoutError> {
-        match (self.next_deadline(), self.input_closed) {
-            (Some(deadline), false) => self
-                .rx
-                .recv_timeout(deadline.saturating_duration_since(Instant::now())),
-            (None, false) => self
-                .rx
-                .recv()
-                .map_err(|_| mpsc::RecvTimeoutError::Disconnected),
-            // Input closed but a notification is still pending: the output side
-            // is independent, so honor the deadline instead of dropping it.
-            (Some(deadline), true) => {
-                let wait = deadline.saturating_duration_since(Instant::now());
-                if !wait.is_zero() {
-                    thread::sleep(wait);
-                }
-                Err(mpsc::RecvTimeoutError::Timeout)
-            }
-            (None, true) => Err(mpsc::RecvTimeoutError::Disconnected),
-        }
     }
 
     fn next_deadline(&self) -> Option<Instant> {
@@ -827,83 +808,38 @@ impl<W: Write> NotificationLoop<W> {
             .min()
     }
 
-    fn handle_message(
-        &mut self,
-        message: HarnessOutputMessage,
-        idle_duration: Duration,
-    ) -> Result<LoopControl, Box<dyn Error>> {
-        if matches!(message, HarnessOutputMessage::Disconnect(_)) {
-            tracing::info!(target: LOG_TARGET, "disconnect received, exiting");
-            return Ok(LoopControl::Break);
+    fn apply_config(&mut self, cfg: ExtConfig) -> tau_client::ClientResult<()> {
+        if let Err(message) = cfg.validate() {
+            tracing::warn!(target: LOG_TARGET, error = %message, "rejecting config");
+            return Err(ClientError::handler(message));
         }
-        let Some(inner) = self.handle_non_disconnect_message(message)? else {
-            return Ok(LoopControl::Continue);
-        };
-        tracing::trace!(target: LOG_TARGET, name = %inner.name(), "event received");
-        self.update_all_idle_tracking(&inner, idle_duration);
-        if is_sub_agent_event(&inner) {
-            tracing::trace!(target: LOG_TARGET, name = %inner.name(), "skipping sub-agent event");
-            return Ok(LoopControl::Continue);
-        }
-        self.handle_user_event(inner, idle_duration)?;
-        Ok(LoopControl::Continue)
-    }
-
-    fn handle_non_disconnect_message(
-        &mut self,
-        message: HarnessOutputMessage,
-    ) -> Result<Option<Event>, Box<dyn Error>> {
-        match message {
-            HarnessOutputMessage::Configure(msg) => {
-                self.apply_config(msg.config)?;
-                Ok(None)
-            }
-            HarnessOutputMessage::Deliver(delivery) => {
-                if delivery.is_replay() {
-                    tracing::trace!(target: LOG_TARGET, name = %delivery.event().name(), "skipping replayed event");
-                    Ok(None)
-                } else {
-                    Ok(Some(delivery.into_event()))
-                }
-            }
-            _ => Ok(None),
-        }
-    }
-
-    fn apply_config(&mut self, raw_config: tau_proto::CborValue) -> Result<(), Box<dyn Error>> {
-        match tau_extension::parse_config::<ExtConfig>(&raw_config) {
-            Ok(cfg) => {
-                if let Err(message) = cfg.validate() {
-                    tracing::warn!(target: LOG_TARGET, error = %message, "rejecting config");
-                    self.writer
-                        .write_message(&HarnessInputMessage::ConfigError(ConfigError {
-                            message,
-                        }))?;
-                    self.writer.flush()?;
-                    return Ok(());
-                }
-                self.idle.clear();
-                self.idle_all.clear();
-                tracing::info!(
-                    target: LOG_TARGET,
-                    agent_start = cfg.agent_start.len(),
-                    agent_end = cfg.agent_end.len(),
-                    agent_idle = cfg.agent_idle.len(),
-                    agent_idle_all = cfg.agent_idle_all.len(),
-                    "applied config",
-                );
-                self.config = cfg;
-            }
-            Err(message) => {
-                tracing::warn!(target: LOG_TARGET, error = %message, "rejecting config");
-                self.writer
-                    .write_message(&HarnessInputMessage::ConfigError(ConfigError {
-                        message: message.clone(),
-                    }))?;
-                self.writer.flush()?;
-            }
-        }
+        self.idle.clear();
+        self.idle_all.clear();
+        tracing::info!(
+            target: LOG_TARGET,
+            agent_start = cfg.agent_start.len(),
+            agent_end = cfg.agent_end.len(),
+            agent_idle = cfg.agent_idle.len(),
+            agent_idle_all = cfg.agent_idle_all.len(),
+            "applied config",
+        );
+        self.config = cfg;
         Ok(())
+    }
+
+    fn handle_live_event(
+        &mut self,
+        event: Event,
+        handle: &ClientHandle,
+    ) -> tau_client::ClientResult<()> {
+        tracing::trace!(target: LOG_TARGET, name = %event.name(), "event received");
+        self.update_all_idle_tracking(&event, self.idle_duration);
+        if is_sub_agent_event(&event) {
+            tracing::trace!(target: LOG_TARGET, name = %event.name(), "skipping sub-agent event");
+            return Ok(());
+        }
+        self.handle_user_event(event, handle)
+            .map_err(|error| ClientError::handler(error.to_string()))
     }
 
     fn update_all_idle_tracking(&mut self, event: &Event, idle_duration: Duration) {
@@ -1025,7 +961,7 @@ impl<W: Write> NotificationLoop<W> {
     fn handle_user_event(
         &mut self,
         event: Event,
-        idle_duration: Duration,
+        handle: &ClientHandle,
     ) -> Result<(), Box<dyn Error>> {
         match event {
             Event::AgentStarted(started) => {
@@ -1037,14 +973,14 @@ impl<W: Write> NotificationLoop<W> {
             Event::ProviderPromptSubmitted(prompt) => {
                 self.handle_provider_prompt_submitted(prompt);
             }
-            Event::AgentPromptSubmitted(prompt) => self.handle_agent_prompt(prompt)?,
+            Event::AgentPromptSubmitted(prompt) => self.handle_agent_prompt(prompt, handle)?,
             Event::AgentPromptStarted(started) => self.handle_agent_prompt_started(started),
             Event::AgentPromptTerminated(terminated) => {
                 self.handle_agent_prompt_terminated(terminated);
             }
-            Event::UiPromptDraft(_) => self.extend_idle_deadlines(idle_duration),
+            Event::UiPromptDraft(_) => self.extend_idle_deadlines(self.idle_duration),
             Event::ProviderResponseFinished(finished) => {
-                self.handle_provider_response_finished(finished, idle_duration)?;
+                self.handle_provider_response_finished(finished, handle)?;
             }
             Event::ToolResult(result) | Event::ProviderToolResult(result) => {
                 self.handle_tool_result(result);
@@ -1053,20 +989,12 @@ impl<W: Write> NotificationLoop<W> {
                 self.handle_tool_error(error);
             }
             Event::ToolBackgroundResult(result) => {
-                self.handle_background_tool_finished(
-                    result.call_id,
-                    result.originator,
-                    idle_duration,
-                )?;
+                self.handle_background_tool_finished(result.call_id, result.originator, handle)?;
             }
             Event::ToolBackgroundError(error) => {
-                self.handle_background_tool_finished(
-                    error.call_id,
-                    error.originator,
-                    idle_duration,
-                )?;
+                self.handle_background_tool_finished(error.call_id, error.originator, handle)?;
             }
-            Event::StartAgentResult(result) => self.handle_start_agent_result(result)?,
+            Event::StartAgentResult(result) => self.handle_start_agent_result(result, handle)?,
             other => {
                 tracing::trace!(target: LOG_TARGET, name = %other.name(), "ignoring unhandled event")
             }
@@ -1084,6 +1012,7 @@ impl<W: Write> NotificationLoop<W> {
     fn handle_agent_prompt(
         &mut self,
         prompt: tau_proto::AgentPromptSubmitted,
+        handle: &ClientHandle,
     ) -> Result<(), Box<dyn Error>> {
         self.set_display_name(prompt.agent_id.clone(), prompt.display_name.as_deref());
         self.idle
@@ -1109,7 +1038,7 @@ impl<W: Write> NotificationLoop<W> {
                 "",
                 "",
             );
-            emit_hooks(&mut self.writer, &self.config.agent_start, &ctx)?;
+            emit_hooks(handle, &self.config.agent_start, &ctx)?;
         }
         Ok(())
     }
@@ -1176,7 +1105,7 @@ impl<W: Write> NotificationLoop<W> {
     fn handle_provider_response_finished(
         &mut self,
         finished: tau_proto::ProviderResponseFinished,
-        idle_duration: Duration,
+        handle: &ClientHandle,
     ) -> Result<(), Box<dyn Error>> {
         if finished.stop_reason.requests_tool_calls() {
             self.track_tool_call_owners(&finished);
@@ -1190,7 +1119,7 @@ impl<W: Write> NotificationLoop<W> {
             .get(&finished.agent_id)
             .is_none_or(|turn| turn.active_background_tools.is_empty());
         if active_background_tools_empty {
-            self.emit_finished_response(finished, idle_duration)?;
+            self.emit_finished_response(finished, handle)?;
         } else {
             self.defer_finished_response(finished);
         }
@@ -1233,7 +1162,7 @@ impl<W: Write> NotificationLoop<W> {
     fn emit_finished_response(
         &mut self,
         finished: tau_proto::ProviderResponseFinished,
-        idle_duration: Duration,
+        handle: &ClientHandle,
     ) -> Result<(), Box<dyn Error>> {
         let agent_id = finished.agent_id.clone();
         self.agent_prompt_agents
@@ -1243,10 +1172,10 @@ impl<W: Write> NotificationLoop<W> {
         let turn = self.agent_turns.entry(agent_id.clone()).or_default();
         turn.record_prompt_started(finished.agent_prompt_id.clone());
         emit_agent_end(
-            &mut self.writer,
+            handle,
             turn,
             &mut self.idle,
-            idle_duration,
+            self.idle_duration,
             &self.config,
             agent_id,
             agent_name,
@@ -1325,7 +1254,7 @@ impl<W: Write> NotificationLoop<W> {
         &mut self,
         call_id: tau_proto::ToolCallId,
         originator: tau_proto::PromptOriginator,
-        idle_duration: Duration,
+        handle: &ClientHandle,
     ) -> Result<(), Box<dyn Error>> {
         if !originator.is_user() {
             return Ok(());
@@ -1338,10 +1267,10 @@ impl<W: Write> NotificationLoop<W> {
         };
         turn.active_background_tools.remove(&call_id);
         if maybe_emit_deferred_agent_end(
-            &mut self.writer,
+            handle,
             turn,
             &mut self.idle,
-            idle_duration,
+            self.idle_duration,
             &self.config,
             &self.agent_display_names,
             &agent_id,
@@ -1356,6 +1285,7 @@ impl<W: Write> NotificationLoop<W> {
     fn handle_start_agent_result(
         &mut self,
         result: tau_proto::StartAgentResult,
+        handle: &ClientHandle,
     ) -> Result<(), Box<dyn Error>> {
         tracing::debug!(
             target: LOG_TARGET,
@@ -1379,7 +1309,7 @@ impl<W: Write> NotificationLoop<W> {
         } else {
             truncate_for_summary_text(result.text.trim())
         };
-        self.emit_summary_result(pending, &agent_summary)
+        self.emit_summary_result(pending, &agent_summary, handle)
     }
 
     fn matching_summary_hook(&self, query_id: &str) -> Option<(bool, usize)> {
@@ -1399,11 +1329,12 @@ impl<W: Write> NotificationLoop<W> {
         &mut self,
         pending: PendingIdleHook,
         agent_summary: &str,
+        handle: &ClientHandle,
     ) -> Result<(), Box<dyn Error>> {
         let hook = configured_idle_hook(&self.config, &pending);
         let agent_name = display_name_for_agent(&self.agent_display_names, &pending.agent_id);
         emit_idle_hook(
-            &mut self.writer,
+            handle,
             IdleHookEmission {
                 hook_name: idle_hook_name(pending.hook_kind),
                 hook,
@@ -1416,10 +1347,14 @@ impl<W: Write> NotificationLoop<W> {
         )
     }
 
-    fn process_timeout(&mut self, summary_timeout: Duration) -> Result<(), Box<dyn Error>> {
+    fn process_timeout(
+        &mut self,
+        handle: &ClientHandle,
+        summary_timeout: Duration,
+    ) -> Result<(), Box<dyn Error>> {
         let now = Instant::now();
         process_due_idle_hooks(
-            &mut self.writer,
+            handle,
             &mut self.idle,
             now,
             &self.config,
@@ -1429,7 +1364,7 @@ impl<W: Write> NotificationLoop<W> {
             "idle",
         )?;
         process_due_idle_hooks(
-            &mut self.writer,
+            handle,
             &mut self.idle_all,
             now,
             &self.config,
@@ -1439,6 +1374,38 @@ impl<W: Write> NotificationLoop<W> {
             "all-idle",
         )?;
         Ok(())
+    }
+}
+
+fn recv_next_idle_or_message(
+    runtime: &mut ManualExtensionRuntime<NotificationLoop>,
+) -> tau_client::ClientResult<LoopInput> {
+    match (
+        runtime.state().next_deadline(),
+        runtime.state().input_closed,
+    ) {
+        (Some(deadline), false) => {
+            match runtime.recv_timeout(deadline.saturating_duration_since(Instant::now()))? {
+                ManualRuntimeInput::Message(message) => Ok(LoopInput::Message(message)),
+                ManualRuntimeInput::Timeout => Ok(LoopInput::Timeout),
+                ManualRuntimeInput::InputClosed => Ok(LoopInput::InputClosed),
+            }
+        }
+        (None, false) => match runtime.recv()? {
+            ManualRuntimeInput::Message(message) => Ok(LoopInput::Message(message)),
+            ManualRuntimeInput::Timeout => unreachable!("recv without timeout cannot time out"),
+            ManualRuntimeInput::InputClosed => Ok(LoopInput::InputClosed),
+        },
+        // Input closed but a notification is still pending: the output side is
+        // independent, so honor the deadline instead of dropping it.
+        (Some(deadline), true) => {
+            let wait = deadline.saturating_duration_since(Instant::now());
+            if !wait.is_zero() {
+                thread::sleep(wait);
+            }
+            Ok(LoopInput::Timeout)
+        }
+        (None, true) => Ok(LoopInput::InputClosed),
     }
 }
 
@@ -1475,8 +1442,8 @@ fn truncate_utf8_with_marker(text: &str, limit_bytes: usize) -> String {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn process_due_idle_hooks<W: Write>(
-    writer: &mut PeerOutputWriter<BufWriter<W>>,
+fn process_due_idle_hooks(
+    handle: &ClientHandle,
     pending_hooks: &mut Vec<PendingIdleHook>,
     now: Instant,
     config: &ExtConfig,
@@ -1502,18 +1469,15 @@ fn process_due_idle_hooks<W: Write>(
                 );
                 let instruction =
                     summary_instruction(&pending.user_prompt, &pending.agent_response);
-                writer.write_message(&HarnessInputMessage::emit(Event::StartAgentRequest(
-                    StartAgentRequest {
-                        parent_agent: None,
-                        query_id: query_id.clone(),
-                        instruction,
-                        role: None,
-                        input_stats: tau_proto::ToolUseStats::default(),
-                        tool_call_id: None,
-                        task_name: None,
-                    },
-                )))?;
-                writer.flush()?;
+                handle.emit(Event::StartAgentRequest(StartAgentRequest {
+                    parent_agent: None,
+                    query_id: query_id.clone(),
+                    instruction,
+                    role: None,
+                    input_stats: tau_proto::ToolUseStats::default(),
+                    tool_call_id: None,
+                    task_name: None,
+                }))?;
                 pending.state = IdleState::WaitingSummary {
                     query_id,
                     deadline: Instant::now() + summary_timeout,
@@ -1525,22 +1489,22 @@ fn process_due_idle_hooks<W: Write>(
                     target: LOG_TARGET,
                     "{log_prefix} deadline elapsed, emitting static notification",
                 );
-                emit_due_idle_hook(writer, config, agent_display_names, &pending, "")?;
+                emit_due_idle_hook(handle, config, agent_display_names, &pending, "")?;
             }
             IdleState::WaitingSummary { .. } => {
                 tracing::info!(
                     target: LOG_TARGET,
                     "summary timed out, falling back to static notification",
                 );
-                emit_due_idle_hook(writer, config, agent_display_names, &pending, "")?;
+                emit_due_idle_hook(handle, config, agent_display_names, &pending, "")?;
             }
         }
     }
     Ok(())
 }
 
-fn emit_due_idle_hook<W: Write>(
-    writer: &mut PeerOutputWriter<BufWriter<W>>,
+fn emit_due_idle_hook(
+    handle: &ClientHandle,
     config: &ExtConfig,
     agent_display_names: &HashMap<tau_proto::AgentId, String>,
     pending: &PendingIdleHook,
@@ -1549,7 +1513,7 @@ fn emit_due_idle_hook<W: Write>(
     let hook = configured_idle_hook(config, pending);
     let agent_name = display_name_for_agent(agent_display_names, &pending.agent_id);
     emit_idle_hook(
-        writer,
+        handle,
         IdleHookEmission {
             hook_name: idle_hook_name(pending.hook_kind),
             hook,
@@ -1562,8 +1526,8 @@ fn emit_due_idle_hook<W: Write>(
     )
 }
 #[allow(clippy::too_many_arguments)]
-fn emit_agent_end<W: Write>(
-    writer: &mut PeerOutputWriter<BufWriter<W>>,
+fn emit_agent_end(
+    handle: &ClientHandle,
     turn: &mut AgentTurnState,
     idle: &mut Vec<PendingIdleHook>,
     default_idle_duration: Duration,
@@ -1581,7 +1545,7 @@ fn emit_agent_end<W: Write>(
         &agent_response,
         "",
     );
-    emit_hooks(writer, &config.agent_end, &ctx)?;
+    emit_hooks(handle, &config.agent_end, &ctx)?;
     turn.waiting_for_final_response = false;
     turn.turn_end_emitted = true;
     arm_idle_hooks(
@@ -1595,8 +1559,8 @@ fn emit_agent_end<W: Write>(
     Ok(())
 }
 
-fn maybe_emit_deferred_agent_end<W: Write>(
-    writer: &mut PeerOutputWriter<BufWriter<W>>,
+fn maybe_emit_deferred_agent_end(
+    handle: &ClientHandle,
     turn: &mut AgentTurnState,
     idle: &mut Vec<PendingIdleHook>,
     default_idle_duration: Duration,
@@ -1609,7 +1573,7 @@ fn maybe_emit_deferred_agent_end<W: Write>(
         let agent_name = display_name_for_agent(agent_display_names, agent_id);
         let agent_response = std::mem::take(&mut turn.pending_final_response_text);
         emit_agent_end(
-            writer,
+            handle,
             turn,
             idle,
             default_idle_duration,
@@ -1724,25 +1688,24 @@ fn next_idle_deadline(idle: &[PendingIdleHook]) -> Option<Instant> {
     idle.iter().map(PendingIdleHook::deadline).min()
 }
 
-fn emit_hooks<W: Write>(
-    writer: &mut PeerOutputWriter<BufWriter<W>>,
+fn emit_hooks(
+    handle: &ClientHandle,
     hooks: &[HookConfig],
     ctx: &TemplateContext<'_>,
 ) -> Result<(), Box<dyn Error>> {
     for hook in hooks {
-        emit_hook(writer, hook, ctx)?;
+        emit_hook(handle, hook, ctx)?;
     }
-    writer.flush()?;
     Ok(())
 }
 
-fn emit_hook<W: Write>(
-    writer: &mut PeerOutputWriter<BufWriter<W>>,
+fn emit_hook(
+    handle: &ClientHandle,
     hook: &HookConfig,
     ctx: &TemplateContext<'_>,
 ) -> Result<(), Box<dyn Error>> {
     if hook.bell {
-        writer.write_message(&HarnessInputMessage::emit(Event::TermBell(TermBell {})))?;
+        handle.emit(Event::TermBell(TermBell {}))?;
     }
     if let Some(osc) = &hook.osc1337 {
         let name = render_template(&osc.key, ctx)?;
@@ -1750,9 +1713,9 @@ fn emit_hook<W: Write>(
         match validate_osc1337_name(&name) {
             Ok(()) => {
                 match validate_rendered_value_len("osc1337.value", &value, MAX_OSC1337_VALUE_LEN) {
-                    Ok(()) => writer.write_message(&HarnessInputMessage::emit(
-                        Event::Osc1337SetUserVar(Osc1337SetUserVar { name, value }),
-                    ))?,
+                    Ok(()) => {
+                        handle.emit(Event::Osc1337SetUserVar(Osc1337SetUserVar { name, value }))?
+                    }
                     Err(message) => {
                         tracing::warn!(
                             target: LOG_TARGET,
@@ -1921,8 +1884,8 @@ struct IdleHookEmission<'a> {
     agent_summary: &'a str,
 }
 
-fn emit_idle_hook<W: Write>(
-    writer: &mut PeerOutputWriter<BufWriter<W>>,
+fn emit_idle_hook(
+    handle: &ClientHandle,
     emission: IdleHookEmission<'_>,
 ) -> Result<(), Box<dyn Error>> {
     let ctx = template_context(
@@ -1933,8 +1896,7 @@ fn emit_idle_hook<W: Write>(
         emission.agent_response,
         emission.agent_summary,
     );
-    emit_hook(writer, &emission.hook.hook, &ctx)?;
-    writer.flush()?;
+    emit_hook(handle, &emission.hook.hook, &ctx)?;
     Ok(())
 }
 

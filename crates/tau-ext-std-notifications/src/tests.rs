@@ -1,5 +1,5 @@
-use std::io::Cursor;
-use std::sync::Once;
+use std::io::{Cursor, Write};
+use std::sync::{Arc, Mutex, Once};
 
 use tau_proto::{
     AgentPromptSubmitted, ContentPart, ContextItem, ContextRole, Event, HarnessInputMessage,
@@ -9,6 +9,116 @@ use tau_proto::{
 use tracing_subscriber::EnvFilter;
 
 use super::*;
+
+/// Shared byte sink used by tests that run tau-client's writer thread.
+#[derive(Clone, Default)]
+struct SharedWriter {
+    /// Shared byte buffer written by the tau-client writer thread.
+    bytes: Arc<Mutex<Vec<u8>>>,
+}
+
+impl SharedWriter {
+    fn bytes(&self) -> Vec<u8> {
+        self.bytes.lock().expect("lock shared writer").clone()
+    }
+}
+
+impl Write for SharedWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.bytes.lock().expect("lock shared writer").extend(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn run_with_idle_output(input: Vec<u8>, idle_duration: Duration) -> Vec<u8> {
+    let writer = SharedWriter::default();
+    let output = writer.clone();
+    run_with_idle(Cursor::new(input), writer, idle_duration).expect("run");
+    output.bytes()
+}
+
+fn run_with_idle_and_summary_output(
+    input: Vec<u8>,
+    idle_duration: Duration,
+    summary_timeout: Duration,
+) -> Vec<u8> {
+    let writer = SharedWriter::default();
+    let output = writer.clone();
+    run_with_idle_and_summary_timeout(Cursor::new(input), writer, idle_duration, summary_timeout)
+        .expect("run");
+    output.bytes()
+}
+
+/// Corrupted protocol input should surface as a fatal decode/read error under
+/// tau-client instead of being silently treated as EOF and draining timers.
+#[test]
+fn malformed_protocol_input_returns_error() {
+    let writer = SharedWriter::default();
+    let error = run_with_idle(Cursor::new(vec![0x9f]), writer, Duration::from_secs(3600))
+        .expect_err("malformed input should fail");
+
+    assert!(!error.to_string().is_empty());
+}
+
+/// Startup must keep the legacy exact subscription set without broadening to a
+/// prefix selector, because notifications are visible side effects and replay
+/// catch-up volume is a security/resource boundary.
+#[test]
+fn startup_uses_exact_notification_subscriptions() {
+    let mut input = Vec::new();
+    let mut writer = EventWriter::new(&mut input);
+    writer.write_frame(&disconnect_frame(None)).expect("write");
+    writer.flush().expect("flush");
+
+    let output = run_with_idle_output(input, Duration::from_secs(3600));
+    let mut reader = HarnessInputReader::new(Cursor::new(output));
+    let mut frames = Vec::new();
+    while let Some(frame) = reader.read_message().expect("read frame") {
+        frames.push(frame);
+    }
+
+    assert!(matches!(frames[0], HarnessInputMessage::Hello(_)));
+    let subscribe = frames
+        .iter()
+        .find_map(|frame| match frame {
+            HarnessInputMessage::Subscribe(subscribe) => Some(subscribe),
+            _ => None,
+        })
+        .expect("subscribe frame");
+    // Intentionally duplicate the production subscription contract here so an
+    // accidental event-set change cannot update the test oracle too.
+    let expected = vec![
+        tau_proto::EventSelector::Exact(tau_proto::EventName::PROVIDER_PROMPT_SUBMITTED),
+        tau_proto::EventSelector::Exact(tau_proto::EventName::PROVIDER_RESPONSE_FINISHED),
+        tau_proto::EventSelector::Exact(tau_proto::EventName::AGENT_PROMPT_SUBMITTED),
+        tau_proto::EventSelector::Exact(tau_proto::EventName::AGENT_PROMPT_STARTED),
+        tau_proto::EventSelector::Exact(tau_proto::EventName::AGENT_PROMPT_TERMINATED),
+        tau_proto::EventSelector::Exact(tau_proto::EventName::AGENT_STARTED),
+        tau_proto::EventSelector::Exact(tau_proto::EventName::AGENT_DISPLAY_NAME_SET),
+        tau_proto::EventSelector::Exact(tau_proto::EventName::AGENT_STATE),
+        tau_proto::EventSelector::Exact(tau_proto::EventName::SESSION_AGENT_LOADED),
+        tau_proto::EventSelector::Exact(tau_proto::EventName::SESSION_AGENT_UNLOADED),
+        tau_proto::EventSelector::Exact(tau_proto::EventName::AGENT_START_ACCEPTED),
+        tau_proto::EventSelector::Exact(tau_proto::EventName::UI_PROMPT_DRAFT),
+        tau_proto::EventSelector::Exact(tau_proto::EventName::TOOL_RESULT),
+        tau_proto::EventSelector::Exact(tau_proto::EventName::TOOL_ERROR),
+        tau_proto::EventSelector::Exact(tau_proto::EventName::PROVIDER_TOOL_RESULT),
+        tau_proto::EventSelector::Exact(tau_proto::EventName::PROVIDER_TOOL_ERROR),
+        tau_proto::EventSelector::Exact(tau_proto::EventName::TOOL_BACKGROUND_RESULT),
+        tau_proto::EventSelector::Exact(tau_proto::EventName::TOOL_BACKGROUND_ERROR),
+        tau_proto::EventSelector::Exact(tau_proto::EventName::AGENT_START_RESULT),
+    ];
+    assert_eq!(subscribe.selectors, expected);
+    assert!(
+        frames
+            .iter()
+            .any(|frame| matches!(frame, HarnessInputMessage::Ready(_)))
+    );
+}
 
 fn message_variant(msg: &HarnessInputMessage) -> &'static str {
     match msg {
@@ -367,8 +477,7 @@ fn empty_config_emits_no_notifications() {
     writer.write_frame(&disconnect_frame(None)).expect("write");
     writer.flush().expect("flush");
 
-    let mut output = Vec::new();
-    run_with_idle(Cursor::new(input), &mut output, Duration::from_millis(1)).expect("run");
+    let output = run_with_idle_output(input, Duration::from_millis(1));
 
     let mut reader = EventReader::new(Cursor::new(output));
     drain_lifecycle(&mut reader);
@@ -402,8 +511,7 @@ fn emits_start_and_end_user_var_in_order() {
     writer.write_frame(&disconnect_frame(None)).expect("write");
     writer.flush().expect("flush");
 
-    let mut output = Vec::new();
-    run_with_idle(Cursor::new(input), &mut output, Duration::from_secs(3600)).expect("run");
+    let output = run_with_idle_output(input, Duration::from_secs(3600));
 
     let mut reader = EventReader::new(Cursor::new(output));
     drain_lifecycle(&mut reader);
@@ -456,8 +564,7 @@ fn replay_marked_frames_emit_no_notifications() {
     writer.write_frame(&disconnect_frame(None)).expect("write");
     writer.flush().expect("flush");
 
-    let mut output = Vec::new();
-    run_with_idle(Cursor::new(input), &mut output, Duration::from_millis(1)).expect("run");
+    let output = run_with_idle_output(input, Duration::from_millis(1));
 
     let mut reader = EventReader::new(Cursor::new(output));
     drain_lifecycle(&mut reader);
@@ -491,8 +598,7 @@ fn bell_mode_emits_only_completion_bell() {
         .expect("write");
     writer.flush().expect("flush");
 
-    let mut output = Vec::new();
-    run_with_idle(Cursor::new(input), &mut output, Duration::from_millis(1)).expect("run");
+    let output = run_with_idle_output(input, Duration::from_millis(1));
 
     let mut reader = EventReader::new(Cursor::new(output));
     drain_lifecycle(&mut reader);
@@ -537,8 +643,7 @@ fn agent_start_hook_renders_multiple_configured_actions() {
     writer.write_frame(&disconnect_frame(None)).expect("write");
     writer.flush().expect("flush");
 
-    let mut output = Vec::new();
-    run_with_idle(Cursor::new(input), &mut output, Duration::from_secs(3600)).expect("run");
+    let output = run_with_idle_output(input, Duration::from_secs(3600));
 
     let mut reader = EventReader::new(Cursor::new(output));
     drain_lifecycle(&mut reader);
@@ -595,8 +700,7 @@ fn agent_start_hook_uses_display_name_set_with_id_fallback_for_blank_prompt_name
     writer.write_frame(&disconnect_frame(None)).expect("write");
     writer.flush().expect("flush");
 
-    let mut output = Vec::new();
-    run_with_idle(Cursor::new(input), &mut output, Duration::from_secs(3600)).expect("run");
+    let output = run_with_idle_output(input, Duration::from_secs(3600));
 
     let mut reader = EventReader::new(Cursor::new(output));
     drain_lifecycle(&mut reader);
@@ -645,8 +749,7 @@ fn mid_turn_finish_with_tool_calls_does_not_emit_end_sound() {
     writer.write_frame(&disconnect_frame(None)).expect("write");
     writer.flush().expect("flush");
 
-    let mut output = Vec::new();
-    run_with_idle(Cursor::new(input), &mut output, Duration::from_secs(3600)).expect("run");
+    let output = run_with_idle_output(input, Duration::from_secs(3600));
 
     let mut reader = EventReader::new(Cursor::new(output));
     drain_lifecycle(&mut reader);
@@ -703,8 +806,7 @@ fn final_response_waits_for_background_tools_before_end_sound() {
     writer.write_frame(&disconnect_frame(None)).expect("write");
     writer.flush().expect("flush");
 
-    let mut output = Vec::new();
-    run_with_idle(Cursor::new(input), &mut output, Duration::from_secs(3600)).expect("run");
+    let output = run_with_idle_output(input, Duration::from_secs(3600));
 
     let mut reader = EventReader::new(Cursor::new(output));
     drain_lifecycle(&mut reader);
@@ -757,8 +859,7 @@ fn new_prompt_does_not_forget_previous_background_tool() {
     writer.write_frame(&disconnect_frame(None)).expect("write");
     writer.flush().expect("flush");
 
-    let mut output = Vec::new();
-    run_with_idle(Cursor::new(input), &mut output, Duration::from_secs(3600)).expect("run");
+    let output = run_with_idle_output(input, Duration::from_secs(3600));
 
     let mut reader = EventReader::new(Cursor::new(output));
     drain_lifecycle(&mut reader);
@@ -856,8 +957,7 @@ fn background_tool_deferral_is_scoped_to_owning_agent() {
     writer.write_frame(&disconnect_frame(None)).expect("write");
     writer.flush().expect("flush");
 
-    let mut output = Vec::new();
-    run_with_idle(Cursor::new(input), &mut output, Duration::from_secs(3600)).expect("run");
+    let output = run_with_idle_output(input, Duration::from_secs(3600));
 
     let mut reader = EventReader::new(Cursor::new(output));
     drain_lifecycle(&mut reader);
@@ -904,8 +1004,7 @@ fn final_response_without_background_completion_does_not_emit_end_sound() {
     writer.write_frame(&disconnect_frame(None)).expect("write");
     writer.flush().expect("flush");
 
-    let mut output = Vec::new();
-    run_with_idle(Cursor::new(input), &mut output, Duration::from_secs(3600)).expect("run");
+    let output = run_with_idle_output(input, Duration::from_secs(3600));
 
     let mut reader = EventReader::new(Cursor::new(output));
     drain_lifecycle(&mut reader);
@@ -937,15 +1036,11 @@ fn idle_timeout_defaults_to_static_notification() {
         ))
         .expect("write");
     writer.flush().expect("flush");
-
-    let mut output = Vec::new();
-    run_with_idle_and_summary_timeout(
-        Cursor::new(input),
-        &mut output,
+    let output = run_with_idle_and_summary_output(
+        input,
         Duration::from_millis(50),
         Duration::from_millis(50),
-    )
-    .expect("run");
+    );
 
     let mut reader = EventReader::new(Cursor::new(output));
     drain_lifecycle(&mut reader);
@@ -999,8 +1094,7 @@ fn agent_idle_snake_case_fires_for_individual_agent_idle() {
         .expect("write response");
     writer.flush().expect("flush");
 
-    let mut output = Vec::new();
-    run_with_idle(Cursor::new(input), &mut output, Duration::from_millis(1)).expect("run");
+    let output = run_with_idle_output(input, Duration::from_millis(1));
 
     let mut reader = EventReader::new(Cursor::new(output));
     drain_lifecycle(&mut reader);
@@ -1081,8 +1175,7 @@ fn agent_idle_all_fires_when_every_loaded_session_agent_is_idle() {
         .write_event(&agent_state("other", tau_proto::AgentRuntimeState::Idle))
         .expect("other idle");
 
-    let mut output = Vec::new();
-    run_with_idle(Cursor::new(input), &mut output, Duration::from_millis(1)).expect("run");
+    let output = run_with_idle_output(input, Duration::from_millis(1));
 
     let mut reader = EventReader::new(Cursor::new(output));
     drain_lifecycle(&mut reader);
@@ -1154,8 +1247,7 @@ fn agent_idle_all_does_not_fire_while_another_session_agent_is_busy() {
         .expect("disconnect");
     writer.flush().expect("flush");
 
-    let mut output = Vec::new();
-    run_with_idle(Cursor::new(input), &mut output, Duration::from_millis(1)).expect("run");
+    let output = run_with_idle_output(input, Duration::from_millis(1));
 
     let mut reader = EventReader::new(Cursor::new(output));
     drain_lifecycle(&mut reader);
@@ -1205,8 +1297,7 @@ fn agent_idle_all_timer_survives_running_agent_in_other_session() {
         .expect("other running");
     writer.flush().expect("flush");
 
-    let mut output = Vec::new();
-    run_with_idle(Cursor::new(input), &mut output, Duration::from_millis(1)).expect("run");
+    let output = run_with_idle_output(input, Duration::from_millis(1));
 
     let mut reader = EventReader::new(Cursor::new(output));
     drain_lifecycle(&mut reader);
@@ -1262,8 +1353,7 @@ fn agent_idle_all_timer_survives_provider_prompt_in_other_session() {
         .expect("provider prompt");
     writer.flush().expect("flush");
 
-    let mut output = Vec::new();
-    run_with_idle(Cursor::new(input), &mut output, Duration::from_millis(1)).expect("run");
+    let output = run_with_idle_output(input, Duration::from_millis(1));
 
     let mut reader = EventReader::new(Cursor::new(output));
     drain_lifecycle(&mut reader);
@@ -1418,8 +1508,7 @@ fn agent_idle_all_fires_when_busy_agent_unloads() {
         .expect("unload other");
     writer.flush().expect("flush");
 
-    let mut output = Vec::new();
-    run_with_idle(Cursor::new(input), &mut output, Duration::from_millis(1)).expect("run");
+    let output = run_with_idle_output(input, Duration::from_millis(1));
 
     let mut reader = EventReader::new(Cursor::new(output));
     drain_lifecycle(&mut reader);
@@ -1465,15 +1554,8 @@ fn agent_idle_all_summary_after_unload_uses_no_parent_agent() {
         .write_event(&session_agent_unloaded("s1", "other"))
         .expect("unload other");
     writer.flush().expect("flush");
-
-    let mut output = Vec::new();
-    run_with_idle_and_summary_timeout(
-        Cursor::new(input),
-        &mut output,
-        Duration::from_millis(1),
-        Duration::from_millis(1),
-    )
-    .expect("run");
+    let output =
+        run_with_idle_and_summary_output(input, Duration::from_millis(1), Duration::from_millis(1));
 
     let mut reader = EventReader::new(Cursor::new(output));
     drain_lifecycle(&mut reader);
@@ -1503,8 +1585,7 @@ fn kebab_case_idle_config_key_is_rejected() {
         .expect("disconnect");
     writer.flush().expect("flush");
 
-    let mut output = Vec::new();
-    run_with_idle(Cursor::new(input), &mut output, Duration::from_millis(1)).expect("run");
+    let output = run_with_idle_output(input, Duration::from_millis(1));
 
     let mut reader = EventReader::new(Cursor::new(output));
     let err_frame = loop {
@@ -1540,15 +1621,11 @@ fn idle_timeout_requests_summary_when_enabled_then_falls_back() {
         ))
         .expect("write");
     writer.flush().expect("flush");
-
-    let mut output = Vec::new();
-    run_with_idle_and_summary_timeout(
-        Cursor::new(input),
-        &mut output,
+    let output = run_with_idle_and_summary_output(
+        input,
         Duration::from_millis(50),
         Duration::from_millis(50),
-    )
-    .expect("run");
+    );
 
     let mut reader = EventReader::new(Cursor::new(output));
     drain_lifecycle(&mut reader);
@@ -2022,8 +2099,7 @@ fn oversized_rendered_command_arg_skips_command() {
     writer.write_frame(&disconnect_frame(None)).expect("write");
     writer.flush().expect("flush");
 
-    let mut output = Vec::new();
-    run_with_idle(Cursor::new(input), &mut output, Duration::from_secs(3600)).expect("run");
+    let _output = run_with_idle_output(input, Duration::from_secs(3600));
 
     thread::sleep(Duration::from_millis(50));
     assert!(
@@ -2051,8 +2127,7 @@ fn invalid_config_emits_lifecycle_config_error() {
     writer.write_frame(&disconnect_frame(None)).expect("write");
     writer.flush().expect("flush");
 
-    let mut output = Vec::new();
-    run_with_idle(Cursor::new(input), &mut output, Duration::from_secs(3600)).expect("run");
+    let output = run_with_idle_output(input, Duration::from_secs(3600));
 
     let mut reader = EventReader::new(Cursor::new(output));
     // Skip startup messages (hello, subscribe, ready) until we reach
@@ -2072,6 +2147,73 @@ fn invalid_config_emits_lifecycle_config_error() {
     assert!(!e.message.is_empty(), "config error must carry a message");
 }
 
+/// A malformed reconfiguration must emit one `ConfigError` and keep the
+/// previous accepted config plus already-armed idle hook state intact. This
+/// protects the migration contract that tau-client reports config errors while
+/// std-notifications continues with the last valid notification policy.
+#[test]
+fn invalid_config_preserves_previous_config_and_pending_idle() {
+    let valid_config = tau_proto::json_to_cbor(&serde_json::json!({
+        "agent_idle": [{
+            "osc1337": {
+                "key": TEXT_VAR_NAME,
+                "value": "still-active",
+            },
+        }],
+    }));
+    let bad_config = tau_proto::json_to_cbor(&serde_json::json!({
+        "totally_unknown_field": 7,
+    }));
+
+    let mut input = Vec::new();
+    let mut writer = EventWriter::new(&mut input);
+    writer
+        .write_frame(&configure_frame(valid_config))
+        .expect("write valid config");
+    writer
+        .write_event(&Event::ProviderResponseFinished(
+            assistant_finished_response("sp-0", "done", tau_proto::PromptOriginator::User),
+        ))
+        .expect("write response");
+    writer
+        .write_frame(&configure_frame(bad_config))
+        .expect("write bad config");
+    writer.flush().expect("flush");
+
+    let output = run_with_idle_output(input, Duration::from_millis(20));
+    let mut reader = HarnessInputReader::new(Cursor::new(output));
+    let mut config_error_count = 0;
+    let mut saw_preserved_idle_hook = false;
+
+    while let Some(frame) = reader.read_message().expect("read") {
+        match frame {
+            HarnessInputMessage::ConfigError(error) => {
+                config_error_count += 1;
+                assert!(
+                    error.message.contains("totally_unknown_field"),
+                    "config error should describe the malformed reconfigure: {error:?}",
+                );
+            }
+            HarnessInputMessage::Emit(emit) => {
+                if let Event::Osc1337SetUserVar(osc) = *emit.event {
+                    saw_preserved_idle_hook |=
+                        osc.name == TEXT_VAR_NAME && osc.value == "still-active";
+                }
+            }
+            _ => {}
+        }
+    }
+
+    assert_eq!(
+        config_error_count, 1,
+        "malformed reconfigure should emit exactly one ConfigError",
+    );
+    assert!(
+        saw_preserved_idle_hook,
+        "previous config and pending idle hook should remain active after invalid reconfigure",
+    );
+}
+
 /// Bad hook templates must be rejected during Configure instead of
 /// crashing the extension later when the hook fires.
 #[test]
@@ -2088,8 +2230,7 @@ fn invalid_hook_template_emits_config_error() {
     writer.write_frame(&disconnect_frame(None)).expect("write");
     writer.flush().expect("flush");
 
-    let mut output = Vec::new();
-    run_with_idle(Cursor::new(input), &mut output, Duration::from_secs(3600)).expect("run");
+    let output = run_with_idle_output(input, Duration::from_secs(3600));
 
     let mut reader = EventReader::new(Cursor::new(output));
     let err_frame = loop {
@@ -2152,8 +2293,7 @@ fn invalid_static_osc1337_key_emits_config_error() {
     writer.write_frame(&disconnect_frame(None)).expect("write");
     writer.flush().expect("flush");
 
-    let mut output = Vec::new();
-    run_with_idle(Cursor::new(input), &mut output, Duration::from_secs(3600)).expect("run");
+    let output = run_with_idle_output(input, Duration::from_secs(3600));
 
     let mut reader = EventReader::new(Cursor::new(output));
     let err_frame = loop {
@@ -2201,8 +2341,7 @@ fn runtime_invalid_osc1337_key_is_skipped() {
     writer.write_frame(&disconnect_frame(None)).expect("write");
     writer.flush().expect("flush");
 
-    let mut output = Vec::new();
-    run_with_idle(Cursor::new(input), &mut output, Duration::from_secs(3600)).expect("run");
+    let output = run_with_idle_output(input, Duration::from_secs(3600));
 
     let mut reader = EventReader::new(Cursor::new(output));
     drain_lifecycle(&mut reader);
@@ -2243,8 +2382,7 @@ fn json_helper_quotes_untrusted_template_values() {
     writer.write_frame(&disconnect_frame(None)).expect("write");
     writer.flush().expect("flush");
 
-    let mut output = Vec::new();
-    run_with_idle(Cursor::new(input), &mut output, Duration::from_secs(3600)).expect("run");
+    let output = run_with_idle_output(input, Duration::from_secs(3600));
 
     let mut reader = EventReader::new(Cursor::new(output));
     drain_lifecycle(&mut reader);
@@ -2283,8 +2421,7 @@ fn oversized_rendered_osc_value_is_skipped() {
     writer.write_frame(&disconnect_frame(None)).expect("write");
     writer.flush().expect("flush");
 
-    let mut output = Vec::new();
-    run_with_idle(Cursor::new(input), &mut output, Duration::from_secs(3600)).expect("run");
+    let output = run_with_idle_output(input, Duration::from_secs(3600));
 
     let mut reader = EventReader::new(Cursor::new(output));
     drain_lifecycle(&mut reader);
@@ -2326,15 +2463,8 @@ fn idle_summary_request_contains_recent_turn_context() {
         ))
         .expect("write response");
     writer.flush().expect("flush");
-
-    let mut output = Vec::new();
-    run_with_idle_and_summary_timeout(
-        Cursor::new(input),
-        &mut output,
-        Duration::from_millis(1),
-        Duration::from_millis(1),
-    )
-    .expect("run");
+    let output =
+        run_with_idle_and_summary_output(input, Duration::from_millis(1), Duration::from_millis(1));
 
     let mut reader = EventReader::new(Cursor::new(output));
     drain_lifecycle(&mut reader);
@@ -2388,8 +2518,7 @@ fn config_reload_clears_pending_idle_hooks() {
     writer.write_frame(&disconnect_frame(None)).expect("write");
     writer.flush().expect("flush");
 
-    let mut output = Vec::new();
-    run_with_idle(Cursor::new(input), &mut output, Duration::from_secs(3600)).expect("run");
+    let output = run_with_idle_output(input, Duration::from_secs(3600));
 
     let mut reader = EventReader::new(Cursor::new(output));
     drain_lifecycle(&mut reader);
@@ -2423,9 +2552,8 @@ fn user_prompt_during_idle_window_cancels_text_notification() {
         .expect("write");
     writer.flush().expect("flush");
 
-    let mut output = Vec::new();
     // Long idle window — if the cancel works, we never wait.
-    run_with_idle(Cursor::new(input), &mut output, Duration::from_secs(3600)).expect("run");
+    let output = run_with_idle_output(input, Duration::from_secs(3600));
 
     let mut reader = EventReader::new(Cursor::new(output));
     drain_lifecycle(&mut reader);
@@ -2531,8 +2659,7 @@ fn sub_agent_prompts_and_responses_are_ignored() {
     writer.write_frame(&disconnect_frame(None)).expect("write");
     writer.flush().expect("flush");
 
-    let mut output = Vec::new();
-    run_with_idle(Cursor::new(input), &mut output, Duration::from_secs(3600)).expect("run");
+    let output = run_with_idle_output(input, Duration::from_secs(3600));
 
     let mut reader = EventReader::new(Cursor::new(output));
     drain_lifecycle(&mut reader);
@@ -2588,8 +2715,7 @@ fn duplicate_agent_prompt_submitted_during_same_turn_emits_one_start_sound() {
     writer.write_frame(&disconnect_frame(None)).expect("write");
     writer.flush().expect("flush");
 
-    let mut output = Vec::new();
-    run_with_idle(Cursor::new(input), &mut output, Duration::from_secs(3600)).expect("run");
+    let output = run_with_idle_output(input, Duration::from_secs(3600));
 
     let mut reader = EventReader::new(Cursor::new(output));
     drain_lifecycle(&mut reader);
@@ -2665,8 +2791,7 @@ fn interleaved_agents_each_emit_start_and_end_with_own_prompt_context() {
     writer.write_frame(&disconnect_frame(None)).expect("write");
     writer.flush().expect("flush");
 
-    let mut output = Vec::new();
-    run_with_idle(Cursor::new(input), &mut output, Duration::from_secs(3600)).expect("run");
+    let output = run_with_idle_output(input, Duration::from_secs(3600));
 
     let mut reader = EventReader::new(Cursor::new(output));
     drain_lifecycle(&mut reader);
@@ -2713,8 +2838,7 @@ fn terminated_prompt_clears_in_flight_turn_state() {
     writer.write_frame(&disconnect_frame(None)).expect("write");
     writer.flush().expect("flush");
 
-    let mut output = Vec::new();
-    run_with_idle(Cursor::new(input), &mut output, Duration::from_secs(3600)).expect("run");
+    let output = run_with_idle_output(input, Duration::from_secs(3600));
 
     let mut reader = EventReader::new(Cursor::new(output));
     drain_lifecycle(&mut reader);
@@ -2754,8 +2878,7 @@ fn stale_completion_after_non_current_termination_is_ignored() {
     writer.write_frame(&disconnect_frame(None)).expect("write");
     writer.flush().expect("flush");
 
-    let mut output = Vec::new();
-    run_with_idle(Cursor::new(input), &mut output, Duration::from_secs(3600)).expect("run");
+    let output = run_with_idle_output(input, Duration::from_secs(3600));
 
     let mut reader = EventReader::new(Cursor::new(output));
     drain_lifecycle(&mut reader);
@@ -2804,8 +2927,7 @@ fn agent_idle_timers_are_scoped_per_agent() {
         .expect("other prompt");
     writer.flush().expect("flush");
 
-    let mut output = Vec::new();
-    run_with_idle(Cursor::new(input), &mut output, Duration::from_millis(1)).expect("run");
+    let output = run_with_idle_output(input, Duration::from_millis(1));
 
     let mut reader = EventReader::new(Cursor::new(output));
     drain_lifecycle(&mut reader);

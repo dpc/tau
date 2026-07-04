@@ -2,6 +2,13 @@
 
 `std-notifications` is a user-facing side-effect bridge. It listens to harness events and emits terminal-facing notification actions; it does not own agent execution.
 
+The extension runs on `tau-client`'s manual-loop runtime. Tau-client owns the
+startup prelude, exact event subscriptions, `Ready`, raw configuration dispatch,
+live-only event dispatch, and outbound writer thread. This crate owns the policy
+loop on top: it waits for either harness input or the next idle/summary deadline,
+and after clean input EOF it switches to a timer-only path so pending idle hooks
+can still fire.
+
 ## Configuration keys
 
 Hook and option keys use snake_case (`agent_start`, `agent_end`, `agent_idle`, `agent_idle_all`). Unknown fields must stay rejected so typoed notification config surfaces as a harness config error.
@@ -50,4 +57,7 @@ config reloads, and idle deadline timing. Keep
 timer windows short and bounded; use `UnixStream::pair` tests only when the test
 must observe an emitted request before sending the matching response. Terminal
 side-effect changes need regression coverage for config-time validation and
-runtime template-rendered data.
+runtime template-rendered data. Runtime migration changes should preserve the
+manual-loop contracts: exact live subscriptions, post-EOF idle draining, explicit
+Disconnect without idle draining, and fatal surfacing of protocol decode/read
+errors from tau-client rather than silently treating corrupted input as EOF.

@@ -3384,7 +3384,7 @@ dependencies = [
  "libc",
  "serde",
  "serde_json",
- "tau-extension",
+ "tau-client",
  "tau-proto",
  "tempfile",
  "tracing",
