@@ -1,12 +1,41 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::io::Write;
+use std::os::unix::net::UnixStream;
 use std::rc::Rc;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 use tau_proto::{
-    EventName, EventSelector, HarnessInputMessage, HarnessInputReader, PeerOutputWriter,
+    EventName, EventSelector, HarnessInputMessage, HarnessInputReader, HarnessOutputMessage,
+    HarnessOutputWriter,
 };
 
 use super::*;
+
+/// Thread-safe test writer that captures startup frames emitted by tau-client.
+#[derive(Clone, Default)]
+struct SharedWriter {
+    /// Shared buffer containing encoded harness-input frames.
+    bytes: Arc<Mutex<Vec<u8>>>,
+}
+
+impl SharedWriter {
+    fn bytes(&self) -> Vec<u8> {
+        self.bytes.lock().expect("writer lock").clone()
+    }
+}
+
+impl Write for SharedWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.bytes.lock().expect("writer lock").extend(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
 
 /// A failed PIM reconfigure may be an attempted policy revocation. Ensure the
 /// wrapper does not keep serving calls from a previously accepted email or
@@ -231,42 +260,33 @@ fn ignores_tool_started_for_tools_owned_by_other_extensions() {
     }
 }
 
+/// Ensures tau-client startup preserves PIM's split email/calendar tool
+/// registrations, prompt fragments, action schema publication, exact
+/// subscriptions, and pre-`Ready` ordering.
 #[test]
-fn handshake_registers_email_and_calendar_tools() {
-    let mut bytes = Vec::new();
-    let handshake = tau_extension::Handshake::tool("tau-ext-pim").subscribe([
-        tau_proto::EventName::TOOL_STARTED,
-        tau_proto::EventName::ACTION_INVOKE,
-    ]);
-    let handshake = register_tools_with_prompt_fragment(
-        handshake,
-        email::email_tool_specs(),
-        tau_proto::ToolGroupName::new("email"),
-        "email_read",
-        email::email_prompt_fragment(),
-    );
-    let handshake = register_tools_with_prompt_fragment(
-        handshake,
-        calendar::calendar_tool_specs(),
-        tau_proto::ToolGroupName::new("calendar"),
-        "calendar_get",
-        calendar::calendar_prompt_fragment(),
-    );
+fn startup_registers_email_and_calendar_tools() {
+    let writer = SharedWriter::default();
+    let written = writer.clone();
+    tau_client::TauExtensionRunner::new(PimExtension)
+        .run(
+            std::io::Cursor::new(Vec::new()),
+            writer,
+            RuntimeState::default(),
+        )
+        .expect("startup writes");
 
-    handshake
-        .publish_actions(action_schema())
-        .ready_message("pim extension ready")
-        .run(&mut PeerOutputWriter::new(&mut bytes))
-        .expect("handshake writes");
-
+    let bytes = written.bytes();
     let mut reader = HarnessInputReader::new(bytes.as_slice());
     let mut tools = Vec::new();
     let mut prompt_tools = Vec::new();
     let mut per_tool_prompt_tools = Vec::new();
     let mut saw_subscription = false;
+    let mut saw_action_schema = false;
+    let mut saw_ready = false;
     while let Some(frame) = reader.read_message().expect("frame decodes") {
         match frame {
             HarnessInputMessage::Subscribe(subscribe) => {
+                assert!(!saw_ready, "Subscribe should be emitted before Ready");
                 saw_subscription = subscribe.selectors
                     == vec![
                         EventSelector::Exact(EventName::TOOL_STARTED),
@@ -276,6 +296,7 @@ fn handshake_registers_email_and_calendar_tools() {
             HarnessInputMessage::Emit(emit)
                 if matches!(emit.event.as_ref(), Event::ToolRegister(_)) =>
             {
+                assert!(!saw_ready, "tools should be registered before Ready");
                 let Event::ToolRegister(register) = *emit.event else {
                     unreachable!();
                 };
@@ -299,11 +320,22 @@ fn handshake_registers_email_and_calendar_tools() {
                 }
                 tools.push(register.tool.name);
             }
+            HarnessInputMessage::Emit(emit)
+                if matches!(emit.event.as_ref(), Event::ActionSchemaPublished(_)) =>
+            {
+                assert!(!saw_ready, "actions should be published before Ready");
+                saw_action_schema = true;
+            }
+            HarnessInputMessage::Ready(_) => {
+                saw_ready = true;
+            }
             _ => {}
         }
     }
 
     assert!(saw_subscription);
+    assert!(saw_action_schema);
+    assert!(saw_ready);
     assert!(
         tools
             .iter()
@@ -339,4 +371,181 @@ fn handshake_registers_email_and_calendar_tools() {
             .any(|tool| tool.as_str() == calendar::TOOL_NAME)
     );
     assert_eq!(tools.len(), 18);
+}
+
+/// Ensures the public `run` path installs extension-data storage before
+/// configuration and keeps tau-client's live-only action dispatch behavior.
+#[test]
+fn public_run_installs_storage_and_skips_replayed_actions() {
+    let temp = tempfile::TempDir::new().expect("tempdir");
+    let (reader_stream, mut input_stream) = UnixStream::pair().expect("unix stream pair");
+    let output = SharedWriter::default();
+    let written = output.clone();
+    let responder = spawn_storage_responder(
+        written.clone(),
+        input_stream.try_clone().expect("clone input stream"),
+    );
+    let run_thread =
+        std::thread::spawn(move || run(reader_stream, output).map_err(|error| error.to_string()));
+    {
+        let mut writer = HarnessOutputWriter::new(&mut input_stream);
+        writer
+            .write_message(&HarnessOutputMessage::Configure(configure(
+                CborValue::Map(vec![]),
+                temp.path(),
+            )))
+            .expect("write configure");
+        writer
+            .write_message(&HarnessOutputMessage::deliver_replay(
+                tau_proto::UnixMicros::new(1),
+                unknown_action("replayed-action"),
+            ))
+            .expect("write replayed action");
+        writer
+            .write_message(&HarnessOutputMessage::deliver_live(
+                tau_proto::UnixMicros::new(2),
+                unknown_action("live-action"),
+            ))
+            .expect("write live action");
+        writer.flush().expect("flush input");
+    }
+    drop(input_stream);
+
+    responder.join().expect("storage responder");
+    run_thread.join().expect("run thread").expect("public run");
+
+    let output_bytes = written.bytes();
+    let mut reader = HarnessInputReader::new(output_bytes.as_slice());
+    let mut config_errors = Vec::new();
+    let mut action_errors = Vec::new();
+    while let Some(frame) = reader.read_message().expect("output frame decodes") {
+        match frame {
+            HarnessInputMessage::ConfigError(error) => config_errors.push(error.message),
+            HarnessInputMessage::Emit(emit) => {
+                if let Event::ActionError(error) = *emit.event {
+                    action_errors.push(error.invocation_id);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    assert_eq!(config_errors, Vec::<String>::new());
+    assert_eq!(
+        action_errors,
+        vec![tau_proto::ActionInvocationId::new("live-action")]
+    );
+}
+
+fn unknown_action(invocation_id: &str) -> Event {
+    Event::ActionInvoke(tau_proto::ActionInvoke {
+        invocation_id: tau_proto::ActionInvocationId::new(invocation_id),
+        session_id: tau_proto::SessionId::new("session-1"),
+        extension_name: tau_proto::ExtensionName::new("tau-ext-pim"),
+        instance_id: tau_proto::ExtensionInstanceId::from(1),
+        action_id: "pim.unknown".to_owned(),
+        raw_line: "/pim unknown".to_owned(),
+        argv: Vec::new(),
+        arguments: CborValue::Map(Vec::new()),
+    })
+}
+
+fn spawn_storage_responder(
+    writer: SharedWriter,
+    input_stream: UnixStream,
+) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || {
+        let mut input_writer = HarnessOutputWriter::new(input_stream);
+        let mut responded = BTreeSet::new();
+        let mut last_response = Instant::now();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let mut made_progress = false;
+            for request in extension_data_requests_from_bytes(writer.bytes()) {
+                if !responded.insert(request.request_id.clone()) {
+                    continue;
+                }
+                input_writer
+                    .write_message(&extension_data_result_for_request(request))
+                    .expect("write storage response");
+                input_writer.flush().expect("flush storage response");
+                last_response = Instant::now();
+                made_progress = true;
+            }
+            if responded.is_empty() || made_progress {
+                assert!(
+                    Instant::now() < deadline,
+                    "timed out waiting for PIM storage requests to settle"
+                );
+                std::thread::sleep(Duration::from_millis(1));
+                continue;
+            }
+            if last_response.elapsed() >= Duration::from_millis(50) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    })
+}
+
+fn extension_data_requests_from_bytes(bytes: Vec<u8>) -> Vec<tau_proto::ExtensionDataRequest> {
+    let mut reader = HarnessInputReader::new(bytes.as_slice());
+    let mut requests = Vec::new();
+    loop {
+        match reader.read_message() {
+            Ok(Some(HarnessInputMessage::ExtensionDataRequest(request))) => requests.push(request),
+            Ok(Some(_)) => {}
+            Ok(None) | Err(_) => break,
+        }
+    }
+    requests
+}
+
+fn extension_data_result_for_request(
+    request: tau_proto::ExtensionDataRequest,
+) -> HarnessOutputMessage {
+    let result = match request.op {
+        tau_proto::ExtensionDataRequestOp::ReadFile { .. } => {
+            tau_proto::ExtensionDataResultPayload::Error {
+                kind: tau_proto::ExtensionDataErrorKind::NotFound,
+                message: "missing".to_owned(),
+            }
+        }
+        tau_proto::ExtensionDataRequestOp::WriteFile { .. } => {
+            tau_proto::ExtensionDataResultPayload::Ok {
+                value: tau_proto::ExtensionDataValue::WriteFile,
+            }
+        }
+        tau_proto::ExtensionDataRequestOp::CreateFile { .. } => {
+            tau_proto::ExtensionDataResultPayload::Ok {
+                value: tau_proto::ExtensionDataValue::CreateFile,
+            }
+        }
+        tau_proto::ExtensionDataRequestOp::AppendFile { .. } => {
+            tau_proto::ExtensionDataResultPayload::Ok {
+                value: tau_proto::ExtensionDataValue::AppendFile,
+            }
+        }
+        tau_proto::ExtensionDataRequestOp::DeleteFile { .. } => {
+            tau_proto::ExtensionDataResultPayload::Ok {
+                value: tau_proto::ExtensionDataValue::DeleteFile,
+            }
+        }
+        tau_proto::ExtensionDataRequestOp::RenameFile { .. } => {
+            tau_proto::ExtensionDataResultPayload::Ok {
+                value: tau_proto::ExtensionDataValue::RenameFile,
+            }
+        }
+        tau_proto::ExtensionDataRequestOp::ListFiles { .. } => {
+            tau_proto::ExtensionDataResultPayload::Ok {
+                value: tau_proto::ExtensionDataValue::ListFiles {
+                    entries: Vec::new(),
+                },
+            }
+        }
+    };
+    HarnessOutputMessage::ExtensionDataResult(Box::new(tau_proto::ExtensionDataResult {
+        request_id: request.request_id,
+        result,
+    }))
 }

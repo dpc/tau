@@ -1,6 +1,4 @@
-use std::cell::RefCell;
-use std::collections::VecDeque;
-use std::io::{Read, Write};
+use std::io::Write;
 #[cfg(unix)]
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
@@ -9,9 +7,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use tau_proto::{
-    ExtensionDataErrorKind, ExtensionDataPath, ExtensionDataRequest, ExtensionDataRequestOp,
-    ExtensionDataResultPayload, ExtensionDataScope, ExtensionDataValue, HarnessInputMessage,
-    HarnessOutputMessage, PeerInputReader, PeerOutputWriter,
+    ExtensionDataErrorKind, ExtensionDataPath, ExtensionDataRequestOp, ExtensionDataScope,
+    ExtensionDataValue,
 };
 
 static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
@@ -254,85 +251,36 @@ impl Storage for FsStorage {
     }
 }
 
-pub(crate) struct RpcStorage<R: Read, W: Write> {
+/// Storage backend that proxies PIM state operations through harness
+/// extension-data RPC.
+pub(crate) struct RpcStorage {
+    /// Extension-data scope used for every PIM storage operation.
     scope: ExtensionDataScope,
-    reader: Rc<RefCell<PeerInputReader<std::io::BufReader<R>>>>,
-    writer: Rc<RefCell<PeerOutputWriter<std::io::BufWriter<W>>>>,
-    pending: Rc<RefCell<VecDeque<HarnessOutputMessage>>>,
+    /// Correlated tau-client RPC helper shared with the manual runtime loop.
+    client: tau_client::ExtensionDataClient,
 }
 
-impl<R, W> RpcStorage<R, W>
-where
-    R: Read,
-    W: Write,
-{
-    pub(crate) fn new(
-        scope: ExtensionDataScope,
-        reader: Rc<RefCell<PeerInputReader<std::io::BufReader<R>>>>,
-        writer: Rc<RefCell<PeerOutputWriter<std::io::BufWriter<W>>>>,
-        pending: Rc<RefCell<VecDeque<HarnessOutputMessage>>>,
-    ) -> Self {
-        Self {
-            scope,
-            reader,
-            writer,
-            pending,
-        }
+impl RpcStorage {
+    pub(crate) fn new(scope: ExtensionDataScope, client: tau_client::ExtensionDataClient) -> Self {
+        Self { scope, client }
     }
 
     fn request(&self, op: ExtensionDataRequestOp) -> Result<ExtensionDataValue, String> {
-        let request_id = format!(
-            "pim-storage-{}",
-            NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed)
-        );
-        self.writer
-            .borrow_mut()
-            .write_message(&HarnessInputMessage::ExtensionDataRequest(
-                ExtensionDataRequest {
-                    request_id: request_id.clone(),
-                    scope: self.scope.clone(),
-                    op,
-                },
-            ))
-            .map_err(|error| error.to_string())?;
-        self.writer
-            .borrow_mut()
-            .flush()
-            .map_err(|error| error.to_string())?;
-
-        loop {
-            let message = self
-                .reader
-                .borrow_mut()
-                .read_message()
-                .map_err(|error| error.to_string())?
-                .ok_or_else(|| "harness disconnected during extension data request".to_owned())?;
-            match message {
-                HarnessOutputMessage::ExtensionDataResult(result)
-                    if result.request_id == request_id =>
-                {
-                    return match result.result {
-                        ExtensionDataResultPayload::Ok { value } => Ok(value),
-                        ExtensionDataResultPayload::Error { kind, message } => {
-                            Err(format_storage_error(kind, message))
-                        }
-                    };
-                }
-                disconnect @ HarnessOutputMessage::Disconnect(_) => {
-                    self.pending.borrow_mut().push_front(disconnect);
-                    return Err("harness disconnected during extension data request".to_owned());
-                }
-                other => self.pending.borrow_mut().push_back(other),
+        match self.client.request(self.scope.clone(), op) {
+            Ok(value) => Ok(value),
+            Err(tau_client::ExtensionDataRpcError::Harness { kind, message }) => {
+                Err(format_storage_error(kind, message))
             }
+            Err(tau_client::ExtensionDataRpcError::Disconnect(_))
+            | Err(tau_client::ExtensionDataRpcError::InputClosed) => {
+                Err("harness disconnected during extension data request".to_owned())
+            }
+            Err(error) => Err(error.to_string()),
         }
     }
 }
 
-impl<R, W> Storage for RpcStorage<R, W>
-where
-    R: Read + 'static,
-    W: Write + 'static,
-{
+impl Storage for RpcStorage {
     fn read_file(&self, path: &str) -> Result<Option<Vec<u8>>, String> {
         match self.request(ExtensionDataRequestOp::ReadFile {
             path: ExtensionDataPath::new(path),

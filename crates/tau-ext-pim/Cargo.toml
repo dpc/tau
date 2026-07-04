@@ -33,6 +33,7 @@ rustls.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+tau-client.workspace = true
 tau-extension.workspace = true
 tau-proto.workspace = true
 time.workspace = true

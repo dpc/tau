@@ -6,7 +6,8 @@
 //! a cloneable outbound [`ClientHandle`]. Extensions with timers or other
 //! custom scheduling needs can use [`ManualExtensionRuntime`] to receive with
 //! timeouts and dispatch messages one at a time while preserving the same
-//! protocol semantics. It also provides the standard
+//! protocol semantics, including correlated extension-data RPC through
+//! [`ExtensionDataClient`]. It also provides the standard
 //! extension `TAU_LOG` subscriber helpers so migrated extension binaries do not
 //! need the legacy startup helper crate just for logging. It intentionally
 //! keeps the existing Tau wire protocol and `tau_extension::Handshake` intact
@@ -36,7 +37,10 @@ pub use contexts::{
 pub use event_payload::EventPayload;
 pub use intercept_decision::InterceptDecision;
 pub use logging::{DEFAULT_FILTER, ENV_VAR, init_logging, init_logging_for};
-pub use manual_runtime::{DispatchOutcome, ManualExtensionRuntime, ManualRuntimeInput};
+pub use manual_runtime::{
+    DispatchOutcome, ExtensionDataClient, ExtensionDataRpcError, ManualExtensionRuntime,
+    ManualRuntimeInput,
+};
 pub use runner::TauExtensionRunner;
 pub use tau_extension_trait::{ExtensionPlugin, TauExtension};
 

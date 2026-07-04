@@ -2,7 +2,7 @@ use std::io::{Cursor, Write};
 use std::os::unix::net::UnixStream;
 use std::rc::Rc;
 use std::sync::{Arc, Condvar, Mutex, mpsc};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tau_proto::{
     ActionOutput, ActionSchema, AgentPromptSubmitted, CborValue, Configure, Event, EventSelector,
@@ -14,6 +14,7 @@ use tau_proto::{
 
 use super::*;
 
+/// Thread-safe test writer that captures encoded harness-input frames.
 #[derive(Clone, Default)]
 struct SharedWriter {
     /// Shared byte buffer written by the runner's writer thread.
@@ -810,6 +811,67 @@ fn tool_started(name: &str) -> HarnessOutputMessage {
     }))
 }
 
+fn extension_data_result(
+    request_id: String,
+    result: tau_proto::ExtensionDataResultPayload,
+) -> HarnessOutputMessage {
+    HarnessOutputMessage::ExtensionDataResult(Box::new(tau_proto::ExtensionDataResult {
+        request_id,
+        result,
+    }))
+}
+
+fn extension_data_request_from_bytes(bytes: Vec<u8>) -> Option<tau_proto::ExtensionDataRequest> {
+    let mut reader = HarnessInputReader::new(Cursor::new(bytes));
+    loop {
+        let frame = match reader.read_message() {
+            Ok(Some(frame)) => frame,
+            Ok(None) => return None,
+            Err(_) => return None,
+        };
+        if let HarnessInputMessage::ExtensionDataRequest(request) = frame {
+            return Some(request);
+        }
+    }
+}
+
+fn spawn_extension_data_responder(
+    writer: SharedWriter,
+    writer_stream: UnixStream,
+    result: tau_proto::ExtensionDataResultPayload,
+) -> std::thread::JoinHandle<tau_proto::ExtensionDataRequest> {
+    std::thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let request = loop {
+            if let Some(request) = extension_data_request_from_bytes(writer.bytes()) {
+                break request;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for extension data request"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        };
+        let mut input_writer = HarnessOutputWriter::new(writer_stream);
+        input_writer
+            .write_message(&extension_data_result(request.request_id.clone(), result))
+            .expect("write extension data result");
+        input_writer.flush().expect("flush extension data result");
+        request
+    })
+}
+
+fn latest_extension_data_request(writer: &SharedWriter) -> tau_proto::ExtensionDataRequest {
+    frames_from_writer(writer)
+        .into_iter()
+        .rev()
+        .find_map(|frame| match frame {
+            HarnessInputMessage::ExtensionDataRequest(request) => Some(request),
+            _ => None,
+        })
+        .expect("extension data request")
+}
+
 fn action_invoke(extension_name: &str, action_id: &str) -> Event {
     Event::ActionInvoke(tau_proto::ActionInvoke {
         invocation_id: format!("invoke-{extension_name}-{action_id}").into(),
@@ -1594,6 +1656,390 @@ fn manual_loop_allows_post_eof_output_before_finish() {
 
     let frames = frames_from_writer(&written);
     assert!(notice_frame_index(&frames, "post-eof") > ready_frame_index(&frames));
+}
+
+/// Ensures extension-data RPC uses tau-client's reader pump for demux:
+/// unrelated frames are not consumed by the request helper and remain available
+/// to the manual loop in original order.
+#[test]
+fn manual_loop_extension_data_request_preserves_unrelated_frames() {
+    let (reader, writer_stream) = UnixStream::pair().expect("unix stream pair");
+    let writer = SharedWriter::default();
+    let written = writer.clone();
+    let mut runtime = TauExtensionRunner::new(ReplayExtension)
+        .start_manual_loop(reader, writer, Counts::default())
+        .expect("start manual loop");
+
+    let preload_stream = writer_stream
+        .try_clone()
+        .expect("clone writer stream for preload");
+    let mut input_writer = HarnessOutputWriter::new(preload_stream);
+    input_writer
+        .write_message(&HarnessOutputMessage::deliver_live(
+            UnixMicros::new(30),
+            notice("before-result"),
+        ))
+        .expect("write unrelated");
+    input_writer
+        .write_message(&extension_data_result(
+            "unrelated-request".to_owned(),
+            tau_proto::ExtensionDataResultPayload::Ok {
+                value: tau_proto::ExtensionDataValue::WriteFile,
+            },
+        ))
+        .expect("write unrelated result");
+    input_writer.flush().expect("flush unrelated input");
+    drop(input_writer);
+
+    let responder = spawn_extension_data_responder(
+        written.clone(),
+        writer_stream,
+        tau_proto::ExtensionDataResultPayload::Ok {
+            value: tau_proto::ExtensionDataValue::ReadFile {
+                contents: b"stored".to_vec(),
+            },
+        },
+    );
+    let request_result = runtime
+        .extension_data_request(
+            tau_proto::ExtensionDataScope::User,
+            tau_proto::ExtensionDataRequestOp::ReadFile {
+                path: tau_proto::ExtensionDataPath::new("state.cbor"),
+            },
+        )
+        .expect("extension data request");
+    let request = responder.join().expect("responder thread");
+
+    assert_eq!(
+        request_result,
+        tau_proto::ExtensionDataValue::ReadFile {
+            contents: b"stored".to_vec()
+        }
+    );
+    assert_eq!(request.scope, tau_proto::ExtensionDataScope::User);
+    assert!(matches!(
+        request.op,
+        tau_proto::ExtensionDataRequestOp::ReadFile { ref path }
+            if path.as_str() == "state.cbor"
+    ));
+
+    match runtime.recv().expect("preserved delivery") {
+        ManualRuntimeInput::Message(HarnessOutputMessage::Deliver(delivery)) => {
+            assert!(
+                matches!(delivery.event.as_ref(), Event::HarnessNotice(notice) if notice.message == "before-result")
+            );
+        }
+        other => panic!("expected preserved delivery, got {other:?}"),
+    }
+    match runtime.recv().expect("preserved unrelated result") {
+        ManualRuntimeInput::Message(HarnessOutputMessage::ExtensionDataResult(result)) => {
+            assert_eq!(result.request_id, "unrelated-request");
+        }
+        other => panic!("expected preserved unrelated result, got {other:?}"),
+    }
+    assert!(matches!(
+        runtime.recv().expect("input closed"),
+        ManualRuntimeInput::InputClosed
+    ));
+    runtime.finish().expect("finish");
+}
+
+/// Ensures harness extension-data errors are surfaced as RPC errors without
+/// stopping the manual runtime.
+#[test]
+fn manual_loop_extension_data_request_reports_harness_error() {
+    let (reader, writer_stream) = UnixStream::pair().expect("unix stream pair");
+    let writer = SharedWriter::default();
+    let written = writer.clone();
+    let mut runtime = TauExtensionRunner::new(ReplayExtension)
+        .start_manual_loop(reader, writer, Counts::default())
+        .expect("start manual loop");
+
+    let responder = spawn_extension_data_responder(
+        written,
+        writer_stream,
+        tau_proto::ExtensionDataResultPayload::Error {
+            kind: tau_proto::ExtensionDataErrorKind::NotFound,
+            message: "missing".to_owned(),
+        },
+    );
+    let error = runtime
+        .extension_data_request(
+            tau_proto::ExtensionDataScope::User,
+            tau_proto::ExtensionDataRequestOp::DeleteFile {
+                path: tau_proto::ExtensionDataPath::new("missing"),
+            },
+        )
+        .expect_err("harness error should surface");
+    responder.join().expect("responder thread");
+
+    assert!(matches!(
+        error,
+        ExtensionDataRpcError::Harness {
+            kind: tau_proto::ExtensionDataErrorKind::NotFound,
+            ref message,
+        } if message == "missing"
+    ));
+    runtime.finish().expect("finish");
+}
+
+/// Ensures extension-data RPC preserves an early Disconnect for the caller's
+/// normal manual-loop shutdown path.
+#[test]
+fn manual_loop_extension_data_request_preserves_disconnect() {
+    let (reader, writer_stream) = UnixStream::pair().expect("unix stream pair");
+    let writer = SharedWriter::default();
+    let mut runtime = TauExtensionRunner::new(ReplayExtension)
+        .start_manual_loop(reader, writer, Counts::default())
+        .expect("start manual loop");
+    let mut input_writer = HarnessOutputWriter::new(writer_stream);
+    input_writer
+        .write_message(&HarnessOutputMessage::deliver_live(
+            UnixMicros::new(32),
+            notice("should not run before disconnect"),
+        ))
+        .expect("write unrelated delivery");
+    input_writer
+        .write_message(&disconnect("done"))
+        .expect("write disconnect");
+    input_writer.flush().expect("flush disconnect");
+
+    let error = runtime
+        .extension_data_request(
+            tau_proto::ExtensionDataScope::User,
+            tau_proto::ExtensionDataRequestOp::ListFiles {
+                path: tau_proto::ExtensionDataPath::new(""),
+            },
+        )
+        .expect_err("disconnect should surface");
+    assert!(matches!(error, ExtensionDataRpcError::Disconnect(_)));
+
+    assert!(matches!(
+        runtime.recv().expect("preserved disconnect"),
+        ManualRuntimeInput::Message(HarnessOutputMessage::Disconnect(_))
+    ));
+    let _ = runtime.finish_detached();
+}
+
+/// Ensures clean input EOF before a matching extension-data response is
+/// reported as `InputClosed` and remains visible to the outer manual receive
+/// loop.
+#[test]
+fn manual_loop_extension_data_request_reports_input_closed() {
+    let (reader, writer_stream) = UnixStream::pair().expect("unix stream pair");
+    let writer = SharedWriter::default();
+    let mut runtime = TauExtensionRunner::new(ReplayExtension)
+        .start_manual_loop(reader, writer, Counts::default())
+        .expect("start manual loop");
+    drop(writer_stream);
+
+    let error = runtime
+        .extension_data_request(
+            tau_proto::ExtensionDataScope::User,
+            tau_proto::ExtensionDataRequestOp::ListFiles {
+                path: tau_proto::ExtensionDataPath::new(""),
+            },
+        )
+        .expect_err("clean EOF should surface");
+    assert!(matches!(error, ExtensionDataRpcError::InputClosed));
+    assert!(matches!(
+        runtime.recv().expect("input remains closed"),
+        ManualRuntimeInput::InputClosed
+    ));
+    runtime.finish().expect("finish");
+}
+
+/// Ensures unrelated frames already read by the extension-data helper are
+/// restored if a later malformed protocol frame turns the request into a client
+/// error.
+#[test]
+fn manual_loop_extension_data_request_restores_frames_on_reader_error() {
+    let (reader, mut writer_stream) = UnixStream::pair().expect("unix stream pair");
+    let writer = SharedWriter::default();
+    let mut runtime = TauExtensionRunner::new(ReplayExtension)
+        .start_manual_loop(reader, writer, Counts::default())
+        .expect("start manual loop");
+    {
+        let mut input_writer = HarnessOutputWriter::new(&mut writer_stream);
+        input_writer
+            .write_message(&HarnessOutputMessage::deliver_live(
+                UnixMicros::new(33),
+                notice("before-error"),
+            ))
+            .expect("write unrelated delivery");
+        input_writer.flush().expect("flush unrelated input");
+    }
+    writer_stream
+        .write_all(b"\xff")
+        .expect("write malformed frame");
+    writer_stream.flush().expect("flush malformed frame");
+    drop(writer_stream);
+
+    let error = runtime
+        .extension_data_request(
+            tau_proto::ExtensionDataScope::User,
+            tau_proto::ExtensionDataRequestOp::ListFiles {
+                path: tau_proto::ExtensionDataPath::new(""),
+            },
+        )
+        .expect_err("malformed frame should surface as client error");
+    assert!(matches!(error, ExtensionDataRpcError::Client(_)));
+    match runtime.recv().expect("preserved delivery") {
+        ManualRuntimeInput::Message(HarnessOutputMessage::Deliver(delivery)) => {
+            assert!(
+                matches!(delivery.event.as_ref(), Event::HarnessNotice(notice) if notice.message == "before-error")
+            );
+        }
+        other => panic!("expected preserved delivery, got {other:?}"),
+    }
+    assert!(matches!(
+        runtime
+            .recv()
+            .expect("input marked closed after reader error"),
+        ManualRuntimeInput::InputClosed
+    ));
+    runtime.finish().expect("finish");
+}
+
+/// Ensures timed extension-data requests return promptly and leave later frames
+/// available to the manual loop.
+#[test]
+fn manual_loop_extension_data_request_timeout_keeps_runtime_usable() {
+    let (reader, writer_stream) = UnixStream::pair().expect("unix stream pair");
+    let writer = SharedWriter::default();
+    let written = writer.clone();
+    let mut runtime = TauExtensionRunner::new(ReplayExtension)
+        .start_manual_loop(reader, writer, Counts::default())
+        .expect("start manual loop");
+
+    let error = runtime
+        .extension_data_request_timeout(
+            tau_proto::ExtensionDataScope::User,
+            tau_proto::ExtensionDataRequestOp::ListFiles {
+                path: tau_proto::ExtensionDataPath::new(""),
+            },
+            Duration::from_millis(10),
+        )
+        .expect_err("request should time out");
+    assert!(matches!(error, ExtensionDataRpcError::Timeout));
+    let request = latest_extension_data_request(&written);
+    assert_eq!(request.scope, tau_proto::ExtensionDataScope::User);
+
+    let mut input_writer = HarnessOutputWriter::new(writer_stream);
+    input_writer
+        .write_message(&extension_data_result(
+            request.request_id.clone(),
+            tau_proto::ExtensionDataResultPayload::Ok {
+                value: tau_proto::ExtensionDataValue::ListFiles { entries: vec![] },
+            },
+        ))
+        .expect("write late extension data result");
+    input_writer
+        .write_message(&HarnessOutputMessage::deliver_live(
+            UnixMicros::new(34),
+            notice("after-timeout"),
+        ))
+        .expect("write later message");
+    input_writer.flush().expect("flush later message");
+    match runtime.recv().expect("late result remains available") {
+        ManualRuntimeInput::Message(HarnessOutputMessage::ExtensionDataResult(result)) => {
+            assert_eq!(result.request_id, request.request_id);
+        }
+        other => panic!("expected late extension data result, got {other:?}"),
+    }
+    match runtime.recv().expect("runtime remains usable") {
+        ManualRuntimeInput::Message(HarnessOutputMessage::Deliver(delivery)) => {
+            assert!(
+                matches!(delivery.event.as_ref(), Event::HarnessNotice(notice) if notice.message == "after-timeout")
+            );
+        }
+        other => panic!("expected later delivery, got {other:?}"),
+    }
+    runtime.finish().expect("finish");
+}
+
+/// Ensures handler-owned code can use `ExtensionDataClient` without direct
+/// transport access, which is the storage shape needed by PIM-style migrations.
+#[test]
+fn manual_loop_extension_data_client_works_inside_handler() {
+    /// State used to prove handler-owned storage can retain an extension-data
+    /// client without making the manual runtime own PIM policy.
+    #[derive(Default)]
+    struct StorageState {
+        /// Client installed by the test after startup and used inside the tool
+        /// handler.
+        client: Option<ExtensionDataClient>,
+        /// Contents returned by the correlated extension-data read.
+        contents: Vec<u8>,
+    }
+
+    /// Minimal extension whose tool handler performs one extension-data read.
+    struct StorageExtension;
+
+    impl TauExtension for StorageExtension {
+        type State = StorageState;
+
+        fn name(&self) -> &'static str {
+            "storage"
+        }
+
+        fn register(self, builder: &mut ExtensionBuilder<Self::State>) {
+            builder.tool(tool_spec("load"), |cx| {
+                let client = cx
+                    .state
+                    .client
+                    .as_ref()
+                    .expect("extension data client installed");
+                match client.request(
+                    tau_proto::ExtensionDataScope::User,
+                    tau_proto::ExtensionDataRequestOp::ReadFile {
+                        path: tau_proto::ExtensionDataPath::new("handler-state.cbor"),
+                    },
+                ) {
+                    Ok(tau_proto::ExtensionDataValue::ReadFile { contents }) => {
+                        cx.state.contents = contents;
+                        Ok(())
+                    }
+                    Ok(other) => Err(ClientError::handler(format!(
+                        "unexpected extension data value: {other:?}"
+                    ))),
+                    Err(error) => Err(ClientError::handler(error.to_string())),
+                }
+            });
+        }
+    }
+
+    let (reader, writer_stream) = UnixStream::pair().expect("unix stream pair");
+    let writer = SharedWriter::default();
+    let written = writer.clone();
+    let mut runtime = TauExtensionRunner::new(StorageExtension)
+        .start_manual_loop(reader, writer, StorageState::default())
+        .expect("start manual loop");
+    runtime.state_mut().client = Some(runtime.extension_data_client());
+
+    let responder = spawn_extension_data_responder(
+        written,
+        writer_stream,
+        tau_proto::ExtensionDataResultPayload::Ok {
+            value: tau_proto::ExtensionDataValue::ReadFile {
+                contents: b"handler contents".to_vec(),
+            },
+        },
+    );
+    assert_eq!(
+        runtime
+            .dispatch_one(tool_started("load"))
+            .expect("dispatch storage handler"),
+        DispatchOutcome::Continue
+    );
+    let request = responder.join().expect("responder thread");
+    assert!(matches!(
+        request.op,
+        tau_proto::ExtensionDataRequestOp::ReadFile { ref path }
+            if path.as_str() == "handler-state.cbor"
+    ));
+    assert_eq!(runtime.state().contents, b"handler contents");
+    runtime.finish().expect("finish");
 }
 
 /// Ensures manual-loop dispatch preserves config-error emission and continues

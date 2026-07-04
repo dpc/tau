@@ -9,8 +9,22 @@ handling boundaries.
 
 `src/main.rs` starts the extension process and `src/lib.rs` owns protocol
 configuration, tool/action registration, and dispatch to feature runtimes. The
-top-level `RuntimeState` keeps separate email and calendar runtime states plus
-shared extension configuration.
+top-level PIM runtime uses `tau-client` for startup publication, exact
+subscriptions, configuration error emission, live-only tool/action dispatch, and
+writer lifecycle. The top-level `RuntimeState` keeps separate email and calendar
+runtime states plus shared extension configuration.
+
+Persistent extension-data storage goes through tau-client's manual-runtime
+`ExtensionDataClient`. It generates request ids, waits for matching
+`ExtensionDataResult` frames, and returns unrelated harness frames to the manual
+loop instead of reading the protocol transport directly. PIM still owns storage
+schema, feature policy, and conversion of harness storage errors into
+email/calendar behavior.
+
+The crate still contains a legacy email-only runner path used by email-module
+tests and local helpers. That path keeps the `tau-extension` dependency and
+`FsStorage` test/local storage backend isolated from the top-level PIM runtime
+until a separate email-specific cleanup slice removes it.
 
 Each feature validates its raw config before becoming operational:
 

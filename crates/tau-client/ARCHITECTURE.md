@@ -88,6 +88,15 @@ state they need, publish context values, and choose when to emit
 provides small readiness emit helpers for those two DTOs, but readiness policy
 and correlation remain extension-owned.
 
+Manual-loop extensions that need harness-owned extension-data storage can use the
+extension-data RPC helper. It generates a request id, sends the existing
+`ExtensionDataRequest` frame, waits for the matching `ExtensionDataResult`, and
+buffers unrelated harness frames back into the manual runtime so later
+`recv`/`dispatch_one` calls still see them in order. The helper does not add
+storage policy, path validation, or background demux ownership to tau-client; the
+harness still owns storage boundaries and the extension still owns how storage
+errors map to feature behavior.
+
 Manual-loop receive results distinguish timeout, clean input EOF, and protocol
 `Disconnect`. Clean input EOF allows the caller to keep running local timers and
 emit post-EOF output before graceful writer shutdown. `finish()` always shuts
@@ -110,8 +119,9 @@ They should cover startup frame ordering, subscription selector semantics,
 writer-thread behavior, configuration errors, replay/live dispatch boundaries,
 raw event dispatch, tool/action matching, intercept reply guarantees, context
 provider startup publication, disconnect behavior, manual-loop
-receive/dispatch/shutdown contracts, builder validation, empty subscriptions,
-and plugin composition. Add focused coverage when changing lifecycle, writer
-shutdown, replay filtering, configuration, intercept, action dispatch, manual
-receive loops, or startup declaration behavior so migrated extensions do not
-need to rediscover runtime regressions independently.
+receive/dispatch/shutdown contracts, extension-data RPC demux, builder
+validation, empty subscriptions, and plugin composition. Add focused coverage
+when changing lifecycle, writer shutdown, replay filtering, configuration,
+intercept, action dispatch, manual receive loops, extension-data request
+correlation, or startup declaration behavior so migrated extensions do not need
+to rediscover runtime regressions independently.

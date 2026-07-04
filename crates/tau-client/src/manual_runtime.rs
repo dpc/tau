@@ -1,7 +1,12 @@
+use std::cell::RefCell;
+use std::collections::VecDeque;
+use std::fmt;
 use std::io::{Read, Write};
+use std::rc::Rc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::builder::ExtensionBuilder;
 use crate::runner::{dispatch_message, write_startup};
@@ -23,12 +28,20 @@ pub struct ManualExtensionRuntime<State> {
     builder: ExtensionBuilder<State>,
     /// Cloneable outbound handle for caller-owned side work.
     handle: ClientHandle,
-    /// Reader-thread channel carrying decoded harness messages.
-    input: mpsc::Receiver<ReaderMessage>,
+    /// Shared input queue used by manual receive and correlated RPC helpers.
+    input: Rc<RefCell<ManualInput>>,
     /// Reader thread that decodes harness messages for timeout-based receive.
     reader_thread: JoinHandle<()>,
     /// Writer thread that serializes outbound protocol frames.
     writer_thread: JoinHandle<ClientResult<()>>,
+}
+
+/// Shared manual-loop input queue used by receive calls and correlated helpers.
+struct ManualInput {
+    /// Reader-thread channel carrying decoded harness messages.
+    receiver: mpsc::Receiver<ReaderMessage>,
+    /// Harness messages read while waiting for a correlated helper response.
+    pending: VecDeque<ReaderMessage>,
     /// True once the reader reported EOF or a decode error.
     input_closed: bool,
 }
@@ -64,6 +77,147 @@ enum ReaderMessage {
     Error(ClientError),
 }
 
+/// Correlated extension-data RPC helper for manual-loop extensions.
+///
+/// This client is caller-thread-local (`Rc`-backed, not `Send`). It shares the
+/// manual runtime input queue so handler-owned storage operations can wait for
+/// matching `ExtensionDataResult` frames without directly reading the transport
+/// or stealing unrelated frames from the outer manual loop.
+#[derive(Clone)]
+pub struct ExtensionDataClient {
+    /// Outbound handle used to send extension-data request frames.
+    handle: ClientHandle,
+    /// Shared input queue used to wait for correlated response frames.
+    input: Rc<RefCell<ManualInput>>,
+}
+
+/// Error returned by manual-loop extension-data RPC helpers.
+#[derive(Debug)]
+pub enum ExtensionDataRpcError {
+    /// Sending the request or reading the input stream failed.
+    Client(ClientError),
+    /// Harness returned an extension-data operation error.
+    Harness {
+        /// Machine-readable error kind reported by the harness.
+        kind: tau_proto::ExtensionDataErrorKind,
+        /// Human-readable error details reported by the harness.
+        message: String,
+    },
+    /// The timeout elapsed before the matching response arrived.
+    Timeout,
+    /// The harness input stream reached clean EOF before the matching response.
+    InputClosed,
+    /// The harness explicitly disconnected before the matching response.
+    Disconnect(tau_proto::Disconnect),
+}
+
+impl fmt::Display for ExtensionDataRpcError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Client(error) => write!(f, "{error}"),
+            Self::Harness { kind, message } => write!(f, "{kind:?}: {message}"),
+            Self::Timeout => f.write_str("extension data request timed out"),
+            Self::InputClosed => f.write_str("harness input closed during extension data request"),
+            Self::Disconnect(disconnect) => match &disconnect.reason {
+                Some(reason) => write!(
+                    f,
+                    "harness disconnected during extension data request: {reason}"
+                ),
+                None => f.write_str("harness disconnected during extension data request"),
+            },
+        }
+    }
+}
+
+impl std::error::Error for ExtensionDataRpcError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Client(error) => Some(error),
+            Self::Harness { .. } | Self::Timeout | Self::InputClosed | Self::Disconnect(_) => None,
+        }
+    }
+}
+
+impl From<ClientError> for ExtensionDataRpcError {
+    fn from(error: ClientError) -> Self {
+        Self::Client(error)
+    }
+}
+
+static NEXT_EXTENSION_DATA_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
+
+impl ExtensionDataClient {
+    /// Sends one extension-data request and waits for its correlated response.
+    ///
+    /// This call has no timeout and may wait indefinitely if the harness never
+    /// sends a matching `ExtensionDataResult`.
+    ///
+    /// Unrelated harness frames received while waiting are preserved and
+    /// returned by later manual-runtime receive calls in their original order,
+    /// except that protocol `Disconnect` is treated as a priority shutdown
+    /// control frame. If a `Disconnect` arrives before the matching result, it
+    /// is both returned as [`ExtensionDataRpcError::Disconnect`] and re-queued
+    /// ahead of deferred side-effect frames for the outer manual loop to
+    /// observe.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when output fails, the harness returns an
+    /// extension-data operation error, the input stream closes, or a protocol
+    /// `Disconnect` arrives before the matching result.
+    pub fn request(
+        &self,
+        scope: tau_proto::ExtensionDataScope,
+        op: tau_proto::ExtensionDataRequestOp,
+    ) -> Result<tau_proto::ExtensionDataValue, ExtensionDataRpcError> {
+        self.request_inner(scope, op, None)
+    }
+
+    /// Sends one extension-data request and waits up to `timeout` for its
+    /// correlated response.
+    ///
+    /// Unrelated harness frames and priority protocol `Disconnect` are
+    /// preserved as in [`Self::request`]. If the timeout elapses, the request
+    /// is not cancelled at the protocol layer; a later result with the same
+    /// request id will be treated as an unrelated frame by the manual loop.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ExtensionDataRpcError::Timeout`] when no matching result
+    /// arrives before `timeout`, or the same errors as [`Self::request`].
+    pub fn request_timeout(
+        &self,
+        scope: tau_proto::ExtensionDataScope,
+        op: tau_proto::ExtensionDataRequestOp,
+        timeout: Duration,
+    ) -> Result<tau_proto::ExtensionDataValue, ExtensionDataRpcError> {
+        self.request_inner(scope, op, Some(timeout))
+    }
+
+    fn request_inner(
+        &self,
+        scope: tau_proto::ExtensionDataScope,
+        op: tau_proto::ExtensionDataRequestOp,
+        timeout: Option<Duration>,
+    ) -> Result<tau_proto::ExtensionDataValue, ExtensionDataRpcError> {
+        let request_id = format!(
+            "tau-client-extension-data-{}",
+            NEXT_EXTENSION_DATA_REQUEST_ID.fetch_add(1, Ordering::Relaxed)
+        );
+        self.handle
+            .send(tau_proto::HarnessInputMessage::ExtensionDataRequest(
+                tau_proto::ExtensionDataRequest {
+                    request_id: request_id.clone(),
+                    scope,
+                    op,
+                },
+            ))?;
+        self.input
+            .borrow_mut()
+            .wait_for_extension_data_result(request_id, timeout)
+    }
+}
+
 impl<State> ManualExtensionRuntime<State> {
     /// Returns a shared reference to caller-owned extension state.
     #[must_use]
@@ -83,6 +237,15 @@ impl<State> ManualExtensionRuntime<State> {
         self.handle.clone()
     }
 
+    /// Returns a caller-thread-local extension-data RPC helper.
+    #[must_use]
+    pub fn extension_data_client(&self) -> ExtensionDataClient {
+        ExtensionDataClient {
+            handle: self.handle.clone(),
+            input: Rc::clone(&self.input),
+        }
+    }
+
     /// Waits until the next harness message or input EOF is available.
     ///
     /// After this method returns [`ManualRuntimeInput::InputClosed`],
@@ -95,16 +258,7 @@ impl<State> ManualExtensionRuntime<State> {
     /// Returns an error when the reader thread reports a protocol decode/read
     /// failure or exits without sending its terminal status.
     pub fn recv(&mut self) -> ClientResult<ManualRuntimeInput> {
-        if self.input_closed {
-            return Ok(ManualRuntimeInput::InputClosed);
-        }
-        match self.input.recv() {
-            Ok(message) => self.handle_reader_message(message),
-            Err(_) => {
-                self.input_closed = true;
-                Err(ClientError::ReaderClosed)
-            }
-        }
+        self.input.borrow_mut().recv()
     }
 
     /// Waits up to `timeout` for the next harness message or input EOF.
@@ -118,17 +272,64 @@ impl<State> ManualExtensionRuntime<State> {
     /// Returns an error when the reader thread reports a protocol decode/read
     /// failure or exits without sending its terminal status.
     pub fn recv_timeout(&mut self, timeout: Duration) -> ClientResult<ManualRuntimeInput> {
-        if self.input_closed {
-            return Ok(ManualRuntimeInput::InputClosed);
-        }
-        match self.input.recv_timeout(timeout) {
-            Ok(message) => self.handle_reader_message(message),
-            Err(mpsc::RecvTimeoutError::Timeout) => Ok(ManualRuntimeInput::Timeout),
-            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                self.input_closed = true;
-                Err(ClientError::ReaderClosed)
-            }
-        }
+        self.input.borrow_mut().recv_timeout(timeout)
+    }
+
+    /// Sends one extension-data request and waits for its correlated response.
+    ///
+    /// This call has no timeout and may wait indefinitely if the harness never
+    /// sends a matching `ExtensionDataResult`.
+    ///
+    /// Unrelated harness frames received while waiting are preserved and
+    /// returned by later [`Self::recv`] / [`Self::recv_timeout`] calls in their
+    /// original order, except that protocol `Disconnect` is treated as a
+    /// priority shutdown control frame. If a `Disconnect` arrives before the
+    /// matching result, it is both returned as
+    /// [`ExtensionDataRpcError::Disconnect`] and re-queued ahead of deferred
+    /// side-effect frames for the outer manual loop to observe. This lets
+    /// extensions perform synchronous storage operations from a manual loop
+    /// without directly reading the transport or stealing unrelated messages
+    /// from tau-client dispatch.
+    ///
+    /// This helper is available only on manual extension runtimes, and sends
+    /// the existing protocol
+    /// [`tau_proto::HarnessInputMessage::ExtensionDataRequest`]
+    /// frame without broadening peer capabilities.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when output fails, the harness returns an
+    /// extension-data operation error, the input stream closes, or a protocol
+    /// `Disconnect` arrives before the matching result.
+    pub fn extension_data_request(
+        &mut self,
+        scope: tau_proto::ExtensionDataScope,
+        op: tau_proto::ExtensionDataRequestOp,
+    ) -> Result<tau_proto::ExtensionDataValue, ExtensionDataRpcError> {
+        self.extension_data_client().request(scope, op)
+    }
+
+    /// Sends one extension-data request and waits up to `timeout` for its
+    /// correlated response.
+    ///
+    /// Unrelated frames and priority protocol `Disconnect` are preserved as in
+    /// [`Self::extension_data_request`]. If the timeout elapses, the request is
+    /// not cancelled at the protocol layer; a later result with the same
+    /// request id will be treated as an unrelated frame by the manual loop.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ExtensionDataRpcError::Timeout`] when no matching result
+    /// arrives before `timeout`, or the same errors as
+    /// [`Self::extension_data_request`].
+    pub fn extension_data_request_timeout(
+        &mut self,
+        scope: tau_proto::ExtensionDataScope,
+        op: tau_proto::ExtensionDataRequestOp,
+        timeout: Duration,
+    ) -> Result<tau_proto::ExtensionDataValue, ExtensionDataRpcError> {
+        self.extension_data_client()
+            .request_timeout(scope, op, timeout)
     }
 
     /// Dispatches one harness message through the registered tau-client
@@ -174,13 +375,14 @@ impl<State> ManualExtensionRuntime<State> {
     /// Returns an error when reader completion reports a panic, writer shutdown
     /// cannot be queued, the writer thread panics, or the writer reports an
     /// encode/flush error.
-    pub fn finish(mut self) -> ClientResult<State> {
+    pub fn finish(self) -> ClientResult<State> {
         let reader_message_result = if self.reader_thread.is_finished() {
-            self.drain_finished_reader_status()
+            self.input.borrow_mut().drain_finished_reader_status()
         } else {
             Ok(())
         };
-        let reader_join_result = if self.input_closed || self.reader_thread.is_finished() {
+        let input_closed = self.input.borrow().input_closed;
+        let reader_join_result = if input_closed || self.reader_thread.is_finished() {
             self.reader_thread
                 .join()
                 .map_err(|_| ClientError::ReaderPanicked)
@@ -219,6 +421,49 @@ impl<State> ManualExtensionRuntime<State> {
     pub fn finish_detached(self) -> State {
         self.state
     }
+}
+
+impl ManualInput {
+    fn recv(&mut self) -> ClientResult<ManualRuntimeInput> {
+        if let Some(message) = self.pending.pop_front() {
+            return self.handle_reader_message(message);
+        }
+        if self.input_closed {
+            return Ok(ManualRuntimeInput::InputClosed);
+        }
+        self.recv_from_reader()
+    }
+
+    fn recv_timeout(&mut self, timeout: Duration) -> ClientResult<ManualRuntimeInput> {
+        if let Some(message) = self.pending.pop_front() {
+            return self.handle_reader_message(message);
+        }
+        if self.input_closed {
+            return Ok(ManualRuntimeInput::InputClosed);
+        }
+        self.recv_timeout_from_reader(timeout)
+    }
+
+    fn recv_from_reader(&mut self) -> ClientResult<ManualRuntimeInput> {
+        match self.receiver.recv() {
+            Ok(message) => self.handle_reader_message(message),
+            Err(_) => {
+                self.input_closed = true;
+                Err(ClientError::ReaderClosed)
+            }
+        }
+    }
+
+    fn recv_timeout_from_reader(&mut self, timeout: Duration) -> ClientResult<ManualRuntimeInput> {
+        match self.receiver.recv_timeout(timeout) {
+            Ok(message) => self.handle_reader_message(message),
+            Err(mpsc::RecvTimeoutError::Timeout) => Ok(ManualRuntimeInput::Timeout),
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                self.input_closed = true;
+                Err(ClientError::ReaderClosed)
+            }
+        }
+    }
 
     fn handle_reader_message(
         &mut self,
@@ -238,7 +483,7 @@ impl<State> ManualExtensionRuntime<State> {
     }
 
     fn drain_finished_reader_status(&mut self) -> ClientResult<()> {
-        while let Ok(message) = self.input.try_recv() {
+        while let Ok(message) = self.receiver.try_recv() {
             match message {
                 ReaderMessage::Message(_) => {}
                 ReaderMessage::InputClosed => {
@@ -251,6 +496,61 @@ impl<State> ManualExtensionRuntime<State> {
             }
         }
         Ok(())
+    }
+
+    fn wait_for_extension_data_result(
+        &mut self,
+        request_id: String,
+        timeout: Option<Duration>,
+    ) -> Result<tau_proto::ExtensionDataValue, ExtensionDataRpcError> {
+        let mut deferred = std::mem::take(&mut self.pending);
+        let deadline = timeout.map(|timeout| Instant::now() + timeout);
+        let result = loop {
+            let input = match deadline {
+                Some(deadline) => {
+                    let remaining = deadline.saturating_duration_since(Instant::now());
+                    if remaining.is_zero() {
+                        break Err(ExtensionDataRpcError::Timeout);
+                    }
+                    match self.recv_timeout_from_reader(remaining) {
+                        Ok(input) => input,
+                        Err(error) => break Err(ExtensionDataRpcError::Client(error)),
+                    }
+                }
+                None => match self.recv_from_reader() {
+                    Ok(input) => input,
+                    Err(error) => break Err(ExtensionDataRpcError::Client(error)),
+                },
+            };
+            match input {
+                ManualRuntimeInput::Message(
+                    tau_proto::HarnessOutputMessage::ExtensionDataResult(result),
+                ) if result.request_id == request_id => {
+                    break match result.result {
+                        tau_proto::ExtensionDataResultPayload::Ok { value } => Ok(value),
+                        tau_proto::ExtensionDataResultPayload::Error { kind, message } => {
+                            Err(ExtensionDataRpcError::Harness { kind, message })
+                        }
+                    };
+                }
+                ManualRuntimeInput::Message(tau_proto::HarnessOutputMessage::Disconnect(
+                    disconnect,
+                )) => {
+                    deferred.push_front(ReaderMessage::Message(
+                        tau_proto::HarnessOutputMessage::Disconnect(disconnect.clone()),
+                    ));
+                    break Err(ExtensionDataRpcError::Disconnect(disconnect));
+                }
+                ManualRuntimeInput::Message(message) => {
+                    deferred.push_back(ReaderMessage::Message(message));
+                }
+                ManualRuntimeInput::Timeout => break Err(ExtensionDataRpcError::Timeout),
+                ManualRuntimeInput::InputClosed => break Err(ExtensionDataRpcError::InputClosed),
+            }
+        };
+        deferred.append(&mut self.pending);
+        self.pending = deferred;
+        result
     }
 }
 
@@ -326,10 +626,13 @@ where
             state,
             builder,
             handle,
-            input,
+            input: Rc::new(RefCell::new(ManualInput {
+                receiver: input,
+                pending: VecDeque::new(),
+                input_closed: false,
+            })),
             reader_thread,
             writer_thread,
-            input_closed: false,
         })
     }
 }
