@@ -7,11 +7,10 @@
 //! custom scheduling needs can use [`ManualExtensionRuntime`] to receive with
 //! timeouts and dispatch messages one at a time while preserving the same
 //! protocol semantics, including correlated extension-data RPC through
-//! [`ExtensionDataClient`]. It also provides the standard
-//! extension `TAU_LOG` subscriber helpers so migrated extension binaries do not
-//! need the legacy startup helper crate just for logging. It intentionally
-//! keeps the existing Tau wire protocol and `tau_extension::Handshake` intact
-//! while new extensions migrate incrementally.
+//! [`ExtensionDataClient`]. It also provides the standard extension `TAU_LOG`
+//! subscriber helpers. First-party extensions now use this crate directly; the
+//! old compatibility startup helper crate has been removed after the migration
+//! completed.
 
 mod builder;
 mod client_error;
@@ -19,12 +18,12 @@ mod client_handle;
 mod config;
 mod contexts;
 mod event_payload;
+mod extension_trait;
 mod handler;
 mod intercept_decision;
 mod logging;
 mod manual_runtime;
 mod runner;
-mod tau_extension_trait;
 mod writer_thread;
 
 pub use builder::ExtensionBuilder;
@@ -35,6 +34,7 @@ pub use contexts::{
     RawConfigureContext, RawEventContext, ToolContext,
 };
 pub use event_payload::EventPayload;
+pub use extension_trait::{ExtensionPlugin, TauExtension};
 pub use intercept_decision::InterceptDecision;
 pub use logging::{DEFAULT_FILTER, ENV_VAR, init_logging, init_logging_for};
 pub use manual_runtime::{
@@ -42,7 +42,6 @@ pub use manual_runtime::{
     ManualRuntimeInput,
 };
 pub use runner::TauExtensionRunner;
-pub use tau_extension_trait::{ExtensionPlugin, TauExtension};
 
 #[cfg(test)]
 mod tests;

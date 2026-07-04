@@ -3450,18 +3450,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "tau-extension"
-version = "0.1.0"
-dependencies = [
- "ciborium",
- "serde",
- "serde_json",
- "tau-proto",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "tau-harness"
 version = "0.1.0"
 dependencies = [

@@ -1064,7 +1064,7 @@ pub(crate) fn run_chat(
         socket_shutdown_stream,
     } = connect_ui_transport(&mut daemon, &ui_io_meter, startup_started_at)?;
 
-    // Handshake.
+    // UI connection handshake.
     send_handshake_frame(
         &writer,
         &mut read_stream,

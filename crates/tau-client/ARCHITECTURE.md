@@ -1,9 +1,9 @@
 # tau-client architecture
 
-`tau-client` is the shared runtime slice for Tau protocol peers. It sits above
-`tau-proto`, which owns the wire messages, and alongside existing
-`tau-extension` handshake code so extensions can migrate incrementally without a
-protocol break.
+`tau-client` is the shared runtime for Tau extension protocol peers. It sits
+above `tau-proto`, which owns the wire messages. First-party extensions now use
+`tau-client` directly; the former compatibility startup helper crate was removed
+after the migration completed without a protocol break.
 
 The runner writes startup frames in harness-defined order: `Hello`, optional
 `Subscribe`, optional `Intercept`, startup `Emit` frames, then `Ready`. After

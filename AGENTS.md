@@ -18,7 +18,6 @@
 - `crates/tau-ext-test-dummy` — test-only dummy extension
 - `crates/tau-ext-websearch` — built-in generic web search extension (Exa default plus opt-in Parallel.ai tools)
 - `crates/tau-ext-xmpp` — disabled-by-default XMPP text bridge extension
-- `crates/tau-extension` — extension-side protocol/runtime helpers
 - `crates/tau-harness` — harness daemon: extensions, bus, sessions, socket server, harness-owned delegate/wait tools
 - `crates/tau-provider` — provider credential/config library plus shared provider runtime utilities (OAuth, storage, stream guards)
 - `crates/tau-provider-chat-completions` — OpenAI-compatible Chat Completions backend helpers

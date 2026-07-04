@@ -247,7 +247,7 @@ pub(crate) fn spawn_supervised(
 
 /// Read an extension's stderr line-by-line and append each line
 /// verbatim to `log_path`. Extensions are expected to use
-/// `tau_extension::init_logging` (or any other `tracing`-based
+/// `tau_client::init_logging_for` (or any other `tracing`-based
 /// formatter), which already emits its own timestamps and levels —
 /// adding our own prefix would double up the metadata. The thread
 /// exits naturally when stderr closes (i.e. the child exits), so

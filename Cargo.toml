@@ -21,7 +21,6 @@ members = [
   "crates/tau-ext-test-dummy",
   "crates/tau-ext-websearch",
   "crates/tau-ext-xmpp",
-  "crates/tau-extension",
   "crates/tau-harness",
   "crates/tau-harness-tools",
   "crates/tau-proto",
@@ -81,7 +80,6 @@ tau-ext-telegram = { path = "crates/tau-ext-telegram" }
 tau-ext-test-dummy = { path = "crates/tau-ext-test-dummy" }
 tau-ext-websearch = { path = "crates/tau-ext-websearch" }
 tau-ext-xmpp = { path = "crates/tau-ext-xmpp" }
-tau-extension = { path = "crates/tau-extension" }
 tau-harness = { path = "crates/tau-harness" }
 tau-harness-tools = { path = "crates/tau-harness-tools" }
 tau-proto = { path = "crates/tau-proto" }

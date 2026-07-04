@@ -9,7 +9,7 @@
 //!
 //! Why a dedicated runtime and not async-everything at the provider
 //! boundary: the provider's main loop is sync (blocking mpsc, blocking
-//! frame IO via `tau_extension`). Driving async tasks from sync code
+//! protocol frame IO). Driving async tasks from sync code
 //! is fine via the `Handle::block_on` / `Sender::send` /
 //! `Receiver::blocking_recv` boundary primitives.
 
