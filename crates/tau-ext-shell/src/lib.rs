@@ -8,17 +8,18 @@
 
 use std::collections::HashMap;
 use std::error::Error;
-use std::io::{BufReader, BufWriter, Read, Write};
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
 use tau_proto::{
     ActionError, ActionInvoke, ActionOutput, ActionResult, AgentContextKey, AgentContextValue,
-    CborValue, Event, ExtAgentContextPublish, ExtPromptFragmentPublish, ExtensionContextReady,
-    ExtensionSessionContextReady, HarnessInputMessage, PeerInputReader, PeerOutputWriter,
-    PromptContent, PromptFragment, PromptPriority, SessionAgentLoaded, SessionStarted,
-    ToolCancelled, ToolExample, ToolExampleSelector, ToolResult, ToolResultKind, ToolSpec, ToolTag,
+    CborValue, Event, ExtAgentContextPublish, ExtensionContextReady, ExtensionSessionContextReady,
+    HarnessInputMessage, PromptContent, PromptFragment, PromptPriority, SessionAgentLoaded,
+    SessionStarted, ToolCancelled, ToolExample, ToolExampleSelector, ToolResult, ToolResultKind,
+    ToolSpec, ToolTag,
 };
 use tracing::{debug, trace};
 
@@ -51,6 +52,49 @@ use crate::tools::{
     APPLY_PATCH_TOOL_NAME, CD_TOOL_NAME, EDIT_TOOL_NAME, FIND_TOOL_NAME, GPT_SHELL_TOOL_NAME,
     GREP_TOOL_NAME, LS_TOOL_NAME, READ_TOOL_NAME, SHELL_TOOL_NAME, execute_tool,
 };
+
+/// Cloneable shell output adapter.
+///
+/// Production output uses tau-client's writer thread and detached enqueue
+/// semantics to match the old unbounded response-channel behavior: shell worker
+/// threads should not block on protocol flush. Tests can still use an
+/// mpsc-backed adapter for direct state-machine coverage.
+#[derive(Clone)]
+pub(crate) struct Output {
+    inner: OutputInner,
+}
+
+#[derive(Clone)]
+enum OutputInner {
+    Client(tau_client::ClientHandle),
+    #[cfg(test)]
+    Channel(mpsc::Sender<HarnessInputMessage>),
+}
+
+impl Output {
+    fn client(handle: tau_client::ClientHandle) -> Self {
+        Self {
+            inner: OutputInner::Client(handle),
+        }
+    }
+
+    #[cfg(test)]
+    fn channel(tx: mpsc::Sender<HarnessInputMessage>) -> Self {
+        Self {
+            inner: OutputInner::Channel(tx),
+        }
+    }
+
+    fn send(&self, message: HarnessInputMessage) -> tau_client::ClientResult<()> {
+        match &self.inner {
+            OutputInner::Client(handle) => handle.send_detached(message),
+            #[cfg(test)]
+            OutputInner::Channel(tx) => tx
+                .send(message)
+                .map_err(|_| tau_client::ClientError::WriterClosed),
+        }
+    }
+}
 
 fn tool_tags(tags: &[&str]) -> Vec<ToolTag> {
     tags.iter().map(|tag| ToolTag::new(*tag)).collect()
@@ -86,7 +130,7 @@ pub fn run_stdio() -> Result<(), Box<dyn Error>> {
 /// `cfg(test)` or the `echo-agent` cargo feature.
 pub fn run<R, W>(reader: R, writer: W) -> Result<(), Box<dyn Error>>
 where
-    R: Read,
+    R: Read + Send + 'static,
     W: Write + Send + 'static,
 {
     run_impl(reader, writer)
@@ -582,94 +626,143 @@ fn registered_tool_specs(dir_lock_enabled: bool) -> Vec<ToolSpec> {
 
 fn run_impl<R, W>(reader: R, writer: W) -> Result<(), Box<dyn Error>>
 where
-    R: Read,
+    R: Read + Send + 'static,
     W: Write + Send + 'static,
 {
-    let mut reader = PeerInputReader::new(BufReader::new(reader));
-    let mut writer = PeerOutputWriter::new(BufWriter::new(writer));
-
     let initial_config = ExtConfig::default();
-    let tools = registered_tool_specs(initial_config.dir_lock.enable);
+    let mut runtime = tau_client::TauExtensionRunner::new(ShellExtension {
+        initial_config: initial_config.clone(),
+    })
+    .start_manual_loop_with_state(reader, writer, |handle| {
+        ShellRuntime::new(Output::client(handle), initial_config)
+    })?;
 
-    // No past events requested: the shell starts from fresh live state.
-    // Replaying old invokes/commands would repeat work; old session starts
-    // would duplicate context publication.
-    let mut handshake = tau_extension::Handshake::tool("tau-ext-shell").subscribe([
-        tau_proto::EventName::TOOL_STARTED,
-        tau_proto::EventName::TOOL_CANCEL_REQUEST,
-        tau_proto::EventName::ACTION_INVOKE,
-        tau_proto::EventName::SESSION_STARTED,
-        tau_proto::EventName::SESSION_AGENT_LOADED,
-        tau_proto::EventName::SESSION_AGENT_UNLOADED,
-        tau_proto::EventName::AGENT_METADATA_SET,
-        tau_proto::EventName::AGENT_METADATA_UNSET,
-        tau_proto::EventName::SESSION_SHUTDOWN,
-        tau_proto::EventName::AGENT_START_ACCEPTED,
-        tau_proto::EventName::AGENT_START_RESULT,
-        tau_proto::EventName::UI_SHELL_COMMAND,
-    ]);
-    let shell_tool_group = tau_proto::ToolGroup {
-        name: tau_proto::ToolGroupName::new("shell"),
-        prompt_fragment: None,
-    };
-    let test_tool_group = tau_proto::ToolGroup {
-        name: tau_proto::ToolGroupName::new("test"),
-        prompt_fragment: None,
-    };
-    for tool in tools {
-        let tool_group = if tool.name.as_str() == "echo" {
-            test_tool_group.clone()
-        } else {
-            shell_tool_group.clone()
-        };
-        handshake =
-            handshake.register_tool_with_group_and_prompt_fragment(tool, Some(tool_group), None);
+    let loop_result = run_shell_manual_loop(&mut runtime);
+
+    // EOF/disconnect/errors may arrive without a committed SessionShutdown event.
+    // Wake lock waiters and drop scheduler workers before tau-client shuts down
+    // its writer, because active worker jobs may be blocked inside DirLockManager
+    // and worker-held output handles must not enqueue after writer shutdown.
+    runtime.state_mut().final_shutdown();
+    let finish_result = runtime.finish().map(|_| ());
+    match (loop_result, finish_result) {
+        (Ok(()), Ok(())) => Ok(()),
+        (_, Err(error)) => Err(Box::new(error)),
+        (Err(error), _) => Err(Box::new(error)),
     }
-    handshake = handshake.announce_event(Event::ExtensionContextProviderRegister(
-        tau_proto::ExtensionContextProviderRegister {},
-    ));
-    handshake = handshake.announce_event(Event::ExtensionSessionContextProviderRegister(
-        tau_proto::ExtensionSessionContextProviderRegister {},
-    ));
-    handshake
-        .announce_event(Event::ExtPromptFragmentPublish(ExtPromptFragmentPublish {
-            fragment: shell_cwd_prompt_fragment(),
-        }))
-        .publish_actions(shell_action_schema())
-        .ready_message("filesystem and shell tools ready")
-        .run(&mut writer)?;
+}
 
-    // Response channel: worker threads send protocol messages here; writer
-    // thread drains them onto the wire.
-    let (tx, rx) = mpsc::channel::<HarnessInputMessage>();
-    let mut runtime = ShellRuntime::new(tx.clone(), initial_config);
-
-    // Writer thread: drains response messages and writes them to the wire.
-    let writer_handle = std::thread::spawn(move || -> Result<(), Box<dyn Error + Send>> {
-        for message in rx {
-            writer
-                .write_message(&message)
-                .map_err(|e| -> Box<dyn Error + Send> { Box::new(e) })?;
-            writer
-                .flush()
-                .map_err(|e| -> Box<dyn Error + Send> { Box::new(e) })?;
+fn run_shell_manual_loop(
+    runtime: &mut tau_client::ManualExtensionRuntime<ShellRuntime>,
+) -> tau_client::ClientResult<()> {
+    loop {
+        match runtime.recv()? {
+            tau_client::ManualRuntimeInput::Message(message) => {
+                match runtime.dispatch_one(message)? {
+                    tau_client::DispatchOutcome::Continue => {}
+                    tau_client::DispatchOutcome::StopRequested
+                    | tau_client::DispatchOutcome::Disconnect(_) => return Ok(()),
+                }
+            }
+            tau_client::ManualRuntimeInput::Timeout => {}
+            tau_client::ManualRuntimeInput::InputClosed => return Ok(()),
         }
-        Ok(())
-    });
+    }
+}
 
-    let reader_result = runtime.run_reader_loop(&mut reader);
+struct ShellExtension {
+    initial_config: ExtConfig,
+}
 
-    // EOF/disconnect may arrive without a committed SessionShutdown event. Wake
-    // lock waiters before dropping the scheduler, because scheduler drop joins
-    // workers and active worker jobs may be blocked inside DirLockManager.
-    runtime.shutdown();
-    drop(runtime);
-    drop(tx);
-    writer_handle
-        .join()
-        .map_err(|_| "writer thread panicked")?
-        .map_err(|e| -> Box<dyn Error> { e })?;
-    reader_result
+impl tau_client::TauExtension for ShellExtension {
+    type State = ShellRuntime;
+
+    fn name(&self) -> &'static str {
+        "tau-ext-shell"
+    }
+
+    fn register(self, builder: &mut tau_client::ExtensionBuilder<Self::State>) {
+        let tools = registered_tool_specs(self.initial_config.dir_lock.enable);
+
+        // Replay policy is declared per handler below: historical cwd metadata
+        // is folded, while effectful tools/actions/cancellation/UI commands and
+        // session lifecycle publications stay live-only.
+        let shell_tool_group = tau_proto::ToolGroup {
+            name: tau_proto::ToolGroupName::new("shell"),
+            prompt_fragment: None,
+        };
+        let test_tool_group = tau_proto::ToolGroup {
+            name: tau_proto::ToolGroupName::new("test"),
+            prompt_fragment: None,
+        };
+
+        for tool in tools {
+            let tool_group = if tool.name.as_str() == "echo" {
+                test_tool_group.clone()
+            } else {
+                shell_tool_group.clone()
+            };
+            builder.tool_with_group_and_prompt_fragment(tool, Some(tool_group), None, |cx| {
+                cx.state
+                    .handle_event(Event::ToolStarted(cx.invoke.clone()), false)
+            });
+        }
+        builder
+            .register_context_provider()
+            .register_session_context_provider()
+            .publish_prompt_fragment(shell_cwd_prompt_fragment())
+            .publish_actions(shell_action_schema())
+            .on_live::<tau_proto::ToolCancelRequest>(|cx| {
+                cx.state
+                    .handle_event(Event::ToolCancelRequest(cx.event.clone()), false)
+            })
+            .on_raw_live(
+                tau_proto::EventSelector::Exact(tau_proto::EventName::ACTION_INVOKE),
+                |cx| cx.state.handle_event(cx.event().clone(), false),
+            )
+            .on_live::<tau_proto::SessionStarted>(|cx| {
+                cx.state
+                    .handle_event(Event::SessionStarted(cx.event.clone()), false)
+            })
+            .on_live::<tau_proto::SessionAgentLoaded>(|cx| {
+                cx.state
+                    .handle_event(Event::SessionAgentLoaded(cx.event.clone()), false)
+            })
+            .on_live::<tau_proto::SessionAgentUnloaded>(|cx| {
+                cx.state
+                    .handle_event(Event::SessionAgentUnloaded(cx.event.clone()), false)
+            })
+            .on::<tau_proto::AgentMetadataSet>(|cx| {
+                cx.state
+                    .handle_event(Event::AgentMetadataSet(cx.event.clone()), cx.is_replay())
+            })
+            .on::<tau_proto::AgentMetadataUnset>(|cx| {
+                cx.state
+                    .handle_event(Event::AgentMetadataUnset(cx.event.clone()), cx.is_replay())
+            })
+            .on_live::<tau_proto::SessionShutdown>(|cx| {
+                cx.state
+                    .handle_event(Event::SessionShutdown(cx.event.clone()), false)
+            })
+            .on_live::<tau_proto::StartAgentAccepted>(|cx| {
+                cx.state
+                    .handle_event(Event::StartAgentAccepted(cx.event.clone()), false)
+            })
+            .on_live::<tau_proto::StartAgentResult>(|cx| {
+                cx.state
+                    .handle_event(Event::StartAgentResult(cx.event.clone()), false)
+            })
+            .on_live::<tau_proto::UiShellCommand>(|cx| {
+                cx.state
+                    .handle_event(Event::UiShellCommand(cx.event.clone()), false)
+            })
+            .configure_raw(|cx| {
+                let cfg = cx.parse_config::<ExtConfig>()?;
+                cx.state
+                    .apply_config(cx.configure.instance_name.clone(), cfg)
+            })
+            .ready_message("filesystem and shell tools ready");
+    }
 }
 
 fn apply_working_directory(
@@ -845,7 +938,7 @@ fn action_error(invoke: ActionInvoke, message: String) -> Event {
 fn rewrite_invoke_for_cwd(
     mut invoke: tau_proto::ToolStarted,
     cwd_state: &CwdState,
-    tx: &mpsc::Sender<HarnessInputMessage>,
+    tx: &Output,
 ) -> tau_proto::ToolStarted {
     if invoke.tool_name == CD_TOOL_NAME {
         return invoke;
@@ -928,7 +1021,7 @@ fn set_cbor_text_field(arguments: &mut CborValue, field: &str, value: String) {
 fn schedule_tool_started(
     invoke: tau_proto::ToolStarted,
     scheduler: &WorkScheduler,
-    tx: &mpsc::Sender<HarnessInputMessage>,
+    tx: &Output,
     config: ExtConfig,
     lock_manager: DirLockManager,
     running_calls: Arc<Mutex<HashMap<tau_proto::ToolCallId, mpsc::Sender<()>>>>,
@@ -991,8 +1084,11 @@ fn schedule_tool_started(
 fn schedule_ui_shell_command(
     cmd: tau_proto::UiShellCommand,
     scheduler: &WorkScheduler,
-    tx: &mpsc::Sender<HarnessInputMessage>,
+    tx: &Output,
     shell_config: ShellConfig,
+    running_ui_commands: Arc<Mutex<HashMap<tau_proto::ShellCommandId, mpsc::Sender<()>>>>,
+    shutdown_generation: Arc<AtomicU64>,
+    scheduled_generation: u64,
 ) -> Result<(), Box<(tau_proto::UiShellCommand, String)>> {
     let meta = WorkMeta {
         call_id: None,
@@ -1002,9 +1098,27 @@ fn schedule_ui_shell_command(
     };
     let tx_for_job = tx.clone();
     let cmd_for_error = cmd.clone();
+    let command_id = cmd.command_id.clone();
     scheduler
         .enqueue(WorkPriority::User, meta, move || {
-            crate::tools::shell::dispatch_user_shell_command(cmd, shell_config, &tx_for_job);
+            let (cancel_tx, cancel_rx) = mpsc::channel();
+            running_ui_commands
+                .lock()
+                .expect("running ui shell registry lock poisoned")
+                .insert(command_id.clone(), cancel_tx.clone());
+            if shutdown_generation.load(Ordering::SeqCst) != scheduled_generation {
+                let _ = cancel_tx.send(());
+            }
+            crate::tools::shell::dispatch_user_shell_command(
+                cmd,
+                shell_config,
+                &tx_for_job,
+                cancel_rx,
+            );
+            running_ui_commands
+                .lock()
+                .expect("running ui shell registry lock poisoned")
+                .remove(&command_id);
         })
         .map_err(|error| Box::new((cmd_for_error, error.message)))
 }
@@ -1087,7 +1201,7 @@ fn saturating_add_capped(lhs: usize, rhs: usize, cap: usize) -> usize {
 fn dispatch_locked_tool_invoke(
     invoke: tau_proto::ToolStarted,
     shell_config: ShellConfig,
-    tx: &mpsc::Sender<HarnessInputMessage>,
+    tx: &Output,
     running_calls: &Arc<Mutex<HashMap<tau_proto::ToolCallId, mpsc::Sender<()>>>>,
     lock_manager: &DirLockManager,
     enforce_ro_bind: bool,
@@ -1203,11 +1317,7 @@ fn dispatch_locked_tool_invoke(
     drop(guard);
 }
 
-fn send_ui_shell_saturated_failure(
-    cmd: tau_proto::UiShellCommand,
-    message: String,
-    tx: &mpsc::Sender<HarnessInputMessage>,
-) {
+fn send_ui_shell_saturated_failure(cmd: tau_proto::UiShellCommand, message: String, tx: &Output) {
     let _ = tx.send(HarnessInputMessage::emit(Event::ShellCommandFinished(
         tau_proto::ShellCommandFinished {
             command_id: cmd.command_id,
@@ -1225,7 +1335,7 @@ fn send_ui_shell_saturated_failure(
 fn send_tool_failure(
     invoke: tau_proto::ToolStarted,
     failure: crate::display::ToolFailure,
-    tx: &mpsc::Sender<HarnessInputMessage>,
+    tx: &Output,
 ) {
     let crate::display::ToolFailure {
         message,
@@ -1317,7 +1427,7 @@ fn lock_wait_duration_entry(seconds: u64) -> (CborValue, CborValue) {
 fn dispatch_tool_invoke(
     invoke: tau_proto::ToolStarted,
     shell_config: ShellConfig,
-    tx: &mpsc::Sender<HarnessInputMessage>,
+    tx: &Output,
     running_calls: &Arc<Mutex<HashMap<tau_proto::ToolCallId, mpsc::Sender<()>>>>,
     lock_wait_duration_seconds: Option<u64>,
     shell_command_mode: Option<ShellCommandMode>,
@@ -1433,7 +1543,7 @@ fn dispatch_tool_invoke(
 
 fn dispatch_cancellable_non_shell_tool(
     invoke: tau_proto::ToolStarted,
-    tx: &mpsc::Sender<HarnessInputMessage>,
+    tx: &Output,
     running_calls: &Arc<Mutex<HashMap<tau_proto::ToolCallId, mpsc::Sender<()>>>>,
     lock_wait_duration_seconds: Option<u64>,
     world: crate::tools::world::ShellWorld,
@@ -1491,7 +1601,7 @@ struct CancellableShellDispatch<'a> {
     /// Effective shell execution configuration for this invocation.
     shell_config: ShellConfig,
     /// Channel used to send progress and terminal events back to the harness.
-    tx: &'a mpsc::Sender<HarnessInputMessage>,
+    tx: &'a Output,
     /// Shared registry used by cancel requests to signal running shell
     /// processes.
     running_calls: &'a Arc<Mutex<HashMap<tau_proto::ToolCallId, mpsc::Sender<()>>>>,
@@ -1608,7 +1718,7 @@ fn dispatch_cancellable_shell_tool(params: CancellableShellDispatch<'_>) {
     }
 }
 
-fn dispatch_session_started(started: SessionStarted, tx: &mpsc::Sender<HarnessInputMessage>) {
+fn dispatch_session_started(started: SessionStarted, tx: &Output) {
     let session_id = started.session_id.clone();
     for event in build_session_started_events(started) {
         let _ = tx.send(HarnessInputMessage::emit(event));
@@ -1620,7 +1730,7 @@ fn dispatch_session_started(started: SessionStarted, tx: &mpsc::Sender<HarnessIn
 
 fn apply_started_cwd_metadata(
     started: tau_proto::AgentStarted,
-    tx: &mpsc::Sender<HarnessInputMessage>,
+    tx: &Output,
     cwd_state: &CwdState,
     is_replay: bool,
 ) {
@@ -1640,11 +1750,7 @@ fn apply_started_cwd_metadata(
     }
 }
 
-fn dispatch_session_agent_loaded(
-    loaded: SessionAgentLoaded,
-    tx: &mpsc::Sender<HarnessInputMessage>,
-    cwd_state: &CwdState,
-) {
+fn dispatch_session_agent_loaded(loaded: SessionAgentLoaded, tx: &Output, cwd_state: &CwdState) {
     if let Some(cwd) = cwd_state.get(&loaded.agent_id) {
         let _ = tx.send(HarnessInputMessage::emit(cwd_context_event(
             loaded.agent_id.clone(),

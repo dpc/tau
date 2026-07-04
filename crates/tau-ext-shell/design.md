@@ -7,6 +7,11 @@ that providers may emit. When an argument is removed from a schema, normal tests
 must stop sending it; keep any stale-call compatibility coverage in an explicitly
 named legacy test.
 
+Runtime protocol tests should also lock the exact startup subscription set and
+the ordering of startup publications before `Ready`, because the extension uses
+tau-client helpers for startup and dispatch while preserving a narrow event
+exposure boundary.
+
 Provider-owned invocation examples are protocol metadata and must be validated
 with `tau_core::validate_tool_examples` in registration tests. Custom/freeform
 tools are not fully checked by JSON-schema validation, so keep separate semantic

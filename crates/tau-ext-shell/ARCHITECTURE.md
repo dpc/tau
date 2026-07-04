@@ -58,6 +58,21 @@ covering manual-lock ownership at the moment the automatic lock is granted;
 otherwise it falls back to read-only execution instead of running under stale
 coverage.
 
+## tau-client runtime boundary
+
+The shell extension uses `tau-client` for protocol startup, exact
+subscriptions, configuration error reporting, replay/live dispatch filtering,
+and serialized output. Shell-specific policy remains local: cwd folding,
+session/agent lifecycle cleanup, directory-lock scheduling, tool cancellation,
+and `StartAgentResult` correlation are owned by `ShellRuntime`.
+
+Worker and scheduler output goes through a shell-local `Output` adapter backed
+by `ClientHandle::send_detached` in production. This preserves the historical
+enqueue-to-writer behavior: worker threads do not block on protocol flush, while
+the tau-client writer still reports encode/flush failures during graceful
+shutdown. Tests can use an mpsc-backed adapter for direct state-machine
+coverage.
+
 ## Scheduler and shutdown ordering
 
 Tool invocations run through a fixed native-thread `WorkScheduler` with bounded
@@ -71,13 +86,13 @@ also register cancellation handles while active. Tool cancellation and runtime
 shutdown signal those handles so a running ripgrep child or filesystem traversal
 can stop before scheduler drop waits for worker threads to exit.
 
-At every post-scheduler termination path, including explicit
-`session_shutdown`, `disconnect`, EOF, reader decode errors, and response-send
-errors, ext-shell must shut down `DirLockManager` before dropping
-`WorkScheduler`. This releases manual locks and cancels queued lock waiters so
-worker jobs blocked in lock acquisition can exit. Only after scheduler drop
-should the main response sender be dropped and the protocol writer thread
-joined.
+At every session or process shutdown path, including explicit
+`session_shutdown`, `disconnect`, EOF, reader decode errors, and output
+shutdown errors, ext-shell must shut down `DirLockManager` and cancel queued or
+running work. This releases manual locks and cancels queued lock waiters so
+worker jobs blocked in lock acquisition can exit. On process termination paths,
+only after this cleanup should `WorkScheduler` be dropped and the tau-client
+manual runtime be finished so the protocol writer can flush and join.
 
 ## Tool tags
 

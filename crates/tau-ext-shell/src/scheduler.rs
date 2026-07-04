@@ -6,13 +6,17 @@
 //! waiter threads or rejecting ordinary short bursts while workers are busy.
 
 use std::collections::VecDeque;
-use std::sync::{Arc, Condvar, Mutex, mpsc};
+#[cfg(test)]
+use std::sync::mpsc;
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 
 use tau_proto::{
     AgentId, Event, HarnessInputMessage, ToolCallId, ToolCancelled, ToolName, ToolType,
 };
 use tracing::warn;
+
+use crate::Output;
 
 /// Default aggregate cap for approximated queued argument bytes.
 pub(crate) const DEFAULT_QUEUED_BYTES_LIMIT: usize = 1024 * 1024;
@@ -111,7 +115,7 @@ pub(crate) struct WorkScheduler {
 struct Inner {
     state: Mutex<State>,
     changed: Condvar,
-    tx: mpsc::Sender<HarnessInputMessage>,
+    tx: Output,
     config: SchedulerConfig,
 }
 
@@ -135,7 +139,7 @@ enum WorkerKind {
 
 impl WorkScheduler {
     /// Create a scheduler and spawn its bounded worker set.
-    pub(crate) fn new(tx: mpsc::Sender<HarnessInputMessage>, config: SchedulerConfig) -> Self {
+    pub(crate) fn new(tx: Output, config: SchedulerConfig) -> Self {
         let mut scheduler = Self {
             inner: Arc::new(Inner {
                 state: Mutex::new(State::default()),
@@ -423,7 +427,7 @@ mod tests {
     fn enqueue_respects_total_limit() {
         let (tx, _rx) = mpsc::channel();
         let scheduler = WorkScheduler::new(
-            tx,
+            Output::channel(tx),
             SchedulerConfig {
                 total_limit: 1,
                 control_workers: 0,
@@ -449,7 +453,7 @@ mod tests {
     fn cancel_queued_call_removes_work() {
         let (tx, rx) = mpsc::channel();
         let scheduler = WorkScheduler::new(
-            tx,
+            Output::channel(tx),
             SchedulerConfig {
                 control_workers: 0,
                 user_workers: 0,
@@ -480,7 +484,7 @@ mod tests {
     fn cancel_agent_removes_owned_queued_work() {
         let (tx, _rx) = mpsc::channel();
         let scheduler = WorkScheduler::new(
-            tx,
+            Output::channel(tx),
             SchedulerConfig {
                 control_workers: 0,
                 user_workers: 0,
@@ -508,7 +512,7 @@ mod tests {
     fn enqueue_respects_queued_byte_limit() {
         let (tx, _rx) = mpsc::channel();
         let scheduler = WorkScheduler::new(
-            tx,
+            Output::channel(tx),
             SchedulerConfig {
                 queued_bytes_limit: 1,
                 control_workers: 0,
@@ -538,7 +542,7 @@ mod tests {
     fn control_work_runs_while_bulk_worker_is_busy() {
         let (tx, _rx) = mpsc::channel();
         let scheduler = WorkScheduler::new(
-            tx,
+            Output::channel(tx),
             SchedulerConfig {
                 control_workers: 1,
                 user_workers: 0,
@@ -582,7 +586,7 @@ mod tests {
     fn drop_cancels_queued_work_and_joins_running_workers() {
         let (tx, _rx) = mpsc::channel();
         let scheduler = WorkScheduler::new(
-            tx,
+            Output::channel(tx),
             SchedulerConfig {
                 control_workers: 0,
                 user_workers: 0,

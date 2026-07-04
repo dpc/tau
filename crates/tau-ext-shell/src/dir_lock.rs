@@ -19,7 +19,7 @@ mod fs;
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Condvar, Mutex, MutexGuard, mpsc};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
@@ -32,6 +32,7 @@ use self::fs::{
     FsAutoAcquireRequest, FsLockBackend, FsManualAcquireRequest, StateDirSource,
     default_fs_state_dir,
 };
+use crate::Output;
 use crate::argument::{argument_text, optional_argument_text};
 use crate::config::{DirLockBackendConfig, DirLockConfig};
 use crate::display::{ToolFailure, ok_display};
@@ -1043,7 +1044,7 @@ pub(crate) fn dispatch_dir_lock_tool(
     invoke: ToolStarted,
     manager: &DirLockManager,
     enabled: bool,
-    tx: &mpsc::Sender<HarnessInputMessage>,
+    tx: &Output,
 ) {
     if !enabled {
         send_event(
@@ -1118,7 +1119,7 @@ impl DirLockToolRequest {
 fn dispatch_dir_lock_update(
     invoke: ToolStarted,
     manager: &DirLockManager,
-    tx: &mpsc::Sender<HarnessInputMessage>,
+    tx: &Output,
     request: DirLockToolRequest,
 ) {
     let wait_invoke = invoke.clone();
@@ -1157,7 +1158,7 @@ fn dispatch_dir_lock_update(
 fn dispatch_dir_lock_unlock(
     invoke: ToolStarted,
     manager: &DirLockManager,
-    tx: &mpsc::Sender<HarnessInputMessage>,
+    tx: &Output,
     request: DirLockToolRequest,
 ) {
     let owner = match dir_lock_unlock_owner(&invoke, &request.dir) {
@@ -1238,25 +1239,17 @@ fn dir_lock_unlock_owner(invoke: &ToolStarted, dir: &Path) -> Result<UnlockOwner
     }
 }
 
-fn send_dir_lock_update_result(
-    invoke: &ToolStarted,
-    tx: &mpsc::Sender<HarnessInputMessage>,
-    request: &DirLockToolRequest,
-) {
+fn send_dir_lock_update_result(invoke: &ToolStarted, tx: &Output, request: &DirLockToolRequest) {
     send_dir_lock_result(invoke, tx, "update", request, true);
 }
 
-fn send_dir_lock_unlock_result(
-    invoke: &ToolStarted,
-    tx: &mpsc::Sender<HarnessInputMessage>,
-    request: &DirLockToolRequest,
-) {
+fn send_dir_lock_unlock_result(invoke: &ToolStarted, tx: &Output, request: &DirLockToolRequest) {
     send_dir_lock_result(invoke, tx, "unlock", request, false);
 }
 
 fn send_dir_lock_result(
     invoke: &ToolStarted,
-    tx: &mpsc::Sender<HarnessInputMessage>,
+    tx: &Output,
     command: &str,
     request: &DirLockToolRequest,
     locked: bool,
@@ -1273,7 +1266,7 @@ fn send_dir_lock_result(
 
 fn send_duplicate_dir_lock_error(
     invoke: &ToolStarted,
-    tx: &mpsc::Sender<HarnessInputMessage>,
+    tx: &Output,
     requested_dir: &Path,
     held_dir: &Path,
 ) {
@@ -1294,7 +1287,7 @@ fn send_duplicate_dir_lock_error(
 
 fn send_abandoned_dir_lock_error(
     invoke: &ToolStarted,
-    tx: &mpsc::Sender<HarnessInputMessage>,
+    tx: &Output,
     command: &str,
     lock: &AbandonedLock,
 ) {
@@ -1611,7 +1604,7 @@ fn cancelled_event(invoke: ToolStarted) -> Event {
     })
 }
 
-fn send_event(tx: &mpsc::Sender<HarnessInputMessage>, event: Event) {
+fn send_event(tx: &Output, event: Event) {
     let _ = tx.send(HarnessInputMessage::emit(event));
 }
 

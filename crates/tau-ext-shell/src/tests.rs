@@ -6,8 +6,9 @@ use std::time::{Duration, Instant};
 use std::{fs, thread};
 
 use tau_proto::{
-    CborValue, EventName, HarnessInputMessage, HarnessInputReader, HarnessOutputMessage,
-    HarnessOutputWriter, ToolCancelRequest, ToolStarted, ToolUsePayload, ToolUseStatus,
+    CborValue, EventName, EventSelector, HarnessInputMessage, HarnessInputReader,
+    HarnessOutputMessage, HarnessOutputWriter, ToolCancelRequest, ToolStarted, ToolUsePayload,
+    ToolUseStatus,
 };
 use tempfile::TempDir;
 
@@ -97,6 +98,10 @@ impl<R: std::io::Read> EventReader<R> {
                 Some(message) => return Ok(Some(message)),
             }
         }
+    }
+
+    fn read_raw_message(&mut self) -> Result<Option<HarnessInputMessage>, tau_proto::DecodeError> {
+        self.inner.read_message()
     }
 }
 
@@ -305,6 +310,16 @@ fn action_invoke(invocation_id: &str, action_id: &str, directory: &str) -> Event
     })
 }
 
+fn ui_shell_command(command_id: &str, command: &str) -> Event {
+    Event::UiShellCommand(tau_proto::UiShellCommand {
+        session_id: "session-1".into(),
+        command_id: command_id.into(),
+        command: command.to_owned(),
+        include_in_context: true,
+        target_agent_id: None,
+    })
+}
+
 /// Consumes startup events (tool registers). The hello/subscribe/ready
 /// messages are filtered out by the test-side `EventReader` wrapper.
 fn drain_startup(reader: &mut EventReader<BufReader<UnixStream>>) {
@@ -331,6 +346,176 @@ fn drain_startup(reader: &mut EventReader<BufReader<UnixStream>>) {
             .expect("startup event should arrive");
         assert_eq!(event.name(), expected);
     }
+}
+
+fn wait_for_user_shell_progress(reader: &mut TestExtensionReader, command_id: &str, text: &str) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for user shell progress"
+        );
+        match reader.read_event().expect("read progress") {
+            Some(Event::ShellCommandProgress(progress))
+                if progress.command_id == command_id && progress.chunk.contains(text) =>
+            {
+                return;
+            }
+            Some(_) => {}
+            None => panic!("extension closed before user shell progress"),
+        }
+    }
+}
+
+fn wait_for_user_shell_finished(
+    reader: &mut TestExtensionReader,
+    command_id: &str,
+) -> tau_proto::ShellCommandFinished {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for user shell finish"
+        );
+        match reader.read_event().expect("read finish") {
+            Some(Event::ShellCommandFinished(finished)) if finished.command_id == command_id => {
+                return finished;
+            }
+            Some(_) => {}
+            None => panic!("extension closed before user shell finish"),
+        }
+    }
+}
+
+#[test]
+fn startup_declares_exact_shell_subscriptions_and_ready_after_publications() {
+    let (mut reader, mut writer) = spawn_extension();
+
+    let hello = reader
+        .read_raw_message()
+        .expect("read hello")
+        .expect("hello frame");
+    assert!(matches!(hello, HarnessInputMessage::Hello(_)));
+
+    let subscribe = reader
+        .read_raw_message()
+        .expect("read subscribe")
+        .expect("subscribe frame");
+    let HarnessInputMessage::Subscribe(subscribe) = subscribe else {
+        panic!("expected Subscribe after Hello");
+    };
+    assert_eq!(
+        subscribe.selectors,
+        [
+            EventSelector::Exact(EventName::TOOL_STARTED),
+            EventSelector::Exact(EventName::TOOL_CANCEL_REQUEST),
+            EventSelector::Exact(EventName::ACTION_INVOKE),
+            EventSelector::Exact(EventName::SESSION_STARTED),
+            EventSelector::Exact(EventName::SESSION_AGENT_LOADED),
+            EventSelector::Exact(EventName::SESSION_AGENT_UNLOADED),
+            EventSelector::Exact(EventName::AGENT_METADATA_SET),
+            EventSelector::Exact(EventName::AGENT_METADATA_UNSET),
+            EventSelector::Exact(EventName::SESSION_SHUTDOWN),
+            EventSelector::Exact(EventName::AGENT_START_ACCEPTED),
+            EventSelector::Exact(EventName::AGENT_START_RESULT),
+            EventSelector::Exact(EventName::UI_SHELL_COMMAND),
+        ]
+    );
+
+    for expected_tool in [
+        ECHO_TOOL_NAME,
+        READ_TOOL_NAME,
+        EDIT_TOOL_NAME,
+        APPLY_PATCH_TOOL_NAME,
+        DIR_LOCK_TOOL_NAME,
+        GREP_TOOL_NAME,
+        FIND_TOOL_NAME,
+        LS_TOOL_NAME,
+        CD_TOOL_NAME,
+        SHELL_TOOL_NAME,
+        GPT_SHELL_TOOL_NAME,
+    ] {
+        let message = reader
+            .read_raw_message()
+            .expect("read startup tool")
+            .expect("startup tool frame");
+        let HarnessInputMessage::Emit(emit) = message else {
+            panic!("expected tool registration before Ready, got {message:?}");
+        };
+        let Event::ToolRegister(register) = *emit.event else {
+            panic!(
+                "expected tool registration before Ready, got {:?}",
+                emit.event
+            );
+        };
+        assert_eq!(register.tool.name, expected_tool);
+    }
+
+    for expected in [
+        EventName::EXTENSION_CONTEXT_PROVIDER_REGISTER,
+        EventName::EXTENSION_SESSION_CONTEXT_PROVIDER_REGISTER,
+        EventName::EXTENSION_PROMPT_FRAGMENT_PUBLISH,
+        EventName::ACTION_SCHEMA_PUBLISHED,
+    ] {
+        let message = reader
+            .read_raw_message()
+            .expect("read startup publication")
+            .expect("startup publication frame");
+        let HarnessInputMessage::Emit(emit) = message else {
+            panic!("expected startup Emit before Ready, got {message:?}");
+        };
+        assert_eq!(emit.event.name(), expected);
+    }
+
+    let ready = reader
+        .read_raw_message()
+        .expect("read ready")
+        .expect("ready frame");
+    assert!(
+        matches!(ready, HarnessInputMessage::Ready(_)),
+        "Ready must follow all startup publications, got {ready:?}"
+    );
+
+    writer
+        .write_frame(&disconnect_frame(None))
+        .expect("disconnect");
+    writer.flush().expect("flush");
+}
+
+#[test]
+fn replayed_shell_tool_delivery_does_not_run_tool() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let path = tempdir.path().join("replay-must-not-write.txt");
+    let (mut reader, mut writer, done_rx) = spawn_extension_with_exit();
+    drain_startup(&mut reader);
+
+    let Event::ToolStarted(invoke) = tool_started(
+        "replayed-edit",
+        EDIT_TOOL_NAME,
+        edit_arguments(&path, vec![context_half_open_edit(1, 1, "created\n", "")]),
+        "agent-a",
+    ) else {
+        unreachable!();
+    };
+    writer
+        .write_frame(&HarnessOutputMessage::deliver_replay(
+            tau_proto::UnixMicros::new(1),
+            Event::ToolStarted(invoke),
+        ))
+        .expect("replayed edit");
+    writer
+        .write_frame(&disconnect_frame(None))
+        .expect("disconnect");
+    writer.flush().expect("flush");
+
+    done_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("extension exit")
+        .expect("extension ok");
+    assert!(
+        !path.exists(),
+        "replayed tool delivery must not mutate files"
+    );
 }
 
 #[test]
@@ -535,6 +720,74 @@ fn shell_tool_cancel_request_stops_running_command_quickly() {
 }
 
 #[test]
+fn disconnect_cancels_active_user_shell_command_before_scheduler_join() {
+    let (mut reader, mut writer, done_rx) = spawn_extension_with_exit();
+    drain_startup(&mut reader);
+
+    writer
+        .write_event(&ui_shell_command(
+            "ui-sleep-disconnect",
+            "printf started; sleep 30",
+        ))
+        .expect("ui shell");
+    writer.flush().expect("flush ui shell");
+    wait_for_user_shell_progress(&mut reader, "ui-sleep-disconnect", "started");
+
+    writer
+        .write_frame(&disconnect_frame(None))
+        .expect("disconnect");
+    writer.flush().expect("flush disconnect");
+
+    done_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("extension should exit after cancelling UI shell command")
+        .expect("extension should exit cleanly");
+}
+
+#[test]
+fn session_shutdown_cancels_active_user_shell_and_keeps_scheduler_usable() {
+    let (mut reader, mut writer) = spawn_extension();
+    drain_startup(&mut reader);
+
+    writer
+        .write_event(&ui_shell_command(
+            "ui-sleep-session",
+            "printf started; sleep 30",
+        ))
+        .expect("ui shell");
+    writer.flush().expect("flush ui shell");
+    wait_for_user_shell_progress(&mut reader, "ui-sleep-session", "started");
+
+    writer
+        .write_event(&Event::SessionShutdown(tau_proto::SessionShutdown {
+            session_id: "session-1".into(),
+        }))
+        .expect("session shutdown");
+    writer.flush().expect("flush session shutdown");
+
+    let cancelled = wait_for_user_shell_finished(&mut reader, "ui-sleep-session");
+    assert!(
+        cancelled.cancelled,
+        "session shutdown should cancel running UI shell command: {cancelled:?}"
+    );
+
+    writer
+        .write_event(&ui_shell_command("ui-after-session", "printf after"))
+        .expect("second ui shell");
+    writer.flush().expect("flush second ui shell");
+
+    let finished = wait_for_user_shell_finished(&mut reader, "ui-after-session");
+    assert_eq!(finished.exit_code, Some(0));
+    assert!(!finished.cancelled);
+    assert!(finished.output.contains("after"));
+
+    writer
+        .write_frame(&disconnect_frame(None))
+        .expect("disconnect");
+    writer.flush().expect("flush disconnect");
+}
+
+#[test]
 fn startup_registers_dir_lock_disabled_by_default() {
     let (mut reader, mut writer) = spawn_extension();
 
@@ -735,8 +988,9 @@ fn dir_lock_config_re_registers_tool_enabled_when_config_true() {
 #[test]
 fn schedule_tool_started_reports_queue_full_error() {
     let (tx, _rx) = std::sync::mpsc::channel();
+    let output = Output::channel(tx);
     let scheduler = WorkScheduler::new(
-        tx.clone(),
+        output.clone(),
         crate::scheduler::SchedulerConfig {
             total_limit: 0,
             control_workers: 0,
@@ -758,7 +1012,7 @@ fn schedule_tool_started_reports_queue_full_error() {
     let Err(error) = schedule_tool_started(
         invoke,
         &scheduler,
-        &tx,
+        &output,
         ExtConfig::default(),
         DirLockManager::default(),
         Arc::new(Mutex::new(HashMap::new())),
@@ -780,8 +1034,9 @@ fn schedule_tool_started_cancel_before_start_prevents_mutation() {
     let edit_path = tempdir.path().join("queued-edit.txt");
     fs::write(&edit_path, "old\n").expect("initial file");
     let (tx, rx) = std::sync::mpsc::channel();
+    let output = Output::channel(tx);
     let scheduler = WorkScheduler::new(
-        tx.clone(),
+        output.clone(),
         crate::scheduler::SchedulerConfig {
             control_workers: 0,
             user_workers: 0,
@@ -803,7 +1058,7 @@ fn schedule_tool_started_cancel_before_start_prevents_mutation() {
     schedule_tool_started(
         invoke,
         &scheduler,
-        &tx,
+        &output,
         ExtConfig::default(),
         DirLockManager::default(),
         Arc::new(Mutex::new(HashMap::new())),
@@ -1982,6 +2237,7 @@ fn session_agent_loaded_publishes_current_directory_context_for_agent() {
     // fragment; it must be keyed by durable agent, not by session.
     let cwd = std::env::current_dir().expect("current dir");
     let (tx, rx) = std::sync::mpsc::channel();
+    let output = Output::channel(tx);
     let cwd_state = CwdState::new();
 
     dispatch_session_agent_loaded(
@@ -1990,7 +2246,7 @@ fn session_agent_loaded_publishes_current_directory_context_for_agent() {
             agent_id: tau_proto::AgentId::parse("agent-1").expect("agent id"),
             ephemeral: false,
         },
-        &tx,
+        &output,
         &cwd_state,
     );
 
@@ -5021,13 +5277,11 @@ fn shell_extension_reports_config_error_for_insecure_dir_lock_state_dir() {
 fn shell_enforce_ro_bind_defaults_true_under_dir_lock_config() {
     assert!(ExtConfig::default().dir_lock.enforce_ro_bind);
 
-    let config = tau_extension::parse_config::<ExtConfig>(&CborValue::Map(vec![(
-        CborValue::Text("dir_lock".to_owned()),
-        CborValue::Map(vec![(
-            CborValue::Text("enforce_ro_bind".to_owned()),
-            CborValue::Bool(false),
-        )]),
-    )]))
+    let config = serde_json::from_value::<ExtConfig>(serde_json::json!({
+        "dir_lock": {
+            "enforce_ro_bind": false,
+        },
+    }))
     .expect("parse enforce_ro_bind config");
     assert!(!config.dir_lock.enforce_ro_bind);
 }
@@ -5573,10 +5827,13 @@ fn user_shell_returns_after_foreground_exit_even_if_background_holds_pipe() {
     };
 
     let started = std::time::Instant::now();
+    let output = Output::channel(tx);
+    let (_cancel_tx, cancel_rx) = std::sync::mpsc::channel();
     crate::tools::shell::dispatch_user_shell_command(
         cmd,
         crate::config::ShellConfig::default(),
-        &tx,
+        &output,
+        cancel_rx,
     );
     let elapsed = started.elapsed();
     assert!(
@@ -7106,7 +7363,8 @@ fn explicit_shell_cwd_emits_metadata_without_precommitting_remembered_cwd() {
         unreachable!();
     };
 
-    let rewritten = rewrite_invoke_for_cwd(invoke, &cwd_state, &tx);
+    let output = Output::channel(tx);
+    let rewritten = rewrite_invoke_for_cwd(invoke, &cwd_state, &output);
     let canonical = temp.path().canonicalize().expect("canonical cwd");
     assert_eq!(
         cwd_state.get_or_default(&agent_id),
@@ -7140,6 +7398,7 @@ fn relative_path_tools_use_remembered_cwd() {
         temp.path().canonicalize().expect("canonical temp"),
     );
     let (tx, _rx) = std::sync::mpsc::channel();
+    let output = Output::channel(tx);
     let Event::ToolStarted(invoke) = tool_started(
         "call-find",
         FIND_TOOL_NAME,
@@ -7149,7 +7408,7 @@ fn relative_path_tools_use_remembered_cwd() {
         unreachable!();
     };
 
-    let rewritten = rewrite_invoke_for_cwd(invoke, &cwd_state, &tx);
+    let rewritten = rewrite_invoke_for_cwd(invoke, &cwd_state, &output);
     assert_eq!(
         optional_argument_text(&rewritten.arguments, "path").expect("path arg"),
         Some(

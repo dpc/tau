@@ -7,6 +7,7 @@ use tau_proto::{
 };
 use tracing::{debug, trace};
 
+use crate::Output;
 use crate::argument::{argument_text, optional_argument_int_strict, optional_argument_text};
 use crate::config::ShellConfig;
 use crate::display::{ToolFailure, ToolOutput, ok_display, text_stats};
@@ -342,7 +343,8 @@ fn parse_timeout_secs(arguments: &CborValue) -> Result<u64, String> {
 pub(crate) fn dispatch_user_shell_command(
     cmd: tau_proto::UiShellCommand,
     shell_config: ShellConfig,
-    tx: &mpsc::Sender<HarnessInputMessage>,
+    tx: &Output,
+    cancel_rx: mpsc::Receiver<()>,
 ) {
     let child = match shell_config.spawn_isolated(&cmd.command, None, false, false) {
         Ok(child) => child,
@@ -359,9 +361,21 @@ pub(crate) fn dispatch_user_shell_command(
     };
 
     #[cfg(unix)]
-    dispatch_user_shell_command_unix(cmd, child, shell_config.user_command_timeout_secs, tx);
+    dispatch_user_shell_command_unix(
+        cmd,
+        child,
+        shell_config.user_command_timeout_secs,
+        tx,
+        cancel_rx,
+    );
     #[cfg(not(unix))]
-    dispatch_user_shell_command_blocking(cmd, child, shell_config.user_command_timeout_secs, tx);
+    dispatch_user_shell_command_blocking(
+        cmd,
+        child,
+        shell_config.user_command_timeout_secs,
+        tx,
+        cancel_rx,
+    );
 }
 
 fn send_user_shell_finished(
@@ -369,7 +383,7 @@ fn send_user_shell_finished(
     output: String,
     exit_code: Option<i32>,
     cancelled: bool,
-    tx: &mpsc::Sender<HarnessInputMessage>,
+    tx: &Output,
 ) {
     let _ = tx.send(HarnessInputMessage::emit(Event::ShellCommandFinished(
         tau_proto::ShellCommandFinished {
@@ -477,7 +491,7 @@ fn read_available_user_shell<R: std::io::Read>(
     command_id: &tau_proto::ShellCommandId,
     target_agent_id: &Option<tau_proto::AgentId>,
     capture: &mut UserStreamCapture,
-    tx: &mpsc::Sender<HarnessInputMessage>,
+    tx: &Output,
 ) {
     let Some(pipe_ref) = pipe.as_mut() else {
         return;
@@ -607,9 +621,12 @@ fn dispatch_user_shell_command_unix(
     cmd: tau_proto::UiShellCommand,
     mut child: std::process::Child,
     timeout_secs: u64,
-    tx: &mpsc::Sender<HarnessInputMessage>,
+    tx: &Output,
+    cancel_rx: mpsc::Receiver<()>,
 ) {
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     let timeout = std::time::Duration::from_secs(timeout_secs);
     let pid = child.id();
@@ -657,6 +674,36 @@ fn dispatch_user_shell_command_unix(
             None
         }
     });
+    let cancel_wake_write = wake_write.as_ref().and_then(|wake_write| {
+        #[allow(unsafe_code)]
+        let fd = unsafe { libc::dup(wake_write.as_raw_fd()) };
+        if 0 <= fd {
+            #[allow(unsafe_code)]
+            unsafe {
+                Some(OwnedFd::from_raw_fd(fd))
+            }
+        } else {
+            None
+        }
+    });
+    let cancelled_by_request = Arc::new(AtomicBool::new(false));
+    let cancel_flag = Arc::clone(&cancelled_by_request);
+    let _cancel_waiter = std::thread::spawn(move || {
+        if cancel_rx.recv().is_ok() {
+            cancel_flag.store(true, Ordering::SeqCst);
+            if let Some(wake_write) = cancel_wake_write {
+                let byte = [1u8];
+                #[allow(unsafe_code)]
+                unsafe {
+                    let _ = libc::write(
+                        wake_write.as_raw_fd(),
+                        byte.as_ptr().cast::<libc::c_void>(),
+                        byte.len(),
+                    );
+                }
+            }
+        }
+    });
 
     let (status_tx, status_rx) = mpsc::channel::<Option<std::process::ExitStatus>>();
     let _waiter = std::thread::spawn(move || {
@@ -682,6 +729,7 @@ fn dispatch_user_shell_command_unix(
     let mut status = None;
     let mut wait_failed = false;
     let mut timed_out = false;
+    let mut cancelled = false;
     let deadline = std::time::Instant::now() + timeout;
 
     loop {
@@ -702,6 +750,11 @@ fn dispatch_user_shell_command_unix(
             tx,
         );
         if collect_user_shell_status(&status_rx, &mut status, &mut wait_failed) {
+            break;
+        }
+        if cancelled_by_request.load(Ordering::SeqCst) {
+            cancelled = true;
+            kill_process_group_by_pid(pid);
             break;
         }
         let now = std::time::Instant::now();
@@ -733,6 +786,11 @@ fn dispatch_user_shell_command_unix(
         }
         if let Some(wake_read) = wake_read.as_ref() {
             drain_user_shell_wake_fd(wake_read);
+        }
+        if cancelled_by_request.load(Ordering::SeqCst) {
+            cancelled = true;
+            kill_process_group_by_pid(pid);
+            break;
         }
     }
 
@@ -778,13 +836,15 @@ fn dispatch_user_shell_command_unix(
     let exit_code = status.as_ref().and_then(|status| status.code());
     let status_note = if timed_out {
         Some(format!("command killed after {timeout_secs}s timeout"))
+    } else if cancelled {
+        Some("command cancelled".to_owned())
     } else if wait_failed {
         Some("wait failed".to_owned())
     } else {
         None
     };
     let output = merged_user_shell_output(stdout, stderr, status_note);
-    send_user_shell_finished(cmd, output, exit_code, timed_out, tx);
+    send_user_shell_finished(cmd, output, exit_code, timed_out || cancelled, tx);
 }
 
 #[cfg(not(unix))]
@@ -792,7 +852,8 @@ fn dispatch_user_shell_command_blocking(
     cmd: tau_proto::UiShellCommand,
     mut child: std::process::Child,
     timeout_secs: u64,
-    tx: &mpsc::Sender<HarnessInputMessage>,
+    tx: &Output,
+    cancel_rx: mpsc::Receiver<()>,
 ) {
     use std::io::Read;
 
@@ -801,7 +862,7 @@ fn dispatch_user_shell_command_blocking(
         stream: tau_proto::ShellStream,
         command_id: tau_proto::ShellCommandId,
         target_agent_id: Option<tau_proto::AgentId>,
-        tx: mpsc::Sender<HarnessInputMessage>,
+        tx: Output,
     ) -> std::thread::JoinHandle<UserStreamCapture> {
         std::thread::spawn(move || {
             let mut capture = UserStreamCapture::default();
@@ -863,22 +924,39 @@ fn dispatch_user_shell_command_blocking(
         let _ = done_tx.send(status);
     });
 
-    let (exit_code, status_note, cancelled) = match done_rx.recv_timeout(timeout) {
-        Ok(Some(status)) => (status.code(), None, false),
-        Ok(None) => (None, Some("wait failed".to_owned()), false),
-        Err(mpsc::RecvTimeoutError::Timeout) => {
+    let started = std::time::Instant::now();
+    let (exit_code, status_note, cancelled) = loop {
+        if cancel_rx.try_recv().is_ok() {
             #[cfg(unix)]
             kill_process_group_by_pid(pid);
             let status = done_rx.recv().ok().flatten();
             let _ = waiter.join();
-            (
+            break (
+                status.and_then(|s| s.code()),
+                Some("command cancelled".to_owned()),
+                true,
+            );
+        }
+        let elapsed = started.elapsed();
+        if timeout <= elapsed {
+            #[cfg(unix)]
+            kill_process_group_by_pid(pid);
+            let status = done_rx.recv().ok().flatten();
+            let _ = waiter.join();
+            break (
                 status.and_then(|s| s.code()),
                 Some(format!("command killed after {timeout_secs}s timeout")),
                 true,
-            )
+            );
         }
-        Err(mpsc::RecvTimeoutError::Disconnected) => {
-            (None, Some("waiter thread vanished".to_owned()), false)
+        let remaining = timeout - elapsed;
+        match done_rx.recv_timeout(remaining.min(std::time::Duration::from_millis(25))) {
+            Ok(Some(status)) => break (status.code(), None, false),
+            Ok(None) => break (None, Some("wait failed".to_owned()), false),
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                break (None, Some("waiter thread vanished".to_owned()), false);
+            }
         }
     };
 
