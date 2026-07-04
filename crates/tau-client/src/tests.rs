@@ -339,6 +339,87 @@ impl TauExtension for ContextStartupExtension {
     }
 }
 
+#[derive(Default)]
+struct RuntimeEventState {
+    /// Ordered runtime handler labels observed by typed event dispatch tests.
+    seen: Vec<&'static str>,
+    /// Replay flags observed by the replay-aware metadata handler.
+    metadata_replay_flags: Vec<bool>,
+}
+
+struct ShellRuntimeEventsExtension;
+
+impl TauExtension for ShellRuntimeEventsExtension {
+    type State = RuntimeEventState;
+
+    fn name(&self) -> &'static str {
+        "shell-runtime-events"
+    }
+
+    fn register(self, builder: &mut ExtensionBuilder<Self::State>) {
+        builder
+            .on::<tau_proto::AgentStarted>(|cx| {
+                cx.state.seen.push("agent_started");
+                Ok(())
+            })
+            .on::<tau_proto::AgentMetadataSet>(|cx| {
+                cx.state.seen.push("metadata_set");
+                cx.state.metadata_replay_flags.push(cx.is_replay());
+                Ok(())
+            })
+            .on_live::<tau_proto::AgentMetadataUnset>(|cx| {
+                cx.state.seen.push("metadata_unset");
+                Ok(())
+            })
+            .on_live::<tau_proto::SessionAgentLoaded>(|cx| {
+                cx.state.seen.push("agent_loaded");
+                Ok(())
+            })
+            .on_live::<tau_proto::SessionAgentUnloaded>(|cx| {
+                cx.state.seen.push("agent_unloaded");
+                Ok(())
+            })
+            .on_live::<tau_proto::ToolCancelRequest>(|cx| {
+                cx.state.seen.push("tool_cancel_request");
+                Ok(())
+            })
+            .on_live::<tau_proto::StartAgentAccepted>(|cx| {
+                cx.state.seen.push("start_agent_accepted");
+                Ok(())
+            })
+            .on_live::<tau_proto::StartAgentResult>(|cx| {
+                cx.state.seen.push("start_agent_result");
+                Ok(())
+            })
+            .on_live::<tau_proto::UiShellCommand>(|cx| {
+                cx.state.seen.push("ui_shell_command");
+                Ok(())
+            });
+    }
+}
+
+struct ContextReadyEmitExtension;
+
+impl TauExtension for ContextReadyEmitExtension {
+    type State = ();
+
+    fn name(&self) -> &'static str {
+        "context-ready-emit"
+    }
+
+    fn register(self, builder: &mut ExtensionBuilder<Self::State>) {
+        builder.tool(tool_spec("context_ready_tool"), |cx| {
+            cx.handle().emit_context_ready(
+                tau_proto::SessionId::new("session-1"),
+                tau_proto::AgentId::parse("agent-1").expect("agent id"),
+            )?;
+            cx.handle()
+                .emit_session_context_ready(tau_proto::SessionId::new("session-1"))?;
+            Ok(())
+        });
+    }
+}
+
 struct DetachedEmitExtension;
 
 impl TauExtension for DetachedEmitExtension {
@@ -742,6 +823,83 @@ fn action_invoke(extension_name: &str, action_id: &str) -> Event {
     })
 }
 
+fn agent_id() -> tau_proto::AgentId {
+    tau_proto::AgentId::parse("agent-1").expect("agent id")
+}
+
+fn agent_started() -> Event {
+    Event::AgentStarted(tau_proto::AgentStarted {
+        agent_id: agent_id(),
+        parent_agent: None,
+        role: "senior-engineer".to_owned(),
+        display_name: None,
+        metadata: Vec::new(),
+        ephemeral: false,
+    })
+}
+
+fn metadata_set() -> Event {
+    Event::AgentMetadataSet(tau_proto::AgentMetadataSet {
+        agent_id: agent_id(),
+        key: tau_proto::AgentMetadataKey::new("ext_core-shell_cwd"),
+        value: CborValue::Text("/tmp".to_owned()),
+        inheritable: true,
+    })
+}
+
+fn metadata_unset() -> Event {
+    Event::AgentMetadataUnset(tau_proto::AgentMetadataUnset {
+        agent_id: agent_id(),
+        key: tau_proto::AgentMetadataKey::new("ext_core-shell_cwd"),
+    })
+}
+
+fn session_agent_loaded() -> Event {
+    Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
+        session_id: "session-1".into(),
+        agent_id: agent_id(),
+        ephemeral: false,
+    })
+}
+
+fn session_agent_unloaded() -> Event {
+    Event::SessionAgentUnloaded(tau_proto::SessionAgentUnloaded {
+        session_id: "session-1".into(),
+        agent_id: agent_id(),
+    })
+}
+
+fn tool_cancel_request() -> Event {
+    Event::ToolCancelRequest(tau_proto::ToolCancelRequest {
+        target_call_id: tau_proto::ToolCallId::new("call-1"),
+    })
+}
+
+fn start_agent_accepted() -> Event {
+    Event::StartAgentAccepted(tau_proto::StartAgentAccepted {
+        query_id: "query-1".to_owned(),
+        agent_id: agent_id(),
+    })
+}
+
+fn start_agent_result() -> Event {
+    Event::StartAgentResult(tau_proto::StartAgentResult {
+        query_id: "query-1".to_owned(),
+        text: "done".to_owned(),
+        error: None,
+    })
+}
+
+fn ui_shell_command() -> Event {
+    Event::UiShellCommand(tau_proto::UiShellCommand {
+        session_id: "session-1".into(),
+        command_id: "cmd-1".into(),
+        command: "pwd".to_owned(),
+        include_in_context: true,
+        target_agent_id: Some(agent_id()),
+    })
+}
+
 fn test_prompt(text: &str) -> AgentPromptSubmitted {
     AgentPromptSubmitted {
         agent_id: tau_proto::AgentId::parse("agent-1").expect("agent id"),
@@ -1033,6 +1191,95 @@ fn context_provider_helpers_publish_startup_events_before_ready() {
     );
     assert!(matches!(frames[4], HarnessInputMessage::Ready(_)));
     assert_eq!(frames.len(), 5);
+}
+
+/// Ensures shell-oriented first-party typed event payloads map to their exact
+/// event names and preserve replay-aware versus live-only dispatch boundaries.
+#[test]
+fn shell_runtime_event_payloads_subscribe_and_dispatch_with_replay_policy() {
+    let (state, frames) = run_messages(
+        ShellRuntimeEventsExtension,
+        RuntimeEventState::default(),
+        &[
+            HarnessOutputMessage::deliver_replay(UnixMicros::new(1), agent_started()),
+            HarnessOutputMessage::deliver_replay(UnixMicros::new(2), metadata_set()),
+            HarnessOutputMessage::deliver_live(UnixMicros::new(3), metadata_set()),
+            HarnessOutputMessage::deliver_replay(UnixMicros::new(4), metadata_unset()),
+            HarnessOutputMessage::deliver_live(UnixMicros::new(5), metadata_unset()),
+            HarnessOutputMessage::deliver_live(UnixMicros::new(6), session_agent_loaded()),
+            HarnessOutputMessage::deliver_live(UnixMicros::new(7), session_agent_unloaded()),
+            HarnessOutputMessage::deliver_live(UnixMicros::new(8), tool_cancel_request()),
+            HarnessOutputMessage::deliver_live(UnixMicros::new(9), start_agent_accepted()),
+            HarnessOutputMessage::deliver_live(UnixMicros::new(10), start_agent_result()),
+            HarnessOutputMessage::deliver_live(UnixMicros::new(11), ui_shell_command()),
+        ],
+    );
+
+    let subscribe = frames
+        .iter()
+        .find_map(|frame| match frame {
+            HarnessInputMessage::Subscribe(subscribe) => Some(subscribe),
+            _ => None,
+        })
+        .expect("subscribe frame");
+    assert_eq!(
+        subscribe.selectors,
+        [
+            EventSelector::Exact(tau_proto::EventName::AGENT_STARTED),
+            EventSelector::Exact(tau_proto::EventName::AGENT_METADATA_SET),
+            EventSelector::Exact(tau_proto::EventName::AGENT_METADATA_UNSET),
+            EventSelector::Exact(tau_proto::EventName::SESSION_AGENT_LOADED),
+            EventSelector::Exact(tau_proto::EventName::SESSION_AGENT_UNLOADED),
+            EventSelector::Exact(tau_proto::EventName::TOOL_CANCEL_REQUEST),
+            EventSelector::Exact(tau_proto::EventName::AGENT_START_ACCEPTED),
+            EventSelector::Exact(tau_proto::EventName::AGENT_START_RESULT),
+            EventSelector::Exact(tau_proto::EventName::UI_SHELL_COMMAND),
+        ]
+    );
+    assert_eq!(state.metadata_replay_flags, [true, false]);
+    assert_eq!(
+        state.seen,
+        [
+            "agent_started",
+            "metadata_set",
+            "metadata_set",
+            "metadata_unset",
+            "agent_loaded",
+            "agent_unloaded",
+            "tool_cancel_request",
+            "start_agent_accepted",
+            "start_agent_result",
+            "ui_shell_command",
+        ]
+    );
+}
+
+/// Ensures context-ready emit helpers produce the existing readiness DTOs
+/// without taking ownership of readiness policy.
+#[test]
+fn client_handle_context_ready_helpers_emit_existing_events() {
+    let (_, frames) = run_messages(
+        ContextReadyEmitExtension,
+        (),
+        &[tool_started("context_ready_tool")],
+    );
+
+    let ready_events = frames
+        .iter()
+        .filter_map(|frame| match frame {
+            HarnessInputMessage::Emit(emit) => Some(emit.event.as_ref()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert!(ready_events.iter().any(|event| matches!(
+        event,
+        Event::ExtensionContextReady(ready)
+            if ready.session_id == "session-1" && ready.agent_id.as_str() == "agent-1"
+    )));
+    assert!(ready_events.iter().any(|event| matches!(
+        event,
+        Event::ExtensionSessionContextReady(ready) if ready.session_id == "session-1"
+    )));
 }
 
 /// Ensures detached sends still flow through the writer before runner

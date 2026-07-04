@@ -46,10 +46,11 @@ separate `handle()` method to emit output without storing a handle in every
 state type.
 
 Event handlers are either typed payload handlers or raw delivery handlers. Typed
-handlers cover the built-in `EventPayload` variants; raw handlers are available
-for unsupported first-party or custom extension events. Replay-aware handlers
-receive both historical and live deliveries, while live-only handlers skip
-replay-marked deliveries.
+handlers cover the built-in `EventPayload` variants, including common runtime
+events needed by extensions that fold session, agent metadata, cancellation, and
+side-agent result state; raw handlers are available for unsupported first-party
+or custom extension events. Replay-aware handlers receive both historical and
+live deliveries, while live-only handlers skip replay-marked deliveries.
 
 Raw handlers normally add their selector to the startup subscription set. For
 deliveries that the harness routes through another protocol contract, such as
@@ -82,8 +83,10 @@ existing `extension.context_provider_register`,
 `extension.session_context_provider_register`, and
 `extension.prompt_fragment_publish` DTOs before `Ready` without owning the
 runtime lifecycle: extensions still subscribe to session/agent events, fold any
-state they need, publish context values, and emit `extension.context_ready` or
-`extension.session_context_ready` themselves.
+state they need, publish context values, and choose when to emit
+`extension.context_ready` or `extension.session_context_ready`. `ClientHandle`
+provides small readiness emit helpers for those two DTOs, but readiness policy
+and correlation remain extension-owned.
 
 Manual-loop receive results distinguish timeout, clean input EOF, and protocol
 `Disconnect`. Clean input EOF allows the caller to keep running local timers and

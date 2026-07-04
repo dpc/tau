@@ -88,6 +88,46 @@ impl ClientHandle {
         ))
     }
 
+    /// Emits `extension.context_ready` for one agent after extension-owned
+    /// per-agent context work is complete.
+    ///
+    /// This is only a protocol convenience paired with
+    /// [`crate::ExtensionBuilder::register_context_provider`]. Callers still
+    /// own any state folding, context publication, and readiness policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when sending the underlying protocol frame fails.
+    pub fn emit_context_ready(
+        &self,
+        session_id: tau_proto::SessionId,
+        agent_id: tau_proto::AgentId,
+    ) -> ClientResult<()> {
+        self.emit(tau_proto::Event::ExtensionContextReady(
+            tau_proto::ExtensionContextReady {
+                session_id,
+                agent_id,
+            },
+        ))
+    }
+
+    /// Emits `extension.session_context_ready` after extension-owned
+    /// session-wide context work is complete.
+    ///
+    /// This is only a protocol convenience paired with
+    /// [`crate::ExtensionBuilder::register_session_context_provider`]. Callers
+    /// still own session lifecycle handling, context publication, and readiness
+    /// policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when sending the underlying protocol frame fails.
+    pub fn emit_session_context_ready(&self, session_id: tau_proto::SessionId) -> ClientResult<()> {
+        self.emit(tau_proto::Event::ExtensionSessionContextReady(
+            tau_proto::ExtensionSessionContextReady { session_id },
+        ))
+    }
+
     /// Reports an extension configuration failure to the harness.
     ///
     /// # Errors

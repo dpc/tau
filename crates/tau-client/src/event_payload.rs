@@ -35,6 +35,26 @@ impl_event_payload!(
     tau_proto::Event::ToolStarted
 );
 impl_event_payload!(
+    tau_proto::ToolCancelRequest,
+    tau_proto::EventName::TOOL_CANCEL_REQUEST,
+    tau_proto::Event::ToolCancelRequest
+);
+impl_event_payload!(
+    tau_proto::AgentStarted,
+    tau_proto::EventName::AGENT_STARTED,
+    tau_proto::Event::AgentStarted
+);
+impl_event_payload!(
+    tau_proto::AgentMetadataSet,
+    tau_proto::EventName::AGENT_METADATA_SET,
+    tau_proto::Event::AgentMetadataSet
+);
+impl_event_payload!(
+    tau_proto::AgentMetadataUnset,
+    tau_proto::EventName::AGENT_METADATA_UNSET,
+    tau_proto::Event::AgentMetadataUnset
+);
+impl_event_payload!(
     tau_proto::AgentPromptSubmitted,
     tau_proto::EventName::AGENT_PROMPT_SUBMITTED,
     tau_proto::Event::AgentPromptSubmitted
@@ -50,7 +70,32 @@ impl_event_payload!(
     tau_proto::Event::SessionStarted
 );
 impl_event_payload!(
+    tau_proto::SessionAgentLoaded,
+    tau_proto::EventName::SESSION_AGENT_LOADED,
+    tau_proto::Event::SessionAgentLoaded
+);
+impl_event_payload!(
+    tau_proto::SessionAgentUnloaded,
+    tau_proto::EventName::SESSION_AGENT_UNLOADED,
+    tau_proto::Event::SessionAgentUnloaded
+);
+impl_event_payload!(
     tau_proto::SessionShutdown,
     tau_proto::EventName::SESSION_SHUTDOWN,
     tau_proto::Event::SessionShutdown
+);
+impl_event_payload!(
+    tau_proto::StartAgentAccepted,
+    tau_proto::EventName::AGENT_START_ACCEPTED,
+    tau_proto::Event::StartAgentAccepted
+);
+impl_event_payload!(
+    tau_proto::StartAgentResult,
+    tau_proto::EventName::AGENT_START_RESULT,
+    tau_proto::Event::StartAgentResult
+);
+impl_event_payload!(
+    tau_proto::UiShellCommand,
+    tau_proto::EventName::UI_SHELL_COMMAND,
+    tau_proto::Event::UiShellCommand
 );
