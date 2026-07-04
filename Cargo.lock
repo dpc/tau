@@ -3225,6 +3225,7 @@ dependencies = [
  "ciborium",
  "serde",
  "serde_json",
+ "tau-blocking-notify-channel",
  "tau-proto",
  "tracing",
  "tracing-subscriber",

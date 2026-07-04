@@ -1819,6 +1819,62 @@ fn manual_loop_recv_timeout_distinguishes_timeout_message_and_input_closed() {
     assert_eq!(runtime.finish().expect("finish").replay_aware, 1);
 }
 
+/// Ensures manual-loop callers can block reactively until either harness input
+/// or caller-owned side-channel work wakes them, instead of using timeout
+/// polling to interleave those sources.
+#[test]
+fn manual_loop_waker_reacts_to_harness_input_and_side_channel_work() {
+    let (reader, writer_stream) = UnixStream::pair().expect("unix stream pair");
+    let writer = SharedWriter::default();
+    let mut runtime = TauExtensionRunner::new(ReplayExtension)
+        .start_manual_loop(reader, writer, Counts::default())
+        .expect("start manual loop");
+
+    assert!(matches!(
+        runtime.try_recv().expect("empty initial poll"),
+        ManualRuntimePoll::Empty
+    ));
+
+    let input_writer_stream = writer_stream
+        .try_clone()
+        .expect("clone input writer stream");
+    let mut input_writer = HarnessOutputWriter::new(input_writer_stream);
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(20));
+        input_writer
+            .write_message(&HarnessOutputMessage::deliver_live(
+                UnixMicros::new(31),
+                notice("reactive"),
+            ))
+            .expect("write input");
+        input_writer.flush().expect("flush input");
+    });
+
+    runtime.wait_for_wake();
+    assert!(matches!(
+        runtime.try_recv().expect("message after reader wake"),
+        ManualRuntimePoll::Message(_)
+    ));
+
+    assert!(matches!(
+        runtime.try_recv().expect("empty after message"),
+        ManualRuntimePoll::Empty
+    ));
+    let side_waker = runtime.waker();
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(20));
+        side_waker.wake();
+    });
+    runtime.wait_for_wake();
+    let poll = runtime
+        .try_recv()
+        .expect("no protocol input after side wake");
+    assert!(matches!(poll, ManualRuntimePoll::Empty), "{poll:?}");
+
+    drop(writer_stream);
+    runtime.finish().expect("finish");
+}
+
 /// Ensures graceful manual-loop finish is explicitly writer-focused when input
 /// is still open: it must not wait forever for an arbitrary blocking reader to
 /// reach EOF.

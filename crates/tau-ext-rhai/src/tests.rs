@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::io::{Cursor, Write};
+use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -16,6 +17,10 @@ use super::*;
 struct SharedWriter(Arc<Mutex<Vec<u8>>>);
 
 impl SharedWriter {
+    fn bytes(&self) -> Vec<u8> {
+        self.0.lock().expect("writer mutex").clone()
+    }
+
     fn into_bytes(self) -> Vec<u8> {
         Arc::try_unwrap(self.0)
             .expect("single writer reference")
@@ -118,6 +123,15 @@ fn run_frames(input_frames: &[HarnessOutputMessage]) -> Vec<HarnessInputMessage>
     frames
 }
 
+fn frames_from_bytes_lossy(bytes: Vec<u8>) -> Vec<HarnessInputMessage> {
+    let mut reader = HarnessInputReader::new(Cursor::new(bytes));
+    let mut frames = Vec::new();
+    while let Ok(Some(frame)) = reader.read_message() {
+        frames.push(frame);
+    }
+    frames
+}
+
 fn emitted_event(message: &HarnessInputMessage) -> Option<&Event> {
     match message {
         HarnessInputMessage::Emit(emit) => Some(emit.event.as_ref()),
@@ -149,6 +163,22 @@ fn tool_result_output(frames: &[HarnessInputMessage]) -> &str {
         }
     }
     panic!("tool result output");
+}
+
+fn tool_result_has_output(frame: &HarnessInputMessage, expected: &str) -> bool {
+    let Some(Event::ToolResult(result)) = emitted_event(frame) else {
+        return false;
+    };
+    let CborValue::Map(fields) = &result.result else {
+        return false;
+    };
+    fields.iter().any(|(key, value)| {
+        matches!(
+            (key, value),
+            (CborValue::Text(key), CborValue::Text(output))
+                if key == "output" && output == expected
+        )
+    })
 }
 
 fn setsid_available() -> bool {
@@ -888,6 +918,130 @@ fn shell_job_returned_by_tool_defers_until_completion_callback() {
         emitted_event(frame),
         Some(Event::ToolResult(result)) if result.result == CborValue::Text("shell-ok".to_owned())
     )));
+}
+
+#[test]
+fn shell_completion_wakes_runtime_while_harness_input_stays_open() {
+    // A completed shell-backed tool must produce its ToolResult without waiting
+    // for another harness frame or input EOF; the shell worker wake is the only
+    // stimulus after the tool.started frame.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let script = write_script(
+        &dir,
+        r#"
+            fn init(config) { register_tool("host_echo", #{}, Fn("host_echo")); }
+            fn host_echo(args, c) {
+                return shell_spawn("printf live-open", #{ timeout: 5 });
+            }
+        "#,
+    );
+
+    let (input_reader, input_writer) = UnixStream::pair().expect("unix stream pair");
+    let mut harness_writer = HarnessOutputWriter::new(
+        input_writer
+            .try_clone()
+            .expect("clone harness input writer"),
+    );
+    let output = SharedWriter::default();
+    let run_output = output.clone();
+    let run_thread = std::thread::spawn(move || {
+        run(input_reader, run_output).map_err(|error| error.to_string())
+    });
+
+    harness_writer
+        .write_message(&configure_with_script(&script))
+        .expect("write configure");
+    harness_writer
+        .write_message(&HarnessOutputMessage::deliver_live(
+            UnixMicros::new(1),
+            tool_started("host_echo", CborValue::Map(Vec::new())),
+        ))
+        .expect("write tool start");
+    harness_writer.flush().expect("flush harness input");
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let frames = frames_from_bytes_lossy(output.bytes());
+        if frames
+            .iter()
+            .any(|frame| tool_result_has_output(frame, "live-open"))
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for shell completion wake"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+
+    drop(harness_writer);
+    drop(input_writer);
+    run_thread
+        .join()
+        .expect("run thread")
+        .expect("run rhai extension");
+}
+
+#[test]
+fn shell_completions_are_not_starved_by_ready_harness_input() {
+    // The runtime checks shell completions between harness messages so replay
+    // catch-up or another ready burst cannot postpone completed shell callbacks
+    // until all queued harness input has drained.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let script = write_script(
+        &dir,
+        r#"
+            fn init(config) { register_tool("host_echo", #{}, Fn("host_echo")); }
+            fn host_echo(args, c) {
+                return shell_spawn("printf fair", #{ timeout: 5 });
+            }
+            fn on_event(event, meta) {
+                let checksum = 0;
+                for n in 0..20000 {
+                    checksum += n;
+                }
+                tau_info(event.payload.message);
+            }
+        "#,
+    );
+    let mut input = vec![
+        configure_with_script(&script),
+        HarnessOutputMessage::deliver_live(
+            UnixMicros::new(1),
+            tool_started("host_echo", CborValue::Map(Vec::new())),
+        ),
+    ];
+    for i in 0..200 {
+        input.push(HarnessOutputMessage::deliver_live(
+            UnixMicros::new(2 + i),
+            Event::HarnessNotice(HarnessNotice {
+                kind: tau_proto::notice_kind::EXTENSION_NOTICE.to_owned(),
+                message: format!("flood-{i}"),
+                level: NoticeLevel::Info,
+                always_show: false,
+            }),
+        ));
+    }
+
+    let frames = run_frames(&input);
+    let result_index = frames
+        .iter()
+        .position(|frame| tool_result_has_output(frame, "fair"))
+        .expect("tool result");
+    let last_flood_notice_index = frames
+        .iter()
+        .rposition(|frame| {
+            matches!(
+                emitted_event(frame),
+                Some(Event::HarnessNotice(notice)) if notice.message.starts_with("flood-")
+            )
+        })
+        .expect("flood notice");
+    assert!(
+        result_index < last_flood_notice_index,
+        "shell completion was emitted only after the harness burst drained"
+    );
 }
 
 #[test]

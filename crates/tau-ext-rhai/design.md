@@ -16,6 +16,12 @@ shutdown join timeout.
 This keeps script execution non-concurrent while still allowing host shell
 commands to run without blocking harness frame handling.
 
+The main runtime loop is event-driven. It must not use fixed polling intervals
+to discover shell completions or harness input; shell workers and the tau-client
+protocol reader wake the loop after enqueueing work. The loop must drain ready
+sources fairly so a flood of harness events cannot indefinitely delay a shell
+completion callback.
+
 Shell output capture is also bounded after foreground completion, timeout, or
 cancellation. Unix commands run in an owned process group/session, but detached
 descendants can survive with inherited stdout/stderr pipes; the runtime drains

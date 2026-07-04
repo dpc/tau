@@ -18,8 +18,9 @@ use crate::{ClientError, ClientHandle, ClientResult, TauExtension};
 /// `ManualExtensionRuntime` owns the usual tau-client startup declaration,
 /// dispatch table, outbound writer thread, and extension state, but it does not
 /// own the policy loop. Callers receive harness frames with [`Self::recv`] or
-/// [`Self::recv_timeout`], interleave their own timer or side-effect work, and
-/// pass received messages to [`Self::dispatch_one`].
+/// [`Self::recv_timeout`], or combine [`Self::try_recv`] with
+/// [`Self::wait_for_wake`] for reactive side-channel work, and pass received
+/// messages to [`Self::dispatch_one`].
 pub struct ManualExtensionRuntime<State> {
     /// Extension state mutated by dispatch handlers and caller-owned timer
     /// work.
@@ -30,7 +31,11 @@ pub struct ManualExtensionRuntime<State> {
     handle: ClientHandle,
     /// Shared input queue used by manual receive and correlated RPC helpers.
     input: Rc<RefCell<ManualInput>>,
-    /// Reader thread that decodes harness messages for timeout-based receive.
+    /// Blocking notification channel signaled by reader and caller-owned work.
+    wake_receiver: tau_blocking_notify_channel::Receiver,
+    /// Cloneable handle for waking manual runtime loops from caller-owned work.
+    waker: ManualRuntimeWaker,
+    /// Reader thread that decodes harness messages for manual receive APIs.
     reader_thread: JoinHandle<()>,
     /// Writer thread that serializes outbound protocol frames.
     writer_thread: JoinHandle<ClientResult<()>>,
@@ -59,6 +64,17 @@ pub enum ManualRuntimeInput {
     InputClosed,
 }
 
+/// Result of non-blocking manual runtime input polling.
+#[derive(Debug)]
+pub enum ManualRuntimePoll {
+    /// A decoded harness-to-peer protocol message is ready to handle.
+    Message(tau_proto::HarnessOutputMessage),
+    /// The harness input stream ended cleanly at a message boundary.
+    InputClosed,
+    /// No harness input is currently ready.
+    Empty,
+}
+
 /// Result of dispatching one harness-to-peer protocol message.
 #[derive(Debug, Eq, PartialEq)]
 pub enum DispatchOutcome {
@@ -77,6 +93,18 @@ enum ReaderMessage {
     InputClosed,
     /// Decode or read failure from the reader thread.
     Error(ClientError),
+}
+
+/// Cloneable wake handle for caller-owned manual runtime work.
+///
+/// A `ManualRuntimeWaker` can be moved to worker threads that have their own
+/// side-channel back to the extension loop. Calling [`Self::wake`] makes
+/// [`ManualExtensionRuntime::wait_for_wake`] return promptly, allowing the
+/// caller-owned single-threaded policy loop to react without polling.
+#[derive(Clone, Debug)]
+pub struct ManualRuntimeWaker {
+    /// Shared coalescing notification sender.
+    sender: tau_blocking_notify_channel::Sender,
 }
 
 /// Startup phase tracked by manual runtimes.
@@ -259,6 +287,12 @@ impl<State> ManualExtensionRuntime<State> {
         }
     }
 
+    /// Returns a cloneable handle that wakes this manual runtime's policy loop.
+    #[must_use]
+    pub fn waker(&self) -> ManualRuntimeWaker {
+        self.waker.clone()
+    }
+
     /// Sends a dynamic startup `Subscribe` frame before `Ready`.
     ///
     /// This is available only for runtimes started with
@@ -333,7 +367,8 @@ impl<State> ManualExtensionRuntime<State> {
     ///
     /// After this succeeds, subsequent dynamic startup helpers return an error.
     /// Callers should then enter their normal manual receive loop with
-    /// [`Self::recv`], [`Self::recv_timeout`], and [`Self::dispatch_one`].
+    /// [`Self::recv`] / [`Self::recv_timeout`] or [`Self::try_recv`] /
+    /// [`Self::wait_for_wake`], and [`Self::dispatch_one`].
     ///
     /// # Errors
     ///
@@ -373,6 +408,33 @@ impl<State> ManualExtensionRuntime<State> {
     /// failure or exits without sending its terminal status.
     pub fn recv_timeout(&mut self, timeout: Duration) -> ClientResult<ManualRuntimeInput> {
         self.input.borrow_mut().recv_timeout(timeout)
+    }
+
+    /// Attempts to receive a harness message or input EOF without blocking.
+    ///
+    /// This is intended for event-driven loops that combine harness input with
+    /// a caller-owned side channel. Such loops should drain `try_recv` until
+    /// [`ManualRuntimePoll::Empty`], drain their side channel, and then block
+    /// in [`Self::wait_for_wake`]. The runtime's internal reader thread and
+    /// any clones of [`ManualRuntimeWaker`] signal the same coalesced wake
+    /// channel.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the reader thread reports a protocol decode/read
+    /// failure or exits without sending its terminal status.
+    pub fn try_recv(&mut self) -> ClientResult<ManualRuntimePoll> {
+        self.input.borrow_mut().try_recv()
+    }
+
+    /// Blocks until harness input or caller-owned work signals this runtime.
+    ///
+    /// Notifications are coalesced, so callers must always drain all currently
+    /// ready sources after this method returns. If every wake sender has been
+    /// dropped, the method returns; a subsequent drain will observe any
+    /// terminal input state that remains.
+    pub fn wait_for_wake(&self) {
+        let _ = self.wake_receiver.recv();
     }
 
     /// Sends one extension-data request and waits for its correlated response.
@@ -532,6 +594,19 @@ impl<State> ManualExtensionRuntime<State> {
     }
 }
 
+impl ManualRuntimeWaker {
+    /// Wakes a manual runtime loop blocked in
+    /// [`ManualExtensionRuntime::wait_for_wake`].
+    ///
+    /// Wakes are payload-free and coalesced: multiple calls before the runtime
+    /// observes the wake may produce only one return from `wait_for_wake`.
+    /// Worker threads should make side-channel work observable, such as by
+    /// enqueueing it, before calling this method.
+    pub fn wake(&self) {
+        self.sender.notify();
+    }
+}
+
 impl ManualInput {
     fn recv(&mut self) -> ClientResult<ManualRuntimeInput> {
         if let Some(message) = self.pending.pop_front() {
@@ -551,6 +626,34 @@ impl ManualInput {
             return Ok(ManualRuntimeInput::InputClosed);
         }
         self.recv_timeout_from_reader(timeout)
+    }
+
+    fn try_recv(&mut self) -> ClientResult<ManualRuntimePoll> {
+        if let Some(message) = self.pending.pop_front() {
+            return self.handle_reader_poll_message(message);
+        }
+        if self.input_closed {
+            return Ok(ManualRuntimePoll::InputClosed);
+        }
+        match self.receiver.try_recv() {
+            Ok(message) => self.handle_reader_poll_message(message),
+            Err(mpsc::TryRecvError::Empty) => Ok(ManualRuntimePoll::Empty),
+            Err(mpsc::TryRecvError::Disconnected) => {
+                self.input_closed = true;
+                Err(ClientError::ReaderClosed)
+            }
+        }
+    }
+
+    fn handle_reader_poll_message(
+        &mut self,
+        message: ReaderMessage,
+    ) -> ClientResult<ManualRuntimePoll> {
+        match self.handle_reader_message(message)? {
+            ManualRuntimeInput::Message(message) => Ok(ManualRuntimePoll::Message(message)),
+            ManualRuntimeInput::InputClosed => Ok(ManualRuntimePoll::InputClosed),
+            ManualRuntimeInput::Timeout => unreachable!("try_recv does not produce timeouts"),
+        }
     }
 
     fn recv_from_reader(&mut self) -> ClientResult<ManualRuntimeInput> {
@@ -730,7 +833,8 @@ where
         }
 
         let state = make_state(handle.clone());
-        let (input, reader_thread) = spawn_reader_thread(reader);
+        let (wake_sender, wake_receiver) = tau_blocking_notify_channel::channel();
+        let (input, reader_thread) = spawn_reader_thread(reader, wake_sender.clone());
         Ok(ManualExtensionRuntime {
             state,
             builder,
@@ -740,6 +844,10 @@ where
                 pending: VecDeque::new(),
                 input_closed: false,
             })),
+            wake_receiver,
+            waker: ManualRuntimeWaker {
+                sender: wake_sender,
+            },
             reader_thread,
             writer_thread,
             startup: ManualStartupState::Complete,
@@ -822,7 +930,8 @@ where
         }
 
         let state = make_state(handle.clone());
-        let (input, reader_thread) = spawn_reader_thread(reader);
+        let (wake_sender, wake_receiver) = tau_blocking_notify_channel::channel();
+        let (input, reader_thread) = spawn_reader_thread(reader, wake_sender.clone());
         Ok(ManualExtensionRuntime {
             state,
             builder,
@@ -832,6 +941,10 @@ where
                 pending: VecDeque::new(),
                 input_closed: false,
             })),
+            wake_receiver,
+            waker: ManualRuntimeWaker {
+                sender: wake_sender,
+            },
             reader_thread,
             writer_thread,
             startup: ManualStartupState::Deferred,
@@ -839,12 +952,30 @@ where
     }
 }
 
-fn spawn_reader_thread<R>(reader: R) -> (mpsc::Receiver<ReaderMessage>, JoinHandle<()>)
+fn spawn_reader_thread<R>(
+    reader: R,
+    wake_sender: tau_blocking_notify_channel::Sender,
+) -> (mpsc::Receiver<ReaderMessage>, JoinHandle<()>)
 where
     R: Read + Send + 'static,
 {
     let (sender, receiver) = mpsc::sync_channel(1);
     let reader_thread = std::thread::spawn(move || {
+        /// Exit guard that wakes waiters when the reader thread leaves.
+        struct WakeOnDrop {
+            /// Wake sender shared with manual runtime waiters.
+            sender: tau_blocking_notify_channel::Sender,
+        }
+
+        impl Drop for WakeOnDrop {
+            fn drop(&mut self) {
+                self.sender.notify();
+            }
+        }
+
+        let _wake_on_exit = WakeOnDrop {
+            sender: wake_sender.clone(),
+        };
         let mut reader = tau_proto::PeerInputReader::new(reader);
         loop {
             let message = match reader.read_message() {
@@ -853,7 +984,11 @@ where
                 Err(error) => ReaderMessage::Error(ClientError::from(error)),
             };
             let should_stop = !matches!(message, ReaderMessage::Message(_));
-            if sender.send(message).is_err() || should_stop {
+            if sender.send(message).is_err() {
+                break;
+            }
+            wake_sender.notify();
+            if should_stop {
                 break;
             }
         }

@@ -17,6 +17,7 @@ workspace = true
 [dependencies]
 ciborium.workspace = true
 serde.workspace = true
+tau-blocking-notify-channel.workspace = true
 tau-proto.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true

@@ -18,14 +18,14 @@ script-computed `Subscribe`, `Intercept`, tool registrations, and terminal
 `ConfigError` followed by an inert `Ready`.
 
 After startup, `tau-client` owns protocol decoding and serialized writing while
-the Rhai runtime owns the policy loop. The loop polls harness input through
-`ManualExtensionRuntime::recv_timeout` and drains shell worker completions from a
-crate-local channel. This keeps script execution non-concurrent while still
-allowing host shell commands to run without blocking harness frame handling.
-The polling interval is currently fixed at 50 ms: this deliberately avoids
-adding another custom select/demux API to tau-client for the migration, at the
-cost of idle wakeups and up to 50 ms latency before a shell completion callback
-runs while the loop is otherwise waiting for harness input.
+the Rhai runtime owns the policy loop. The loop is reactive rather than
+poll-based: each iteration handles at most one ready harness input from
+`ManualExtensionRuntime`, drains shell worker completions from a crate-local
+channel, and then blocks on a coalesced tau-client wake primitive when neither
+source can make progress. This keeps script execution non-concurrent while still
+allowing host shell commands to run without blocking harness frame handling,
+starving completion callbacks behind harness bursts, or introducing idle wakeups
+and fixed completion latency.
 
 ## Tool dispatch
 

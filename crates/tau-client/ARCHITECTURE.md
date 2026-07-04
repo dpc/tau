@@ -12,10 +12,16 @@ intercept requests, and disconnects.
 
 The manual-loop runtime uses the same startup writer and dispatch machinery, but
 hands receive-loop ownership to the extension. It starts a reader thread, exposes
-`recv`/`recv_timeout` so extensions can select between harness input and local
-timers, and exposes `dispatch_one` for decoded messages. Extension state and
-handlers stay on the caller thread; only the protocol reader and writer need to
-move to background threads.
+`recv`/`recv_timeout` for blocking or timer-driven receive loops, exposes
+`try_recv`/`wait_for_wake` plus `ManualRuntimeWaker` for reactive loops that
+combine harness input with extension-owned side channels, and exposes
+`dispatch_one` for decoded messages. Wake notifications are coalesced and
+payload-free: the reader thread wakes after queueing harness input/EOF/errors,
+and extension workers must enqueue their own side-channel work before calling a
+cloned waker. Reactive callers are responsible for draining all ready sources
+fairly after each wake, because one wake may represent multiple ready items.
+Extension state and handlers stay on the caller thread; only the protocol reader
+and writer need to move to background threads.
 
 The builder preserves the first-seen order of startup subscription selectors
 while coalescing exact structural duplicates. It does not collapse logical
@@ -64,8 +70,8 @@ through `ManualExtensionRuntime` helpers, and completes startup exactly once
 with `startup_ready`. Static builder declarations are rejected in this mode so a
 config-gated extension cannot accidentally leak pre-configuration subscriptions,
 intercepts, tool registrations, action schemas, or ready text. After `Ready`,
-the runtime has the same receive, dispatch, finish, and detached-finish
-contracts as other manual-loop users.
+the runtime has the same blocking receive, reactive wake, dispatch, finish, and
+detached-finish contracts as other manual-loop users.
 
 Event handlers are either typed payload handlers or raw delivery handlers. Typed
 handlers cover the built-in `EventPayload` variants, including common runtime
@@ -120,8 +126,10 @@ harness still owns storage boundaries and the extension still owns how storage
 errors map to feature behavior.
 
 Manual-loop receive results distinguish timeout, clean input EOF, and protocol
-`Disconnect`. Clean input EOF allows the caller to keep running local timers and
-emit post-EOF output before graceful writer shutdown. `finish()` always shuts
+`Disconnect`. Non-blocking `try_recv` has separate message, input-closed, and
+empty states because timeouts are only possible for `recv_timeout`. Clean input
+EOF allows the caller to keep running local timers or side-channel completions
+and emit post-EOF output before graceful writer shutdown. `finish()` always shuts
 down and joins the writer; it joins the reader only after EOF or another already
 finished reader state, because arbitrary blocking `Read` implementations cannot
 be cancelled portably. If a caller stops before EOF, the blocked reader is

@@ -22,8 +22,8 @@ use rhai::{Array, Dynamic, Engine, EvalAltResult, FnPtr, ImmutableString, Map, S
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use tau_client::{
-    ClientHandle, ExtensionBuilder, ManualExtensionRuntime, ManualRuntimeInput, TauExtension,
-    TauExtensionRunner,
+    ClientHandle, ExtensionBuilder, ManualExtensionRuntime, ManualRuntimeInput, ManualRuntimePoll,
+    ManualRuntimeWaker, TauExtension, TauExtensionRunner,
 };
 use tau_proto::{
     CborValue, Configure, Event, EventSelector, HarnessInputMessage, HarnessNotice,
@@ -43,10 +43,6 @@ const MAX_SHELL_TIMEOUT_SECS: i64 = 24 * 60 * 60;
 
 /// Maximum time to wait for a canceled shell worker to finish shutdown.
 const SHELL_SHUTDOWN_JOIN_TIMEOUT: Duration = Duration::from_secs(5);
-
-/// Maximum time the Rhai policy loop waits for harness input before checking
-/// shell completions.
-const RUNTIME_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -91,6 +87,15 @@ struct InitIntercept {
 enum RuntimeInput {
     /// Completion of an asynchronously spawned shell job.
     ShellComplete(ShellCompletion),
+}
+
+/// Cloneable side-channel sender that wakes the runtime after enqueueing work.
+#[derive(Clone)]
+struct RuntimeInputSender {
+    /// Channel carrying side-channel runtime work.
+    tx: Sender<RuntimeInput>,
+    /// Wake handle shared with the manual protocol runtime.
+    waker: ManualRuntimeWaker,
 }
 
 /// Outbound protocol adapter used by Rhai host callbacks and shell completions.
@@ -228,6 +233,20 @@ impl Output {
     }
 }
 
+impl RuntimeInputSender {
+    /// Creates a sender that wakes `manual` after enqueueing runtime work.
+    fn new(tx: Sender<RuntimeInput>, waker: ManualRuntimeWaker) -> Self {
+        Self { tx, waker }
+    }
+
+    /// Sends one input to the runtime loop and wakes it if the send succeeded.
+    fn send(&self, input: RuntimeInput) {
+        if self.tx.send(input).is_ok() {
+            self.waker.wake();
+        }
+    }
+}
+
 /// Run the extension over stdio.
 ///
 /// # Errors
@@ -268,8 +287,9 @@ where
 
     let (runtime_tx, runtime_rx) = mpsc::channel::<RuntimeInput>();
     let output = Output::new(manual.handle());
+    let runtime_sender = RuntimeInputSender::new(runtime_tx.clone(), manual.waker());
     let runtime =
-        match load_initial_runtime(&configure, &mut manual, output.clone(), runtime_tx.clone()) {
+        match load_initial_runtime(&configure, &mut manual, output.clone(), runtime_sender) {
             Ok(runtime) => runtime,
             Err(error) => {
                 let _ = manual.finish();
@@ -292,9 +312,9 @@ fn load_initial_runtime(
     configure: &Configure,
     manual: &mut ManualExtensionRuntime<()>,
     output: Output,
-    runtime_tx: Sender<RuntimeInput>,
+    runtime_sender: RuntimeInputSender,
 ) -> Result<Option<ScriptRuntime>, Box<dyn Error>> {
-    match load_runtime(configure, output.clone(), runtime_tx) {
+    match load_runtime(configure, output.clone(), runtime_sender) {
         Ok((mut runtime, init, config_json)) => {
             send_init_messages(manual, &runtime, init)?;
             runtime.start(config_json, &output);
@@ -315,8 +335,19 @@ fn drive_runtime_loop(
     output: &Output,
 ) -> Result<(), Box<dyn Error>> {
     let mut reader_closed = false;
+    let mut shell_channel_closed = false;
     loop {
-        drain_shell_completions(runtime.as_mut(), &runtime_rx, output);
+        let should_stop =
+            drain_one_harness_input(&mut runtime, manual, output, &mut reader_closed)?;
+        drain_shell_completions(
+            runtime.as_mut(),
+            &runtime_rx,
+            output,
+            &mut shell_channel_closed,
+        );
+        if should_stop {
+            break;
+        }
         if reader_closed
             && runtime
                 .as_ref()
@@ -332,37 +363,76 @@ fn drive_runtime_loop(
                         runtime.on_shell_complete(completion, output);
                     }
                 }
-                Err(_) => break,
+                Err(_) => {
+                    break;
+                }
             }
             continue;
         }
 
-        match manual.recv_timeout(RUNTIME_POLL_INTERVAL)? {
-            ManualRuntimeInput::Message(message) => {
-                if handle_harness_message(&mut runtime, message, output) {
-                    break;
-                }
+        if shell_channel_closed {
+            let input = manual.recv()?;
+            if handle_runtime_input(&mut runtime, input, output, &mut reader_closed) {
+                break;
             }
-            ManualRuntimeInput::Timeout => {}
-            ManualRuntimeInput::InputClosed => {
-                reader_closed = true;
-            }
+        } else {
+            manual.wait_for_wake();
         }
     }
     Ok(())
 }
 
+fn drain_one_harness_input(
+    runtime: &mut Option<ScriptRuntime>,
+    manual: &mut ManualExtensionRuntime<()>,
+    output: &Output,
+    reader_closed: &mut bool,
+) -> Result<bool, Box<dyn Error>> {
+    match manual.try_recv()? {
+        ManualRuntimePoll::Message(message) => Ok(handle_harness_message(runtime, message, output)),
+        ManualRuntimePoll::InputClosed => {
+            *reader_closed = true;
+            Ok(false)
+        }
+        ManualRuntimePoll::Empty => Ok(false),
+    }
+}
+
+fn handle_runtime_input(
+    runtime: &mut Option<ScriptRuntime>,
+    input: ManualRuntimeInput,
+    output: &Output,
+    reader_closed: &mut bool,
+) -> bool {
+    match input {
+        ManualRuntimeInput::Message(message) => handle_harness_message(runtime, message, output),
+        ManualRuntimeInput::InputClosed => {
+            *reader_closed = true;
+            false
+        }
+        ManualRuntimeInput::Timeout => false,
+    }
+}
+
 fn drain_shell_completions(
-    runtime: Option<&mut ScriptRuntime>,
+    mut runtime: Option<&mut ScriptRuntime>,
     runtime_rx: &Receiver<RuntimeInput>,
     output: &Output,
+    shell_channel_closed: &mut bool,
 ) {
-    let Some(runtime) = runtime else {
-        while runtime_rx.try_recv().is_ok() {}
-        return;
-    };
-    while let Ok(RuntimeInput::ShellComplete(completion)) = runtime_rx.try_recv() {
-        runtime.on_shell_complete(completion, output);
+    loop {
+        match runtime_rx.try_recv() {
+            Ok(RuntimeInput::ShellComplete(completion)) => {
+                if let Some(runtime) = runtime.as_deref_mut() {
+                    runtime.on_shell_complete(completion, output);
+                }
+            }
+            Err(mpsc::TryRecvError::Empty) => return,
+            Err(mpsc::TryRecvError::Disconnected) => {
+                *shell_channel_closed = true;
+                return;
+            }
+        }
     }
 }
 
@@ -422,7 +492,7 @@ fn read_initial_config(
 fn load_runtime(
     configure: &Configure,
     output: Output,
-    runtime_tx: mpsc::Sender<RuntimeInput>,
+    runtime_sender: RuntimeInputSender,
 ) -> Result<(ScriptRuntime, InitOutput, serde_json::Value), String> {
     let cfg = parse_config::<ExtConfig>(&configure.config)?;
     let script = cfg
@@ -433,7 +503,7 @@ fn load_runtime(
 
     let mut engine = Engine::new();
     let host_state = Rc::new(RefCell::new(HostState::default()));
-    register_host_functions(&mut engine, output, runtime_tx, host_state.clone());
+    register_host_functions(&mut engine, output, runtime_sender, host_state.clone());
     let max_expr_depth = cfg.limits.max_expr_depth.unwrap_or(64);
     engine.set_max_expr_depths(max_expr_depth, max_expr_depth);
     if let Some(max) = cfg.limits.max_operations {
@@ -527,7 +597,7 @@ fn send_config_error_ready(
 fn register_host_functions(
     engine: &mut Engine,
     output: Output,
-    runtime_tx: mpsc::Sender<RuntimeInput>,
+    runtime_sender: RuntimeInputSender,
     host_state: HostStateRef,
 ) {
     engine.register_type_with_name::<ShellJob>("ShellJob");
@@ -598,25 +668,30 @@ fn register_host_functions(
     );
 
     let shell_state = host_state.clone();
-    let shell_runtime_tx = runtime_tx.clone();
+    let shell_runtime_sender = runtime_sender.clone();
     engine.register_fn(
         "shell_spawn",
         move |command: ImmutableString, opts: Map| -> Result<ShellJob, Box<EvalAltResult>> {
             ensure_not_init(&shell_state, "shell_spawn")?;
-            shell_spawn(&shell_state, &shell_runtime_tx, command.to_string(), opts)
-                .map_err(eval_error)
+            shell_spawn(
+                &shell_state,
+                &shell_runtime_sender,
+                command.to_string(),
+                opts,
+            )
+            .map_err(eval_error)
         },
     );
 
     let shell_state = host_state.clone();
-    let shell_runtime_tx = runtime_tx;
+    let shell_runtime_sender = runtime_sender;
     engine.register_fn(
         "shell_spawn",
         move |command: ImmutableString| -> Result<ShellJob, Box<EvalAltResult>> {
             ensure_not_init(&shell_state, "shell_spawn")?;
             shell_spawn(
                 &shell_state,
-                &shell_runtime_tx,
+                &shell_runtime_sender,
                 command.to_string(),
                 Map::new(),
             )
@@ -741,7 +816,7 @@ fn optional_bool_field(map: &Map, key: &str) -> Result<Option<bool>, String> {
 
 fn shell_spawn(
     state: &HostStateRef,
-    runtime_tx: &mpsc::Sender<RuntimeInput>,
+    runtime_sender: &RuntimeInputSender,
     command: String,
     opts: Map,
 ) -> Result<ShellJob, String> {
@@ -776,7 +851,7 @@ fn shell_spawn(
     let id = state_guard.next_shell_job_id;
     let cancel = shell::ShellCancel::default();
     let worker_cancel = cancel.clone();
-    let tx = runtime_tx.clone();
+    let sender = runtime_sender.clone();
     let worker_command = command.clone();
     let join_handle = std::thread::spawn(move || {
         let result = shell::run_shell_command(
@@ -785,7 +860,7 @@ fn shell_spawn(
             Duration::from_secs(timeout_secs as u64),
             worker_cancel,
         );
-        let _ = tx.send(RuntimeInput::ShellComplete(ShellCompletion {
+        sender.send(RuntimeInput::ShellComplete(ShellCompletion {
             job_id: id,
             result,
         }));
