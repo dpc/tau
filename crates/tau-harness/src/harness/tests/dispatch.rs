@@ -3803,6 +3803,80 @@ fn cancel_publishes_tool_cancel_request() {
     h.shutdown().expect("shutdown");
 }
 
+/// Regression for tau-agent-95m: the harness host API used by the built-in
+/// `cancel` tool must only accept target calls owned by the requesting
+/// conversation. Otherwise one agent that learns another agent's call id can
+/// broadcast a cancellation request for unrelated work.
+#[test]
+fn cancel_request_api_rejects_non_owner_conversation() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    let owner = AgentId::parse("owner").expect("owner id");
+    let attacker = AgentId::parse("attacker").expect("attacker id");
+    let target: ToolCallId = "owned-running-call".into();
+
+    h.tool_agents.insert(target.clone(), owner.clone());
+    h.pending_tools.insert(
+        target.clone(),
+        PendingTool {
+            name: ToolName::new("slow_tool"),
+            internal_name: ToolName::new("slow_tool"),
+            tool_type: tau_proto::ToolType::Function,
+        },
+    );
+
+    assert!(!h.is_running_cancellable_tool_call_for(&attacker, &target));
+    assert_eq!(
+        h.publish_tool_cancel_request_for(&attacker, target.clone())
+            .expect_err("non-owner must not cancel the call"),
+        "Unknown tool call id"
+    );
+    assert!(!event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::ToolCancelRequest(request) if request.target_call_id == target
+    )));
+
+    assert!(h.is_running_cancellable_tool_call_for(&owner, &target));
+    h.publish_tool_cancel_request_for(&owner, target.clone())
+        .expect("owner may cancel the call");
+    assert!(event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::ToolCancelRequest(request) if request.target_call_id == target
+    )));
+
+    h.shutdown().expect("shutdown");
+}
+
+/// Completed-call diagnostics are also conversation-scoped so a caller cannot
+/// probe whether another agent's guessed call id existed earlier in the
+/// session.
+#[test]
+fn completed_tool_call_lookup_is_owner_scoped() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    let owner = AgentId::parse("owner").expect("owner id");
+    let attacker = AgentId::parse("attacker").expect("attacker id");
+    let target: ToolCallId = "owned-completed-call".into();
+
+    h.tool_agents.insert(target.clone(), owner.clone());
+    h.pending_tools.insert(
+        target.clone(),
+        PendingTool {
+            name: ToolName::new("slow_tool"),
+            internal_name: ToolName::new("slow_tool"),
+            tool_type: tau_proto::ToolType::Function,
+        },
+    );
+    h.clear_tool_call_tracking(target.as_str());
+
+    assert!(h.is_completed_tool_call_for(&owner, &target));
+    assert!(!h.is_completed_tool_call_for(&attacker, &target));
+
+    h.shutdown().expect("shutdown");
+}
+
 /// Regression: harness-authored turn cancellation must not publish a second
 /// transcript-terminal `ToolCancelled` after a background placeholder has
 /// already closed the foreground tool round. Backgrounded calls are completed

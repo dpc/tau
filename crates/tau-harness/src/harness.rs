@@ -1380,6 +1380,10 @@ pub struct Harness {
     /// state. Used to distinguish completed calls from typos in user-facing
     /// cancellation errors.
     pub(crate) completed_tool_calls: std::collections::HashSet<ToolCallId>,
+    /// `call_id` → owning agent for completed tool calls whose owner was known
+    /// at completion time. Used by internal tools to keep completion
+    /// diagnostics scoped to the caller's conversation.
+    pub(crate) completed_tool_agents: std::collections::HashMap<ToolCallId, AgentId>,
     /// `call_id` → connection id of the extension currently servicing
     /// the call. Needed to route cancellation requests back to the
     /// right provider.
@@ -2013,6 +2017,7 @@ impl Harness {
             tool_agents: HashMap::new(),
             pending_tools: HashMap::new(),
             completed_tool_calls: HashSet::new(),
+            completed_tool_agents: HashMap::new(),
             pending_tool_providers: HashMap::new(),
             pending_action_invocations: HashMap::new(),
             event_log: EventLog::new(),
@@ -6720,19 +6725,36 @@ impl Harness {
         self.pending_tools.contains_key(target_call_id)
     }
 
-    pub(crate) fn is_running_cancellable_tool_call(&self, target_call_id: &ToolCallId) -> bool {
+    pub(crate) fn is_running_cancellable_tool_call_for(
+        &self,
+        conversation_id: &AgentId,
+        target_call_id: &ToolCallId,
+    ) -> bool {
         self.pending_tools.contains_key(target_call_id)
+            && self.tool_agents.get(target_call_id) == Some(conversation_id)
     }
 
-    pub(crate) fn is_completed_tool_call(&self, target_call_id: &ToolCallId) -> bool {
-        self.completed_tool_calls.contains(target_call_id)
+    pub(crate) fn is_completed_tool_call_for(
+        &self,
+        conversation_id: &AgentId,
+        target_call_id: &ToolCallId,
+    ) -> bool {
+        self.completed_tool_agents.get(target_call_id) == Some(conversation_id)
     }
 
-    pub(crate) fn publish_tool_cancel_request(&mut self, target_call_id: ToolCallId) {
+    pub(crate) fn publish_tool_cancel_request_for(
+        &mut self,
+        conversation_id: &AgentId,
+        target_call_id: ToolCallId,
+    ) -> Result<(), String> {
+        if !self.is_running_cancellable_tool_call_for(conversation_id, &target_call_id) {
+            return Err("Unknown tool call id".to_owned());
+        }
         self.publish_event(
             Some(HARNESS_CONNECTION_ID),
             Event::ToolCancelRequest(tau_proto::ToolCancelRequest { target_call_id }),
         );
+        Ok(())
     }
 
     pub(crate) fn cancel_start_agent_request(
@@ -7451,7 +7473,11 @@ impl Harness {
     /// terminal-event enrichment and transcript attribution can still read the
     /// runtime metadata.
     pub(crate) fn clear_tool_call_tracking(&mut self, call_id: &str) {
+        let owner = self.tool_agents.get(call_id).cloned();
         self.completed_tool_calls.insert(call_id.into());
+        if let Some(owner) = owner {
+            self.completed_tool_agents.insert(call_id.into(), owner);
+        }
         self.tool_agents.remove(call_id);
         self.pending_tools.remove(call_id);
         self.pending_tool_providers.remove(call_id);
@@ -9303,6 +9329,7 @@ impl Harness {
         self.tool_agents.clear();
         self.pending_tools.clear();
         self.completed_tool_calls.clear();
+        self.completed_tool_agents.clear();
         self.pending_tool_providers.clear();
         self.pending_action_invocations.clear();
         self.prompt_agents.clear();

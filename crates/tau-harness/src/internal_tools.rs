@@ -332,21 +332,38 @@ impl<'a> InternalToolHost<'a> {
         self.harness.is_running_tool_call(target_call_id)
     }
 
-    /// Return true when a running tool call is known to accept the generic
-    /// event-log cancellation request used by the `cancel` tool.
-    pub fn is_running_cancellable_tool_call(&self, target_call_id: &ToolCallId) -> bool {
+    /// Return true when a running tool call owned by `conversation_id` is known
+    /// to accept the generic event-log cancellation request used by the
+    /// `cancel` tool.
+    pub fn is_running_cancellable_tool_call_for(
+        &self,
+        conversation_id: &AgentId,
+        target_call_id: &ToolCallId,
+    ) -> bool {
         self.harness
-            .is_running_cancellable_tool_call(target_call_id)
+            .is_running_cancellable_tool_call_for(conversation_id, target_call_id)
     }
 
-    /// Return true when this harness saw the tool call reach a terminal state.
-    pub fn is_completed_tool_call(&self, target_call_id: &ToolCallId) -> bool {
-        self.harness.is_completed_tool_call(target_call_id)
+    /// Return true when this harness saw the caller's tool call reach a
+    /// terminal state.
+    pub fn is_completed_tool_call_for(
+        &self,
+        conversation_id: &AgentId,
+        target_call_id: &ToolCallId,
+    ) -> bool {
+        self.harness
+            .is_completed_tool_call_for(conversation_id, target_call_id)
     }
 
-    /// Publish a durable broadcast tool cancellation request.
-    pub fn publish_tool_cancel_request(&mut self, target_call_id: ToolCallId) {
-        self.harness.publish_tool_cancel_request(target_call_id);
+    /// Publish a durable broadcast tool cancellation request after checking
+    /// that `conversation_id` owns the target call.
+    pub fn publish_tool_cancel_request_for(
+        &mut self,
+        conversation_id: &AgentId,
+        target_call_id: ToolCallId,
+    ) -> Result<(), String> {
+        self.harness
+            .publish_tool_cancel_request_for(conversation_id, target_call_id)
     }
 
     /// Cancel a start-agent request owned by an internal tool handler.

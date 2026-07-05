@@ -1147,15 +1147,15 @@ impl BuiltinTools {
             if state.cancel_requested.contains(&target) {
                 return Err("Tool call already canceled".to_owned());
             }
-            if !host.is_running_cancellable_tool_call(&target) {
-                if host.is_completed_tool_call(&target) {
+            if !host.is_running_cancellable_tool_call_for(conversation_id, &target) {
+                if host.is_completed_tool_call_for(conversation_id, &target) {
                     return Err("Tool call is already done".to_owned());
                 }
                 return Err("Unknown tool call id".to_owned());
             }
             state.cancel_requested.insert(target.clone());
             drop(state);
-            host.publish_tool_cancel_request(target);
+            host.publish_tool_cancel_request_for(conversation_id, target)?;
             Ok(())
         });
         match result {
