@@ -243,6 +243,94 @@ fn recv_prompt(rx: &mpsc::Receiver<HarnessInputMessage>) -> String {
     prompt.text
 }
 
+/// Ensures the shared shutdown signal wakes async waiters immediately,
+/// preventing regressions to periodic shutdown polling in the Slack worker.
+#[tokio::test]
+async fn shutdown_signal_wait_wakes_after_request() {
+    let shutdown = Arc::new(ShutdownSignal::new());
+    let waiter_shutdown = Arc::clone(&shutdown);
+    let waiter = tokio::spawn(async move {
+        waiter_shutdown.wait().await;
+    });
+
+    tokio::task::yield_now().await;
+    shutdown.request();
+
+    tokio::time::timeout(Duration::from_millis(75), waiter)
+        .await
+        .expect("shutdown waiter should wake promptly")
+        .expect("shutdown waiter should not panic");
+}
+
+/// Ensures reconnect backoff waits are interruptible by notification rather
+/// than sleeping in fixed polling chunks for the full delay.
+#[tokio::test]
+async fn shutdown_signal_wait_timeout_wakes_before_long_backoff() {
+    let shutdown = Arc::new(ShutdownSignal::new());
+    let waiter_shutdown = Arc::clone(&shutdown);
+    let waiter =
+        tokio::spawn(async move { waiter_shutdown.wait_timeout(Duration::from_secs(60)).await });
+
+    tokio::task::yield_now().await;
+    shutdown.request();
+
+    let interrupted = tokio::time::timeout(Duration::from_millis(75), waiter)
+        .await
+        .expect("backoff wait should wake promptly")
+        .expect("backoff waiter should not panic");
+    assert!(interrupted, "wait_timeout should report requested shutdown");
+}
+
+/// Ensures a Socket Mode worker blocked on websocket receive exits promptly
+/// when shutdown is requested, preserving shutdown latency without a receive
+/// timeout.
+#[tokio::test]
+async fn socket_worker_once_shutdown_interrupts_idle_websocket_receive() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind loopback websocket listener");
+    let socket_url = format!(
+        "ws://{}/socket-ticket",
+        listener.local_addr().expect("listener local address")
+    );
+    let (accepted_tx, accepted_rx) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.expect("accept websocket client");
+        let _ws = tokio_tungstenite::accept_async(stream)
+            .await
+            .expect("complete websocket handshake");
+        let _ = accepted_tx.send(());
+        std::future::pending::<()>().await;
+    });
+
+    let (tx, _rx) = mpsc::channel();
+    let ext = Extension::new(FakeClient::new(), tx);
+    let shutdown = Arc::clone(&ext.shutdown);
+    let worker_cfg = cfg();
+    let worker = tokio::spawn(async move {
+        socket_worker_once(
+            &ext,
+            &worker_cfg,
+            Some(WorkerStartup {
+                bot_user_id: "UBOT123".to_owned(),
+                socket_url,
+            }),
+        )
+        .await
+    });
+
+    accepted_rx.await.expect("websocket should connect");
+    shutdown.request();
+
+    let outcome = tokio::time::timeout(Duration::from_millis(150), worker)
+        .await
+        .expect("socket worker should stop promptly")
+        .expect("socket worker should not panic")
+        .expect("socket worker should exit cleanly");
+    assert_eq!(outcome, WorkerOutcome::Shutdown);
+    server.abort();
+}
+
 /// Long successful Slack Web API JSON responses must be parsed from the raw
 /// body rather than from bounded diagnostic text, otherwise successful sends
 /// can be reported as false JSON errors.

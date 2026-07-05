@@ -2,7 +2,7 @@
 
 This extension bridges untrusted external Slack text into Tau. Before changing
 routing, config, secrets, Socket Mode lifecycle, or tool behavior, read
-`ARCHITECTURE.md` and `SECURITY.md` in this crate, plus the workspace
+`ARCHITECTURE.md`, `design.md`, and `SECURITY.md` in this crate, plus the workspace
 `SECURITY.md`.
 
 Keep configuration keys snake_case and reject unknown fields. Never log Slack

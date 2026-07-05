@@ -291,7 +291,7 @@ struct Extension {
     state: Arc<Mutex<State>>,
     client: Arc<dyn SlackClient>,
     output: Output,
-    shutdown: Arc<AtomicBool>,
+    shutdown: Arc<ShutdownSignal>,
 }
 
 impl Extension {
@@ -302,7 +302,7 @@ impl Extension {
             state: Arc::new(Mutex::new(State::default())),
             client,
             output: output.into(),
-            shutdown: Arc::new(AtomicBool::new(false)),
+            shutdown: Arc::new(ShutdownSignal::new()),
         }
     }
 
@@ -876,7 +876,64 @@ fn active_channel_locked(state: &State) -> Option<String> {
 
 impl Drop for Extension {
     fn drop(&mut self) {
-        self.shutdown.store(true, Ordering::Relaxed);
+        self.shutdown.request();
+    }
+}
+
+/// Shared shutdown state that supports synchronous checks and async wakeups.
+struct ShutdownSignal {
+    /// Fast flag used by synchronous code that cannot await.
+    requested: AtomicBool,
+    /// Wakes the asynchronous Socket Mode worker and backoff sleepers.
+    notify: tokio::sync::Notify,
+}
+
+impl ShutdownSignal {
+    /// Create a shutdown signal in the running state.
+    fn new() -> Self {
+        Self {
+            requested: AtomicBool::new(false),
+            notify: tokio::sync::Notify::new(),
+        }
+    }
+
+    /// Return whether shutdown has already been requested.
+    fn is_requested(&self) -> bool {
+        self.requested.load(Ordering::Relaxed)
+    }
+
+    /// Request shutdown and wake all current asynchronous waiters.
+    fn request(&self) {
+        self.requested.store(true, Ordering::Relaxed);
+        self.notify.notify_waiters();
+    }
+
+    /// Wait until shutdown is requested without polling.
+    async fn wait(&self) {
+        loop {
+            // Create the notification future before checking the flag: `notify_waiters()`
+            // does not buffer for future waiters, so this ordering prevents missing a
+            // concurrent request between the check and await.
+            let notified = self.notify.notified();
+            if self.is_requested() {
+                return;
+            }
+            notified.await;
+        }
+    }
+
+    /// Wait until either shutdown is requested or the requested delay elapses.
+    ///
+    /// Returns `true` when shutdown was requested and `false` when the delay
+    /// elapsed first.
+    async fn wait_timeout(&self, delay: Duration) -> bool {
+        if delay.is_zero() {
+            return self.is_requested();
+        }
+        tokio::select! {
+            () = self.wait() => true,
+            () = tokio::time::sleep(delay) => self.is_requested(),
+        }
     }
 }
 
@@ -886,7 +943,7 @@ fn socket_worker_loop(
     output: Output,
     cfg: RuntimeConfig,
     startup: Option<WorkerStartup>,
-    shutdown: Arc<AtomicBool>,
+    shutdown: Arc<ShutdownSignal>,
 ) {
     let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -906,7 +963,7 @@ fn socket_worker_loop(
     };
     let mut backoff = INITIAL_RECONNECT_BACKOFF;
     let mut startup = startup;
-    while !shutdown.load(Ordering::Relaxed) {
+    while !shutdown.is_requested() {
         match runtime.block_on(socket_worker_once(&ext, &cfg, startup.take())) {
             Ok(WorkerOutcome::ReconnectNow) => {
                 backoff = INITIAL_RECONNECT_BACKOFF;
@@ -915,7 +972,9 @@ fn socket_worker_loop(
             Err(message) => {
                 ext.report_worker_startup_failure_once(&cfg, &message);
                 tracing::warn!(target: LOG_TARGET, error = %message, "Slack Socket Mode worker failed");
-                sleep_interruptibly(&shutdown, backoff);
+                if runtime.block_on(shutdown.wait_timeout(backoff)) {
+                    break;
+                }
                 backoff = (backoff * 2).min(MAX_RECONNECT_BACKOFF);
             }
         }
@@ -966,15 +1025,15 @@ async fn socket_worker_once(
             )
         })?;
     loop {
-        if ext.shutdown.load(Ordering::Relaxed) {
-            let _ = ws.close(None).await;
-            return Ok(WorkerOutcome::Shutdown);
-        }
-        let next = tokio::time::timeout(Duration::from_millis(250), ws.next()).await;
-        let Some(frame) = (match next {
-            Ok(frame) => frame,
-            Err(_) => continue,
-        }) else {
+        let frame = tokio::select! {
+            biased;
+            () = ext.shutdown.wait() => {
+                let _ = ws.close(None).await;
+                return Ok(WorkerOutcome::Shutdown);
+            }
+            frame = ws.next() => frame,
+        };
+        let Some(frame) = frame else {
             return Ok(WorkerOutcome::ReconnectNow);
         };
         let frame = frame.map_err(|error| {
@@ -1004,7 +1063,6 @@ async fn handle_socket_frame(
         Message::Pong(_) | Message::Binary(_) | Message::Frame(_) => Ok(None),
     }
 }
-
 async fn handle_socket_text_frame(
     ext: &Extension,
     cfg: &RuntimeConfig,
@@ -1143,7 +1201,7 @@ where
         .run_detached_writer_with_state(reader, writer, move |handle| SlackRuntime {
             ext: Extension::new(client, handle),
         })?;
-    state.ext.shutdown.store(true, Ordering::Relaxed);
+    state.ext.shutdown.request();
     Ok(())
 }
 
@@ -1553,15 +1611,6 @@ fn is_loopback_host(host: url::Host<&str>) -> bool {
         url::Host::Domain(domain) => domain.eq_ignore_ascii_case("localhost"),
         url::Host::Ipv4(addr) => addr.is_loopback(),
         url::Host::Ipv6(addr) => addr.is_loopback(),
-    }
-}
-
-fn sleep_interruptibly(shutdown: &AtomicBool, total: Duration) {
-    let step = Duration::from_millis(100);
-    let mut slept = Duration::ZERO;
-    while slept < total && !shutdown.load(Ordering::Relaxed) {
-        std::thread::sleep(step);
-        slept += step;
     }
 }
 

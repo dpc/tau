@@ -51,3 +51,9 @@ acks valid envelopes quickly with `{"envelope_id":"..."}`, and then routes only
 text `app_mention` and IM `message` events. Slack event ids, or `(channel, ts)`
 when no event id is present, are cached in a bounded in-memory duplicate cache so
 retries and reconnects do not duplicate prompts.
+
+Socket Mode shutdown is event-driven rather than polling based. The websocket
+receive loop races incoming Slack frames against a shared shutdown notification,
+and reconnect backoff sleeps race the full backoff delay against the same signal.
+This keeps normal reconnect timing unchanged while allowing Tau shutdown to wake
+an idle connection or long backoff immediately.
