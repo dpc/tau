@@ -4,7 +4,7 @@
 //! storage scan, model publication, and dispatch across built-in provider
 //! backends. Individual backend crates own provider-specific wire formats.
 
-use std::collections::{BTreeMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::error::Error;
 use std::io::{BufWriter, Cursor, Read, Write};
 use std::marker::PhantomData;
@@ -34,7 +34,9 @@ use tau_provider_chat_completions::{
     ChatCompletionsModel, ChatCompletionsProvider, models_for_provider as chat_models_for_provider,
     run_prompt_for_provider as run_chat_completions_prompt,
 };
-use tau_provider_chatgpt::{ChatGptRuntime, ChatGptTurnState, common, responses};
+use tau_provider_chatgpt::{
+    ChatGptRuntime, ChatGptTurnState, TurnAbort, TurnAbortWaker, common, responses,
+};
 
 /// `tracing` target for events emitted from this extension.
 pub const LOG_TARGET: &str = "provider-builtin";
@@ -967,16 +969,30 @@ struct CancellationState {
 #[derive(Default)]
 struct CancellationInner {
     canceled_apids: HashSet<tau_proto::AgentPromptId>,
+    abort_wakers: HashMap<tau_proto::AgentPromptId, Vec<AbortWakerEntry>>,
+    next_abort_waker_id: u64,
     retry_cancel_generation: u64,
     shutdown: bool,
 }
 
+#[derive(Clone)]
+struct AbortWakerEntry {
+    id: u64,
+    waker: Arc<dyn Fn() + Send + Sync + 'static>,
+}
+
 impl CancellationState {
     fn cancel(&self, apid: tau_proto::AgentPromptId) {
-        if let Ok(mut inner) = self.inner.lock() {
-            inner.canceled_apids.insert(apid);
-            self.changed.notify_all();
+        let wakers = if let Ok(mut inner) = self.inner.lock() {
+            inner.canceled_apids.insert(apid.clone());
+            inner.abort_wakers.get(&apid).cloned().unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        for waker in wakers {
+            (waker.waker)();
         }
+        self.changed.notify_all();
     }
 
     fn cancel_retry_sleeps(&self) {
@@ -987,10 +1003,20 @@ impl CancellationState {
     }
 
     fn shutdown(&self) {
-        if let Ok(mut inner) = self.inner.lock() {
+        let wakers = if let Ok(mut inner) = self.inner.lock() {
             inner.shutdown = true;
-            self.changed.notify_all();
+            inner
+                .abort_wakers
+                .values()
+                .flat_map(|entries| entries.iter().cloned())
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+        for waker in wakers {
+            (waker.waker)();
         }
+        self.changed.notify_all();
     }
 
     fn take_canceled(&self, apid: &tau_proto::AgentPromptId) -> bool {
@@ -1034,7 +1060,66 @@ impl CancellationState {
             }
         }
     }
+
+    fn register_abort_waker(
+        self: &Arc<Self>,
+        current_apid: &tau_proto::AgentPromptId,
+        waker: Arc<dyn Fn() + Send + Sync + 'static>,
+    ) -> CancellationAbortWaker {
+        let (id, call_now) = if let Ok(mut inner) = self.inner.lock() {
+            let id = inner.next_abort_waker_id;
+            inner.next_abort_waker_id = inner.next_abort_waker_id.saturating_add(1);
+            let call_now =
+                inner.shutdown || inner.canceled_apids.iter().any(|apid| apid == current_apid);
+            inner
+                .abort_wakers
+                .entry(current_apid.clone())
+                .or_default()
+                .push(AbortWakerEntry {
+                    id,
+                    waker: Arc::clone(&waker),
+                });
+            (id, call_now)
+        } else {
+            (0, true)
+        };
+        if call_now {
+            waker();
+        }
+        CancellationAbortWaker {
+            cancellation: Arc::clone(self),
+            apid: current_apid.clone(),
+            id,
+        }
+    }
+
+    fn unregister_abort_waker(&self, apid: &tau_proto::AgentPromptId, id: u64) {
+        let Ok(mut inner) = self.inner.lock() else {
+            return;
+        };
+        if let Some(entries) = inner.abort_wakers.get_mut(apid) {
+            entries.retain(|entry| entry.id != id);
+            if entries.is_empty() {
+                inner.abort_wakers.remove(apid);
+            }
+        }
+    }
 }
+
+struct CancellationAbortWaker {
+    cancellation: Arc<CancellationState>,
+    apid: tau_proto::AgentPromptId,
+    id: u64,
+}
+
+impl Drop for CancellationAbortWaker {
+    fn drop(&mut self) {
+        self.cancellation
+            .unregister_abort_waker(&self.apid, self.id);
+    }
+}
+
+impl TurnAbortWaker for CancellationAbortWaker {}
 
 fn prompt_concurrency_limit() -> usize {
     std::env::var(PROMPT_CONCURRENCY_ENV)
@@ -1060,6 +1145,7 @@ fn production_prompt_executor() -> PromptExecutor {
         let mut writer = execution.frame_writer();
         let mut retry_ctx = SharedRetryContext {
             cancellation: execution.cancellation.clone(),
+            current_apid: agent_prompt_id.clone(),
         };
         let result = handle_prompt_backend(
             &agent_prompt_id,
@@ -1297,6 +1383,7 @@ trait RetrySleeper {
 
 struct SharedRetryContext {
     cancellation: Arc<CancellationState>,
+    current_apid: tau_proto::AgentPromptId,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1307,12 +1394,24 @@ enum SleepOutcome {
 
 impl RetrySleeper for SharedRetryContext {
     fn sleep_or_abort(&mut self, delay: Duration, current_apid: &str) -> SleepOutcome {
-        // Prompt workers do not own the blocking network request, so targeted
-        // cancel cannot preempt an in-flight HTTP/WS read yet. It still aborts
-        // retry backoff sleeps and keeps queued prompts from starting, matching
-        // the existing provider's retry-abort safety without collateral-canceling
-        // unrelated prompt ids.
         self.cancellation.sleep_or_abort(delay, current_apid)
+    }
+}
+
+impl TurnAbort for SharedRetryContext {
+    fn is_aborted(&mut self) -> bool {
+        let current_apid = self.current_apid.clone();
+        RetrySleeper::is_aborted(self, current_apid.as_str())
+    }
+
+    fn register_waker(
+        &mut self,
+        waker: Arc<dyn Fn() + Send + Sync + 'static>,
+    ) -> Box<dyn TurnAbortWaker> {
+        Box::new(
+            self.cancellation
+                .register_abort_waker(&self.current_apid, waker),
+        )
     }
 }
 
@@ -1631,7 +1730,7 @@ fn handle_prompt_backend<R, W: Write>(
     chatgpt_runtime: &ChatGptRuntime,
 ) -> Result<(), Box<dyn Error>>
 where
-    R: RetrySleeper,
+    R: RetrySleeper + TurnAbort,
 {
     match backend {
         PromptBackend::Responses(config) => handle_prompt(
@@ -1672,7 +1771,7 @@ fn handle_prompt<R, W: Write>(
     chatgpt_runtime: &ChatGptRuntime,
 ) -> Result<(), Box<dyn Error>>
 where
-    R: RetrySleeper,
+    R: RetrySleeper + TurnAbort,
 {
     write_prompt_submitted(agent_prompt_id, &prompt.originator, writer)?;
     let request = common::PromptPayload {
@@ -1724,7 +1823,7 @@ where
                 config,
                 &request,
                 &mut chatgpt_turn_state,
-                &mut || retry_ctx.is_aborted(agent_prompt_id),
+                retry_ctx,
                 &mut on_update,
             )
         },

@@ -31,7 +31,7 @@
 //! marshals envelopes to the writer task and pulls events back from
 //! the reader.
 
-use std::sync::mpsc as std_mpsc;
+use std::sync::{Arc, mpsc as std_mpsc};
 use std::time::{Duration, Instant};
 
 use futures_util::sink::SinkExt;
@@ -50,6 +50,7 @@ use super::{
 };
 use crate::common::{LlmError, PromptPayload, StreamState};
 use crate::responses::ws_runtime;
+use crate::{NeverAbort, TurnAbort};
 
 /// Beta-feature header value the OpenAI WebSocket endpoint expects.
 /// Dated by the server; will need a bump when OpenAI rolls a new
@@ -78,10 +79,6 @@ const KEEPALIVE_PING_INTERVAL: Duration = Duration::from_secs(25);
 /// How long one WS turn may go without any provider event before Tau treats
 /// the socket as wedged and lets the caller retry/fall back to HTTP/SSE.
 const TURN_EVENT_TIMEOUT: Duration = Duration::from_secs(120);
-
-/// Poll cadence while waiting for WS events so harness cancellation is not
-/// hidden behind a blocking receive on an otherwise idle socket.
-const TURN_ABORT_POLL: Duration = Duration::from_millis(250);
 
 type SharedStream = WebSocketStream<MaybeTlsStream<TcpStream>>;
 type Sink = SplitSink<SharedStream, Message>;
@@ -112,6 +109,9 @@ enum InboundEvent {
     Closed(String),
     /// Transport / protocol error mid-stream.
     Error(String),
+    /// Harness cancellation state changed; the sync turn loop should re-check
+    /// its abort source immediately.
+    AbortWake,
 }
 
 /// One live WS connection to a Responses endpoint, as seen from the
@@ -124,6 +124,7 @@ enum InboundEvent {
 /// the outbound channel and pulls events off the inbound one.
 pub struct WsConn {
     outbound_tx: UnboundedSender<WsCommand>,
+    inbound_tx: std_mpsc::Sender<InboundEvent>,
     inbound_rx: std_mpsc::Receiver<InboundEvent>,
     /// Aborted on [`Drop`] so a `WsConn` falling out of scope cleanly
     /// tears down its background tasks. Cooperative cancellation via
@@ -194,13 +195,14 @@ impl WsConn {
             .spawn(write_loop(
                 sink,
                 outbound_rx,
-                inbound_tx,
+                inbound_tx.clone(),
                 KEEPALIVE_PING_INTERVAL,
             ))
             .abort_handle();
 
         Ok(Self {
             outbound_tx,
+            inbound_tx,
             inbound_rx,
             reader_abort,
             writer_abort,
@@ -224,7 +226,7 @@ impl WsConn {
         agent_prompt_id: &str,
         request: &PromptPayload<'_>,
         recording_stream: Option<&mut ProviderRawEventStream>,
-        should_abort: &mut impl FnMut() -> bool,
+        abort: &mut impl TurnAbort,
         on_update: &mut impl FnMut(&StreamState),
     ) -> Result<WsTurnResult, LlmError> {
         let cached_response_id = self.cached_response_id.as_deref();
@@ -241,7 +243,7 @@ impl WsConn {
             tau_proto::ProviderBackendTransport::Websocket,
             &envelope,
         );
-        let state = self.run_envelope(envelope, recording_stream, Some(should_abort), on_update)?;
+        let state = self.run_envelope(envelope, recording_stream, abort, on_update)?;
         self.cached_response_id = state.response_id.clone();
         Ok(WsTurnResult {
             state,
@@ -258,14 +260,15 @@ impl WsConn {
         request: &PromptPayload<'_>,
     ) -> Result<StreamState, LlmError> {
         let envelope = build_ws_envelope(config, request, None, Some(false));
-        self.run_envelope(envelope, None, None::<&mut fn() -> bool>, &mut |_| {})
+        let mut abort = NeverAbort;
+        self.run_envelope(envelope, None, &mut abort, &mut |_| {})
     }
 
     fn run_envelope(
         &mut self,
         envelope: super::WsResponseCreate,
         mut recording_stream: Option<&mut ProviderRawEventStream>,
-        mut should_abort: Option<&mut impl FnMut() -> bool>,
+        abort: &mut impl TurnAbort,
         on_update: &mut impl FnMut(&StreamState),
     ) -> Result<StreamState, LlmError> {
         let text = serde_json::to_string(&envelope).map_err(LlmError::Json)?;
@@ -275,13 +278,18 @@ impl WsConn {
 
         let mut state = StreamState::new();
         let mut last_event_at = Instant::now();
+        let _abort_waker = {
+            let inbound_tx = self.inbound_tx.clone();
+            abort.register_waker(Arc::new(move || {
+                let _ = inbound_tx.send(InboundEvent::AbortWake);
+            }))
+        };
         loop {
-            if should_abort.as_mut().is_some_and(|abort| abort()) {
+            if abort.is_aborted() {
                 return Err(LlmError::HttpStatus(499, "cancelled by harness".to_owned()));
             }
             let remaining = TURN_EVENT_TIMEOUT.saturating_sub(last_event_at.elapsed());
-            let wait_for = remaining.min(TURN_ABORT_POLL);
-            let event = match self.inbound_rx.recv_timeout(wait_for) {
+            let event = match self.inbound_rx.recv_timeout(remaining) {
                 Ok(event) => event,
                 Err(std_mpsc::RecvTimeoutError::Timeout)
                     if last_event_at.elapsed() < TURN_EVENT_TIMEOUT =>
@@ -325,6 +333,7 @@ impl WsConn {
                 InboundEvent::Error(msg) => {
                     return Err(LlmError::HttpStatus(0, format!("stream error: {msg}")));
                 }
+                InboundEvent::AbortWake => continue,
             }
         }
         Ok(state)
@@ -613,3 +622,6 @@ fn map_ws_connect_error(e: tungstenite::Error) -> LlmError {
     // Network / TLS / protocol — treat as retryable transport.
     LlmError::HttpStatus(0, format!("stream error: ws connect: {e}"))
 }
+
+#[cfg(test)]
+mod tests;

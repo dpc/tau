@@ -32,6 +32,9 @@ const CHECKOUT_ABORT_POLL: Duration = Duration::from_millis(50);
 
 use super::ResponsesConfig;
 use super::ws::WsConn;
+#[cfg(test)]
+use crate::NeverAbort;
+use crate::TurnAbort;
 use crate::common::{LlmError, PromptPayload};
 
 /// Default soft cap on simultaneously-cached WS connections.
@@ -243,7 +246,7 @@ impl SharedWsPool {
         ))
     }
 
-    /// Reserve `key`, aborting promptly if `should_abort` becomes true while a
+    /// Reserve `key`, aborting promptly if the abort source fires while a
     /// same-key worker owns the reservation. This is used by prompt turns so a
     /// targeted cancel cannot leave a worker blocked in the pool and then later
     /// send a stale network request after the canceled turn releases.
@@ -251,11 +254,11 @@ impl SharedWsPool {
         &self,
         key: &PoolKey,
         current_bearer: &str,
-        should_abort: &mut impl FnMut() -> bool,
+        abort: &mut impl TurnAbort,
     ) -> Result<Option<WsConn>, WsTurnError> {
         let mut inner = self.lock_inner()?;
         while inner.busy.contains(key) {
-            if should_abort() {
+            if abort.is_aborted() {
                 return Err(WsTurnError::Canceled);
             }
             let (guard, _) = self
@@ -264,7 +267,7 @@ impl SharedWsPool {
                 .map_err(pool_poisoned)?;
             inner = guard;
         }
-        if should_abort() {
+        if abort.is_aborted() {
             return Err(WsTurnError::Canceled);
         }
         inner.busy.insert(key.clone());
@@ -465,12 +468,13 @@ pub fn run_turn_through_pool(
         let mut recording_stream = vcr_record_config
             .as_ref()
             .map(|_| super::ProviderRawEventStream::default());
+        let mut abort = NeverAbort;
         match conn.run_turn(
             config,
             agent_prompt_id,
             request,
             recording_stream.as_mut(),
-            &mut || false,
+            &mut abort,
             on_update,
         ) {
             Ok(turn) => {
@@ -523,12 +527,13 @@ pub fn run_turn_through_pool(
     let mut recording_stream = vcr_record_config
         .as_ref()
         .map(|_| super::ProviderRawEventStream::default());
+    let mut abort = NeverAbort;
     match conn.run_turn(
         config,
         agent_prompt_id,
         request,
         recording_stream.as_mut(),
-        &mut || false,
+        &mut abort,
         on_update,
     ) {
         Ok(turn) => {
@@ -562,7 +567,7 @@ pub fn run_turn_through_shared_pool(
     config: &ResponsesConfig,
     agent_prompt_id: &str,
     request: &crate::common::PromptPayload<'_>,
-    should_abort: &mut impl FnMut() -> bool,
+    abort: &mut impl TurnAbort,
     on_update: &mut impl FnMut(&crate::common::StreamState),
 ) -> Result<crate::common::StreamState, WsTurnError> {
     let record_config = match prepare_vcr_turn(config, agent_prompt_id, request, on_update)? {
@@ -573,7 +578,7 @@ pub fn run_turn_through_shared_pool(
     let session_id = request.session_id.as_str();
     let key = PoolKey::for_request(config, request);
 
-    if let Some(conn) = pool.checkout_until(&key, &config.api_key, should_abort)? {
+    if let Some(conn) = pool.checkout_until(&key, &config.api_key, abort)? {
         let turn_context = SharedTurnContext {
             pool,
             key: key.clone(),
@@ -582,7 +587,7 @@ pub fn run_turn_through_shared_pool(
             request,
             record_config: record_config.as_ref(),
         };
-        match turn_context.run_cached(conn, session_id, should_abort, on_update)? {
+        match turn_context.run_cached(conn, session_id, abort, on_update)? {
             CachedSharedTurn::Completed(state) => return Ok(*state),
             CachedSharedTurn::RetryFresh => {}
         }
@@ -596,7 +601,7 @@ pub fn run_turn_through_shared_pool(
         request,
         record_config: record_config.as_ref(),
     }
-    .run_fresh(should_abort, on_update)
+    .run_fresh(abort, on_update)
 }
 
 impl<'a, 'request> SharedTurnContext<'a, 'request> {
@@ -604,10 +609,10 @@ impl<'a, 'request> SharedTurnContext<'a, 'request> {
         self,
         mut conn: WsConn,
         session_id: &str,
-        should_abort: &mut impl FnMut() -> bool,
+        abort: &mut impl TurnAbort,
         on_update: &mut impl FnMut(&crate::common::StreamState),
     ) -> Result<CachedSharedTurn, WsTurnError> {
-        if should_abort() {
+        if abort.is_aborted() {
             self.pool.release(self.key, conn)?;
             return Err(WsTurnError::Canceled);
         }
@@ -618,7 +623,7 @@ impl<'a, 'request> SharedTurnContext<'a, 'request> {
             self.agent_prompt_id,
             self.request,
             stream.as_mut(),
-            should_abort,
+            abort,
             on_update,
         ) {
             Ok(turn) => self
@@ -655,10 +660,10 @@ impl<'a, 'request> SharedTurnContext<'a, 'request> {
 
     fn run_fresh(
         self,
-        should_abort: &mut impl FnMut() -> bool,
+        abort: &mut impl TurnAbort,
         on_update: &mut impl FnMut(&crate::common::StreamState),
     ) -> Result<crate::common::StreamState, WsTurnError> {
-        if should_abort() {
+        if abort.is_aborted() {
             self.pool.abandon(&self.key)?;
             return Err(WsTurnError::Canceled);
         }
@@ -669,7 +674,7 @@ impl<'a, 'request> SharedTurnContext<'a, 'request> {
                 return Err(WsTurnError::Other(error));
             }
         };
-        if should_abort() {
+        if abort.is_aborted() {
             drop(conn);
             self.pool.abandon(&self.key)?;
             return Err(WsTurnError::Canceled);
@@ -681,7 +686,7 @@ impl<'a, 'request> SharedTurnContext<'a, 'request> {
             self.agent_prompt_id,
             self.request,
             stream.as_mut(),
-            should_abort,
+            abort,
             on_update,
         ) {
             Ok(turn) => self.release_and_store_recording(conn, turn, stream),

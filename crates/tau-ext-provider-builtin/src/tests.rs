@@ -278,6 +278,88 @@ fn cancellation_sleep_aborts_when_deadline_would_overflow() {
     );
 }
 
+#[test]
+fn cancellation_waker_fires_for_matching_prompt_only() {
+    // WebSocket turns park on provider events for up to the turn timeout. The
+    // cancellation registry must therefore wake the matching turn directly,
+    // without relying on periodic receive timeouts.
+    let cancellation = Arc::new(CancellationState::default());
+    let target_apid = tau_proto::AgentPromptId::from("ap-target");
+    let other_apid = tau_proto::AgentPromptId::from("ap-other");
+    let matching = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let other = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+    let _matching_guard = cancellation.register_abort_waker(&target_apid, {
+        let matching = Arc::clone(&matching);
+        Arc::new(move || {
+            matching.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        })
+    });
+    let _other_guard = cancellation.register_abort_waker(&other_apid, {
+        let other = Arc::clone(&other);
+        Arc::new(move || {
+            other.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        })
+    });
+
+    cancellation.cancel(target_apid);
+
+    assert_eq!(matching.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(other.load(std::sync::atomic::Ordering::SeqCst), 0);
+}
+
+#[test]
+fn cancellation_shutdown_wakes_all_registered_abort_wakers() {
+    // Provider shutdown must wake every active ChatGPT WebSocket turn so workers
+    // can return their normal canceled terminal path instead of waiting on idle
+    // upstream sockets.
+    let cancellation = Arc::new(CancellationState::default());
+    let first_apid = tau_proto::AgentPromptId::from("ap-first");
+    let second_apid = tau_proto::AgentPromptId::from("ap-second");
+    let first = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let second = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+    let _first_guard = cancellation.register_abort_waker(&first_apid, {
+        let first = Arc::clone(&first);
+        Arc::new(move || {
+            first.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        })
+    });
+    let _second_guard = cancellation.register_abort_waker(&second_apid, {
+        let second = Arc::clone(&second);
+        Arc::new(move || {
+            second.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        })
+    });
+
+    cancellation.shutdown();
+
+    assert_eq!(first.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(second.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
+
+#[test]
+fn cancellation_waker_guard_unregisters_on_drop() {
+    // Completed turns drop their abort-waker guard. Later cancellation for the
+    // same prompt id must not enqueue stale wake hints into a reused socket's
+    // inbound event stream.
+    let cancellation = Arc::new(CancellationState::default());
+    let apid = tau_proto::AgentPromptId::from("ap-drop");
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+    let guard = cancellation.register_abort_waker(&apid, {
+        let calls = Arc::clone(&calls);
+        Arc::new(move || {
+            calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        })
+    });
+    drop(guard);
+
+    cancellation.cancel(apid);
+
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+}
+
 fn minimal_prompt() -> tau_proto::AgentPromptCreated {
     tau_proto::AgentPromptCreated {
         agent_prompt_id: "ap-test".into(),

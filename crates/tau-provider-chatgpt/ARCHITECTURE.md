@@ -15,3 +15,20 @@ WebSocket pool keys must follow the same identity as request `prompt_cache_key` 
 ChatGPT/Codex model publication includes provider-owned capability tags such as
 `shell:chatgpt` and `tools:custom-text`. These tags describe the model/backend
 surface; the harness owns all policy that maps them to tool alternatives.
+
+## WebSocket turn cancellation
+
+The synchronous WebSocket turn loop treats cancellation as an event source rather
+than a polling cadence. Callers pass a `TurnAbort` implementation that can both
+answer `is_aborted()` and register a `TurnAbortWaker`. While a turn waits for
+provider events, the registered waker sends `InboundEvent::AbortWake` through the
+same inbound queue used by reader/writer transport events, so the blocking
+receive wakes promptly without reducing the 120 second provider-event timeout.
+
+`AbortWake` is only a wake hint. The loop always calls `TurnAbort::is_aborted()`
+after waking, and that check remains authoritative so stale or coalesced wake
+hints cannot cancel the wrong turn. When cancellation is confirmed, the turn
+returns `LlmError::HttpStatus(499, "cancelled by harness")`, matching the rest of
+the provider cancellation path. The waker guard unregisters on drop so completed
+turns do not leave callbacks that could enqueue stale wake hints into a pooled
+socket's later turn.

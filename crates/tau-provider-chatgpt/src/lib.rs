@@ -24,6 +24,49 @@ const WS_RETRY_BUDGET_BEFORE_HTTP_FALLBACK: usize = 2;
 pub mod common;
 pub mod responses;
 
+/// Prompt-turn cancellation source used by the WebSocket transport.
+///
+/// The synchronous provider loop needs a cancellation event that can wake a
+/// blocking WebSocket receive. Implementors should register the supplied waker
+/// with their native cancellation primitive and call it when the current turn
+/// is canceled or the provider is shutting down.
+pub trait TurnAbort {
+    /// Return whether the current turn has already been canceled.
+    fn is_aborted(&mut self) -> bool;
+
+    /// Register a waker for future cancellation notifications.
+    ///
+    /// The returned guard must unregister the waker on drop so completed turns
+    /// do not leave stale callbacks behind.
+    fn register_waker(
+        &mut self,
+        waker: std::sync::Arc<dyn Fn() + Send + Sync + 'static>,
+    ) -> Box<dyn TurnAbortWaker>;
+}
+
+/// Guard for a registered [`TurnAbort`] waker.
+pub trait TurnAbortWaker {}
+
+/// Cancellation source that never aborts.
+pub struct NeverAbort;
+
+impl TurnAbort for NeverAbort {
+    fn is_aborted(&mut self) -> bool {
+        false
+    }
+
+    fn register_waker(
+        &mut self,
+        _waker: std::sync::Arc<dyn Fn() + Send + Sync + 'static>,
+    ) -> Box<dyn TurnAbortWaker> {
+        Box::new(NeverAbortWaker)
+    }
+}
+
+struct NeverAbortWaker;
+
+impl TurnAbortWaker for NeverAbortWaker {}
+
 /// Runtime state for ChatGPT/Codex transports.
 ///
 /// This owns the WebSocket pool and per-session WS fallback state so callers do
@@ -60,14 +103,17 @@ impl ChatGptRuntime {
     /// failures disable WS for this session and transparently fall back to
     /// HTTP/SSE; retryable WS failures are surfaced until this turn's internal
     /// retry budget is exhausted, then also fall back to HTTP/SSE for this
-    /// session.
+    /// session. The `abort` source is checked before starting WS work and is
+    /// also registered as a wake source while a WS turn is blocked on
+    /// provider events; canceled turns return `LlmError::HttpStatus(499,
+    /// "cancelled by harness")`.
     pub fn stream(
         &self,
         agent_prompt_id: &str,
         config: &responses::ResponsesConfig,
         request: &common::PromptPayload<'_>,
         turn_state: &mut ChatGptTurnState,
-        should_abort: &mut impl FnMut() -> bool,
+        abort: &mut impl TurnAbort,
         on_update: &mut impl FnMut(&common::StreamState),
     ) -> Result<StreamDispatchResult, common::LlmError> {
         let ws_pool_before = self.ws_pool.stats();
@@ -85,7 +131,7 @@ impl ChatGptRuntime {
                 config,
                 agent_prompt_id,
                 request,
-                should_abort,
+                abort,
                 on_update,
             ) {
                 Ok(state) => {

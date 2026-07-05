@@ -1,0 +1,36 @@
+# Design decisions
+
+This file records major design decisions for the ChatGPT/Codex provider
+transport crate.
+
+## WebSocket cancellation is a cooperative wake source
+
+Status: inferred
+
+ChatGPT/Codex WebSocket turns run from synchronous prompt workers while socket IO
+is owned by background Tokio reader/writer tasks. A turn waiting for upstream
+events registers a `TurnAbortWaker`; cancellation sends an `AbortWake` hint into
+the same inbound event queue as transport events. The turn then re-checks
+`TurnAbort::is_aborted()` and returns the standard 499 harness cancellation error
+only when the abort source confirms cancellation.
+
+This keeps cancellation prompt without shortening the provider-event timeout.
+The 120 second timeout still means "no upstream events arrived for this long",
+not "wake periodically to poll cancellation".
+
+## Backend transport behavior is covered by focused local tests
+
+Status: inferred
+
+This crate owns ChatGPT/Codex HTTP/SSE parsing, WebSocket turn and pool
+behavior, transport fallback, provider-cache key derivation, and
+provider-specific retry/error mapping. Backend transport behavior should be
+tested here with focused unit tests and local fakes rather than duplicated in
+`tau-ext-provider-builtin`.
+
+WebSocket changes should cover observable turn/pool contracts such as pool-key
+identity, reservation/release behavior, reconnect behavior, provider-event
+timeouts, cancellation returning the standard 499 harness path, and abort wakers
+waking blocked turn waits without relying on short receive polling. Parser and
+streaming changes should keep using focused event/delta/snapshot regression
+tests, with broader provider response streaming guidance in `../../docs/testing.md`.

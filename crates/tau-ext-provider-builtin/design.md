@@ -43,11 +43,13 @@ and worker messages until both are empty before blocking in
 `ManualExtensionRuntime::wait_for_wake`.
 
 Cancellation state is shared between the event loop and workers. Targeted
-cancels remove queued prompts immediately and abort retry sleeps for matching
-active prompts; disconnect/shutdown aborts all retry sleeps. Network reads are
-still owned by the backend transports, so cancellation is guaranteed at retry
-boundaries and queue boundaries rather than as a hard interruption of an
-in-flight upstream read.
+cancels remove queued prompts immediately, abort retry sleeps for matching active
+prompts, and notify any backend transport that registered a per-prompt abort
+waker. Disconnect/shutdown aborts retry sleeps and wakes all registered backend
+abort wakers. Backend network reads remain transport-owned and cancellation is
+cooperative rather than a hard socket interruption; ChatGPT/Codex WebSocket turns
+use the abort-waker path to wake an idle provider-event receive and return the
+normal harness cancellation result promptly.
 
 ## Provider retry sleeps are capped per attempt
 

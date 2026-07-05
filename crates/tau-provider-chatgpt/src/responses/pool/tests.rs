@@ -10,6 +10,28 @@ use tungstenite::Message;
 use super::*;
 use crate::common::PromptPayload;
 use crate::responses::ResponsesSurface;
+use crate::{NeverAbort, TurnAbort, TurnAbortWaker};
+
+struct AtomicAbort {
+    canceled: Arc<AtomicBool>,
+}
+
+impl TurnAbort for AtomicAbort {
+    fn is_aborted(&mut self) -> bool {
+        self.canceled.load(Ordering::SeqCst)
+    }
+
+    fn register_waker(
+        &mut self,
+        _waker: Arc<dyn Fn() + Send + Sync + 'static>,
+    ) -> Box<dyn TurnAbortWaker> {
+        Box::new(TestAbortWaker)
+    }
+}
+
+struct TestAbortWaker;
+
+impl TurnAbortWaker for TestAbortWaker {}
 
 fn context(items: &[ContextItem]) -> &'static tau_proto::PromptContext {
     Box::leak(Box::new(tau_proto::PromptContext {
@@ -205,8 +227,9 @@ fn shared_pool_checkout_wait_aborts_when_canceled() {
         let canceled = canceled.clone();
         let started = started.clone();
         thread::spawn(move || {
+            let mut abort = AtomicAbort { canceled };
             started.wait();
-            pool.checkout_until(&key, "test", &mut || canceled.load(Ordering::SeqCst))
+            pool.checkout_until(&key, "test", &mut abort)
         })
     };
 
@@ -794,12 +817,13 @@ fn shared_pool_mid_stream_close_keeps_reservation_through_fresh_retry() {
         share_user_cache_key: false,
         debug_provider_requests: false,
     };
+    let mut abort = NeverAbort;
     let state1 = run_turn_through_shared_pool(
         &pool,
         &config,
         "sp-shared-1",
         &req1,
-        &mut || false,
+        &mut abort,
         &mut on_update,
     )
     .expect("first shared turn ok");
@@ -818,12 +842,13 @@ fn shared_pool_mid_stream_close_keeps_reservation_through_fresh_retry() {
         share_user_cache_key: false,
         debug_provider_requests: false,
     };
+    let mut abort = NeverAbort;
     run_turn_through_shared_pool(
         &pool,
         &config,
         "sp-shared-2",
         &req2,
-        &mut || false,
+        &mut abort,
         &mut on_update,
     )
     .expect("shared chained reconnect should rebuild WS warmth");
@@ -1204,12 +1229,13 @@ fn run_shared_turn_for_agent(
         debug_provider_requests: false,
     };
     let mut on_update = |_: &crate::common::StreamState| {};
+    let mut abort = NeverAbort;
     run_turn_through_shared_pool(
         pool,
         config,
         agent_prompt_id,
         &request,
-        &mut || false,
+        &mut abort,
         &mut on_update,
     )
     .expect("shared turn ok");
