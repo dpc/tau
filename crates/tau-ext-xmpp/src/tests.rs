@@ -76,7 +76,7 @@ impl XmppBridge for FakeBridge {
         &self,
         _cfg: RuntimeConfig,
         _output: Output,
-        _shutdown: Arc<AtomicBool>,
+        _shutdown: Arc<ShutdownSignal>,
     ) -> Result<(), String> {
         *self.started.lock().expect("lock") += 1;
         Ok(())
@@ -311,8 +311,8 @@ fn empty_password_secrets() -> BTreeMap<String, tau_proto::SecretValue> {
     secrets
 }
 
-fn shutdown_flag() -> Arc<AtomicBool> {
-    Arc::new(AtomicBool::new(false))
+fn shutdown_signal() -> Arc<ShutdownSignal> {
+    Arc::new(ShutdownSignal::new())
 }
 
 fn extension() -> (
@@ -920,7 +920,7 @@ fn harness_disconnect_stops_extension_and_shuts_down_bridge() {
 #[test]
 fn disconnected_state_requires_fresh_online_readiness() {
     let (tx, _rx) = mpsc::channel();
-    let mut worker = WorkerState::new(cfg(), tx, shutdown_flag());
+    let mut worker = WorkerState::new(cfg(), tx, shutdown_signal());
     worker.bound_jid = Some(Jid::new("tau@example.org/tau-resource").expect("jid"));
     worker.occupant_real_jids.insert(
         Jid::new("room@conference.example.org/alice").expect("jid"),
@@ -965,7 +965,7 @@ fn worker_with_muc_agent() -> (
     Jid,
 ) {
     let (tx, rx) = mpsc::channel();
-    let mut worker = WorkerState::new(cfg(), tx, shutdown_flag());
+    let mut worker = WorkerState::new(cfg(), tx, shutdown_signal());
     let room = Jid::new("tau-agent-1@conference.example.org")
         .expect("jid")
         .to_bare();
@@ -1082,7 +1082,7 @@ fn instant_room_config_query_uses_owner_submit_form() {
 #[test]
 fn pending_muc_join_is_not_routable_and_can_be_removed() {
     let (tx, _rx) = mpsc::channel();
-    let mut worker = WorkerState::new(cfg(), tx, shutdown_flag());
+    let mut worker = WorkerState::new(cfg(), tx, shutdown_signal());
     let room = Jid::new("tau-agent-1@conference.example.org")
         .expect("jid")
         .to_bare();
@@ -1135,7 +1135,7 @@ fn muc_join_presence_correlation_requires_exact_room_and_nick() {
 #[test]
 fn muc_message_without_real_jid_is_not_routed() {
     let (tx, rx) = mpsc::channel();
-    let mut worker = WorkerState::new(cfg(), tx, shutdown_flag());
+    let mut worker = WorkerState::new(cfg(), tx, shutdown_signal());
     worker.room_to_agent.insert(
         Jid::new("tau-agent-1@conference.example.org")
             .expect("jid")
@@ -1165,7 +1165,7 @@ fn muc_message_without_real_jid_is_not_routed() {
 #[test]
 fn muc_room_identity_uses_stable_session_and_agent() {
     let (tx, _rx) = mpsc::channel();
-    let worker = WorkerState::new(cfg(), tx, shutdown_flag());
+    let worker = WorkerState::new(cfg(), tx, shutdown_signal());
     let room = worker
         .muc_room_for(&"session-1".into(), &agent_id("agent-1"))
         .expect("room");
@@ -1181,7 +1181,7 @@ fn muc_room_identity_uses_stable_session_and_agent() {
 #[test]
 fn muc_room_identity_hashes_full_long_agent_ids() {
     let (tx, _rx) = mpsc::channel();
-    let worker = WorkerState::new(cfg(), tx, shutdown_flag());
+    let worker = WorkerState::new(cfg(), tx, shutdown_signal());
     let first = agent_id(&format!("{}{}", "a".repeat(48), "b".repeat(16)));
     let second = agent_id(&format!("{}{}", "a".repeat(48), "c".repeat(16)));
 
@@ -1203,7 +1203,7 @@ fn muc_room_identity_hashes_full_long_agent_ids() {
 #[test]
 fn muc_room_identity_hashes_full_long_session_ids() {
     let (tx, _rx) = mpsc::channel();
-    let worker = WorkerState::new(cfg(), tx, shutdown_flag());
+    let worker = WorkerState::new(cfg(), tx, shutdown_signal());
     let first = format!("{}{}", "s".repeat(48), "b".repeat(16));
     let second = format!("{}{}", "s".repeat(48), "c".repeat(16));
 
@@ -1226,7 +1226,7 @@ fn muc_room_identity_hashes_full_long_session_ids() {
 #[test]
 fn muc_room_identity_is_stable_across_xmpp_nodeprep_casefolding() {
     let (tx, _rx) = mpsc::channel();
-    let worker = WorkerState::new(cfg(), tx, shutdown_flag());
+    let worker = WorkerState::new(cfg(), tx, shutdown_signal());
     let uppercase = worker
         .muc_room_for(&"session-1".into(), &agent_id("AgentA"))
         .expect("uppercase room");
@@ -1250,7 +1250,7 @@ fn muc_room_identity_is_stable_across_xmpp_nodeprep_casefolding() {
 #[test]
 fn muc_room_identity_drops_generated_agent_suffix_from_slug() {
     let (tx, _rx) = mpsc::channel();
-    let worker = WorkerState::new(cfg(), tx, shutdown_flag());
+    let worker = WorkerState::new(cfg(), tx, shutdown_signal());
 
     let room = worker
         .muc_room_for(&"duvp2c".into(), &agent_id("manager-Y3KG"))
@@ -1267,7 +1267,7 @@ fn muc_room_identity_drops_generated_agent_suffix_from_slug() {
 #[test]
 fn muc_room_collision_does_not_overwrite_existing_routing() {
     let (tx, _rx) = mpsc::channel();
-    let mut worker = WorkerState::new(cfg(), tx, shutdown_flag());
+    let mut worker = WorkerState::new(cfg(), tx, shutdown_signal());
     let room = worker
         .muc_room_for(&"session-1".into(), &agent_id("agent-1"))
         .expect("room");
@@ -1288,7 +1288,7 @@ fn muc_room_collision_does_not_overwrite_existing_routing() {
 #[test]
 fn muc_room_collision_does_not_overwrite_pending_join() {
     let (tx, _rx) = mpsc::channel();
-    let mut worker = WorkerState::new(cfg(), tx, shutdown_flag());
+    let mut worker = WorkerState::new(cfg(), tx, shutdown_signal());
     let room = worker
         .muc_room_for(&"session-1".into(), &agent_id("agent-1"))
         .expect("room");
@@ -1318,7 +1318,7 @@ fn muc_room_identity_is_bounded_and_xmpp_localpart_safe() {
     let (tx, _rx) = mpsc::channel();
     let mut cfg = cfg();
     cfg.muc.room_prefix = "x".repeat(48);
-    let worker = WorkerState::new(cfg, tx, shutdown_flag());
+    let worker = WorkerState::new(cfg, tx, shutdown_signal());
 
     let room = worker
         .muc_room_for(
@@ -1372,7 +1372,7 @@ fn config_prefix_sanitization_uses_call_site_fallbacks() {
 /// in-flight XMPP operation can be interrupted before cleanup is attempted.
 #[tokio::test]
 async fn worker_operations_are_cancelled_by_shutdown() {
-    let shutdown = Arc::new(AtomicBool::new(false));
+    let shutdown = shutdown_signal();
     let shutdown_trigger = Arc::clone(&shutdown);
 
     let outcome = run_until_worker_shutdown(Arc::clone(&shutdown), async move {
@@ -1380,18 +1380,38 @@ async fn worker_operations_are_cancelled_by_shutdown() {
     });
     tokio::spawn(async move {
         tokio::time::sleep(Duration::from_millis(10)).await;
-        shutdown_trigger.store(true, Ordering::Relaxed);
+        shutdown_trigger.request();
     });
 
     assert_eq!(outcome.await, WorkerRunOutcome::Shutdown);
 }
 
-/// Best-effort helper operations also observe the shutdown flag directly so
+/// Shutdown waiters wake from notification promptly instead of relying on the
+/// removed polling interval; this prevents reintroducing tau-agent-t48g.
+#[tokio::test]
+async fn shutdown_signal_wakes_waiters_without_polling() {
+    let shutdown = shutdown_signal();
+    let waiter_shutdown = Arc::clone(&shutdown);
+    let waiter = tokio::spawn(async move {
+        waiter_shutdown.wait().await;
+    });
+
+    tokio::task::yield_now().await;
+    shutdown.request();
+
+    tokio::time::timeout(Duration::from_millis(25), waiter)
+        .await
+        .expect("shutdown signal should wake faster than the old polling interval")
+        .expect("shutdown waiter task should not panic");
+}
+
+/// Best-effort helper operations also observe the shutdown signal directly so
 /// lower-priority notices can be skipped once cleanup starts.
 #[tokio::test]
 async fn best_effort_helper_operations_are_cancelled_by_shutdown() {
     let (tx, _rx) = mpsc::channel();
-    let shutdown = Arc::new(AtomicBool::new(true));
+    let shutdown = shutdown_signal();
+    shutdown.request();
     let worker = WorkerState::new(cfg(), tx, Arc::clone(&shutdown));
 
     let err = worker
@@ -1429,7 +1449,7 @@ fn muc_invite_message_contains_mediated_invite_payload() {
 #[test]
 fn allowed_muc_message_routes_prompt() {
     let (tx, rx) = mpsc::channel();
-    let mut worker = WorkerState::new(cfg(), tx, shutdown_flag());
+    let mut worker = WorkerState::new(cfg(), tx, shutdown_signal());
     let room = Jid::new("tau-agent-1@conference.example.org")
         .expect("jid")
         .to_bare();
@@ -1585,7 +1605,7 @@ fn online_state_updates_direct_resource_full_jid() {
     let (tx, _rx) = mpsc::channel();
     let mut cfg = cfg();
     cfg.routing_mode = RoutingMode::DirectResource;
-    let mut worker = WorkerState::new(cfg, tx, shutdown_flag());
+    let mut worker = WorkerState::new(cfg, tx, shutdown_signal());
     worker.conversations.insert(
         agent_id("agent-1"),
         Conversation::Direct {
@@ -1647,7 +1667,7 @@ fn direct_message_requires_exact_bound_full_jid() {
     let (tx, rx) = mpsc::channel();
     let mut cfg = cfg();
     cfg.routing_mode = RoutingMode::DirectResource;
-    let mut worker = WorkerState::new(cfg, tx, shutdown_flag());
+    let mut worker = WorkerState::new(cfg, tx, shutdown_signal());
     let bound = Jid::new("tau@example.org/tau-resource").expect("jid");
     worker.bound_jid = Some(bound.clone());
     worker.conversations.insert(
@@ -1683,7 +1703,7 @@ async fn direct_registration_rejects_second_agent() {
     let (tx, _rx) = mpsc::channel();
     let mut cfg = cfg();
     cfg.routing_mode = RoutingMode::DirectResource;
-    let mut worker = WorkerState::new(cfg, tx, shutdown_flag());
+    let mut worker = WorkerState::new(cfg, tx, shutdown_signal());
     worker.bound_jid = Some(Jid::new("tau@example.org/tau-resource").expect("jid"));
     worker.conversations.insert(
         agent_id("agent-1"),
@@ -1708,7 +1728,7 @@ async fn direct_registration_rejects_second_agent() {
 #[test]
 fn removing_muc_conversation_tracks_leave_and_clears_routing() {
     let (tx, _rx) = mpsc::channel();
-    let mut worker = WorkerState::new(cfg(), tx, shutdown_flag());
+    let mut worker = WorkerState::new(cfg(), tx, shutdown_signal());
     let agent = agent_id("agent-1");
     let room = Jid::new("tau-agent-1@conference.example.org")
         .expect("jid")

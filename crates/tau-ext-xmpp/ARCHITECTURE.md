@@ -59,7 +59,9 @@ conversation exists after readiness the tool still fails with the explicit
 Harness disconnect and extension drop request worker-wide shutdown. In-flight
 command, reconnect, readiness, join, rejoin, stanza-send, and best-effort notice
 work must be interrupted or bounded so the worker can prioritize unavailable MUC
-leave presence under the remaining cleanup budget.
+leave presence under the remaining cleanup budget. Shutdown wakeups are
+event-driven: async worker paths wait on notification instead of periodic
+polling, while synchronous paths keep a cheap requested-state check.
 
 Incoming XMPP text is emitted as `extension.prompt_submit_request`. The harness
 validates the target loaded agent and owns the durable prompt fact. The

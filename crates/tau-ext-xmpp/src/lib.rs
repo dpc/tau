@@ -61,7 +61,6 @@ const READY_RESPONSE_SLACK: Duration = Duration::from_secs(1);
 const STANZA_TIMEOUT: Duration = Duration::from_secs(20);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 const WORKER_SHUTDOWN_CLEANUP_TIMEOUT: Duration = Duration::from_secs(4);
-const SHUTDOWN_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const MUC_OWNER_NS: &str = "http://jabber.org/protocol/muc#owner";
 const MUC_ROOM_DISAMBIGUATOR_BYTES: usize = 5;
 const MUC_SESSION_SLUG_MAX_CHARS: usize = 16;
@@ -124,6 +123,50 @@ impl Output {
     }
 }
 
+/// Shared shutdown state that supports both synchronous checks and async
+/// wakeups.
+struct ShutdownSignal {
+    /// Fast flag used by synchronous call sites that cannot await.
+    requested: AtomicBool,
+    /// Wakes async worker tasks as soon as shutdown is requested.
+    notify: tokio::sync::Notify,
+}
+
+impl ShutdownSignal {
+    /// Create a shutdown signal in the running state.
+    fn new() -> Self {
+        Self {
+            requested: AtomicBool::new(false),
+            notify: tokio::sync::Notify::new(),
+        }
+    }
+
+    /// Return whether shutdown has already been requested.
+    fn is_requested(&self) -> bool {
+        self.requested.load(Ordering::Relaxed)
+    }
+
+    /// Request shutdown and wake async waiters immediately.
+    fn request(&self) {
+        self.requested.store(true, Ordering::Relaxed);
+        self.notify.notify_waiters();
+    }
+
+    /// Wait until shutdown is requested without polling.
+    async fn wait(&self) {
+        loop {
+            // Create the notification future before checking the flag: `notify_waiters()`
+            // does not buffer for future waiters, so this ordering prevents missing a
+            // concurrent request between the check and await.
+            let notified = self.notify.notified();
+            if self.is_requested() {
+                return;
+            }
+            notified.await;
+        }
+    }
+}
+
 /// Small bridge surface used by the extension and faked by unit tests.
 trait XmppBridge: Send + Sync + 'static {
     /// Ensure the underlying XMPP task is started.
@@ -131,7 +174,7 @@ trait XmppBridge: Send + Sync + 'static {
         &self,
         cfg: RuntimeConfig,
         output: Output,
-        shutdown: Arc<AtomicBool>,
+        shutdown: Arc<ShutdownSignal>,
     ) -> Result<(), String>;
 
     /// Register one agent conversation and return its XMPP address.
@@ -459,8 +502,8 @@ struct Extension {
     bridge: Arc<dyn XmppBridge>,
     /// Output channel toward the harness.
     output: Output,
-    /// Shared shutdown flag.
-    shutdown: Arc<AtomicBool>,
+    /// Shared shutdown signal.
+    shutdown: Arc<ShutdownSignal>,
 }
 
 impl Extension {
@@ -469,7 +512,7 @@ impl Extension {
             state: Arc::new(Mutex::new(State::default())),
             bridge,
             output: output.into(),
-            shutdown: Arc::new(AtomicBool::new(false)),
+            shutdown: Arc::new(ShutdownSignal::new()),
         }
     }
 
@@ -644,7 +687,7 @@ impl Extension {
 
 impl Drop for Extension {
     fn drop(&mut self) {
-        self.shutdown.store(true, Ordering::Relaxed);
+        self.shutdown.request();
         if let Err(error) = self.bridge.shutdown(SHUTDOWN_TIMEOUT) {
             tracing::warn!(target: LOG_TARGET, %error, "xmpp bridge shutdown did not finish cleanly");
         }
@@ -658,8 +701,8 @@ struct LiveXmppBridge {
     command_tx: Mutex<Option<mpsc::Sender<XmppCommand>>>,
     /// Running worker thread and completion notification.
     worker: Mutex<Option<XmppWorkerThread>>,
-    /// Shared shutdown flag used by the running worker.
-    shutdown: Mutex<Option<Arc<AtomicBool>>>,
+    /// Shared shutdown signal used by the running worker.
+    shutdown: Mutex<Option<Arc<ShutdownSignal>>>,
 }
 
 struct XmppWorkerThread {
@@ -705,7 +748,7 @@ impl XmppBridge for LiveXmppBridge {
         &self,
         cfg: RuntimeConfig,
         output: Output,
-        shutdown: Arc<AtomicBool>,
+        shutdown: Arc<ShutdownSignal>,
     ) -> Result<(), String> {
         let mut guard = self.command_tx.lock().unwrap_or_else(|e| e.into_inner());
         if guard.is_some() {
@@ -795,7 +838,7 @@ impl XmppBridge for LiveXmppBridge {
             .unwrap_or_else(|e| e.into_inner())
             .as_ref()
         {
-            shutdown.store(true, Ordering::Relaxed);
+            shutdown.request();
         }
         self.command_tx
             .lock()
@@ -832,7 +875,7 @@ fn xmpp_thread(
     cfg: RuntimeConfig,
     command_rx: mpsc::Receiver<XmppCommand>,
     output: Output,
-    shutdown: Arc<AtomicBool>,
+    shutdown: Arc<ShutdownSignal>,
 ) {
     match tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -847,7 +890,7 @@ async fn xmpp_worker(
     cfg: RuntimeConfig,
     command_rx: mpsc::Receiver<XmppCommand>,
     output: Output,
-    shutdown: Arc<AtomicBool>,
+    shutdown: Arc<ShutdownSignal>,
 ) {
     if let Err(error) = tokio_xmpp::rustls::crypto::ring::default_provider().install_default() {
         tracing::debug!(target: LOG_TARGET, ?error, "rustls provider was already installed or unavailable");
@@ -864,7 +907,7 @@ async fn xmpp_worker(
     let mut command_rx = std_to_tokio(command_rx);
     let mut worker = WorkerState::new(cfg, output, Arc::clone(&shutdown));
     loop {
-        if shutdown.load(Ordering::Relaxed) {
+        if shutdown.is_requested() {
             worker
                 .leave_all_with_timeout(&mut client, WORKER_SHUTDOWN_CLEANUP_TIMEOUT)
                 .await;
@@ -920,7 +963,12 @@ async fn xmpp_worker(
                     return;
                 }
             }
-            _ = tokio::time::sleep(Duration::from_millis(200)) => {}
+            () = wait_for_shutdown(Arc::clone(&shutdown)) => {
+                worker
+                    .leave_all_with_timeout(&mut client, WORKER_SHUTDOWN_CLEANUP_TIMEOUT)
+                    .await;
+                return;
+            }
         }
     }
 }
@@ -939,10 +987,8 @@ fn std_to_tokio<T: Send + 'static>(
     tokio_rx
 }
 
-async fn wait_for_shutdown(shutdown: Arc<AtomicBool>) {
-    while !shutdown.load(Ordering::Relaxed) {
-        tokio::time::sleep(SHUTDOWN_POLL_INTERVAL).await;
-    }
+async fn wait_for_shutdown(shutdown: Arc<ShutdownSignal>) {
+    shutdown.wait().await;
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -953,7 +999,10 @@ enum WorkerRunOutcome {
     Shutdown,
 }
 
-async fn run_until_worker_shutdown<F>(shutdown: Arc<AtomicBool>, operation: F) -> WorkerRunOutcome
+async fn run_until_worker_shutdown<F>(
+    shutdown: Arc<ShutdownSignal>,
+    operation: F,
+) -> WorkerRunOutcome
 where
     F: std::future::Future<Output = ()>,
 {
@@ -968,8 +1017,8 @@ struct WorkerState {
     cfg: RuntimeConfig,
     /// Output channel toward the harness.
     output: Output,
-    /// Shared shutdown flag used to cancel long best-effort operations.
-    shutdown: Arc<AtomicBool>,
+    /// Shared shutdown signal used to cancel long best-effort operations.
+    shutdown: Arc<ShutdownSignal>,
     /// Server-returned bound JID.
     bound_jid: Option<Jid>,
     /// Registered conversations.
@@ -984,7 +1033,7 @@ struct WorkerState {
 
 impl WorkerState {
     /// Create a worker state.
-    fn new(cfg: RuntimeConfig, output: impl Into<Output>, shutdown: Arc<AtomicBool>) -> Self {
+    fn new(cfg: RuntimeConfig, output: impl Into<Output>, shutdown: Arc<ShutdownSignal>) -> Self {
         Self {
             cfg,
             output: output.into(),
@@ -1176,7 +1225,7 @@ impl WorkerState {
 
     /// Return whether shutdown has been requested.
     fn shutdown_requested(&self) -> bool {
-        self.shutdown.load(Ordering::Relaxed)
+        self.shutdown.is_requested()
     }
 
     /// Run a best-effort operation only while shutdown has not been requested.
@@ -2020,7 +2069,7 @@ where
             ext: Extension::new(bridge, handle),
         },
     )?;
-    state.ext.shutdown.store(true, Ordering::Relaxed);
+    state.ext.shutdown.request();
     Ok(())
 }
 
