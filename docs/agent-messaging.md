@@ -92,7 +92,11 @@ Task result text.
 </response>
 ```
 
-The `agent_start` tool result only confirms metadata such as `self_agent_id` and `sub_agent_id`; response text arrives through watch notifications. Disable watching explicitly when later responses are no longer wanted.
+The `agent_start` tool result only confirms metadata such as `self_agent_id` and
+`sub_agent_id`; response text arrives through watch notifications. Watches are
+session-local runtime state: they are dropped on session shutdown, including a
+session switch such as `/session new`. Disable watching explicitly when later
+responses in the same session are no longer wanted.
 
 Disable watching with:
 

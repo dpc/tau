@@ -102,8 +102,8 @@ fn agent_start_spec_advertises_only_current_tool_name() {
     let description = agent_start_tool_spec()
         .description
         .expect("agent_start description");
-    assert!(description.contains("delivered asynchronously via `agent_watch`"));
-    assert!(description.contains("until the caller disables the watch"));
+    assert!(description.contains("delivered asynchronously via session-local `agent_watch`"));
+    assert!(description.contains("until the caller disables the watch or the session ends"));
     assert!(description.contains("metadata"));
     assert!(!description.contains("return its final response"));
 }
@@ -124,7 +124,7 @@ fn agent_watch_spec_is_advertised_and_requires_agent_id_and_enable() {
     let description = agent_watch_tool_spec()
         .description
         .expect("agent_watch description");
-    assert!(description.contains("persistent async notifications"));
+    assert!(description.contains("session-local async notifications"));
     assert!(description.contains("automatically enables a watch"));
     assert!(description.contains("enable: false"));
     assert_eq!(required, vec!["agent_id", "enable"]);
@@ -384,8 +384,10 @@ fn cancel_completed_request_state_is_owner_scoped() {
 }
 
 /// Ensures session shutdown drops runtime-only bookkeeping for abandoned
-/// in-flight tools and agent watches, because session switching can occur
-/// without individual terminal events for every tracked call.
+/// in-flight tools and stale `agent_watch` subscriptions, because session
+/// switching can occur without individual terminal events for every tracked
+/// call or watch. This locks down the tau-agent-ybq finding that watches must
+/// not survive `/session new`.
 #[test]
 fn session_runtime_state_cleanup_clears_in_flight_bookkeeping() {
     let mut state = BuiltinState::default();
@@ -395,6 +397,11 @@ fn session_runtime_state_cleanup_clears_in_flight_bookkeeping() {
     state
         .agent_watchers
         .entry("agent-child".to_owned())
+        .or_default()
+        .extend(["agent-parent".to_owned(), "agent-observer".to_owned()]);
+    state
+        .agent_watchers
+        .entry("agent-reviewer".to_owned())
         .or_default()
         .insert("agent-parent".to_owned());
     state.pending_delegates.insert(
