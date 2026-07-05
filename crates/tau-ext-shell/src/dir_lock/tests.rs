@@ -107,8 +107,10 @@ fn shell_auto_lock_requires_current_manual_coverage() {
     drop(guard);
 }
 
+/// Ensures unrelated waiters are not blocked behind a queued request for a
+/// different subtree while fairness is still preserved for overlapping paths.
 #[test]
-fn fifo_front_waiter_blocks_later_independent_request() {
+fn blocked_waiter_does_not_block_later_independent_request() {
     let manager = DirLockManager::default();
     manager
         .acquire_manual(
@@ -123,9 +125,9 @@ fn fifo_front_waiter_blocks_later_independent_request() {
         let manager = manager.clone();
         move || {
             manager.acquire_manual(
-                "manual-root".into(),
+                "manual-a-child".into(),
                 agent_id("agent-b"),
-                path("/repo"),
+                path("/repo/a/child"),
                 || {},
             )
         }
@@ -143,22 +145,162 @@ fn fifo_front_waiter_blocks_later_independent_request() {
             )
         }
     });
-    wait_until(|| manager.inner.state.lock().expect("state").waiters.len() == 2);
+    let guard = second.join().expect("second").expect("second acquired");
     assert_eq!(
-        manager.inner.state.lock().expect("state").automatic.len(),
-        0,
-        "later independent auto lock must not jump a blocked front waiter"
+        manager.inner.state.lock().expect("state").waiters.len(),
+        1,
+        "later independent auto lock must not stay blocked behind an unrelated waiter"
     );
+    drop(guard);
 
     manager
         .unlock_manual(&agent_id("agent-a"), Path::new("/repo/a"))
         .expect("unlock");
     first.join().expect("first").expect("first acquired");
     manager
+        .unlock_manual(&agent_id("agent-b"), Path::new("/repo/a/child"))
+        .expect("unlock child");
+}
+
+/// Ensures a later waiter that overlaps an earlier queued waiter cannot jump
+/// ahead just because it does not overlap the currently active lock.
+#[test]
+fn overlapping_waiter_stays_behind_earlier_overlapping_waiter() {
+    let manager = DirLockManager::default();
+    manager
+        .acquire_manual(
+            "manual-a".into(),
+            agent_id("agent-a"),
+            path("/repo/a"),
+            || {},
+        )
+        .expect("manual lock");
+
+    let (first_tx, first_rx) = std::sync::mpsc::channel();
+    let first = std::thread::spawn({
+        let manager = manager.clone();
+        move || {
+            let result = manager.acquire_manual(
+                "manual-root".into(),
+                agent_id("agent-b"),
+                path("/repo"),
+                || {},
+            );
+            first_tx.send(result).expect("send first waiter result");
+        }
+    });
+    wait_until(|| manager.inner.state.lock().expect("state").waiters.len() == 1);
+
+    let (second_tx, second_rx) = std::sync::mpsc::channel();
+    let second = std::thread::spawn({
+        let manager = manager.clone();
+        move || {
+            let result = manager.acquire_manual(
+                "manual-b".into(),
+                agent_id("agent-c"),
+                path("/repo/b"),
+                || {},
+            );
+            second_tx.send(result).expect("send second waiter result");
+        }
+    });
+    wait_until(|| manager.inner.state.lock().expect("state").waiters.len() == 2);
+    assert!(
+        second_rx.recv_timeout(Duration::from_millis(50)).is_err(),
+        "later overlapping waiter must stay behind earlier overlapping waiter"
+    );
+
+    manager
+        .unlock_manual(&agent_id("agent-a"), Path::new("/repo/a"))
+        .expect("unlock blocker");
+    first_rx
+        .recv_timeout(Duration::from_millis(50))
+        .expect("earlier overlapping waiter should acquire")
+        .expect("earlier overlapping waiter result");
+    assert!(
+        second_rx.recv_timeout(Duration::from_millis(50)).is_err(),
+        "later overlapping waiter must remain blocked until earlier waiter unlocks"
+    );
+
+    manager
         .unlock_manual(&agent_id("agent-b"), Path::new("/repo"))
         .expect("unlock root");
-    let guard = second.join().expect("second").expect("second acquired");
-    drop(guard);
+    second_rx
+        .recv_timeout(Duration::from_millis(50))
+        .expect("later overlapping waiter should acquire after root unlock")
+        .expect("later overlapping waiter result");
+    manager
+        .unlock_manual(&agent_id("agent-c"), Path::new("/repo/b"))
+        .expect("unlock sibling");
+    first.join().expect("first waiter thread");
+    second.join().expect("second waiter thread");
+}
+
+/// Ensures queued manual requests revalidate same-owner overlap before grant so
+/// path-local queue scans cannot create duplicate manual locks for one agent.
+#[test]
+fn queued_same_owner_manual_waiter_errors_instead_of_duplicate_lock() {
+    let manager = DirLockManager::default();
+    manager
+        .acquire_manual(
+            "manual-root".into(),
+            agent_id("agent-x"),
+            path("/repo"),
+            || {},
+        )
+        .expect("blocking manual lock");
+
+    let (first_tx, first_rx) = std::sync::mpsc::channel();
+    let first = std::thread::spawn({
+        let manager = manager.clone();
+        move || {
+            let result = manager.acquire_manual(
+                "manual-a".into(),
+                agent_id("agent-a"),
+                path("/repo/a"),
+                || {},
+            );
+            first_tx.send(result).expect("send first waiter result");
+        }
+    });
+    wait_until(|| manager.inner.state.lock().expect("state").waiters.len() == 1);
+
+    let (second_tx, second_rx) = std::sync::mpsc::channel();
+    let second = std::thread::spawn({
+        let manager = manager.clone();
+        move || {
+            let result = manager.acquire_manual(
+                "manual-a-child".into(),
+                agent_id("agent-a"),
+                path("/repo/a/child"),
+                || {},
+            );
+            second_tx.send(result).expect("send second waiter result");
+        }
+    });
+    wait_until(|| manager.inner.state.lock().expect("state").waiters.len() == 2);
+
+    manager
+        .unlock_manual(&agent_id("agent-x"), Path::new("/repo"))
+        .expect("unlock blocker");
+    first_rx
+        .recv_timeout(Duration::from_millis(50))
+        .expect("first same-owner waiter should acquire")
+        .expect("first same-owner waiter result");
+    assert_eq!(
+        second_rx
+            .recv_timeout(Duration::from_millis(50))
+            .expect("second same-owner waiter should fail"),
+        Err(ManualLockAcquireError::AlreadyHeld {
+            dir: path("/repo/a")
+        })
+    );
+
+    manager
+        .unlock_manual(&agent_id("agent-a"), Path::new("/repo/a"))
+        .expect("unlock acquired same-owner lock");
+    first.join().expect("first waiter thread");
+    second.join().expect("second waiter thread");
 }
 
 #[test]
@@ -747,10 +889,10 @@ fn filesystem_backend_release_agent_notifies_queued_only_cancellation() {
     waiter.join().expect("waiter thread");
 }
 
-/// Ensures a same-process filesystem waiter that advances the FIFO queue wakes
-/// later same-process waiters instead of making them wait for adaptive polling.
+/// Ensures the filesystem backend does not let a blocked waiter for one subtree
+/// cause global head-of-line blocking for a later unrelated path request.
 #[test]
-fn filesystem_backend_front_waiter_grant_notifies_later_waiter() {
+fn filesystem_backend_blocked_waiter_does_not_block_later_independent_request() {
     let tempdir = tempfile::TempDir::new().expect("tempdir");
     let manager = filesystem_lock_manager(tempdir.path());
     manager
@@ -769,7 +911,7 @@ fn filesystem_backend_front_waiter_grant_notifies_later_waiter() {
             let result = manager.acquire_manual(
                 "manual-b".into(),
                 agent_id("agent-b"),
-                path("/repo"),
+                path("/repo/a/child"),
                 || {},
             );
             first_tx.send(result).expect("send first waiter result");
@@ -792,28 +934,169 @@ fn filesystem_backend_front_waiter_grant_notifies_later_waiter() {
             second_tx.send(result).expect("send second waiter result");
         }
     });
-    wait_until(|| registry_waiter_count(tempdir.path()).expect("registry") == 2);
+    second_rx
+        .recv_timeout(Duration::from_millis(50))
+        .expect("later independent waiter should not be blocked globally")
+        .expect("later waiter result");
+    assert_eq!(
+        registry_waiter_count(tempdir.path()).expect("registry"),
+        1,
+        "only the overlapping waiter should remain queued"
+    );
 
     manager
         .unlock_manual(&agent_id("agent-a"), Path::new("/repo/a"))
         .expect("unlock blocker");
-    let generation_after_unlock = manager.wake_generation();
     first_rx
         .recv_timeout(Duration::from_millis(50))
-        .expect("front waiter should acquire")
-        .expect("front waiter result");
+        .expect("overlapping waiter should acquire after blocker is gone")
+        .expect("overlapping waiter result");
+    manager
+        .unlock_manual(&agent_id("agent-b"), Path::new("/repo/a/child"))
+        .expect("unlock overlapping waiter manual lock");
+    first.join().expect("first waiter thread");
+    second.join().expect("second waiter thread");
+}
+
+/// Ensures the filesystem backend keeps FIFO ordering among overlapping queued
+/// waiters even when a later waiter does not overlap the active lock.
+#[test]
+fn filesystem_backend_overlapping_waiter_stays_behind_earlier_overlapping_waiter() {
+    let tempdir = tempfile::TempDir::new().expect("tempdir");
+    let manager = filesystem_lock_manager(tempdir.path());
+    manager
+        .acquire_manual(
+            "manual-a".into(),
+            agent_id("agent-a"),
+            path("/repo/a"),
+            || {},
+        )
+        .expect("manual lock");
+
+    let (first_tx, first_rx) = std::sync::mpsc::channel();
+    let first = std::thread::spawn({
+        let manager = manager.clone();
+        move || {
+            let result = manager.acquire_manual(
+                "manual-root".into(),
+                agent_id("agent-b"),
+                path("/repo"),
+                || {},
+            );
+            first_tx.send(result).expect("send first waiter result");
+        }
+    });
+    wait_until(|| registry_waiter_count(tempdir.path()).expect("registry") == 1);
+
+    let (second_tx, second_rx) = std::sync::mpsc::channel();
+    let second = std::thread::spawn({
+        let manager = manager.clone();
+        move || {
+            let result = manager.acquire_manual(
+                "manual-b".into(),
+                agent_id("agent-c"),
+                path("/repo/b"),
+                || {},
+            );
+            second_tx.send(result).expect("send second waiter result");
+        }
+    });
+    wait_until(|| registry_waiter_count(tempdir.path()).expect("registry") == 2);
     assert!(
-        manager.wake_generation() > generation_after_unlock,
-        "front filesystem waiter grant should notify later same-process waiters"
+        second_rx.recv_timeout(Duration::from_millis(50)).is_err(),
+        "later overlapping filesystem waiter must stay queued"
     );
-    second_rx
+
+    manager
+        .unlock_manual(&agent_id("agent-a"), Path::new("/repo/a"))
+        .expect("unlock blocker");
+    first_rx
         .recv_timeout(Duration::from_millis(50))
-        .expect("later waiter should be woken promptly")
-        .expect("later waiter result");
+        .expect("earlier overlapping waiter should acquire")
+        .expect("earlier overlapping waiter result");
+    assert!(
+        second_rx.recv_timeout(Duration::from_millis(50)).is_err(),
+        "later overlapping filesystem waiter must wait for earlier waiter unlock"
+    );
 
     manager
         .unlock_manual(&agent_id("agent-b"), Path::new("/repo"))
-        .expect("unlock front waiter manual lock");
+        .expect("unlock root");
+    second_rx
+        .recv_timeout(Duration::from_millis(50))
+        .expect("later overlapping waiter should acquire after root unlock")
+        .expect("later overlapping waiter result");
+    manager
+        .unlock_manual(&agent_id("agent-c"), Path::new("/repo/b"))
+        .expect("unlock sibling");
+    first.join().expect("first waiter thread");
+    second.join().expect("second waiter thread");
+}
+
+/// Ensures the filesystem backend revalidates same-owner manual overlaps before
+/// granting queued waiters so duplicate manual locks are rejected consistently.
+#[test]
+fn filesystem_backend_queued_same_owner_manual_waiter_errors_instead_of_duplicate_lock() {
+    let tempdir = tempfile::TempDir::new().expect("tempdir");
+    let manager = filesystem_lock_manager(tempdir.path());
+    manager
+        .acquire_manual(
+            "manual-root".into(),
+            agent_id("agent-x"),
+            path("/repo"),
+            || {},
+        )
+        .expect("blocking manual lock");
+
+    let (first_tx, first_rx) = std::sync::mpsc::channel();
+    let first = std::thread::spawn({
+        let manager = manager.clone();
+        move || {
+            let result = manager.acquire_manual(
+                "manual-a".into(),
+                agent_id("agent-a"),
+                path("/repo/a"),
+                || {},
+            );
+            first_tx.send(result).expect("send first waiter result");
+        }
+    });
+    wait_until(|| registry_waiter_count(tempdir.path()).expect("registry") == 1);
+
+    let (second_tx, second_rx) = std::sync::mpsc::channel();
+    let second = std::thread::spawn({
+        let manager = manager.clone();
+        move || {
+            let result = manager.acquire_manual(
+                "manual-a-child".into(),
+                agent_id("agent-a"),
+                path("/repo/a/child"),
+                || {},
+            );
+            second_tx.send(result).expect("send second waiter result");
+        }
+    });
+    wait_until(|| registry_waiter_count(tempdir.path()).expect("registry") == 2);
+
+    manager
+        .unlock_manual(&agent_id("agent-x"), Path::new("/repo"))
+        .expect("unlock blocker");
+    first_rx
+        .recv_timeout(Duration::from_millis(50))
+        .expect("first same-owner waiter should acquire")
+        .expect("first same-owner waiter result");
+    assert_eq!(
+        second_rx
+            .recv_timeout(Duration::from_millis(50))
+            .expect("second same-owner waiter should fail"),
+        Err(ManualLockAcquireError::AlreadyHeld {
+            dir: path("/repo/a")
+        })
+    );
+
+    manager
+        .unlock_manual(&agent_id("agent-a"), Path::new("/repo/a"))
+        .expect("unlock acquired same-owner lock");
     first.join().expect("first waiter thread");
     second.join().expect("second waiter thread");
 }

@@ -38,19 +38,24 @@ automatic lock; otherwise it is read-only.
 
 The default directory-lock backend is `memory`, which coordinates only workers
 inside one ext-shell process. The optional `filesystem` backend stores the same
-manual locks, automatic locks, and FIFO waiters in a JSON registry protected by
-`fs2` file locks. Each ext-shell instance holds an exclusive lease lock under the
-registry's `instances/` directory; other instances reap registry records whose
-lease locks are no longer held. The filesystem backend therefore coordinates
-Tau/ext-shell processes on the same host and user account without treating
-timestamps as liveness proof. Filesystem `instance_id`s are internal lease
-identifiers; model/user-visible diagnostics and `owner_agent_id` recovery use
-only `AgentId`. The backend is initialized only when directory locking is
-enabled. Backend reconfiguration initializes the requested backend before
-swapping it in, so initialization failure is reported as `ConfigError` while the
-previous backend and its lock state remain active. Backend swaps are also
-rejected while automatic locks are active, because those guards release through
-the backend that granted them and must remain visible to later acquisitions.
+manual locks, automatic locks, and arrival-ordered waiters in a JSON registry
+protected by `fs2` file locks. Granting is path-local FIFO in both backends: an
+active lock blocks overlapping requests, and an earlier queued waiter only blocks
+later queued waiters whose requested directories overlap. Later unrelated
+waiters may proceed, while later overlapping waiters preserve arrival order and
+queued same-owner manual waiters revalidate duplicate-lock rules before grant.
+Each ext-shell instance holds an exclusive lease lock under the registry's
+`instances/` directory; other instances reap registry records whose lease locks
+are no longer held. The filesystem backend therefore coordinates Tau/ext-shell
+processes on the same host and user account without treating timestamps as
+liveness proof. Filesystem `instance_id`s are internal lease identifiers;
+model/user-visible diagnostics and `owner_agent_id` recovery use only `AgentId`.
+The backend is initialized only when directory locking is enabled. Backend
+reconfiguration initializes the requested backend before swapping it in, so
+initialization failure is reported as `ConfigError` while the previous backend
+and its lock state remain active. Backend swaps are also rejected while automatic
+locks are active, because those guards release through the backend that granted
+them and must remain visible to later acquisitions.
 
 The read-write inference and automatic lock acquisition happen under the
 `DirLockManager` state lock. A shell call queued as read-write must still have

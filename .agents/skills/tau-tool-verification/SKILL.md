@@ -214,7 +214,7 @@ When locking is enabled, verify all of these behaviors:
 * Missing directories and regular files are rejected before any lock is acquired.
 * Manual locks are owner-scoped by `agent_id`; a different agent cannot unlock them unless it passes `owner_agent_id` for an explicit force-unlock.
 * Repeated `update` by the same agent on the same canonical directory, an ancestor, or a child is an error. It should return `error: dir_lock_duplicate` with details headers including `blocking_directory`, `requested_directory`, and `lock_owner_id`, plus a short text payload in `output`. Same-agent automatic writer reentry under a manual lock should still complete, including while another same-agent mutating tool under that lock is still running.
-* Ancestor and child directories conflict both ways. Sibling directories do not conflict unless a blocked FIFO waiter is ahead of them.
+* Ancestor and child directories conflict both ways. Sibling directories do not conflict, even when a blocked waiter for another subtree is already queued.
 * Reads stay free: `read`, `grep`, `find`, and `ls` complete while an update lock is held.
 * Mutating tools participate when enabled: `edit`, `apply_patch`, `shell`, and `gpt_shell` wait on conflicting locks.
 * Lock waiters do not consume the ext-shell worker semaphore before their lock is available. A large number of blocked lock waiters should not prevent unrelated reads from running.
@@ -255,10 +255,11 @@ Use separate agents so owner reentry does not hide conflicts. Verify these cases
 
 * Agent A holds `root/a`; Agent B tries `dir_lock update root/a/child`. B waits until A unlocks.
 * Agent A holds `root/a/child`; Agent B tries `dir_lock update root/a`. B waits until A unlocks.
-* Agent A holds `root/a`; Agent B mutates `root/b`. B should not wait when no earlier FIFO waiter blocks the queue.
-* Agent A holds `root/a`; Agent B tries `dir_lock update root`; Agent C then tries `dir_lock update other`. C should not acquire before B, even though `other` is independent. After A unlocks, B should acquire first; C may acquire immediately after B is dequeued if it does not conflict.
+* Agent A holds `root/a`; Agent B mutates `root/b`. B should not wait.
+* Agent A holds `root/a`; Agent B tries `dir_lock update root/a/child`; Agent C then tries `dir_lock update other`. C should not wait behind B because the requested paths do not overlap. B should remain queued until A unlocks.
+* Agent A holds `root/a`; Agent B tries `dir_lock update root`; Agent C then tries `dir_lock update root/b`. C should not acquire before B because C's requested path overlaps B's earlier queued request. After A unlocks, B should acquire first; C should remain blocked until B unlocks.
 
-The FIFO check is the starvation guard. If C completes before B while B is already queued at the front, record it as a bug. Do not wait on later independent mutating tools before releasing the front blocked lock unless you intentionally want to observe head-of-line blocking; strict FIFO will park them too.
+The FIFO check is the starvation guard only among overlapping path requests. If an unrelated C waits behind B, record it as head-of-line blocking. If an overlapping C completes before B while B is already queued earlier, record it as a fairness bug.
 
 #### Phase 5: user force-unlock action
 
@@ -294,7 +295,7 @@ Report concise but complete findings:
 * Whether waiting UI/status showed the blocked directory, whether `dir_lock` failures showed the target directory, and whether auto-background plus `wait` behaved normally.
 * Whether slow acquired lock waits reported `lock_wait_duration_seconds`, and whether quick/no-wait, canceled, and abandoned paths omitted it.
 * Whether `/shell-dir-force-unlock DIRECTORY` was available, released overlapping manual locks, reported owner details, and left automatic locks alone.
-* Whether FIFO prevented later independent waiters from jumping ahead of a blocked front waiter.
+* Whether unrelated later waiters could proceed despite an earlier blocked waiter, while later overlapping waiters still stayed behind the earlier conflicting waiter.
 * Whether cancellation removed a waiting lock request and prevented the delayed mutation.
 * Whether abandoned-lock liveness errors used `error: dir_lock_abandoned`, structured details headers for `blocking_directory`, `lock_owner_id`, `idle_seconds`, and `held_seconds`, and an explanatory `output` payload, and whether active same-owner tools suppressed the abandoned-lock error.
 * Whether delegate final-answer, agent unload, and session shutdown released manual locks.

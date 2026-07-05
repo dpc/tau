@@ -189,7 +189,10 @@ struct LockState {
     manual: Vec<ManualLock>,
     /// Automatic writer locks currently held by mutating tool calls.
     automatic: Vec<AutomaticLock>,
-    /// FIFO queue of blocked memory-backend acquisitions.
+    /// Arrival-ordered memory-backend waiters.
+    ///
+    /// Granting is path-local FIFO: earlier waiters block only later requests
+    /// whose directories overlap.
     waiters: VecDeque<Waiter>,
     /// Next FIFO waiter id, unique within this process-local state.
     next_waiter_id: u64,
@@ -267,7 +270,8 @@ pub(super) enum UnlockOwnerScope {
 }
 
 /// RAII guard for an automatic writer lock. Dropping it releases the active
-/// lock and wakes the next FIFO waiter.
+/// lock and wakes queued waiters so any newly unblocked path-local request can
+/// proceed.
 #[derive(Debug)]
 pub(crate) struct AutoDirLockGuard {
     manager: DirLockManager,
@@ -536,21 +540,29 @@ impl DirLockManager {
             let Some(pos) = state.waiters.iter().position(|queued| queued.id == waiter) else {
                 return Err(LockAcquireError::Cancelled);
             };
-            if pos == 0 {
-                let queued = state.waiters.front().expect("position says front exists");
+            if state.can_grant_waiter_at(pos) {
+                let queued = state
+                    .waiters
+                    .remove(pos)
+                    .expect("position says waiter exists");
+                let id = state.add_auto(queued.owner, queued.dirs);
+                state.record_wake();
+                self.inner.changed.notify_all();
+                return Ok(AutoDirLockGuard {
+                    manager: self.clone(),
+                    token: AutoLockToken::Memory(id),
+                });
+            }
+            if !state.has_earlier_overlapping_waiter(pos) {
+                let queued = state.waiters.get(pos).expect("position says waiter exists");
                 if require_manual_cover && !state.manual_covers(&queued.owner, &queued.dirs) {
-                    state.waiters.pop_front().expect("front exists");
+                    state
+                        .waiters
+                        .remove(pos)
+                        .expect("position says waiter exists");
                     state.record_wake();
                     self.inner.changed.notify_all();
                     return Err(LockAcquireError::NotCovered);
-                }
-                if !state.has_conflict(&queued.owner, &queued.dirs, queued.kind) {
-                    let queued = state.waiters.pop_front().expect("front exists");
-                    let id = state.add_auto(queued.owner, queued.dirs);
-                    return Ok(AutoDirLockGuard {
-                        manager: self.clone(),
-                        token: AutoLockToken::Memory(id),
-                    });
                 }
                 let now = Instant::now();
                 if next_liveness_check <= now {
@@ -561,7 +573,10 @@ impl DirLockManager {
                         now,
                         policy.abandoned_after,
                     ) {
-                        state.waiters.pop_front().expect("front exists");
+                        state
+                            .waiters
+                            .remove(pos)
+                            .expect("position says waiter exists");
                         state.record_wake();
                         self.inner.changed.notify_all();
                         return Err(LockAcquireError::Abandoned(blocker));
@@ -648,23 +663,32 @@ impl DirLockManager {
             let Some(pos) = state.waiters.iter().position(|queued| queued.id == waiter) else {
                 return Err(ManualLockAcquireError::Cancelled);
             };
-            if pos == 0 {
-                let queued = state.waiters.front().expect("position says front exists");
+            if !state.has_earlier_overlapping_waiter(pos) {
+                let queued = state.waiters.get(pos).expect("position says waiter exists");
                 if let Some(held_dir) =
                     state.manual_lock_owned_overlapping(&queued.owner, &queued.dirs)
                 {
-                    state.waiters.pop_front().expect("front exists");
+                    state
+                        .waiters
+                        .remove(pos)
+                        .expect("position says waiter exists");
                     state.record_wake();
                     self.inner.changed.notify_all();
                     return Err(ManualLockAcquireError::AlreadyHeld { dir: held_dir });
                 }
-                if !state.has_conflict(&queued.owner, &queued.dirs, queued.kind) {
-                    let queued = state.waiters.pop_front().expect("front exists");
-                    state.add_manual(queued.owner, queued.dirs, Instant::now());
-                    state.record_wake();
-                    self.inner.changed.notify_all();
-                    return Ok(());
-                }
+            }
+            if state.can_grant_waiter_at(pos) {
+                let queued = state
+                    .waiters
+                    .remove(pos)
+                    .expect("position says waiter exists");
+                state.add_manual(queued.owner, queued.dirs, Instant::now());
+                state.record_wake();
+                self.inner.changed.notify_all();
+                return Ok(());
+            }
+            if !state.has_earlier_overlapping_waiter(pos) {
+                let queued = state.waiters.get(pos).expect("position says waiter exists");
                 let now = Instant::now();
                 if next_liveness_check <= now {
                     if let Some(blocker) = state.abandoned_blocker(
@@ -674,7 +698,10 @@ impl DirLockManager {
                         now,
                         policy.abandoned_after,
                     ) {
-                        state.waiters.pop_front().expect("front exists");
+                        state
+                            .waiters
+                            .remove(pos)
+                            .expect("position says waiter exists");
                         state.record_wake();
                         self.inner.changed.notify_all();
                         return Err(ManualLockAcquireError::Abandoned(blocker));
@@ -958,7 +985,8 @@ impl LockState {
 
     fn can_grant_now(&self, owner: &AgentId, dirs: &[PathBuf], kind: WaitKind) -> bool {
         let bypass_queue = self.can_bypass_queue(owner, dirs, kind);
-        (bypass_queue || self.waiters.is_empty()) && !self.has_conflict(owner, dirs, kind)
+        (bypass_queue || !self.has_overlapping_waiter(dirs))
+            && !self.has_conflict(owner, dirs, kind)
     }
 
     fn can_bypass_queue(&self, owner: &AgentId, dirs: &[PathBuf], kind: WaitKind) -> bool {
@@ -974,6 +1002,34 @@ impl LockState {
                 .iter()
                 .any(|lock| &lock.owner == owner && dir.starts_with(&lock.dir))
         })
+    }
+
+    /// Return whether the queued waiter at `pos` can acquire under path-local
+    /// FIFO fairness: active locks must not conflict, and earlier waiters only
+    /// block requests whose directories overlap.
+    fn can_grant_waiter_at(&self, pos: usize) -> bool {
+        let Some(waiter) = self.waiters.get(pos) else {
+            return false;
+        };
+        (self.can_bypass_queue(&waiter.owner, &waiter.dirs, waiter.kind)
+            || !self.has_earlier_overlapping_waiter(pos))
+            && !self.has_conflict(&waiter.owner, &waiter.dirs, waiter.kind)
+    }
+
+    fn has_overlapping_waiter(&self, dirs: &[PathBuf]) -> bool {
+        self.waiters
+            .iter()
+            .any(|waiter| dirs_overlap(&waiter.dirs, dirs))
+    }
+
+    fn has_earlier_overlapping_waiter(&self, pos: usize) -> bool {
+        let Some(waiter) = self.waiters.get(pos) else {
+            return false;
+        };
+        self.waiters
+            .iter()
+            .take(pos)
+            .any(|earlier| dirs_overlap(&earlier.dirs, &waiter.dirs))
     }
 
     fn has_conflict(&self, owner: &AgentId, dirs: &[PathBuf], kind: WaitKind) -> bool {
@@ -1573,6 +1629,11 @@ pub(crate) fn normalize_lock_dirs(mut dirs: Vec<PathBuf>) -> Vec<PathBuf> {
 
 fn paths_overlap(a: &Path, b: &Path) -> bool {
     a.starts_with(b) || b.starts_with(a)
+}
+
+fn dirs_overlap(a: &[PathBuf], b: &[PathBuf]) -> bool {
+    a.iter()
+        .any(|a_dir| b.iter().any(|b_dir| paths_overlap(a_dir, b_dir)))
 }
 
 fn dir_lock_result_value(

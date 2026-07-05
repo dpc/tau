@@ -14,7 +14,7 @@ use tau_proto::{AgentId, ToolCallId};
 use super::{
     AbandonedLock, AutoDirLockGuard, AutoLockToken, DirLockManager, ForceUnlockedLock,
     LockAcquireError, LockWaitPolicy, ManualLockAcquireError, UnlockOwnerScope, WaitKind,
-    normalize_lock_dirs, paths_overlap,
+    dirs_overlap, normalize_lock_dirs, paths_overlap,
 };
 
 const FS_REGISTRY_VERSION: u32 = 1;
@@ -78,7 +78,10 @@ struct FsRegistry {
     /// Automatic locks held only for the lifetime of active mutating tool
     /// calls.
     automatic: Vec<FsAutomaticLock>,
-    /// FIFO queue of blocked manual and automatic acquisitions.
+    /// Arrival-ordered waiters.
+    ///
+    /// Granting is path-local FIFO: earlier waiters block only later requests
+    /// whose directories overlap.
     waiters: VecDeque<FsWaiter>,
 }
 
@@ -256,24 +259,33 @@ impl FsLockBackend {
                 let Some(pos) = registry.waiters.iter().position(|queued| queued.id == id) else {
                     return Ok(FsAcquireOutcome::Cancelled);
                 };
-                if pos == 0 {
-                    let queued = registry.waiters.front().expect("front waiter");
+                if registry.can_grant_waiter_at(pos) {
+                    if admission_guard.is_none() {
+                        return Ok(FsAcquireOutcome::NeedsAdmission);
+                    }
+                    let queued = registry
+                        .waiters
+                        .remove(pos)
+                        .expect("position says waiter exists");
+                    let id = registry.add_auto(queued.owner, queued.dirs, now_ms());
+                    wake_waiters = true;
+                    return Ok(FsAcquireOutcome::Granted(id));
+                }
+                if !registry.has_earlier_overlapping_waiter(pos) {
+                    let queued = registry
+                        .waiters
+                        .get(pos)
+                        .expect("position says waiter exists");
                     if request.require_manual_cover
                         && !registry.manual_covers(&queued.owner, &queued.dirs)
                     {
-                        registry.waiters.pop_front();
+                        registry
+                            .waiters
+                            .remove(pos)
+                            .expect("position says waiter exists");
                         registry.bump();
                         wake_waiters = true;
                         return Ok(FsAcquireOutcome::NotCovered);
-                    }
-                    if !registry.has_conflict(&queued.owner, &queued.dirs, queued.kind) {
-                        if admission_guard.is_none() {
-                            return Ok(FsAcquireOutcome::NeedsAdmission);
-                        }
-                        let queued = registry.waiters.pop_front().expect("front waiter");
-                        let id = registry.add_auto(queued.owner, queued.dirs, now_ms());
-                        wake_waiters = true;
-                        return Ok(FsAcquireOutcome::Granted(id));
                     }
                     if next_liveness_check <= Instant::now()
                         && let Some(blocker) = registry.abandoned_blocker(
@@ -284,7 +296,10 @@ impl FsLockBackend {
                             policy.abandoned_after,
                         )
                     {
-                        registry.waiters.pop_front();
+                        registry
+                            .waiters
+                            .remove(pos)
+                            .expect("position says waiter exists");
                         registry.bump();
                         wake_waiters = true;
                         return Ok(FsAcquireOutcome::Abandoned(blocker));
@@ -389,25 +404,40 @@ impl FsLockBackend {
                 let Some(pos) = registry.waiters.iter().position(|queued| queued.id == id) else {
                     return Ok(FsManualOutcome::Cancelled);
                 };
-                if pos == 0 {
-                    let queued = registry.waiters.front().expect("front waiter");
+                if !registry.has_earlier_overlapping_waiter(pos) {
+                    let queued = registry
+                        .waiters
+                        .get(pos)
+                        .expect("position says waiter exists");
                     if let Some(held_dir) =
                         registry.manual_lock_owned_overlapping(&queued.owner, &queued.dirs)
                     {
-                        registry.waiters.pop_front();
+                        registry
+                            .waiters
+                            .remove(pos)
+                            .expect("position says waiter exists");
                         registry.bump();
                         wake_waiters = true;
                         return Ok(FsManualOutcome::AlreadyHeld(held_dir));
                     }
-                    if !registry.has_conflict(&queued.owner, &queued.dirs, queued.kind) {
-                        if admission_guard.is_none() {
-                            return Ok(FsManualOutcome::NeedsAdmission);
-                        }
-                        let queued = registry.waiters.pop_front().expect("front waiter");
-                        registry.add_manual(queued.owner, queued.dirs, now_ms());
-                        wake_waiters = true;
-                        return Ok(FsManualOutcome::Granted);
+                }
+                if registry.can_grant_waiter_at(pos) {
+                    if admission_guard.is_none() {
+                        return Ok(FsManualOutcome::NeedsAdmission);
                     }
+                    let queued = registry
+                        .waiters
+                        .remove(pos)
+                        .expect("position says waiter exists");
+                    registry.add_manual(queued.owner, queued.dirs, now_ms());
+                    wake_waiters = true;
+                    return Ok(FsManualOutcome::Granted);
+                }
+                if !registry.has_earlier_overlapping_waiter(pos) {
+                    let queued = registry
+                        .waiters
+                        .get(pos)
+                        .expect("position says waiter exists");
                     if next_liveness_check <= Instant::now()
                         && let Some(blocker) = registry.abandoned_blocker(
                             &queued.owner,
@@ -417,7 +447,10 @@ impl FsLockBackend {
                             policy.abandoned_after,
                         )
                     {
-                        registry.waiters.pop_front();
+                        registry
+                            .waiters
+                            .remove(pos)
+                            .expect("position says waiter exists");
                         registry.bump();
                         wake_waiters = true;
                         return Ok(FsManualOutcome::Abandoned(blocker));
@@ -710,7 +743,8 @@ impl FsRegistry {
 
     fn can_grant_now(&self, owner: &FsOwner, dirs: &[PathBuf], kind: WaitKind) -> bool {
         let bypass_queue = kind == WaitKind::Automatic && self.manual_covers(owner, dirs);
-        (bypass_queue || self.waiters.is_empty()) && !self.has_conflict(owner, dirs, kind)
+        (bypass_queue || !self.has_overlapping_waiter(dirs))
+            && !self.has_conflict(owner, dirs, kind)
     }
 
     fn manual_covers(&self, owner: &FsOwner, dirs: &[PathBuf]) -> bool {
@@ -719,6 +753,35 @@ impl FsRegistry {
                 .iter()
                 .any(|lock| &lock.owner == owner && dir.starts_with(&lock.dir))
         })
+    }
+
+    /// Return whether the queued waiter at `pos` can acquire under path-local
+    /// FIFO fairness: active locks must not conflict, and earlier waiters only
+    /// block requests whose directories overlap.
+    fn can_grant_waiter_at(&self, pos: usize) -> bool {
+        let Some(waiter) = self.waiters.get(pos) else {
+            return false;
+        };
+        let bypass_queue =
+            waiter.kind == WaitKind::Automatic && self.manual_covers(&waiter.owner, &waiter.dirs);
+        (bypass_queue || !self.has_earlier_overlapping_waiter(pos))
+            && !self.has_conflict(&waiter.owner, &waiter.dirs, waiter.kind)
+    }
+
+    fn has_overlapping_waiter(&self, dirs: &[PathBuf]) -> bool {
+        self.waiters
+            .iter()
+            .any(|waiter| dirs_overlap(&waiter.dirs, dirs))
+    }
+
+    fn has_earlier_overlapping_waiter(&self, pos: usize) -> bool {
+        let Some(waiter) = self.waiters.get(pos) else {
+            return false;
+        };
+        self.waiters
+            .iter()
+            .take(pos)
+            .any(|earlier| dirs_overlap(&earlier.dirs, &waiter.dirs))
     }
 
     fn has_conflict(&self, owner: &FsOwner, dirs: &[PathBuf], kind: WaitKind) -> bool {

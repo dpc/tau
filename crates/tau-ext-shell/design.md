@@ -53,14 +53,19 @@ through `DirLockManager` so stale or missing manual coverage cannot run as
 read-write.
 
 When adding or changing directory-lock backends, keep backend-parity coverage for
-path ancestry conflicts, FIFO behavior, duplicate manual locks, same-owner
-automatic reentry, `acquire_auto_if_manual_covers` fallback, cancellation
-cleanup, release/shutdown/disable cleanup, abandoned diagnostics, and
-force-unlock behavior. Filesystem-backend tests should also cover cross-instance
-owner identity, instance-lease reaping, state-dir validation failures, backend
-reconfiguration preserving the previous backend on failure, automatic guards
-surviving backend disable/reconfiguration until drop, and read-only polling that
-does not rewrite the registry.
+path ancestry conflicts, path-local FIFO behavior, duplicate manual locks,
+same-owner automatic reentry, `acquire_auto_if_manual_covers` fallback,
+cancellation cleanup, release/shutdown/disable cleanup, abandoned diagnostics,
+and force-unlock behavior. Path-local FIFO coverage should prove both sides of
+the fairness rule: unrelated later waiters may bypass earlier blocked waiters,
+while later overlapping waiters remain behind earlier overlapping waiters.
+Queued same-owner manual requests must recheck duplicate-lock invariants before
+granting so they do not create overlapping manual locks for one owner.
+Filesystem-backend tests should also cover cross-instance owner identity,
+instance-lease reaping, state-dir validation failures, backend reconfiguration
+preserving the previous backend on failure, automatic guards surviving backend
+disable/reconfiguration until drop, and read-only polling that does not rewrite
+the registry.
 
 Filesystem-backend wait tests should cover the adaptive cross-process polling
 schedule, liveness-deadline caps, and same-process condition-variable wake/reset
