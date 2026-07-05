@@ -88,9 +88,16 @@ remain eligible for cleanup where Tau has a safe pid-liveness backend, but a
 transient connection failure must not make a running daemon permanently
 undiscoverable to external-message lookup or CLI attach.
 
+Receiver-side sender authentication must not block the central harness event
+loop. After cheap target validation, callback socket discovery and I/O run on a
+helper thread and return a harness command that sends the RPC result and commits
+the inbound projection only after the claimed sender authorizes the exact sender,
+recipient, kind, and message body fields.
+
 Tests should cover the runtime metadata active-session contract, stale/ambiguous
 discovery, untrusted peer rejection, target-session and recipient validation,
-external prompt/UI labels, and failure not publishing a sent projection.
+external prompt/UI labels, sender capability binding, non-blocking receiver-side
+authentication, and failure not publishing a sent projection.
 
 Schema-guided argument repair runs only in the pre-dispatch validation failure
 branch. The harness executes a repaired call only after the repaired arguments

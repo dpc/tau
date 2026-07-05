@@ -308,6 +308,11 @@ pub struct ExternalAgentMessageRequest {
     pub request_id: String,
     /// Stable logical message id shared by sender and recipient projections.
     pub message_id: AgentMessageId,
+    /// Sender-minted bearer capability authorizing this exact outbound message.
+    ///
+    /// The recipient harness validates this capability by calling back to the
+    /// claimed sender harness before publishing the inbound projection.
+    pub capability: String,
     /// Active session id of the sending harness.
     pub sender_session_id: SessionId,
     /// Agent id of the sender in the sending harness.
@@ -321,6 +326,45 @@ pub struct ExternalAgentMessageRequest {
     pub kind: AgentMessageKind,
     /// Message body.
     pub message: String,
+}
+
+/// Peer-to-harness RPC that asks a claimed sender harness to authenticate an
+/// external agent-message request before the recipient records it.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ExternalAgentMessageAuthRequest {
+    /// Recipient-generated request correlation id.
+    pub request_id: String,
+    /// Stable logical message id being authenticated.
+    pub message_id: AgentMessageId,
+    /// Bearer capability copied from the external message request.
+    pub capability: String,
+    /// Active session id of the claimed sending harness.
+    pub sender_session_id: SessionId,
+    /// Claimed sender agent id.
+    pub sender_id: AgentId,
+    /// Active session id expected on the receiving harness.
+    pub recipient_session_id: SessionId,
+    /// Claimed recipient agent id.
+    pub recipient_id: AgentId,
+    /// Claimed delivery source semantics.
+    #[serde(default, skip_serializing_if = "AgentMessageKind::is_default")]
+    pub kind: AgentMessageKind,
+    /// Claimed message body. The sender harness compares this with its pending
+    /// outbound message so the capability cannot be replayed with altered text.
+    pub message: String,
+}
+
+/// Harness-to-peer response for an external agent-message authentication RPC.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ExternalAgentMessageAuthResult {
+    /// Request correlation id copied from the request.
+    pub request_id: String,
+    /// True when the claimed sender harness has a matching pending outbound
+    /// message capability.
+    pub authorized: bool,
+    /// Optional bounded diagnostic explaining why authorization failed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 /// Harness-to-peer response for an external agent-message RPC.
@@ -743,6 +787,7 @@ pub enum HarnessInputMessage {
     GetRenderedToolDefinitions(GetRenderedToolDefinitions),
     ExtensionDataRequest(ExtensionDataRequest),
     ExternalAgentMessage(ExternalAgentMessageRequest),
+    ExternalAgentMessageAuth(ExternalAgentMessageAuthRequest),
 }
 
 impl HarnessInputMessage {
@@ -777,6 +822,7 @@ pub enum HarnessOutputMessage {
     RenderedToolDefinitionsResult(Box<RenderedToolDefinitionsResult>),
     ExtensionDataResult(Box<ExtensionDataResult>),
     ExternalAgentMessageResult(ExternalAgentMessageResult),
+    ExternalAgentMessageAuthResult(ExternalAgentMessageAuthResult),
 }
 
 impl HarnessOutputMessage {

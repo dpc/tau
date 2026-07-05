@@ -13,7 +13,10 @@ use tau_proto::{
 
 use crate::error::HarnessError;
 use crate::event::{ExternalMessageToolCompletedCommand, HarnessCommand, HarnessEvent};
-use crate::harness::{AgentMessageRecipientStatus, AgentToolCall, HARNESS_CONNECTION_ID, Harness};
+use crate::harness::{
+    AgentMessageRecipientStatus, AgentToolCall, HARNESS_CONNECTION_ID, Harness,
+    PendingExternalAgentMessageAuth,
+};
 
 /// Model-visible name of the harness-owned wait tool.
 pub(crate) const WAIT_TOOL_NAME: &str = "wait";
@@ -316,6 +319,7 @@ impl Harness {
         let sender_id: tau_proto::AgentId = crate::parse_agent_id(&sender_id);
         let message_id = next_agent_message_id(&sender_id);
         let request_id = format!("external-{message_id}");
+        let capability = random_external_message_capability(&mut self.agent_id_rng);
         let sent_event = (kind == tau_proto::AgentMessageKind::Message).then(|| AgentMessageSent {
             message_id: message_id.clone(),
             sender_id: sender_id.clone(),
@@ -326,9 +330,22 @@ impl Harness {
             kind,
             message: message.clone(),
         });
+        self.pending_external_message_auth.insert(
+            message_id.clone(),
+            PendingExternalAgentMessageAuth {
+                capability: capability.clone(),
+                sender_session_id: self.current_session_id.clone(),
+                sender_id: sender_id.clone(),
+                recipient_session_id: recipient_session_id.clone(),
+                recipient_id: recipient_id.clone(),
+                kind,
+                message: message.clone(),
+            },
+        );
         let request = tau_proto::ExternalAgentMessageRequest {
             request_id,
             message_id,
+            capability,
             sender_session_id: self.current_session_id.clone(),
             sender_id,
             recipient_session_id,
@@ -338,6 +355,7 @@ impl Harness {
         };
         let tx = self.tx.clone();
         thread::spawn(move || {
+            let auth_message_id = request.message_id.clone();
             let result = send_external_agent_message_request(request);
             if let Some(completion) = completion {
                 let _ = tx.send(HarnessEvent::Command(
@@ -350,6 +368,7 @@ impl Harness {
                             tool_type: completion.tool_type,
                             result,
                             details: completion.details,
+                            auth_message_id,
                             sent_event,
                         },
                     )),
@@ -359,8 +378,91 @@ impl Harness {
         Ok(())
     }
 
+    /// Authenticate a target-harness callback for a pending outbound external
+    /// message.
+    pub(crate) fn handle_external_agent_message_auth_request(
+        &mut self,
+        request: tau_proto::ExternalAgentMessageAuthRequest,
+    ) -> tau_proto::ExternalAgentMessageAuthResult {
+        let request_id = request.request_id.clone();
+        let result = self.authorize_external_agent_message(request);
+        tau_proto::ExternalAgentMessageAuthResult {
+            request_id,
+            authorized: result.is_ok(),
+            error: result.err(),
+        }
+    }
+
+    fn authorize_external_agent_message(
+        &self,
+        request: tau_proto::ExternalAgentMessageAuthRequest,
+    ) -> Result<(), String> {
+        let Some(pending) = self.pending_external_message_auth.get(&request.message_id) else {
+            return Err("unknown external message capability".to_owned());
+        };
+        if pending.capability != request.capability
+            || pending.sender_session_id != request.sender_session_id
+            || pending.sender_id != request.sender_id
+            || pending.recipient_session_id != request.recipient_session_id
+            || pending.recipient_id != request.recipient_id
+            || pending.kind != request.kind
+            || pending.message != request.message
+        {
+            return Err("external message capability does not match request".to_owned());
+        }
+        if request.sender_session_id != self.current_session_id {
+            return Err(format!(
+                "sender harness is on active session `{}`, not `{}`",
+                self.current_session_id, request.sender_session_id
+            ));
+        }
+        Ok(())
+    }
+
     /// Handle an external agent message RPC accepted from a socket client.
-    pub(crate) fn handle_external_agent_message_request(
+    pub(crate) fn start_external_agent_message_auth(
+        &mut self,
+        client_id: tau_proto::ConnectionId,
+        request: tau_proto::ExternalAgentMessageRequest,
+    ) -> Option<tau_proto::ExternalAgentMessageResult> {
+        let request_id = request.request_id.clone();
+        if let Err(error) = self.validate_external_agent_message_target(&request) {
+            return Some(tau_proto::ExternalAgentMessageResult {
+                request_id,
+                error: Some(error),
+            });
+        }
+        let tx = self.tx.clone();
+        thread::spawn(move || {
+            let result = authenticate_external_agent_message_sender(&request);
+            let _ = tx.send(HarnessEvent::Command(
+                HarnessCommand::ExternalMessageAuthCompleted(Box::new(
+                    crate::event::ExternalMessageAuthCompletedCommand {
+                        client_id,
+                        request,
+                        result,
+                    },
+                )),
+            ));
+        });
+        None
+    }
+
+    pub(crate) fn complete_external_agent_message_auth(
+        &mut self,
+        request: tau_proto::ExternalAgentMessageRequest,
+        result: Result<(), String>,
+    ) -> tau_proto::ExternalAgentMessageResult {
+        let request_id = request.request_id.clone();
+        let result = result.and_then(|()| self.receive_external_agent_message(request));
+        tau_proto::ExternalAgentMessageResult {
+            request_id,
+            error: result.err(),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn handle_external_agent_message_request_without_auth_for_test(
         &mut self,
         request: tau_proto::ExternalAgentMessageRequest,
     ) -> tau_proto::ExternalAgentMessageResult {
@@ -375,6 +477,25 @@ impl Harness {
     fn receive_external_agent_message(
         &mut self,
         request: tau_proto::ExternalAgentMessageRequest,
+    ) -> Result<(), String> {
+        self.validate_external_agent_message_target(&request)?;
+        self.publish_event(
+            Some(HARNESS_CONNECTION_ID),
+            Event::AgentMessageReceived(AgentMessageReceived {
+                message_id: request.message_id,
+                sender_id: request.sender_id,
+                sender_session_id: Some(request.sender_session_id),
+                recipient_id: request.recipient_id,
+                kind: request.kind,
+                message: request.message,
+            }),
+        );
+        Ok(())
+    }
+
+    fn validate_external_agent_message_target(
+        &self,
+        request: &tau_proto::ExternalAgentMessageRequest,
     ) -> Result<(), String> {
         if request.recipient_session_id != self.current_session_id {
             return Err(format!(
@@ -400,17 +521,6 @@ impl Harness {
                 ));
             }
         }
-        self.publish_event(
-            Some(HARNESS_CONNECTION_ID),
-            Event::AgentMessageReceived(AgentMessageReceived {
-                message_id: request.message_id,
-                sender_id: request.sender_id,
-                sender_session_id: Some(request.sender_session_id),
-                recipient_id: request.recipient_id,
-                kind: request.kind,
-                message: request.message,
-            }),
-        );
         Ok(())
     }
 
@@ -718,6 +828,82 @@ pub(crate) struct ExternalMessageToolCompletion {
     pub(crate) tool_type: ToolType,
     /// Original arguments used as error details.
     pub(crate) details: CborValue,
+}
+
+fn random_external_message_capability(rng: &mut rand::rngs::StdRng) -> String {
+    use rand::Rng as _;
+    use rand::distributions::Alphanumeric;
+
+    rng.sample_iter(Alphanumeric)
+        .take(48)
+        .map(char::from)
+        .collect()
+}
+
+fn authenticate_external_agent_message_sender(
+    request: &tau_proto::ExternalAgentMessageRequest,
+) -> Result<(), String> {
+    let harness_path =
+        crate::runtime_dir::find_harness_for_session(request.sender_session_id.as_str())
+            .map_err(|err| format!("failed to find sender harness: {err}"))?
+            .ok_or_else(|| {
+                format!(
+                    "no running daemon for sender session `{}`",
+                    request.sender_session_id
+                )
+            })?;
+    let socket = crate::runtime_dir::socket_path(&harness_path);
+    let mut peer = tau_socket::SocketPeer::connect(&socket)
+        .map_err(|err| format!("failed to connect to sender harness: {err}"))?;
+    peer.send(&tau_proto::HarnessInputMessage::Hello(tau_proto::Hello {
+        protocol_version: tau_proto::PROTOCOL_VERSION,
+        client_name: crate::harness::EXTERNAL_AGENT_MESSAGE_CLIENT_NAME.into(),
+        client_kind: tau_proto::ClientKind::External,
+    }))
+    .map_err(|err| format!("failed to send external auth hello: {err}"))?;
+    let auth_request_id = format!("auth-{}", request.request_id);
+    peer.send(&tau_proto::HarnessInputMessage::ExternalAgentMessageAuth(
+        tau_proto::ExternalAgentMessageAuthRequest {
+            request_id: auth_request_id.clone(),
+            message_id: request.message_id.clone(),
+            capability: request.capability.clone(),
+            sender_session_id: request.sender_session_id.clone(),
+            sender_id: request.sender_id.clone(),
+            recipient_session_id: request.recipient_session_id.clone(),
+            recipient_id: request.recipient_id.clone(),
+            kind: request.kind,
+            message: request.message.clone(),
+        },
+    ))
+    .map_err(|err| format!("failed to send external auth request: {err}"))?;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let Some(timeout) = deadline.checked_duration_since(Instant::now()) else {
+            return Err("timed out waiting for external message authentication".to_owned());
+        };
+        match peer
+            .recv_timeout(timeout)
+            .map_err(|err| format!("failed to receive external auth result: {err}"))?
+        {
+            tau_socket::SocketReceive::Message {
+                message: tau_proto::HarnessOutputMessage::ExternalAgentMessageAuthResult(result),
+            } if result.request_id == auth_request_id => {
+                if result.authorized {
+                    return Ok(());
+                }
+                return Err(result
+                    .error
+                    .unwrap_or_else(|| "sender rejected external message capability".to_owned()));
+            }
+            tau_socket::SocketReceive::Message { .. } => continue,
+            tau_socket::SocketReceive::Timeout => {
+                return Err("timed out waiting for external message authentication".to_owned());
+            }
+            tau_socket::SocketReceive::Closed => {
+                return Err("sender harness closed before external auth result".to_owned());
+            }
+        }
+    }
 }
 
 fn send_external_agent_message_request(

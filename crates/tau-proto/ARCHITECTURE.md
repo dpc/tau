@@ -11,7 +11,10 @@ Harness input and output messages are directionally typed. Keep request/response
 External agent-message delivery is modeled as a dedicated directional RPC
 (`external_agent_message` / `external_agent_message_result`) rather than as a
 generic `emit`. The payload carries sender and recipient session ids separately
-from slash-free `AgentId`s; do not encode `session/agent` into `AgentId`.
+from slash-free `AgentId`s; do not encode `session/agent` into `AgentId`. Sender
+authentication is a second dedicated RPC (`external_agent_message_auth`) that
+validates a per-message capability before the recipient harness trusts the
+caller-supplied sender identity, message/watch-response kind, or message body.
 
 ## Provider-visible tool responses
 

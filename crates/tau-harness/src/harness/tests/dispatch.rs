@@ -11705,16 +11705,19 @@ fn external_agent_message_request_publishes_received_projection() {
         agent_prompt_id: "external-message-target".into(),
     };
 
-    let result = h.handle_external_agent_message_request(tau_proto::ExternalAgentMessageRequest {
-        request_id: "external-ok".to_owned(),
-        message_id: "msg-external-ok".into(),
-        sender_session_id: "other-session".into(),
-        sender_id: crate::parse_agent_id("sender_agent"),
-        recipient_session_id: "s1".into(),
-        recipient_id: crate::parse_agent_id(&recipient_id),
-        kind: tau_proto::AgentMessageKind::Message,
-        message: "hello from outside".to_owned(),
-    });
+    let result = h.handle_external_agent_message_request_without_auth_for_test(
+        tau_proto::ExternalAgentMessageRequest {
+            request_id: "external-ok".to_owned(),
+            message_id: "msg-external-ok".into(),
+            capability: "cap-ok".to_owned(),
+            sender_session_id: "other-session".into(),
+            sender_id: crate::parse_agent_id("sender_agent"),
+            recipient_session_id: "s1".into(),
+            recipient_id: crate::parse_agent_id(&recipient_id),
+            kind: tau_proto::AgentMessageKind::Message,
+            message: "hello from outside".to_owned(),
+        },
+    );
 
     assert_eq!(result.request_id, "external-ok");
     assert_eq!(result.error, None);
@@ -11751,16 +11754,19 @@ fn external_agent_message_request_rejects_wrong_active_session() {
     let cid = ensure_test_user_agent(&mut h);
     let recipient_id = h.ensure_agent_id_for_agent(&cid).expect("agent id");
 
-    let result = h.handle_external_agent_message_request(tau_proto::ExternalAgentMessageRequest {
-        request_id: "external-wrong-session".to_owned(),
-        message_id: "msg-external-wrong-session".into(),
-        sender_session_id: "other-session".into(),
-        sender_id: crate::parse_agent_id("sender_agent"),
-        recipient_session_id: "not-s1".into(),
-        recipient_id: crate::parse_agent_id(&recipient_id),
-        kind: tau_proto::AgentMessageKind::Message,
-        message: "hello from outside".to_owned(),
-    });
+    let result = h.handle_external_agent_message_request_without_auth_for_test(
+        tau_proto::ExternalAgentMessageRequest {
+            request_id: "external-wrong-session".to_owned(),
+            message_id: "msg-external-wrong-session".into(),
+            capability: "cap-wrong-session".to_owned(),
+            sender_session_id: "other-session".into(),
+            sender_id: crate::parse_agent_id("sender_agent"),
+            recipient_session_id: "not-s1".into(),
+            recipient_id: crate::parse_agent_id(&recipient_id),
+            kind: tau_proto::AgentMessageKind::Message,
+            message: "hello from outside".to_owned(),
+        },
+    );
 
     assert_eq!(result.request_id, "external-wrong-session");
     assert!(result.error.expect("error").contains("active session"));
@@ -11777,16 +11783,19 @@ fn external_agent_message_request_rejects_unknown_recipient() {
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
 
-    let result = h.handle_external_agent_message_request(tau_proto::ExternalAgentMessageRequest {
-        request_id: "external-unknown".to_owned(),
-        message_id: "msg-external-unknown".into(),
-        sender_session_id: "other-session".into(),
-        sender_id: crate::parse_agent_id("sender_agent"),
-        recipient_session_id: "s1".into(),
-        recipient_id: crate::parse_agent_id("missing_agent"),
-        kind: tau_proto::AgentMessageKind::Message,
-        message: "hello from outside".to_owned(),
-    });
+    let result = h.handle_external_agent_message_request_without_auth_for_test(
+        tau_proto::ExternalAgentMessageRequest {
+            request_id: "external-unknown".to_owned(),
+            message_id: "msg-external-unknown".into(),
+            capability: "cap-unknown".to_owned(),
+            sender_session_id: "other-session".into(),
+            sender_id: crate::parse_agent_id("sender_agent"),
+            recipient_session_id: "s1".into(),
+            recipient_id: crate::parse_agent_id("missing_agent"),
+            kind: tau_proto::AgentMessageKind::Message,
+            message: "hello from outside".to_owned(),
+        },
+    );
 
     assert_eq!(result.request_id, "external-unknown");
     assert!(
@@ -11810,16 +11819,19 @@ fn external_agent_message_request_rejects_empty_message() {
     let cid = ensure_test_user_agent(&mut h);
     let recipient_id = h.ensure_agent_id_for_agent(&cid).expect("agent id");
 
-    let result = h.handle_external_agent_message_request(tau_proto::ExternalAgentMessageRequest {
-        request_id: "external-empty".to_owned(),
-        message_id: "msg-external-empty".into(),
-        sender_session_id: "other-session".into(),
-        sender_id: crate::parse_agent_id("sender_agent"),
-        recipient_session_id: "s1".into(),
-        recipient_id: crate::parse_agent_id(&recipient_id),
-        kind: tau_proto::AgentMessageKind::Message,
-        message: " \n\t ".to_owned(),
-    });
+    let result = h.handle_external_agent_message_request_without_auth_for_test(
+        tau_proto::ExternalAgentMessageRequest {
+            request_id: "external-empty".to_owned(),
+            message_id: "msg-external-empty".into(),
+            capability: "cap-empty".to_owned(),
+            sender_session_id: "other-session".into(),
+            sender_id: crate::parse_agent_id("sender_agent"),
+            recipient_session_id: "s1".into(),
+            recipient_id: crate::parse_agent_id(&recipient_id),
+            kind: tau_proto::AgentMessageKind::Message,
+            message: " \n\t ".to_owned(),
+        },
+    );
 
     assert_eq!(result.request_id, "external-empty");
     assert!(result.error.expect("error").contains("must not be empty"));
@@ -11828,8 +11840,141 @@ fn external_agent_message_request_rejects_empty_message() {
     h.shutdown().expect("shutdown");
 }
 
+/// Production external-message intake must reject invalid target-side fields
+/// before starting sender authentication. Returning `Some(result)` from
+/// `start_external_agent_message_auth` is the immediate-rejection path; `None`
+/// means a background sender-auth helper was started.
+#[test]
+fn external_agent_message_auth_start_rejects_invalid_target_before_callback() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    let cid = ensure_test_user_agent(&mut h);
+    let recipient_id = h.ensure_agent_id_for_agent(&cid).expect("agent id");
+    let client_id: tau_proto::ConnectionId = "external".into();
+
+    let base = tau_proto::ExternalAgentMessageRequest {
+        request_id: "external-preauth".to_owned(),
+        message_id: "msg-external-preauth".into(),
+        capability: "cap-preauth".to_owned(),
+        sender_session_id: "other-session".into(),
+        sender_id: crate::parse_agent_id("sender_agent"),
+        recipient_session_id: h.current_session_id.clone(),
+        recipient_id: crate::parse_agent_id(&recipient_id),
+        kind: tau_proto::AgentMessageKind::Message,
+        message: "hello".to_owned(),
+    };
+
+    let cases = [
+        (
+            tau_proto::ExternalAgentMessageRequest {
+                request_id: "external-preauth-wrong-session".to_owned(),
+                recipient_session_id: "wrong-session".into(),
+                ..base.clone()
+            },
+            "active session",
+        ),
+        (
+            tau_proto::ExternalAgentMessageRequest {
+                request_id: "external-preauth-empty".to_owned(),
+                message: " \n\t ".to_owned(),
+                ..base.clone()
+            },
+            "must not be empty",
+        ),
+        (
+            tau_proto::ExternalAgentMessageRequest {
+                request_id: "external-preauth-unknown".to_owned(),
+                recipient_id: crate::parse_agent_id("missing_agent"),
+                ..base
+            },
+            "unknown message recipient",
+        ),
+    ];
+
+    for (request, expected_error) in cases {
+        let request_id = request.request_id.clone();
+        let result = h
+            .start_external_agent_message_auth(client_id.clone(), request)
+            .expect("invalid target request should be rejected immediately");
+        assert_eq!(result.request_id, request_id);
+        assert!(result.error.expect("error").contains(expected_error));
+    }
+    assert!(session_agent_message_received_events(&h).is_empty());
+
+    h.shutdown().expect("shutdown");
+}
+
+/// Sender-harness authorization must bind the bearer capability to every
+/// security-sensitive field, especially the sender identity and watch-response
+/// kind that the target harness will render into the recipient prompt.
+#[test]
+fn external_agent_message_auth_binds_sender_identity_and_kind() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    let message_id: tau_proto::AgentMessageId = "msg-auth".into();
+    h.pending_external_message_auth.insert(
+        message_id.clone(),
+        crate::harness::PendingExternalAgentMessageAuth {
+            capability: "secret-capability".to_owned(),
+            sender_session_id: h.current_session_id.clone(),
+            sender_id: crate::parse_agent_id("sender_agent"),
+            recipient_session_id: "target-session".into(),
+            recipient_id: crate::parse_agent_id("recipient_agent"),
+            kind: tau_proto::AgentMessageKind::WatchResponse,
+            message: "authorized body".to_owned(),
+        },
+    );
+
+    let valid = tau_proto::ExternalAgentMessageAuthRequest {
+        request_id: "auth-valid".to_owned(),
+        message_id: message_id.clone(),
+        capability: "secret-capability".to_owned(),
+        sender_session_id: h.current_session_id.clone(),
+        sender_id: crate::parse_agent_id("sender_agent"),
+        recipient_session_id: "target-session".into(),
+        recipient_id: crate::parse_agent_id("recipient_agent"),
+        kind: tau_proto::AgentMessageKind::WatchResponse,
+        message: "authorized body".to_owned(),
+    };
+    let result = h.handle_external_agent_message_auth_request(valid.clone());
+    assert!(result.authorized);
+    assert_eq!(result.error, None);
+
+    let forged_kind = tau_proto::ExternalAgentMessageAuthRequest {
+        request_id: "auth-forged-kind".to_owned(),
+        kind: tau_proto::AgentMessageKind::Message,
+        ..valid.clone()
+    };
+    let result = h.handle_external_agent_message_auth_request(forged_kind);
+    assert!(!result.authorized);
+    assert!(result.error.expect("error").contains("does not match"));
+
+    let forged_sender = tau_proto::ExternalAgentMessageAuthRequest {
+        request_id: "auth-forged-sender".to_owned(),
+        sender_id: crate::parse_agent_id("attacker"),
+        ..valid.clone()
+    };
+    let result = h.handle_external_agent_message_auth_request(forged_sender);
+    assert!(!result.authorized);
+    assert!(result.error.expect("error").contains("does not match"));
+
+    let forged_body = tau_proto::ExternalAgentMessageAuthRequest {
+        request_id: "auth-forged-body".to_owned(),
+        message: "altered body".to_owned(),
+        ..valid
+    };
+    let result = h.handle_external_agent_message_auth_request(forged_body);
+    assert!(!result.authorized);
+    assert!(result.error.expect("error").contains("does not match"));
+
+    h.shutdown().expect("shutdown");
+}
+
 /// Generic clients and extensions must not be able to forge external-message
-/// RPCs without completing the narrow external-harness hello first.
+/// RPCs. Even the narrow external-harness hello only enables the RPC envelope;
+/// sender identity and kind still require a sender-issued capability.
 #[test]
 fn external_agent_message_rpc_requires_external_peer_hello() {
     let td = TempDir::new().expect("tempdir");
@@ -11840,6 +11985,7 @@ fn external_agent_message_rpc_requires_external_peer_hello() {
     let request = tau_proto::ExternalAgentMessageRequest {
         request_id: "external-forged".to_owned(),
         message_id: "msg-external-forged".into(),
+        capability: "cap-forged".to_owned(),
         sender_session_id: "other-session".into(),
         sender_id: crate::parse_agent_id("sender_agent"),
         recipient_session_id: "s1".into(),
@@ -11890,15 +12036,15 @@ fn external_agent_message_rpc_requires_external_peer_hello() {
         tau_proto::HarnessInputMessage::ExternalAgentMessage(request),
     )
     .expect("external request");
-    assert_eq!(session_agent_message_received_events(&h).len(), 1);
+    assert!(session_agent_message_received_events(&h).is_empty());
 
     h.shutdown().expect("shutdown");
 }
 
-/// A real Unix-socket external client can deliver an external agent message to
-/// another live harness through the dedicated hello plus RPC path.
+/// A real Unix-socket external client cannot deliver an external agent message
+/// unless the claimed sender harness authenticates the message capability.
 #[test]
-fn external_agent_message_rpc_delivers_over_real_socket_between_harnesses() {
+fn external_agent_message_rpc_rejects_unauthenticated_socket_sender() {
     let td = TempDir::new().expect("tempdir");
     let sender_sp = td.path().join("sender-state");
     let target_sp = td.path().join("target-state");
@@ -11932,6 +12078,7 @@ fn external_agent_message_rpc_delivers_over_real_socket_between_harnesses() {
         tau_proto::ExternalAgentMessageRequest {
             request_id: "socket-external-ok".to_owned(),
             message_id: "socket-message-ok".into(),
+            capability: "socket-capability".to_owned(),
             sender_session_id: sender.current_session_id.clone(),
             sender_id: crate::parse_agent_id("sender_agent"),
             recipient_session_id: target.current_session_id.clone(),
@@ -11953,6 +12100,9 @@ fn external_agent_message_rpc_delivers_over_real_socket_between_harnesses() {
                     .handle_client_message(&connection_id, *message)
                     .expect("handle socket message");
             }
+            Ok(HarnessEvent::Command(command)) => target
+                .handle_harness_command(command)
+                .expect("handle auth completion"),
             Ok(other) => target.log_event(&other),
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
@@ -11974,17 +12124,65 @@ fn external_agent_message_rpc_delivers_over_real_socket_between_harnesses() {
     };
 
     assert_eq!(result.request_id, "socket-external-ok");
-    assert_eq!(result.error, None);
-    let received = session_agent_message_received_events(&target);
-    assert_eq!(received.len(), 1);
-    assert_eq!(
-        received[0].sender_session_id,
-        Some(sender.current_session_id.clone())
+    assert!(
+        result
+            .error
+            .expect("authentication error")
+            .contains("no running daemon for sender session")
     );
-    assert_eq!(received[0].message, "hello over socket");
+    assert!(session_agent_message_received_events(&target).is_empty());
 
     target.shutdown().expect("shutdown target");
     sender.shutdown().expect("shutdown sender");
+}
+
+/// Receiver-side sender authentication must run off the central harness loop.
+/// A request whose claimed sender cannot authenticate should enqueue a helper
+/// and return promptly instead of blocking every other harness event until the
+/// socket/auth timeout path completes.
+#[test]
+fn external_agent_message_authentication_starts_without_blocking_client_handler() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    let cid = ensure_test_user_agent(&mut h);
+    let recipient_id = h.ensure_agent_id_for_agent(&cid).expect("agent id");
+
+    h.handle_client_message(
+        "external",
+        tau_proto::HarnessInputMessage::Hello(tau_proto::Hello {
+            protocol_version: tau_proto::PROTOCOL_VERSION,
+            client_name: crate::harness::EXTERNAL_AGENT_MESSAGE_CLIENT_NAME.into(),
+            client_kind: tau_proto::ClientKind::External,
+        }),
+    )
+    .expect("external hello");
+
+    let started = Instant::now();
+    h.handle_client_message(
+        "external",
+        tau_proto::HarnessInputMessage::ExternalAgentMessage(
+            tau_proto::ExternalAgentMessageRequest {
+                request_id: "external-nonblocking-auth".to_owned(),
+                message_id: "msg-external-nonblocking-auth".into(),
+                capability: "cap-nonblocking".to_owned(),
+                sender_session_id: "missing-sender-session".into(),
+                sender_id: crate::parse_agent_id("sender_agent"),
+                recipient_session_id: h.current_session_id.clone(),
+                recipient_id: crate::parse_agent_id(&recipient_id),
+                kind: tau_proto::AgentMessageKind::Message,
+                message: "hello".to_owned(),
+            },
+        ),
+    )
+    .expect("external request");
+    assert!(
+        started.elapsed() < std::time::Duration::from_millis(100),
+        "external auth should be delegated off-loop"
+    );
+    assert!(session_agent_message_received_events(&h).is_empty());
+
+    h.shutdown().expect("shutdown");
 }
 
 /// Sender-side external message projections should represent confirmed
@@ -12017,6 +12215,7 @@ fn external_message_send_failure_does_not_publish_sent_projection() {
     )
     .expect("start external send");
     assert!(session_agent_message_sent_events(&h).is_empty());
+    assert_eq!(h.pending_external_message_auth.len(), 1);
 
     let command = loop {
         match h
@@ -12032,6 +12231,7 @@ fn external_message_send_failure_does_not_publish_sent_projection() {
         .expect("handle completion");
 
     assert!(session_agent_message_sent_events(&h).is_empty());
+    assert!(h.pending_external_message_auth.is_empty());
     assert!(
         event_log_events(&h)
             .into_iter()
@@ -12061,6 +12261,7 @@ fn external_message_success_completion_publishes_sent_projection_and_tool_result
             tool_type: tau_proto::ToolType::Function,
             result: Ok(()),
             details: CborValue::Null,
+            auth_message_id: "delivered-message".into(),
             sent_event: Some(tau_proto::AgentMessageSent {
                 message_id: "delivered-message".into(),
                 sender_id: crate::parse_agent_id("sender_agent"),
@@ -12117,6 +12318,7 @@ fn stale_external_message_completion_after_session_switch_with_reused_ids_is_dro
             tool_type: tau_proto::ToolType::Function,
             result: Ok(()),
             details: CborValue::Null,
+            auth_message_id: "stale-message".into(),
             sent_event: Some(tau_proto::AgentMessageSent {
                 message_id: "stale-message".into(),
                 sender_id: crate::parse_agent_id("sender_agent"),

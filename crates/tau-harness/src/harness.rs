@@ -1253,6 +1253,24 @@ struct PendingActionInvocation {
     action_id: String,
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct PendingExternalAgentMessageAuth {
+    /// Sender-minted bearer capability authorizing one outbound message.
+    pub(crate) capability: String,
+    /// Sender session active when the outbound message was created.
+    pub(crate) sender_session_id: tau_proto::SessionId,
+    /// Agent id claimed as sender by the outbound message.
+    pub(crate) sender_id: tau_proto::AgentId,
+    /// Recipient session targeted by the outbound message.
+    pub(crate) recipient_session_id: tau_proto::SessionId,
+    /// Recipient agent targeted by the outbound message.
+    pub(crate) recipient_id: tau_proto::AgentId,
+    /// Delivery kind authorized by the harness-owned source path.
+    pub(crate) kind: tau_proto::AgentMessageKind,
+    /// Message body authorized by the harness-owned source path.
+    pub(crate) message: String,
+}
+
 /// Message recipient state used to report precise tool errors.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum AgentMessageRecipientStatus {
@@ -1401,6 +1419,12 @@ pub struct Harness {
         std::collections::HashMap<tau_proto::ConnectionId, Sender<WriterCommand>>,
     /// Socket clients that completed the narrow external-message RPC hello.
     external_message_peers: HashSet<tau_proto::ConnectionId>,
+    /// Pending outbound external messages keyed by logical message id.
+    ///
+    /// Target harnesses call back to authenticate sender identity and delivery
+    /// kind before accepting the inbound projection.
+    pub(crate) pending_external_message_auth:
+        HashMap<tau_proto::AgentMessageId, PendingExternalAgentMessageAuth>,
     /// A UI sent `/detach` while the harness was still in startup gating.
     /// The main event loop consumes this to preserve detach semantics after
     /// startup completes.
@@ -2023,6 +2047,7 @@ impl Harness {
             event_log: EventLog::new(),
             client_writers: HashMap::new(),
             external_message_peers: HashSet::new(),
+            pending_external_message_auth: HashMap::new(),
             startup_detach_requested: false,
             lifecycle_messages: Vec::new(),
             replayable_harness_notices: Vec::new(),
@@ -2846,6 +2871,8 @@ impl Harness {
         match command {
             HarnessCommand::ConnectExtension(command) => self.connect_extension(*command),
             HarnessCommand::ExternalMessageToolCompleted(command) => {
+                self.pending_external_message_auth
+                    .remove(&command.auth_message_id);
                 if command.session_generation != self.current_session_generation
                     || self.tool_agents.get(&command.call_id) != Some(&command.conversation_id)
                     || !self.agents.contains_key(&command.conversation_id)
@@ -2887,6 +2914,16 @@ impl Harness {
                         Some(command.details),
                     ),
                 }
+            }
+            HarnessCommand::ExternalMessageAuthCompleted(command) => {
+                let client_id = command.client_id.clone();
+                let result =
+                    self.complete_external_agent_message_auth(command.request, command.result);
+                let _ = self.bus.send_to(
+                    client_id.as_str(),
+                    None,
+                    HarnessOutputMessage::ExternalAgentMessageResult(result),
+                );
             }
         }
         Ok(())
@@ -5011,7 +5048,8 @@ impl Harness {
             | HarnessInputMessage::GetRenderedSystemPrompt(_)
             | HarnessInputMessage::GetRenderedPrompt(_)
             | HarnessInputMessage::GetRenderedToolDefinitions(_)
-            | HarnessInputMessage::ExternalAgentMessage(_) => {}
+            | HarnessInputMessage::ExternalAgentMessage(_)
+            | HarnessInputMessage::ExternalAgentMessageAuth(_) => {}
         }
         Ok(())
     }
@@ -5666,11 +5704,30 @@ impl Harness {
                 {
                     return Ok(true);
                 }
-                let result = self.handle_external_agent_message_request(request);
+                if let Some(result) = self.start_external_agent_message_auth(
+                    tau_proto::ConnectionId::from(client_id),
+                    request,
+                ) {
+                    let _ = self.bus.send_to(
+                        client_id,
+                        None,
+                        HarnessOutputMessage::ExternalAgentMessageResult(result),
+                    );
+                }
+                Ok(true)
+            }
+            HarnessInputMessage::ExternalAgentMessageAuth(request) => {
+                if !self
+                    .external_message_peers
+                    .contains(&tau_proto::ConnectionId::from(client_id))
+                {
+                    return Ok(true);
+                }
+                let result = self.handle_external_agent_message_auth_request(request);
                 let _ = self.bus.send_to(
                     client_id,
                     None,
-                    HarnessOutputMessage::ExternalAgentMessageResult(result),
+                    HarnessOutputMessage::ExternalAgentMessageAuthResult(result),
                 );
                 Ok(true)
             }

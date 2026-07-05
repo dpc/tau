@@ -147,13 +147,17 @@ Cross-harness `message` tool delivery uses a dedicated
 generic `emit`. The sending harness opens the target harness socket discovered
 from active-session runtime metadata, sends a `hello` with the narrow external
 client kind/name, then sends `external_agent_message` with `request_id`,
-`message_id`, sender session/agent identity, recipient session/agent identity,
-kind, and message body.
+`message_id`, a sender-minted per-message capability, sender session/agent
+identity, recipient session/agent identity, kind, and message body.
 
 The receiving harness accepts this RPC only from peers that completed that
 external-message hello. It validates that the requested recipient session is its
 current active session, the message is non-empty, and the recipient agent is live
-or pending before publishing the harness-owned `agent.message_received`
-projection. The result echoes `request_id` and carries an error string on
-rejection. Raw `emit` of `agent.message_sent` or `agent.message_received` remains
-forbidden.
+or pending before starting sender authentication. Authentication runs off the
+central harness loop: the receiver connects back to the claimed sender harness
+and sends `external_agent_message_auth` with the capability plus the exact bound
+message fields, including message body and message/watch-response kind. Only
+after an `external_agent_message_auth_result` authorizes those fields does the
+receiver publish the harness-owned `agent.message_received` projection. The
+result echoes `request_id` and carries an error string on rejection. Raw `emit`
+of `agent.message_sent` or `agent.message_received` remains forbidden.

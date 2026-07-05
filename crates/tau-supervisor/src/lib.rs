@@ -105,7 +105,7 @@ impl ChildExit {
 #[derive(Clone, Debug, PartialEq)]
 pub enum ReceiveOutcome {
     /// A complete extension-to-harness protocol message was decoded.
-    Message(HarnessInputMessage),
+    Message(Box<HarnessInputMessage>),
     /// No stdout message arrived before the requested timeout elapsed.
     Timeout,
     /// The child closed stdout cleanly at a protocol message boundary.
@@ -580,7 +580,7 @@ fn remove_secret_env(command: &mut Command) {
 }
 
 enum StdoutFrame {
-    Message(HarnessInputMessage),
+    Message(Box<HarnessInputMessage>),
     Closed,
 }
 
@@ -595,7 +595,10 @@ fn spawn_stdout_reader(
             loop {
                 match reader.read_message() {
                     Ok(Some(frame)) => {
-                        if sender.send(Ok(StdoutFrame::Message(frame))).is_err() {
+                        if sender
+                            .send(Ok(StdoutFrame::Message(Box::new(frame))))
+                            .is_err()
+                        {
                             return;
                         }
                     }

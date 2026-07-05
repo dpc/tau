@@ -515,7 +515,8 @@ fn handle_harness_message(
         | HarnessOutputMessage::RenderedPromptResult(_)
         | HarnessOutputMessage::RenderedToolDefinitionsResult(_)
         | HarnessOutputMessage::ExtensionDataResult(_)
-        | HarnessOutputMessage::ExternalAgentMessageResult(_) => false,
+        | HarnessOutputMessage::ExternalAgentMessageResult(_)
+        | HarnessOutputMessage::ExternalAgentMessageAuthResult(_) => false,
     }
 }
 

@@ -30,7 +30,7 @@ fn expect_message(child: &mut SupervisedChild, label: &str) -> HarnessInputMessa
         .recv_timeout(Duration::from_secs(1))
         .unwrap_or_else(|error| panic!("{label} should decode: {error}"))
     {
-        ReceiveOutcome::Message(message) => message,
+        ReceiveOutcome::Message(message) => *message,
         ReceiveOutcome::Timeout => panic!("{label} should arrive before timeout"),
         ReceiveOutcome::Closed => panic!("{label} should arrive before stdout closes"),
     }
@@ -184,9 +184,9 @@ fn stdout_reader_handles_message_burst_without_loss() {
             child
                 .recv_timeout(Duration::from_secs(1))
                 .expect("flood message should decode"),
-            ReceiveOutcome::Message(HarnessInputMessage::Ready(Ready {
+            ReceiveOutcome::Message(Box::new(HarnessInputMessage::Ready(Ready {
                 message: Some(index.to_string()),
-            }))
+            })))
         );
     }
     assert_eq!(
@@ -216,9 +216,9 @@ fn spawn_uses_configured_working_dir() {
         child
             .recv_timeout(Duration::from_secs(1))
             .expect("cwd report should decode"),
-        ReceiveOutcome::Message(HarnessInputMessage::Ready(Ready {
+        ReceiveOutcome::Message(Box::new(HarnessInputMessage::Ready(Ready {
             message: Some(working_dir.display().to_string()),
-        }))
+        })))
     );
     let exit = child
         .wait_for_exit(Duration::from_secs(2))
@@ -309,9 +309,9 @@ fn stderr_policy_null_discards_child_stderr() {
             child
                 .recv_timeout(Duration::from_secs(1))
                 .expect("stderr marker child should report readiness"),
-            ReceiveOutcome::Message(HarnessInputMessage::Ready(Ready {
+            ReceiveOutcome::Message(Box::new(HarnessInputMessage::Ready(Ready {
                 message: Some("stderr-written".to_owned()),
-            }))
+            })))
         );
         let exit = child
             .wait_for_exit(Duration::from_secs(2))
@@ -341,9 +341,9 @@ fn spawned_child_does_not_inherit_tau_secret_env() {
             child
                 .recv_timeout(Duration::from_secs(1))
                 .expect("env report should decode"),
-            ReceiveOutcome::Message(HarnessInputMessage::Ready(Ready {
+            ReceiveOutcome::Message(Box::new(HarnessInputMessage::Ready(Ready {
                 message: Some("absent".to_owned()),
-            }))
+            })))
         );
         let _exit = child
             .wait_for_exit(Duration::from_secs(2))

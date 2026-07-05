@@ -305,6 +305,9 @@ pub fn output_message_key(message: &HarnessOutputMessage) -> String {
         HarnessOutputMessage::ExternalAgentMessageResult(_) => {
             "message.external_agent_message_result".to_owned()
         }
+        HarnessOutputMessage::ExternalAgentMessageAuthResult(_) => {
+            "message.external_agent_message_auth_result".to_owned()
+        }
     }
 }
 
@@ -326,6 +329,7 @@ pub fn harness_input_message_name(message: &HarnessInputMessage) -> &'static str
         HarnessInputMessage::GetRenderedToolDefinitions(_) => "get_rendered_tool_definitions",
         HarnessInputMessage::ExtensionDataRequest(_) => "extension_data_request",
         HarnessInputMessage::ExternalAgentMessage(_) => "external_agent_message",
+        HarnessInputMessage::ExternalAgentMessageAuth(_) => "external_agent_message_auth",
     }
 }
 

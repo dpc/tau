@@ -24,6 +24,8 @@ pub(crate) enum HarnessCommand {
     ConnectExtension(Box<ExtensionConnectCommand>),
     /// Complete an asynchronous external message tool delivery attempt.
     ExternalMessageToolCompleted(Box<ExternalMessageToolCompletedCommand>),
+    /// Complete receiver-side authentication for an inbound external message.
+    ExternalMessageAuthCompleted(Box<ExternalMessageAuthCompletedCommand>),
 }
 
 /// Completion payload for asynchronous external message tool delivery.
@@ -43,8 +45,21 @@ pub(crate) struct ExternalMessageToolCompletedCommand {
     pub(crate) result: Result<(), String>,
     /// Original call arguments for error details.
     pub(crate) details: tau_proto::CborValue,
+    /// Pending sender-authentication entry to remove when the async attempt
+    /// ends.
+    pub(crate) auth_message_id: tau_proto::AgentMessageId,
     /// Sender-side projection to publish only after confirmed delivery.
     pub(crate) sent_event: Option<tau_proto::AgentMessageSent>,
+}
+
+/// Completion payload for receiver-side external-message authentication.
+pub(crate) struct ExternalMessageAuthCompletedCommand {
+    /// Socket client that sent the external message RPC.
+    pub(crate) client_id: tau_proto::ConnectionId,
+    /// Request to publish after successful sender authentication.
+    pub(crate) request: tau_proto::ExternalAgentMessageRequest,
+    /// Authentication result from the helper thread.
+    pub(crate) result: Result<(), String>,
 }
 
 /// Internal event type — all reader threads feed this into one channel.

@@ -870,7 +870,7 @@ impl PromptExecution {
 enum WorkerMessage {
     /// One typed provider frame produced by a prompt worker and awaiting main
     /// loop serialization.
-    Output(HarnessInputMessage),
+    Output(Box<HarnessInputMessage>),
     /// Marker that one prompt worker finished and freed a concurrency slot.
     PromptDone,
 }
@@ -922,9 +922,9 @@ impl HarnessInputMessageWrite {
                 .send(message)
                 .map_err(|error| std::io::Error::new(std::io::ErrorKind::BrokenPipe, error)),
             HarnessInputMessageTarget::Worker { tx, waker } => {
-                send_worker_message(tx, waker, WorkerMessage::Output(message)).map_err(|_| {
-                    std::io::Error::new(std::io::ErrorKind::BrokenPipe, "writer closed")
-                })
+                send_worker_message(tx, waker, WorkerMessage::Output(Box::new(message))).map_err(
+                    |_| std::io::Error::new(std::io::ErrorKind::BrokenPipe, "writer closed"),
+                )
             }
         }
     }
@@ -1247,7 +1247,7 @@ fn drain_worker_messages(
     loop {
         match worker_rx.try_recv() {
             Ok(WorkerMessage::Output(message)) => {
-                handle.send(message)?;
+                handle.send(*message)?;
             }
             Ok(WorkerMessage::PromptDone) => {
                 *active_prompts = active_prompts.saturating_sub(1);

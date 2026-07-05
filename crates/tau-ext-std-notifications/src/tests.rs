@@ -137,6 +137,7 @@ fn message_variant(msg: &HarnessInputMessage) -> &'static str {
         HarnessInputMessage::GetRenderedToolDefinitions(_) => "GetRenderedToolDefinitions",
         HarnessInputMessage::ExtensionDataRequest(_) => "ExtensionDataRequest",
         HarnessInputMessage::ExternalAgentMessage(_) => "ExternalAgentMessage",
+        HarnessInputMessage::ExternalAgentMessageAuth(_) => "ExternalAgentMessageAuth",
     }
 }
 

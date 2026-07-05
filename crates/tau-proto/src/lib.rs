@@ -57,7 +57,7 @@ pub use token_usage::*;
 ///
 /// Version 6 wraps opaque provider items with parsed CBOR plus an optional raw
 /// JSON replay sidecar.
-pub const PROTOCOL_VERSION: u32 = 6;
+pub const PROTOCOL_VERSION: u32 = 7;
 
 /// UI marker text for responses, thinking blocks, and tool calls that
 /// are still in progress.
