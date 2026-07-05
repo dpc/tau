@@ -282,7 +282,11 @@ fn local_socket_accepts_status_request() {
     let (mut client, server) = UnixStream::pair().expect("socket pair");
     writeln!(client, r#"{{"protocol_version":1,"kind":"status"}}"#).expect("write request");
 
-    read_gateway_socket_request(&server).expect("status request should parse");
+    assert!(
+        read_gateway_socket_request(&server)
+            .expect("status request should parse")
+            .is_some()
+    );
 }
 
 /// Ensures one local socket client cannot force unbounded request
@@ -309,12 +313,12 @@ fn local_socket_status_response_contains_core_fields() {
         next_update_offset: Some(42),
         ..GatewayDurableState::default()
     };
-    let status = Arc::new(Mutex::new(GatewayStatus::new(
+    let status = Arc::new(GatewaySocketState::new(
         &cfg,
         &durable,
         "test-stream".to_owned(),
         PathBuf::from("/tmp/test.sock"),
-    )));
+    ));
     let (mut client, server) = UnixStream::pair().expect("socket pair");
     writeln!(client, r#"{{"protocol_version":1,"kind":"status"}}"#).expect("write request");
 
@@ -330,6 +334,187 @@ fn local_socket_status_response_contains_core_fields() {
     assert_eq!(value["stream_hash"], "test-stream");
     assert_eq!(value["next_update_offset"], 42);
     assert_eq!(value["routing"], "help/status-only");
+}
+
+/// Ensures sidecar hello advertises that clients must reannounce their live
+/// registrations after connecting to this gateway process.
+#[test]
+fn sidecar_hello_requires_registration_reannouncement() {
+    let cfg = runtime_config(Some(10), [7]);
+    let durable = GatewayDurableState {
+        stream_hash: "test-stream".to_owned(),
+        ..GatewayDurableState::default()
+    };
+    let state = GatewaySocketState::new(
+        &cfg,
+        &durable,
+        "test-stream".to_owned(),
+        PathBuf::from("/tmp/test.sock"),
+    );
+
+    let response = handle_gateway_socket_request(
+        &state,
+        1,
+        GatewaySocketRequest {
+            kind: "hello".to_owned(),
+            ..GatewaySocketRequest::default()
+        },
+    );
+
+    assert_eq!(response["reannounce_required"], true);
+    assert_eq!(
+        response["heartbeat_interval_seconds"],
+        SIDECAR_HEARTBEAT_INTERVAL.as_secs()
+    );
+    assert_eq!(
+        response["registration_lease_seconds"],
+        REGISTRATION_LEASE_DURATION.as_secs()
+    );
+}
+
+/// Ensures disconnecting a sidecar prunes every route it registered so stale
+/// session/agent targets cannot remain selectable.
+#[test]
+fn sidecar_disconnect_prunes_registered_routes() {
+    let mut registry = GatewayRegistry::default();
+    let now = Instant::now();
+    registry.hello(1, now);
+    registry
+        .register_agent(1, register_request("session-a", "agent-a"), now)
+        .expect("register route");
+    registry
+        .register_agent(1, register_request("session-a", "agent-b"), now)
+        .expect("register route");
+
+    registry.disconnect(1);
+
+    let counts = registry.counts(now);
+    assert_eq!(counts.sidecars, 0);
+    assert_eq!(counts.registrations, 0);
+}
+
+/// Ensures registration leases expire when heartbeats stop, while a heartbeat
+/// refresh extends the lease for owned registrations.
+#[test]
+fn sidecar_registration_lease_expires_without_heartbeat() {
+    let mut registry = GatewayRegistry::default();
+    let now = Instant::now();
+    registry.hello(1, now);
+    registry
+        .register_agent(1, register_request("session-a", "agent-a"), now)
+        .expect("register route");
+    registry
+        .heartbeat(1, now + Duration::from_secs(5))
+        .expect("heartbeat refreshes lease");
+
+    registry.prune_expired(now + REGISTRATION_LEASE_DURATION + Duration::from_secs(1));
+    assert_eq!(registry.counts(now).registrations, 1);
+
+    registry.prune_expired(now + REGISTRATION_LEASE_DURATION + Duration::from_secs(6));
+    assert_eq!(registry.counts(now).registrations, 0);
+}
+
+/// Ensures malformed socket traffic closes the connection and removes expired
+/// registrations immediately instead of preserving stale routes until status.
+#[test]
+fn malformed_socket_request_disconnects_and_prunes_stale_routes() {
+    let state = Arc::new(test_socket_state());
+    let expired_at = Instant::now() - REGISTRATION_LEASE_DURATION - Duration::from_secs(1);
+    {
+        let mut registry = state.registry.lock().expect("registry lock");
+        registry.hello(1, expired_at);
+        registry
+            .register_agent(1, register_request("session-a", "agent-a"), expired_at)
+            .expect("register route");
+    }
+    let (mut client, server) = UnixStream::pair().expect("socket pair");
+    writeln!(client, "not-json").expect("write malformed request");
+
+    handle_gateway_socket_client(server, Arc::clone(&state));
+
+    let mut response = String::new();
+    client
+        .read_to_string(&mut response)
+        .expect("read malformed response");
+    let value: serde_json::Value = serde_json::from_str(&response).expect("response JSON");
+    assert_eq!(value["ok"], false);
+    assert_eq!(state.registry_counts().registrations, 0);
+}
+
+/// Ensures the persistent sidecar protocol supports explicit unregister while
+/// status reflects live registration counts.
+#[test]
+fn sidecar_register_unregister_and_status_update_counts() {
+    let state = test_socket_state();
+    let connection_id = 1;
+    handle_gateway_socket_request(
+        &state,
+        connection_id,
+        GatewaySocketRequest {
+            kind: "hello".to_owned(),
+            ..GatewaySocketRequest::default()
+        },
+    );
+    handle_gateway_socket_request(
+        &state,
+        connection_id,
+        register_request("session-a", "agent-a"),
+    );
+
+    let registered = handle_gateway_socket_request(
+        &state,
+        connection_id,
+        GatewaySocketRequest {
+            kind: "status".to_owned(),
+            ..GatewaySocketRequest::default()
+        },
+    );
+    assert_eq!(registered["active_registration_count"], 1);
+
+    let unregister = GatewaySocketRequest {
+        kind: "unregister_agent".to_owned(),
+        session_id: Some("session-a".to_owned()),
+        agent_id: Some("agent-a".to_owned()),
+        ..GatewaySocketRequest::default()
+    };
+    let unregister_response = handle_gateway_socket_request(&state, connection_id, unregister);
+    assert_eq!(unregister_response["ok"], true);
+
+    let unregistered = handle_gateway_socket_request(
+        &state,
+        connection_id,
+        GatewaySocketRequest {
+            kind: "status".to_owned(),
+            ..GatewaySocketRequest::default()
+        },
+    );
+    assert_eq!(unregistered["active_registration_count"], 0);
+}
+
+/// Ensures goodbye on a persistent sidecar socket closes the connection and
+/// prunes routes that were still registered by that sidecar.
+#[test]
+fn sidecar_goodbye_disconnect_prunes_registered_routes() {
+    let state = Arc::new(test_socket_state());
+    let (mut client, server) = UnixStream::pair().expect("socket pair");
+    writeln!(client, r#"{{"protocol_version":1,"kind":"hello"}}"#).expect("write hello");
+    writeln!(
+        client,
+        r#"{{"protocol_version":1,"kind":"register_agent","session_id":"session-a","agent_id":"agent-a"}}"#
+    )
+    .expect("write register");
+    writeln!(client, r#"{{"protocol_version":1,"kind":"goodbye"}}"#).expect("write goodbye");
+
+    handle_gateway_socket_client(server, Arc::clone(&state));
+
+    let mut response = String::new();
+    client
+        .read_to_string(&mut response)
+        .expect("read goodbye responses");
+    assert!(response.lines().any(|line| {
+        serde_json::from_str::<serde_json::Value>(line).expect("response JSON")["goodbye"] == true
+    }));
+    assert_eq!(state.registry_counts().registrations, 0);
 }
 
 /// Fake Telegram client state captured by gateway tests.
@@ -411,19 +596,19 @@ impl GatewayFixture {
         let client = Arc::new(FakeGatewayClient::default());
         let gateway_client: Arc<dyn TelegramClient> = client.clone();
         let tempdir = tempfile::tempdir().expect("tempdir");
-        let status = Arc::new(Mutex::new(GatewayStatus::new(
+        let socket_state = Arc::new(GatewaySocketState::new(
             &cfg,
             &durable,
             "test-stream".to_owned(),
             PathBuf::from("/tmp/test.sock"),
-        )));
+        ));
         Self {
             gateway: Gateway {
                 cfg,
                 client: gateway_client,
                 state_path: tempdir.path().join("state.json"),
                 durable,
-                status,
+                socket_state,
                 _resources: GatewayResources::Test,
             },
             client,
@@ -463,4 +648,31 @@ fn message(user_id: i64, chat_id: i64, text: &str) -> TgMessage {
         from_name: Some("tester".to_owned()),
         text: Some(text.to_owned()),
     }
+}
+
+/// Build a gateway socket register_agent request for tests.
+fn register_request(session_id: &str, agent_id: &str) -> GatewaySocketRequest {
+    GatewaySocketRequest {
+        kind: "register_agent".to_owned(),
+        session_id: Some(session_id.to_owned()),
+        agent_id: Some(agent_id.to_owned()),
+        display_name: Some("tester".to_owned()),
+        tool_namespace: Some("telegram".to_owned()),
+        ..GatewaySocketRequest::default()
+    }
+}
+
+/// Build a gateway socket state for protocol tests.
+fn test_socket_state() -> GatewaySocketState {
+    let cfg = runtime_config(Some(10), [7]);
+    let durable = GatewayDurableState {
+        stream_hash: "test-stream".to_owned(),
+        ..GatewayDurableState::default()
+    };
+    GatewaySocketState::new(
+        &cfg,
+        &durable,
+        "test-stream".to_owned(),
+        PathBuf::from("/tmp/test.sock"),
+    )
 }

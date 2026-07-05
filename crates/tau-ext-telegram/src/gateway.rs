@@ -1,11 +1,12 @@
 //! Standalone Telegram gateway daemon MVP.
 //!
-//! This module intentionally implements only the single-owner gateway slice:
-//! stream locking, durable update offsets, Telegram allowlist/chat policy,
-//! help/status command handling, and a private local status socket. Prompt
-//! routing and gateway-client sidecars are deliberately left for later stages.
+//! This module implements the single-owner gateway slice: stream locking,
+//! durable update offsets, Telegram allowlist/chat policy, help/status command
+//! handling, and private local socket support for gateway-side sidecar
+//! heartbeat and registration-lease bookkeeping. Prompt routing and outbound
+//! gateway sends are deliberately left for later stages.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
@@ -13,8 +14,9 @@ use std::io::{Read, Write};
 use std::os::unix::fs::{FileTypeExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use std::{env, thread};
 
 use crate::stream_owner::{
@@ -36,6 +38,12 @@ const SOCKET_PROTOCOL_VERSION: u32 = 1;
 
 /// Maximum bytes read from one local socket request.
 const MAX_SOCKET_REQUEST_BYTES: usize = 8192;
+
+/// Interval sidecars should use for gateway heartbeats.
+const SIDECAR_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
+
+/// Maximum time a registration remains live without a sidecar heartbeat.
+const REGISTRATION_LEASE_DURATION: Duration = Duration::from_secs(30);
 
 /// Default environment variable carrying the bot token.
 const DEFAULT_BOT_TOKEN_ENV: &str = "TELEGRAM_BOT_TOKEN";
@@ -245,8 +253,8 @@ struct Gateway {
     state_path: PathBuf,
     /// Mutable durable gateway state.
     durable: GatewayDurableState,
-    /// Shared status snapshot served by the local socket.
-    status: Arc<Mutex<GatewayStatus>>,
+    /// Shared socket state served by the local socket.
+    socket_state: Arc<GatewaySocketState>,
     /// Resources that keep production stream/socket ownership alive.
     _resources: GatewayResources,
 }
@@ -286,19 +294,19 @@ impl Gateway {
             durable.save(&state_path)?;
         }
         let socket_path = config.runtime_dir.join(format!("{stream_hash}.sock"));
-        let status = Arc::new(Mutex::new(GatewayStatus::new(
+        let socket_state = Arc::new(GatewaySocketState::new(
             &cfg,
             &durable,
             stream_hash.clone(),
             socket_path.clone(),
-        )));
-        let socket_guard = GatewaySocketGuard::bind(socket_path, Arc::clone(&status))?;
+        ));
+        let socket_guard = GatewaySocketGuard::bind(socket_path, Arc::clone(&socket_state))?;
         Ok(Self {
             cfg,
             client,
             state_path,
             durable,
-            status,
+            socket_state,
             _resources: GatewayResources::Production {
                 _update_stream_lock: update_stream_lock,
                 _socket_guard: socket_guard,
@@ -310,11 +318,7 @@ impl Gateway {
     fn run_forever(mut self) -> Result<(), Box<dyn Error>> {
         eprintln!(
             "Telegram gateway started; local socket: {}",
-            self.status
-                .lock()
-                .expect("status lock")
-                .socket_path
-                .display()
+            self.socket_state.socket_path.display()
         );
         loop {
             match self
@@ -377,9 +381,8 @@ impl Gateway {
     fn persist(&mut self) -> Result<(), String> {
         self.durable.save(&self.state_path)?;
         let stream_hash = self.durable.stream_hash.clone();
-        let socket_path = self.status.lock().expect("status lock").socket_path.clone();
-        *self.status.lock().expect("status lock") =
-            GatewayStatus::new(&self.cfg, &self.durable, stream_hash, socket_path);
+        self.socket_state
+            .set_status(GatewayStatus::new(&self.cfg, &self.durable, stream_hash));
         Ok(())
     }
 
@@ -684,8 +687,6 @@ struct GatewayStatus {
     protocol_version: u32,
     /// Non-secret stream fingerprint.
     stream_hash: String,
-    /// Filesystem path of the private gateway socket.
-    socket_path: PathBuf,
     /// Number of configured allowlisted users.
     allowed_user_count: usize,
     /// Optional configured chat id.
@@ -700,22 +701,28 @@ struct GatewayStatus {
     processed_update_count: u64,
     /// Rejected update count.
     rejected_update_count: u64,
+    /// Number of currently connected sidecars.
+    active_sidecar_count: usize,
+    /// Number of currently live agent registrations.
+    active_registration_count: usize,
+    /// Number of registrations carrying optional display metadata.
+    active_registration_metadata_count: usize,
+    /// Oldest live registration age in seconds.
+    oldest_registration_age_seconds: Option<u64>,
+    /// Sidecar heartbeat interval advertised to clients.
+    heartbeat_interval_seconds: u64,
+    /// Registration lease advertised to clients.
+    registration_lease_seconds: u64,
     /// Human-readable MVP routing stage.
     routing: &'static str,
 }
 
 impl GatewayStatus {
     /// Build a fresh status snapshot.
-    fn new(
-        cfg: &RuntimeConfig,
-        durable: &GatewayDurableState,
-        stream_hash: String,
-        socket_path: PathBuf,
-    ) -> Self {
+    fn new(cfg: &RuntimeConfig, durable: &GatewayDurableState, stream_hash: String) -> Self {
         Self {
             protocol_version: SOCKET_PROTOCOL_VERSION,
             stream_hash,
-            socket_path,
             allowed_user_count: cfg.allowed_user_ids.len(),
             configured_chat_id: cfg.configured_chat_id,
             linked_chat_id: durable.linked_chat.map(|link| link.chat_id),
@@ -723,7 +730,313 @@ impl GatewayStatus {
             recent_update_count: durable.recent_update_ids.len(),
             processed_update_count: durable.processed_update_count,
             rejected_update_count: durable.rejected_update_count,
+            active_sidecar_count: 0,
+            active_registration_count: 0,
+            active_registration_metadata_count: 0,
+            oldest_registration_age_seconds: None,
+            heartbeat_interval_seconds: SIDECAR_HEARTBEAT_INTERVAL.as_secs(),
+            registration_lease_seconds: REGISTRATION_LEASE_DURATION.as_secs(),
             routing: "help/status-only",
+        }
+    }
+}
+
+/// Shared state used by the gateway local socket accept loop.
+struct GatewaySocketState {
+    /// Filesystem path of the private gateway socket.
+    socket_path: PathBuf,
+    /// Latest durable gateway status snapshot.
+    status: Mutex<GatewayStatus>,
+    /// Live sidecar connection and registration registry.
+    registry: Mutex<GatewayRegistry>,
+    /// Monotonic connection id allocator.
+    next_connection_id: AtomicU64,
+    /// Per-process generation that tells reconnecting sidecars to reannounce.
+    generation: String,
+}
+
+impl GatewaySocketState {
+    /// Build shared socket state for a newly started gateway process.
+    fn new(
+        cfg: &RuntimeConfig,
+        durable: &GatewayDurableState,
+        stream_hash: String,
+        socket_path: PathBuf,
+    ) -> Self {
+        Self {
+            socket_path,
+            status: Mutex::new(GatewayStatus::new(cfg, durable, stream_hash)),
+            registry: Mutex::new(GatewayRegistry::default()),
+            next_connection_id: AtomicU64::new(1),
+            generation: gateway_generation(),
+        }
+    }
+
+    /// Replace the durable status fields after offset/state persistence.
+    fn set_status(&self, mut status: GatewayStatus) {
+        let counts = self.registry_counts();
+        status.active_sidecar_count = counts.sidecars;
+        status.active_registration_count = counts.registrations;
+        status.active_registration_metadata_count = counts.registration_metadata;
+        status.oldest_registration_age_seconds = counts.oldest_registration_age_seconds;
+        *self.status.lock().expect("status lock") = status;
+    }
+
+    /// Allocate an id for one accepted sidecar socket.
+    fn allocate_connection_id(&self) -> u64 {
+        self.next_connection_id.fetch_add(1, Ordering::Relaxed)
+    }
+
+    /// Remove expired sidecars and registration leases.
+    fn prune_registry(&self) {
+        self.registry
+            .lock()
+            .expect("registry lock")
+            .prune_expired(Instant::now());
+    }
+
+    /// Return current live registry counts after removing expired leases.
+    fn registry_counts(&self) -> GatewayRegistryCounts {
+        let now = Instant::now();
+        let mut registry = self.registry.lock().expect("registry lock");
+        registry.prune_expired(now);
+        registry.counts(now)
+    }
+
+    /// Build a JSON status response with live registry counters.
+    fn status_response(&self, reannounce_required: bool) -> serde_json::Value {
+        let counts = self.registry_counts();
+        let mut status = self.status.lock().expect("status lock").clone();
+        status.active_sidecar_count = counts.sidecars;
+        status.active_registration_count = counts.registrations;
+        status.active_registration_metadata_count = counts.registration_metadata;
+        status.oldest_registration_age_seconds = counts.oldest_registration_age_seconds;
+        serde_json::json!({
+            "protocol_version": status.protocol_version,
+            "stream_hash": status.stream_hash,
+            "socket_path": self.socket_path,
+            "allowed_user_count": status.allowed_user_count,
+            "configured_chat_id": status.configured_chat_id,
+            "linked_chat_id": status.linked_chat_id,
+            "next_update_offset": status.next_update_offset,
+            "recent_update_count": status.recent_update_count,
+            "processed_update_count": status.processed_update_count,
+            "rejected_update_count": status.rejected_update_count,
+            "active_sidecar_count": status.active_sidecar_count,
+            "active_registration_count": status.active_registration_count,
+            "active_registration_metadata_count": status.active_registration_metadata_count,
+            "oldest_registration_age_seconds": status.oldest_registration_age_seconds,
+            "heartbeat_interval_seconds": status.heartbeat_interval_seconds,
+            "registration_lease_seconds": status.registration_lease_seconds,
+            "gateway_generation": self.generation,
+            "reannounce_required": reannounce_required,
+            "routing": status.routing,
+        })
+    }
+}
+
+/// Live registry summary used by status responses.
+struct GatewayRegistryCounts {
+    /// Number of connected sidecars.
+    sidecars: usize,
+    /// Number of live registrations.
+    registrations: usize,
+    /// Number of registrations with optional display/tool metadata.
+    registration_metadata: usize,
+    /// Oldest registration age in seconds.
+    oldest_registration_age_seconds: Option<u64>,
+}
+
+/// Live sidecar registry keyed by accepted socket connection id.
+#[derive(Default)]
+struct GatewayRegistry {
+    /// Connected sidecars and their last heartbeat time.
+    sidecars: HashMap<u64, GatewaySidecar>,
+    /// Registered agent routes owned by connected sidecars.
+    registrations: HashMap<GatewayRegistrationKey, GatewayRegistration>,
+}
+
+impl GatewayRegistry {
+    /// Add or refresh a connected sidecar.
+    fn hello(&mut self, connection_id: u64, now: Instant) {
+        self.sidecars
+            .entry(connection_id)
+            .and_modify(|sidecar| sidecar.last_seen = now)
+            .or_insert(GatewaySidecar { last_seen: now });
+    }
+
+    /// Refresh a sidecar heartbeat and extend its registration leases.
+    fn heartbeat(&mut self, connection_id: u64, now: Instant) -> Result<(), String> {
+        let sidecar = self
+            .sidecars
+            .get_mut(&connection_id)
+            .ok_or_else(|| "sidecar must send hello before heartbeat".to_owned())?;
+        sidecar.last_seen = now;
+        for registration in self.registrations.values_mut() {
+            if registration.connection_id == connection_id {
+                registration.expires_at = now + REGISTRATION_LEASE_DURATION;
+            }
+        }
+        Ok(())
+    }
+
+    /// Register or refresh one `(session_id, agent_id)` route for this sidecar.
+    fn register_agent(
+        &mut self,
+        connection_id: u64,
+        request: GatewaySocketRequest,
+        now: Instant,
+    ) -> Result<(), String> {
+        if !self.sidecars.contains_key(&connection_id) {
+            return Err("sidecar must send hello before register_agent".to_owned());
+        }
+        let session_id = required_request_field(request.session_id, "session_id")?;
+        let agent_id = required_request_field(request.agent_id, "agent_id")?;
+        let key = GatewayRegistrationKey {
+            session_id,
+            agent_id,
+        };
+        self.registrations.insert(
+            key,
+            GatewayRegistration {
+                connection_id,
+                display_name: request.display_name,
+                tool_namespace: request.tool_namespace,
+                registered_at: now,
+                expires_at: now + REGISTRATION_LEASE_DURATION,
+            },
+        );
+        Ok(())
+    }
+
+    /// Remove one registered agent route for this sidecar.
+    fn unregister_agent(
+        &mut self,
+        connection_id: u64,
+        request: GatewaySocketRequest,
+    ) -> Result<(), String> {
+        let session_id = required_request_field(request.session_id, "session_id")?;
+        let agent_id = required_request_field(request.agent_id, "agent_id")?;
+        let key = GatewayRegistrationKey {
+            session_id,
+            agent_id,
+        };
+        if self
+            .registrations
+            .get(&key)
+            .is_some_and(|registration| registration.connection_id == connection_id)
+        {
+            self.registrations.remove(&key);
+        }
+        Ok(())
+    }
+
+    /// Remove all routes owned by a disconnected sidecar.
+    fn disconnect(&mut self, connection_id: u64) {
+        self.sidecars.remove(&connection_id);
+        self.registrations
+            .retain(|_, registration| registration.connection_id != connection_id);
+    }
+
+    /// Return live registry counts for a status response.
+    fn counts(&self, now: Instant) -> GatewayRegistryCounts {
+        let oldest_registration_age_seconds = self
+            .registrations
+            .values()
+            .map(|registration| {
+                now.saturating_duration_since(registration.registered_at)
+                    .as_secs()
+            })
+            .max();
+        let registration_metadata = self
+            .registrations
+            .values()
+            .filter(|registration| {
+                registration.display_name.is_some() || registration.tool_namespace.is_some()
+            })
+            .count();
+        GatewayRegistryCounts {
+            sidecars: self.sidecars.len(),
+            registrations: self.registrations.len(),
+            registration_metadata,
+            oldest_registration_age_seconds,
+        }
+    }
+
+    /// Remove expired sidecars and registration leases.
+    fn prune_expired(&mut self, now: Instant) {
+        let expired_sidecars = self
+            .sidecars
+            .iter()
+            .filter_map(|(connection_id, sidecar)| {
+                (sidecar.last_seen + REGISTRATION_LEASE_DURATION <= now).then_some(*connection_id)
+            })
+            .collect::<Vec<_>>();
+        for connection_id in expired_sidecars {
+            self.disconnect(connection_id);
+        }
+        self.registrations
+            .retain(|_, registration| registration.expires_at > now);
+    }
+}
+
+/// Connected sidecar heartbeat state.
+struct GatewaySidecar {
+    /// Last time the sidecar sent hello or heartbeat.
+    last_seen: Instant,
+}
+
+/// Key identifying one registered Tau agent route.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct GatewayRegistrationKey {
+    /// Tau session id announced by the sidecar.
+    session_id: String,
+    /// Tau agent id announced by the sidecar.
+    agent_id: String,
+}
+
+/// Live route metadata for one registered Tau agent.
+struct GatewayRegistration {
+    /// Sidecar connection that owns this route.
+    connection_id: u64,
+    /// Optional model/display name for diagnostics.
+    display_name: Option<String>,
+    /// Tool namespace exposed by this sidecar.
+    tool_namespace: Option<String>,
+    /// Registration creation time.
+    registered_at: Instant,
+    /// Lease expiry time extended by heartbeats.
+    expires_at: Instant,
+}
+
+/// Parsed JSON request from a gateway local socket client.
+#[derive(Debug, serde::Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct GatewaySocketRequest {
+    /// Protocol version expected by the client.
+    protocol_version: Option<u32>,
+    /// Request kind such as `status`, `hello`, `heartbeat`,
+    /// `register_agent`, `unregister_agent`, or `goodbye`.
+    kind: String,
+    /// Tau session id for registration requests.
+    session_id: Option<String>,
+    /// Tau agent id for registration requests.
+    agent_id: Option<String>,
+    /// Optional display name supplied by the sidecar.
+    display_name: Option<String>,
+    /// Optional tool namespace supplied by the sidecar.
+    tool_namespace: Option<String>,
+}
+
+impl Default for GatewaySocketRequest {
+    fn default() -> Self {
+        Self {
+            protocol_version: None,
+            kind: "status".to_owned(),
+            session_id: None,
+            agent_id: None,
+            display_name: None,
+            tool_namespace: None,
         }
     }
 }
@@ -736,13 +1049,13 @@ struct GatewaySocketGuard {
 
 impl GatewaySocketGuard {
     /// Bind a private status socket and start its accept loop.
-    fn bind(path: PathBuf, status: Arc<Mutex<GatewayStatus>>) -> Result<Self, String> {
+    fn bind(path: PathBuf, state: Arc<GatewaySocketState>) -> Result<Self, String> {
         remove_inactive_socket(&path)?;
         let listener = UnixListener::bind(&path)
             .map_err(|error| format!("binding Telegram gateway socket: {error}"))?;
         thread::Builder::new()
             .name("telegram-gateway-socket".to_owned())
-            .spawn(move || accept_gateway_socket_loop(listener, status))
+            .spawn(move || accept_gateway_socket_loop(listener, state))
             .map_err(|error| format!("starting Telegram gateway socket thread: {error}"))?;
         Ok(Self { path })
     }
@@ -755,14 +1068,14 @@ impl Drop for GatewaySocketGuard {
 }
 
 /// Accept local status socket clients until the process exits.
-fn accept_gateway_socket_loop(listener: UnixListener, status: Arc<Mutex<GatewayStatus>>) {
+fn accept_gateway_socket_loop(listener: UnixListener, state: Arc<GatewaySocketState>) {
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
-                let status = Arc::clone(&status);
+                let state = Arc::clone(&state);
                 let _ = thread::Builder::new()
                     .name("telegram-gateway-client".to_owned())
-                    .spawn(move || handle_gateway_socket_client(stream, status));
+                    .spawn(move || handle_gateway_socket_client(stream, state));
             }
             Err(error) => {
                 tracing::warn!(target: crate::LOG_TARGET, error = %error, "telegram gateway socket accept failed");
@@ -771,25 +1084,125 @@ fn accept_gateway_socket_loop(listener: UnixListener, status: Arc<Mutex<GatewayS
     }
 }
 
-/// Handle one local socket client using one request and one JSON-line response.
-fn handle_gateway_socket_client(mut stream: UnixStream, status: Arc<Mutex<GatewayStatus>>) {
-    let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
-    let response = match read_gateway_socket_request(&stream) {
-        Ok(()) => serde_json::to_value(status.lock().expect("status lock").clone())
-            .unwrap_or_else(|_| serde_json::json!({"error": "status encoding failed"})),
+/// Handle one local socket client using JSON-line requests and responses.
+fn handle_gateway_socket_client(mut stream: UnixStream, state: Arc<GatewaySocketState>) {
+    let connection_id = state.allocate_connection_id();
+    let _ = stream.set_read_timeout(Some(REGISTRATION_LEASE_DURATION));
+    loop {
+        state.prune_registry();
+        let mut close_after_response;
+        let response = match read_gateway_socket_request(&stream) {
+            Ok(Some(request)) => {
+                close_after_response = request.kind == "status";
+                handle_gateway_socket_request(&state, connection_id, request)
+            }
+            Ok(None) => break,
+            Err(error) => {
+                close_after_response = true;
+                serde_json::json!({
+                    "protocol_version": SOCKET_PROTOCOL_VERSION,
+                    "ok": false,
+                    "error": error,
+                })
+            }
+        };
+        if response.get("ok").and_then(serde_json::Value::as_bool) == Some(false) {
+            close_after_response = true;
+        }
+        if !write_gateway_socket_response(&mut stream, &response) {
+            break;
+        }
+        if close_after_response
+            || response.get("goodbye").and_then(serde_json::Value::as_bool) == Some(true)
+        {
+            break;
+        }
+    }
+    state
+        .registry
+        .lock()
+        .expect("registry lock")
+        .disconnect(connection_id);
+}
+
+/// Apply one parsed local socket request to the gateway registry.
+fn handle_gateway_socket_request(
+    state: &GatewaySocketState,
+    connection_id: u64,
+    request: GatewaySocketRequest,
+) -> serde_json::Value {
+    match request.kind.as_str() {
+        "status" => state.status_response(false),
+        "hello" => {
+            state
+                .registry
+                .lock()
+                .expect("registry lock")
+                .hello(connection_id, Instant::now());
+            state.status_response(true)
+        }
+        "heartbeat" => registry_result(state, |registry| {
+            registry.heartbeat(connection_id, Instant::now())
+        }),
+        "register_agent" => registry_result(state, |registry| {
+            registry.register_agent(connection_id, request, Instant::now())
+        }),
+        "unregister_agent" => registry_result(state, |registry| {
+            registry.unregister_agent(connection_id, request)
+        }),
+        "goodbye" => serde_json::json!({
+            "protocol_version": SOCKET_PROTOCOL_VERSION,
+            "ok": true,
+            "goodbye": true,
+        }),
+        kind => serde_json::json!({
+            "protocol_version": SOCKET_PROTOCOL_VERSION,
+            "ok": false,
+            "error": format!("unsupported gateway socket request kind `{kind}`"),
+        }),
+    }
+}
+
+/// Execute a registry mutation and return a JSON result response.
+fn registry_result<F>(state: &GatewaySocketState, f: F) -> serde_json::Value
+where
+    F: FnOnce(&mut GatewayRegistry) -> Result<(), String>,
+{
+    let result = {
+        let mut registry = state.registry.lock().expect("registry lock");
+        registry.prune_expired(Instant::now());
+        f(&mut registry)
+    };
+    match result {
+        Ok(()) => serde_json::json!({
+            "protocol_version": SOCKET_PROTOCOL_VERSION,
+            "ok": true,
+            "heartbeat_interval_seconds": SIDECAR_HEARTBEAT_INTERVAL.as_secs(),
+            "registration_lease_seconds": REGISTRATION_LEASE_DURATION.as_secs(),
+            "gateway_generation": state.generation,
+        }),
         Err(error) => serde_json::json!({
             "protocol_version": SOCKET_PROTOCOL_VERSION,
+            "ok": false,
             "error": error,
         }),
-    };
-    if let Ok(text) = serde_json::to_string(&response) {
-        let _ = writeln!(stream, "{text}");
-        let _ = stream.flush();
+    }
+}
+
+/// Write one JSON-line response to a gateway socket client.
+fn write_gateway_socket_response(stream: &mut UnixStream, response: &serde_json::Value) -> bool {
+    match serde_json::to_string(response) {
+        Ok(text) => writeln!(stream, "{text}")
+            .and_then(|()| stream.flush())
+            .is_ok(),
+        Err(_) => false,
     }
 }
 
 /// Read and validate one JSON-line local socket request.
-fn read_gateway_socket_request(stream: &UnixStream) -> Result<(), String> {
+fn read_gateway_socket_request(
+    stream: &UnixStream,
+) -> Result<Option<GatewaySocketRequest>, String> {
     let mut reader = stream
         .try_clone()
         .map_err(|error| format!("cloning gateway socket stream: {error}"))?;
@@ -797,7 +1210,12 @@ fn read_gateway_socket_request(stream: &UnixStream) -> Result<(), String> {
     loop {
         let mut byte = [0_u8; 1];
         match reader.read(&mut byte) {
-            Ok(0) => break,
+            Ok(0) => {
+                if request.is_empty() {
+                    return Ok(None);
+                }
+                break;
+            }
             Ok(_) => {
                 request.push(byte[0]);
                 if request.len() > MAX_SOCKET_REQUEST_BYTES {
@@ -812,37 +1230,41 @@ fn read_gateway_socket_request(stream: &UnixStream) -> Result<(), String> {
                     || error.kind() == std::io::ErrorKind::TimedOut =>
             {
                 if request.is_empty() {
-                    return Ok(());
+                    return Ok(None);
                 }
                 break;
             }
             Err(error) => return Err(format!("reading gateway socket request: {error}")),
         }
     }
-    if request.is_empty() {
-        return Ok(());
-    }
     let line = std::str::from_utf8(&request)
         .map_err(|error| format!("gateway socket request is not UTF-8: {error}"))?;
-    let value: serde_json::Value = serde_json::from_str(line)
+    let parsed: GatewaySocketRequest = serde_json::from_str(line)
         .map_err(|error| format!("invalid gateway socket JSON request: {error}"))?;
-    let version = value
-        .get("protocol_version")
-        .and_then(serde_json::Value::as_u64)
-        .unwrap_or(u64::from(SOCKET_PROTOCOL_VERSION));
-    if version != u64::from(SOCKET_PROTOCOL_VERSION) {
+    if parsed.protocol_version.unwrap_or(SOCKET_PROTOCOL_VERSION) != SOCKET_PROTOCOL_VERSION {
         return Err(format!(
-            "unsupported gateway socket protocol version {version}"
+            "unsupported gateway socket protocol version {}",
+            parsed.protocol_version.unwrap_or_default()
         ));
     }
-    let kind = value
-        .get("kind")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("status");
-    if kind != "status" && kind != "hello" {
-        return Err(format!("unsupported gateway socket request kind `{kind}`"));
-    }
-    Ok(())
+    Ok(Some(parsed))
+}
+
+/// Extract and validate a required sidecar request field.
+fn required_request_field(value: Option<String>, name: &str) -> Result<String, String> {
+    value
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| format!("gateway socket request requires `{name}`"))
+}
+
+/// Return a per-process gateway generation label for reconnect detection.
+fn gateway_generation() -> String {
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    format!("{timestamp:x}")
 }
 
 /// Create a private directory, rejecting symlink final components.

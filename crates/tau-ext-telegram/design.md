@@ -107,6 +107,16 @@ Registrations are removed on sidecar disconnect, heartbeat expiry, session
 shutdown, agent unload, or explicit unregister. Reconnecting sidecars must
 re-announce their current session and registered agents after gateway restart.
 
+The implemented gateway socket slice currently supports one-shot `status` and
+persistent `hello`, `heartbeat`, `register_agent`, `unregister_agent`, and
+`goodbye` JSON-line requests. `hello` and status responses advertise heartbeat
+interval, registration lease duration, a per-process gateway generation, and a
+reannouncement hint so a sidecar can detect gateway restart and rebuild its
+registrations. The gateway prunes live registrations on unregister, goodbye,
+socket disconnect, protocol-error disconnect, heartbeat/lease expiry, and gateway
+restart; routing commands and the outbound `telegram_send` gateway path remain
+separate future slices.
+
 Security requirements for gateway mode:
 
 - only the gateway reads or logs decisions about the bot token; raw tokens and

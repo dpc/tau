@@ -72,11 +72,16 @@ Until sidecar routing lands, Telegram-visible behavior is limited to `/start`,
 `/help`, and `/status`. The allowlist is checked before any side effects.
 Without a fixed `chat_id`, only one allowlisted private chat can link with
 `/start`; unconfigured group/supergroup chats are ignored rather than linked or
-replied to. The local socket accepts versioned JSON-line `status`/`hello`
-requests up to a small fixed byte limit and returns a bounded status snapshot
-for future gateway-client discovery experiments. The socket is private same-UID
-local IPC, not an authentication boundary; this MVP bounds request size but does
-not attempt to defend against all same-user local denial-of-service patterns.
+replied to. The local socket accepts a one-shot versioned JSON-line `status`
+request and persistent sidecar `hello`, `heartbeat`, `register_agent`,
+`unregister_agent`, and `goodbye` requests up to a small fixed byte limit. It
+returns bounded status snapshots and sidecar lease parameters for future
+gateway-client discovery experiments. Sidecar registrations are live-only leases:
+they are removed on explicit unregister, goodbye, socket disconnect, heartbeat
+expiry, or gateway restart/reannouncement. The socket is private same-UID local
+IPC, not an authentication boundary; this MVP bounds request size and closes
+protocol-error connections but does not attempt to defend against all same-user
+local denial-of-service patterns.
 
 On the idle-to-active transition for the first registered agent, after acquiring
 the local lock and before reporting registration success, the extension calls
@@ -138,5 +143,7 @@ Telegram checks are manual only and should not be required for normal CI.
 Gateway daemon tests use a fake Telegram client plus test-only gateway resources
 to cover durable state round-trips/reconciliation, retry-vs-offset advancement
 semantics, same-batch redelivery stops, allowlist/group-chat behavior, local
-socket parser/response bounds, and CLI/env parsing. Future sidecar routing tests
-should keep using fake gateway clients rather than live Telegram.
+socket parser/response bounds, sidecar heartbeat/lease cleanup, disconnect and
+unregister pruning, gateway restart reannouncement hints, and CLI/env parsing.
+Future routing/outbound-send tests should keep using fake gateway clients rather
+than live Telegram.

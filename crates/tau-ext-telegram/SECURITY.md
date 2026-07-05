@@ -40,11 +40,15 @@
 - The standalone `tau-telegram-gateway` MVP is a stream owner and status daemon
   only. It reads the bot token from an environment variable, shares the same
   stream lock and webhook/409 diagnostics, stores durable per-stream offset and
-  duplicate-suppression state under a private state directory, and exposes only a
-  private local status socket. The socket bounds request size but is same-UID
-  local IPC, not a sandbox or DoS boundary against the user's own processes. It
-  handles `/start`, `/help`, and `/status`; it does not submit Telegram text to
-  Tau sessions yet.
+  duplicate-suppression state under a private state directory, and exposes only
+  private same-UID local IPC. The socket supports one-shot `status` and
+  persistent sidecar `hello`/`heartbeat`/`register_agent`/`unregister_agent`/
+  `goodbye`; registered routes are live leases pruned on unregister, goodbye,
+  disconnect, protocol-error disconnect, heartbeat expiry, or gateway restart
+  reannouncement. The socket bounds request size but is same-UID local IPC, not a
+  sandbox or DoS boundary against the user's own processes. It handles `/start`,
+  `/help`, and `/status`; it does not submit Telegram text to Tau sessions or
+  send outbound `telegram_send` messages through the gateway yet.
 - Gateway mode must continue to reject non-allowlisted Telegram users before any
   side effects. Without an explicit configured `chat_id`, group/supergroup chats
   must not be linked or replied to; only an allowlisted private chat may link

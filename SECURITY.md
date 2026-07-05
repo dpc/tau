@@ -241,11 +241,17 @@ Additional Telegram extension instances use namespaced tools/groups so one
 harness does not route a model-visible tool call ambiguously between bot tokens.
 The experimental standalone `tau-telegram-gateway` daemon is a first gateway
 slice that owns polling and durable per-stream offset/dedup state for one bot
-token, shares the same stream lock/webhook/409 safeguards, and exposes only a
-private local status socket plus Telegram `/start`, `/help`, and `/status`
-responses until sidecar routing is implemented. In gateway mode, non-allowlisted
-users are ignored before side effects, and unconfigured group/supergroup chats
-must not be linked or replied to.
+token, shares the same stream lock/webhook/409 safeguards, and exposes only
+private same-UID local IPC plus Telegram `/start`, `/help`, and `/status`
+responses until sidecar routing is implemented. Its socket supports one-shot
+`status` and persistent sidecar
+`hello`/`heartbeat`/`register_agent`/`unregister_agent`/`goodbye`; registrations
+are live leases pruned on unregister, goodbye, disconnect, protocol-error
+disconnect, heartbeat expiry, or gateway restart reannouncement. Routing
+Telegram prompts and outbound `telegram_send` through the gateway remain out of
+scope for this slice. In gateway mode, non-allowlisted users are ignored before
+side effects, and unconfigured group/supergroup chats must not be linked or
+replied to.
 
 ## XMPP extension
 

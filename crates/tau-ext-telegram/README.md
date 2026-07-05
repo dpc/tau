@@ -114,6 +114,14 @@ TELEGRAM_BOT_TOKEN=... tau-telegram-gateway \
 ```
 
 Optional flags include `--bot-token-env`, `--chat-id`, `--api-base`,
-`--poll-timeout-seconds`, `--state-dir`, and `--runtime-dir`. The local socket
-accepts a JSON-line `{"protocol_version":1,"kind":"status"}` request and returns
-a status snapshot.
+`--poll-timeout-seconds`, `--state-dir`, and `--runtime-dir`. The private
+same-UID local socket accepts a one-shot JSON-line
+`{"protocol_version":1,"kind":"status"}` request and returns a status snapshot.
+It also accepts persistent sidecar requests: `hello`, `heartbeat`,
+`register_agent`, `unregister_agent`, and `goodbye`. The gateway treats
+registrations as live leases, refreshes them on heartbeat, removes them on
+explicit unregister/goodbye or socket disconnect, and prunes them on lease expiry.
+`hello`/status responses include a gateway generation and reannouncement hint so
+sidecars reconnecting after a gateway restart know to re-send their current
+session/agent registrations. Routing and outbound `telegram_send` through the
+gateway remain out of scope for this slice.
