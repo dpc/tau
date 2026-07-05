@@ -561,7 +561,9 @@ explicitly registered Tau agents and lets those agents reply with
 `telegram_send`. It requires a bot-token secret and non-empty `allowed_user_ids`;
 outgoing messages use only a configured or linked chat id, never a model-chosen
 destination. Runtime registrations and Telegram update offsets are in-memory,
-and unconfigured group chats are refused.
+unconfigured group chats are refused, and Bot API `getUpdates` polling is
+protected by a same-state-root advisory lock for the singleton Telegram update
+stream.
 
 ### `std-slack` — personal Slack Socket Mode text bridge
 

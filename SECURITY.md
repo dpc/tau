@@ -219,8 +219,12 @@ cannot provide arbitrary chat ids: outgoing messages use only the configured
 chat or an allowlisted user's linked private chat. Unconfigured group/supergroup
 chats are refused, and configured groups should be treated as shared output
 channels visible to everyone in that chat. Runtime registrations, selected
-agents, learned chat id, and update offsets are in-memory only. Avoid logs that
-include bot tokens, Bot API URLs, or unexpected private Telegram content.
+agents, learned chat id, and update offsets are in-memory only. Telegram
+`getUpdates` is a singleton stream per Bot API base plus bot token; Tau takes an
+advisory OS lock before polling so another Tau process sharing the same Tau state
+root and stream fails closed with non-secret owner/hash diagnostics instead of
+racing the cursor. Avoid logs that include bot tokens, Bot API URLs, or
+unexpected private Telegram content.
 
 ## XMPP extension
 

@@ -66,4 +66,6 @@ The MVP is text-only. Attachments are acknowledged as unsupported. Registrations
 selected agents, learned chat link, and Telegram update offsets are in memory
 only. On lazy startup the extension drains Telegram's existing backlog without
 routing it; after restart, Telegram may still redeliver newer updates that were
-not acknowledged before shutdown.
+not acknowledged before shutdown. Only one local Tau process can poll a given
+Bot API base plus bot token within the same Tau state root at a time; another
+process using the same stream is rejected with an advisory-lock contention error.

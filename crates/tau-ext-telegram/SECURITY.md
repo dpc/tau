@@ -21,6 +21,10 @@
   the active runtime config, registrations, selected agents, learned chat, and
   update offset state are cleared until a valid config is applied and agents
   explicitly register again.
+- `getUpdates` polling is protected by an advisory OS lock keyed by Bot API base
+  plus bot token for Tau processes sharing the same Tau state root. Lock
+  sidecars and contention diagnostics include only the API base, owner metadata,
+  and a non-secret stream hash, never the raw bot token.
 - In-flight poll responses captured under an older configuration are discarded
   so old Telegram streams cannot advance offsets, mark backlog draining complete,
   send replies, or submit prompts after reconfiguration.

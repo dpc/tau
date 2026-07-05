@@ -18,6 +18,17 @@ Poll responses captured under an older configuration generation are discarded
 instead of advancing offsets, marking the new stream drained, or routing old
 updates.
 
+Before the poller issues `getUpdates`, the extension takes a Tau-side advisory
+exclusive OS lock for the stream identity under the shared `state/ext` root. The
+lock filename and metadata use a BLAKE3 fingerprint over API base plus bot
+token, so they identify contention without writing the raw token. A second Tau
+process using the same Tau state root and stream fails closed with a clear
+registration/configuration error instead of racing Telegram's singleton update
+cursor. The poller clones the held lock for each request so unregister,
+reconfiguration, or shutdown can stop future polls without dropping the OS lock
+while an older `getUpdates` request is still in flight; the in-flight clone is
+released only after that request returns.
+
 ## Harness boundary
 
 Incoming Telegram text is emitted as `extension.prompt_submit_request`. The
@@ -56,5 +67,6 @@ so agents must explicitly re-register before sending replies into the new chat.
 Unit tests use a fake Telegram client and in-memory harness channels. They cover
 config validation, tool specs/examples, allowlist enforcement, active-chat and
 linking privacy invariants, command routing, update offset/backlog behavior,
-shutdown lifecycle, and bot-token/Bot API URL redaction. Live Telegram checks are
-manual only and should not be required for normal CI.
+shutdown lifecycle, advisory update-stream lock acquisition/contention/release,
+active-reconfigure lock contention, and bot-token/Bot API URL redaction. Live
+Telegram checks are manual only and should not be required for normal CI.

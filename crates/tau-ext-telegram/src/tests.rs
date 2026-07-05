@@ -176,6 +176,21 @@ fn cfg() -> RuntimeConfig {
     }
 }
 
+fn temp_ext_root() -> std::path::PathBuf {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let dir = std::env::temp_dir().join(format!(
+        "tau-ext-telegram-test-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+    std::fs::create_dir_all(&dir).expect("create temp state dir");
+    dir
+}
+
+fn temp_state_dir() -> std::path::PathBuf {
+    temp_ext_root().join("std-telegram")
+}
+
 fn agent_id(text: &str) -> AgentId {
     AgentId::parse(text).expect("agent id")
 }
@@ -212,7 +227,8 @@ fn extension() -> (
     let (tx, rx) = mpsc::channel();
     let client = FakeClient::new();
     let ext = Extension::new(client.clone(), tx);
-    ext.apply_config(cfg(), None);
+    ext.apply_config(cfg(), Some(temp_state_dir()))
+        .expect("apply config");
     (ext, rx, client)
 }
 
@@ -224,6 +240,18 @@ fn process_update(ext: &Extension, update: TgUpdate) {
 fn expect_tool_finished(rx: &mpsc::Receiver<HarnessInputMessage>) {
     let _progress = rx.recv().expect("progress");
     let _result = rx.recv().expect("result");
+}
+
+fn expect_tool_error(rx: &mpsc::Receiver<HarnessInputMessage>) -> String {
+    let _progress = rx.recv().expect("progress");
+    let msg = rx.recv().expect("result");
+    let HarnessInputMessage::Emit(emit) = msg else {
+        panic!("emit")
+    };
+    let Event::ToolError(error) = *emit.event else {
+        panic!("tool error")
+    };
+    error.message
 }
 
 /// Telegram bridge tools are disabled by default because each role must make an
@@ -348,6 +376,192 @@ fn telegram_register_true_registers_agent_and_starts_poller() {
     let state = ext.state.lock();
     assert!(state.registered_agents.contains(&agent_id("agent-1")));
     assert!(state.poller_started);
+}
+
+/// Two Tau sessions using the same Telegram Bot API base and bot token would
+/// race on Telegram's singleton `getUpdates` cursor, so the second registration
+/// must fail closed before it starts polling and without exposing the raw
+/// token.
+#[test]
+fn telegram_register_fails_when_update_stream_lock_is_held() {
+    let root = temp_ext_root();
+    let cfg = cfg();
+    let (tx1, _rx1) = mpsc::channel();
+    let ext1 = Extension::new(FakeClient::new(), tx1);
+    ext1.apply_config(cfg.clone(), Some(root.join("std-telegram-1")))
+        .expect("apply first config");
+    let (tx2, rx2) = mpsc::channel();
+    let ext2 = Extension::new(FakeClient::new(), tx2);
+    ext2.apply_config(cfg, Some(root.join("std-telegram-2")))
+        .expect("apply second config");
+
+    ext1.dispatch_tool(tool(REGISTER_TOOL_NAME, "agent-1", bool_args(true)));
+    ext2.dispatch_tool(tool(REGISTER_TOOL_NAME, "agent-2", bool_args(true)));
+
+    let _progress = rx2.recv().expect("progress");
+    let msg = rx2.recv().expect("result");
+    let HarnessInputMessage::Emit(emit) = msg else {
+        panic!("emit")
+    };
+    let Event::ToolError(error) = *emit.event else {
+        panic!("tool error")
+    };
+    assert!(
+        error.message.contains("already locked"),
+        "{}",
+        error.message
+    );
+    assert!(
+        !error.message.contains("token"),
+        "lock contention leaked token: {}",
+        error.message
+    );
+    assert!(
+        !ext2
+            .state
+            .lock()
+            .registered_agents
+            .contains(&agent_id("agent-2")),
+        "failed registration must not leave the agent registered"
+    );
+}
+
+/// The advisory lock identity includes the bot token as hashed input, not just
+/// the API base, so independent bots served from the same endpoint can poll
+/// concurrently.
+#[test]
+fn update_stream_lock_allows_different_bot_tokens() {
+    let root = temp_ext_root();
+    let (tx1, _rx1) = mpsc::channel();
+    let ext1 = Extension::new(FakeClient::new(), tx1);
+    ext1.apply_config(cfg(), Some(root.join("std-telegram-1")))
+        .expect("apply first config");
+    let (tx2, rx2) = mpsc::channel();
+    let ext2 = Extension::new(FakeClient::new(), tx2);
+    let mut second_cfg = cfg();
+    second_cfg.bot_token = "other-secret-token".to_owned();
+    ext2.apply_config(second_cfg, Some(root.join("std-telegram-2")))
+        .expect("apply second config");
+
+    ext1.dispatch_tool(tool(REGISTER_TOOL_NAME, "agent-1", bool_args(true)));
+    ext2.dispatch_tool(tool(REGISTER_TOOL_NAME, "agent-2", bool_args(true)));
+
+    expect_tool_finished(&rx2);
+    assert!(
+        ext2.state
+            .lock()
+            .registered_agents
+            .contains(&agent_id("agent-2"))
+    );
+}
+
+/// After the final local agent unregisters and the poller returns to idle, the
+/// stream lock must be released so another Tau process can take over. A later
+/// re-registration in the original process must then reacquire the lock and
+/// fail closed if that other process still owns the stream.
+#[test]
+fn register_after_idle_must_reacquire_update_stream_lock() {
+    let root = temp_ext_root();
+    let (tx1, rx1) = mpsc::channel();
+    let ext1 = Extension::new(FakeClient::new(), tx1);
+    ext1.apply_config(cfg(), Some(root.join("std-telegram-1")))
+        .expect("apply first config");
+    let (tx2, rx2) = mpsc::channel();
+    let ext2 = Extension::new(FakeClient::new(), tx2);
+    ext2.apply_config(cfg(), Some(root.join("std-telegram-2")))
+        .expect("apply second config");
+
+    ext1.dispatch_tool(tool(REGISTER_TOOL_NAME, "agent-1", bool_args(true)));
+    expect_tool_finished(&rx1);
+    ext1.dispatch_tool(tool(REGISTER_TOOL_NAME, "agent-1", bool_args(false)));
+    expect_tool_finished(&rx1);
+    std::thread::sleep(Duration::from_millis(100));
+
+    ext2.dispatch_tool(tool(REGISTER_TOOL_NAME, "agent-2", bool_args(true)));
+    expect_tool_finished(&rx2);
+    ext1.dispatch_tool(tool(REGISTER_TOOL_NAME, "agent-1", bool_args(true)));
+    let message = expect_tool_error(&rx1);
+    assert!(message.contains("already locked"), "{message}");
+    assert!(
+        !ext1
+            .state
+            .lock()
+            .registered_agents
+            .contains(&agent_id("agent-1"))
+    );
+}
+
+/// Unregistering while a long-poll request is in flight must not release the OS
+/// lock until that request has returned, otherwise another Tau process could
+/// issue a concurrent `getUpdates` against the singleton Telegram cursor.
+#[test]
+fn in_flight_poll_keeps_update_stream_lock_after_unregister() {
+    let root = temp_ext_root();
+    let (tx1, rx1) = mpsc::channel();
+    let client1 = ControlledPollClient::new();
+    let ext1 = Extension::new(client1.clone(), tx1);
+    ext1.apply_config(cfg(), Some(root.join("std-telegram-1")))
+        .expect("apply first config");
+    let (tx2, rx2) = mpsc::channel();
+    let ext2 = Extension::new(FakeClient::new(), tx2);
+    ext2.apply_config(cfg(), Some(root.join("std-telegram-2")))
+        .expect("apply second config");
+
+    ext1.dispatch_tool(tool(REGISTER_TOOL_NAME, "agent-1", bool_args(true)));
+    expect_tool_finished(&rx1);
+    client1.wait_for_call();
+    ext1.dispatch_tool(tool(REGISTER_TOOL_NAME, "agent-1", bool_args(false)));
+    expect_tool_finished(&rx1);
+
+    ext2.dispatch_tool(tool(REGISTER_TOOL_NAME, "agent-2", bool_args(true)));
+    let message = expect_tool_error(&rx2);
+    assert!(message.contains("already locked"), "{message}");
+
+    client1.release_first_response(Vec::new());
+    std::thread::sleep(Duration::from_millis(100));
+    ext2.dispatch_tool(tool(REGISTER_TOOL_NAME, "agent-2", bool_args(true)));
+    expect_tool_finished(&rx2);
+}
+
+/// Active reconfiguration to a Telegram stream already locked by another Tau
+/// process must fail closed: no raw token in diagnostics, no stale
+/// registration, and no old config left available for later sends.
+#[test]
+fn active_reconfigure_to_locked_stream_fails_closed() {
+    let root = temp_ext_root();
+    let (tx1, rx1) = mpsc::channel();
+    let ext1 = Extension::new(FakeClient::new(), tx1);
+    ext1.apply_config(cfg(), Some(root.join("std-telegram-1")))
+        .expect("apply first config");
+    let (tx2, rx2) = mpsc::channel();
+    let ext2 = Extension::new(FakeClient::new(), tx2);
+    let mut locked_cfg = cfg();
+    locked_cfg.bot_token = "super-secret-telegram-token".to_owned();
+    ext2.apply_config(locked_cfg.clone(), Some(root.join("std-telegram-2")))
+        .expect("apply second config");
+
+    ext1.dispatch_tool(tool(REGISTER_TOOL_NAME, "agent-1", bool_args(true)));
+    expect_tool_finished(&rx1);
+    ext2.dispatch_tool(tool(REGISTER_TOOL_NAME, "agent-2", bool_args(true)));
+    expect_tool_finished(&rx2);
+
+    let message = ext1
+        .apply_config(locked_cfg, Some(root.join("std-telegram-1")))
+        .expect_err("active reconfigure to locked stream should fail");
+    assert!(message.contains("already locked"), "{message}");
+    assert!(
+        !message.contains("super-secret-telegram-token"),
+        "lock contention leaked token: {message}"
+    );
+    {
+        let state = ext1.state.lock();
+        assert!(state.config.is_none());
+        assert!(state.registered_agents.is_empty());
+    }
+
+    ext1.dispatch_tool(tool(SEND_TOOL_NAME, "agent-1", message_args("stale send")));
+    let message = expect_tool_error(&rx1);
+    assert!(message.contains("telegram_register"), "{message}");
 }
 
 /// Messages from users outside the allowlist must not become Tau prompts.
@@ -890,7 +1104,8 @@ fn reconfigured_chat_id_requires_reregistration_before_send() {
     );
     let mut new_cfg = cfg();
     new_cfg.configured_chat_id = Some(456);
-    ext.apply_config(new_cfg, None);
+    ext.apply_config(new_cfg, Some(temp_state_dir()))
+        .expect("apply config");
     ext.dispatch_tool(tool(SEND_TOOL_NAME, "agent-1", message_args("reply")));
     let _progress = rx.recv().expect("progress");
     let msg = rx.recv().expect("result");
@@ -954,7 +1169,8 @@ fn initial_poller_drops_stale_backlog() {
         }),
     }]]);
     let ext = Extension::new(client, tx);
-    ext.apply_config(cfg(), None);
+    ext.apply_config(cfg(), Some(temp_state_dir()))
+        .expect("apply config");
     ext.dispatch_tool(tool(REGISTER_TOOL_NAME, "agent-1", bool_args(true)));
     let _progress = rx.recv().expect("progress");
     let _result = rx.recv().expect("result");
@@ -1002,7 +1218,8 @@ fn initial_poller_drops_multiple_stale_batches_until_empty() {
         }],
     ]);
     let ext = Extension::new(client, tx);
-    ext.apply_config(cfg(), None);
+    ext.apply_config(cfg(), Some(temp_state_dir()))
+        .expect("apply config");
     ext.dispatch_tool(tool(REGISTER_TOOL_NAME, "agent-1", bool_args(true)));
     let _progress = rx.recv().expect("progress");
     let _result = rx.recv().expect("result");
@@ -1057,7 +1274,7 @@ fn run_exits_after_register_then_disconnect() {
                 "chat_id": 123,
                 "poll_timeout_seconds": 1,
             })),
-            state_dir: None,
+            state_dir: Some(temp_state_dir()),
             secrets,
         }))
         .expect("config");
@@ -1095,7 +1312,7 @@ fn run_exits_promptly_when_disconnect_races_long_poll() {
                 "chat_id": 123,
                 "poll_timeout_seconds": 1,
             })),
-            state_dir: None,
+            state_dir: Some(temp_state_dir()),
             secrets,
         }))
         .expect("config");
@@ -1140,7 +1357,7 @@ fn run_ignores_replayed_tool_delivery_before_live_send() {
                 "chat_id": 123,
                 "poll_timeout_seconds": 1,
             })),
-            state_dir: None,
+            state_dir: Some(temp_state_dir()),
             secrets,
         }))
         .expect("config");
@@ -1200,7 +1417,7 @@ fn run_malformed_reconfiguration_clears_active_bridge_state() {
                 "chat_id": 123,
                 "poll_timeout_seconds": 1,
             })),
-            state_dir: None,
+            state_dir: Some(temp_state_dir()),
             secrets,
         }))
         .expect("valid config");
@@ -1217,7 +1434,7 @@ fn run_malformed_reconfiguration_clears_active_bridge_state() {
             config: tau_proto::json_to_cbor(&serde_json::json!({
                 "unknown_field": true,
             })),
-            state_dir: None,
+            state_dir: Some(temp_state_dir()),
             secrets: BTreeMap::new(),
         }))
         .expect("invalid config");
@@ -1282,7 +1499,8 @@ fn initial_empty_drain_then_fresh_message_routes() {
         }],
     ]);
     let ext = Extension::new(client.clone(), tx);
-    ext.apply_config(cfg(), None);
+    ext.apply_config(cfg(), Some(temp_state_dir()))
+        .expect("apply config");
     ext.dispatch_tool(tool(REGISTER_TOOL_NAME, "agent-1", bool_args(true)));
     let _progress = rx.recv().expect("progress");
     let _result = rx.recv().expect("result");
@@ -1311,7 +1529,8 @@ fn reconfigured_bot_token_resets_update_backlog_drain() {
 
     let mut new_cfg = cfg();
     new_cfg.bot_token = "different-token".to_owned();
-    ext.apply_config(new_cfg, None);
+    ext.apply_config(new_cfg, Some(temp_state_dir()))
+        .expect("apply config");
 
     let state = ext.state.lock();
     assert!(!state.poller_drained_initial_backlog);
@@ -1331,7 +1550,8 @@ fn reconfigured_api_base_resets_update_backlog_drain() {
 
     let mut new_cfg = cfg();
     new_cfg.api_base = "http://127.0.0.1:1234".to_owned();
-    ext.apply_config(new_cfg, None);
+    ext.apply_config(new_cfg, Some(temp_state_dir()))
+        .expect("apply config");
 
     let state = ext.state.lock();
     assert!(!state.poller_drained_initial_backlog);
@@ -1352,7 +1572,8 @@ fn reconfigured_poll_timeout_keeps_update_offset() {
 
     let mut new_cfg = cfg();
     new_cfg.poll_timeout_seconds = 5;
-    ext.apply_config(new_cfg, None);
+    ext.apply_config(new_cfg, Some(temp_state_dir()))
+        .expect("apply config");
 
     let state = ext.state.lock();
     assert!(state.poller_drained_initial_backlog);
@@ -1367,7 +1588,8 @@ fn old_generation_empty_poll_response_does_not_drain_new_stream() {
     let (tx, rx) = mpsc::channel();
     let client = ControlledPollClient::new();
     let ext = Extension::new(client.clone(), tx);
-    ext.apply_config(cfg(), None);
+    ext.apply_config(cfg(), Some(temp_state_dir()))
+        .expect("apply config");
     ext.dispatch_tool(tool(REGISTER_TOOL_NAME, "agent-1", bool_args(true)));
     let _progress = rx.recv().expect("progress");
     let _result = rx.recv().expect("result");
@@ -1375,7 +1597,8 @@ fn old_generation_empty_poll_response_does_not_drain_new_stream() {
 
     let mut new_cfg = cfg();
     new_cfg.bot_token = "different-token".to_owned();
-    ext.apply_config(new_cfg, None);
+    ext.apply_config(new_cfg, Some(temp_state_dir()))
+        .expect("apply config");
     client.release_first_response(Vec::new());
     std::thread::sleep(Duration::from_millis(100));
 
@@ -1393,7 +1616,8 @@ fn old_generation_non_empty_poll_response_does_not_route_or_advance_offset() {
     let (tx, rx) = mpsc::channel();
     let client = ControlledPollClient::new();
     let ext = Extension::new(client.clone(), tx);
-    ext.apply_config(cfg(), None);
+    ext.apply_config(cfg(), Some(temp_state_dir()))
+        .expect("apply config");
     ext.dispatch_tool(tool(REGISTER_TOOL_NAME, "agent-1", bool_args(true)));
     let _progress = rx.recv().expect("progress");
     let _result = rx.recv().expect("result");
@@ -1401,7 +1625,8 @@ fn old_generation_non_empty_poll_response_does_not_route_or_advance_offset() {
 
     let mut new_cfg = cfg();
     new_cfg.api_base = "http://127.0.0.1:1234".to_owned();
-    ext.apply_config(new_cfg, None);
+    ext.apply_config(new_cfg, Some(temp_state_dir()))
+        .expect("apply config");
     client.release_first_response(vec![TgUpdate {
         update_id: 55,
         message: Some(TgMessage {
@@ -1428,7 +1653,8 @@ fn zero_registered_agents_redrains_backlog_before_routing() {
     let (tx, rx) = mpsc::channel();
     let client = ControlledPollClient::new();
     let ext = Extension::new(client.clone(), tx);
-    ext.apply_config(cfg(), None);
+    ext.apply_config(cfg(), Some(temp_state_dir()))
+        .expect("apply config");
     ext.dispatch_tool(tool(REGISTER_TOOL_NAME, "agent-1", bool_args(true)));
     expect_tool_finished(&rx);
 
@@ -1482,7 +1708,8 @@ fn poll_error_backoff_wakes_on_config_change() {
     let (tx, rx) = mpsc::channel();
     let client = ControlledPollClient::new();
     let ext = Extension::new(client.clone(), tx);
-    ext.apply_config(cfg(), None);
+    ext.apply_config(cfg(), Some(temp_state_dir()))
+        .expect("apply config");
     ext.dispatch_tool(tool(REGISTER_TOOL_NAME, "agent-1", bool_args(true)));
     expect_tool_finished(&rx);
 
@@ -1493,7 +1720,8 @@ fn poll_error_backoff_wakes_on_config_change() {
 
     let mut new_cfg = cfg();
     new_cfg.poll_timeout_seconds = 2;
-    ext.apply_config(new_cfg, None);
+    ext.apply_config(new_cfg, Some(temp_state_dir()))
+        .expect("apply config");
     client.wait_for_call_count(3);
 }
 
@@ -1505,7 +1733,8 @@ fn shutdown_wakes_poller_readiness_wait() {
     let (tx, _rx) = mpsc::channel();
     let client = FakeClient::new();
     let ext = Extension::new(client.clone(), tx.clone());
-    ext.apply_config(cfg(), None);
+    ext.apply_config(cfg(), Some(temp_state_dir()))
+        .expect("apply config");
     let state = Arc::clone(&ext.state);
     let shutdown = Arc::clone(&ext.shutdown);
     let handle = std::thread::spawn(move || poll_loop(state, client, tx.into(), shutdown));
@@ -1532,7 +1761,8 @@ fn stale_generation_update_processing_does_not_reread_current_config() {
 
     let mut new_cfg = cfg();
     new_cfg.bot_token = "different-token".to_owned();
-    ext.apply_config(new_cfg, None);
+    ext.apply_config(new_cfg, Some(temp_state_dir()))
+        .expect("apply config");
     ext.state
         .lock()
         .registered_agents

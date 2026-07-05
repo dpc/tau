@@ -4,6 +4,8 @@
 //! keeps listener registrations in memory and uses the Telegram Bot API only
 //! after an agent registers or another Telegram action needs the client.
 
+mod update_stream_lock;
+
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::error::Error;
 use std::io::{Read, Write};
@@ -16,6 +18,7 @@ use tau_proto::{
     AgentId, CborValue, Event, ExtPromptSubmitRequest, HarnessInputMessage, ToolError, ToolExample,
     ToolProgress, ToolResult, ToolSpec, ToolStarted, ToolUseState, ToolUseStatus,
 };
+use update_stream_lock::UpdateStreamLock;
 
 /// Tracing target used by this extension.
 pub const LOG_TARGET: &str = "telegram";
@@ -174,6 +177,20 @@ struct LinkedChat {
     user_id: i64,
 }
 
+/// Snapshot of state needed to issue exactly one Telegram poll request.
+struct PollRequest {
+    /// Runtime configuration captured for this request.
+    cfg: RuntimeConfig,
+    /// Telegram update offset captured for this request.
+    offset: Option<i64>,
+    /// Configuration generation captured for stale-response checks.
+    config_generation: ConfigGeneration,
+    /// Coordination generation observed before this request.
+    coordination_generation: u64,
+    /// Held advisory lock clone that keeps the stream locked until return.
+    update_stream_lock: Arc<UpdateStreamLock>,
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 struct ConfigGeneration(u64);
 
@@ -191,12 +208,17 @@ struct State {
     /// end.
     shutdown_requested: bool,
     config: Option<RuntimeConfig>,
+    /// Harness-provided user-scoped state directory for this extension
+    /// instance.
+    state_dir: Option<std::path::PathBuf>,
     config_generation: ConfigGeneration,
     registered_agents: HashSet<AgentId>,
     agent_labels: HashMap<AgentId, String>,
     selected_agent_by_chat: HashMap<i64, AgentId>,
     learned_chat: Option<LinkedChat>,
     poller_started: bool,
+    /// Held OS advisory lock for the singleton Telegram update stream.
+    update_stream_lock: Option<Arc<UpdateStreamLock>>,
     poller_drained_initial_backlog: bool,
     next_update_offset: Option<i64>,
 }
@@ -261,6 +283,35 @@ impl State {
     fn mark_coordination_changed(&mut self) {
         self.coordination_generation = self.coordination_generation.wrapping_add(1);
     }
+
+    /// Acquire the advisory stream lock unless this state already holds it.
+    fn ensure_update_stream_locked(&mut self, cfg: &RuntimeConfig) -> Result<(), String> {
+        if self
+            .update_stream_lock
+            .as_ref()
+            .is_some_and(|lock| lock.covers(cfg))
+        {
+            return Ok(());
+        }
+        let state_dir = self.state_dir.as_deref().ok_or_else(|| {
+            "telegram update polling requires an extension state directory for advisory locking"
+                .to_owned()
+        })?;
+        self.update_stream_lock = Some(Arc::new(UpdateStreamLock::acquire(state_dir, cfg)?));
+        Ok(())
+    }
+
+    /// Clear active runtime bridge state after config loss or fail-closed
+    /// errors.
+    fn clear_active_bridge_state(&mut self) {
+        self.config = None;
+        self.update_stream_lock = None;
+        self.registered_agents.clear();
+        self.selected_agent_by_chat.clear();
+        self.learned_chat = None;
+        self.poller_drained_initial_backlog = false;
+        self.next_update_offset = None;
+    }
 }
 
 #[derive(Clone)]
@@ -321,9 +372,14 @@ impl Extension {
         }
     }
 
-    fn apply_config(&self, cfg: RuntimeConfig, _state_dir: Option<std::path::PathBuf>) {
+    fn apply_config(
+        &self,
+        cfg: RuntimeConfig,
+        state_dir: Option<std::path::PathBuf>,
+    ) -> Result<(), String> {
         let mut state = self.state.lock();
         state.config_generation = state.config_generation.next();
+        state.state_dir = state_dir;
         let update_stream_changed = state
             .config
             .as_ref()
@@ -350,21 +406,26 @@ impl Extension {
         if update_stream_changed {
             state.poller_drained_initial_backlog = false;
             state.next_update_offset = None;
+            state.update_stream_lock = None;
+        }
+        if !state.registered_agents.is_empty()
+            && let Err(message) = state.ensure_update_stream_locked(&cfg)
+        {
+            state.clear_active_bridge_state();
+            state.mark_coordination_changed();
+            self.state.notify_all();
+            return Err(message);
         }
         state.config = Some(cfg);
         state.mark_coordination_changed();
         self.state.notify_all();
+        Ok(())
     }
 
     fn clear_config_after_error(&self) {
         let mut state = self.state.lock();
         state.config_generation = state.config_generation.next();
-        state.config = None;
-        state.registered_agents.clear();
-        state.selected_agent_by_chat.clear();
-        state.learned_chat = None;
-        state.poller_drained_initial_backlog = false;
-        state.next_update_offset = None;
+        state.clear_active_bridge_state();
         state.mark_coordination_changed();
         self.state.notify_all();
     }
@@ -413,6 +474,16 @@ impl Extension {
         let mut state = self.state.lock();
         if enabled {
             let was_unregistered = state.registered_agents.is_empty();
+            let cfg = match state.config.clone() {
+                Some(cfg) => cfg,
+                None => {
+                    return tool_error(invoke, "telegram extension is not configured".to_owned());
+                }
+            };
+            if let Err(message) = state.ensure_update_stream_locked(&cfg) {
+                return tool_error(invoke, message);
+            }
+            self.ensure_poller_started_locked(&mut state);
             state.registered_agents.insert(invoke.agent_id.clone());
             if was_unregistered {
                 state.poller_drained_initial_backlog = false;
@@ -421,9 +492,6 @@ impl Extension {
                 .agent_labels
                 .entry(invoke.agent_id.clone())
                 .or_insert_with(|| invoke.agent_id.to_string());
-            if let Err(message) = self.ensure_poller_started_locked(&mut state) {
-                return tool_error(invoke, message);
-            }
             state.mark_coordination_changed();
             self.state.notify_all();
         } else {
@@ -447,12 +515,9 @@ impl Extension {
         )
     }
 
-    fn ensure_poller_started_locked(&self, state: &mut State) -> Result<(), String> {
+    fn ensure_poller_started_locked(&self, state: &mut State) {
         if state.poller_started {
-            return Ok(());
-        }
-        if state.config.is_none() {
-            return Err("telegram extension is not configured".to_owned());
+            return;
         }
         state.poller_started = true;
         let state_arc = Arc::clone(&self.state);
@@ -460,7 +525,6 @@ impl Extension {
         let client = Arc::clone(&self.client);
         let shutdown = Arc::clone(&self.shutdown);
         std::thread::spawn(move || poll_loop(state_arc, client, output, shutdown));
-        Ok(())
     }
 
     fn handle_send(&self, invoke: ToolStarted) -> Event {
@@ -922,21 +986,32 @@ impl Drop for Extension {
 fn wait_for_poller_ready_or_shutdown(
     state_cell: &SharedState,
     shutdown: &AtomicBool,
-) -> Option<(RuntimeConfig, Option<i64>, ConfigGeneration, u64)> {
+) -> Option<PollRequest> {
     let mut state = state_cell.lock();
+    if state.registered_agents.is_empty() {
+        state.update_stream_lock = None;
+    }
     state = state_cell.wait_while(state, |state| {
-        !state.shutdown_requested && (state.config.is_none() || state.registered_agents.is_empty())
+        if state.registered_agents.is_empty() {
+            state.update_stream_lock = None;
+        }
+        !state.shutdown_requested
+            && (state.config.is_none()
+                || state.registered_agents.is_empty()
+                || state.update_stream_lock.is_none())
     });
     if state.shutdown_requested || shutdown.load(Ordering::Relaxed) {
         return None;
     }
     let cfg = state.config.clone()?;
-    Some((
+    let update_stream_lock = state.update_stream_lock.clone()?;
+    Some(PollRequest {
         cfg,
-        state.next_update_offset,
-        state.config_generation,
-        state.coordination_generation,
-    ))
+        offset: state.next_update_offset,
+        config_generation: state.config_generation,
+        coordination_generation: state.coordination_generation,
+        update_stream_lock,
+    })
 }
 
 fn wait_for_coordination_change_or_shutdown(
@@ -970,12 +1045,17 @@ fn poll_loop(
         if shutdown.load(Ordering::Relaxed) {
             return;
         }
-        let Some((cfg, offset, config_generation, coordination_generation)) =
-            wait_for_poller_ready_or_shutdown(&ext.state, &shutdown)
-        else {
+        let Some(poll_request) = wait_for_poller_ready_or_shutdown(&ext.state, &shutdown) else {
             return;
         };
-        let mut request_cfg = cfg.clone();
+        if !poll_request.update_stream_lock.covers(&poll_request.cfg) {
+            tracing::warn!(
+                target: LOG_TARGET,
+                "telegram poller skipped request because stream lock did not match config"
+            );
+            continue;
+        }
+        let mut request_cfg = poll_request.cfg.clone();
         let draining_initial_backlog = {
             let state = ext.state.lock();
             !state.poller_drained_initial_backlog
@@ -983,18 +1063,20 @@ fn poll_loop(
         if draining_initial_backlog {
             request_cfg.poll_timeout_seconds = 0;
         }
-        match ext.client.get_updates(&request_cfg, offset) {
+        match ext.client.get_updates(&request_cfg, poll_request.offset) {
             Ok(updates) => {
                 if shutdown.load(Ordering::Relaxed) {
                     return;
                 }
-                if !ext.poll_response_matches_config(config_generation) {
+                if !ext.poll_response_matches_config(poll_request.config_generation) {
                     continue;
                 }
                 let mut stale_generation = false;
                 let draining = {
                     let mut state = ext.state.lock();
-                    if state.config_generation != config_generation || state.config.is_none() {
+                    if state.config_generation != poll_request.config_generation
+                        || state.config.is_none()
+                    {
                         stale_generation = true;
                         false
                     } else if !state.poller_drained_initial_backlog {
@@ -1020,22 +1102,24 @@ fn poll_loop(
                         &ext.state,
                         &shutdown,
                         Duration::from_millis(50),
-                        coordination_generation,
+                        poll_request.coordination_generation,
                     );
                 }
                 for update in updates {
                     {
                         let mut state = ext.state.lock();
-                        if state.config_generation != config_generation || state.config.is_none() {
+                        if state.config_generation != poll_request.config_generation
+                            || state.config.is_none()
+                        {
                             break;
                         }
                         state.next_update_offset = Some(update.update_id + 1);
                     }
-                    ext.process_update_for_generation(update, config_generation);
+                    ext.process_update_for_generation(update, poll_request.config_generation);
                 }
             }
             Err(message) => {
-                if !ext.poll_response_matches_config(config_generation) {
+                if !ext.poll_response_matches_config(poll_request.config_generation) {
                     continue;
                 }
                 tracing::warn!(target: LOG_TARGET, error = %message, "telegram polling failed");
@@ -1043,7 +1127,7 @@ fn poll_loop(
                     &ext.state,
                     &shutdown,
                     Duration::from_secs(5),
-                    coordination_generation,
+                    poll_request.coordination_generation,
                 );
             }
         }
@@ -1083,7 +1167,10 @@ impl TauExtension for TelegramExtension {
                     let secrets = cx.secrets().clone();
                     let state_dir = cx.state_dir().map(std::path::Path::to_path_buf);
                     let cfg = cx.config.validate(&secrets).map_err(ClientError::handler)?;
-                    cx.state.ext.apply_config(cfg, state_dir);
+                    cx.state
+                        .ext
+                        .apply_config(cfg, state_dir)
+                        .map_err(ClientError::handler)?;
                     Ok(())
                 },
                 |cx| {
@@ -1167,6 +1254,7 @@ fn handle_live_event(cx: tau_client::RawEventContext<'_, TelegramRuntime>) -> Cl
             state.agent_labels.clear();
             state.selected_agent_by_chat.clear();
             state.poller_drained_initial_backlog = false;
+            state.update_stream_lock = None;
             state.shutdown_requested = true;
             state.mark_coordination_changed();
             cx.state.ext.shutdown.store(true, Ordering::Relaxed);
