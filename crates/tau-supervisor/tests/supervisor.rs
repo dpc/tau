@@ -133,6 +133,28 @@ fn recv_timeout_reports_clean_stdout_close() {
     assert_eq!(exit.exit_code(), Some(0));
 }
 
+/// Ensures the one-shot waiter notification is cached after the first
+/// observation so later status checks report the same child exit.
+#[test]
+fn child_exit_observation_is_repeatable() {
+    let mut child =
+        SupervisedChild::spawn(test_command(&["--exit-immediately"])).expect("child should spawn");
+
+    let first = child
+        .wait_for_exit(Duration::from_secs(2))
+        .expect("child should exit");
+    let second = child
+        .wait_for_exit(Duration::from_secs(2))
+        .expect("cached exit should be returned");
+    let third = child
+        .try_wait()
+        .expect("cached exit status should be readable")
+        .expect("cached exit should be present");
+
+    assert_eq!(first, second);
+    assert_eq!(second, third);
+}
+
 /// Ensures truncated protocol data remains a decode error instead of a clean
 /// close.
 #[test]
@@ -246,6 +268,7 @@ fn pre_spawn_starting_event_has_no_pid() {
 
 /// Ensures explicit hard termination can clean up a child that ignores protocol
 /// shutdown.
+#[cfg(target_os = "linux")]
 #[test]
 fn terminate_kills_long_running_child() {
     let mut child = SupervisedChild::spawn(test_command(&["--sleep"])).expect("child should spawn");
@@ -258,7 +281,7 @@ fn terminate_kills_long_running_child() {
 
 /// Ensures Drop performs best-effort direct child cleanup when callers forget
 /// explicit termination.
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 #[test]
 fn drop_kills_long_running_direct_child() {
     let pid = {

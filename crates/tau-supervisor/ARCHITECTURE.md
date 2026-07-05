@@ -8,9 +8,11 @@ This crate is currently non-production. The production harness supervisor still 
 
 ## Process ownership
 
-`SupervisedChild::spawn` owns the spawned direct child from successful process creation onward. During initialization a guard kill/waits the child if pipe setup or stdout-reader startup fails. Once construction succeeds, callers should prefer explicit protocol shutdown or `SupervisedChild::terminate`; `Drop` is only best-effort hard-kill cleanup with ignored errors. Termination intentionally targets only the direct child process, not a process tree or grandchildren.
+`SupervisedChild::spawn` owns the spawned direct child lifecycle from successful process creation onward. During initialization a guard kill/waits the child if pipe setup, stdout-reader startup, pidfd setup, or child-waiter startup fails. Once construction succeeds, a dedicated waiter thread owns the `std::process::Child` handle and reports the single exit status through a channel; `try_wait` and `wait_for_exit` observe and cache that notification rather than polling child status.
 
-Lifecycle helpers on `SupervisedChild` derive process pids from the owned child. Use `ExtensionCommand::pre_spawn_starting_event` only for pid-less pre-spawn lifecycle reporting.
+On Linux, spawn opens a pidfd before disarming the initialization guard. `SupervisedChild::terminate` and best-effort `Drop` hard-kill through that pidfd, then wait for the waiter notification, so cleanup does not signal a reused numeric PID after the waiter reaps the child. Hard termination is currently unsupported on non-Linux targets under this waiter-thread design. Callers should prefer explicit protocol shutdown or `SupervisedChild::terminate`; `Drop` is only best-effort cleanup with ignored errors. Termination intentionally targets only the direct child process, not a process tree or grandchildren.
+
+Lifecycle helpers on `SupervisedChild` use the pid recorded during spawn before the `Child` handle is handed to the waiter thread. Use `ExtensionCommand::pre_spawn_starting_event` only for pid-less pre-spawn lifecycle reporting.
 
 ## Stdio transport
 
