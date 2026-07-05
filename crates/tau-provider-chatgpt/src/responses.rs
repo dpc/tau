@@ -19,11 +19,13 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 use tau_proto::{
-    ContentPart, ContextItem, ContextRole, MessageItem, ToolCallItem, ToolResponseHeader,
-    ToolResultItem, ToolResultStatus,
+    ContentPart, ContextItem, ContextRole, MessageItem, ResponsesToolCallEnvelope, ToolCallItem,
+    ToolResponseHeader, ToolResultItem, ToolResultStatus,
 };
 
-use crate::common::{LlmError, PromptPayload, StreamState, cbor_to_json, effort_wire};
+use crate::common::{
+    LlmError, PromptPayload, StreamState, cbor_to_json, effort_wire, json_to_cbor,
+};
 
 pub mod pool;
 pub mod ws;
@@ -789,7 +791,35 @@ fn apply_output_item_tool(
         call.arguments_json = final_input.to_owned();
         changed = true;
     }
+    let responses_envelope = responses_tool_call_envelope(item);
+    if call.responses_envelope != responses_envelope {
+        call.responses_envelope = responses_envelope;
+        changed = true;
+    }
     Ok(changed)
+}
+
+fn responses_tool_call_envelope(item: &serde_json::Value) -> ResponsesToolCallEnvelope {
+    let extra_fields = item.as_object().and_then(|object| {
+        let extra: serde_json::Map<String, serde_json::Value> = object
+            .iter()
+            .filter(|(key, _)| !is_structured_responses_tool_call_field(key))
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect();
+        (!extra.is_empty()).then(|| json_to_cbor(&serde_json::Value::Object(extra)))
+    });
+    ResponsesToolCallEnvelope {
+        item_id: item["id"].as_str().map(str::to_owned),
+        status: item["status"].as_str().map(str::to_owned),
+        extra_fields,
+    }
+}
+
+fn is_structured_responses_tool_call_field(key: &str) -> bool {
+    matches!(
+        key,
+        "type" | "id" | "status" | "call_id" | "name" | "arguments" | "input"
+    )
 }
 
 fn tool_type_from_output_item(item: &serde_json::Value) -> Option<tau_proto::ToolType> {
@@ -1559,15 +1589,16 @@ fn convert_tool_call_item(call: &ToolCallItem, out: &mut Vec<ResponsesInputItem>
 
 fn convert_function_call_item(call: &ToolCallItem) -> serde_json::Value {
     let id_str = call.call_id.as_str();
-    let fc_id = prefixed_provider_item_id(id_str, "fc_");
     let arguments = function_call_arguments_json(call);
-    serde_json::json!({
-        "type": "function_call",
-        "id": fc_id,
-        "call_id": id_str,
-        "name": encode_tool_name(call.name.as_str()),
-        "arguments": arguments,
-    })
+    let mut item = responses_tool_call_base(call, "fc_");
+    item.insert("type".to_owned(), serde_json::json!("function_call"));
+    item.insert("call_id".to_owned(), serde_json::json!(id_str));
+    item.insert(
+        "name".to_owned(),
+        serde_json::json!(encode_tool_name(call.name.as_str())),
+    );
+    item.insert("arguments".to_owned(), serde_json::json!(arguments));
+    serde_json::Value::Object(item)
 }
 
 fn function_call_arguments_json(call: &ToolCallItem) -> String {
@@ -1579,18 +1610,44 @@ fn function_call_arguments_json(call: &ToolCallItem) -> String {
 
 fn convert_custom_tool_call_item(call: &ToolCallItem) -> serde_json::Value {
     let id_str = call.call_id.as_str();
-    let custom_id = prefixed_provider_item_id(id_str, "ctc_");
     let input = match &call.arguments {
         tau_proto::CborValue::Text(text) => text.clone(),
         other => serde_json::to_string(&cbor_to_json(other)).unwrap_or_default(),
     };
-    serde_json::json!({
-        "type": "custom_tool_call",
-        "id": custom_id,
-        "call_id": id_str,
-        "name": encode_tool_name(call.name.as_str()),
-        "input": input,
-    })
+    let mut item = responses_tool_call_base(call, "ctc_");
+    item.insert("type".to_owned(), serde_json::json!("custom_tool_call"));
+    item.insert("call_id".to_owned(), serde_json::json!(id_str));
+    item.insert(
+        "name".to_owned(),
+        serde_json::json!(encode_tool_name(call.name.as_str())),
+    );
+    item.insert("input".to_owned(), serde_json::json!(input));
+    serde_json::Value::Object(item)
+}
+
+fn responses_tool_call_base(
+    call: &ToolCallItem,
+    fallback_id_prefix: &str,
+) -> serde_json::Map<String, serde_json::Value> {
+    let mut item = serde_json::Map::new();
+    if let Some(envelope) = &call.responses_envelope {
+        if let Some(extra_fields) = &envelope.extra_fields
+            && let serde_json::Value::Object(extra) = cbor_to_json(extra_fields)
+        {
+            item.extend(extra);
+        }
+        if let Some(status) = &envelope.status {
+            item.insert("status".to_owned(), serde_json::json!(status));
+        }
+    }
+    let item_id = call
+        .responses_envelope
+        .as_ref()
+        .and_then(|envelope| envelope.item_id.as_deref())
+        .map(str::to_owned)
+        .unwrap_or_else(|| prefixed_provider_item_id(call.call_id.as_str(), fallback_id_prefix));
+    item.insert("id".to_owned(), serde_json::json!(item_id));
+    item
 }
 
 fn prefixed_provider_item_id(id: &str, prefix: &str) -> String {

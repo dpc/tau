@@ -682,6 +682,7 @@ fn assemble_conversation_includes_tool_error_details() {
                 tool_type: tau_proto::ToolType::Function,
                 arguments: CborValue::Null,
                 raw_arguments_json: None,
+                responses_envelope: None,
             })],
             stop_reason: tau_proto::ProviderStopReason::ToolCalls,
             error: None,

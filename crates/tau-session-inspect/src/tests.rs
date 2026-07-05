@@ -27,6 +27,7 @@ fn assistant_preview_represents_multiple_messages_and_tool_calls_in_order() {
                 CborValue::Text("src/main.rs".into()),
             )]),
             raw_arguments_json: None,
+            responses_envelope: None,
         }),
         assistant_message("second"),
     ];

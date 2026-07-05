@@ -23,6 +23,18 @@ compaction, and unknown output items should be stored with
 transcript replay should prefer that sidecar over the parsed CBOR
 `OpaqueProviderItem.value`.
 
+Responses tool-call output items split semantic tool-call routing from provider
+envelope fidelity. `ToolCallItem.call_id`, name, type, and arguments remain the
+validated Tau fields used for dispatch and tool-result pairing, while
+`ToolCallItem.responses_envelope` stores the provider item id/status and unknown
+non-structured fields needed to replay `function_call` and `custom_tool_call`
+items without changing provider-visible item identity. The sidecar's
+`extra_fields` is a parsed CBOR map of JSON object members; it preserves values,
+not raw JSON spelling/order, and replay ignores non-map values. Extra fields
+cannot override rebuilt structured fields such as `id`, `status`, `call_id`,
+`name`, `arguments`, or `input`. Full transcript replay must fall back to the
+historical `fc_`/`ctc_` id synthesis when that sidecar is absent.
+
 ## Model metadata tags
 
 ChatGPT/Codex model publication includes provider-owned capability tags such as

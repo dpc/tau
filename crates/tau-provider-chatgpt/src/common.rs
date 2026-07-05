@@ -7,7 +7,8 @@ use tau_proto::{
     CborValue, ContentPart, ContextItem, ContextRole, MessageItem, OpaqueProviderItem,
     PromptContext, PromptOriginator, ProviderResponseCompactionStatus,
     ProviderResponseCompactionUpdate, ProviderResponseTextDelta, ProviderTokenUsage,
-    ReasoningTextItem, ReasoningTextKind, SessionId, ToolCallItem, ToolDefinition,
+    ReasoningTextItem, ReasoningTextKind, ResponsesToolCallEnvelope, SessionId, ToolCallItem,
+    ToolDefinition,
 };
 use tau_provider::{StreamRepetitionGuard, StreamRepetitionKey};
 use uuid::Uuid;
@@ -317,6 +318,7 @@ pub struct ToolCallAccumulator {
     pub name: String,
     pub tool_type: tau_proto::ToolType,
     pub arguments_json: String,
+    pub responses_envelope: ResponsesToolCallEnvelope,
 }
 
 impl ToolCallAccumulator {
@@ -326,6 +328,7 @@ impl ToolCallAccumulator {
             name: String::new(),
             tool_type,
             arguments_json: String::new(),
+            responses_envelope: ResponsesToolCallEnvelope::default(),
         }
     }
 
@@ -349,6 +352,8 @@ impl ToolCallAccumulator {
             arguments,
             raw_arguments_json: (self.tool_type == tau_proto::ToolType::Function)
                 .then(|| self.arguments_json.clone()),
+            responses_envelope: (!self.responses_envelope.is_empty())
+                .then(|| self.responses_envelope.clone()),
         }))
     }
 }

@@ -161,6 +161,47 @@ pub struct ToolCallItem {
     /// providers fall back to serializing [`Self::arguments`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub raw_arguments_json: Option<String>,
+    /// Optional Responses provider item envelope for replay fidelity.
+    ///
+    /// Responses output items have a provider-owned item `id`, may carry a
+    /// `status`, and can gain future envelope fields. Tau keeps the semantic
+    /// tool-call fields above as authoritative for validation and dispatch, but
+    /// Responses replay uses this sidecar to keep provider-visible transcript
+    /// identity stable when rebuilding `function_call` and `custom_tool_call`
+    /// input items. Old persisted turns and non-Responses providers leave this
+    /// empty and providers fall back to deterministic synthesis.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub responses_envelope: Option<ResponsesToolCallEnvelope>,
+}
+
+/// Provider-owned Responses envelope fields for one tool-call output item.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ResponsesToolCallEnvelope {
+    /// Provider output item id, distinct from the semantic tool-call `call_id`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub item_id: Option<String>,
+    /// Provider output item status, if the Responses item carried one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    /// Unknown provider envelope fields preserved for full-transcript replay.
+    ///
+    /// This must be a [`CborValue::Map`] corresponding to parsed JSON object
+    /// members. It preserves field values, but not raw JSON spelling, duplicate
+    /// keys, or object-member order. The map intentionally excludes structured
+    /// Responses tool-call fields such as `type`, `id`, `status`, `call_id`,
+    /// `name`, `arguments`, and `input`; those are rebuilt from
+    /// [`ToolCallItem`] or from the named envelope fields above, so
+    /// harness-side tool-call id normalization remains authoritative and
+    /// extra fields cannot override semantic replay fields.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extra_fields: Option<CborValue>,
+}
+
+impl ResponsesToolCallEnvelope {
+    /// Returns whether the envelope carries no provider replay fields.
+    pub fn is_empty(&self) -> bool {
+        self.item_id.is_none() && self.status.is_none() && self.extra_fields.is_none()
+    }
 }
 
 /// Terminal status for one tool result item.

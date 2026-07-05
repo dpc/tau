@@ -623,6 +623,7 @@ impl ToolCallAccumulator {
                 .map(|value| json_to_cbor(&value))
                 .unwrap_or(tau_proto::CborValue::Null),
             raw_arguments_json: Some(self.arguments.clone()),
+            responses_envelope: None,
         }))
     }
 }

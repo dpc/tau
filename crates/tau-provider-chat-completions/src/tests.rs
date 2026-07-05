@@ -435,6 +435,7 @@ fn tool_call_replay_falls_back_to_parsed_arguments_when_raw_json_missing() {
                         tau_proto::CborValue::Text("date".to_owned()),
                     )]),
                     raw_arguments_json: None,
+                    responses_envelope: None,
                 })],
                 usage: None,
             },

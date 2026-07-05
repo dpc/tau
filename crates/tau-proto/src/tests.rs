@@ -30,11 +30,11 @@ fn user_text_item(text: &str) -> ContextItem {
     })
 }
 
-/// Ensures the optional raw function-call argument JSON sidecar is additive for
-/// old persisted context items while still round-tripping when a provider
-/// parser records it for replay/cache identity.
+/// Ensures the optional tool-call replay sidecars are additive for old
+/// persisted context items while still round-tripping when a provider parser
+/// records them for replay/cache identity.
 #[test]
-fn tool_call_item_raw_arguments_json_is_optional_and_round_trips() {
+fn tool_call_item_replay_sidecars_are_optional_and_round_trip() {
     let raw_arguments = "{ \"z\" : 1, \"a\" : [2, 3] }";
     let call = ToolCallItem {
         call_id: "call-raw".into(),
@@ -54,15 +54,25 @@ fn tool_call_item_raw_arguments_json_is_optional_and_round_trips() {
             ),
         ]),
         raw_arguments_json: Some(raw_arguments.to_owned()),
+        responses_envelope: Some(ResponsesToolCallEnvelope {
+            item_id: Some("fc_provider_item".to_owned()),
+            status: Some("completed".to_owned()),
+            extra_fields: Some(CborValue::Map(vec![(
+                CborValue::Text("provider_future".to_owned()),
+                CborValue::Text("kept".to_owned()),
+            )])),
+        }),
     };
     let mut legacy_value = serde_json::to_value(&call).expect("serialize legacy fixture");
-    legacy_value
+    let legacy_object = legacy_value
         .as_object_mut()
-        .expect("tool call serializes as object")
-        .remove("raw_arguments_json");
+        .expect("tool call serializes as object");
+    legacy_object.remove("raw_arguments_json");
+    legacy_object.remove("responses_envelope");
     let legacy_call: ToolCallItem =
         serde_json::from_value(legacy_value).expect("legacy tool call item");
     assert_eq!(legacy_call.raw_arguments_json, None);
+    assert_eq!(legacy_call.responses_envelope, None);
 
     let round_trip: ToolCallItem =
         serde_json::from_value(serde_json::to_value(&call).expect("serialize tool call item"))
@@ -71,6 +81,7 @@ fn tool_call_item_raw_arguments_json_is_optional_and_round_trips() {
         round_trip.raw_arguments_json.as_deref(),
         Some(raw_arguments)
     );
+    assert_eq!(round_trip.responses_envelope, call.responses_envelope);
 }
 
 /// Ensures opaque provider items keep their raw JSON replay sidecar while still

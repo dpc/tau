@@ -195,6 +195,7 @@ fn tool_call(call_id: &str) -> tau_proto::ContextItem {
         tool_type: tau_proto::ToolType::Function,
         arguments: tau_proto::CborValue::Null,
         raw_arguments_json: None,
+        responses_envelope: None,
     })
 }
 

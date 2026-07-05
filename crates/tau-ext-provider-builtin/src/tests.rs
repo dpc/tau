@@ -46,6 +46,7 @@ fn compaction_with_tool_calls_still_requests_tools() {
             tool_type: tau_proto::ToolType::Function,
             arguments: tau_proto::CborValue::Null,
             raw_arguments_json: None,
+            responses_envelope: None,
         }),
     ];
 

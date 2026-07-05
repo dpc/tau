@@ -39,6 +39,15 @@ reconstructing provider history and fall back to serializing `arguments` only fo
 old persisted records or calls without provider-wire JSON. The sidecar is not a
 semantic authority and must not bypass CBOR validation/dispatch.
 
+`ToolCallItem.responses_envelope` is an optional Responses-only replay sidecar
+for provider-owned tool-call output item envelope fields such as item `id`,
+`status`, and unknown future fields. It must not contain semantic fields such as
+`call_id`, `name`, `arguments`, or `input`; those are rebuilt from the validated
+`ToolCallItem` fields so harness-side id normalization and dispatch remain
+authoritative. Responses replay should prefer the provider item id from this
+sidecar and fall back to deterministic `fc_`/`ctc_` synthesis only for old
+records.
+
 ## Opaque provider item dual representation
 
 `OpaqueProviderItem.value` is the parsed CBOR form of provider-owned output

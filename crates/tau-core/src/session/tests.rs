@@ -95,6 +95,7 @@ fn provider_tool_round_waits_for_all_terminal_results() {
                         tool_type: ToolType::Function,
                         arguments: tau_proto::CborValue::Null,
                         raw_arguments_json: None,
+                        responses_envelope: None,
                     }),
                     ContextItem::ToolCall(ToolCallItem {
                         call_id: second_call_id.clone(),
@@ -102,6 +103,7 @@ fn provider_tool_round_waits_for_all_terminal_results() {
                         tool_type: ToolType::Function,
                         arguments: tau_proto::CborValue::Null,
                         raw_arguments_json: None,
+                        responses_envelope: None,
                     }),
                 ],
                 stop_reason: tau_proto::ProviderStopReason::ToolCalls,

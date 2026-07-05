@@ -1,6 +1,6 @@
 use tau_proto::{
-    ContentPart, ContextItem, ContextRole, MessageItem, OpaqueProviderItem, ToolCallItem,
-    ToolResultItem, ToolResultStatus,
+    ContentPart, ContextItem, ContextRole, MessageItem, OpaqueProviderItem,
+    ResponsesToolCallEnvelope, ToolCallItem, ToolResultItem, ToolResultStatus,
 };
 
 use super::*;
@@ -362,6 +362,7 @@ fn build_request_full_replay_preserves_raw_function_call_arguments() {
                 ),
             ]),
             raw_arguments_json: Some(raw_arguments.to_owned()),
+            responses_envelope: None,
         }),
         user_text("continue"),
     ];
@@ -384,6 +385,70 @@ fn build_request_full_replay_preserves_raw_function_call_arguments() {
     let input = body["input"].as_array().expect("input array");
     assert_eq!(input[0]["type"], "function_call");
     assert_eq!(input[0]["arguments"], raw_arguments);
+}
+
+/// Responses replay must keep provider output item ids and envelope fields
+/// distinct from semantic tool-result `call_id`s. The provider item `id` is
+/// part of full-transcript cache identity, while `call_id` remains Tau's
+/// dispatch/result pairing key.
+#[test]
+fn build_request_full_replay_preserves_responses_tool_call_envelope() {
+    let messages = vec![
+        ContextItem::ToolCall(ToolCallItem {
+            call_id: "call_semantic".into(),
+            name: tau_proto::ToolName::new("shell"),
+            tool_type: tau_proto::ToolType::Function,
+            arguments: tau_proto::CborValue::Map(vec![]),
+            raw_arguments_json: Some("{}".to_owned()),
+            responses_envelope: Some(ResponsesToolCallEnvelope {
+                item_id: Some("fc_provider_item".to_owned()),
+                status: Some("completed".to_owned()),
+                extra_fields: Some(tau_proto::CborValue::Map(vec![(
+                    tau_proto::CborValue::Text("provider_future".to_owned()),
+                    tau_proto::CborValue::Bool(true),
+                )])),
+            }),
+        }),
+        ContextItem::ToolCall(ToolCallItem {
+            call_id: "call_custom_semantic".into(),
+            name: tau_proto::ToolName::new("custom"),
+            tool_type: tau_proto::ToolType::Custom,
+            arguments: tau_proto::CborValue::Text("raw custom input".to_owned()),
+            raw_arguments_json: None,
+            responses_envelope: Some(ResponsesToolCallEnvelope {
+                item_id: Some("ctc_provider_item".to_owned()),
+                status: Some("in_progress".to_owned()),
+                extra_fields: None,
+            }),
+        }),
+        user_text("continue"),
+    ];
+    let request = PromptPayload {
+        system_prompt: "sys",
+        context: context(&messages),
+        tools: &[],
+        params: tau_proto::ModelParams::default(),
+        tool_choice: tau_proto::ToolChoice::default(),
+        compaction: None,
+        originator: &tau_proto::PromptOriginator::User,
+        session_id: &tau_proto::SessionId::new("test-session"),
+        agent_id: &tau_proto::AgentId::parse("test-agent").expect("agent id"),
+        share_user_cache_key: false,
+        debug_provider_requests: false,
+    };
+
+    let body = serde_json::to_value(build_request(&chain_test_config(), &request, None))
+        .expect("serialize request");
+    let input = body["input"].as_array().expect("input array");
+    assert_eq!(input[0]["type"], "function_call");
+    assert_eq!(input[0]["id"], "fc_provider_item");
+    assert_eq!(input[0]["call_id"], "call_semantic");
+    assert_eq!(input[0]["status"], "completed");
+    assert_eq!(input[0]["provider_future"], true);
+    assert_eq!(input[1]["type"], "custom_tool_call");
+    assert_eq!(input[1]["id"], "ctc_provider_item");
+    assert_eq!(input[1]["call_id"], "call_custom_semantic");
+    assert_eq!(input[1]["status"], "in_progress");
 }
 
 /// Stateful-chain turn: when the harness supplies a
@@ -854,6 +919,7 @@ fn assistant_tool_call(
         tool_type,
         arguments: input,
         raw_arguments_json: None,
+        responses_envelope: None,
     })
 }
 
@@ -2043,8 +2109,11 @@ fn apply_event_function_call_assembles_tool_call() {
             "output_index": 0,
             "item": {
                 "type": "function_call",
+                "id": "fc_provider_item",
                 "call_id": "call_a",
                 "name": "shell",
+                "status": "completed",
+                "provider_future": { "kept": true },
             },
         }),
         &mut on_update,
@@ -2076,6 +2145,19 @@ fn apply_event_function_call_assembles_tool_call() {
         )])
     );
     assert_eq!(call.raw_arguments_json.as_deref(), Some("{\"cmd\":\"ls\"}"));
+    let envelope = call
+        .responses_envelope
+        .as_ref()
+        .expect("responses envelope");
+    assert_eq!(envelope.item_id.as_deref(), Some("fc_provider_item"));
+    assert_eq!(envelope.status.as_deref(), Some("completed"));
+    assert_eq!(
+        envelope
+            .extra_fields
+            .as_ref()
+            .map(crate::common::cbor_to_json),
+        Some(serde_json::json!({ "provider_future": { "kept": true } }))
+    );
 }
 
 #[test]

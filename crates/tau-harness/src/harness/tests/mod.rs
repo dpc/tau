@@ -20,9 +20,9 @@ use tau_proto::{
     CborValue, ContentPart, ContextItem, ContextRole, Disconnect, Event, EventDelivery,
     EventSelector, HarnessInputMessage, HarnessInputWriter, HarnessOutputMessage,
     HarnessOutputReader, Intercept, InterceptAction, InterceptReply, InterceptionPriority,
-    MessageItem, NodeId, ProviderResponseFinished, ProviderResponseUpdated, StartAgentRequest,
-    Subscribe, ToolCallId, ToolCallItem, ToolName, ToolResult, ToolResultItem, ToolResultStatus,
-    ToolSpec, UiPromptDraft, UiPromptSubmitted,
+    MessageItem, NodeId, ProviderResponseFinished, ProviderResponseUpdated,
+    ResponsesToolCallEnvelope, StartAgentRequest, Subscribe, ToolCallId, ToolCallItem, ToolName,
+    ToolResult, ToolResultItem, ToolResultStatus, ToolSpec, UiPromptDraft, UiPromptSubmitted,
 };
 use tau_session_inspect::{
     default_session_id, format_session_entry, open_session_store, policy_lines, session_lines,
@@ -1342,6 +1342,7 @@ fn seed_assistant_tool_round(h: &mut Harness, cid: &crate::AgentId, calls: &[(&s
                         tool_type: tau_proto::ToolType::Function,
                         arguments: CborValue::Map(Vec::new()),
                         raw_arguments_json: None,
+                        responses_envelope: None,
                     })
                 })
                 .collect(),
@@ -1364,12 +1365,19 @@ fn seed_assistant_tool_round(h: &mut Harness, cid: &crate::AgentId, calls: &[(&s
 }
 
 /// Harness tool-call normalization may rewrite ids or routed tool metadata
-/// before persisting the provider response, but it must not discard the
-/// provider's raw function-call argument JSON sidecar used later for provider
-/// replay/cache identity.
+/// before persisting the provider response, but it must not discard provider
+/// replay sidecars used later for Responses cache identity.
 #[test]
-fn rewrite_finished_response_tool_call_items_preserves_raw_arguments_json() {
+fn rewrite_finished_response_tool_call_items_preserves_provider_replay_sidecars() {
     let raw_arguments = "{ \"z\" : 1, \"a\" : [2, 3] }";
+    let responses_envelope = ResponsesToolCallEnvelope {
+        item_id: Some("fc_provider_item".to_owned()),
+        status: Some("completed".to_owned()),
+        extra_fields: Some(CborValue::Map(vec![(
+            CborValue::Text("provider_future".to_owned()),
+            CborValue::Bool(true),
+        )])),
+    };
     let mut response = ProviderResponseFinished {
         agent_prompt_id: "sp-raw".into(),
         agent_id: crate::parse_agent_id("main"),
@@ -1379,6 +1387,7 @@ fn rewrite_finished_response_tool_call_items_preserves_raw_arguments_json() {
             tool_type: tau_proto::ToolType::Function,
             arguments: CborValue::Map(Vec::new()),
             raw_arguments_json: Some(raw_arguments.to_owned()),
+            responses_envelope: Some(responses_envelope.clone()),
         })],
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
@@ -1407,6 +1416,7 @@ fn rewrite_finished_response_tool_call_items_preserves_raw_arguments_json() {
     };
     assert_eq!(call.call_id.as_str(), "call-normalized");
     assert_eq!(call.raw_arguments_json.as_deref(), Some(raw_arguments));
+    assert_eq!(call.responses_envelope, Some(responses_envelope));
 }
 
 /// Pumps the harness event loop until the named tool call's result

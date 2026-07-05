@@ -1732,6 +1732,7 @@ where
                             CborValue::Text(path.trim().to_owned()),
                         )]),
                         raw_arguments_json: None,
+                        responses_envelope: None,
                     }
                 } else if let Some(cmd) = user_text.strip_prefix("shell ") {
                     ToolCallItem {
@@ -1743,6 +1744,7 @@ where
                             CborValue::Text(cmd.trim().to_owned()),
                         )]),
                         raw_arguments_json: None,
+                        responses_envelope: None,
                     }
                 } else {
                     ToolCallItem {
@@ -1751,6 +1753,7 @@ where
                         tool_type: tau_proto::ToolType::Function,
                         arguments: CborValue::Text(user_text),
                         raw_arguments_json: None,
+                        responses_envelope: None,
                     }
                 };
 
@@ -11636,6 +11639,7 @@ impl Harness {
                         tool_type: entry.call.tool_type,
                         arguments: entry.call.arguments.clone(),
                         raw_arguments_json: original_call.raw_arguments_json,
+                        responses_envelope: original_call.responses_envelope,
                     })
                 }
                 item => item,
