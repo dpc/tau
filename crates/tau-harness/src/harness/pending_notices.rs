@@ -6,7 +6,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use tau_proto::{SessionId, ToolName};
+use tau_proto::{AgentId, SessionId, ToolName};
 
 use super::{tool_available_again_notice_prompt, tool_unavailable_notice_prompt};
 
@@ -19,8 +19,9 @@ pub(crate) struct PendingPromptNoticeState {
     /// durable event timestamp seen before resume when available.
     pub(crate) restore_sessions: HashMap<SessionId, Option<tau_proto::UnixMicros>>,
     /// Per-background-tool restore notes that should be folded immediately
-    /// before the next real user prompt, not dispatched as standalone turns.
-    pub(crate) restore_background_notices: HashMap<SessionId, Vec<String>>,
+    /// before the owning agent's next real user prompt, not dispatched as
+    /// standalone turns.
+    pub(crate) restore_background_notices: HashMap<(SessionId, AgentId), Vec<String>>,
     /// Tool availability notices waiting to be folded before the next real user
     /// prompt on the target user agent, keyed by internal tool name for
     /// deterministic delivery.

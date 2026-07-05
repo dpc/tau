@@ -9507,10 +9507,16 @@ impl Harness {
             .any(|entry| matches_event(&entry.event))
     }
 
-    fn internal_prompt_already_persisted(&self, session_id: &SessionId, text: &str) -> bool {
-        self.any_loaded_agent_event(session_id, |event| {
-            event_is_internal_prompt_text(event, text)
-        })
+    fn agent_internal_prompt_already_persisted(&self, agent_id: &AgentId, text: &str) -> bool {
+        self.agent_store
+            .agent_events(agent_id.as_str())
+            .inspect_err(|error| {
+                tracing::warn!(target: "tau_harness", %agent_id, %error, "failed to load agent events while checking restored background notice");
+            })
+            .ok()
+            .into_iter()
+            .flatten()
+            .any(|entry| event_is_internal_prompt_text(&entry.event, text))
     }
 
     fn restore_notice_already_persisted(&self, session_id: &SessionId) -> bool {
@@ -9553,9 +9559,10 @@ impl Harness {
         if session_id != &self.current_session_id {
             return;
         }
-        let mut seen = HashSet::new();
-        let mut notices = Vec::new();
+        let mut notices_by_agent = HashMap::new();
         for cid in self.restored_agent_ids(session_id) {
+            let mut seen = HashSet::new();
+            let mut notices = Vec::new();
             for state in self.restored_background_tool_states_for_agent(&cid) {
                 let Some(tau_core::BackgroundToolCompletion::Error(error)) = state.completion
                 else {
@@ -9565,20 +9572,26 @@ impl Harness {
                 if error.message != notice || !seen.insert(notice.clone()) {
                     continue;
                 }
-                if self.internal_prompt_already_persisted(session_id, &notice) {
+                if self.agent_internal_prompt_already_persisted(&cid, &notice) {
                     continue;
                 }
                 notices.push(notice);
             }
+            if !notices.is_empty() {
+                notices_by_agent.insert((session_id.clone(), cid), notices);
+            }
         }
-        if notices.is_empty() {
+        if notices_by_agent.is_empty() {
             self.pending_notices
                 .restore_background_notices
-                .remove(session_id);
+                .retain(|(queued_session_id, _), _| queued_session_id != session_id);
         } else {
             self.pending_notices
                 .restore_background_notices
-                .insert(session_id.clone(), notices);
+                .retain(|(queued_session_id, _), _| queued_session_id != session_id);
+            self.pending_notices
+                .restore_background_notices
+                .extend(notices_by_agent);
         }
     }
 
@@ -9666,7 +9679,14 @@ impl Harness {
         &mut self,
         cid: &AgentId,
     ) -> Vec<PendingPrompt> {
-        let Some(session_id) = self.agents.get(cid).map(|conv| conv.session_id.clone()) else {
+        let Some((session_id, agent_id)) = self.agents.get(cid).map(|conv| {
+            let agent_id = conv
+                .agent_id
+                .as_deref()
+                .map(crate::parse_agent_id)
+                .unwrap_or_else(|| cid.clone());
+            (conv.session_id.clone(), agent_id)
+        }) else {
             return Vec::new();
         };
         if session_id != self.current_session_id {
@@ -9688,10 +9708,10 @@ impl Harness {
         if let Some(notices) = self
             .pending_notices
             .restore_background_notices
-            .remove(&session_id)
+            .remove(&(session_id.clone(), agent_id.clone()))
         {
             for notice in notices {
-                if !self.internal_prompt_already_persisted(&session_id, &notice) {
+                if !self.agent_internal_prompt_already_persisted(&agent_id, &notice) {
                     prompts.push(PendingPrompt::internal(notice));
                 }
             }

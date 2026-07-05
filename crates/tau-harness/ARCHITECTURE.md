@@ -291,6 +291,11 @@ node advances the folded `AgentTree::head()`. Resume therefore restores the
 conversation cursor from the replayed tree head, preserving root head moves only
 until a later branch-advancing event supersedes them.
 
+Restored background-tool interruption notices are queued by session and owning
+agent. They must be folded only into the next real user prompt for the agent
+whose background call was repaired, so one loaded agent in a resumed session
+cannot consume or see another agent's restored background-tool notice.
+
 ## Lifecycle events
 
 Harness lifecycle events such as session start/shutdown and extension status are

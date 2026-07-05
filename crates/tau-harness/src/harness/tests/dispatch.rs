@@ -607,15 +607,19 @@ fn seed_prior_user_message_at(state_dir: &Path, text: &str, recorded_at: tau_pro
 }
 
 fn seed_main_agent_loaded(state_dir: &Path) {
+    seed_agent_loaded(state_dir, "s1", "main");
+}
+
+fn seed_agent_loaded(state_dir: &Path, session_id: &str, agent_id: &str) {
     let sessions_dir = tau_config::settings::sessions_dir_of(state_dir);
     let mut store = tau_core::SessionStore::open(&sessions_dir).expect("session store");
     store
         .append_session_event(
-            "s1",
+            session_id,
             None,
             Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
-                session_id: "s1".into(),
-                agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
+                session_id: session_id.into(),
+                agent_id: tau_proto::AgentId::parse(agent_id).expect("agent id"),
                 ephemeral: false,
             }),
         )
@@ -673,15 +677,25 @@ fn restored_background_notice(call_id: &str) -> String {
 }
 
 fn seed_background_placeholder(state_dir: &Path, call_id: &str, tool_name: &str) {
-    seed_main_agent_loaded(state_dir);
+    seed_background_placeholder_for_agent(state_dir, "main", call_id, tool_name);
+}
+
+fn seed_background_placeholder_for_agent(
+    state_dir: &Path,
+    agent_id: &str,
+    call_id: &str,
+    tool_name: &str,
+) {
+    seed_agent_loaded(state_dir, "s1", agent_id);
+    let parsed_agent_id = tau_proto::AgentId::parse(agent_id).expect("agent id");
     let mut agent_store =
         tau_core::AgentStore::open(state_dir.join("agents")).expect("agent store");
     agent_store
         .append_agent_event(
-            "main",
+            agent_id,
             None,
             Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
-                agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
+                agent_id: parsed_agent_id.clone(),
                 text: format!("run {tool_name}"),
                 message_class: tau_proto::PromptMessageClass::User,
                 originator: tau_proto::PromptOriginator::User,
@@ -692,11 +706,11 @@ fn seed_background_placeholder(state_dir: &Path, call_id: &str, tool_name: &str)
         .expect("seed prior user message");
     agent_store
         .append_agent_event(
-            "main",
+            agent_id,
             None,
             Event::ProviderResponseFinished(ProviderResponseFinished {
                 agent_prompt_id: format!("sp-{call_id}").into(),
-                agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
+                agent_id: parsed_agent_id,
                 output_items: vec![ContextItem::ToolCall(ToolCallItem {
                     call_id: call_id.into(),
                     name: ToolName::new(tool_name),
@@ -719,7 +733,7 @@ fn seed_background_placeholder(state_dir: &Path, call_id: &str, tool_name: &str)
         .expect("seed background tool call");
     agent_store
         .append_agent_event(
-            "main",
+            agent_id,
             None,
             Event::ProviderToolResult(ToolResult {
                 call_id: call_id.into(),
@@ -6362,6 +6376,56 @@ fn resumed_lost_background_tool_gets_error_and_wait_returns() {
         Event::ToolError(error)
             if error.call_id.as_str() == "wait-lost-bg" && error.message == notice
     )));
+
+    h.shutdown().expect("shutdown");
+}
+
+/// Regression: restored background notices are owned by the agent whose
+/// background call was repaired. A session-level queue let the first prompted
+/// agent consume every restored background notice, including notices for other
+/// loaded agents in the same session.
+#[test]
+fn restored_background_notices_are_delivered_to_owning_agent() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    seed_background_placeholder_for_agent(&sp, "main", "main-lost-bg", "slow_bg");
+    seed_background_placeholder_for_agent(&sp, "side_agent", "side-lost-bg", "slow_bg");
+
+    let mut h =
+        quiet_provider_harness_with_start_reason(&sp, tau_proto::SessionStartReason::Resume)
+            .expect("resume");
+    let main_notice = restored_background_notice("main-lost-bg");
+    let side_notice = restored_background_notice("side-lost-bg");
+    let main_cid = h
+        .agent_routes
+        .get("main")
+        .cloned()
+        .expect("main agent route");
+    let side_cid = h
+        .agent_routes
+        .get("side_agent")
+        .cloned()
+        .expect("side agent route");
+
+    let side_prompts = h.take_pending_restore_prompts_for_user_prompt(&side_cid);
+    assert!(
+        side_prompts.iter().any(|prompt| prompt.text == side_notice),
+        "side agent should receive its own restored background notice"
+    );
+    assert!(
+        side_prompts.iter().all(|prompt| prompt.text != main_notice),
+        "side agent must not receive main agent's restored background notice"
+    );
+
+    let main_prompts = h.take_pending_restore_prompts_for_user_prompt(&main_cid);
+    assert!(
+        main_prompts.iter().any(|prompt| prompt.text == main_notice),
+        "main agent should still receive its own restored background notice"
+    );
+    assert!(
+        main_prompts.iter().all(|prompt| prompt.text != side_notice),
+        "main agent must not receive side agent's restored background notice"
+    );
 
     h.shutdown().expect("shutdown");
 }
