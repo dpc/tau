@@ -4474,6 +4474,50 @@ fn live_cancel_backgrounded_builtin_agent_start_keeps_passive_completion_notice(
     h.shutdown().expect("shutdown");
 }
 
+/// Regression: cancellation routing must re-check background state after the
+/// cancel request has been published. A future synchronous cancel-request
+/// handler may turn a still-foreground call into a backgrounded call without
+/// completing it; that must be finalized through `ToolBackgroundError`, not a
+/// second foreground `ToolCancelled`.
+#[test]
+fn cancel_target_rechecks_background_state_after_cancel_request() {
+    let (_td, mut h) = setup_routed_test_tool_call("post-request-bg-call", "post_request_bg_tool");
+    let call_id: ToolCallId = "post-request-bg-call".into();
+    let target = super::super::CancelTarget {
+        call_id: call_id.clone(),
+        tool_name: ToolName::new("post_request_bg_tool"),
+        tool_type: tau_proto::ToolType::Function,
+        backgrounded: false,
+    };
+
+    assert!(!h.cancel_target_should_finish_as_background_error(&target));
+    h.publish_event(
+        Some(HARNESS_CONNECTION_ID),
+        Event::ToolCancelRequest(tau_proto::ToolCancelRequest {
+            target_call_id: call_id.clone(),
+        }),
+    );
+    assert!(h.tool_turn.mark_backgrounded(&call_id));
+    h.publish_synthetic_background_result(&call_id);
+
+    assert!(h.cancel_target_should_finish_as_background_error(&target));
+    h.finish_backgrounded_tool_cancelled_by_harness(target);
+
+    assert!(!event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::ToolCancelled(cancelled) if cancelled.call_id == call_id
+    )));
+    assert!(event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::ToolBackgroundError(error)
+            if error.call_id == call_id && error.message == "Tool call canceled"
+    )));
+    assert!(!h.tool_turn.is_backgrounded(&call_id));
+    assert!(!h.tool_agents.contains_key(&call_id));
+
+    h.shutdown().expect("shutdown");
+}
+
 /// Cancelling a turn while `wait` is blocked must remove the waiter entry. A
 /// later wait for the same target should report the cancelled/consumed target,
 /// not a stale "existing wait" from the aborted wait call.

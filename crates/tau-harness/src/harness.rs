@@ -6743,7 +6743,7 @@ impl Harness {
                     target_call_id: target.call_id.clone(),
                 }),
             );
-            if target.backgrounded {
+            if self.cancel_target_should_finish_as_background_error(&target) {
                 // A background placeholder is already the foreground terminal
                 // result. After broadcasting cancellation, synthesize a
                 // background error only if no synchronous handler completed the
@@ -6785,6 +6785,10 @@ impl Harness {
         if let Some(conv) = self.agents.get_mut(cid) {
             conv.tools_in_flight = 0;
         }
+    }
+
+    fn cancel_target_should_finish_as_background_error(&self, target: &CancelTarget) -> bool {
+        target.backgrounded || self.tool_turn.is_backgrounded(&target.call_id)
     }
 
     fn finish_backgrounded_tool_cancelled_by_harness(
