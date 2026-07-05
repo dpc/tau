@@ -1790,7 +1790,11 @@ where
 
     let originator = prompt.originator.clone();
     let mut chatgpt_turn_state = ChatGptTurnState::new(max_retries_for(&originator));
-    let mut transport_taken = ProviderBackendTransport::HttpSse;
+    let mut transport_taken = if config.supports_websocket {
+        ProviderBackendTransport::Websocket
+    } else {
+        ProviderBackendTransport::HttpSse
+    };
     let mut ws_pool_delta = None;
     let result = with_llm_retry(
         agent_prompt_id,

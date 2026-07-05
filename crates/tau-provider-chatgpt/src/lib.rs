@@ -4,9 +4,6 @@
 //! implementation, including HTTP/SSE, WebSocket transport, and pooled WS
 //! sessions.
 
-use std::collections::HashSet;
-use std::sync::Mutex;
-
 use tau_proto::{
     Effort, ModelId, ModelName, ModelTag, ProviderBackendTransport, ProviderModelInfo,
     ProviderName, ThinkingSummary, Verbosity,
@@ -19,7 +16,6 @@ pub const DEFAULT_BASE_URL: &str = "https://chatgpt.com/backend-api";
 
 const CONTEXT_WINDOW: u64 = 258400;
 const CHATGPT_MODELS: &[&str] = &["gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex"];
-const WS_RETRY_BUDGET_BEFORE_HTTP_FALLBACK: usize = 2;
 
 pub mod common;
 pub mod responses;
@@ -71,12 +67,10 @@ impl TurnAbortWaker for NeverAbortWaker {}
 
 /// Runtime state for ChatGPT/Codex transports.
 ///
-/// This owns the WebSocket pool and per-session WS fallback state so callers do
-/// not need to know whether a prompt used WS or HTTP/SSE until the turn returns
-/// its backend metadata.
+/// This owns the WebSocket pool so callers do not need to know whether a prompt
+/// used WS or HTTP/SSE until the turn returns its backend metadata.
 pub struct ChatGptRuntime {
     ws_pool: responses::pool::SharedWsPool,
-    ws_disabled: Mutex<HashSet<String>>,
 }
 
 /// Result of one ChatGPT/Codex streaming dispatch.
@@ -95,20 +89,20 @@ impl ChatGptRuntime {
     pub fn new() -> Self {
         Self {
             ws_pool: responses::pool::SharedWsPool::new(),
-            ws_disabled: Mutex::new(HashSet::new()),
         }
     }
 
     /// Stream one prompt through the best available ChatGPT transport.
     ///
-    /// WebSocket is tried first when supported. Known WS-capability or limit
-    /// failures disable WS for this session and transparently fall back to
-    /// HTTP/SSE; retryable WS failures are surfaced until this turn's internal
-    /// retry budget is exhausted, then also fall back to HTTP/SSE for this
-    /// session. The `abort` source is checked before starting WS work and is
-    /// also registered as a wake source while a WS turn is blocked waiting for
-    /// a same-key pool reservation or provider events; canceled turns
-    /// return `LlmError::HttpStatus(499, "cancelled by harness")`.
+    /// WebSocket is always used when supported by the model configuration.
+    /// Retryable WS failures are returned to the outer provider retry loop,
+    /// which applies bounded backoff and eventually surfaces the terminal
+    /// provider error for the turn. Known WS-capability or limit failures are
+    /// surfaced directly instead of silently falling back to HTTP/SSE. The
+    /// `abort` source is checked before starting WS work and is also registered
+    /// as a wake source while a WS turn is blocked waiting for a same-key pool
+    /// reservation or provider events; canceled turns return
+    /// `LlmError::HttpStatus(499, "cancelled by harness")`.
     pub fn stream(
         &self,
         agent_prompt_id: &str,
@@ -121,13 +115,7 @@ impl ChatGptRuntime {
         let ws_pool_before = self.ws_pool.stats();
         let mut transport = ProviderBackendTransport::HttpSse;
         let session_id = request.session_id.as_str();
-        let try_ws = config.supports_websocket
-            && self
-                .ws_disabled
-                .lock()
-                .map(|disabled| !disabled.contains(session_id))
-                .unwrap_or(false);
-        let state = if try_ws {
+        let state = if config.supports_websocket {
             match responses::pool::run_turn_through_shared_pool(
                 &self.ws_pool,
                 config,
@@ -141,47 +129,33 @@ impl ChatGptRuntime {
                     transport = ProviderBackendTransport::Websocket;
                     state
                 }
-                Err(error) if should_disable_ws_error(&error) => {
+                Err(error) if is_ws_capability_or_limit_error(&error) => {
                     let error = error.into_llm_error();
                     tracing::warn!(
                         target: LOG_TARGET,
                         session_id,
-                        "WS path failed ({error}); falling back to HTTP for this session",
+                        "WS path failed with capability/limit error; surfacing error without HTTP fallback: {error}",
                     );
-                    if let Ok(mut disabled) = self.ws_disabled.lock() {
-                        disabled.insert(session_id.to_owned());
-                    }
-                    responses::responses_stream(agent_prompt_id, config, request, on_update)?
+                    return Err(error);
                 }
                 Err(other) => {
                     let error = other.into_llm_error();
                     if error.retry_after().is_some() {
                         turn_state.ws_failures += 1;
-                        if turn_state.ws_failures <= turn_state.ws_retry_budget {
-                            tracing::warn!(
-                                target: LOG_TARGET,
-                                session_id,
-                                ws_retry_failures = turn_state.ws_failures,
-                                ws_retry_budget = turn_state.ws_retry_budget,
-                                "WS path failed with retryable error ({error}); retrying WS before HTTP fallback",
-                            );
-                            return Err(error);
-                        }
+                        let retry_status = if turn_state.ws_failures <= turn_state.ws_retry_budget {
+                            "retrying WS without HTTP fallback"
+                        } else {
+                            "surfacing error without HTTP fallback"
+                        };
                         tracing::warn!(
                             target: LOG_TARGET,
                             session_id,
                             ws_retry_failures = turn_state.ws_failures,
                             ws_retry_budget = turn_state.ws_retry_budget,
-                            "WS retry budget exhausted ({error}); falling back to HTTP for this session",
+                            "WS path failed with retryable error; {retry_status}: {error}",
                         );
-                        if let Ok(mut disabled) = self.ws_disabled.lock() {
-                            disabled.insert(session_id.to_owned());
-                        }
-                        transport = ProviderBackendTransport::HttpSse;
-                        responses::responses_stream(agent_prompt_id, config, request, on_update)?
-                    } else {
-                        return Err(error);
                     }
+                    return Err(error);
                 }
             }
         } else {
@@ -206,12 +180,7 @@ impl ChatGptRuntime {
         session_id: &str,
         request: &common::PromptPayload<'_>,
     ) -> Result<(), common::LlmError> {
-        let ws_disabled_for_session = self
-            .ws_disabled
-            .lock()
-            .map(|disabled| disabled.contains(session_id))
-            .unwrap_or(true);
-        if !config.supports_websocket || ws_disabled_for_session {
+        if !config.supports_websocket {
             tracing::debug!(
                 target: LOG_TARGET,
                 session_id,
@@ -220,21 +189,8 @@ impl ChatGptRuntime {
             return Ok(());
         }
 
-        match responses::pool::run_prewarm_through_shared_pool(
-            &self.ws_pool,
-            config,
-            session_id,
-            request,
-        ) {
-            Ok(_) => Ok(()),
-            Err(error) if should_disable_ws(&error) => {
-                if let Ok(mut disabled) = self.ws_disabled.lock() {
-                    disabled.insert(session_id.to_owned());
-                }
-                Err(error)
-            }
-            Err(error) => Err(error),
-        }
+        responses::pool::run_prewarm_through_shared_pool(&self.ws_pool, config, session_id, request)
+            .map(|_| ())
     }
 }
 
@@ -244,7 +200,7 @@ impl Default for ChatGptRuntime {
     }
 }
 
-/// Per-turn state for ChatGPT/Codex transport fallback.
+/// Per-turn state for ChatGPT/Codex WebSocket retries.
 pub struct ChatGptTurnState {
     ws_failures: usize,
     ws_retry_budget: usize,
@@ -253,25 +209,26 @@ pub struct ChatGptTurnState {
 impl ChatGptTurnState {
     /// Create state for one prompt turn from the outer provider retry budget.
     ///
-    /// ChatGPT may spend a small prefix of those retries on WebSocket before
-    /// falling back to HTTP/SSE for the session.
+    /// The outer provider loop owns sleep/backoff and the terminal retry bound;
+    /// this state tracks how many retryable WebSocket failures happened within
+    /// that bounded turn.
     #[must_use]
     pub fn new(max_provider_retries: usize) -> Self {
         Self {
             ws_failures: 0,
-            ws_retry_budget: max_provider_retries.min(WS_RETRY_BUDGET_BEFORE_HTTP_FALLBACK),
+            ws_retry_budget: max_provider_retries,
         }
     }
 }
 
-fn should_disable_ws_error(error: &responses::pool::WsTurnError) -> bool {
+fn is_ws_capability_or_limit_error(error: &responses::pool::WsTurnError) -> bool {
     match error {
         responses::pool::WsTurnError::Canceled => false,
-        responses::pool::WsTurnError::Other(error) => should_disable_ws(error),
+        responses::pool::WsTurnError::Other(error) => is_ws_capability_or_limit_llm_error(error),
     }
 }
 
-fn should_disable_ws(error: &common::LlmError) -> bool {
+fn is_ws_capability_or_limit_llm_error(error: &common::LlmError) -> bool {
     match error {
         common::LlmError::HttpStatus(426, _) => true,
         common::LlmError::HttpStatus(_, body) => {

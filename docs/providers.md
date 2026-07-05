@@ -166,6 +166,9 @@ It lives in `crates/tau-ext-provider-builtin` and is spawned as the built-in `pr
 It publishes hardcoded ChatGPT/Codex metadata and configured Chat Completions/OpenRouter model metadata before `Ready` during extension startup.
 It owns execution for those namespaces and preserves the existing provider execution event semantics for streaming, tool calls, usage, and retries.
 It publishes `chatgpt/*` only from auth named `chatgpt`; there is no `openai-codex` compatibility alias.
+WebSocket-capable ChatGPT/Codex Responses models remain on WebSocket: retryable
+WS failures follow the bounded retry/backoff policy, and terminal WS errors are
+surfaced instead of silently falling back to HTTP/SSE.
 
 ## Summary
 

@@ -7,9 +7,8 @@
 //! When the resolved config advertises `supports_websocket`, the provider
 //! loop routes Responses turns through the [`ws`] module
 //! instead — same wire envelope, persistent connection, per-session
-//! pooling. This module's HTTP+SSE path is kept as the universal
-//! fallback (and as the only transport for endpoints that don't
-//! support WS).
+//! pooling. This module's HTTP+SSE path is kept for endpoints that don't
+//! support WS and for HTTP/SSE-specific tests and replays.
 
 use std::borrow::Cow;
 use std::io::BufRead;

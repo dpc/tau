@@ -13,6 +13,68 @@ impl RetrySleeper for RecordingRetrySleeper {
     }
 }
 
+struct NoopAbortWaker;
+
+impl TurnAbortWaker for NoopAbortWaker {}
+
+impl TurnAbort for RecordingRetrySleeper {
+    fn is_aborted(&mut self) -> bool {
+        false
+    }
+
+    fn register_waker(
+        &mut self,
+        _waker: Arc<dyn Fn() + Send + Sync + 'static>,
+    ) -> Box<dyn TurnAbortWaker> {
+        Box::new(NoopAbortWaker)
+    }
+}
+
+#[derive(Default)]
+struct TransportCounts {
+    http_post_requests: std::sync::atomic::AtomicUsize,
+}
+
+fn spawn_ws_426_server() -> (String, Arc<TransportCounts>) {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind fake provider");
+    listener
+        .set_nonblocking(true)
+        .expect("set fake provider nonblocking");
+    let addr = listener.local_addr().expect("fake provider addr");
+    let counts = Arc::new(TransportCounts::default());
+    let thread_counts = Arc::clone(&counts);
+    std::thread::spawn(move || {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while std::time::Instant::now() < deadline {
+            let (mut stream, _) = match listener.accept() {
+                Ok(accepted) => accepted,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                    continue;
+                }
+                Err(_) => break,
+            };
+            let _ = stream.set_read_timeout(Some(std::time::Duration::from_millis(200)));
+            let mut request = [0_u8; 1024];
+            let read = std::io::Read::read(&mut stream, &mut request).unwrap_or(0);
+            if request[..read].starts_with(b"POST ") {
+                thread_counts
+                    .http_post_requests
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+            let response = concat!(
+                "HTTP/1.1 426 Upgrade Required\r\n",
+                "Content-Length: 21\r\n",
+                "Connection: close\r\n",
+                "\r\n",
+                "upgrade unavailable\n"
+            );
+            let _ = std::io::Write::write_all(&mut stream, response.as_bytes());
+        }
+    });
+    (format!("http://{addr}/backend-api"), counts)
+}
+
 fn model_ids(models: &[ProviderModelInfo]) -> Vec<String> {
     models.iter().map(|model| model.id.to_string()).collect()
 }
@@ -70,6 +132,70 @@ fn synthetic_provider_error_is_not_output_item() {
     assert!(finished.output_items.is_empty());
     assert_eq!(finished.stop_reason, tau_proto::ProviderStopReason::Error);
     assert_eq!(finished.error.as_deref(), Some("no model specified"));
+}
+
+#[test]
+fn chatgpt_websocket_terminal_error_reports_websocket_backend() {
+    // Regression for tau-agent-y8vc: when a WebSocket-capable ChatGPT/Codex
+    // prompt fails before a stream is established, the final provider error
+    // metadata should describe the attempted WebSocket transport and must not
+    // be produced by an HTTP/SSE fallback POST.
+    let (base_url, counts) = spawn_ws_426_server();
+    let config = tau_provider_chatgpt::responses::ResponsesConfig {
+        surface: tau_provider_chatgpt::responses::ResponsesSurface::ChatGpt,
+        base_url: base_url.clone(),
+        api_key: "token".to_owned(),
+        model_id: "gpt-5.3-codex".to_owned(),
+        context_window: 258_400,
+        account_id: Some("account".to_owned()),
+        supports_reasoning_effort: false,
+        supports_reasoning_summary: false,
+        supports_verbosity: false,
+        supports_phase: true,
+        supports_encrypted_reasoning: false,
+        supports_websocket: true,
+        supports_compaction: true,
+        supports_prompt_cache_key: false,
+    };
+    let mut prompt = minimal_prompt();
+    prompt.model = "chatgpt/gpt-5.3-codex".parse().expect("model id");
+    let mut retry = RecordingRetrySleeper { delays: Vec::new() };
+    let runtime = ChatGptRuntime::new();
+    let mut bytes = Vec::new();
+    let mut writer = PeerOutputWriter::new(&mut bytes);
+
+    handle_prompt(
+        "ap-ws-terminal",
+        &config,
+        &prompt,
+        false,
+        &mut writer,
+        &mut retry,
+        &runtime,
+    )
+    .expect("prompt handler should emit terminal provider error");
+
+    assert_eq!(
+        counts
+            .http_post_requests
+            .load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "terminal WS error must not be produced by HTTP/SSE fallback"
+    );
+    let frames = decode_frames(&bytes);
+    let finished = frames.iter().find_map(|frame| match frame {
+        tau_proto::HarnessInputMessage::Emit(emit) => match emit.event.as_ref() {
+            tau_proto::Event::ProviderResponseFinished(finished) => Some(finished),
+            _ => None,
+        },
+        _ => None,
+    });
+    let finished = finished.expect("provider response finished frame");
+    assert_eq!(
+        finished.backend.as_ref().map(|backend| backend.transport),
+        Some(tau_proto::ProviderBackendTransport::Websocket)
+    );
+    assert_eq!(finished.stop_reason, tau_proto::ProviderStopReason::Error);
 }
 
 #[test]

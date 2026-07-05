@@ -2,6 +2,19 @@
 
 This crate contains the ChatGPT/Codex provider transport implementation shared by the built-in provider extension. It owns request construction, Responses HTTP/SSE handling, persistent Responses WebSocket pooling, provider-cache key derivation, and provider-specific retry/error mapping.
 
+## Transport selection
+
+`ResponsesConfig::supports_websocket` is the source of truth for ChatGPT/Codex
+Responses transport routing. When it is true, Tau treats WebSocket as the
+required transport for that model/configuration, not as a speculative
+optimization before HTTP/SSE. Capability or limit failures from the WebSocket
+path, and retryable WebSocket failures after the bounded outer retry/backoff
+policy is exhausted, must surface as provider errors for the turn rather than
+silently replaying the same prompt over HTTP/SSE.
+
+HTTP/SSE remains the Responses transport for configs that do not advertise
+WebSocket support and for the HTTP/SSE-specific request/debug/replay paths.
+
 ## Prompt-cache identity
 
 First-party ChatGPT/Codex prompt-cache keys are stable per provider base URL and durable target `AgentId`. Prompt provenance (`PromptOriginator`) is intentionally not part of the key: a target agent must stay on the same provider cache bucket whether a turn came from direct user input, extension-originated work, a manager relay, or an agent-to-agent message.

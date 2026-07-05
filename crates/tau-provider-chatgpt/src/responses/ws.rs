@@ -77,7 +77,7 @@ pub const OPENAI_BETA_WS: &str = "responses_websockets=2026-02-06";
 const KEEPALIVE_PING_INTERVAL: Duration = Duration::from_secs(25);
 
 /// How long one WS turn may go without any provider event before Tau treats
-/// the socket as wedged and lets the caller retry/fall back to HTTP/SSE.
+/// the socket as wedged and returns a retryable WebSocket error to the caller.
 const TURN_EVENT_TIMEOUT: Duration = Duration::from_secs(120);
 
 type SharedStream = WebSocketStream<MaybeTlsStream<TcpStream>>;
@@ -162,8 +162,7 @@ impl WsConn {
     /// as both `session-id` and `thread-id` on the upgrade.
     ///
     /// Errors:
-    /// - `LlmError::HttpStatus(426, _)` — server rejected the upgrade (sticky
-    ///   fallback to HTTP+SSE).
+    /// - `LlmError::HttpStatus(426, _)` — server rejected the upgrade.
     /// - `LlmError::HttpStatus(0, "stream error: ...")` — transient transport
     ///   hiccup, retryable.
     /// - Other 4xx — surface as-is.

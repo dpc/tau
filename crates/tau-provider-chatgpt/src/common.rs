@@ -40,9 +40,9 @@ pub struct PromptPayload<'a> {
     /// bucket explicitly. Prompt-cache routing is now stable per agent, so this
     /// no longer changes the wire `prompt_cache_key`.
     pub share_user_cache_key: bool,
-    /// Harness session this prompt belongs to. Used for debug paths,
-    /// tracing, and transport fallback state; the Responses WebSocket
-    /// pool keys upstream sockets by the prompt-cache UUID instead.
+    /// Harness session this prompt belongs to. Used for debug paths and
+    /// tracing; the Responses WebSocket pool keys upstream sockets by the
+    /// prompt-cache UUID instead.
     /// Backends without session-scoped diagnostics ignore this.
     pub session_id: &'a SessionId,
     /// Durable agent this prompt belongs to.

@@ -3278,15 +3278,16 @@ pub struct ProviderResponseFinished {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_response_id: Option<String>,
     /// Per-turn delta of the provider's Codex WS pool counters. `Some(_)`
-    /// only for Responses-backend turns where the WS path was
-    /// attempted (i.e. `cfg.supports_websocket` and the routing-key
-    /// sticky-disable flag was off). `None` for Chat Completions and
-    /// for Responses routing keys that have been permanently flipped to
-    /// HTTP+SSE. Lets offline analysis attribute a low
-    /// `cached_tokens` to a chain-strip event (the Codex chain cache
-    /// is connection-local; a fresh socket or a silent reconnect
-    /// drops the in-request `previous_response_id`, collapsing
-    /// `cached_tokens` to the static system+tools baseline).
+    /// is used when a Responses backend can report WebSocket pool stats for
+    /// the turn. `None` for Chat Completions, Responses configs that do not
+    /// use WebSocket, and turns that fail before a WebSocket pool delta can be
+    /// computed. Transport selection is recorded separately in
+    /// `ProviderBackend::transport`; WebSocket-capable configs must not be
+    /// silently or permanently flipped to HTTP/SSE after WebSocket failures.
+    /// Lets offline analysis attribute a low `cached_tokens` to a chain-strip
+    /// event (the Codex chain cache is connection-local; a fresh socket or a
+    /// silent reconnect drops the in-request `previous_response_id`,
+    /// collapsing `cached_tokens` to the static system+tools baseline).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ws_pool_delta: Option<WsPoolDelta>,
 }
@@ -3382,8 +3383,8 @@ pub enum ProviderBackendKind {
 #[serde(rename_all = "snake_case")]
 pub enum ProviderBackendTransport {
     /// One-shot HTTP request with Server-Sent Events streaming.
-    /// Default — covers Chat Completions and the HTTP+SSE Responses
-    /// fallback.
+    /// Default — covers Chat Completions and Responses endpoints that do not
+    /// use WebSocket.
     #[default]
     HttpSse,
     /// Persistent WebSocket. Only Codex Responses today.

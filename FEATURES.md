@@ -519,6 +519,10 @@ response cache stays warm across turns of the same conversation — including
 when sub-agent delegations are interleaved with the parent. Connections age out
 before the upstream's 60-minute hard cap, and refreshed OAuth tokens invalidate
 stale sockets on next use.
+WebSocket-capable ChatGPT/Codex models stay on the WebSocket transport:
+retryable WebSocket failures use Tau's bounded retry/backoff policy, and
+terminal WebSocket errors are surfaced instead of silently falling back to
+HTTP/SSE.
 
 ### `std-notifications` — idle and turn notifications
 

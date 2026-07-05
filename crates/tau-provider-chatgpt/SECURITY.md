@@ -20,6 +20,16 @@ Pool checkout cancellation uses the same wake discipline: an abort wake only
 causes checkout to re-check authoritative abort state, and a canceled same-key
 waiter must not send a delayed stale request after the prior reservation clears.
 
+## WebSocket downgrade prevention
+
+For ChatGPT/Codex configs that advertise WebSocket support, the WebSocket
+transport is a routing commitment. WebSocket capability/limit failures and
+retryable WebSocket failures after bounded retry exhaustion must surface as
+provider errors instead of silently replaying the prompt over HTTP/SSE. This
+keeps transport behavior visible, avoids surprising downgrade paths, and
+prevents masking a WebSocket-specific upstream or pool failure as an unrelated
+HTTP/SSE turn.
+
 ## Raw Responses replay sidecars
 
 Raw provider replay sidecars are external-provider-authored transcript data. They
