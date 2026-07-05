@@ -68,8 +68,10 @@ The idle deadline resets on:
 
 - `agent.prompt_submitted` (originator: User) — the user prompt was
   accepted into the agent transcript;
-- `provider.prompt_submitted` (originator: User) — the provider is
-  starting a real turn;
+- `provider.prompt_submitted` (originator: User), when its
+  `agent_prompt_id` maps to the same agent — the provider is starting a real
+  turn; unowned provider prompts leave existing per-agent idle deadlines
+  unchanged so one agent cannot suppress another agent's idle notification;
 - `ui.prompt_draft` — trailing-edge debounced typing pings from
   the UI; the deadline jumps back by that idle hook's `delay_seconds`
   so the notification doesn't fire mid-sentence while the user is

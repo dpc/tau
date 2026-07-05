@@ -14,9 +14,9 @@
 //! A per-agent idle timer resets on that agent's user-originated
 //! `agent.prompt_submitted`, and on matching user-originated
 //! `provider.prompt_submitted` when the prompt owner is known. Unowned provider
-//! prompt submissions clear conservatively for compatibility with older event
-//! streams. Pending idle hooks that are still waiting for their idle deadline
-//! are extended by
+//! prompt submissions are ignored because clearing all idle state would let one
+//! agent prompt perturb another. Pending idle hooks that are still waiting for
+//! their idle deadline are extended by
 //! `ui.prompt_draft` typing pings.
 //!
 //! The downstream tooling (typically a terminal multiplexer status
@@ -1050,7 +1050,11 @@ impl NotificationLoop {
         if let Some(agent_id) = self.agent_prompt_agents.get(&prompt.agent_prompt_id) {
             self.idle.retain(|pending| &pending.agent_id != agent_id);
         } else {
-            self.idle.clear();
+            tracing::trace!(
+                target: LOG_TARGET,
+                agent_prompt_id = %prompt.agent_prompt_id,
+                "provider prompt has no known owning agent; leaving per-agent idle timers unchanged",
+            );
         }
     }
 

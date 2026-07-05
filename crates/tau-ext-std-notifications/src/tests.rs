@@ -2944,3 +2944,59 @@ fn agent_idle_timers_are_scoped_per_agent() {
     };
     assert_eq!(osc.value, "idle:main");
 }
+
+/// Provider prompt submissions carry only an agent prompt id. If the extension
+/// does not yet know that prompt's owning agent, it must not globally clear
+/// unrelated per-agent idle timers, or a prompt for one active agent can
+/// suppress another agent's waiting-user notification.
+#[test]
+fn unowned_provider_prompt_does_not_clear_other_agent_idle_timer() {
+    let mut input = Vec::new();
+    let mut writer = EventWriter::new(&mut input);
+    writer
+        .write_frame(&configure_frame(tau_proto::json_to_cbor(
+            &serde_json::json!({
+                "agent_idle": [{
+                    "delay_seconds": 0,
+                    "osc1337": { "key": TEXT_VAR_NAME, "value": "idle:{{agent.id}}" },
+                }],
+            }),
+        )))
+        .expect("write config");
+    writer
+        .write_event(&user_prompt_submitted_for_agent(
+            "main",
+            "main prompt",
+            tau_proto::PromptOriginator::User,
+        ))
+        .expect("main prompt");
+    writer
+        .write_event(&Event::ProviderResponseFinished(
+            assistant_finished_response_for_agent(
+                "main",
+                "sp-main",
+                "done",
+                tau_proto::PromptOriginator::User,
+            ),
+        ))
+        .expect("main response");
+    writer
+        .write_event(&Event::ProviderPromptSubmitted(
+            tau_proto::ProviderPromptSubmitted {
+                agent_prompt_id: "sp-unowned-other".into(),
+                originator: tau_proto::PromptOriginator::User,
+            },
+        ))
+        .expect("unowned provider prompt");
+    writer.flush().expect("flush");
+
+    let output = run_with_idle_output(input, Duration::from_millis(1));
+
+    let mut reader = EventReader::new(Cursor::new(output));
+    drain_lifecycle(&mut reader);
+    let idle = reader.read_event().expect("read").expect("idle");
+    let Event::Osc1337SetUserVar(osc) = idle else {
+        panic!("expected main idle OSC, got {idle:?}");
+    };
+    assert_eq!(osc.value, "idle:main");
+}

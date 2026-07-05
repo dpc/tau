@@ -24,6 +24,12 @@ created them. This lets multiple loaded agents make interleaved progress without
 one agent suppressing another agent's `agent_start`/`agent_end` hooks or mixing
 `turn.*` template data.
 
+Provider prompt-start events are scoped through the known `agent_prompt_id` to
+agent mapping. If that mapping is missing, the event is ignored for per-agent
+idle cancellation instead of clearing all idle timers, because a global fallback
+would let one active agent prompt suppress another agent's pending idle
+notification.
+
 `agent.prompt_terminated` marks the corresponding user-originated prompt id
 consumed, clears that prompt's in-flight notification state, and emits no
 completion hooks or idle timers. It does not by itself clear active
