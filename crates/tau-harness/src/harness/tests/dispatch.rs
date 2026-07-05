@@ -3966,6 +3966,133 @@ fn cancel_remaining_backgrounded_extension_call_publishes_background_error_only(
     h.shutdown().expect("shutdown");
 }
 
+struct TestAgentStartBuiltin;
+
+impl crate::InternalToolHandler for TestAgentStartBuiltin {
+    fn tool_specs(&self) -> Vec<tau_proto::ToolSpec> {
+        vec![tau_proto::ToolSpec {
+            name: ToolName::new("agent_start"),
+            model_visible_name: None,
+            description: Some("test agent_start".to_owned()),
+            tool_type: tau_proto::ToolType::Function,
+            parameters: Some(serde_json::json!({"type":"object"})),
+            format: None,
+            tags: Vec::new(),
+            enabled_by_default: true,
+            background_support: Some(tau_proto::BackgroundSupport::Never),
+            examples: Vec::new(),
+        }]
+    }
+
+    fn handles(&self, internal_tool_name: &ToolName) -> bool {
+        internal_tool_name.as_str() == "agent_start"
+    }
+
+    fn handle_event(
+        &self,
+        host: &mut crate::InternalToolHost<'_>,
+        event: &Event,
+    ) -> Result<(), HarnessError> {
+        let Event::ToolStarted(started) = event else {
+            return Ok(());
+        };
+        let Some((_conversation_id, call, _visible_tool_name)) =
+            host.internal_started_call(started)
+        else {
+            return Ok(());
+        };
+        let query_id = format!("test-agent-start-{}", call.id);
+        host.enqueue_start_agent_request_without_draining(tau_proto::StartAgentRequest {
+            parent_agent: None,
+            query_id,
+            instruction: "test builtin agent_start".to_owned(),
+            role: None,
+            input_stats: tau_proto::ToolUseStats::default(),
+            tool_call_id: Some(call.id.clone()),
+            task_name: Some("test agent_start".to_owned()),
+        })
+        .map_err(HarnessError::Participant)?;
+        host.background_tool_call(
+            &call.id,
+            CborValue::Text("test builtin agent_start running in background".to_owned()),
+        );
+        host.drain_start_agent_requests()
+    }
+}
+
+/// Regression: a harness-owned, backgrounded `agent_start` must be completed
+/// through the background-error channel when delegate teardown cancels it. A
+/// second transcript-terminal `ToolCancelled` would make the store reject the
+/// already-closed background placeholder branch.
+#[test]
+fn cancel_backgrounded_builtin_agent_start_publishes_background_error_only() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    h.selected_model = Some("test/model".into());
+    h.install_internal_tool_handlers(vec![std::sync::Arc::new(TestAgentStartBuiltin)]);
+
+    let parent_cid = ensure_test_user_agent(&mut h);
+    let spid: AgentPromptId = "sp-builtin-agent-start-bg".into();
+    seed_agent_thinking(&mut h, &parent_cid, spid.as_str());
+    let parent_agent_id = h.agents[&parent_cid].agent_id.clone().expect("agent id");
+    h.prompt_agents.insert(spid.clone(), parent_cid.clone());
+    let call_id: ToolCallId = "builtin-agent-start-bg".into();
+    h.handle_provider_response_finished(ProviderResponseFinished {
+        agent_prompt_id: spid,
+        agent_id: crate::parse_agent_id(&parent_agent_id),
+        output_items: vec![ContextItem::ToolCall(ToolCallItem {
+            call_id: call_id.clone(),
+            name: ToolName::new("agent_start"),
+            tool_type: tau_proto::ToolType::Function,
+            arguments: CborValue::Map(Vec::new()),
+            raw_arguments_json: None,
+            responses_envelope: None,
+        })],
+        stop_reason: tau_proto::ProviderStopReason::ToolCalls,
+        error: None,
+        usage: None,
+        originator: tau_proto::PromptOriginator::User,
+        compaction_original_input_tokens: None,
+        compaction_compacted_input_tokens: None,
+        backend: None,
+        provider_response_id: None,
+        ws_pool_delta: None,
+    })
+    .expect("builtin agent_start dispatched");
+    assert_eq!(background_placeholder_count(&h, call_id.as_str()), 1);
+    assert!(h.tool_turn.is_backgrounded(&call_id));
+
+    let query_id = format!("test-agent-start-{call_id}");
+    let side_cid = ext_query_cid(&h, &query_id).expect("side conversation");
+    assert_eq!(
+        h.agents
+            .get(&side_cid)
+            .and_then(|agent| agent.parent_tool_call_id.as_ref()),
+        Some(&call_id)
+    );
+
+    h.cancel_remaining_tool_calls(&parent_cid, vec![call_id.clone()], "harness teardown");
+
+    assert_eq!(background_error_count(&h, call_id.as_str()), 1);
+    assert_eq!(
+        event_log_count(&h, |event| matches!(
+            event,
+            Event::ToolCancelled(cancelled) if cancelled.call_id == call_id
+        )),
+        0
+    );
+    assert!(!event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::HarnessNotice(notice) if notice.kind == tau_proto::notice_kind::HARNESS_FAILURE
+    )));
+    assert!(!h.tool_turn.is_backgrounded(&call_id));
+    assert!(!h.pending_tools.contains_key(&call_id));
+    assert!(!h.tool_agents.contains_key(&call_id));
+
+    h.shutdown().expect("shutdown");
+}
+
 /// Cancelling a turn while `wait` is blocked must remove the waiter entry. A
 /// later wait for the same target should report the cancelled/consumed target,
 /// not a stale "existing wait" from the aborted wait call.
