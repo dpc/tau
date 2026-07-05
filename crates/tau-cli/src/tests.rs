@@ -1872,6 +1872,97 @@ fn no_agent_extension_lifecycle_completion_routes_to_no_agent_snapshot() {
     assert!(!vt.screen_contains(80, "extension std-global starting"));
 }
 
+/// Dynamic action results must render in the transcript that was viewed when
+/// the action was invoked. The result event itself has no agent id, so routing
+/// it by the currently selected agent would leak output into whichever
+/// transcript the user switched to while the extension was working.
+#[test]
+fn action_result_routes_to_invocation_snapshot() {
+    let (_term, handle, vt) = setup(80, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        cli_test_theme(),
+    );
+
+    renderer.switch_agent("agent-a".to_owned());
+    renderer.record_action_invocation("action-1".into(), Some("agent-a".to_owned()));
+    renderer.switch_agent("agent-b".to_owned());
+    renderer.handle(&Event::ActionResult(tau_proto::ActionResult {
+        invocation_id: "action-1".into(),
+        action_id: "demo.action".to_owned(),
+        output: tau_proto::ActionOutput::Text {
+            text: "agent a action output".to_owned(),
+        },
+    }));
+    sync(&handle);
+    assert!(!vt.screen_contains(80, "agent a action output"));
+
+    renderer.switch_agent("agent-a".to_owned());
+    sync(&handle);
+    assert!(vt.screen_contains(80, "agent a action output"));
+}
+
+/// Dynamic action errors invoked from the no-agent screen must not appear in a
+/// later-selected agent transcript. This preserves the global/no-agent snapshot
+/// boundary for extension action failures just like successful output.
+#[test]
+fn no_agent_action_error_routes_to_no_agent_snapshot() {
+    let (_term, handle, vt) = setup(80, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        cli_test_theme(),
+    );
+
+    renderer.record_action_invocation("action-2".into(), None);
+    renderer.switch_agent("fresh-agent".to_owned());
+    renderer.handle(&Event::ActionError(tau_proto::ActionError {
+        invocation_id: "action-2".into(),
+        action_id: "demo.action".to_owned(),
+        message: "no-agent action failed".to_owned(),
+        details: None,
+    }));
+    sync(&handle);
+    assert!(!vt.screen_contains(80, "no-agent action failed"));
+
+    renderer.clear_selected_agent();
+    sync(&handle);
+    assert!(vt.screen_contains(80, "no-agent action failed"));
+}
+
+/// No-agent action output that arrives while the no-agent screen is still
+/// visible must be snapshotted before switching to a fresh agent. Otherwise the
+/// fresh agent would inherit global action output that was never scoped to it.
+#[test]
+fn visible_no_agent_action_result_is_preserved_when_switching_to_fresh_agent() {
+    let (_term, handle, vt) = setup(80, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        cli_test_theme(),
+    );
+
+    renderer.record_action_invocation("action-3".into(), None);
+    renderer.handle(&Event::ActionResult(tau_proto::ActionResult {
+        invocation_id: "action-3".into(),
+        action_id: "demo.action".to_owned(),
+        output: tau_proto::ActionOutput::Text {
+            text: "visible no-agent action output".to_owned(),
+        },
+    }));
+    sync(&handle);
+    assert!(vt.screen_contains(80, "visible no-agent action output"));
+
+    renderer.switch_agent("fresh-agent".to_owned());
+    sync(&handle);
+    assert!(!vt.screen_contains(80, "visible no-agent action output"));
+
+    renderer.clear_selected_agent();
+    sync(&handle);
+    assert!(vt.screen_contains(80, "visible no-agent action output"));
+}
+
 /// Removing a visible starting block must request a redraw even when the
 /// matching completion is filtered by the current notice level. Without this,
 /// the stale starting line stays on screen until some unrelated redraw happens.

@@ -68,6 +68,9 @@ pub(crate) struct EventRenderer {
     /// visible. The currently visible agent lives in the fields on this struct
     /// so existing rendering code can stay direct and efficient.
     agents_ui_state: HashMap<String, AgentUiState>,
+    /// Whether the visible no-agent transcript must be snapshotted before
+    /// switching to a fresh agent transcript.
+    preserve_on_fresh_agent_switch: bool,
     /// Agent ids known to the UI for `/agent` completion.
     known_agents: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
     /// Human-friendly display names keyed by agent id.
@@ -123,6 +126,11 @@ pub(crate) struct EventRenderer {
     /// above_active while starting, then completed in the same transcript
     /// snapshot that originally owned the starting block.
     extension_blocks: HashMap<tau_proto::ExtensionInstanceId, ExtensionBlockState>,
+    /// Dynamic action invocations keyed by invocation id. Action results and
+    /// errors do not carry an agent id, so the CLI snapshots the viewed
+    /// transcript when the slash command is invoked and routes completion
+    /// output back to that transcript.
+    action_invocation_owners: HashMap<tau_proto::ActionInvocationId, UiSnapshotOwner>,
     /// Extensions that are already up in this daemon. `/session new` starts a
     /// fresh session, but these processes are intentionally kept.
     ready_extensions: HashSet<String>,
@@ -315,6 +323,7 @@ struct AgentUiState {
     tool_summaries: HashMap<tau_cli_term::BlockId, ToolSummaryDisplay>,
     prompt_tool_summary: Option<tau_cli_term::BlockId>,
     prompt_tool_summary_active: bool,
+    preserve_on_fresh_agent_switch: bool,
     cumulative_agent_latency: Duration,
     agent_activity: AgentActivity,
 }
@@ -325,12 +334,12 @@ struct EditorConversationContext {
     last_response: Option<String>,
 }
 
-/// UI snapshot that currently owns an in-flight extension lifecycle block.
+/// UI transcript snapshot that owns UI output for an in-flight lifecycle.
 #[derive(Clone)]
-enum ExtensionBlockOwner {
-    /// The no-agent/global output snapshot owns the block.
+enum UiSnapshotOwner {
+    /// The no-agent/global output snapshot owns the output.
     NoAgent,
-    /// A concrete agent transcript snapshot owns the block.
+    /// A concrete agent transcript snapshot owns the output.
     Agent(String),
 }
 
@@ -339,7 +348,7 @@ struct ExtensionBlockState {
     /// Terminal block id for the in-flight "starting" line.
     block_id: tau_cli_term::BlockId,
     /// Snapshot that must receive the matching ready/exited update.
-    owner: ExtensionBlockOwner,
+    owner: UiSnapshotOwner,
 }
 
 enum EventAgentIdResolution {
@@ -1069,6 +1078,7 @@ impl EventRenderer {
             awaiting_new_agent_selection: false,
             no_agent_ui_state: AgentUiState::default(),
             agents_ui_state: HashMap::new(),
+            preserve_on_fresh_agent_switch: false,
             known_agents: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             agent_display_names: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
             live_agents: std::sync::Arc::new(std::sync::Mutex::new(HashSet::new())),
@@ -1086,6 +1096,7 @@ impl EventRenderer {
             tool_timer: None,
             shell_blocks: HashMap::new(),
             extension_blocks: HashMap::new(),
+            action_invocation_owners: HashMap::new(),
             ready_extensions: HashSet::new(),
             model_status_block: None,
             current_session_id: None,
@@ -1241,7 +1252,7 @@ impl EventRenderer {
     fn show_agent_transcript(&mut self, agent_id: String) {
         let needs_snapshot_swap = self.displayed_agent_id.is_some()
             || self.agents_ui_state.contains_key(&agent_id)
-            || self.visible_no_agent_extension_blocks_exist();
+            || self.visible_no_agent_snapshot_needs_preservation();
         if needs_snapshot_swap {
             self.store_visible_agent_state();
             let state = self.agents_ui_state.remove(&agent_id).unwrap_or_default();
@@ -1251,12 +1262,8 @@ impl EventRenderer {
         self.displayed_agent_id = Some(agent_id);
     }
 
-    fn visible_no_agent_extension_blocks_exist(&self) -> bool {
-        self.displayed_agent_id.is_none()
-            && self
-                .extension_blocks
-                .values()
-                .any(|state| matches!(state.owner, ExtensionBlockOwner::NoAgent))
+    fn visible_no_agent_snapshot_needs_preservation(&self) -> bool {
+        self.displayed_agent_id.is_none() && self.preserve_on_fresh_agent_switch
     }
 
     fn set_current_agent_id(&mut self, agent_id: Option<String>) {
@@ -1285,6 +1292,18 @@ impl EventRenderer {
     pub(crate) fn set_action_state(&mut self, action_state: ActionCommandState) {
         self.action_state = action_state;
         self.refresh_action_completions();
+    }
+
+    /// Remember which transcript was viewed when a dynamic action was invoked.
+    pub(crate) fn record_action_invocation(
+        &mut self,
+        invocation_id: tau_proto::ActionInvocationId,
+        owner_agent_id: Option<String>,
+    ) {
+        let owner = owner_agent_id
+            .map(UiSnapshotOwner::Agent)
+            .unwrap_or(UiSnapshotOwner::NoAgent);
+        self.action_invocation_owners.insert(invocation_id, owner);
     }
 
     pub(crate) fn skill_arg_completer(&self) -> tau_cli_term::ArgCompleter {
@@ -1317,6 +1336,9 @@ impl EventRenderer {
             tool_summaries: std::mem::take(&mut self.tool_summaries),
             prompt_tool_summary: self.prompt_tool_summary.take(),
             prompt_tool_summary_active: std::mem::take(&mut self.prompt_tool_summary_active),
+            preserve_on_fresh_agent_switch: std::mem::take(
+                &mut self.preserve_on_fresh_agent_switch,
+            ),
             cumulative_agent_latency: std::mem::take(&mut self.cumulative_agent_latency),
             agent_activity: std::mem::take(&mut self.agent_activity),
         }
@@ -1367,6 +1389,7 @@ impl EventRenderer {
         self.tool_summaries = state.tool_summaries;
         self.prompt_tool_summary = state.prompt_tool_summary;
         self.prompt_tool_summary_active = state.prompt_tool_summary_active;
+        self.preserve_on_fresh_agent_switch = state.preserve_on_fresh_agent_switch;
         self.cumulative_agent_latency = state.cumulative_agent_latency;
         self.agent_activity = state.agent_activity;
     }
@@ -2071,6 +2094,7 @@ impl EventRenderer {
         }
         self.shell_blocks.clear();
         self.extension_blocks.clear();
+        self.action_invocation_owners.clear();
         self.model_status_block = None;
         self.diff_blocks.clear();
         self.thinking_history.clear();
@@ -2080,6 +2104,7 @@ impl EventRenderer {
         self.tool_summaries.clear();
         self.prompt_tool_summary = None;
         self.prompt_tool_summary_active = false;
+        self.preserve_on_fresh_agent_switch = false;
         // Model selection and effort are harness-global, not
         // session-scoped. `/session new` only causes a SessionStarted event;
         // the harness does not re-emit HarnessRoleSelected for the
@@ -2666,7 +2691,12 @@ impl EventRenderer {
     pub(crate) fn handle_recorded_at(&mut self, event: &Event, recorded_at: UnixMicros) {
         self.learn_agent_metadata(event);
         if let Some(owner) = self.extension_lifecycle_owner(event) {
-            self.handle_recorded_at_for_extension_owner(event, recorded_at, owner);
+            self.handle_recorded_at_for_snapshot_owner(event, recorded_at, owner);
+            self.update_agent_in_progress();
+            return;
+        }
+        if let Some(owner) = self.take_action_completion_owner(event) {
+            self.handle_recorded_at_for_snapshot_owner(event, recorded_at, owner);
             self.update_agent_in_progress();
             return;
         }
@@ -2765,7 +2795,7 @@ impl EventRenderer {
         self.update_agent_in_progress();
     }
 
-    fn extension_lifecycle_owner(&self, event: &Event) -> Option<ExtensionBlockOwner> {
+    fn extension_lifecycle_owner(&self, event: &Event) -> Option<UiSnapshotOwner> {
         let instance_id = match event {
             Event::ExtensionReady(ready) => ready.instance_id,
             Event::ExtensionExited(exited) => exited.instance_id,
@@ -2776,32 +2806,41 @@ impl EventRenderer {
             .map(|state| state.owner.clone())
     }
 
-    fn current_extension_block_owner(&self) -> ExtensionBlockOwner {
+    fn current_extension_block_owner(&self) -> UiSnapshotOwner {
         self.displayed_agent_id
             .clone()
-            .map(ExtensionBlockOwner::Agent)
-            .unwrap_or(ExtensionBlockOwner::NoAgent)
+            .map(UiSnapshotOwner::Agent)
+            .unwrap_or(UiSnapshotOwner::NoAgent)
     }
 
-    fn handle_recorded_at_for_extension_owner(
+    fn take_action_completion_owner(&mut self, event: &Event) -> Option<UiSnapshotOwner> {
+        let invocation_id = match event {
+            Event::ActionResult(result) => &result.invocation_id,
+            Event::ActionError(error) => &error.invocation_id,
+            _ => return None,
+        };
+        self.action_invocation_owners.remove(invocation_id)
+    }
+
+    fn handle_recorded_at_for_snapshot_owner(
         &mut self,
         event: &Event,
         recorded_at: UnixMicros,
-        owner: ExtensionBlockOwner,
+        owner: UiSnapshotOwner,
     ) {
         match owner {
-            ExtensionBlockOwner::Agent(agent_id)
+            UiSnapshotOwner::Agent(agent_id)
                 if self.displayed_agent_id.as_deref() == Some(agent_id.as_str()) =>
             {
                 self.handle_recorded_at_for_visible_agent(event, recorded_at);
             }
-            ExtensionBlockOwner::NoAgent if self.displayed_agent_id.is_none() => {
+            UiSnapshotOwner::NoAgent if self.displayed_agent_id.is_none() => {
                 self.handle_recorded_at_for_visible_agent(event, recorded_at);
             }
-            ExtensionBlockOwner::Agent(agent_id) => {
+            UiSnapshotOwner::Agent(agent_id) => {
                 self.handle_recorded_at_for_hidden_agent(event, recorded_at, agent_id);
             }
-            ExtensionBlockOwner::NoAgent => {
+            UiSnapshotOwner::NoAgent => {
                 self.handle_recorded_at_for_hidden_no_agent(event, recorded_at);
             }
         }
@@ -5179,6 +5218,9 @@ impl EventRenderer {
             "action-result",
             render_action_output_block(&self.theme, &text),
         );
+        if self.displayed_agent_id.is_none() {
+            self.preserve_on_fresh_agent_switch = true;
+        }
     }
 
     fn handle_action_error(&mut self, error: &tau_proto::ActionError) {
@@ -5188,6 +5230,9 @@ impl EventRenderer {
             "action-error",
             render_action_error_block(&self.theme, &error.action_id, &error.message),
         );
+        if self.displayed_agent_id.is_none() {
+            self.preserve_on_fresh_agent_switch = true;
+        }
     }
 
     fn handle_extension_events(&mut self, event: &Event) -> bool {
@@ -5228,6 +5273,9 @@ impl EventRenderer {
             return;
         }
         let owner = self.current_extension_block_owner();
+        if matches!(owner, UiSnapshotOwner::NoAgent) {
+            self.preserve_on_fresh_agent_switch = true;
+        }
         let block = extension_status_block(&self.theme, &starting.extension_name, "starting");
         let id = self.handle.new_block(
             format!("extension-starting:{}", starting.instance_id),

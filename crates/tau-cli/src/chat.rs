@@ -1078,6 +1078,10 @@ pub(crate) fn run_chat(
                         RendererCmd::ResumeAgent { agent_id } => renderer.resume_agent(agent_id),
                         RendererCmd::ClearSelectedAgent => renderer.clear_selected_agent(),
                         RendererCmd::SetTheme { theme } => renderer.apply_theme(theme),
+                        RendererCmd::ActionInvoked {
+                            invocation_id,
+                            owner_agent_id,
+                        } => renderer.record_action_invocation(invocation_id, owner_agent_id),
                         RendererCmd::ToolTimerTick => renderer.handle_tool_timer_tick(),
                     }
                     ui_io_tracker.sample_if_due(&mut renderer);
@@ -1289,6 +1293,11 @@ enum RendererCmd {
     /// `/theme <name>` — apply a theme to this UI process only.
     SetTheme {
         theme: tau_themes::Theme,
+    },
+    /// Dynamic extension action was invoked from the current viewed transcript.
+    ActionInvoked {
+        invocation_id: tau_proto::ActionInvocationId,
+        owner_agent_id: Option<String>,
     },
     Remote {
         event: Box<Event>,
@@ -1592,6 +1601,14 @@ enum CommandOutcome {
     NotHandled,
     Continue,
     Exit(InputLoopExit),
+}
+
+/// Prepared dynamic action dispatch and matching renderer owner update.
+struct DynamicActionInvocation {
+    /// Event sent to the harness/extension action provider.
+    event: Event,
+    /// Renderer command that records the invocation-time viewed transcript.
+    renderer_cmd: RendererCmd,
 }
 
 enum NewAliasCommandEffect<'a> {
@@ -2545,29 +2562,25 @@ impl<'a> TerminalInputSession<'a> {
     }
 
     fn handle_dynamic_action(&self, text: &str) -> CommandOutcome {
-        let Some(dispatch) = self.ctx.action_state.parse_line(text) else {
-            return CommandOutcome::NotHandled;
-        };
-        let dispatch = match dispatch {
-            Ok(dispatch) => dispatch,
+        let invocation = match prepare_dynamic_action_invocation(
+            &self.ctx.action_state,
+            &self.ctx.routing,
+            self.session_id,
+            text,
+        ) {
+            Ok(Some(invocation)) => invocation,
+            Ok(None) => return CommandOutcome::NotHandled,
             Err(error) => {
-                self.output.system_info(&error.to_string());
+                self.output.system_info(&error);
                 return CommandOutcome::Continue;
             }
         };
-        let parsed = dispatch.parsed;
         self.invalidate_pending_draft();
-        let event = Event::ActionInvoke(tau_proto::ActionInvoke {
-            invocation_id: crate::mint_short_id("action").into(),
-            session_id: self.session_id.as_str().into(),
-            extension_name: dispatch.extension_name,
-            instance_id: dispatch.instance_id,
-            action_id: parsed.action_id.clone(),
-            raw_line: text.to_owned(),
-            argv: parsed.argv.clone(),
-            arguments: parsed_action_arguments(&parsed.named_args),
-        });
-        if send_event(self.writer, &event).is_err() {
+        // Record the renderer owner before sending `action.invoke`: fast
+        // completions carry only `invocation_id`, so result/error routing must
+        // already know which transcript was viewed at invocation time.
+        let _ = self.ctx.renderer_tx.send(invocation.renderer_cmd);
+        if send_event(self.writer, &invocation.event).is_err() {
             CommandOutcome::Exit(InputLoopExit::Quit)
         } else {
             CommandOutcome::Continue
@@ -2880,6 +2893,39 @@ pub(crate) fn next_active_agent(
             }
         });
     Some(active_agents[index].to_string())
+}
+
+fn prepare_dynamic_action_invocation(
+    action_state: &ActionCommandState,
+    routing: &InputRoutingState,
+    session_id: &str,
+    text: &str,
+) -> Result<Option<DynamicActionInvocation>, String> {
+    let Some(dispatch) = action_state.parse_line(text) else {
+        return Ok(None);
+    };
+    let dispatch = dispatch.map_err(|error| error.to_string())?;
+    let parsed = dispatch.parsed;
+    let invocation_id: tau_proto::ActionInvocationId = crate::mint_short_id("action").into();
+    let owner_agent_id = routing.selected_agent_id();
+    let event = Event::ActionInvoke(tau_proto::ActionInvoke {
+        invocation_id: invocation_id.clone(),
+        session_id: session_id.into(),
+        extension_name: dispatch.extension_name,
+        instance_id: dispatch.instance_id,
+        action_id: parsed.action_id.clone(),
+        raw_line: text.to_owned(),
+        argv: parsed.argv.clone(),
+        arguments: parsed_action_arguments(&parsed.named_args),
+    });
+    let renderer_cmd = RendererCmd::ActionInvoked {
+        invocation_id,
+        owner_agent_id,
+    };
+    Ok(Some(DynamicActionInvocation {
+        event,
+        renderer_cmd,
+    }))
 }
 
 fn terminal_input_loop(

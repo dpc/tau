@@ -1,5 +1,97 @@
 use super::*;
 
+fn action_schema(root: &str, action_id: &str) -> tau_actions::ActionSchema {
+    tau_actions::ActionSchema {
+        version: tau_actions::ACTION_SCHEMA_VERSION,
+        roots: vec![tau_actions::ActionCommand {
+            name: root.to_owned(),
+            description: format!("{root} actions"),
+            action_id: None,
+            args: Vec::new(),
+            children: vec![tau_actions::ActionCommand {
+                name: "list".to_owned(),
+                description: "List items".to_owned(),
+                action_id: Some(action_id.to_owned()),
+                args: Vec::new(),
+                children: Vec::new(),
+            }],
+        }],
+    }
+}
+
+fn action_state_with_email_list() -> ActionCommandState {
+    let state = ActionCommandState::new(BUILTIN_SLASH_COMMANDS.iter().map(|(name, _)| *name));
+    state.apply_schema_published(&tau_proto::ActionSchemaPublished {
+        extension_name: "std-email".into(),
+        instance_id: 7.into(),
+        schema: action_schema("/email", "email.list"),
+    });
+    state
+}
+
+fn routing_state_with_selected_agent(selected: Option<&str>) -> InputRoutingState {
+    let current_agent_state = Arc::new(Mutex::new(selected.map(str::to_owned)));
+    let known_agents = Arc::new(Mutex::new(Vec::new()));
+    let live_agents = Arc::new(Mutex::new(std::collections::HashSet::new()));
+    let ephemeral_agents = Arc::new(Mutex::new(std::collections::HashSet::new()));
+    let suspended_agents = Arc::new(Mutex::new(std::collections::HashSet::new()));
+    InputRoutingState::new(
+        current_agent_state,
+        known_agents,
+        live_agents,
+        ephemeral_agents,
+        suspended_agents,
+    )
+}
+
+#[derive(Clone)]
+struct MiniVtWriter {
+    parser: Arc<Mutex<vt100::Parser>>,
+}
+
+impl MiniVtWriter {
+    fn screen_contains(&self, width: u16, needle: &str) -> bool {
+        let parser = self.parser.lock().expect("vt parser");
+        let contents = parser.screen().contents();
+        contents
+            .as_bytes()
+            .chunks(width as usize)
+            .any(|row| String::from_utf8_lossy(row).contains(needle))
+    }
+}
+
+impl std::io::Write for MiniVtWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.parser.lock().expect("vt parser").process(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn mini_term(
+    width: u16,
+    height: u16,
+) -> (
+    tau_cli_term_raw::Term,
+    tau_cli_term::TermHandle,
+    MiniVtWriter,
+) {
+    let vt = MiniVtWriter {
+        parser: Arc::new(Mutex::new(vt100::Parser::new(height, width, 100))),
+    };
+    let (term, handle, _input) = tau_cli_term_raw::Term::new_virtual(
+        width as usize,
+        height as usize,
+        "> ",
+        Box::new(vt.clone()),
+        tau_cli_term::CursorShape::Bar,
+    );
+    (term, handle, vt)
+}
+
 struct TestRecordedLineHandlers {
     dynamic_consumes: bool,
     outputs: Vec<String>,
@@ -42,6 +134,58 @@ fn route_line(line: &str, dynamic_consumes: bool) -> Vec<String> {
     let mut handlers = TestRecordedLineHandlers::new(dynamic_consumes);
     handle_recorded_line_with_handlers(line, &mut handlers).expect("line routes");
     handlers.outputs
+}
+
+/// Dynamic action preparation uses the same selected-agent mirror as the input
+/// loop and emits a renderer owner command whose invocation id matches the
+/// harness `action.invoke`. This protects completion routing from drifting away
+/// from the command path that captures invocation-time ownership.
+#[test]
+fn dynamic_action_prepare_records_matching_selected_agent_owner() {
+    let action_state = action_state_with_email_list();
+    let routing = routing_state_with_selected_agent(Some("agent-a"));
+    let invocation =
+        prepare_dynamic_action_invocation(&action_state, &routing, "s1", "/email list")
+            .expect("dynamic action prepares")
+            .expect("known dynamic action");
+
+    let Event::ActionInvoke(invoke) = &invocation.event else {
+        panic!("expected action.invoke");
+    };
+    assert_eq!(invoke.action_id, "email.list");
+
+    let RendererCmd::ActionInvoked {
+        invocation_id,
+        owner_agent_id,
+    } = invocation.renderer_cmd
+    else {
+        panic!("expected action-invoked renderer command");
+    };
+    assert_eq!(invocation_id, invoke.invocation_id);
+    assert_eq!(owner_agent_id.as_deref(), Some("agent-a"));
+
+    let (_term, handle, vt) = mini_term(80, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        tau_themes::Theme::new(),
+    );
+    renderer.switch_agent("agent-a".to_owned());
+    renderer.record_action_invocation(invocation_id, owner_agent_id);
+    renderer.switch_agent("agent-b".to_owned());
+    renderer.handle(&Event::ActionResult(tau_proto::ActionResult {
+        invocation_id: invoke.invocation_id.clone(),
+        action_id: invoke.action_id.clone(),
+        output: tau_proto::ActionOutput::Text {
+            text: "prepared action output".to_owned(),
+        },
+    }));
+    handle.redraw_sync();
+    assert!(!vt.screen_contains(80, "prepared action output"));
+
+    renderer.switch_agent("agent-a".to_owned());
+    handle.redraw_sync();
+    assert!(vt.screen_contains(80, "prepared action output"));
 }
 
 struct TestTreeCommandHandlers {
