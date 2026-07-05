@@ -1,5 +1,8 @@
 use std::io::BufReader;
 use std::os::unix::net::UnixStream;
+use std::sync::mpsc;
+use std::time::Duration;
+use std::{fs, thread};
 
 use tau_config::settings::TauDirs;
 use tau_proto::{HarnessOutputMessage, PeerInputReader};
@@ -31,6 +34,119 @@ fn daemon_message_trace_subscription_uses_no_prefix_selectors() {
     .collect::<Vec<_>>();
 
     assert_eq!(selectors, expected);
+}
+
+/// Ensures dropping the listener forwarder wakes an idle poll/accept wait
+/// without forwarding the internal wake endpoint as a harness client.
+#[test]
+fn listener_forwarder_drop_wakes_idle_accept() {
+    let td = TempDir::new().expect("tempdir");
+    let socket_path = td.path().join("daemon.sock");
+    let listener = bind_listener(&socket_path).expect("bind listener");
+    let (forwarder, rx) = spawn_waiting_test_forwarder(&listener);
+
+    drop_forwarder_with_timeout(forwarder);
+
+    assert!(
+        rx.try_recv().is_err(),
+        "wake endpoint must not be delivered as a daemon client"
+    );
+}
+
+/// Ensures listener forwarder shutdown uses its owned wake endpoint rather than
+/// relying on the daemon socket pathname to remain present.
+#[test]
+fn listener_forwarder_drop_wakes_after_socket_path_removed() {
+    let td = TempDir::new().expect("tempdir");
+    let socket_path = td.path().join("daemon.sock");
+    let listener = bind_listener(&socket_path).expect("bind listener");
+    let (forwarder, rx) = spawn_waiting_test_forwarder(&listener);
+
+    fs::remove_file(&socket_path).expect("remove daemon socket path");
+    drop_forwarder_with_timeout(forwarder);
+
+    assert!(
+        rx.try_recv().is_err(),
+        "wake endpoint must not be delivered as a daemon client"
+    );
+}
+
+/// Ensures listener forwarder shutdown is tied to the owned accept thread even
+/// when another listener later occupies the same daemon socket pathname.
+#[test]
+fn listener_forwarder_drop_wakes_after_socket_path_replaced() {
+    let td = TempDir::new().expect("tempdir");
+    let socket_path = td.path().join("daemon.sock");
+    let listener = bind_listener(&socket_path).expect("bind listener");
+    let (forwarder, rx) = spawn_waiting_test_forwarder(&listener);
+
+    fs::remove_file(&socket_path).expect("remove daemon socket path");
+    let _replacement = bind_listener(&socket_path).expect("bind replacement listener");
+    drop_forwarder_with_timeout(forwarder);
+
+    assert!(
+        rx.try_recv().is_err(),
+        "wake endpoint must not be delivered as a daemon client"
+    );
+}
+
+/// Ensures shutdown wakeup wins over a listener that is already receiving
+/// clients, so lifecycle control cannot be starved by accept draining.
+#[test]
+fn listener_forwarder_drop_wakes_while_accept_ready() {
+    let td = TempDir::new().expect("tempdir");
+    let socket_path = td.path().join("daemon.sock");
+    let listener = bind_listener(&socket_path).expect("bind listener");
+    let (forwarder, rx) = spawn_waiting_test_forwarder(&listener);
+    let (stop_tx, stop_rx) = mpsc::channel();
+    let connector_path = socket_path.clone();
+    let connector = thread::spawn(move || {
+        while stop_rx.try_recv().is_err() {
+            let _ = UnixStream::connect(&connector_path);
+        }
+    });
+    rx.recv_timeout(Duration::from_secs(1))
+        .expect("forwarder should accept at least one traffic client");
+
+    let (done_tx, done_rx) = mpsc::channel();
+    let drop_join = thread::spawn(move || {
+        drop(forwarder);
+        let _ = done_tx.send(());
+    });
+    let drop_result = done_rx.recv_timeout(Duration::from_secs(1));
+    let _ = stop_tx.send(());
+    connector.join().expect("connector should not panic");
+    drop_result.expect("forwarder drop should not wait for accept traffic to quiesce");
+    drop_join.join().expect("drop thread should not panic");
+}
+
+fn spawn_waiting_test_forwarder(
+    listener: &SocketListener,
+) -> (ListenerForwarder, mpsc::Receiver<HarnessEvent>) {
+    let (tx, rx) = mpsc::channel();
+    let (before_wait_tx, before_wait_rx) = mpsc::channel();
+    let forwarder = ListenerForwarder::spawn_for_test(
+        listener.try_clone_raw_listener().expect("clone listener"),
+        tx,
+        before_wait_tx,
+    )
+    .expect("spawn listener forwarder");
+    before_wait_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("forwarder should reach poll wait");
+    (forwarder, rx)
+}
+
+fn drop_forwarder_with_timeout(forwarder: ListenerForwarder) {
+    let (done_tx, done_rx) = mpsc::channel();
+    let join = thread::spawn(move || {
+        drop(forwarder);
+        let _ = done_tx.send(());
+    });
+    done_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("forwarder drop should wake and join accept thread");
+    join.join().expect("drop thread should not panic");
 }
 
 /// Ensures startup failures are reported to the initial UI through the Tau

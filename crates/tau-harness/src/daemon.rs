@@ -1,14 +1,15 @@
 //! Public entry points: blocking `run_*` daemons, the embedded
 //! single-message helpers, and the small types passed to/from them.
 
-use std::os::unix::net::UnixListener;
-#[cfg(any(test, feature = "echo-agent"))]
-use std::os::unix::net::UnixStream;
+use std::net::Shutdown;
+use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 use std::{fmt, io, thread};
 
+use rustix::event::{PollFd, PollFlags, poll};
+use rustix::io::Errno;
 use tau_proto::{
     ClientKind, ConnectionId, Disconnect, Event, EventName, EventSelector, HarnessInputMessage,
     HarnessOutputMessage, HarnessOutputWriter, Hello, PROTOCOL_VERSION, Subscribe, UiCreateAgent,
@@ -158,6 +159,9 @@ enum ListenerHandle {
 }
 
 impl ListenerHandle {
+    // Spawns the only accept forwarder for this listener. The forwarder owns a
+    // socketpair wake endpoint, so shutdown never depends on the filesystem socket
+    // path still naming this listener.
     fn spawn_forwarder(
         &self,
         tx: mpsc::Sender<HarnessEvent>,
@@ -166,56 +170,187 @@ impl ListenerHandle {
             Self::SocketActivated(listener) => listener.try_clone().map_err(HarnessError::Io)?,
             Self::Bound(listener) => listener.try_clone_raw_listener()?,
         };
-        spawn_listener_forwarder(listener, tx)
+        ListenerForwarder::spawn(listener, tx)
     }
 }
 
 struct ListenerForwarder {
-    // Stop signal sent before joining the accept-loop thread.
-    stop_tx: mpsc::Sender<()>,
+    // Owned wake endpoint used to interrupt the accept-loop poll during drop.
+    wake_tx: UnixStream,
     // Accept-loop thread joined during `ListenerForwarder` drop.
     join: Option<thread::JoinHandle<()>>,
 }
 
 impl Drop for ListenerForwarder {
     fn drop(&mut self) {
-        let _ = self.stop_tx.send(());
+        // The accept loop polls this owned socketpair endpoint together with the
+        // listener fd. Shutting down the write side wakes the thread without using
+        // the filesystem socket path, and the wake fd is never forwarded as a
+        // `NewClient` stream.
+        let _ = self.wake_tx.shutdown(Shutdown::Write);
         if let Some(join) = self.join.take() {
             let _ = join.join();
         }
     }
 }
 
-fn spawn_listener_forwarder(
-    listener: UnixListener,
-    tx: mpsc::Sender<HarnessEvent>,
-) -> Result<ListenerForwarder, HarnessError> {
-    listener.set_nonblocking(true).map_err(HarnessError::Io)?;
-    let (stop_tx, stop_rx) = mpsc::channel();
-    let join = thread::spawn(move || {
-        loop {
-            if stop_rx.try_recv().is_ok() {
-                return;
+enum ListenerForwarderReady {
+    Wake,
+    Accept,
+}
+
+enum ListenerForwarderAction {
+    Continue,
+    Stop,
+}
+
+impl ListenerForwarder {
+    const MAX_ACCEPT_BATCH: usize = 16;
+
+    fn spawn(
+        listener: UnixListener,
+        tx: mpsc::Sender<HarnessEvent>,
+    ) -> Result<ListenerForwarder, HarnessError> {
+        Self::spawn_inner(listener, tx, None)
+    }
+
+    #[cfg(test)]
+    fn spawn_for_test(
+        listener: UnixListener,
+        tx: mpsc::Sender<HarnessEvent>,
+        before_wait_tx: mpsc::Sender<()>,
+    ) -> Result<ListenerForwarder, HarnessError> {
+        Self::spawn_inner(listener, tx, Some(before_wait_tx))
+    }
+
+    fn spawn_inner(
+        listener: UnixListener,
+        tx: mpsc::Sender<HarnessEvent>,
+        before_wait_tx: Option<mpsc::Sender<()>>,
+    ) -> Result<ListenerForwarder, HarnessError> {
+        listener.set_nonblocking(true).map_err(HarnessError::Io)?;
+        let (wake_rx, wake_tx) = UnixStream::pair().map_err(HarnessError::Io)?;
+        let join = thread::spawn(move || {
+            loop {
+                if let Some(before_wait_tx) = before_wait_tx.as_ref() {
+                    let _ = before_wait_tx.send(());
+                }
+                match Self::poll_ready(&listener, &wake_rx) {
+                    Ok(ListenerForwarderReady::Wake) => return,
+                    Ok(ListenerForwarderReady::Accept) => {
+                        if matches!(
+                            Self::accept_ready_clients(&listener, &wake_rx, &tx),
+                            ListenerForwarderAction::Stop
+                        ) {
+                            return;
+                        }
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            target: "tau_harness::daemon",
+                            %error,
+                            "listener forwarder poll failed; stopping client accepts",
+                        );
+                        return;
+                    }
+                }
             }
+        });
+        Ok(ListenerForwarder {
+            wake_tx,
+            join: Some(join),
+        })
+    }
+
+    fn poll_ready(
+        listener: &UnixListener,
+        wake_rx: &UnixStream,
+    ) -> Result<ListenerForwarderReady, Errno> {
+        loop {
+            let mut fds = [
+                PollFd::new(wake_rx, PollFlags::IN),
+                PollFd::new(listener, PollFlags::IN),
+            ];
+            if let Err(error) = poll(&mut fds, -1) {
+                if error == Errno::INTR {
+                    continue;
+                }
+                return Err(error);
+            }
+
+            if Self::wake_revents_requested(fds[0].revents()) {
+                return Ok(ListenerForwarderReady::Wake);
+            }
+            if fds[1].revents().contains(PollFlags::IN) {
+                return Ok(ListenerForwarderReady::Accept);
+            }
+            if fds[1]
+                .revents()
+                .intersects(PollFlags::HUP | PollFlags::ERR | PollFlags::NVAL)
+            {
+                return Err(Errno::INVAL);
+            }
+        }
+    }
+
+    fn accept_ready_clients(
+        listener: &UnixListener,
+        wake_rx: &UnixStream,
+        tx: &mpsc::Sender<HarnessEvent>,
+    ) -> ListenerForwarderAction {
+        let mut accepted = 0;
+        loop {
             match listener.accept() {
                 Ok((stream, _)) => {
                     if tx.send(HarnessEvent::NewClient(stream)).is_err() {
-                        return;
+                        return ListenerForwarderAction::Stop;
+                    }
+                    accepted += 1;
+                    if Self::wake_requested(wake_rx) {
+                        return ListenerForwarderAction::Stop;
+                    }
+                    if accepted >= Self::MAX_ACCEPT_BATCH {
+                        return ListenerForwarderAction::Continue;
                     }
                 }
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                    if stop_rx.recv_timeout(Duration::from_millis(20)).is_ok() {
-                        return;
-                    }
+                    return ListenerForwarderAction::Continue;
                 }
-                Err(_) => return,
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                Err(error) => {
+                    tracing::warn!(
+                        target: "tau_harness::daemon",
+                        %error,
+                        "listener forwarder accept failed; stopping client accepts",
+                    );
+                    return ListenerForwarderAction::Stop;
+                }
             }
         }
-    });
-    Ok(ListenerForwarder {
-        stop_tx,
-        join: Some(join),
-    })
+    }
+
+    fn wake_requested(wake_rx: &UnixStream) -> bool {
+        loop {
+            let mut fds = [PollFd::new(wake_rx, PollFlags::IN)];
+            match poll(&mut fds, 0) {
+                Ok(_) if Self::wake_revents_requested(fds[0].revents()) => return true,
+                Ok(_) => return false,
+                Err(error) if error == Errno::INTR => continue,
+                Err(error) => {
+                    tracing::warn!(
+                        target: "tau_harness::daemon",
+                        %error,
+                        "listener forwarder wake poll failed; stopping client accepts",
+                    );
+                    return true;
+                }
+            }
+        }
+    }
+
+    fn wake_revents_requested(revents: PollFlags) -> bool {
+        revents.intersects(PollFlags::IN | PollFlags::HUP | PollFlags::ERR | PollFlags::NVAL)
+    }
 }
 
 fn open_listener(path: &Path) -> Result<ListenerHandle, HarnessError> {
@@ -928,8 +1063,9 @@ fn run_harness_daemon_with_internal_tools_and_initial_client(
         &mut initial_client_error_stream,
     )?;
     tracing::debug!(target: "tau_harness::startup", harness_path = %harness_paths.path().display(), elapsed_ms = startup_started_at.elapsed().as_millis(), "prepared harness paths");
+    let socket_path = harness_paths.socket_path();
     let listener = notify_startup_error(
-        bind_listener(&harness_paths.socket_path()),
+        bind_listener(&socket_path),
         &mut initial_client_error_stream,
     )?;
 

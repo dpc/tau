@@ -4,6 +4,18 @@
 clients and extensions, sequences events, applies interception, persists durable
 session/agent facts, and delivers committed events to subscribers.
 
+## Daemon listener and accept forwarding
+
+Daemon IPC sockets are bound or socket-activated before the harness event loop
+starts. A small accept-forwarder thread converts accepted Unix streams into
+`HarnessEvent::NewClient` messages for the event loop; all client protocol
+validation still happens after the stream reaches the harness.
+
+The forwarder waits reactively on the listener fd plus an owned wake fd. Dropping
+the forwarder wakes and joins the thread before the daemon listener handle is
+dropped, preserving socket cleanup ownership while avoiding sleep polling and
+path-based shutdown races.
+
 ## Event sequencing, interception, and persistence
 
 All ordinary event publication should flow through the central publish path:

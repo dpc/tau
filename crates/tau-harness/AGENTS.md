@@ -5,3 +5,4 @@
 - Read `design.md` before changing lifecycle/startup behavior, prompt assembly, system prompt templating, or adding harness tests; it records focused design decisions for this crate.
 
 - Read `ARCHITECTURE.md` before changing or reviewing harness event sequencing, persistence, interception, extension boundaries, session semantics, or extension-data behavior.
+- Read `SECURITY.md` before changing daemon IPC, listener lifecycle, shutdown, runtime discovery, or security-sensitive harness behavior.

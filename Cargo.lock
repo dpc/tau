@@ -3466,6 +3466,7 @@ dependencies = [
  "libc",
  "listenfd",
  "rand 0.8.6",
+ "rustix 0.38.44",
  "serde",
  "serde_json",
  "tau-actions",
