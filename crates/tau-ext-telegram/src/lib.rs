@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::error::Error;
 use std::io::{Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, mpsc};
 use std::time::Duration;
 
 use tau_client::{ClientError, ClientHandle, ClientResult, ExtensionBuilder, TauExtension};
@@ -185,6 +185,11 @@ impl ConfigGeneration {
 
 #[derive(Default)]
 struct State {
+    /// Monotonic counter for poller coordination-relevant state changes.
+    coordination_generation: u64,
+    /// Whether the extension is shutting down and local poller waits should
+    /// end.
+    shutdown_requested: bool,
     config: Option<RuntimeConfig>,
     config_generation: ConfigGeneration,
     registered_agents: HashSet<AgentId>,
@@ -194,6 +199,68 @@ struct State {
     poller_started: bool,
     poller_drained_initial_backlog: bool,
     next_update_offset: Option<i64>,
+}
+
+/// Shared Telegram state plus a condition variable for waking the poller.
+struct SharedState {
+    /// Mutable extension state guarded by a single process-local mutex.
+    state: Mutex<State>,
+    /// Wakes local poller waits after configuration, registration, or shutdown.
+    changed: Condvar,
+}
+
+impl SharedState {
+    /// Create an empty shared state cell.
+    fn new() -> Self {
+        Self {
+            state: Mutex::new(State::default()),
+            changed: Condvar::new(),
+        }
+    }
+
+    /// Lock the shared state, recovering from panics in tests or callbacks.
+    fn lock(&self) -> MutexGuard<'_, State> {
+        self.state.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Wait while `condition` remains true, recovering a poisoned mutex.
+    fn wait_while<'a, F>(&self, guard: MutexGuard<'a, State>, condition: F) -> MutexGuard<'a, State>
+    where
+        F: FnMut(&mut State) -> bool,
+    {
+        self.changed
+            .wait_while(guard, condition)
+            .unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Wait for a bounded delay while `condition` remains true.
+    fn wait_timeout_while<'a, F>(
+        &self,
+        guard: MutexGuard<'a, State>,
+        delay: Duration,
+        condition: F,
+    ) -> MutexGuard<'a, State>
+    where
+        F: FnMut(&mut State) -> bool,
+    {
+        let (guard, _timeout) = self
+            .changed
+            .wait_timeout_while(guard, delay, condition)
+            .unwrap_or_else(|e| e.into_inner());
+        guard
+    }
+
+    /// Wake all current state waiters.
+    fn notify_all(&self) {
+        self.changed.notify_all();
+    }
+}
+
+impl State {
+    /// Record a change to config, registration, or shutdown that affects waits.
+    fn mark_coordination_changed(&mut self) {
+        self.coordination_generation = self.coordination_generation.wrapping_add(1);
+    }
 }
 
 #[derive(Clone)]
@@ -238,7 +305,7 @@ impl Output {
 }
 
 struct Extension {
-    state: Arc<Mutex<State>>,
+    state: Arc<SharedState>,
     client: Arc<dyn TelegramClient>,
     output: Output,
     shutdown: Arc<AtomicBool>,
@@ -247,7 +314,7 @@ struct Extension {
 impl Extension {
     fn new(client: Arc<dyn TelegramClient>, output: impl Into<Output>) -> Self {
         Self {
-            state: Arc::new(Mutex::new(State::default())),
+            state: Arc::new(SharedState::new()),
             client,
             output: output.into(),
             shutdown: Arc::new(AtomicBool::new(false)),
@@ -255,7 +322,7 @@ impl Extension {
     }
 
     fn apply_config(&self, cfg: RuntimeConfig, _state_dir: Option<std::path::PathBuf>) {
-        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let mut state = self.state.lock();
         state.config_generation = state.config_generation.next();
         let update_stream_changed = state
             .config
@@ -285,10 +352,12 @@ impl Extension {
             state.next_update_offset = None;
         }
         state.config = Some(cfg);
+        state.mark_coordination_changed();
+        self.state.notify_all();
     }
 
     fn clear_config_after_error(&self) {
-        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let mut state = self.state.lock();
         state.config_generation = state.config_generation.next();
         state.config = None;
         state.registered_agents.clear();
@@ -296,10 +365,20 @@ impl Extension {
         state.learned_chat = None;
         state.poller_drained_initial_backlog = false;
         state.next_update_offset = None;
+        state.mark_coordination_changed();
+        self.state.notify_all();
+    }
+
+    fn request_shutdown(&self) {
+        let mut state = self.state.lock();
+        state.shutdown_requested = true;
+        state.mark_coordination_changed();
+        self.shutdown.store(true, Ordering::Relaxed);
+        self.state.notify_all();
     }
 
     fn poll_response_matches_config(&self, config_generation: ConfigGeneration) -> bool {
-        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let state = self.state.lock();
         state.config.is_some() && state.config_generation == config_generation
     }
 
@@ -331,9 +410,13 @@ impl Extension {
             Ok(enabled) => enabled,
             Err(message) => return tool_error(invoke, message),
         };
-        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let mut state = self.state.lock();
         if enabled {
+            let was_unregistered = state.registered_agents.is_empty();
             state.registered_agents.insert(invoke.agent_id.clone());
+            if was_unregistered {
+                state.poller_drained_initial_backlog = false;
+            }
             state
                 .agent_labels
                 .entry(invoke.agent_id.clone())
@@ -341,11 +424,18 @@ impl Extension {
             if let Err(message) = self.ensure_poller_started_locked(&mut state) {
                 return tool_error(invoke, message);
             }
+            state.mark_coordination_changed();
+            self.state.notify_all();
         } else {
             state.registered_agents.remove(&invoke.agent_id);
             state
                 .selected_agent_by_chat
                 .retain(|_, agent| agent != &invoke.agent_id);
+            if state.registered_agents.is_empty() {
+                state.poller_drained_initial_backlog = false;
+            }
+            state.mark_coordination_changed();
+            self.state.notify_all();
         }
         tool_result(
             invoke,
@@ -385,7 +475,7 @@ impl Extension {
             return tool_error(invoke, "`message` must not be empty".to_owned());
         }
         let (cfg, chat_id) = {
-            let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            let state = self.state.lock();
             if !state.registered_agents.contains(&invoke.agent_id) {
                 return tool_error(
                     invoke,
@@ -458,7 +548,7 @@ impl Extension {
         message: &TgMessage,
         config_generation: ConfigGeneration,
     ) -> Option<RuntimeConfig> {
-        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let state = self.state.lock();
         if state.config_generation != config_generation {
             return None;
         }
@@ -472,7 +562,7 @@ impl Extension {
     }
 
     fn active_chat(&self, cfg: &RuntimeConfig) -> Option<i64> {
-        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let state = self.state.lock();
         cfg.configured_chat_id
             .or_else(|| state.learned_chat.map(|chat| chat.chat_id))
     }
@@ -617,7 +707,7 @@ impl Extension {
                 );
                 return;
             }
-            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            let mut state = self.state.lock();
             if state.config_generation != config_generation {
                 return;
             }
@@ -636,7 +726,7 @@ impl Extension {
         config_generation: ConfigGeneration,
     ) {
         let reply = {
-            let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            let state = self.state.lock();
             if state.config_generation != config_generation {
                 return;
             }
@@ -663,7 +753,7 @@ impl Extension {
         }
 
         let reply = {
-            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            let mut state = self.state.lock();
             if state.config_generation != config_generation {
                 return;
             }
@@ -722,7 +812,7 @@ impl Extension {
     }
 
     fn plain_text_target(&self, chat_id: i64) -> Result<AgentId, String> {
-        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let state = self.state.lock();
         if let Some(agent_id) = state.selected_agent_by_chat.get(&chat_id)
             && state.registered_agents.contains(agent_id)
         {
@@ -745,7 +835,7 @@ impl Extension {
     }
 
     fn resolve_registered_agent(&self, target: &str) -> Result<AgentId, String> {
-        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let state = self.state.lock();
         resolve_agent(&state, target)
     }
 
@@ -823,23 +913,49 @@ fn is_loopback_host(host: url::Host<&str>) -> bool {
     }
 }
 
-fn sleep_interruptibly(shutdown: &AtomicBool, total: Duration) {
-    let step = Duration::from_millis(100);
-    let mut slept = Duration::ZERO;
-    while slept < total && !shutdown.load(Ordering::Relaxed) {
-        std::thread::sleep(step);
-        slept += step;
+impl Drop for Extension {
+    fn drop(&mut self) {
+        self.request_shutdown();
     }
 }
 
-impl Drop for Extension {
-    fn drop(&mut self) {
-        self.shutdown.store(true, Ordering::Relaxed);
+fn wait_for_poller_ready_or_shutdown(
+    state_cell: &SharedState,
+    shutdown: &AtomicBool,
+) -> Option<(RuntimeConfig, Option<i64>, ConfigGeneration, u64)> {
+    let mut state = state_cell.lock();
+    state = state_cell.wait_while(state, |state| {
+        !state.shutdown_requested && (state.config.is_none() || state.registered_agents.is_empty())
+    });
+    if state.shutdown_requested || shutdown.load(Ordering::Relaxed) {
+        return None;
     }
+    let cfg = state.config.clone()?;
+    Some((
+        cfg,
+        state.next_update_offset,
+        state.config_generation,
+        state.coordination_generation,
+    ))
+}
+
+fn wait_for_coordination_change_or_shutdown(
+    state_cell: &SharedState,
+    shutdown: &AtomicBool,
+    delay: Duration,
+    observed_generation: u64,
+) {
+    if delay.is_zero() || shutdown.load(Ordering::Relaxed) {
+        return;
+    }
+    let state = state_cell.lock();
+    let _guard = state_cell.wait_timeout_while(state, delay, |state| {
+        !state.shutdown_requested && state.coordination_generation == observed_generation
+    });
 }
 
 fn poll_loop(
-    state: Arc<Mutex<State>>,
+    state: Arc<SharedState>,
     client: Arc<dyn TelegramClient>,
     output: Output,
     shutdown: Arc<AtomicBool>,
@@ -854,18 +970,14 @@ fn poll_loop(
         if shutdown.load(Ordering::Relaxed) {
             return;
         }
-        let (cfg, offset, config_generation) = {
-            let state = ext.state.lock().unwrap_or_else(|e| e.into_inner());
-            let Some(cfg) = state.config.clone() else {
-                drop(state);
-                sleep_interruptibly(&shutdown, Duration::from_millis(50));
-                continue;
-            };
-            (cfg, state.next_update_offset, state.config_generation)
+        let Some((cfg, offset, config_generation, coordination_generation)) =
+            wait_for_poller_ready_or_shutdown(&ext.state, &shutdown)
+        else {
+            return;
         };
         let mut request_cfg = cfg.clone();
         let draining_initial_backlog = {
-            let state = ext.state.lock().unwrap_or_else(|e| e.into_inner());
+            let state = ext.state.lock();
             !state.poller_drained_initial_backlog
         };
         if draining_initial_backlog {
@@ -881,7 +993,7 @@ fn poll_loop(
                 }
                 let mut stale_generation = false;
                 let draining = {
-                    let mut state = ext.state.lock().unwrap_or_else(|e| e.into_inner());
+                    let mut state = ext.state.lock();
                     if state.config_generation != config_generation || state.config.is_none() {
                         stale_generation = true;
                         false
@@ -904,11 +1016,16 @@ fn poll_loop(
                     continue;
                 }
                 if updates.is_empty() {
-                    std::thread::sleep(Duration::from_millis(50));
+                    wait_for_coordination_change_or_shutdown(
+                        &ext.state,
+                        &shutdown,
+                        Duration::from_millis(50),
+                        coordination_generation,
+                    );
                 }
                 for update in updates {
                     {
-                        let mut state = ext.state.lock().unwrap_or_else(|e| e.into_inner());
+                        let mut state = ext.state.lock();
                         if state.config_generation != config_generation || state.config.is_none() {
                             break;
                         }
@@ -922,7 +1039,12 @@ fn poll_loop(
                     continue;
                 }
                 tracing::warn!(target: LOG_TARGET, error = %message, "telegram polling failed");
-                sleep_interruptibly(&shutdown, Duration::from_secs(5));
+                wait_for_coordination_change_or_shutdown(
+                    &ext.state,
+                    &shutdown,
+                    Duration::from_secs(5),
+                    coordination_generation,
+                );
             }
         }
     }
@@ -941,7 +1063,7 @@ where
         .run_detached_writer_with_state(reader, writer, move |handle| TelegramRuntime {
             ext: Extension::new(client, handle),
         })?;
-    state.ext.shutdown.store(true, Ordering::Relaxed);
+    state.ext.request_shutdown();
     Ok(())
 }
 
@@ -1013,32 +1135,42 @@ fn handle_tool_invocation(cx: tau_client::ToolContext<'_, TelegramRuntime>) -> C
 fn handle_live_event(cx: tau_client::RawEventContext<'_, TelegramRuntime>) -> ClientResult<()> {
     match cx.event() {
         Event::AgentDisplayNameSet(name) => {
-            let mut state = cx.state.ext.state.lock().unwrap_or_else(|e| e.into_inner());
+            let mut state = cx.state.ext.state.lock();
             state
                 .agent_labels
                 .insert(name.agent_id.clone(), name.display_name.clone());
         }
         Event::AgentStarted(started) => {
             if let Some(display_name) = started.display_name.clone() {
-                let mut state = cx.state.ext.state.lock().unwrap_or_else(|e| e.into_inner());
+                let mut state = cx.state.ext.state.lock();
                 state
                     .agent_labels
                     .insert(started.agent_id.clone(), display_name);
             }
         }
         Event::SessionAgentUnloaded(unloaded) => {
-            let mut state = cx.state.ext.state.lock().unwrap_or_else(|e| e.into_inner());
+            let mut state = cx.state.ext.state.lock();
             state.registered_agents.remove(&unloaded.agent_id);
             state.agent_labels.remove(&unloaded.agent_id);
             state
                 .selected_agent_by_chat
                 .retain(|_, agent_id| agent_id != &unloaded.agent_id);
+            if state.registered_agents.is_empty() {
+                state.poller_drained_initial_backlog = false;
+            }
+            state.mark_coordination_changed();
+            cx.state.ext.state.notify_all();
         }
         Event::SessionShutdown(_) => {
-            let mut state = cx.state.ext.state.lock().unwrap_or_else(|e| e.into_inner());
+            let mut state = cx.state.ext.state.lock();
             state.registered_agents.clear();
             state.agent_labels.clear();
             state.selected_agent_by_chat.clear();
+            state.poller_drained_initial_backlog = false;
+            state.shutdown_requested = true;
+            state.mark_coordination_changed();
+            cx.state.ext.shutdown.store(true, Ordering::Relaxed);
+            cx.state.ext.state.notify_all();
         }
         _ => {}
     }

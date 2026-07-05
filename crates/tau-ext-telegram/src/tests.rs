@@ -96,9 +96,9 @@ impl TelegramClient for SlowPollClient {
 }
 
 struct ControlledPollClient {
-    first_response: Mutex<Option<Vec<TgUpdate>>>,
+    first_response: Mutex<Option<Result<Vec<TgUpdate>, String>>>,
     response_ready: Condvar,
-    called: Mutex<bool>,
+    called: Mutex<usize>,
     called_ready: Condvar,
 }
 
@@ -107,22 +107,37 @@ impl ControlledPollClient {
         Arc::new(Self {
             first_response: Mutex::new(None),
             response_ready: Condvar::new(),
-            called: Mutex::new(false),
+            called: Mutex::new(0),
             called_ready: Condvar::new(),
         })
     }
 
     fn wait_for_call(&self) {
+        self.wait_for_call_count(1);
+    }
+
+    fn wait_for_call_count(&self, expected: usize) {
         let called = self.called.lock().expect("lock");
         let (called, _timeout) = self
             .called_ready
-            .wait_timeout_while(called, Duration::from_secs(1), |called| !*called)
+            .wait_timeout_while(called, Duration::from_secs(1), |called| *called < expected)
             .expect("wait");
-        assert!(*called, "poller did not issue getUpdates");
+        assert!(
+            *called >= expected,
+            "poller issued {called} getUpdates calls, expected {expected}"
+        );
     }
 
     fn release_first_response(&self, updates: Vec<TgUpdate>) {
-        *self.first_response.lock().expect("lock") = Some(updates);
+        self.release_response(Ok(updates));
+    }
+
+    fn release_error(&self, message: &str) {
+        self.release_response(Err(message.to_owned()));
+    }
+
+    fn release_response(&self, response: Result<Vec<TgUpdate>, String>) {
+        *self.first_response.lock().expect("lock") = Some(response);
         self.response_ready.notify_all();
     }
 }
@@ -135,7 +150,7 @@ impl TelegramClient for ControlledPollClient {
     ) -> Result<Vec<TgUpdate>, String> {
         {
             let mut called = self.called.lock().expect("lock");
-            *called = true;
+            *called += 1;
             self.called_ready.notify_all();
         }
         let response = self.first_response.lock().expect("lock");
@@ -143,7 +158,7 @@ impl TelegramClient for ControlledPollClient {
             .response_ready
             .wait_while(response, |response| response.is_none())
             .expect("wait");
-        Ok(response.take().unwrap_or_default())
+        response.take().unwrap_or_else(|| Ok(Vec::new()))
     }
 
     fn send_message(&self, _cfg: &RuntimeConfig, _chat_id: i64, _text: &str) -> Result<(), String> {
@@ -202,8 +217,13 @@ fn extension() -> (
 }
 
 fn process_update(ext: &Extension, update: TgUpdate) {
-    let config_generation = ext.state.lock().expect("lock").config_generation;
+    let config_generation = ext.state.lock().config_generation;
     ext.process_update_for_generation(update, config_generation);
+}
+
+fn expect_tool_finished(rx: &mpsc::Receiver<HarnessInputMessage>) {
+    let _progress = rx.recv().expect("progress");
+    let _result = rx.recv().expect("result");
 }
 
 /// Telegram bridge tools are disabled by default because each role must make an
@@ -325,7 +345,7 @@ fn telegram_register_true_registers_agent_and_starts_poller() {
     ext.dispatch_tool(tool(REGISTER_TOOL_NAME, "agent-1", bool_args(true)));
     let _progress = rx.recv().expect("progress");
     let _result = rx.recv().expect("result");
-    let state = ext.state.lock().expect("lock");
+    let state = ext.state.lock();
     assert!(state.registered_agents.contains(&agent_id("agent-1")));
     assert!(state.poller_started);
 }
@@ -336,7 +356,6 @@ fn incoming_unallowed_user_is_not_routed() {
     let (ext, rx, _client) = extension();
     ext.state
         .lock()
-        .expect("lock")
         .registered_agents
         .insert(agent_id("agent-1"));
     process_update(
@@ -363,7 +382,6 @@ fn textless_allowed_message_gets_unsupported_reply() {
     let (ext, rx, client) = extension();
     ext.state
         .lock()
-        .expect("lock")
         .registered_agents
         .insert(agent_id("agent-1"));
 
@@ -395,7 +413,6 @@ fn one_registered_agent_routes_plain_text() {
     let (ext, rx, _client) = extension();
     ext.state
         .lock()
-        .expect("lock")
         .registered_agents
         .insert(agent_id("agent-1"));
     process_update(
@@ -427,7 +444,7 @@ fn one_registered_agent_routes_plain_text() {
 fn multiple_agents_without_selection_do_not_route() {
     let (ext, rx, client) = extension();
     {
-        let mut state = ext.state.lock().expect("lock");
+        let mut state = ext.state.lock();
         state.registered_agents.insert(agent_id("agent-1"));
         state.registered_agents.insert(agent_id("agent-2"));
     }
@@ -455,7 +472,7 @@ fn multiple_agents_without_selection_do_not_route() {
 fn bot_commands_show_agent_id_before_display_name() {
     let (ext, _rx, client) = extension();
     {
-        let mut state = ext.state.lock().expect("lock");
+        let mut state = ext.state.lock();
         state.registered_agents.insert(agent_id("agent-1"));
         state.registered_agents.insert(agent_id("agent-2"));
         state
@@ -507,7 +524,7 @@ fn bot_commands_show_agent_id_before_display_name() {
 fn agents_list_omits_empty_or_duplicate_display_names() {
     let (ext, _rx, client) = extension();
     {
-        let mut state = ext.state.lock().expect("lock");
+        let mut state = ext.state.lock();
         state.registered_agents.insert(agent_id("agent-1"));
         state.registered_agents.insert(agent_id("agent-2"));
         state.registered_agents.insert(agent_id("agent-3"));
@@ -546,7 +563,6 @@ fn malformed_slash_commands_are_not_routed_as_prompts() {
     let (ext, rx, client) = extension();
     ext.state
         .lock()
-        .expect("lock")
         .registered_agents
         .insert(agent_id("agent-1"));
     for (update_id, text) in [(1, "/startx"), (2, "/select"), (3, "/to")] {
@@ -577,7 +593,7 @@ fn malformed_slash_commands_are_not_routed_as_prompts() {
 fn select_then_plain_text_routes_to_selected_agent() {
     let (ext, rx, _client) = extension();
     {
-        let mut state = ext.state.lock().expect("lock");
+        let mut state = ext.state.lock();
         state.registered_agents.insert(agent_id("agent-1"));
         state.registered_agents.insert(agent_id("agent-2"));
     }
@@ -622,7 +638,7 @@ fn select_then_plain_text_routes_to_selected_agent() {
 fn telegram_send_rejects_unknown_chat_id_argument() {
     let (ext, rx, client) = extension();
     {
-        let mut state = ext.state.lock().expect("lock");
+        let mut state = ext.state.lock();
         state.registered_agents.insert(agent_id("agent-1"));
         state
             .agent_labels
@@ -657,7 +673,7 @@ fn telegram_send_rejects_unknown_chat_id_argument() {
 fn unconfigured_group_chat_is_refused() {
     let (ext, rx, client) = extension();
     {
-        let mut state = ext.state.lock().expect("lock");
+        let mut state = ext.state.lock();
         state.config.as_mut().expect("config").configured_chat_id = None;
         state.learned_chat = None;
         state.registered_agents.insert(agent_id("agent-1"));
@@ -689,7 +705,7 @@ fn unconfigured_group_chat_is_refused() {
 fn configured_group_chat_can_route() {
     let (ext, rx, _client) = extension();
     {
-        let mut state = ext.state.lock().expect("lock");
+        let mut state = ext.state.lock();
         state.config.as_mut().expect("config").configured_chat_id = Some(-100);
         state.registered_agents.insert(agent_id("agent-1"));
     }
@@ -720,7 +736,6 @@ fn configured_chat_rejects_other_private_chat() {
     let (ext, rx, client) = extension();
     ext.state
         .lock()
-        .expect("lock")
         .registered_agents
         .insert(agent_id("agent-1"));
     process_update(
@@ -750,7 +765,7 @@ fn configured_chat_rejects_other_private_chat() {
 fn unconfigured_private_text_before_start_does_not_route() {
     let (ext, rx, client) = extension();
     {
-        let mut state = ext.state.lock().expect("lock");
+        let mut state = ext.state.lock();
         state.config.as_mut().expect("config").configured_chat_id = None;
         state.registered_agents.insert(agent_id("agent-1"));
     }
@@ -777,7 +792,7 @@ fn unconfigured_private_text_before_start_does_not_route() {
 fn unconfigured_to_before_start_does_not_route() {
     let (ext, rx, client) = extension();
     {
-        let mut state = ext.state.lock().expect("lock");
+        let mut state = ext.state.lock();
         state.config.as_mut().expect("config").configured_chat_id = None;
         state.registered_agents.insert(agent_id("agent-1"));
     }
@@ -804,7 +819,7 @@ fn unconfigured_to_before_start_does_not_route() {
 fn linked_chat_rejects_other_private_chat() {
     let (ext, rx, client) = extension();
     {
-        let mut state = ext.state.lock().expect("lock");
+        let mut state = ext.state.lock();
         state.config.as_mut().expect("config").configured_chat_id = None;
         state
             .config
@@ -856,7 +871,7 @@ fn linked_chat_rejects_other_private_chat() {
 fn reconfigured_chat_id_requires_reregistration_before_send() {
     let (ext, rx, client) = extension();
     {
-        let mut state = ext.state.lock().expect("lock");
+        let mut state = ext.state.lock();
         state.config.as_mut().expect("config").configured_chat_id = None;
         state.registered_agents.insert(agent_id("agent-1"));
     }
@@ -904,7 +919,6 @@ fn unallowed_group_user_cannot_route() {
     let (ext, rx, client) = extension();
     ext.state
         .lock()
-        .expect("lock")
         .registered_agents
         .insert(agent_id("agent-1"));
     process_update(
@@ -1290,7 +1304,7 @@ fn initial_empty_drain_then_fresh_message_routes() {
 fn reconfigured_bot_token_resets_update_backlog_drain() {
     let (ext, _rx, _client) = extension();
     {
-        let mut state = ext.state.lock().expect("lock");
+        let mut state = ext.state.lock();
         state.poller_drained_initial_backlog = true;
         state.next_update_offset = Some(99);
     }
@@ -1299,7 +1313,7 @@ fn reconfigured_bot_token_resets_update_backlog_drain() {
     new_cfg.bot_token = "different-token".to_owned();
     ext.apply_config(new_cfg, None);
 
-    let state = ext.state.lock().expect("lock");
+    let state = ext.state.lock();
     assert!(!state.poller_drained_initial_backlog);
     assert_eq!(state.next_update_offset, None);
 }
@@ -1310,7 +1324,7 @@ fn reconfigured_bot_token_resets_update_backlog_drain() {
 fn reconfigured_api_base_resets_update_backlog_drain() {
     let (ext, _rx, _client) = extension();
     {
-        let mut state = ext.state.lock().expect("lock");
+        let mut state = ext.state.lock();
         state.poller_drained_initial_backlog = true;
         state.next_update_offset = Some(99);
     }
@@ -1319,7 +1333,7 @@ fn reconfigured_api_base_resets_update_backlog_drain() {
     new_cfg.api_base = "http://127.0.0.1:1234".to_owned();
     ext.apply_config(new_cfg, None);
 
-    let state = ext.state.lock().expect("lock");
+    let state = ext.state.lock();
     assert!(!state.poller_drained_initial_backlog);
     assert_eq!(state.next_update_offset, None);
 }
@@ -1331,7 +1345,7 @@ fn reconfigured_api_base_resets_update_backlog_drain() {
 fn reconfigured_poll_timeout_keeps_update_offset() {
     let (ext, _rx, _client) = extension();
     {
-        let mut state = ext.state.lock().expect("lock");
+        let mut state = ext.state.lock();
         state.poller_drained_initial_backlog = true;
         state.next_update_offset = Some(99);
     }
@@ -1340,7 +1354,7 @@ fn reconfigured_poll_timeout_keeps_update_offset() {
     new_cfg.poll_timeout_seconds = 5;
     ext.apply_config(new_cfg, None);
 
-    let state = ext.state.lock().expect("lock");
+    let state = ext.state.lock();
     assert!(state.poller_drained_initial_backlog);
     assert_eq!(state.next_update_offset, Some(99));
 }
@@ -1365,7 +1379,7 @@ fn old_generation_empty_poll_response_does_not_drain_new_stream() {
     client.release_first_response(Vec::new());
     std::thread::sleep(Duration::from_millis(100));
 
-    let state = ext.state.lock().expect("lock");
+    let state = ext.state.lock();
     assert!(!state.poller_drained_initial_backlog);
     assert_eq!(state.next_update_offset, None);
     assert!(rx.try_recv().is_err());
@@ -1400,10 +1414,107 @@ fn old_generation_non_empty_poll_response_does_not_route_or_advance_offset() {
     }]);
     std::thread::sleep(Duration::from_millis(100));
 
-    let state = ext.state.lock().expect("lock");
+    let state = ext.state.lock();
     assert!(!state.poller_drained_initial_backlog);
     assert_eq!(state.next_update_offset, None);
     assert!(rx.try_recv().is_err());
+}
+
+/// A period with no registered agents is a stale-backlog boundary: Telegram
+/// messages observed while nobody is listening must advance offsets but must
+/// not route after a later registration.
+#[test]
+fn zero_registered_agents_redrains_backlog_before_routing() {
+    let (tx, rx) = mpsc::channel();
+    let client = ControlledPollClient::new();
+    let ext = Extension::new(client.clone(), tx);
+    ext.apply_config(cfg(), None);
+    ext.dispatch_tool(tool(REGISTER_TOOL_NAME, "agent-1", bool_args(true)));
+    expect_tool_finished(&rx);
+
+    client.wait_for_call_count(1);
+    client.release_first_response(Vec::new());
+    client.wait_for_call_count(2);
+
+    ext.dispatch_tool(tool(REGISTER_TOOL_NAME, "agent-1", bool_args(false)));
+    expect_tool_finished(&rx);
+    client.release_first_response(vec![TgUpdate {
+        update_id: 20,
+        message: Some(TgMessage {
+            chat_id: 123,
+            chat_type: Some("private".to_owned()),
+            user_id: 123,
+            from_name: Some("alice".to_owned()),
+            text: Some("stale while unregistered".to_owned()),
+        }),
+    }]);
+    assert!(rx.try_recv().is_err());
+
+    ext.dispatch_tool(tool(REGISTER_TOOL_NAME, "agent-1", bool_args(true)));
+    expect_tool_finished(&rx);
+    client.wait_for_call_count(3);
+    client.release_first_response(Vec::new());
+    client.wait_for_call_count(4);
+    client.release_first_response(vec![TgUpdate {
+        update_id: 21,
+        message: Some(TgMessage {
+            chat_id: 123,
+            chat_type: Some("private".to_owned()),
+            user_id: 123,
+            from_name: Some("alice".to_owned()),
+            text: Some("fresh after reregister".to_owned()),
+        }),
+    }]);
+
+    let HarnessInputMessage::Emit(emit) = rx.recv().expect("fresh prompt") else {
+        panic!("emit")
+    };
+    let Event::ExtPromptSubmitRequest(req) = *emit.event else {
+        panic!("prompt request")
+    };
+    assert_eq!(req.text, "[telegram from alice] fresh after reregister");
+}
+
+/// Error backoff uses the shared-state condvar so a config change wakes it
+/// promptly instead of waiting for the full local retry delay.
+#[test]
+fn poll_error_backoff_wakes_on_config_change() {
+    let (tx, rx) = mpsc::channel();
+    let client = ControlledPollClient::new();
+    let ext = Extension::new(client.clone(), tx);
+    ext.apply_config(cfg(), None);
+    ext.dispatch_tool(tool(REGISTER_TOOL_NAME, "agent-1", bool_args(true)));
+    expect_tool_finished(&rx);
+
+    client.wait_for_call_count(1);
+    client.release_first_response(Vec::new());
+    client.wait_for_call_count(2);
+    client.release_error("temporary failure");
+
+    let mut new_cfg = cfg();
+    new_cfg.poll_timeout_seconds = 2;
+    ext.apply_config(new_cfg, None);
+    client.wait_for_call_count(3);
+}
+
+/// Shutdown is recorded under the same mutex used by the poller readiness
+/// condvar, so a poller parked with no registered agents cannot miss the
+/// wakeup.
+#[test]
+fn shutdown_wakes_poller_readiness_wait() {
+    let (tx, _rx) = mpsc::channel();
+    let client = FakeClient::new();
+    let ext = Extension::new(client.clone(), tx.clone());
+    ext.apply_config(cfg(), None);
+    let state = Arc::clone(&ext.state);
+    let shutdown = Arc::clone(&ext.shutdown);
+    let handle = std::thread::spawn(move || poll_loop(state, client, tx.into(), shutdown));
+
+    std::thread::sleep(Duration::from_millis(50));
+    let start = std::time::Instant::now();
+    ext.request_shutdown();
+    handle.join().expect("poller joins after shutdown");
+    assert!(start.elapsed() < Duration::from_secs(1));
 }
 
 /// Even after the poll loop's first generation check succeeds, a later config
@@ -1414,10 +1525,9 @@ fn stale_generation_update_processing_does_not_reread_current_config() {
     let (ext, rx, client) = extension();
     ext.state
         .lock()
-        .expect("lock")
         .registered_agents
         .insert(agent_id("agent-1"));
-    let old_generation = ext.state.lock().expect("lock").config_generation;
+    let old_generation = ext.state.lock().config_generation;
     assert!(ext.poll_response_matches_config(old_generation));
 
     let mut new_cfg = cfg();
@@ -1425,7 +1535,6 @@ fn stale_generation_update_processing_does_not_reread_current_config() {
     ext.apply_config(new_cfg, None);
     ext.state
         .lock()
-        .expect("lock")
         .registered_agents
         .insert(agent_id("agent-1"));
 
@@ -1455,7 +1564,6 @@ fn invalid_reconfiguration_clears_active_bridge_state() {
     let (ext, rx, client) = extension();
     ext.state
         .lock()
-        .expect("lock")
         .registered_agents
         .insert(agent_id("agent-1"));
 
