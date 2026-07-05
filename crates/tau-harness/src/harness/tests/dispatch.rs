@@ -7087,12 +7087,11 @@ fn wait_start_is_interrupted_by_already_queued_agent_message() {
     h.shutdown().expect("shutdown");
 }
 
-/// Exact `wait` interruption is keyed by the waiting conversation, not by the
-/// owner of the background call being waited on. Otherwise a message to the
-/// target owner could unblock an unrelated waiter, while a message to the
-/// waiter would leave it parked.
+/// Exact `wait` is scoped to the background call owner before any waiter is
+/// registered. A cross-owner wait should fail immediately rather than creating
+/// active wait state that later messages could interrupt.
 #[test]
-fn agent_message_interrupts_exact_wait_by_wait_owner() {
+fn cross_owner_exact_wait_is_rejected_without_active_wait_state() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
@@ -7136,9 +7135,20 @@ fn agent_message_interrupts_exact_wait_by_wait_owner() {
             CborValue::Text(background_call_id.to_string()),
         )]),
     };
+    h.agents
+        .get_mut(&waiter_cid)
+        .expect("waiter agent")
+        .pending_prompts
+        .push_back(PendingPrompt::user("queued waiter input".to_owned()));
     h.handle_wait_tool_call(&waiter_cid, &wait_call, ToolName::new("wait"))
-        .expect("start cross-owner wait");
-    seed_tools_running(&mut h, &waiter_cid, vec![wait_call_id.clone()]);
+        .expect("reject cross-owner wait before queued-input preemption");
+
+    assert!(event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::ToolError(error)
+            if error.call_id.as_str() == wait_call_id.as_str()
+                && error.message == "unknown tool call: `bg-cross-msg-wait`"
+    )));
 
     h.publish_event(
         Some(HARNESS_CONNECTION_ID),
@@ -7154,7 +7164,9 @@ fn agent_message_interrupts_exact_wait_by_wait_owner() {
 
     assert!(!event_log_contains_any_source(&h, |event| matches!(
         event,
-        Event::ToolResult(result) if result.call_id.as_str() == wait_call_id.as_str()
+        Event::ToolResult(result)
+            if result.call_id.as_str() == wait_call_id.as_str()
+                && matches!(&result.result, CborValue::Text(text) if text.contains("interrupted because new input is queued"))
     )));
 
     h.publish_event(
@@ -7169,19 +7181,12 @@ fn agent_message_interrupts_exact_wait_by_wait_owner() {
         }),
     );
 
-    assert!(event_log_contains_any_source(&h, |event| matches!(
+    assert!(!event_log_contains_any_source(&h, |event| matches!(
         event,
         Event::ToolResult(result)
             if result.call_id.as_str() == wait_call_id.as_str()
                 && matches!(&result.result, CborValue::Text(text) if text.contains("interrupted because new input is queued"))
     )));
-    assert!(event_log_contains_any_source(&h, |event| matches!(
-        event,
-        Event::AgentPromptSteered(steered)
-            if steered.agent_id.as_str() == waiter_agent_id.as_str()
-                && steered.text.contains("waiter should resume")
-    )));
-
     h.shutdown().expect("shutdown");
 }
 

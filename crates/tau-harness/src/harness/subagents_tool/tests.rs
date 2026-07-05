@@ -585,6 +585,74 @@ fn no_arg_wait_ignores_background_completions_from_other_conversations() {
     );
 }
 
+/// Exact-id waits are scoped to the calling conversation just like no-arg
+/// waits. A caller that guesses or observes another conversation's completed
+/// background id must not consume it or learn that it exists.
+#[test]
+fn exact_wait_does_not_consume_completed_background_result_from_other_conversation() {
+    let main = conv("main");
+    let side = conv("side");
+    let mut tracker = WaitTracker::default();
+    assert!(
+        tracker
+            .record_background_result(background_result("side-bg", "side done"), side.clone())
+            .is_empty()
+    );
+
+    let (message, details) = reply_error(start_reply(start_wait_exact(
+        &mut tracker,
+        &main,
+        "wait-main",
+        "side-bg",
+    )));
+    assert_eq!(message, "unknown tool call: `side-bg`");
+    assert!(details.is_none());
+
+    assert_eq!(
+        reply_result(start_reply(start_wait_exact(
+            &mut tracker,
+            &side,
+            "wait-side",
+            "side-bg",
+        ))),
+        CborValue::Text("side done".to_owned())
+    );
+}
+
+/// Exact-id waits must also reject another conversation's still-running
+/// background call. Without this guard, a cross-agent exact wait could park
+/// first and consume the later completion.
+#[test]
+fn exact_wait_does_not_attach_to_running_background_call_from_other_conversation() {
+    let main = conv("main");
+    let side = conv("side");
+    let mut tracker = WaitTracker::default();
+    tracker.record_tool_invoke("side-bg".into(), slow_tool_name(), side.clone());
+    assert!(
+        tracker
+            .record_tool_result(background_placeholder("side-bg"), side.clone())
+            .is_empty()
+    );
+
+    let (message, details) = reply_error(start_reply(start_wait_exact(
+        &mut tracker,
+        &main,
+        "wait-main",
+        "side-bg",
+    )));
+    assert_eq!(message, "unknown tool call: `side-bg`");
+    assert!(details.is_none());
+
+    let start = start_wait_exact(&mut tracker, &side, "wait-side", "side-bg");
+    assert!(start.reply.is_none());
+    let replies = tracker.record_background_result(background_result("side-bg", "side done"), side);
+    assert_eq!(replies.len(), 1);
+    assert_eq!(
+        reply_result(replies.into_iter().next().expect("side wait reply")),
+        CborValue::Text("side done".to_owned())
+    );
+}
+
 /// Once a no-arg wait consumes a completion, a later exact wait for that
 /// original id must report that the result was already handled.
 #[test]

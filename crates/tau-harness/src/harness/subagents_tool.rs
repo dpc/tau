@@ -459,13 +459,31 @@ impl Harness {
         if self.has_pending_wait_preempting_prompt(agent_id) {
             let reply = match parse_wait_args(&call.arguments) {
                 Ok(WaitTarget::Exact(target)) => {
-                    let source_tool_name = self
+                    if !self
                         .subagents
                         .wait_tracker
-                        .call_tool_names
-                        .get(&target)
-                        .cloned();
-                    wait_interrupted_reply(call_id, visible_tool_name, source_tool_name, &target)
+                        .call_is_owned_by(&target, agent_id)
+                    {
+                        wait_error_reply(
+                            call_id,
+                            visible_tool_name,
+                            format!("unknown tool call: `{target}`"),
+                            None,
+                        )
+                    } else {
+                        let source_tool_name = self
+                            .subagents
+                            .wait_tracker
+                            .call_tool_names
+                            .get(&target)
+                            .cloned();
+                        wait_interrupted_reply(
+                            call_id,
+                            visible_tool_name,
+                            source_tool_name,
+                            &target,
+                        )
+                    }
                 }
                 Ok(WaitTarget::AnyBackground) => {
                     wait_interrupted_any_reply(call_id, visible_tool_name)
@@ -983,6 +1001,14 @@ impl WaitTracker {
     }
 
     fn start_exact_wait(&mut self, target: ToolCallId, wait: WaitRequest) -> WaitStart {
+        if !self.call_is_owned_by(&target, &wait.owner) {
+            return WaitStart::reply(wait_error_reply(
+                wait.call_id,
+                wait.tool_name,
+                format!("unknown tool call: `{target}`"),
+                None,
+            ));
+        }
         if self.waiters.contains_key(&target) {
             return WaitStart::reply(wait_error_reply(
                 wait.call_id,
@@ -1061,6 +1087,10 @@ impl WaitTracker {
                 None,
             )),
         }
+    }
+
+    fn call_is_owned_by(&self, call_id: &ToolCallId, owner: &AgentId) -> bool {
+        self.call_owners.get(call_id) == Some(owner)
     }
 
     fn start_any_wait(&mut self, owner: AgentId, wait: WaitRequest) -> WaitStart {
