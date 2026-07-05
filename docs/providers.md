@@ -106,6 +106,14 @@ string in `ToolCallItem.raw_arguments_json` for provider replay/cache identity.
 Replay should prefer the raw sidecar when present and serialize parsed CBOR only
 for old persisted records or calls that never had provider-wire JSON.
 
+Chat Completions transcript replay is semantic rather than a byte-for-byte
+provider-message round trip. It preserves the `messages[]` content Tau needs to
+continue the conversation — roles, visible text, reasoning text when exposed,
+tool calls, tool results, and raw function-call argument strings — but it does
+not preserve arbitrary provider-specific assistant-message fields. Add opaque
+Chat Completions sidecars only for concrete provider-required replay/cache or
+correctness needs.
+
 Responses providers should likewise preserve raw assistant `message` output
 items in `MessageItem.responses_raw_json` when available. The typed role,
 content text, and phase remain semantic truth; the raw sidecar is a replay/cache
