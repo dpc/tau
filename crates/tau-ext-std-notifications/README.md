@@ -75,7 +75,10 @@ The idle deadline resets on:
 - `ui.prompt_draft` — trailing-edge debounced typing pings from
   the UI; the deadline jumps back by that idle hook's `delay_seconds`
   so the notification doesn't fire mid-sentence while the user is
-  composing. Only applies in the `WaitingIdle` state; an
+  composing. This extension intentionally treats prompt drafts only as
+  liveness/idle-reset signals and ignores their `target_agent_id`; it does not
+  restore, synchronize, or inspect draft contents. Only applies in the
+  `WaitingIdle` state; an
   in-flight side-query summary (`WaitingSummary`, only possible when
   `agent_summary` is enabled) is left alone because we don't
   currently have a way to cancel the agent's in-flight prompt without

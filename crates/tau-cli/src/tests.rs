@@ -19,8 +19,8 @@ use tau_proto::{
 use super::chat::{
     DraftSlot, SUSPENDED_AGENT_PROMPT, agent_is_active_in_sets, custom_prompt_replacement,
     invalidate_pending_draft, is_local_slash_command, leading_slash_action, next_active_agent,
-    redacted_command_echo_line, redacted_prompt_history_line, role_cycling_enabled,
-    should_send_draft_snapshot,
+    queue_prompt_draft_snapshot, redacted_command_echo_line, redacted_prompt_history_line,
+    retarget_prompt_draft_snapshot, role_cycling_enabled, should_send_draft_snapshot,
 };
 use super::event_renderer::EventRenderer;
 
@@ -2992,6 +2992,7 @@ fn stale_draft_snapshot_is_dropped_after_submit_epoch_bump() {
             slot.epoch,
             tau_proto::UiPromptDraft {
                 session_id: "s1".into(),
+                target_agent_id: None,
                 text: "old".into(),
             },
         ));
@@ -3172,6 +3173,7 @@ fn action_submission_invalidates_pending_draft_like_prompt_submission() {
             slot.epoch,
             tau_proto::UiPromptDraft {
                 session_id: "s1".into(),
+                target_agent_id: None,
                 text: "/email list".into(),
             },
         ));
@@ -3183,6 +3185,90 @@ fn action_submission_invalidates_pending_draft_like_prompt_submission() {
     let slot = super::locked(mtx);
     assert_eq!(slot.epoch, 1);
     assert!(slot.pending.is_none());
+}
+
+/// A queued draft snapshot must carry the selected viewed agent so later
+/// consumers can distinguish an existing-agent draft from a start-new-agent
+/// draft without consulting mutable UI selection state.
+#[test]
+fn queued_draft_snapshot_records_selected_agent_target() {
+    let handle = (Mutex::new(DraftSlot::default()), std::sync::Condvar::new());
+    let agent_id = tau_proto::AgentId::parse("agent-a").expect("agent id");
+
+    queue_prompt_draft_snapshot(
+        &handle,
+        "s1".into(),
+        Some(agent_id.clone()),
+        "draft for agent".to_owned(),
+    );
+
+    let (mtx, _cv) = &handle;
+    let slot = super::locked(mtx);
+    let (epoch, draft) = slot.pending.as_ref().expect("pending draft");
+    assert_eq!(*epoch, 0);
+    assert_eq!(draft.session_id, tau_proto::SessionId::from("s1"));
+    assert_eq!(draft.target_agent_id, Some(agent_id));
+    assert_eq!(draft.text, "draft for agent");
+}
+
+/// A queued start-new-agent draft must remain explicitly unscoped instead of
+/// inheriting whatever agent might become current before the debounce fires.
+#[test]
+fn queued_draft_snapshot_records_no_agent_target() {
+    let handle = (Mutex::new(DraftSlot::default()), std::sync::Condvar::new());
+
+    queue_prompt_draft_snapshot(&handle, "s1".into(), None, "new agent draft".to_owned());
+
+    let (mtx, _cv) = &handle;
+    let slot = super::locked(mtx);
+    let (epoch, draft) = slot.pending.as_ref().expect("pending draft");
+    assert_eq!(*epoch, 0);
+    assert_eq!(draft.session_id, tau_proto::SessionId::from("s1"));
+    assert_eq!(draft.target_agent_id, None);
+    assert_eq!(draft.text, "new agent draft");
+}
+
+/// Switching from one viewed agent to another before the debounce fires must
+/// invalidate the stale snapshot and queue the current buffer under the new
+/// target.
+#[test]
+fn retarget_draft_snapshot_replaces_agent_a_with_agent_b() {
+    let handle = (Mutex::new(DraftSlot::default()), std::sync::Condvar::new());
+    let agent_a = tau_proto::AgentId::parse("agent-a").expect("agent id");
+    let agent_b = tau_proto::AgentId::parse("agent-b").expect("agent id");
+    queue_prompt_draft_snapshot(&handle, "s1".into(), Some(agent_a), "draft".to_owned());
+
+    retarget_prompt_draft_snapshot(
+        &handle,
+        "s1".into(),
+        Some(agent_b.clone()),
+        "draft".to_owned(),
+    );
+
+    let (mtx, _cv) = &handle;
+    let slot = super::locked(mtx);
+    let (epoch, draft) = slot.pending.as_ref().expect("retargeted draft");
+    assert_eq!(*epoch, 1);
+    assert_eq!(draft.target_agent_id, Some(agent_b));
+    assert_eq!(draft.text, "draft");
+}
+
+/// Switching from a viewed agent back to the start-new-agent prompt before the
+/// debounce fires must make the replacement snapshot unscoped.
+#[test]
+fn retarget_draft_snapshot_replaces_agent_with_no_agent() {
+    let handle = (Mutex::new(DraftSlot::default()), std::sync::Condvar::new());
+    let agent_a = tau_proto::AgentId::parse("agent-a").expect("agent id");
+    queue_prompt_draft_snapshot(&handle, "s1".into(), Some(agent_a), "draft".to_owned());
+
+    retarget_prompt_draft_snapshot(&handle, "s1".into(), None, "draft".to_owned());
+
+    let (mtx, _cv) = &handle;
+    let slot = super::locked(mtx);
+    let (epoch, draft) = slot.pending.as_ref().expect("retargeted draft");
+    assert_eq!(*epoch, 1);
+    assert_eq!(draft.target_agent_id, None);
+    assert_eq!(draft.text, "draft");
 }
 
 #[test]

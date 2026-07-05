@@ -2084,6 +2084,7 @@ fn prompt_draft_extends_idle_deadline() {
         writer
             .write_event(&Event::UiPromptDraft(UiPromptDraft {
                 session_id: "s1".into(),
+                target_agent_id: None,
                 text: format!("partial draft {i}"),
             }))
             .expect("write");
@@ -2174,6 +2175,7 @@ fn prompt_draft_during_waiting_summary_does_not_cancel() {
     writer
         .write_event(&Event::UiPromptDraft(UiPromptDraft {
             session_id: "s1".into(),
+            target_agent_id: None,
             text: "typing while summary is in flight".into(),
         }))
         .expect("write");
@@ -2739,6 +2741,7 @@ fn config_reload_clears_pending_idle_hooks() {
     writer
         .write_event(&Event::UiPromptDraft(tau_proto::UiPromptDraft {
             session_id: "session".into(),
+            target_agent_id: None,
             text: "still typing".to_owned(),
         }))
         .expect("write draft");

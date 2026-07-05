@@ -20,6 +20,23 @@ fn agent_id(value: &str) -> AgentId {
     AgentId::parse(value).expect("test agent id")
 }
 
+/// Ensures `ui.prompt_draft` remains readable from older peers that emitted
+/// only session/text liveness pings before drafts carried an explicit viewed
+/// agent target.
+#[test]
+fn ui_prompt_draft_target_agent_id_defaults_to_none() {
+    let value = serde_json::json!({
+        "session_id": "s1",
+        "text": "draft"
+    });
+
+    let draft: UiPromptDraft = serde_json::from_value(value).expect("legacy prompt draft");
+
+    assert_eq!(draft.session_id, SessionId::from("s1"));
+    assert_eq!(draft.target_agent_id, None);
+    assert_eq!(draft.text, "draft");
+}
+
 fn user_text_item(text: &str) -> ContextItem {
     ContextItem::Message(MessageItem {
         role: ContextRole::User,
@@ -773,6 +790,7 @@ fn representative_events() -> Vec<Event> {
         }),
         Event::UiPromptDraft(UiPromptDraft {
             session_id: "s1".into(),
+            target_agent_id: Some(agent_id("agent-1")),
             text: "draft".to_owned(),
         }),
         Event::UiFocusChanged(UiFocusChanged {
@@ -1967,6 +1985,7 @@ fn event_defaults_to_transient_marks_progress_kinds() {
         }),
         Event::UiPromptDraft(UiPromptDraft {
             session_id: "s1".into(),
+            target_agent_id: Some(agent_id("agent-1")),
             text: "draft".to_owned(),
         }),
         Event::UiPromptSubmitted(UiPromptSubmitted {

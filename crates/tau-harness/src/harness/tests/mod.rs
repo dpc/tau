@@ -1639,6 +1639,7 @@ fn intercepted_payload(events: &Arc<Mutex<Vec<RoutedFrame>>>) -> (Event, bool) {
 fn draft_event(text: &str) -> Event {
     Event::UiPromptDraft(UiPromptDraft {
         session_id: "s1".into(),
+        target_agent_id: None,
         text: text.to_owned(),
     })
 }

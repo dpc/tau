@@ -2328,12 +2328,27 @@ pub struct UiPromptSubmitted {
 /// its idle deadline on every draft event so the desktop notification
 /// doesn't fire while the user is mid-sentence.
 ///
-/// Future consumers might use the text for autocomplete, draft
-/// restoration on UI reconnect, or in-progress prompt sync across
-/// multiple attached UIs.
+/// The target agent scopes the currently viewed transcript at the moment the
+/// snapshot was captured. This keeps future draft restore, autocomplete, or
+/// cross-UI synchronization consumers from guessing which visible agent a draft
+/// belonged to. Modern producers must set it to `Some(agent_id)` when the draft
+/// belongs to an existing loaded agent transcript. `None` means the draft is
+/// session-level/unscoped, normally because the UI is composing the
+/// start-new-agent prompt; legacy peers whose payloads predate this field also
+/// decode as `None`, so stateful consumers must not reinterpret absence as the
+/// current agent.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct UiPromptDraft {
+    /// Session whose attached UI owns the prompt buffer.
     pub session_id: SessionId,
+    /// Existing agent transcript viewed by the user while editing this draft.
+    ///
+    /// `None` means the draft is session-level/unscoped, normally the
+    /// start-new-agent prompt. It is also the compatibility value for legacy
+    /// payloads that did not carry target scoping.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_agent_id: Option<AgentId>,
+    /// Full current prompt-buffer contents.
     pub text: String,
 }
 

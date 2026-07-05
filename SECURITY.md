@@ -23,6 +23,14 @@ for intentionally generic observers that truly need the entire category; changes
 to subscribers must consider replay behavior, payload size/frequency, and whether
 the selected events carry prompt, tool, provider, or extension-provided content.
 
+`ui.prompt_draft` is transient and not transcript truth, but it is still
+contentful user input. Consumers that store, restore, synchronize, autocomplete,
+or otherwise maintain state from prompt drafts must key that state by both
+`session_id` and `target_agent_id`. A missing `target_agent_id` means an
+unscoped/session-level draft, normally the start-new-agent prompt, and is also
+the compatibility shape for legacy peers; consumers must not infer the current
+agent from absence.
+
 These quotas bound individual file writes, file reads, and directory listing
 work performed by the harness. They do not bound aggregate per-extension disk
 usage across many files, sandbox arbitrary extension code, or prevent protocol

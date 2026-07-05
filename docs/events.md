@@ -352,7 +352,12 @@ intent.
   `agent.prompt_submitted` facts.
 - **`ui.prompt_draft`** — Trailing-edge debounced (≤1/s) snapshot of the
   current draft buffer. Transient — used for "user is alive" signals
-  (e.g. notification idle reset), not persisted.
+  (e.g. notification idle reset), not persisted. Carries the viewed
+  `target_agent_id` when the draft belongs to an existing agent transcript;
+  modern producers must set it in that case. Absence means the draft is
+  session-level/unscoped, normally the start-new-agent prompt. Legacy peers whose
+  payloads predate this field also decode as absent, so future restore/sync
+  consumers must not infer the current agent from absence.
 - **`ui.focus_changed`** — Attached terminal UI reports focus gained/lost for a
   session when terminal focus events are available. Transient; used for idle and
   notification behavior, not transcript truth.

@@ -3,8 +3,8 @@
 //! state so streaming updates land in the right block.
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use tau_proto::{
@@ -15,6 +15,7 @@ use tau_proto::{
 use crate::action_commands::ActionCommandState;
 use crate::agent_activity::AgentActivity;
 use crate::build_banner;
+use crate::chat::{DraftSlot, retarget_prompt_draft_snapshot};
 use crate::markdown_render::{
     MarkdownStreamCache, markdown_block, markdown_prompt_block, markdown_streaming_block,
 };
@@ -93,6 +94,9 @@ pub(crate) struct EventRenderer {
     shell_agents: HashMap<String, String>,
     /// Shared current visible agent mirror for prompt submission.
     current_agent_state: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+    /// Shared prompt-draft mailbox used to retarget pending drafts when remote
+    /// events auto-select an agent.
+    draft_retargeter: Option<DraftRetargeter>,
     /// Per-`agent_prompt_id` UI state. An entry is created on
     /// `AgentPromptStarted` (or `ProviderPromptSubmitted` for prompts
     /// without an explicit start event) and torn down on
@@ -295,6 +299,15 @@ pub(crate) struct EventRenderer {
     agent_in_progress: Arc<AtomicBool>,
     /// Detailed lifecycle bookkeeping backing [`Self::agent_in_progress`].
     agent_activity: AgentActivity,
+}
+
+/// Shared state needed by renderer-owned selection changes to retarget prompt
+/// drafts without sending protocol events directly from the renderer thread.
+struct DraftRetargeter {
+    /// Debounce mailbox owned by the CLI input/draft subsystem.
+    handle: Arc<(Mutex<DraftSlot>, Condvar)>,
+    /// Current session id mirrored by the input loop for `/session new`.
+    session_id: Arc<Mutex<String>>,
 }
 
 #[derive(Default)]
@@ -1089,6 +1102,7 @@ impl EventRenderer {
             tool_agents: HashMap::new(),
             shell_agents: HashMap::new(),
             current_agent_state: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            draft_retargeter: None,
             prompts: HashMap::new(),
             last_user_block: None,
             queued_user_blocks: VecDeque::new(),
@@ -1168,6 +1182,14 @@ impl EventRenderer {
         self.tool_timer = Some(timer);
     }
 
+    pub(crate) fn set_draft_retargeter(
+        &mut self,
+        handle: Arc<(Mutex<DraftSlot>, Condvar)>,
+        session_id: Arc<Mutex<String>>,
+    ) {
+        self.draft_retargeter = Some(DraftRetargeter { handle, session_id });
+    }
+
     pub(crate) fn known_agents(&self) -> std::sync::Arc<std::sync::Mutex<Vec<String>>> {
         self.known_agents.clone()
     }
@@ -1215,7 +1237,7 @@ impl EventRenderer {
         }
 
         if target_changed {
-            self.set_current_agent_id(Some(agent_id));
+            self.set_current_agent_id(Some(agent_id), false);
             self.render_model_status();
             self.refresh_prompt_placeholder();
         }
@@ -1234,7 +1256,7 @@ impl EventRenderer {
         }
 
         if target_changed {
-            self.set_current_agent_id(None);
+            self.set_current_agent_id(None, false);
             self.render_model_status();
             self.refresh_prompt_placeholder();
         }
@@ -1266,11 +1288,34 @@ impl EventRenderer {
         self.displayed_agent_id.is_none() && self.preserve_on_fresh_agent_switch
     }
 
-    fn set_current_agent_id(&mut self, agent_id: Option<String>) {
+    fn set_current_agent_id(&mut self, agent_id: Option<String>, retarget_draft: bool) {
         self.current_agent_id = agent_id.clone();
         if let Ok(mut current) = self.current_agent_state.lock() {
             *current = agent_id;
         }
+        if retarget_draft {
+            self.retarget_prompt_draft();
+        }
+    }
+
+    fn retarget_prompt_draft(&self) {
+        let Some(retargeter) = &self.draft_retargeter else {
+            return;
+        };
+        let session_id = retargeter
+            .session_id
+            .lock()
+            .map(|session_id| session_id.clone())
+            .unwrap_or_default();
+        let target_agent_id = self.current_agent_id.as_deref().map(|agent_id| {
+            tau_proto::AgentId::parse(agent_id).expect("renderer stores valid agent ids")
+        });
+        retarget_prompt_draft_snapshot(
+            retargeter.handle.as_ref(),
+            session_id.into(),
+            target_agent_id,
+            self.handle.get_buffer(),
+        );
     }
 
     fn refresh_prompt_placeholder(&mut self) {
@@ -2712,7 +2757,7 @@ impl EventRenderer {
                     self.show_agent_transcript(target_agent_id.clone());
                 }
                 self.awaiting_new_agent_selection = false;
-                self.set_current_agent_id(Some(target_agent_id.clone()));
+                self.set_current_agent_id(Some(target_agent_id.clone()), true);
                 self.refresh_prompt_placeholder();
                 self.render_model_status();
                 self.handle_recorded_at_for_visible_agent(event, recorded_at);

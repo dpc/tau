@@ -16,7 +16,7 @@ use tau_config::settings::CliBindingAction;
 use tau_harness::SessionLaunchStatus;
 use tau_proto::{
     CborValue, Disconnect, Event, HarnessInputMessage, HarnessOutputMessage, PeerInputReader,
-    PeerOutputWriter, UiFocusChanged, UiPromptDraft, UiPromptSubmitted, UnixMicros,
+    PeerOutputWriter, SessionId, UiFocusChanged, UiPromptDraft, UiPromptSubmitted, UnixMicros,
 };
 
 use crate::action_commands::ActionCommandState;
@@ -763,6 +763,40 @@ pub(crate) fn invalidate_pending_draft(handle: &(Mutex<DraftSlot>, Condvar)) {
     }
 }
 
+/// Queue a debounced prompt-draft snapshot with the currently viewed agent
+/// target captured by the caller.
+pub(crate) fn queue_prompt_draft_snapshot(
+    handle: &(Mutex<DraftSlot>, Condvar),
+    session_id: SessionId,
+    target_agent_id: Option<tau_proto::AgentId>,
+    text: String,
+) {
+    let (mtx, cv) = handle;
+    if let Ok(mut g) = mtx.lock() {
+        g.pending = Some((
+            g.epoch,
+            UiPromptDraft {
+                session_id,
+                target_agent_id,
+                text,
+            },
+        ));
+        cv.notify_one();
+    }
+}
+
+/// Start a new draft epoch and queue the current buffer under a new viewed
+/// agent target.
+pub(crate) fn retarget_prompt_draft_snapshot(
+    handle: &(Mutex<DraftSlot>, Condvar),
+    session_id: SessionId,
+    target_agent_id: Option<tau_proto::AgentId>,
+    text: String,
+) {
+    invalidate_pending_draft(handle);
+    queue_prompt_draft_snapshot(handle, session_id, target_agent_id, text);
+}
+
 fn encode_binding_action(action: &CliBindingAction) -> String {
     let Some(command) = action.command.as_deref().filter(|c| !c.is_empty()) else {
         return action.action.clone();
@@ -988,6 +1022,8 @@ pub(crate) fn run_chat(
     }
 
     handle.redraw();
+    let draft_handle: DraftHandle = Arc::new((Mutex::new(DraftSlot::default()), Condvar::new()));
+    let active_session_state = Arc::new(Mutex::new(session_id.to_owned()));
 
     // Event renderer thread — drains the channel and renders via
     // the thread-safe TermHandle.
@@ -1006,6 +1042,7 @@ pub(crate) fn run_chat(
         settings.prompt_symbol.clone(),
         settings.submitted_prompt_symbol,
     );
+    renderer.set_draft_retargeter(draft_handle.clone(), active_session_state.clone());
     renderer.set_action_state(action_state.clone());
     completion_data.set_arg_completer(
         tau_cli_term::CommandName::new("/skill"),
@@ -1097,7 +1134,6 @@ pub(crate) fn run_chat(
     // contents; the thread coalesces a typing burst into one
     // `UiPromptDraft` per `DRAFT_DEBOUNCE` window and sends it on the
     // shared writer.
-    let draft_handle: DraftHandle = Arc::new((Mutex::new(DraftSlot::default()), Condvar::new()));
     let debounce_thread = {
         let handle = draft_handle.clone();
         let writer = writer.clone();
@@ -1129,6 +1165,7 @@ pub(crate) fn run_chat(
             agent_in_progress,
             remote_disconnected,
             renderer_tx: event_tx,
+            active_session_state,
             editor_context,
             action_state,
             draft_handle: draft_handle.clone(),
@@ -1323,6 +1360,7 @@ struct TerminalInputLoopCtx {
     agent_in_progress: Arc<std::sync::atomic::AtomicBool>,
     remote_disconnected: Arc<AtomicBool>,
     renderer_tx: mpsc::Sender<RendererCmd>,
+    active_session_state: Arc<Mutex<String>>,
     editor_context: Arc<Mutex<tau_cli_term::EditorContext>>,
     action_state: ActionCommandState,
     draft_handle: DraftHandle,
@@ -2112,6 +2150,9 @@ impl<'a> TerminalInputSession<'a> {
             }),
         );
         *self.session_id = new_id;
+        if let Ok(mut active_session) = self.ctx.active_session_state.lock() {
+            *active_session = self.session_id.clone();
+        }
         self.pending_new_agent_options.clear();
         self.clear_selected_agent();
         Ok(())
@@ -2456,6 +2497,7 @@ impl<'a> TerminalInputSession<'a> {
     fn clear_selected_agent(&mut self) {
         self.ctx.routing.set_selected_agent(None);
         self.dismiss_completion_menu();
+        self.retarget_current_draft();
         let _ = self.ctx.renderer_tx.send(RendererCmd::ClearSelectedAgent);
     }
 
@@ -2469,10 +2511,12 @@ impl<'a> TerminalInputSession<'a> {
         match action {
             Some(AgentSwitchCommandAction::ClearedSelection) => {
                 self.dismiss_completion_menu();
+                self.retarget_current_draft();
             }
             Some(AgentSwitchCommandAction::SwitchedAgent) => {
                 self.pending_new_agent_options.clear();
                 self.dismiss_completion_menu();
+                self.retarget_current_draft();
             }
             None => {}
         }
@@ -2702,18 +2746,26 @@ impl<'a> TerminalInputSession<'a> {
         // coalesce a typing burst into one `UiPromptDraft`
         // per `DRAFT_DEBOUNCE` window.
         let text = self.term.handle().get_buffer();
-        let (mtx, cv) = &*self.ctx.draft_handle;
-        if let Ok(mut g) = mtx.lock() {
-            g.pending = Some((
-                g.epoch,
-                UiPromptDraft {
-                    session_id: self.session_id.as_str().into(),
-                    text,
-                },
-            ));
-            tracing::trace!(target: "tau_cli::ui", "prompt draft updated");
-            cv.notify_one();
-        }
+        let target_agent_id = self.selected_side_agent_id();
+        queue_prompt_draft_snapshot(
+            self.ctx.draft_handle.as_ref(),
+            self.session_id.as_str().into(),
+            target_agent_id,
+            text,
+        );
+        tracing::trace!(target: "tau_cli::ui", "prompt draft updated");
+    }
+
+    fn retarget_current_draft(&self) {
+        let text = self.term.handle().get_buffer();
+        let target_agent_id = self.selected_side_agent_id();
+        retarget_prompt_draft_snapshot(
+            self.ctx.draft_handle.as_ref(),
+            self.session_id.as_str().into(),
+            target_agent_id,
+            text,
+        );
+        tracing::trace!(target: "tau_cli::ui", "prompt draft target changed");
     }
 
     fn toggle_fast_service_tier(&self) {
@@ -2761,6 +2813,7 @@ impl<'a> TerminalInputSession<'a> {
         self.pending_new_agent_options.clear();
         self.ctx.routing.set_selected_agent(Some(agent_id.clone()));
         self.dismiss_completion_menu();
+        self.retarget_current_draft();
         let _ = self
             .ctx
             .renderer_tx

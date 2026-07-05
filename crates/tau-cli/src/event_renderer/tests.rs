@@ -1,6 +1,7 @@
 use tau_cli_term_raw::Term;
 
 use super::{AgentActivity, MessageRenderMode, RoleCompletionDetails, role_value_completion};
+use crate::chat::{DraftSlot, queue_prompt_draft_snapshot};
 
 fn agent_id(value: &str) -> tau_proto::AgentId {
     tau_proto::AgentId::parse(value).expect("valid test agent id")
@@ -19,6 +20,53 @@ fn renderer_for_agent_id_tests() -> super::EventRenderer {
         tau_cli_term::CompletionData::new(),
         tau_themes::Theme::builtin(),
     )
+}
+
+/// Renderer-owned auto-selection from the empty screen must retarget any
+/// pending prompt draft, because the input loop is not involved in remote-event
+/// selection changes.
+#[test]
+fn renderer_auto_select_retargets_pending_prompt_draft() {
+    let (_term, handle, _input) = Term::new_virtual(
+        80,
+        24,
+        "> ",
+        Box::new(std::io::sink()),
+        tau_cli_term::CursorShape::Bar,
+    );
+    handle.set_buffer("draft".to_owned(), "draft".len());
+    let mut renderer = super::EventRenderer::new(
+        handle,
+        tau_cli_term::CompletionData::new(),
+        tau_themes::Theme::builtin(),
+    );
+    let draft_handle = std::sync::Arc::new((
+        std::sync::Mutex::new(DraftSlot::default()),
+        std::sync::Condvar::new(),
+    ));
+    let session_id = std::sync::Arc::new(std::sync::Mutex::new("s1".to_owned()));
+    renderer.set_draft_retargeter(draft_handle.clone(), session_id);
+    queue_prompt_draft_snapshot(draft_handle.as_ref(), "s1".into(), None, "draft".to_owned());
+
+    renderer.handle_recorded_at(
+        &tau_proto::Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+            agent_id: agent_id("agent-a"),
+            text: "submitted".to_owned(),
+            message_class: tau_proto::PromptMessageClass::User,
+            originator: tau_proto::PromptOriginator::User,
+            display_name: None,
+            ctx_id: None,
+        }),
+        tau_proto::UnixMicros::now(),
+    );
+
+    let (mtx, _cv) = draft_handle.as_ref();
+    let slot = mtx.lock().expect("draft slot");
+    let (epoch, draft) = slot.pending.as_ref().expect("retargeted draft");
+    assert_eq!(*epoch, 1);
+    assert_eq!(draft.session_id, tau_proto::SessionId::from("s1"));
+    assert_eq!(draft.target_agent_id, Some(agent_id("agent-a")));
+    assert_eq!(draft.text, "draft");
 }
 
 fn agent_message(sender_id: &str, recipient: &str, message: &str) -> tau_proto::Event {
