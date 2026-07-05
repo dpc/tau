@@ -92,6 +92,21 @@ tail of `all_lines`, near the input cursor. As long as the bottom-anchored
 zones fit in `height` rows, they are entirely inside the visible viewport and
 the diff renderer can update them in place.
 
+`above_active` is still a generic ordered live-block zone, but callers may keep
+their own semantic sub-order inside it. The chat UI uses:
+
+```
+thinking → compaction → streaming response → active tool summary/tool calls
+```
+
+Use `TermHandle::push_above_active_before_any` when inserting a live block that
+must appear before existing active anchors without rebuilding the whole output
+snapshot. The helper removes any existing reference to the moved block, inserts
+it before the first matching active anchor, and appends it when no anchors are
+currently active. This is safe for live-tail/active-area ordering that remains
+inside the bottom-anchored viewport; it is not a general mechanism for rewriting
+history or already-scrolled scrollback rows.
+
 ### Safe mutations (just call `TermHandle::redraw()`)
 
 - Editing the input buffer or prompt.

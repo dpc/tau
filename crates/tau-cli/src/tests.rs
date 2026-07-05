@@ -5684,6 +5684,66 @@ fn live_tool_timer_updates_do_not_mutate_scrolled_history() {
     assert!(vt.screen_contains(80, "read src/main.rs"));
 }
 
+/// Streaming assistant text must stay above already-running tool calls so the
+/// tool UI remains pinned near the prompt even when the live response grows
+/// taller than the viewport.
+#[test]
+fn active_tool_stays_below_streaming_response() {
+    let (_term, handle, vt) = setup(80, 6);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        cli_test_theme(),
+    );
+
+    let read_args = CborValue::Map(vec![(
+        CborValue::Text("path".into()),
+        CborValue::Text("src/main.rs".into()),
+    )]);
+    renderer.handle(&tool_started("call-1", "read", read_args));
+    renderer.handle(&initial_tool_progress("call-1", "read", "src/main.rs", ""));
+    sync(&handle);
+    assert!(vt.screen_contains(80, "read src/main.rs"));
+    let full_renders_before = handle.full_render_count();
+
+    let long_response = (0..12)
+        .map(|i| format!("streaming response line {i}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    renderer.handle(&Event::AgentPromptCreated(agent_prompt_created(
+        "sp-streaming",
+        "s1",
+    )));
+    renderer.handle(&Event::ProviderResponseUpdated(
+        provider_response_delta_update(
+            "sp-streaming",
+            long_response,
+            None,
+            tau_proto::PromptOriginator::User,
+        ),
+    ));
+    sync(&handle);
+
+    let lines = visible_lines(&vt, 80);
+    let response_line = lines
+        .iter()
+        .position(|line| line.contains("streaming response line"))
+        .unwrap_or_else(|| panic!("missing streaming response line: {lines:?}"));
+    let tool_line = lines
+        .iter()
+        .position(|line| line.contains("read src/main.rs"))
+        .unwrap_or_else(|| panic!("missing pinned tool line: {lines:?}"));
+    assert!(
+        response_line < tool_line,
+        "active tool should stay below the streaming response: {lines:?}",
+    );
+    assert_eq!(
+        handle.full_render_count(),
+        full_renders_before,
+        "pinning live tool calls must not force a full redraw",
+    );
+}
+
 #[test]
 fn live_multiline_payload_tool_uses_static_duration_placeholder() {
     // Multi-line live tool payloads can extend above the visible active-tools

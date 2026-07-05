@@ -3460,6 +3460,54 @@ fn tool_summary_like_reorder_in_visible_area_does_not_full_redraw() {
     });
 }
 
+#[test]
+fn push_above_active_before_any_inserts_moves_and_appends() {
+    let buf = SharedBuffer::new();
+    let mut parser = vt100::Parser::new(8, 40, 50);
+    let (_term, handle, _input_tx) =
+        Term::new_virtual(40, 8, "> ", Box::new(buf.clone()), CursorShape::Bar);
+    flush_redraws(&handle, &buf, &mut parser);
+
+    let top = handle.new_block("test", plain_block("top live"));
+    let middle = handle.new_block("test", plain_block("middle live"));
+    let bottom = handle.new_block("test", plain_block("bottom live"));
+    let appended = handle.new_block("test", plain_block("appended live"));
+    handle.push_above_active(top);
+    handle.push_above_active(bottom);
+    handle.push_above_active_before_any(middle, [bottom]);
+    flush_redraws(&handle, &buf, &mut parser);
+    assert_terminal_rows_match(
+        &mut parser,
+        40,
+        8,
+        &["top live", "middle live", "bottom live", "> "],
+    );
+
+    handle.push_above_active_before_any(middle, [top]);
+    flush_redraws(&handle, &buf, &mut parser);
+    assert_terminal_rows_match(
+        &mut parser,
+        40,
+        8,
+        &["middle live", "top live", "bottom live", "> "],
+    );
+
+    handle.push_above_active_before_any(appended, std::iter::empty::<BlockId>());
+    flush_redraws(&handle, &buf, &mut parser);
+    assert_terminal_rows_match(
+        &mut parser,
+        40,
+        8,
+        &[
+            "middle live",
+            "top live",
+            "bottom live",
+            "appended live",
+            "> ",
+        ],
+    );
+}
+
 /// Pseudo-random visible block churn stress-tests that visible-only mutations
 /// keep using incremental rendering.
 #[test]

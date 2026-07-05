@@ -3641,7 +3641,7 @@ impl EventRenderer {
             format!("agent-response-live:{}", prompt.agent_prompt_id),
             block,
         );
-        self.handle.push_above_active(id);
+        self.push_live_response_block(id);
         self.handle.redraw();
         self.prompts
             .entry(prompt.agent_prompt_id.to_string())
@@ -3731,7 +3731,7 @@ impl EventRenderer {
             format!("agent-response-live:{}", update.agent_prompt_id),
             block,
         );
-        self.handle.push_above_active(id);
+        self.push_live_response_block(id);
         self.handle.redraw();
         self.prompts
             .entry(spid.to_owned())
@@ -3832,30 +3832,13 @@ impl EventRenderer {
     }
 
     fn insert_live_thinking_block(&mut self, spid: &str, block: tau_cli_term::StyledBlock) {
-        // Insert the thinking block ABOVE the pending response block in
-        // `above_active`. The response block was pushed first (in
-        // the prompt-start handler for AgentPromptStarted, or by the provider
-        // update fallback), so a plain push would land below it. Briefly remove
-        // the response, push thinking, re-push response — net effect: thinking
-        // is at the response's old position and the response moves down by one.
+        // Insert thinking above the live compaction/response stack while keeping
+        // any active tool-call UI pinned below the whole streaming response.
         let tbid = self
             .handle
             .new_block(format!("agent-thinking-live:{spid}"), block);
-        let response_bid = self.prompts.get(spid).and_then(|s| s.response_block_id);
-        let compaction_bid = self.prompts.get(spid).and_then(|s| s.compaction_block_id);
-        if let Some(compaction_bid) = compaction_bid {
-            self.handle.remove_above_active(compaction_bid);
-        }
-        if let Some(response_bid) = response_bid {
-            self.handle.remove_above_active(response_bid);
-        }
-        self.handle.push_above_active(tbid);
-        if let Some(compaction_bid) = compaction_bid {
-            self.handle.push_above_active(compaction_bid);
-        }
-        if let Some(response_bid) = response_bid {
-            self.handle.push_above_active(response_bid);
-        }
+        let anchors = self.live_thinking_anchor_ids(spid);
+        self.handle.push_above_active_before_any(tbid, anchors);
         self.prompts
             .entry(spid.to_owned())
             .or_default()
@@ -3897,18 +3880,60 @@ impl EventRenderer {
         let block_id = self
             .handle
             .new_block(format!("agent-compaction-live:{spid}"), block);
-        let response_bid = self.prompts.get(spid).and_then(|s| s.response_block_id);
-        if let Some(response_bid) = response_bid {
-            self.handle.remove_above_active(response_bid);
-            self.handle.push_above_active(block_id);
-            self.handle.push_above_active(response_bid);
-        } else {
-            self.handle.push_above_active(block_id);
-        }
+        let anchors = self.live_compaction_anchor_ids(spid);
+        self.handle.push_above_active_before_any(block_id, anchors);
         self.prompts
             .entry(spid.to_owned())
             .or_default()
             .compaction_block_id = Some(block_id);
+    }
+
+    fn push_live_response_block(&self, block_id: tau_cli_term::BlockId) {
+        self.handle
+            .push_above_active_before_any(block_id, self.active_tool_anchor_ids());
+    }
+
+    fn live_thinking_anchor_ids(&self, spid: &str) -> Vec<tau_cli_term::BlockId> {
+        let mut anchors = Vec::new();
+        if let Some(state) = self.prompts.get(spid) {
+            if let Some(block_id) = state.compaction_block_id {
+                anchors.push(block_id);
+            }
+            if let Some(block_id) = state.response_block_id {
+                anchors.push(block_id);
+            }
+        }
+        anchors.extend(self.active_tool_anchor_ids());
+        anchors
+    }
+
+    fn live_compaction_anchor_ids(&self, spid: &str) -> Vec<tau_cli_term::BlockId> {
+        let mut anchors = Vec::new();
+        if let Some(state) = self.prompts.get(spid)
+            && let Some(block_id) = state.response_block_id
+        {
+            anchors.push(block_id);
+        }
+        anchors.extend(self.active_tool_anchor_ids());
+        anchors
+    }
+
+    fn active_tool_anchor_ids(&self) -> Vec<tau_cli_term::BlockId> {
+        let mut anchors = Vec::new();
+        if self.prompt_tool_summary_active
+            && let Some(block_id) = self.prompt_tool_summary
+        {
+            anchors.push(block_id);
+        }
+        for state in self.tool_calls.values() {
+            if let Some(block_id) = state.summary_block_id {
+                anchors.push(block_id);
+            }
+            if let Some(block_id) = state.block_id {
+                anchors.push(block_id);
+            }
+        }
+        anchors
     }
 
     fn update_live_response_block(&mut self, spid: &str, text: &str) {

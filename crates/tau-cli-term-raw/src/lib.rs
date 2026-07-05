@@ -12,7 +12,7 @@
 //! - **Full render** — on resize/invalidation, clears screen + scrollback and
 //!   replays the capped log/history suffix plus fixed tail without rubber
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{self, BufWriter, Write};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::{self, JoinHandle};
@@ -1117,6 +1117,28 @@ impl TermHandle {
             st.above_active.push(id);
             tracing::trace!(target: "tau_cli_term_raw::blocks", ?id, zone = "above_active", "push block zone");
         }
+    }
+
+    /// Inserts a block id into the above-active zone before the first matching
+    /// anchor block, or appends it when none of the anchors are active.
+    ///
+    /// Existing references to `id` are moved rather than duplicated. This keeps
+    /// callers from rebuilding the whole output snapshot when they need a
+    /// stable sub-order inside the bottom-anchored live block area.
+    pub fn push_above_active_before_any<I>(&self, id: BlockId, anchors: I)
+    where
+        I: IntoIterator<Item = BlockId>,
+    {
+        let anchors = anchors.into_iter().collect::<HashSet<_>>();
+        let mut st = self.lock();
+        st.above_active.retain(|&x| x != id);
+        let insert_at = st
+            .above_active
+            .iter()
+            .position(|active_id| anchors.contains(active_id))
+            .unwrap_or(st.above_active.len());
+        st.above_active.insert(insert_at, id);
+        tracing::trace!(target: "tau_cli_term_raw::blocks", ?id, zone = "above_active", "insert block zone");
     }
 
     /// Removes a block id from the above-active zone.
