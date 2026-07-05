@@ -30,7 +30,9 @@ use tau_session_inspect::{
 };
 use tempfile::TempDir;
 
-use super::{AgentState, AgentToolCall, HARNESS_CONNECTION_ID, Harness};
+use super::{
+    AgentState, AgentToolCall, HARNESS_CONNECTION_ID, Harness, NormalizedFinishedToolCall,
+};
 use crate::AgentId;
 use crate::agent::{AgentTurnState, PendingPrompt};
 use crate::daemon::{
@@ -1339,6 +1341,7 @@ fn seed_assistant_tool_round(h: &mut Harness, cid: &crate::AgentId, calls: &[(&s
                         name: ToolName::new(*tool_name),
                         tool_type: tau_proto::ToolType::Function,
                         arguments: CborValue::Map(Vec::new()),
+                        raw_arguments_json: None,
                     })
                 })
                 .collect(),
@@ -1358,6 +1361,52 @@ fn seed_assistant_tool_round(h: &mut Harness, cid: &crate::AgentId, calls: &[(&s
         cid,
         calls.iter().map(|(call_id, _)| (*call_id).into()).collect(),
     );
+}
+
+/// Harness tool-call normalization may rewrite ids or routed tool metadata
+/// before persisting the provider response, but it must not discard the
+/// provider's raw function-call argument JSON sidecar used later for provider
+/// replay/cache identity.
+#[test]
+fn rewrite_finished_response_tool_call_items_preserves_raw_arguments_json() {
+    let raw_arguments = "{ \"z\" : 1, \"a\" : [2, 3] }";
+    let mut response = ProviderResponseFinished {
+        agent_prompt_id: "sp-raw".into(),
+        agent_id: crate::parse_agent_id("main"),
+        output_items: vec![ContextItem::ToolCall(ToolCallItem {
+            call_id: "call-original".into(),
+            name: ToolName::new("shell"),
+            tool_type: tau_proto::ToolType::Function,
+            arguments: CborValue::Map(Vec::new()),
+            raw_arguments_json: Some(raw_arguments.to_owned()),
+        })],
+        stop_reason: tau_proto::ProviderStopReason::ToolCalls,
+        error: None,
+        usage: None,
+        originator: tau_proto::PromptOriginator::User,
+        compaction_original_input_tokens: None,
+        compaction_compacted_input_tokens: None,
+        backend: None,
+        provider_response_id: None,
+        ws_pool_delta: None,
+    };
+    let normalized_calls = vec![NormalizedFinishedToolCall {
+        call: AgentToolCall {
+            id: "call-normalized".into(),
+            name: ToolName::new("shell"),
+            tool_type: tau_proto::ToolType::Function,
+            arguments: CborValue::Map(Vec::new()),
+        },
+        background_support: tau_proto::BackgroundSupport::Never,
+    }];
+
+    Harness::rewrite_finished_response_tool_call_items(&mut response, &normalized_calls);
+
+    let ContextItem::ToolCall(call) = &response.output_items[0] else {
+        panic!("expected rewritten tool call");
+    };
+    assert_eq!(call.call_id.as_str(), "call-normalized");
+    assert_eq!(call.raw_arguments_json.as_deref(), Some(raw_arguments));
 }
 
 /// Pumps the harness event loop until the named tool call's result

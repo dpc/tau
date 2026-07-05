@@ -6,10 +6,12 @@ use super::*;
 use crate::TurnAbortWaker;
 use crate::responses::ResponsesSurface;
 
+type TestAbortWakerSlot = Arc<Mutex<Option<Arc<dyn Fn() + Send + Sync + 'static>>>>;
+
 struct CapturingAbort {
     aborted: Arc<AtomicBool>,
     registered_tx: std_mpsc::Sender<()>,
-    waker: Arc<Mutex<Option<Arc<dyn Fn() + Send + Sync + 'static>>>>,
+    waker: TestAbortWakerSlot,
 }
 
 impl TurnAbort for CapturingAbort {

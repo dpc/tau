@@ -36,6 +36,7 @@ struct ToolCallItem {
     name: ToolName,
     tool_type: ToolType,
     arguments: CborValue,
+    raw_arguments_json: Option<String>,
 }
 
 struct ToolResultItem {
@@ -60,6 +61,11 @@ Notes:
 - `ToolCallItem::name` is already the strict Tau-visible tool name. Provider
   names that cannot be normalized to a valid `ToolName` are rejected before
   becoming transcript items.
+- `ToolCallItem::arguments` is the parsed CBOR semantic form used for
+  validation, routing, and tool dispatch. `raw_arguments_json` is an optional
+  provider-wire sidecar for function calls whose upstream argument payload was a
+  JSON string; provider replay uses it to preserve cache identity and falls back
+  to serializing `arguments` only for old records or non-function/custom calls.
 - `Reasoning`, `Compaction`, and `UnknownProviderItem` are opaque payloads.
 - Embedded `ContextItem::Compaction` is preserved as output, but is not a
   transcript boundary.

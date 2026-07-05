@@ -10,6 +10,13 @@ The legacy `share_user_cache_key` prompt flag is retained for persisted events a
 
 WebSocket pool keys must follow the same identity as request `prompt_cache_key` values so upstream thread/session headers and request bodies target the same cache bucket.
 
+Replay contributes to the same provider-visible cache identity. When replaying
+assistant function calls, request construction must prefer
+`ToolCallItem.raw_arguments_json` so object key order, whitespace, and numeric
+spelling match the provider's original argument string. Serializing parsed CBOR
+arguments is only a fallback for older persisted records that do not have the raw
+sidecar.
+
 ## Model metadata tags
 
 ChatGPT/Codex model publication includes provider-owned capability tags such as

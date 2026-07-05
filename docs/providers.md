@@ -99,6 +99,12 @@ then a final response with empty `output_items` and a bounded display `error`.
 
 Provider final responses may contain tool calls, but providers do not execute Tau tools.
 The harness routes tools and sends follow-up prompts back to the selected provider when needed.
+Providers that receive function-call arguments from upstream as JSON text must
+store both forms in finished output items: parsed CBOR in
+`ToolCallItem.arguments` for validation/tool dispatch, and the original JSON
+string in `ToolCallItem.raw_arguments_json` for provider replay/cache identity.
+Replay should prefer the raw sidecar when present and serialize parsed CBOR only
+for old persisted records or calls that never had provider-wire JSON.
 
 ## Roles
 

@@ -194,6 +194,7 @@ fn tool_call(call_id: &str) -> tau_proto::ContextItem {
         name: tau_proto::ToolName::new("read"),
         tool_type: tau_proto::ToolType::Function,
         arguments: tau_proto::CborValue::Null,
+        raw_arguments_json: None,
     })
 }
 

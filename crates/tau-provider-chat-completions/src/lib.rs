@@ -622,6 +622,7 @@ impl ToolCallAccumulator {
             arguments: serde_json::from_str::<serde_json::Value>(&self.arguments)
                 .map(|value| json_to_cbor(&value))
                 .unwrap_or(tau_proto::CborValue::Null),
+            raw_arguments_json: Some(self.arguments.clone()),
         }))
     }
 }
@@ -983,7 +984,7 @@ fn append_context_block(block: &tau_proto::ContextBlock, messages: &mut Vec<serd
                             "type": "function",
                             "function": {
                                 "name": call.name,
-                                "arguments": cbor_to_json(&call.arguments).to_string(),
+                                "arguments": function_call_arguments_json(call),
                             }
                         }));
                     }
@@ -1027,6 +1028,12 @@ fn append_context_block(block: &tau_proto::ContextBlock, messages: &mut Vec<serd
             }
         }
     }
+}
+
+fn function_call_arguments_json(call: &ToolCallItem) -> String {
+    call.raw_arguments_json.clone().unwrap_or_else(|| {
+        serde_json::to_string(&cbor_to_json(&call.arguments)).unwrap_or_default()
+    })
 }
 
 fn chat_completions_reasoning_text(item: &OpaqueProviderItem) -> Option<String> {

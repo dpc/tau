@@ -12,9 +12,11 @@ use crate::common::PromptPayload;
 use crate::responses::ResponsesSurface;
 use crate::{NeverAbort, TurnAbort, TurnAbortWaker};
 
+type TestAbortWakerSlot = Arc<Mutex<Option<Arc<dyn Fn() + Send + Sync + 'static>>>>;
+
 struct AtomicAbort {
     canceled: Arc<AtomicBool>,
-    waker: Arc<Mutex<Option<Arc<dyn Fn() + Send + Sync + 'static>>>>,
+    waker: TestAbortWakerSlot,
     registered_tx: std_mpsc::Sender<()>,
 }
 

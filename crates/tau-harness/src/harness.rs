@@ -1728,6 +1728,7 @@ where
                             CborValue::Text("path".to_owned()),
                             CborValue::Text(path.trim().to_owned()),
                         )]),
+                        raw_arguments_json: None,
                     }
                 } else if let Some(cmd) = user_text.strip_prefix("shell ") {
                     ToolCallItem {
@@ -1738,6 +1739,7 @@ where
                             CborValue::Text("command".to_owned()),
                             CborValue::Text(cmd.trim().to_owned()),
                         )]),
+                        raw_arguments_json: None,
                     }
                 } else {
                     ToolCallItem {
@@ -1745,6 +1747,7 @@ where
                         name: ToolName::new("echo"),
                         tool_type: tau_proto::ToolType::Function,
                         arguments: CborValue::Text(user_text),
+                        raw_arguments_json: None,
                     }
                 };
 
@@ -11620,7 +11623,7 @@ impl Harness {
             .output_items
             .drain(..)
             .map(|item| match item {
-                ContextItem::ToolCall(_) => {
+                ContextItem::ToolCall(original_call) => {
                     let entry = normalized_calls_iter
                         .next()
                         .expect("tool-call normalization count should match output items");
@@ -11629,6 +11632,7 @@ impl Harness {
                         name: entry.call.name.clone(),
                         tool_type: entry.call.tool_type,
                         arguments: entry.call.arguments.clone(),
+                        raw_arguments_json: original_call.raw_arguments_json,
                     })
                 }
                 item => item,

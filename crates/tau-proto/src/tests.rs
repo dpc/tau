@@ -30,6 +30,49 @@ fn user_text_item(text: &str) -> ContextItem {
     })
 }
 
+/// Ensures the optional raw function-call argument JSON sidecar is additive for
+/// old persisted context items while still round-tripping when a provider
+/// parser records it for replay/cache identity.
+#[test]
+fn tool_call_item_raw_arguments_json_is_optional_and_round_trips() {
+    let raw_arguments = "{ \"z\" : 1, \"a\" : [2, 3] }";
+    let call = ToolCallItem {
+        call_id: "call-raw".into(),
+        name: ToolName::new("shell"),
+        tool_type: ToolType::Function,
+        arguments: CborValue::Map(vec![
+            (
+                CborValue::Text("z".to_owned()),
+                CborValue::Integer(1.into()),
+            ),
+            (
+                CborValue::Text("a".to_owned()),
+                CborValue::Array(vec![
+                    CborValue::Integer(2.into()),
+                    CborValue::Integer(3.into()),
+                ]),
+            ),
+        ]),
+        raw_arguments_json: Some(raw_arguments.to_owned()),
+    };
+    let mut legacy_value = serde_json::to_value(&call).expect("serialize legacy fixture");
+    legacy_value
+        .as_object_mut()
+        .expect("tool call serializes as object")
+        .remove("raw_arguments_json");
+    let legacy_call: ToolCallItem =
+        serde_json::from_value(legacy_value).expect("legacy tool call item");
+    assert_eq!(legacy_call.raw_arguments_json, None);
+
+    let round_trip: ToolCallItem =
+        serde_json::from_value(serde_json::to_value(&call).expect("serialize tool call item"))
+            .expect("deserialize tool call item");
+    assert_eq!(
+        round_trip.raw_arguments_json.as_deref(),
+        Some(raw_arguments)
+    );
+}
+
 fn action_schema_fixture() -> ActionSchema {
     ActionSchema {
         version: tau_actions::ACTION_SCHEMA_VERSION,

@@ -325,6 +325,7 @@ fn build_request_full_replay_serializes_restored_tool_error_before_next_user_mes
     assert_eq!(input[0]["type"], "function_call");
     assert_eq!(input[0]["id"], "fc_call-restored");
     assert_eq!(input[0]["call_id"], "call-restored");
+    assert_eq!(input[0]["arguments"], "{\"command\":\"sleep 30\"}");
     assert_eq!(input[1]["type"], "function_call_output");
     assert_eq!(input[1]["call_id"], "call-restored");
     let output = input[1]["output"].as_str().expect("tool output");
@@ -333,6 +334,56 @@ fn build_request_full_replay_serializes_restored_tool_error_before_next_user_mes
     assert!(output.contains("partial stdout before restart"));
     assert_eq!(input[2]["role"], "user");
     assert_eq!(input[2]["content"][0]["text"], "after restart");
+}
+
+/// Responses replay must use the provider's original function-call argument
+/// string when it is available. Re-serializing parsed CBOR can reorder keys or
+/// normalize whitespace/numbers, which changes the provider-visible cache
+/// input.
+#[test]
+fn build_request_full_replay_preserves_raw_function_call_arguments() {
+    let raw_arguments = "{ \"z\" : 1, \"a\" : [2, 3] }";
+    let messages = vec![
+        ContextItem::ToolCall(ToolCallItem {
+            call_id: "call-raw".into(),
+            name: tau_proto::ToolName::new("shell"),
+            tool_type: tau_proto::ToolType::Function,
+            arguments: tau_proto::CborValue::Map(vec![
+                (
+                    tau_proto::CborValue::Text("z".to_owned()),
+                    tau_proto::CborValue::Integer(1.into()),
+                ),
+                (
+                    tau_proto::CborValue::Text("a".to_owned()),
+                    tau_proto::CborValue::Array(vec![
+                        tau_proto::CborValue::Integer(2.into()),
+                        tau_proto::CborValue::Integer(3.into()),
+                    ]),
+                ),
+            ]),
+            raw_arguments_json: Some(raw_arguments.to_owned()),
+        }),
+        user_text("continue"),
+    ];
+    let request = PromptPayload {
+        system_prompt: "sys",
+        context: context(&messages),
+        tools: &[],
+        params: tau_proto::ModelParams::default(),
+        tool_choice: tau_proto::ToolChoice::default(),
+        compaction: None,
+        originator: &tau_proto::PromptOriginator::User,
+        session_id: &tau_proto::SessionId::new("test-session"),
+        agent_id: &tau_proto::AgentId::parse("test-agent").expect("agent id"),
+        share_user_cache_key: false,
+        debug_provider_requests: false,
+    };
+
+    let body = serde_json::to_value(build_request(&chain_test_config(), &request, None))
+        .expect("serialize request");
+    let input = body["input"].as_array().expect("input array");
+    assert_eq!(input[0]["type"], "function_call");
+    assert_eq!(input[0]["arguments"], raw_arguments);
 }
 
 /// Stateful-chain turn: when the harness supplies a
@@ -802,6 +853,7 @@ fn assistant_tool_call(
         name: tau_proto::ToolName::new(name),
         tool_type,
         arguments: input,
+        raw_arguments_json: None,
     })
 }
 
@@ -1307,6 +1359,7 @@ fn apply_event_accumulates_custom_tool_input_deltas() {
     assert_eq!(call.tool_type, tau_proto::ToolType::Custom);
     assert_eq!(call.call_id.as_str(), "call_patch");
     assert_eq!(call.name.as_str(), "apply_patch");
+    assert_eq!(call.raw_arguments_json, None);
     assert_eq!(
         call.arguments,
         tau_proto::CborValue::Text("*** Begin Patch".into())
@@ -1704,6 +1757,10 @@ fn apply_event_preserves_incremental_output_item_order() {
     assert_eq!(call.call_id.as_str(), "call_read");
     assert_eq!(call.name.as_str(), "read");
     assert_eq!(
+        call.raw_arguments_json.as_deref(),
+        Some("{\"path\":\"Cargo.toml\"}")
+    );
+    assert_eq!(
         crate::common::cbor_to_json(&call.arguments),
         serde_json::json!({ "path": "Cargo.toml" })
     );
@@ -1773,6 +1830,10 @@ fn apply_event_output_item_done_hydrates_message_text_before_tool_call() {
     };
     assert_eq!(call.call_id.as_str(), "call_read");
     assert_eq!(call.name.as_str(), "read");
+    assert_eq!(
+        call.raw_arguments_json.as_deref(),
+        Some("{\"path\":\"Cargo.toml\"}")
+    );
 }
 
 #[test]
@@ -1874,6 +1935,7 @@ fn apply_event_function_call_assembles_tool_call() {
             tau_proto::CborValue::Text("ls".into())
         )])
     );
+    assert_eq!(call.raw_arguments_json.as_deref(), Some("{\"cmd\":\"ls\"}"));
 }
 
 #[test]

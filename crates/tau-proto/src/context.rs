@@ -67,6 +67,16 @@ pub struct ToolCallItem {
     pub tool_type: ToolType,
     /// Tool arguments in protocol CBOR form.
     pub arguments: CborValue,
+    /// Provider-produced raw JSON text for function-call arguments.
+    ///
+    /// Providers usually expose function arguments as a JSON string. Tau parses
+    /// that string into [`Self::arguments`] for validation and tool dispatch,
+    /// but replay needs the original string so provider cache identity is
+    /// not changed by JSON map reordering or normalization. Older persisted
+    /// turns and non-function/custom tool calls leave this empty and
+    /// providers fall back to serializing [`Self::arguments`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub raw_arguments_json: Option<String>,
 }
 
 /// Terminal status for one tool result item.

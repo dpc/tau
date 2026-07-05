@@ -1429,13 +1429,20 @@ fn convert_tool_call_item(call: &ToolCallItem, out: &mut Vec<serde_json::Value>)
 fn convert_function_call_item(call: &ToolCallItem) -> serde_json::Value {
     let id_str = call.call_id.as_str();
     let fc_id = prefixed_provider_item_id(id_str, "fc_");
-    let args_json = cbor_to_json(&call.arguments);
+    let arguments = function_call_arguments_json(call);
     serde_json::json!({
         "type": "function_call",
         "id": fc_id,
         "call_id": id_str,
         "name": encode_tool_name(call.name.as_str()),
-        "arguments": serde_json::to_string(&args_json).unwrap_or_default(),
+        "arguments": arguments,
+    })
+}
+
+fn function_call_arguments_json(call: &ToolCallItem) -> String {
+    call.raw_arguments_json.clone().unwrap_or_else(|| {
+        let args_json = cbor_to_json(&call.arguments);
+        serde_json::to_string(&args_json).unwrap_or_default()
     })
 }
 

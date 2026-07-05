@@ -2055,6 +2055,7 @@ fn extension_agent_prompt_lifecycle_is_active_until_response_finishes() {
                 name: tau_proto::ToolName::new("read"),
                 tool_type: tau_proto::ToolType::Function,
                 arguments: CborValue::Map(Vec::new()),
+                raw_arguments_json: None,
             })],
         )
     }));
@@ -2223,6 +2224,7 @@ fn switched_agent_shows_its_tool_usage() {
                     CborValue::Text("path".into()),
                     CborValue::Text("src/lib.rs".into()),
                 )]),
+                raw_arguments_json: None,
             })],
         )
     }));
@@ -2284,6 +2286,7 @@ fn delegate_progress_routes_to_hidden_tool_owner() {
                 name: tau_proto::ToolName::new("agent_start"),
                 tool_type: tau_proto::ToolType::Function,
                 arguments: delegate_args.clone(),
+                raw_arguments_json: None,
             })],
         )
     }));
@@ -3180,6 +3183,7 @@ fn new_session_clears_session_ui_state() {
                     CborValue::Text("path".into()),
                     CborValue::Text("src/lib.rs".into()),
                 )]),
+                raw_arguments_json: None,
             }),
         ],
     )));
@@ -3606,6 +3610,7 @@ fn model_status_shows_main_tool_usage_before_context() {
             name: tau_proto::ToolName::new("grep"),
             tool_type: tau_proto::ToolType::Function,
             arguments: CborValue::Map(Vec::new()),
+            raw_arguments_json: None,
         })],
         stop_reason: ProviderStopReason::ToolCalls,
         error: None,
@@ -3640,12 +3645,14 @@ fn model_status_shows_main_tool_usage_before_context() {
                 name: tau_proto::ToolName::new("read"),
                 tool_type: tau_proto::ToolType::Function,
                 arguments: CborValue::Map(Vec::new()),
+                raw_arguments_json: None,
             }),
             ContextItem::ToolCall(ToolCallItem {
                 call_id: "call-2".into(),
                 name: tau_proto::ToolName::new("grep"),
                 tool_type: tau_proto::ToolType::Function,
                 arguments: CborValue::Map(Vec::new()),
+                raw_arguments_json: None,
             }),
         ],
     )));
@@ -3867,6 +3874,7 @@ fn agent_in_progress_clears_when_tool_is_cancelled() {
             name: tau_proto::ToolName::new("read"),
             tool_type: tau_proto::ToolType::Function,
             arguments: CborValue::Map(Vec::new()),
+            raw_arguments_json: None,
         })],
     )));
     assert!(in_progress.load(std::sync::atomic::Ordering::Relaxed));
@@ -3916,6 +3924,7 @@ fn delegate_side_conversation_keeps_parent_tool_status_visible() {
             name: tau_proto::ToolName::new("agent_start"),
             tool_type: tau_proto::ToolType::Function,
             arguments: CborValue::Map(Vec::new()),
+            raw_arguments_json: None,
         })],
     )));
     renderer.handle(&tool_started(
@@ -5022,6 +5031,7 @@ fn delegate_progress_redraws_live_parent_block() {
             name: tau_proto::ToolName::new("agent_start"),
             tool_type: tau_proto::ToolType::Function,
             arguments: delegate_args.clone(),
+            raw_arguments_json: None,
         })],
     )));
     renderer.handle(&tool_started("call-delegate", "agent_start", delegate_args));
@@ -5097,6 +5107,7 @@ fn provider_tool_error_before_tool_started_is_ignored() {
                     CborValue::Text("unknown_option".into()),
                     CborValue::Text("invalid".into()),
                 )]),
+                raw_arguments_json: None,
             })],
         )),
         tau_proto::UnixMicros::new(1_000_000),
@@ -5186,6 +5197,7 @@ fn provider_tool_error_without_logical_tool_error_does_not_finish_live_tool() {
                 name: tau_proto::ToolName::new("strict_tool"),
                 tool_type: tau_proto::ToolType::Function,
                 arguments: CborValue::Map(Vec::new()),
+                raw_arguments_json: None,
             })],
         )),
         tau_proto::UnixMicros::new(1_000_000),
@@ -5234,6 +5246,7 @@ fn running_tool_call_shows_ellipsis_until_result() {
                     CborValue::Text("path".into()),
                     CborValue::Text("src/main.rs".into()),
                 )]),
+                raw_arguments_json: None,
             })],
         )),
         tau_proto::UnixMicros::new(1_000_000),
@@ -5398,6 +5411,7 @@ fn backgrounded_tool_stays_visibly_running_until_background_result() {
                     ),
                     (CborValue::Text("mode".into()), CborValue::Text("ro".into())),
                 ]),
+                raw_arguments_json: None,
             })],
         )),
         tau_proto::UnixMicros::new(1_000_000),
@@ -5500,6 +5514,7 @@ fn running_shell_tool_shows_multiline_command_body_in_full_mode() {
                     CborValue::Text("command".into()),
                     CborValue::Text(command.into()),
                 )]),
+                raw_arguments_json: None,
             })],
         )),
         tau_proto::UnixMicros::new(1_000_000),
@@ -5596,6 +5611,7 @@ fn finished_tool_result_preserves_message_and_tool_item_order() {
                     CborValue::Text("path".into()),
                     CborValue::Text("src/main.rs".into()),
                 )]),
+                raw_arguments_json: None,
             }),
             assistant_message_item("after tool"),
         ],
@@ -5665,6 +5681,7 @@ fn live_tool_timer_updates_do_not_mutate_scrolled_history() {
             name: tau_proto::ToolName::new("read"),
             tool_type: tau_proto::ToolType::Function,
             arguments: read_args.clone(),
+            raw_arguments_json: None,
         })],
     )));
     renderer.handle(&tool_started("call-1", "read", read_args));
@@ -5767,6 +5784,7 @@ fn live_multiline_payload_tool_uses_static_duration_placeholder() {
             name: tau_proto::ToolName::new("read"),
             tool_type: tau_proto::ToolType::Function,
             arguments: args.clone(),
+            raw_arguments_json: None,
         })],
     )));
     renderer.handle(&tool_started("call-1", "read", args));
@@ -5853,6 +5871,7 @@ fn show_tools_summarize_turn_summarizes_tool_batch() {
                     CborValue::Text("path".into()),
                     CborValue::Text("src/main.rs".into()),
                 )]),
+                raw_arguments_json: None,
             }),
             ContextItem::ToolCall(ToolCallItem {
                 call_id: "call-2".into(),
@@ -5862,6 +5881,7 @@ fn show_tools_summarize_turn_summarizes_tool_batch() {
                     CborValue::Text("pattern".into()),
                     CborValue::Text("foo".into()),
                 )]),
+                raw_arguments_json: None,
             }),
         ],
     )));
@@ -5928,6 +5948,7 @@ fn show_tools_summarize_prompt_aggregates_across_tool_followups() {
                 CborValue::Text("path".into()),
                 CborValue::Text("src/main.rs".into()),
             )]),
+            raw_arguments_json: None,
         })],
     )));
     renderer.handle(&Event::ToolResult(ToolResult {
@@ -5962,6 +5983,7 @@ fn show_tools_summarize_prompt_aggregates_across_tool_followups() {
                 CborValue::Text("pattern".into()),
                 CborValue::Text("foo".into()),
             )]),
+            raw_arguments_json: None,
         })],
     )));
     sync(&handle);
@@ -6015,6 +6037,7 @@ fn show_tools_compact_hides_payload_body() {
                     CborValue::Text("path".into()),
                     CborValue::Text("src/main.rs".into()),
                 )]),
+                raw_arguments_json: None,
             })],
         )),
         tau_proto::UnixMicros::new(1_000_000),
@@ -6080,6 +6103,7 @@ fn show_tools_off_hides_tool_blocks() {
                 CborValue::Text("path".into()),
                 CborValue::Text("src/main.rs".into()),
             )]),
+            raw_arguments_json: None,
         })],
     )));
     renderer.handle(&Event::ToolResult(ToolResult {

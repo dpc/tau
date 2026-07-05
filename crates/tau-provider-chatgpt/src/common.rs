@@ -346,6 +346,8 @@ impl ToolCallAccumulator {
             name,
             tool_type: self.tool_type,
             arguments,
+            raw_arguments_json: (self.tool_type == tau_proto::ToolType::Function)
+                .then(|| self.arguments_json.clone()),
         }))
     }
 }

@@ -681,6 +681,7 @@ fn assemble_conversation_includes_tool_error_details() {
                 name: tau_proto::ToolName::new("shell"),
                 tool_type: tau_proto::ToolType::Function,
                 arguments: CborValue::Null,
+                raw_arguments_json: None,
             })],
             stop_reason: tau_proto::ProviderStopReason::ToolCalls,
             error: None,

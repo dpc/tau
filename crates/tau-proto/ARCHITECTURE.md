@@ -25,6 +25,20 @@ harness state or extension implementation details. These helpers are part of the
 same prompt-surface safety boundary as rendered tool responses: keep work
 bounded, outputs deterministic, and tests close to the exported helper.
 
+## Tool-call argument dual representation
+
+`ToolCallItem.arguments` is the parsed CBOR semantic form of assistant tool-call
+arguments. Harness validation, tool routing, repair, and dispatch must use this
+field as the source of truth.
+
+`ToolCallItem.raw_arguments_json` is an optional replay/cache-identity sidecar
+for provider function calls whose upstream wire format supplied arguments as a
+JSON string. Providers should populate it with the exact original string while
+also parsing into `arguments`; prompt replay should prefer the sidecar when
+reconstructing provider history and fall back to serializing `arguments` only for
+old persisted records or calls without provider-wire JSON. The sidecar is not a
+semantic authority and must not bypass CBOR validation/dispatch.
+
 ## Event names and routing
 
 `Event` serde `rename` values, `EventName` constants, and `Event::name()` are one contract. When adding or renaming an event, update all three together and update `docs/events.md` when the selected guide should mention the event.

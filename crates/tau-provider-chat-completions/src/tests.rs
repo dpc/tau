@@ -363,6 +363,93 @@ fn reasoning_content_is_persisted_and_replayed_with_tool_call() {
     );
 }
 
+/// Ensures Chat Completions preserves provider-wire function-call argument JSON
+/// through parsing and replay so cache identity is not changed by
+/// reserialization.
+#[test]
+fn tool_call_replay_preserves_raw_function_arguments_json() {
+    let raw_arguments = "{ \"z\" : 1, \"a\" : [2, 3] }";
+    let mut state = StreamState::new();
+    apply_event(
+        &mut state,
+        &serde_json::json!({
+            "choices": [{
+                "delta": {
+                    "tool_calls": [{
+                        "index": 0,
+                        "id": "call-raw",
+                        "type": "function",
+                        "function": { "name": "shell", "arguments": raw_arguments }
+                    }]
+                },
+                "finish_reason": "tool_calls"
+            }]
+        }),
+        &mut |_| {},
+    )
+    .expect("stream event should apply");
+
+    let items = state.output_items();
+    let ContextItem::ToolCall(call) = &items[0] else {
+        panic!("expected persisted tool call");
+    };
+    assert_eq!(call.raw_arguments_json.as_deref(), Some(raw_arguments));
+
+    let mut replay = prompt();
+    replay.context = tau_proto::PromptContext {
+        blocks: vec![tau_proto::ContextBlock::AssistantResponse(
+            tau_proto::AssistantResponseBlock {
+                provider_response_id: None,
+                backend: None,
+                output_items: items,
+                usage: None,
+            },
+        )],
+    };
+    let provider = provider();
+    let request = build_request(&resolved_provider(&provider), &provider.models[0], &replay);
+    let json = serde_json::to_value(request).expect("request json");
+
+    assert_eq!(
+        json["messages"][0]["tool_calls"][0]["function"]["arguments"],
+        raw_arguments
+    );
+}
+
+/// Ensures old persisted Chat Completions tool calls without a raw JSON sidecar
+/// still replay by serializing the parsed CBOR semantic arguments.
+#[test]
+fn tool_call_replay_falls_back_to_parsed_arguments_when_raw_json_missing() {
+    let mut replay = prompt();
+    replay.context = tau_proto::PromptContext {
+        blocks: vec![tau_proto::ContextBlock::AssistantResponse(
+            tau_proto::AssistantResponseBlock {
+                provider_response_id: None,
+                backend: None,
+                output_items: vec![ContextItem::ToolCall(ToolCallItem {
+                    call_id: "call-fallback".into(),
+                    name: tau_proto::ToolName::new("shell"),
+                    tool_type: tau_proto::ToolType::Function,
+                    arguments: tau_proto::CborValue::Map(vec![(
+                        tau_proto::CborValue::Text("command".to_owned()),
+                        tau_proto::CborValue::Text("date".to_owned()),
+                    )]),
+                    raw_arguments_json: None,
+                })],
+                usage: None,
+            },
+        )],
+    };
+    let provider = provider();
+    let request = build_request(&resolved_provider(&provider), &provider.models[0], &replay);
+    let json = serde_json::to_value(request).expect("request json");
+
+    assert_eq!(
+        json["messages"][0]["tool_calls"][0]["function"]["arguments"],
+        "{\"command\":\"date\"}"
+    );
+}
+
 #[test]
 fn replay_coalesces_assistant_text_and_tool_calls_in_stream_order() {
     // A single Chat Completions assistant turn can contain reasoning, visible

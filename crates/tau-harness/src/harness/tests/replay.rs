@@ -34,6 +34,7 @@ fn response_with_tool_calls(call_ids: &[&str]) -> ProviderResponseFinished {
                     name: ToolName::new("read"),
                     tool_type: tau_proto::ToolType::Function,
                     arguments: CborValue::Null,
+                    raw_arguments_json: None,
                 })
             })
             .collect(),
@@ -883,6 +884,7 @@ fn late_joining_ui_client_replays_terminal_tool_events() {
                     name: ToolName::new(tool_name),
                     tool_type: tau_proto::ToolType::Function,
                     arguments: CborValue::Map(Vec::new()),
+                    raw_arguments_json: None,
                 })],
                 stop_reason: tau_proto::ProviderStopReason::ToolCalls,
                 error: None,
