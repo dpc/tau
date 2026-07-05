@@ -558,14 +558,17 @@ in the parent UI alongside the delegate's task name and role. See
 
 Disabled by default, `std-telegram` lets allowlisted Telegram users send text to
 explicitly registered Tau agents and lets those agents reply with
-`telegram_send`. It requires a bot-token secret and non-empty `allowed_user_ids`;
+the legacy `telegram_send` tool. It requires a bot-token secret and non-empty
+`allowed_user_ids`;
 outgoing messages use only a configured or linked chat id, never a model-chosen
 destination. Runtime registrations and Telegram update offsets are in-memory,
 unconfigured group chats are refused, and Bot API `getUpdates` polling is
 protected by a same-state-root advisory lock for the singleton Telegram update
 stream. Activating Telegram polling fails visibly when Telegram reports an
 active webhook, and out-of-band `getUpdates` HTTP 409 conflicts are surfaced as
-warning notices that clear active registrations.
+warning notices that clear active registrations. Additional Telegram extension
+instances publish namespaced register/send tools instead of reusing the
+`std-telegram` legacy tool names.
 
 ### `std-slack` — personal Slack Socket Mode text bridge
 

@@ -229,6 +229,8 @@ pending updates on the user's behalf. Out-of-band `getUpdates` HTTP 409
 conflicts are surfaced as warning notices and clear active registrations rather
 than silently pretending the bridge still owns the stream. Avoid logs that
 include bot tokens, Bot API URLs, or unexpected private Telegram content.
+Additional Telegram extension instances use namespaced tools/groups so one
+harness does not route a model-visible tool call ambiguously between bot tokens.
 
 ## XMPP extension
 

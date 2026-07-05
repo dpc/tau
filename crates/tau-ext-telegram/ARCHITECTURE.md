@@ -2,7 +2,19 @@
 
 `std-telegram` is a personal text bridge, not a generic chat abstraction. The
 extension process starts to register tools, but it does not contact Telegram
-until a Tau agent calls `telegram_register(enabled: true)`.
+until a Tau agent calls this instance's register tool (`telegram_register` for
+the legacy `std-telegram` instance) with `enabled: true`.
+
+Tool names are computed from the initial harness configuration before the
+extension sends `Ready`. The built-in `std-telegram` instance publishes the
+legacy `telegram_register` and `telegram_send` tools in group `telegram`.
+Additional instances derive a namespace from their configured instance name by
+escaping `_` as `__` and `-` as `_d`, unless `config.tool_namespace` explicitly
+sets another ASCII tool namespace. For example, instance `telegram-work`
+publishes `telegram_dwork_register` and `telegram_dwork_send` in group
+`telegram_dwork`. This keeps same-harness multi-bot setups unambiguous while
+preserving existing `std-telegram` role policy. The namespace is immutable until
+extension restart because Tau tool declarations are startup declarations.
 
 ## State
 
@@ -62,9 +74,9 @@ Plain text routes when exactly one agent is registered or a selected agent exist
 Command designators always put the stable `agent_id` first, with display name
 only as context in listings and selection confirmations (`agent_id (display
 name)`). `/select` and `/to` resolve by full `agent_id` or unambiguous `agent_id`
-prefix, not by display name. Agent replies sent with `telegram_send` are prefixed
-with `[agent_id]` only. Ambiguous plain text receives a Telegram reply and is not
-routed.
+prefix, not by display name. Agent replies sent with this instance's send tool
+(`telegram_send` for the legacy `std-telegram` instance) are prefixed with
+`[agent_id]` only. Ambiguous plain text receives a Telegram reply and is not routed.
 
 The bridge has one active Telegram chat. If `chat_id` is configured, only that
 chat can route commands or prompts and outgoing messages always go there. If
@@ -82,5 +94,6 @@ config validation, tool specs/examples, allowlist enforcement, active-chat and
 linking privacy invariants, command routing, update offset/backlog behavior,
 shutdown lifecycle, advisory update-stream lock acquisition/contention/release,
 active-reconfigure lock contention, webhook-active registration refusal,
-`getUpdates` 409 conflict notices, and bot-token/Bot API URL redaction. Live
+`getUpdates` 409 conflict notices, tool namespace derivation/validation, and
+bot-token/Bot API URL redaction. Live
 Telegram checks are manual only and should not be required for normal CI.
