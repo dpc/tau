@@ -169,6 +169,13 @@ It publishes `chatgpt/*` only from auth named `chatgpt`; there is no `openai-cod
 WebSocket-capable ChatGPT/Codex Responses models remain on WebSocket: retryable
 WS failures follow the bounded retry/backoff policy, and terminal WS errors are
 surfaced instead of silently falling back to HTTP/SSE.
+ChatGPT/Codex live streams use a five-minute idle watchdog on both HTTP/SSE and
+WebSocket transports. The watchdog resets on each SSE `data:` event or
+WebSocket provider frame, not on SSE comments/heartbeats or partial-line byte
+trickles, and is not an absolute turn-duration cap. If upstream goes quiet, Tau
+aborts the turn and emits a terminal provider error with transport, prompt id,
+elapsed/idle timing, configured idle timeout, whether partial output had already
+arrived, and read-source details where available.
 
 ## Summary
 

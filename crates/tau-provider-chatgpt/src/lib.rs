@@ -159,7 +159,7 @@ impl ChatGptRuntime {
                 }
             }
         } else {
-            responses::responses_stream(agent_prompt_id, config, request, on_update)?
+            responses::responses_stream(agent_prompt_id, config, request, abort, on_update)?
         };
         let ws_pool_delta = ws_pool_before.and_then(|before| {
             self.ws_pool

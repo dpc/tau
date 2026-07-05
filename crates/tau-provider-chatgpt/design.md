@@ -14,9 +14,12 @@ the same inbound event queue as transport events. The turn then re-checks
 `TurnAbort::is_aborted()` and returns the standard 499 harness cancellation error
 only when the abort source confirms cancellation.
 
-This keeps cancellation prompt without shortening the provider-event timeout.
-The 120 second timeout still means "no upstream events arrived for this long",
-not "wake periodically to poll cancellation".
+This keeps cancellation prompt without shortening the provider-stream watchdog.
+The default five-minute timeout is an idle timeout meaning "no upstream SSE
+`data:` event or WebSocket frame arrived for this long", not "wake periodically
+to poll cancellation". SSE comments, heartbeats, and partial-line byte trickles
+do not reset it. Tau does not currently impose a separate absolute turn-duration
+timeout for ChatGPT/Codex streams.
 
 The shared WebSocket pool uses the same cancellation seam when a prompt turn is
 queued behind an active same-key reservation. Checkout waits on the pool
@@ -43,11 +46,12 @@ provider errors for the turn instead of silently retrying the same turn over
 HTTP/SSE.
 
 WebSocket changes should cover observable turn/pool contracts such as pool-key
-identity, reservation/release behavior, reconnect behavior, provider-event
-timeouts, cancellation returning the standard 499 harness path, and abort wakers
-waking blocked turn waits without relying on short receive polling. Parser and
-streaming changes should keep using focused event/delta/snapshot regression
-tests, with broader provider response streaming guidance in `../../docs/testing.md`.
+identity, reservation/release behavior, reconnect behavior, provider-stream
+idle timeouts, cancellation returning the standard 499 harness path, and abort
+wakers waking blocked turn waits without relying on short receive polling.
+Parser and streaming changes should keep using focused event/delta/snapshot
+regression tests, with broader provider response streaming guidance in
+`../../docs/testing.md`.
 
 ## Responses replay sidecars are syntax, not semantics
 

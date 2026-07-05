@@ -524,6 +524,15 @@ retryable WebSocket failures use Tau's bounded retry/backoff policy, and
 terminal WebSocket errors are surfaced instead of silently falling back to
 HTTP/SSE.
 
+Live ChatGPT/Codex streams have a default five-minute idle watchdog for both
+HTTP/SSE and WebSocket transports. The timer resets on each SSE `data:` event or
+WebSocket provider frame, so long responses can continue while active; SSE
+comments, heartbeats, and partial-line byte trickles do not count as provider
+progress. A quiet stalled stream is aborted and surfaced as a provider error
+with transport, prompt id, elapsed, idle, configured idle-timeout, and
+partial-output diagnostics (plus read-source details where available). There is
+no separate absolute turn duration cap for this backend today.
+
 ### `std-notifications` — idle and turn notifications
 
 Runs configurable `agent_start`, `agent_end`, `agent_idle`, and `agent_idle_all` notification

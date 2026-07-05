@@ -108,6 +108,18 @@ fn ws_stream_error_without_type_suffix_is_retryable() {
     assert_eq!(error.retry_after(), Some(std::time::Duration::ZERO));
 }
 
+/// A local watchdog timeout is terminal for the current turn: retrying would
+/// keep queued prompts blocked for another full idle window instead of
+/// surfacing an actionable provider error.
+#[test]
+fn provider_stream_idle_timeout_is_not_retryable() {
+    let error = LlmError::HttpStatus(
+        0,
+        "stream error: provider stream idle timeout: transport=Websocket".to_owned(),
+    );
+    assert_eq!(error.retry_after(), None);
+}
+
 fn cache_key(originator: &PromptOriginator, share_user_cache_key: bool) -> String {
     let context = tau_proto::PromptContext::default();
     let session_id = tau_proto::SessionId::new("test-session");

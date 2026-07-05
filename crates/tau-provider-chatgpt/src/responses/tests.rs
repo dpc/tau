@@ -883,6 +883,318 @@ fn encrypted_reasoning_test_config() -> ResponsesConfig {
     }
 }
 
+fn basic_prompt_payload() -> PromptPayload<'static> {
+    let session_id = Box::leak(Box::new(tau_proto::SessionId::new("test-session")));
+    let agent_id = Box::leak(Box::new(
+        tau_proto::AgentId::parse("test-agent").expect("agent id"),
+    ));
+    PromptPayload {
+        system_prompt: "system",
+        context: context(&[]),
+        tools: &[],
+        params: tau_proto::ModelParams::default(),
+        tool_choice: tau_proto::ToolChoice::default(),
+        compaction: None,
+        originator: &tau_proto::PromptOriginator::User,
+        session_id,
+        agent_id,
+        share_user_cache_key: false,
+        debug_provider_requests: false,
+    }
+}
+
+fn spawn_stalled_sse_server(stalled_body: &'static str) -> String {
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("bind fake SSE server");
+    let addr = listener.local_addr().expect("fake SSE address");
+    std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept fake SSE client");
+        let _ = stream.set_read_timeout(Some(std::time::Duration::from_millis(200)));
+        let mut request = [0_u8; 4096];
+        let _ = std::io::Read::read(&mut stream, &mut request);
+        let headers = concat!(
+            "HTTP/1.1 200 OK\r\n",
+            "Content-Type: text/event-stream\r\n",
+            "Transfer-Encoding: chunked\r\n",
+            "\r\n"
+        );
+        std::io::Write::write_all(&mut stream, headers.as_bytes()).expect("write fake SSE headers");
+        let chunk = format!("{:x}\r\n{stalled_body}\r\n", stalled_body.len());
+        std::io::Write::write_all(&mut stream, chunk.as_bytes()).expect("write fake SSE chunk");
+        std::io::Write::flush(&mut stream).expect("flush fake SSE chunk");
+        std::thread::sleep(std::time::Duration::from_secs(2));
+    });
+    format!("http://{addr}")
+}
+
+fn spawn_eof_sse_server(body: &'static str) -> String {
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("bind EOF SSE server");
+    let addr = listener.local_addr().expect("EOF SSE address");
+    std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept EOF SSE client");
+        let _ = stream.set_read_timeout(Some(std::time::Duration::from_millis(200)));
+        let mut request = [0_u8; 4096];
+        let _ = std::io::Read::read(&mut stream, &mut request);
+        let headers = concat!(
+            "HTTP/1.1 200 OK\r\n",
+            "Content-Type: text/event-stream\r\n",
+            "Transfer-Encoding: chunked\r\n",
+            "\r\n"
+        );
+        std::io::Write::write_all(&mut stream, headers.as_bytes()).expect("write EOF headers");
+        let chunk = format!("{:x}\r\n{body}\r\n0\r\n\r\n", body.len());
+        std::io::Write::write_all(&mut stream, chunk.as_bytes()).expect("write EOF body");
+        std::io::Write::flush(&mut stream).expect("flush EOF body");
+    });
+    format!("http://{addr}")
+}
+
+fn spawn_trickling_sse_server(chunks: Vec<&'static [u8]>, delay: std::time::Duration) -> String {
+    let listener =
+        std::net::TcpListener::bind(("127.0.0.1", 0)).expect("bind trickling SSE server");
+    let addr = listener.local_addr().expect("trickling SSE address");
+    std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept trickling SSE client");
+        let _ = stream.set_read_timeout(Some(std::time::Duration::from_millis(200)));
+        let mut request = [0_u8; 4096];
+        let _ = std::io::Read::read(&mut stream, &mut request);
+        let headers = concat!(
+            "HTTP/1.1 200 OK\r\n",
+            "Content-Type: text/event-stream\r\n",
+            "Transfer-Encoding: chunked\r\n",
+            "\r\n"
+        );
+        if std::io::Write::write_all(&mut stream, headers.as_bytes()).is_err() {
+            return;
+        }
+        for chunk in chunks {
+            std::thread::sleep(delay);
+            let header = format!("{:x}\r\n", chunk.len());
+            if std::io::Write::write_all(&mut stream, header.as_bytes()).is_err()
+                || std::io::Write::write_all(&mut stream, chunk).is_err()
+                || std::io::Write::write_all(&mut stream, b"\r\n").is_err()
+                || std::io::Write::flush(&mut stream).is_err()
+            {
+                return;
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_secs(2));
+    });
+    format!("http://{addr}")
+}
+
+fn assert_sse_timeout_for_base_url(base_url: String, agent_prompt_id: &str) {
+    let config = ResponsesConfig {
+        base_url,
+        ..chain_test_config()
+    };
+    let request = basic_prompt_payload();
+    let body = build_request(&config, &request, None);
+    let mut abort = crate::NeverAbort;
+    let result = responses_stream_live_with_idle_timeout(
+        agent_prompt_id,
+        &config,
+        &request,
+        SseLiveOptions {
+            body: &body,
+            recording_stream: None,
+            idle_timeout: std::time::Duration::from_millis(100),
+        },
+        &mut abort,
+        &mut |_| {},
+    );
+
+    let Err(LlmError::HttpStatus(0, body)) = result else {
+        panic!("expected timeout stream error");
+    };
+    assert!(body.contains("provider stream idle timeout"), "{body}");
+    assert!(body.contains("transport=HttpSse"), "{body}");
+    assert!(
+        body.contains(&format!("agent_prompt_id={agent_prompt_id}")),
+        "{body}"
+    );
+    assert!(body.contains("elapsed="), "{body}");
+    assert!(body.contains("idle="), "{body}");
+    assert!(body.contains("idle_timeout="), "{body}");
+}
+
+/// Regression for tau-agent-jx2z: an HTTP/SSE stream that produces a partial
+/// update and then stalls without a terminal event must return a provider
+/// stream error promptly instead of leaving the prompt worker in-flight
+/// forever.
+#[test]
+fn stalled_sse_stream_returns_idle_timeout_error() {
+    let stalled_body = "data: {\"type\":\"response.output_text.delta\",\"delta\":\"hello\"}\n\n";
+    let base_url = spawn_stalled_sse_server(stalled_body);
+    let config = ResponsesConfig {
+        base_url,
+        ..chain_test_config()
+    };
+    let request = basic_prompt_payload();
+    let body = build_request(&config, &request, None);
+    let idle_timeout = std::time::Duration::from_millis(100);
+    let mut abort = crate::NeverAbort;
+
+    let result = responses_stream_live_with_idle_timeout(
+        "ap-stalled-sse",
+        &config,
+        &request,
+        SseLiveOptions {
+            body: &body,
+            recording_stream: None,
+            idle_timeout,
+        },
+        &mut abort,
+        &mut |_| {},
+    );
+
+    let Err(LlmError::HttpStatus(0, body)) = result else {
+        panic!("expected timeout stream error");
+    };
+    assert!(body.contains("provider stream idle timeout"), "{body}");
+    assert!(body.contains("transport=HttpSse"), "{body}");
+    assert!(body.contains("agent_prompt_id=ap-stalled-sse"), "{body}");
+    assert!(body.contains("partial_output=true"), "{body}");
+}
+
+/// Regression for tau-agent-jx2z: a clean HTTP/SSE EOF after partial provider
+/// output but before any terminal Responses event is a provider stream error,
+/// not a successful partial response.
+#[test]
+fn sse_eof_after_partial_output_returns_terminal_event_error() {
+    let body = "data: {\"type\":\"response.output_text.delta\",\"delta\":\"hello\"}\n\n";
+    let base_url = spawn_eof_sse_server(body);
+    let config = ResponsesConfig {
+        base_url,
+        ..chain_test_config()
+    };
+    let request = basic_prompt_payload();
+    let request_body = build_request(&config, &request, None);
+    let mut abort = crate::NeverAbort;
+
+    let result = responses_stream_live_with_idle_timeout(
+        "ap-sse-eof",
+        &config,
+        &request,
+        SseLiveOptions {
+            body: &request_body,
+            recording_stream: None,
+            idle_timeout: std::time::Duration::from_secs(5),
+        },
+        &mut abort,
+        &mut |_| {},
+    );
+
+    let Err(LlmError::HttpStatus(0, body)) = result else {
+        panic!("expected EOF stream error");
+    };
+    assert!(
+        body.contains("provider stream ended without terminal event"),
+        "{body}"
+    );
+    assert!(body.contains("transport=HttpSse"), "{body}");
+    assert!(body.contains("agent_prompt_id=ap-sse-eof"), "{body}");
+    assert!(body.contains("elapsed="), "{body}");
+    assert!(body.contains("idle="), "{body}");
+    assert!(body.contains("partial_output=true"), "{body}");
+}
+
+/// Regression for tau-agent-jx2z: a peer that trickles bytes without
+/// completing an SSE event must not keep the HTTP/SSE turn alive forever or
+/// grow an unbounded partial-line buffer.
+#[test]
+fn partial_byte_trickle_without_sse_event_returns_idle_timeout_error() {
+    let base_url = spawn_trickling_sse_server(
+        vec![b"d", b"a", b"t", b"a", b":", b" "],
+        std::time::Duration::from_millis(30),
+    );
+    assert_sse_timeout_for_base_url(base_url, "ap-sse-byte-trickle");
+}
+
+/// Regression for tau-agent-jx2z: SSE comments/heartbeats are transport
+/// liveness, not provider progress. They must not reset Tau's provider-event
+/// idle watchdog or a quiet upstream can keep a turn running forever.
+#[test]
+fn comment_heartbeats_without_sse_data_return_idle_timeout_error() {
+    let base_url = spawn_trickling_sse_server(
+        vec![b": keepalive\n"; 6],
+        std::time::Duration::from_millis(30),
+    );
+    assert_sse_timeout_for_base_url(base_url, "ap-sse-comment-heartbeat");
+}
+
+struct AtomicAbort {
+    aborted: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl crate::TurnAbort for AtomicAbort {
+    fn is_aborted(&mut self) -> bool {
+        self.aborted.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn register_waker(
+        &mut self,
+        _waker: std::sync::Arc<dyn Fn() + Send + Sync + 'static>,
+    ) -> Box<dyn crate::TurnAbortWaker> {
+        Box::new(TestAbortWaker)
+    }
+}
+
+struct TestAbortWaker;
+
+impl crate::TurnAbortWaker for TestAbortWaker {}
+
+/// Cancellation must remain distinct from timeout on HTTP/SSE: even while a
+/// stream is stalled, a harness cancel should return the standard 499 path
+/// rather than waiting for the idle watchdog to report a provider error.
+#[test]
+fn stalled_sse_stream_cancellation_returns_499_before_idle_timeout() {
+    let stalled_body = "data: {\"type\":\"response.output_text.delta\",\"delta\":\"hello\"}\n\n";
+    let base_url = spawn_stalled_sse_server(stalled_body);
+    let config = ResponsesConfig {
+        base_url,
+        ..chain_test_config()
+    };
+    let request = basic_prompt_payload();
+    let body = build_request(&config, &request, None);
+    let aborted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let mut abort = AtomicAbort {
+        aborted: std::sync::Arc::clone(&aborted),
+    };
+    let (result_tx, result_rx) = std::sync::mpsc::channel();
+
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            let result = responses_stream_live_with_idle_timeout(
+                "ap-stalled-sse-cancel",
+                &config,
+                &request,
+                SseLiveOptions {
+                    body: &body,
+                    recording_stream: None,
+                    idle_timeout: std::time::Duration::from_secs(5),
+                },
+                &mut abort,
+                &mut |_| {},
+            );
+            result_tx
+                .send(result)
+                .expect("send SSE cancellation result");
+        });
+
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        let start = std::time::Instant::now();
+        aborted.store(true, std::sync::atomic::Ordering::SeqCst);
+        let result = result_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("SSE cancellation result");
+        assert!(start.elapsed() < std::time::Duration::from_secs(1));
+        assert!(matches!(
+            result,
+            Err(LlmError::HttpStatus(499, ref body)) if body == "cancelled by harness"
+        ));
+    });
+}
+
 fn user_text(text: &str) -> ContextItem {
     ContextItem::Message(MessageItem {
         role: ContextRole::User,

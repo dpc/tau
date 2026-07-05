@@ -11,7 +11,7 @@
 //! support WS and for HTTP/SSE-specific tests and replays.
 
 use std::borrow::Cow;
-use std::io::BufRead;
+use std::io::Read;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -22,6 +22,7 @@ use tau_proto::{
     ToolResponseHeader, ToolResultItem, ToolResultStatus,
 };
 
+use crate::TurnAbort;
 use crate::common::{
     LlmError, PromptPayload, StreamState, cbor_to_json, effort_wire, json_to_cbor,
 };
@@ -31,6 +32,16 @@ pub mod ws;
 pub mod ws_runtime;
 
 const PROVIDER_STREAM_CASSETTE_VERSION: u32 = 1;
+/// Default idle watchdog for live provider streaming turns.
+///
+/// This is intentionally an idle timeout, not an absolute turn timeout: long
+/// responses may continue for longer than this as long as the upstream keeps
+/// producing SSE events or WebSocket frames. Five minutes matches the operator
+/// guidance for stalled provider streams while leaving legitimate slow
+/// reasoning/generation room.
+const DEFAULT_PROVIDER_STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+const SSE_READ_POLL_TIMEOUT: Duration = Duration::from_millis(250);
+const MAX_SSE_LINE_BYTES: usize = 1024 * 1024;
 /// Which ChatGPT/Codex Responses surface a model is served through.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ResponsesSurface {
@@ -251,6 +262,7 @@ pub fn responses_stream(
     agent_prompt_id: &str,
     config: &ResponsesConfig,
     request: &PromptPayload<'_>,
+    abort: &mut impl TurnAbort,
     on_update: &mut impl FnMut(&StreamState),
 ) -> Result<StreamState, LlmError> {
     let body = build_request(config, request, None);
@@ -279,6 +291,7 @@ pub fn responses_stream(
             request,
             &body,
             Some(&mut stream),
+            abort,
             on_update,
         )?;
         let cassette = ProviderStreamCassette {
@@ -289,7 +302,15 @@ pub fn responses_stream(
         store.put(&key, &cassette).map_err(LlmError::Vcr)?;
         return Ok(state);
     }
-    responses_stream_live(agent_prompt_id, config, request, &body, None, on_update)
+    responses_stream_live(
+        agent_prompt_id,
+        config,
+        request,
+        &body,
+        None,
+        abort,
+        on_update,
+    )
 }
 
 fn responses_stream_live(
@@ -297,7 +318,30 @@ fn responses_stream_live(
     config: &ResponsesConfig,
     request: &PromptPayload<'_>,
     body: &ResponsesRequest,
-    mut recording_stream: Option<&mut ProviderRawEventStream>,
+    recording_stream: Option<&mut ProviderRawEventStream>,
+    abort: &mut impl TurnAbort,
+    on_update: &mut impl FnMut(&StreamState),
+) -> Result<StreamState, LlmError> {
+    responses_stream_live_with_idle_timeout(
+        agent_prompt_id,
+        config,
+        request,
+        SseLiveOptions {
+            body,
+            recording_stream,
+            idle_timeout: DEFAULT_PROVIDER_STREAM_IDLE_TIMEOUT,
+        },
+        abort,
+        on_update,
+    )
+}
+
+fn responses_stream_live_with_idle_timeout(
+    agent_prompt_id: &str,
+    config: &ResponsesConfig,
+    request: &PromptPayload<'_>,
+    mut options: SseLiveOptions<'_, '_>,
+    abort: &mut impl TurnAbort,
     on_update: &mut impl FnMut(&StreamState),
 ) -> Result<StreamState, LlmError> {
     maybe_debug_write_provider_request(
@@ -305,13 +349,17 @@ fn responses_stream_live(
         config,
         request,
         tau_proto::ProviderBackendTransport::HttpSse,
-        body,
+        options.body,
     );
     let url = config.surface.responses_url(&config.base_url);
-    let body_str = serde_json::to_string(body).map_err(LlmError::Json)?;
+    let body_str = serde_json::to_string(options.body).map_err(LlmError::Json)?;
 
     let mut req = tau_provider::oauth::proxy_agent()
         .post(&url)
+        .config()
+        .timeout_recv_response(Some(options.idle_timeout))
+        .timeout_recv_body(Some(options.idle_timeout.min(SSE_READ_POLL_TIMEOUT)))
+        .build()
         .content_type("application/json")
         .header("Accept", "text/event-stream")
         .header("Authorization", format!("Bearer {}", config.api_key))
@@ -321,38 +369,283 @@ fn responses_stream_live(
         req = req.header("chatgpt-account-id", account_id);
     }
 
-    let mut response = req
-        .send(&body_str)
-        .map_err(|e| LlmError::Http(Box::new(e)))?;
+    let turn_started_at = Instant::now();
+    let mut response = req.send(&body_str).map_err(|error| match error {
+        ureq::Error::Timeout(_) => stream_idle_timeout_error(
+            tau_proto::ProviderBackendTransport::HttpSse,
+            agent_prompt_id,
+            turn_started_at,
+            turn_started_at,
+            options.idle_timeout,
+            &StreamState::new(),
+            None,
+        ),
+        error => LlmError::Http(Box::new(error)),
+    })?;
     if !response.status().is_success() {
         let code = response.status().as_u16();
         let body = response.body_mut().read_to_string().unwrap_or_default();
         return Err(LlmError::HttpStatus(code, body));
     }
 
-    let reader = std::io::BufReader::new(response.body_mut().as_reader());
+    read_sse_response_to_terminal_event(
+        response.body_mut().as_reader(),
+        SseReadContext {
+            agent_prompt_id,
+            idle_timeout: options.idle_timeout,
+            turn_started_at,
+        },
+        &mut options.recording_stream,
+        abort,
+        on_update,
+    )
+}
+
+struct SseLiveOptions<'body, 'stream> {
+    body: &'body ResponsesRequest,
+    recording_stream: Option<&'stream mut ProviderRawEventStream>,
+    idle_timeout: Duration,
+}
+
+#[derive(Clone, Copy)]
+struct SseReadContext<'a> {
+    agent_prompt_id: &'a str,
+    idle_timeout: Duration,
+    turn_started_at: Instant,
+}
+
+fn read_sse_response_to_terminal_event(
+    mut reader: impl Read,
+    context: SseReadContext<'_>,
+    recording_stream: &mut Option<&mut ProviderRawEventStream>,
+    abort: &mut impl TurnAbort,
+    on_update: &mut impl FnMut(&StreamState),
+) -> Result<StreamState, LlmError> {
     let mut state = StreamState::new();
-    let mut recording_last_event_at = Instant::now();
-    for line in reader.lines() {
-        let line = line.map_err(LlmError::Io)?;
-        if !line.starts_with("data: ") {
-            continue;
+    let mut last_event_at = Instant::now();
+    let mut line = Vec::new();
+    let mut buffer = [0_u8; 8192];
+    loop {
+        if abort.is_aborted() {
+            return Err(LlmError::HttpStatus(499, "cancelled by harness".to_owned()));
         }
-        let data = line
-            .strip_prefix("data: ")
-            .expect("line starts with data prefix");
-        if let Some(stream) = recording_stream.as_deref_mut() {
-            let now = Instant::now();
-            let delta = now.saturating_duration_since(recording_last_event_at);
-            recording_last_event_at = now;
-            record_provider_raw_event_after(stream, delta, format!("{line}\n\n"));
+        if last_event_at.elapsed() >= context.idle_timeout {
+            return Err(stream_idle_timeout_error(
+                tau_proto::ProviderBackendTransport::HttpSse,
+                context.agent_prompt_id,
+                context.turn_started_at,
+                last_event_at,
+                context.idle_timeout,
+                &state,
+                None,
+            ));
         }
-        if apply_sse_data(&mut state, data, on_update)? {
-            break;
+
+        match reader.read(&mut buffer) {
+            Ok(0) => {
+                return Err(stream_ended_without_terminal_error(
+                    tau_proto::ProviderBackendTransport::HttpSse,
+                    context.agent_prompt_id,
+                    context.turn_started_at,
+                    last_event_at,
+                    &state,
+                ));
+            }
+            Ok(read) => {
+                for byte in &buffer[..read] {
+                    if *byte == b'\n' {
+                        let now = Instant::now();
+                        let event_delta = now.saturating_duration_since(last_event_at);
+                        let provider_event_line = line.starts_with(b"data: ");
+                        let done = process_sse_line(
+                            &line,
+                            context,
+                            &mut state,
+                            recording_stream,
+                            event_delta,
+                            on_update,
+                        )?;
+                        line.clear();
+                        if provider_event_line {
+                            last_event_at = now;
+                        }
+                        if done {
+                            return Ok(state);
+                        }
+                        if last_event_at.elapsed() >= context.idle_timeout {
+                            return Err(stream_idle_timeout_error(
+                                tau_proto::ProviderBackendTransport::HttpSse,
+                                context.agent_prompt_id,
+                                context.turn_started_at,
+                                last_event_at,
+                                context.idle_timeout,
+                                &state,
+                                None,
+                            ));
+                        }
+                    } else {
+                        line.push(*byte);
+                        if line.len() > MAX_SSE_LINE_BYTES {
+                            return Err(LlmError::HttpStatus(
+                                0,
+                                format!(
+                                    "stream error: SSE line exceeded {} bytes: transport=HttpSse agent_prompt_id={agent_prompt_id} elapsed={:.3}s idle={:.3}s partial_output={}",
+                                    MAX_SSE_LINE_BYTES,
+                                    context.turn_started_at.elapsed().as_secs_f64(),
+                                    last_event_at.elapsed().as_secs_f64(),
+                                    stream_has_partial_output(&state),
+                                    agent_prompt_id = context.agent_prompt_id,
+                                ),
+                            ));
+                        }
+                    }
+                }
+            }
+            Err(error) if is_read_timeout(&error) => continue,
+            Err(error) => {
+                return Err(stream_read_failed_error(
+                    tau_proto::ProviderBackendTransport::HttpSse,
+                    context.agent_prompt_id,
+                    context.turn_started_at,
+                    last_event_at,
+                    context.idle_timeout,
+                    &state,
+                    error,
+                ));
+            }
         }
     }
+}
 
-    Ok(state)
+fn process_sse_line(
+    line: &[u8],
+    context: SseReadContext<'_>,
+    state: &mut StreamState,
+    recording_stream: &mut Option<&mut ProviderRawEventStream>,
+    event_delta: Duration,
+    on_update: &mut impl FnMut(&StreamState),
+) -> Result<bool, LlmError> {
+    let line = line.strip_suffix(b"\r").unwrap_or(line);
+    if !line.starts_with(b"data: ") {
+        return Ok(false);
+    }
+    let line = std::str::from_utf8(line).map_err(|error| {
+        LlmError::HttpStatus(
+            0,
+            format!(
+                "stream error: invalid UTF-8 SSE line: transport=HttpSse agent_prompt_id={agent_prompt_id} elapsed={:.3}s idle_timeout={:.3}s partial_output={} source={error}",
+                context.turn_started_at.elapsed().as_secs_f64(),
+                context.idle_timeout.as_secs_f64(),
+                stream_has_partial_output(state),
+                agent_prompt_id = context.agent_prompt_id,
+            ),
+        )
+    })?;
+    let data = line
+        .strip_prefix("data: ")
+        .expect("line starts with data prefix");
+    if let Some(stream) = recording_stream.as_deref_mut() {
+        record_provider_raw_event_after(stream, event_delta, format!("{line}\n\n"));
+    }
+    apply_sse_data(state, data, on_update)
+}
+
+fn is_read_timeout(error: &std::io::Error) -> bool {
+    matches!(
+        error.kind(),
+        std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+    ) || error.to_string().contains("timeout")
+}
+
+fn stream_read_failed_error(
+    transport: tau_proto::ProviderBackendTransport,
+    agent_prompt_id: &str,
+    turn_started_at: Instant,
+    last_event_at: Instant,
+    idle_timeout: Duration,
+    state: &StreamState,
+    source: std::io::Error,
+) -> LlmError {
+    if source.kind() == std::io::ErrorKind::TimedOut
+        || last_event_at.elapsed() >= idle_timeout.saturating_sub(Duration::from_millis(1))
+    {
+        return stream_idle_timeout_error(
+            transport,
+            agent_prompt_id,
+            turn_started_at,
+            last_event_at,
+            idle_timeout,
+            state,
+            Some(source),
+        );
+    }
+    LlmError::HttpStatus(
+        0,
+        format!(
+            "stream error: provider stream read failed: transport={transport:?} agent_prompt_id={agent_prompt_id} elapsed={:.3}s idle={:.3}s partial_output={} source={}",
+            turn_started_at.elapsed().as_secs_f64(),
+            last_event_at.elapsed().as_secs_f64(),
+            stream_has_partial_output(state),
+            source.kind(),
+        ),
+    )
+}
+
+pub(super) fn stream_idle_timeout_error(
+    transport: tau_proto::ProviderBackendTransport,
+    agent_prompt_id: &str,
+    turn_started_at: Instant,
+    last_event_at: Instant,
+    idle_timeout: Duration,
+    state: &StreamState,
+    source: Option<std::io::Error>,
+) -> LlmError {
+    let now = Instant::now();
+    let source = source
+        .map(|error| format!(" source={}", error.kind()))
+        .unwrap_or_default();
+    LlmError::HttpStatus(
+        0,
+        format!(
+            "stream error: provider stream idle timeout: transport={transport:?} agent_prompt_id={agent_prompt_id} elapsed={:.3}s idle={:.3}s idle_timeout={:.3}s partial_output={}{source}",
+            now.saturating_duration_since(turn_started_at).as_secs_f64(),
+            now.saturating_duration_since(last_event_at).as_secs_f64(),
+            idle_timeout.as_secs_f64(),
+            stream_has_partial_output(state),
+        ),
+    )
+}
+
+fn stream_ended_without_terminal_error(
+    transport: tau_proto::ProviderBackendTransport,
+    agent_prompt_id: &str,
+    turn_started_at: Instant,
+    last_event_at: Instant,
+    state: &StreamState,
+) -> LlmError {
+    let now = Instant::now();
+    LlmError::HttpStatus(
+        0,
+        format!(
+            "stream error: provider stream ended without terminal event: transport={transport:?} agent_prompt_id={agent_prompt_id} elapsed={:.3}s idle={:.3}s partial_output={}",
+            now.saturating_duration_since(turn_started_at).as_secs_f64(),
+            now.saturating_duration_since(last_event_at).as_secs_f64(),
+            stream_has_partial_output(state),
+        ),
+    )
+}
+
+fn stream_has_partial_output(state: &StreamState) -> bool {
+    !state.text.is_empty()
+        || state
+            .thinking
+            .as_deref()
+            .is_some_and(|thinking| !thinking.is_empty())
+        || !state.output_items.is_empty()
+        || state.response_id.is_some()
+        || state.input_tokens.is_some()
+        || state.cached_tokens.is_some()
+        || state.output_tokens.is_some()
 }
 
 fn responses_stream_replay(

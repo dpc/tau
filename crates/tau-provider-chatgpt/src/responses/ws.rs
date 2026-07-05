@@ -45,8 +45,9 @@ use tokio_tungstenite::tungstenite::{Message, Utf8Bytes};
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, tungstenite};
 
 use super::{
-    ProviderRawEventStream, ResponsesConfig, apply_raw_json_event, build_ws_envelope,
-    load_provider_stream_cassette, record_provider_raw_event_after,
+    DEFAULT_PROVIDER_STREAM_IDLE_TIMEOUT, ProviderRawEventStream, ResponsesConfig,
+    apply_raw_json_event, build_ws_envelope, load_provider_stream_cassette,
+    record_provider_raw_event_after, stream_idle_timeout_error,
 };
 use crate::common::{LlmError, PromptPayload, StreamState};
 use crate::responses::ws_runtime;
@@ -78,7 +79,7 @@ const KEEPALIVE_PING_INTERVAL: Duration = Duration::from_secs(25);
 
 /// How long one WS turn may go without any provider event before Tau treats
 /// the socket as wedged and returns a retryable WebSocket error to the caller.
-const TURN_EVENT_TIMEOUT: Duration = Duration::from_secs(120);
+const TURN_EVENT_TIMEOUT: Duration = DEFAULT_PROVIDER_STREAM_IDLE_TIMEOUT;
 
 type SharedStream = WebSocketStream<MaybeTlsStream<TcpStream>>;
 type Sink = SplitSink<SharedStream, Message>;
@@ -239,7 +240,13 @@ impl WsConn {
             tau_proto::ProviderBackendTransport::Websocket,
             &envelope,
         );
-        let state = self.run_envelope(envelope, recording_stream, abort, on_update)?;
+        let state = self.run_envelope(
+            agent_prompt_id,
+            envelope,
+            recording_stream,
+            abort,
+            on_update,
+        )?;
         self.cached_response_id = state.response_id.clone();
         Ok(WsTurnResult {
             state,
@@ -257,14 +264,34 @@ impl WsConn {
     ) -> Result<StreamState, LlmError> {
         let envelope = build_ws_envelope(config, request, None, Some(false));
         let mut abort = NeverAbort;
-        self.run_envelope(envelope, None, &mut abort, &mut |_| {})
+        self.run_envelope("<prewarm>", envelope, None, &mut abort, &mut |_| {})
     }
 
     fn run_envelope(
         &mut self,
+        agent_prompt_id: &str,
+        envelope: super::WsResponseCreate,
+        recording_stream: Option<&mut ProviderRawEventStream>,
+        abort: &mut impl TurnAbort,
+        on_update: &mut impl FnMut(&StreamState),
+    ) -> Result<StreamState, LlmError> {
+        self.run_envelope_with_idle_timeout(
+            agent_prompt_id,
+            envelope,
+            recording_stream,
+            abort,
+            TURN_EVENT_TIMEOUT,
+            on_update,
+        )
+    }
+
+    fn run_envelope_with_idle_timeout(
+        &mut self,
+        agent_prompt_id: &str,
         envelope: super::WsResponseCreate,
         mut recording_stream: Option<&mut ProviderRawEventStream>,
         abort: &mut impl TurnAbort,
+        idle_timeout: Duration,
         on_update: &mut impl FnMut(&StreamState),
     ) -> Result<StreamState, LlmError> {
         let text = serde_json::to_string(&envelope).map_err(LlmError::Json)?;
@@ -273,6 +300,7 @@ impl WsConn {
             .map_err(|_| LlmError::HttpStatus(0, "stream error: ws writer task gone".to_owned()))?;
 
         let mut state = StreamState::new();
+        let turn_started_at = Instant::now();
         let mut last_event_at = Instant::now();
         let _abort_waker = {
             let inbound_tx = self.inbound_tx.clone();
@@ -284,21 +312,23 @@ impl WsConn {
             if abort.is_aborted() {
                 return Err(LlmError::HttpStatus(499, "cancelled by harness".to_owned()));
             }
-            let remaining = TURN_EVENT_TIMEOUT.saturating_sub(last_event_at.elapsed());
+            let remaining = idle_timeout.saturating_sub(last_event_at.elapsed());
             let event = match self.inbound_rx.recv_timeout(remaining) {
                 Ok(event) => event,
                 Err(std_mpsc::RecvTimeoutError::Timeout)
-                    if last_event_at.elapsed() < TURN_EVENT_TIMEOUT =>
+                    if last_event_at.elapsed() < idle_timeout =>
                 {
                     continue;
                 }
                 Err(std_mpsc::RecvTimeoutError::Timeout) => {
-                    return Err(LlmError::HttpStatus(
-                        0,
-                        format!(
-                            "stream error: ws turn produced no events for {}s",
-                            TURN_EVENT_TIMEOUT.as_secs()
-                        ),
+                    return Err(stream_idle_timeout_error(
+                        tau_proto::ProviderBackendTransport::Websocket,
+                        agent_prompt_id,
+                        turn_started_at,
+                        last_event_at,
+                        idle_timeout,
+                        &state,
+                        None,
                     ));
                 }
                 Err(std_mpsc::RecvTimeoutError::Disconnected) => {
@@ -317,7 +347,7 @@ impl WsConn {
                         record_provider_raw_event_after(stream, delta, text.to_string());
                     }
                     if apply_raw_json_event(&mut state, text.as_ref(), on_update)? {
-                        break;
+                        return Ok(state);
                     }
                 }
                 InboundEvent::Closed(reason) => {
@@ -332,7 +362,6 @@ impl WsConn {
                 InboundEvent::AbortWake => continue,
             }
         }
-        Ok(state)
     }
 }
 impl Drop for WsConn {

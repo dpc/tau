@@ -37,6 +37,8 @@ ChatGPT/Codex turns use the Responses backend. Conversation chains reuse `previo
 
 The ChatGPT/Codex surface also uses a persistent WebSocket connection pool keyed by account and agent so upstream connection-local caches stay warm across turns, including interleaved sub-agent delegations. Prompt-cache keys are stable per target agent and do not split based on whether a turn came from the user, an extension, a manager relay, or an agent-to-agent message. Refreshed OAuth tokens invalidate stale sockets on next use. WebSocket-capable ChatGPT/Codex turns remain on WebSocket: retryable WS failures use bounded retry/backoff, and terminal WS errors surface instead of silently falling back to HTTP/SSE.
 
+ChatGPT/Codex live streams have a default five-minute idle watchdog on both HTTP/SSE and WebSocket. The timer resets on each SSE `data:` event or WebSocket provider frame, not on SSE comments/heartbeats or partial-line byte trickles, and is not an absolute turn-duration cap. If upstream stalls, Tau aborts the turn and finishes it as a provider error with transport, prompt id, elapsed/idle timing, configured idle timeout, partial-output diagnostics, and read-source details where available.
+
 Prompt execution concurrency defaults to 4 and can be overridden with `TAU_BUILTIN_PROVIDER_PROMPT_CONCURRENCY`. Main-agent transient provider errors retry with the normal retry count; extension-originated side turns use a smaller retry cap. Every individual retry sleep is capped by `LLM_MAX_RETRY_DELAY` (currently 60 seconds), including provider-supplied `Retry-After` or account reset windows, so a prompt worker is not held for hours by upstream reset metadata.
 
 

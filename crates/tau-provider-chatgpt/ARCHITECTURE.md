@@ -71,7 +71,11 @@ than a polling cadence. Callers pass a `TurnAbort` implementation that can both
 answer `is_aborted()` and register a `TurnAbortWaker`. While a turn waits for
 provider events, the registered waker sends `InboundEvent::AbortWake` through the
 same inbound queue used by reader/writer transport events, so the blocking
-receive wakes promptly without reducing the 120 second provider-event timeout.
+receive wakes promptly without reducing the five-minute provider-stream idle
+timeout. That timeout is per-turn and resets whenever the provider sends an SSE
+`data:` event or WebSocket frame; SSE comments, heartbeats, and partial-line
+byte trickles do not count as provider progress. Tau does not currently impose a
+separate absolute turn-duration timeout for ChatGPT/Codex streams.
 
 `AbortWake` is only a wake hint. The loop always calls `TurnAbort::is_aborted()`
 after waking, and that check remains authoritative so stale or coalesced wake

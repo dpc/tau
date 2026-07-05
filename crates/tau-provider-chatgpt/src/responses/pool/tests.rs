@@ -981,6 +981,19 @@ fn account_limit_stream_errors_are_not_silent_reconnects() {
     }
 }
 
+/// Idle watchdog failures are local terminal turn errors, not evidence that a
+/// cached WebSocket is stale. The pool must not silently reconnect and replay a
+/// timed-out turn, because that would extend a stuck prompt by another full
+/// idle watchdog window.
+#[test]
+fn provider_stream_idle_timeout_is_not_silent_reconnect() {
+    let err = LlmError::HttpStatus(
+        0,
+        "stream error: provider stream idle timeout: transport=Websocket".to_owned(),
+    );
+    assert!(!is_recoverable_ws_error(&err));
+}
+
 // -----------------------------------------------------------------
 // Fake Codex server: minimal blocking tungstenite acceptor.
 // -----------------------------------------------------------------

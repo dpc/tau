@@ -3,8 +3,8 @@ use std::sync::{Arc, Mutex, mpsc as std_mpsc};
 use std::time::{Duration, Instant};
 
 use super::*;
-use crate::TurnAbortWaker;
 use crate::responses::ResponsesSurface;
+use crate::{NeverAbort, TurnAbortWaker};
 
 type TestAbortWakerSlot = Arc<Mutex<Option<Arc<dyn Fn() + Send + Sync + 'static>>>>;
 
@@ -33,26 +33,34 @@ struct TestAbortWaker;
 
 impl TurnAbortWaker for TestAbortWaker {}
 
-/// Ensure WebSocket turns wake promptly from registered cancellation rather
-/// than waiting for the 120 second provider-event timeout.
-#[test]
-fn ws_turn_abort_waker_returns_499_promptly() {
+fn test_ws_conn() -> (
+    WsConn,
+    std_mpsc::Sender<InboundEvent>,
+    UnboundedReceiver<WsCommand>,
+) {
     let (outbound_tx, _outbound_rx) = mpsc::unbounded_channel();
     let (inbound_tx, inbound_rx) = std_mpsc::channel();
     let runtime = ws_runtime::handle();
     let reader_abort = runtime.spawn(std::future::pending::<()>()).abort_handle();
     let writer_abort = runtime.spawn(std::future::pending::<()>()).abort_handle();
-    let mut conn = WsConn {
-        outbound_tx,
+    (
+        WsConn {
+            outbound_tx,
+            inbound_tx: inbound_tx.clone(),
+            inbound_rx,
+            reader_abort,
+            writer_abort,
+            opened_at: Instant::now(),
+            bearer: "test-token".to_owned(),
+            cached_response_id: None,
+        },
         inbound_tx,
-        inbound_rx,
-        reader_abort,
-        writer_abort,
-        opened_at: Instant::now(),
-        bearer: "test-token".to_owned(),
-        cached_response_id: None,
-    };
-    let config = ResponsesConfig {
+        _outbound_rx,
+    )
+}
+
+fn test_responses_config() -> ResponsesConfig {
+    ResponsesConfig {
         surface: ResponsesSurface::ChatGpt,
         base_url: "https://chatgpt.com/backend-api".to_owned(),
         api_key: "test-token".to_owned(),
@@ -67,24 +75,51 @@ fn ws_turn_abort_waker_returns_499_promptly() {
         supports_websocket: true,
         supports_compaction: true,
         supports_prompt_cache_key: true,
-    };
-    let context = tau_proto::PromptContext::default();
-    let session_id = tau_proto::SessionId::new("session-test");
-    let agent_id = tau_proto::AgentId::parse("agent-test").expect("agent id");
-    let originator = tau_proto::PromptOriginator::User;
-    let request = PromptPayload {
-        system_prompt: "",
-        context: &context,
-        tools: &[],
-        params: tau_proto::ModelParams::default(),
-        tool_choice: tau_proto::ToolChoice::default(),
-        compaction: None,
-        originator: &originator,
-        share_user_cache_key: false,
-        session_id: &session_id,
-        agent_id: &agent_id,
-        debug_provider_requests: false,
-    };
+    }
+}
+
+struct PromptFixture {
+    context: tau_proto::PromptContext,
+    session_id: tau_proto::SessionId,
+    agent_id: tau_proto::AgentId,
+    originator: tau_proto::PromptOriginator,
+}
+
+impl PromptFixture {
+    fn new() -> Self {
+        Self {
+            context: tau_proto::PromptContext::default(),
+            session_id: tau_proto::SessionId::new("session-test"),
+            agent_id: tau_proto::AgentId::parse("agent-test").expect("agent id"),
+            originator: tau_proto::PromptOriginator::User,
+        }
+    }
+
+    fn payload(&self) -> PromptPayload<'_> {
+        PromptPayload {
+            system_prompt: "",
+            context: &self.context,
+            tools: &[],
+            params: tau_proto::ModelParams::default(),
+            tool_choice: tau_proto::ToolChoice::default(),
+            compaction: None,
+            originator: &self.originator,
+            share_user_cache_key: false,
+            session_id: &self.session_id,
+            agent_id: &self.agent_id,
+            debug_provider_requests: false,
+        }
+    }
+}
+
+/// Ensure WebSocket turns wake promptly from registered cancellation rather
+/// than waiting for the five-minute provider-stream idle timeout.
+#[test]
+fn ws_turn_abort_waker_returns_499_promptly() {
+    let (mut conn, _inbound_tx, _outbound_rx) = test_ws_conn();
+    let config = test_responses_config();
+    let fixture = PromptFixture::new();
+    let request = fixture.payload();
     let aborted = Arc::new(AtomicBool::new(false));
     let (registered_tx, registered_rx) = std_mpsc::channel();
     let waker = Arc::new(Mutex::new(None));
@@ -130,4 +165,42 @@ fn ws_turn_abort_waker_returns_499_promptly() {
             Err(LlmError::HttpStatus(499, ref body)) if body == "cancelled by harness"
         ));
     });
+}
+
+/// Regression for tau-agent-jx2z: a WebSocket turn that never receives a
+/// terminal provider frame must trip the per-turn idle watchdog instead of
+/// waiting forever on a quiet pooled socket.
+#[test]
+fn ws_turn_returns_idle_timeout_error_after_stalled_frame_stream() {
+    let (mut conn, inbound_tx, _outbound_rx) = test_ws_conn();
+    let config = test_responses_config();
+    let fixture = PromptFixture::new();
+    let request = fixture.payload();
+    let envelope = build_ws_envelope(&config, &request, None, None);
+    let mut abort = NeverAbort;
+
+    inbound_tx
+        .send(InboundEvent::Event {
+            text: r#"{"type":"response.output_text.delta","delta":"hello"}"#.into(),
+        })
+        .expect("queue partial WS frame");
+    let result = conn.run_envelope_with_idle_timeout(
+        "ap-stalled-ws",
+        envelope,
+        None,
+        &mut abort,
+        Duration::from_millis(50),
+        &mut |_| {},
+    );
+
+    let Err(LlmError::HttpStatus(0, body)) = result else {
+        panic!("expected timeout stream error");
+    };
+    assert!(body.contains("provider stream idle timeout"), "{body}");
+    assert!(body.contains("transport=Websocket"), "{body}");
+    assert!(body.contains("agent_prompt_id=ap-stalled-ws"), "{body}");
+    assert!(body.contains("elapsed="), "{body}");
+    assert!(body.contains("idle="), "{body}");
+    assert!(body.contains("idle_timeout="), "{body}");
+    assert!(body.contains("partial_output=true"), "{body}");
 }

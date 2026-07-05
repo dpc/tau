@@ -408,9 +408,9 @@ fn cancellation_sleep_aborts_when_deadline_would_overflow() {
 
 #[test]
 fn cancellation_waker_fires_for_matching_prompt_only() {
-    // WebSocket turns park on provider events for up to the turn timeout. The
-    // cancellation registry must therefore wake the matching turn directly,
-    // without relying on periodic receive timeouts.
+    // WebSocket turns park on provider events for up to the stream idle
+    // watchdog. The cancellation registry must therefore wake the matching turn
+    // directly, without relying on periodic receive timeouts.
     let cancellation = Arc::new(CancellationState::default());
     let target_apid = tau_proto::AgentPromptId::from("ap-target");
     let other_apid = tau_proto::AgentPromptId::from("ap-other");

@@ -884,13 +884,15 @@ pub fn run_prewarm_through_shared_pool(
 /// socket. Other `LlmError` variants and non-stream-prefixed bodies
 /// fall through unchanged.
 ///
-/// The one carve-out: account-level caps (usage_limit_reached, rate
-/// limit, quota) reach us with the same prefix because they ride the
-/// same `error` event, but the connection is fine — reopening just
-/// burns a fresh upgrade against an upstream that's about to reject
-/// every request the same way. Defer those to the outer classifier
-/// (`LlmError::retry_after`), which returns `None` and surfaces the
-/// error immediately.
+/// Carve-outs: account-level caps (usage_limit_reached, rate limit,
+/// quota) reach us with the same prefix because they ride the same
+/// `error` event, but the connection is fine — reopening just burns a
+/// fresh upgrade against an upstream that's about to reject every
+/// request the same way. Local provider-stream idle watchdog failures
+/// also use the same prefix, but replaying them would keep a stuck turn
+/// in-flight for another idle window. Defer those to the outer
+/// classifier (`LlmError::retry_after`), which returns `None` and
+/// surfaces the error immediately.
 fn is_recoverable_ws_error(err: &LlmError) -> bool {
     let LlmError::HttpStatus(0, body) = err else {
         return false;
@@ -899,6 +901,7 @@ fn is_recoverable_ws_error(err: &LlmError) -> bool {
         return false;
     }
     !crate::common::is_account_limit_body(body)
+        && !crate::common::is_provider_stream_idle_timeout_body(body)
 }
 
 #[cfg(test)]

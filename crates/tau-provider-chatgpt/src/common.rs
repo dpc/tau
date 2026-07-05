@@ -134,10 +134,14 @@ impl LlmError {
                 // then, account-level caps (usage_limit_reached,
                 // rate_limit_exceeded, quota_exceeded) arrive
                 // through this path as "stream error: …" and are
-                // *not* transient. The error type is tagged in the
+                // *not* transient. Local provider-stream idle watchdog
+                // timeouts also use the same prefix but are terminal
+                // for the current turn so queued prompts unblock
+                // promptly instead of waiting through another full
+                // idle window. Upstream error types are tagged in the
                 // body suffix by `responses::apply_event`.
                 0 if body.starts_with("stream error:") => {
-                    if is_account_limit_body(body) {
+                    if is_account_limit_body(body) || is_provider_stream_idle_timeout_body(body) {
                         None
                     } else {
                         Some(Duration::ZERO)
@@ -164,6 +168,15 @@ pub fn is_account_limit_body(body: &str) -> bool {
         || body.contains("(type=quota_exceeded)")
         || body.contains("(type=billing_hard_limit_reached)")
         || body.contains("(type=insufficient_quota)")
+}
+
+/// Provider stream idle watchdog failures are terminal for the current turn.
+///
+/// Retrying would keep a visibly stalled prompt in-flight for another full idle
+/// window instead of promptly unblocking queued work with a terminal provider
+/// error.
+pub fn is_provider_stream_idle_timeout_body(body: &str) -> bool {
+    body.contains("provider stream idle timeout")
 }
 
 fn usage_limit_retry_after(body: &str) -> Option<Duration> {
