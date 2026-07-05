@@ -753,7 +753,7 @@ fn build_request_trims_full_replay_before_latest_compaction_item() {
     });
     let items = [
         user_text("obsolete"),
-        ContextItem::Compaction(OpaqueProviderItem(crate::common::json_to_cbor(
+        ContextItem::Compaction(OpaqueProviderItem::new(crate::common::json_to_cbor(
             &compaction_item,
         ))),
         user_text("new"),
@@ -873,7 +873,35 @@ fn restored_internal_tool_error(call_id: &str, body: &str) -> ContextItem {
 
 fn reasoning_item(item: &str) -> ContextItem {
     let value: serde_json::Value = serde_json::from_str(item).expect("reasoning item json");
-    ContextItem::Reasoning(OpaqueProviderItem(crate::common::json_to_cbor(&value)))
+    ContextItem::Reasoning(OpaqueProviderItem::new(crate::common::json_to_cbor(&value)))
+}
+
+fn raw_reasoning_item(item: &str) -> ContextItem {
+    let value: serde_json::Value = serde_json::from_str(item).expect("reasoning item json");
+    ContextItem::Reasoning(OpaqueProviderItem::with_raw_json(
+        crate::common::json_to_cbor(&value),
+        item,
+    ))
+}
+
+fn request_for_items(items: &[ContextItem]) -> PromptPayload<'static> {
+    let session_id = Box::leak(Box::new(tau_proto::SessionId::new("test-session")));
+    let agent_id = Box::leak(Box::new(
+        tau_proto::AgentId::parse("test-agent").expect("agent id"),
+    ));
+    PromptPayload {
+        system_prompt: "sys",
+        context: context(items),
+        tools: &[],
+        params: tau_proto::ModelParams::default(),
+        tool_choice: tau_proto::ToolChoice::default(),
+        compaction: None,
+        originator: &tau_proto::PromptOriginator::User,
+        session_id,
+        agent_id,
+        share_user_cache_key: false,
+        debug_provider_requests: false,
+    }
 }
 
 /// When `supports_phase` is on, every assistant `message` item must
@@ -1174,6 +1202,25 @@ fn build_request_replays_reasoning_item_as_top_level_input() {
     );
 }
 
+/// Opaque Responses reasoning items carry provider-owned JSON whose lexical
+/// shape can matter to upstream cache identity. Replay must therefore prefer
+/// the raw sidecar instead of serializing the parsed CBOR value, preserving key
+/// order and numeric spelling for unknown provider-visible fields.
+#[test]
+fn build_request_replays_reasoning_item_from_raw_json_sidecar() {
+    let config = encrypted_reasoning_test_config();
+    let raw_reasoning = r#"{"type":"reasoning","z":1.2300,"a":1e+03,"id":"rs_raw","encrypted_content":"SEALED","summary":[]}"#;
+    let messages = vec![raw_reasoning_item(raw_reasoning), assistant_text("answer")];
+    let request = request_for_items(&messages);
+
+    let body = serde_json::to_string(&build_request(&config, &request, None)).expect("serialize");
+
+    assert!(
+        body.contains(raw_reasoning),
+        "raw reasoning JSON sidecar must be embedded verbatim; body={body}"
+    );
+}
+
 #[test]
 fn build_request_emits_custom_tool_definition_and_round_trips_custom_tool_output() {
     let config = chain_test_config();
@@ -1462,9 +1509,40 @@ fn apply_event_captures_reasoning_only_on_output_item_done() {
     let tau_proto::ContextItem::Reasoning(item) = &items[0] else {
         panic!("expected reasoning item");
     };
-    let parsed = crate::common::cbor_to_json(&item.0);
+    let parsed = crate::common::cbor_to_json(&item.value);
     assert_eq!(parsed["id"], "rs_done");
     assert_eq!(parsed["encrypted_content"], "SEALED");
+}
+
+/// Reasoning capture on the raw SSE/WS event path must keep the provider item
+/// JSON sidecar, not only the parsed CBOR projection, so full replay preserves
+/// provider-visible key order and numeric spelling.
+#[test]
+fn apply_raw_json_event_preserves_reasoning_item_raw_json_for_replay() {
+    let mut state = crate::common::StreamState::new();
+    let raw_reasoning = r#"{"type":"reasoning","z":1.2300,"a":1e+03,"id":"rs_raw","encrypted_content":"SEALED","summary":[]}"#;
+    let raw_event = format!(
+        r#"{{"type":"response.output_item.done","output_index":0,"item":{raw_reasoning}}}"#
+    );
+
+    apply_raw_json_event(&mut state, &raw_event, &mut |_| {}).expect("reasoning done");
+
+    let items = state.into_output_items();
+    let tau_proto::ContextItem::Reasoning(item) = &items[0] else {
+        panic!("expected reasoning item");
+    };
+    assert_eq!(item.raw_json.as_deref(), Some(raw_reasoning));
+    let request = request_for_items(&items);
+    let body = serde_json::to_string(&build_request(
+        &encrypted_reasoning_test_config(),
+        &request,
+        None,
+    ))
+    .expect("body");
+    assert!(
+        body.contains(raw_reasoning),
+        "raw reasoning JSON sidecar must be embedded verbatim; body={body}"
+    );
 }
 
 /// Server-side compaction is returned as an ordinary Responses output item.
@@ -1518,9 +1596,71 @@ fn apply_event_captures_compaction_output_item_in_order() {
     let tau_proto::ContextItem::Compaction(item) = &items[1] else {
         panic!("expected compaction item");
     };
-    let parsed = crate::common::cbor_to_json(&item.0);
+    let parsed = crate::common::cbor_to_json(&item.value);
     assert_eq!(parsed["type"], "compaction");
     assert_eq!(parsed["summary"], "old history");
+}
+
+/// Compaction items are provider-owned Responses items. Capturing them through
+/// the raw event path must keep the exact `item` JSON for later full-transcript
+/// replay rather than canonicalizing through `serde_json::Value` and CBOR.
+#[test]
+fn apply_raw_json_event_preserves_compaction_item_raw_json_for_replay() {
+    let mut state = crate::common::StreamState::new();
+    let raw_compaction =
+        r#"{"type":"compaction","z":1.2300,"a":1e+03,"summary":"old history","input_items":[]}"#;
+    let raw_event = format!(
+        r#"{{"type":"response.output_item.done","output_index":0,"item":{raw_compaction}}}"#
+    );
+
+    apply_raw_json_event(&mut state, &raw_event, &mut |_| {}).expect("compaction done");
+
+    let items = state.into_output_items();
+    let tau_proto::ContextItem::Compaction(item) = &items[0] else {
+        panic!("expected compaction item");
+    };
+    assert_eq!(item.raw_json.as_deref(), Some(raw_compaction));
+    let request = request_for_items(&items);
+    let body =
+        serde_json::to_string(&build_request(&chain_test_config(), &request, None)).expect("body");
+    assert!(
+        body.contains(raw_compaction),
+        "raw compaction JSON sidecar must be embedded verbatim; body={body}"
+    );
+}
+
+/// Unknown Responses output items must not disappear from durable history. The
+/// parser reserves their provider index on `added`, stores the raw `done` item,
+/// and replay emits that provider-owned JSON before later indexed items.
+#[test]
+fn apply_raw_json_event_captures_unknown_output_item_in_provider_order() {
+    let mut state = crate::common::StreamState::new();
+    let raw_unknown =
+        r#"{"type":"future_provider_item","z":1.2300,"a":1e+03,"payload":{"keep":"raw"}}"#;
+    let unknown_added = r#"{"type":"response.output_item.added","output_index":0,"item":{"type":"future_provider_item","id":"pending"}}"#;
+    let message_done = r#"{"type":"response.output_item.done","output_index":1,"item":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"after"}]}}"#;
+    let unknown_done =
+        format!(r#"{{"type":"response.output_item.done","output_index":0,"item":{raw_unknown}}}"#);
+
+    apply_raw_json_event(&mut state, unknown_added, &mut |_| {}).expect("unknown added");
+    apply_raw_json_event(&mut state, message_done, &mut |_| {}).expect("message done");
+    apply_raw_json_event(&mut state, &unknown_done, &mut |_| {}).expect("unknown done");
+
+    let items = state.into_output_items();
+    assert_eq!(items.len(), 2);
+    let tau_proto::ContextItem::UnknownProviderItem(item) = &items[0] else {
+        panic!("expected unknown provider item first");
+    };
+    assert_eq!(item.raw_json.as_deref(), Some(raw_unknown));
+    assert!(matches!(items[1], tau_proto::ContextItem::Message(_)));
+
+    let request = request_for_items(&items);
+    let body =
+        serde_json::to_string(&build_request(&chain_test_config(), &request, None)).expect("body");
+    assert!(
+        body.contains(raw_unknown),
+        "raw unknown provider JSON sidecar must be embedded verbatim; body={body}"
+    );
 }
 
 // -----------------------------------------------------------------------

@@ -54,7 +54,10 @@ pub use token_usage::*;
 /// Subscribe-time catch-up is uniform across UI clients and extensions.
 ///
 /// Version 5 adds `quota_exceeded` for extension data RPC failures.
-pub const PROTOCOL_VERSION: u32 = 5;
+///
+/// Version 6 wraps opaque provider items with parsed CBOR plus an optional raw
+/// JSON replay sidecar.
+pub const PROTOCOL_VERSION: u32 = 6;
 
 /// UI marker text for responses, thinking blocks, and tool calls that
 /// are still in progress.

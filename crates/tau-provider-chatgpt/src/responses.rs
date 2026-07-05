@@ -11,11 +11,13 @@
 //! fallback (and as the only transport for endpoints that don't
 //! support WS).
 
+use std::borrow::Cow;
 use std::io::BufRead;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
+use serde_json::value::RawValue;
 use tau_proto::{
     ContentPart, ContextItem, ContextRole, MessageItem, ToolCallItem, ToolResponseHeader,
     ToolResultItem, ToolResultStatus,
@@ -389,11 +391,7 @@ fn apply_sse_data(
     if data == "[DONE]" {
         return Ok(true);
     }
-    let event: serde_json::Value = match serde_json::from_str(data) {
-        Ok(v) => v,
-        Err(_) => return Ok(false),
-    };
-    apply_event(state, &event, on_update)
+    apply_raw_json_event(state, data, on_update)
 }
 
 fn load_vcr_config() -> Result<Option<tau_vcr::VcrConfig>, LlmError> {
@@ -468,24 +466,47 @@ fn provider_backend_transport_label(
     }
 }
 
-/// Apply one decoded `response.*` event from the upstream stream to
-/// `state`. Returns `Ok(true)` when the event terminates the stream
-/// (`response.completed` / `response.done`), `Ok(false)` to keep
-/// reading, or an error when the server signaled a model-side
-/// failure that should be surfaced as `LlmError`.
+/// Applies one decoded `response.*` event when raw JSON is unavailable.
 ///
-/// Shared between the HTTP+SSE and WebSocket transports — both
-/// decode a single JSON event and hand it here. The WS docs state
-/// "server events and ordering match the existing Responses
-/// streaming event model", so the parse rules are identical.
+/// This compatibility path preserves semantic stream handling but cannot keep
+/// raw provider item JSON for opaque replay. HTTP+SSE, WebSocket, and VCR
+/// replay should call the raw JSON event helper with the original event text.
 pub fn apply_event(
     state: &mut StreamState,
     event: &serde_json::Value,
     on_update: &mut impl FnMut(&StreamState),
 ) -> Result<bool, LlmError> {
+    apply_event_with_raw_item(state, event, None, on_update)
+}
+
+/// Applies one raw upstream Responses event while preserving opaque item JSON.
+///
+/// Returns `Ok(true)` when the event terminates the stream
+/// (`response.completed` / `response.done`), `Ok(false)` to keep reading, or an
+/// error when the server signaled a model-side failure that should be surfaced
+/// as [`LlmError`].
+pub(super) fn apply_raw_json_event(
+    state: &mut StreamState,
+    data: &str,
+    on_update: &mut impl FnMut(&StreamState),
+) -> Result<bool, LlmError> {
+    let event: serde_json::Value = match serde_json::from_str(data) {
+        Ok(v) => v,
+        Err(_) => return Ok(false),
+    };
+    apply_event_with_raw_item(state, &event, raw_output_item_json(data), on_update)
+}
+
+fn apply_event_with_raw_item(
+    state: &mut StreamState,
+    event: &serde_json::Value,
+    raw_item_json: Option<&str>,
+    on_update: &mut impl FnMut(&StreamState),
+) -> Result<bool, LlmError> {
     let event_type = event["type"].as_str().unwrap_or("");
 
-    let stream_update_applied = apply_stream_update_event(state, event, event_type, on_update)?;
+    let stream_update_applied =
+        apply_stream_update_event(state, event, raw_item_json, event_type, on_update)?;
     if stream_update_applied {
         return Ok(false);
     }
@@ -505,6 +526,7 @@ pub fn apply_event(
 fn apply_stream_update_event(
     state: &mut StreamState,
     event: &serde_json::Value,
+    raw_item_json: Option<&str>,
     event_type: &str,
     on_update: &mut impl FnMut(&StreamState),
 ) -> Result<bool, LlmError> {
@@ -536,14 +558,38 @@ fn apply_stream_update_event(
             on_update,
         )?,
         "response.output_item.added" => {
-            apply_output_item_event(state, event, OutputItemEventKind::Added, on_update)?;
+            apply_output_item_event(
+                state,
+                event,
+                raw_item_json,
+                OutputItemEventKind::Added,
+                on_update,
+            )?;
         }
         "response.output_item.done" => {
-            apply_output_item_event(state, event, OutputItemEventKind::Done, on_update)?;
+            apply_output_item_event(
+                state,
+                event,
+                raw_item_json,
+                OutputItemEventKind::Done,
+                on_update,
+            )?;
         }
         _ => return Ok(false),
     }
     Ok(true)
+}
+
+fn raw_output_item_json(event_json: &str) -> Option<&str> {
+    #[derive(Deserialize)]
+    struct RawOutputItemEvent<'a> {
+        #[serde(borrow)]
+        item: Option<&'a RawValue>,
+    }
+
+    serde_json::from_str::<RawOutputItemEvent<'_>>(event_json)
+        .ok()
+        .and_then(|event| event.item.map(RawValue::get))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -694,6 +740,7 @@ fn check_tool_snapshot(
 fn apply_output_item_event(
     state: &mut StreamState,
     event: &serde_json::Value,
+    raw_item_json: Option<&str>,
     kind: OutputItemEventKind,
     on_update: &mut impl FnMut(&StreamState),
 ) -> Result<(), LlmError> {
@@ -703,8 +750,9 @@ fn apply_output_item_event(
     let output_index = event_output_index(event);
     let mut changed = apply_output_item_tool(state, item, output_index, kind)?;
     changed |= apply_output_item_message(state, item, output_index, kind)?;
-    changed |= apply_output_item_reasoning(state, item, output_index, kind);
-    changed |= apply_output_item_compaction(state, item, output_index, kind);
+    changed |= apply_output_item_reasoning(state, item, raw_item_json, output_index, kind);
+    changed |= apply_output_item_compaction(state, item, raw_item_json, output_index, kind);
+    changed |= apply_output_item_unknown(state, item, raw_item_json, output_index, kind);
     if changed {
         on_update(state);
     }
@@ -781,6 +829,7 @@ fn apply_output_item_message(
 fn apply_output_item_reasoning(
     state: &mut StreamState,
     item: &serde_json::Value,
+    raw_item_json: Option<&str>,
     output_index: usize,
     kind: OutputItemEventKind,
 ) -> bool {
@@ -803,7 +852,8 @@ fn apply_output_item_reasoning(
         && item["type"].as_str() == Some("reasoning")
         && item["encrypted_content"].is_string()
     {
-        state.set_reasoning_item_json_at(output_index, &item.to_string());
+        let item_json = raw_or_canonical_item_json(raw_item_json, item);
+        state.set_reasoning_item_json_at(output_index, &item_json);
         return true;
     }
     false
@@ -812,6 +862,7 @@ fn apply_output_item_reasoning(
 fn apply_output_item_compaction(
     state: &mut StreamState,
     item: &serde_json::Value,
+    raw_item_json: Option<&str>,
     output_index: usize,
     kind: OutputItemEventKind,
 ) -> bool {
@@ -821,10 +872,50 @@ fn apply_output_item_compaction(
     match kind {
         OutputItemEventKind::Added => state.start_compaction_item_at(output_index),
         OutputItemEventKind::Done => {
-            state.set_compaction_item_json_at(output_index, &item.to_string())
+            let item_json = raw_or_canonical_item_json(raw_item_json, item);
+            state.set_compaction_item_json_at(output_index, &item_json)
         }
     }
     true
+}
+
+fn apply_output_item_unknown(
+    state: &mut StreamState,
+    item: &serde_json::Value,
+    raw_item_json: Option<&str>,
+    output_index: usize,
+    kind: OutputItemEventKind,
+) -> bool {
+    let Some(item_type) = item["type"].as_str() else {
+        return false;
+    };
+    if is_known_output_item_type(item_type) {
+        return false;
+    }
+    match kind {
+        OutputItemEventKind::Added => state.reserve_output_item_at(output_index),
+        OutputItemEventKind::Done => {
+            let item_json = raw_or_canonical_item_json(raw_item_json, item);
+            state.set_unknown_provider_item_json_at(output_index, &item_json);
+        }
+    }
+    true
+}
+
+fn raw_or_canonical_item_json<'a>(
+    raw_item_json: Option<&'a str>,
+    item: &serde_json::Value,
+) -> Cow<'a, str> {
+    raw_item_json
+        .map(Cow::Borrowed)
+        .unwrap_or_else(|| Cow::Owned(item.to_string()))
+}
+
+fn is_known_output_item_type(item_type: &str) -> bool {
+    matches!(
+        item_type,
+        "function_call" | "custom_tool_call" | "message" | "reasoning" | "compaction"
+    )
 }
 
 fn apply_terminal_event(state: &mut StreamState, event: &serde_json::Value) {
@@ -915,7 +1006,7 @@ struct ResponsesRequest {
     model: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     instructions: Option<String>,
-    input: Vec<serde_json::Value>,
+    input: Vec<ResponsesInputItem>,
     /// `Some(true)` for HTTP+SSE transport — the only mode where the
     /// `stream` flag actually toggles framing. `None` on the WS
     /// transport, where the WS guide explicitly notes "transport-
@@ -964,6 +1055,25 @@ struct ResponsesRequest {
     /// the public Responses API it requires `store: true`.
     #[serde(skip_serializing_if = "Option::is_none")]
     previous_response_id: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(untagged)]
+enum ResponsesInputItem {
+    Raw(Box<RawValue>),
+    Json(serde_json::Value),
+}
+
+impl ResponsesInputItem {
+    fn json(value: serde_json::Value) -> Self {
+        Self::Json(value)
+    }
+
+    fn raw_json(raw_json: &str) -> Option<Self> {
+        RawValue::from_string(raw_json.to_owned())
+            .ok()
+            .map(Self::Raw)
+    }
 }
 
 #[derive(Serialize)]
@@ -1156,7 +1266,7 @@ fn provider_default_compaction_threshold(context_window: u64) -> u64 {
 fn build_input_items(
     config: &ResponsesConfig,
     input_items: &[ContextItem],
-) -> Vec<serde_json::Value> {
+) -> Vec<ResponsesInputItem> {
     let input_items = if config.supports_compaction {
         trim_before_latest_compaction(input_items)
     } else {
@@ -1328,7 +1438,7 @@ fn encode_tool_name(name: &str) -> String {
 fn convert_context_item(
     item: &ContextItem,
     supports_phase: bool,
-    out: &mut Vec<serde_json::Value>,
+    out: &mut Vec<ResponsesInputItem>,
 ) {
     match item {
         ContextItem::Message(msg) if msg.role == ContextRole::User => {
@@ -1341,21 +1451,36 @@ fn convert_context_item(
         ContextItem::ToolResult(result) => convert_tool_result_item(result, out),
         ContextItem::ReasoningText(_) => {}
         ContextItem::Reasoning(item) => {
-            out.push(cbor_to_json(&item.0));
+            convert_opaque_provider_item(item, out);
         }
         ContextItem::CompactionTrigger => {
-            out.push(serde_json::json!({
+            out.push(ResponsesInputItem::json(serde_json::json!({
                 "type": "compaction_trigger",
-            }));
+            })));
         }
         ContextItem::Compaction(item) | ContextItem::UnknownProviderItem(item) => {
-            out.push(cbor_to_json(&item.0));
+            convert_opaque_provider_item(item, out);
         }
         ContextItem::Message(_) => {}
     }
 }
 
-fn convert_user_message(msg: &MessageItem, out: &mut Vec<serde_json::Value>) {
+fn convert_opaque_provider_item(
+    item: &tau_proto::OpaqueProviderItem,
+    out: &mut Vec<ResponsesInputItem>,
+) {
+    if let Some(raw_item) = item
+        .raw_json
+        .as_deref()
+        .and_then(ResponsesInputItem::raw_json)
+    {
+        out.push(raw_item);
+        return;
+    }
+    out.push(ResponsesInputItem::json(cbor_to_json(&item.value)));
+}
+
+fn convert_user_message(msg: &MessageItem, out: &mut Vec<ResponsesInputItem>) {
     // Collect text blocks into one user message, emit tool results separately.
     let text_items: Vec<serde_json::Value> = msg
         .content
@@ -1368,17 +1493,17 @@ fn convert_user_message(msg: &MessageItem, out: &mut Vec<serde_json::Value>) {
         })
         .collect();
     if !text_items.is_empty() {
-        out.push(serde_json::json!({
+        out.push(ResponsesInputItem::json(serde_json::json!({
             "role": "user",
             "content": text_items,
-        }));
+        })));
     }
 }
 
 fn convert_assistant_message(
     msg: &MessageItem,
     supports_phase: bool,
-    out: &mut Vec<serde_json::Value>,
+    out: &mut Vec<ResponsesInputItem>,
 ) {
     let text_parts: Vec<&str> = msg
         .content
@@ -1403,7 +1528,7 @@ fn convert_assistant_message(
     if let Some(phase) = assistant_message_phase_wire(msg, supports_phase) {
         item["phase"] = serde_json::Value::String(phase.to_owned());
     }
-    out.push(item);
+    out.push(ResponsesInputItem::json(item));
 }
 
 fn assistant_message_phase_wire(msg: &MessageItem, supports_phase: bool) -> Option<&'static str> {
@@ -1419,10 +1544,16 @@ fn assistant_message_phase_wire(msg: &MessageItem, supports_phase: bool) -> Opti
     })
 }
 
-fn convert_tool_call_item(call: &ToolCallItem, out: &mut Vec<serde_json::Value>) {
+fn convert_tool_call_item(call: &ToolCallItem, out: &mut Vec<ResponsesInputItem>) {
     match call.tool_type {
-        tau_proto::ToolType::Function => out.push(convert_function_call_item(call)),
-        tau_proto::ToolType::Custom => out.push(convert_custom_tool_call_item(call)),
+        tau_proto::ToolType::Function => {
+            out.push(ResponsesInputItem::json(convert_function_call_item(call)));
+        }
+        tau_proto::ToolType::Custom => {
+            out.push(ResponsesInputItem::json(convert_custom_tool_call_item(
+                call,
+            )));
+        }
     }
 }
 
@@ -1470,16 +1601,16 @@ fn prefixed_provider_item_id(id: &str, prefix: &str) -> String {
     }
 }
 
-fn convert_tool_result_item(result: &ToolResultItem, out: &mut Vec<serde_json::Value>) {
+fn convert_tool_result_item(result: &ToolResultItem, out: &mut Vec<ResponsesInputItem>) {
     let output_type = match result.tool_type {
         tau_proto::ToolType::Function => "function_call_output",
         tau_proto::ToolType::Custom => "custom_tool_call_output",
     };
-    out.push(serde_json::json!({
+    out.push(ResponsesInputItem::json(serde_json::json!({
         "type": output_type,
         "call_id": result.call_id,
         "output": convert_tool_result_output(result),
-    }));
+    })));
 }
 
 fn convert_tool_result_output(result: &ToolResultItem) -> String {

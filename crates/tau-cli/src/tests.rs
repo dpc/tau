@@ -4998,9 +4998,9 @@ fn render_provider_compaction_item_when_response_finishes() {
     // item, which means server-side compaction has actually completed.
     let mut finished = finished_response(
         "sp-compact",
-        vec![ContextItem::Compaction(OpaqueProviderItem(CborValue::Map(
-            vec![],
-        )))],
+        vec![ContextItem::Compaction(OpaqueProviderItem::new(
+            CborValue::Map(vec![]),
+        ))],
     );
     finished.compaction_original_input_tokens = Some(226_200);
     finished.compaction_compacted_input_tokens = Some(4_500);

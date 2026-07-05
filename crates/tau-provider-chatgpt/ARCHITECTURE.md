@@ -17,6 +17,12 @@ spelling match the provider's original argument string. Serializing parsed CBOR
 arguments is only a fallback for older persisted records that do not have the raw
 sidecar.
 
+The same replay rule applies to opaque Responses provider items. Reasoning,
+compaction, and unknown output items should be stored with
+`OpaqueProviderItem.raw_json` when the upstream event JSON is available, and full
+transcript replay should prefer that sidecar over the parsed CBOR
+`OpaqueProviderItem.value`.
+
 ## Model metadata tags
 
 ChatGPT/Codex model publication includes provider-owned capability tags such as

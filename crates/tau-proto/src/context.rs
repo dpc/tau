@@ -2,7 +2,7 @@
 
 use std::fmt::Write as _;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 
 use crate::events::{ProviderBackend, ToolFormat, ToolType};
 use crate::{CborValue, ProviderTokenUsage, ToolCallId, ToolName};
@@ -36,13 +36,97 @@ pub enum ContentPart {
     },
 }
 
-/// Opaque provider-owned payload preserved without interpretation.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct OpaqueProviderItem(
-    /// Provider-owned CBOR payload preserved exactly enough for replay.
-    pub CborValue,
-);
+/// Opaque provider-owned payload preserved without semantic authority.
+#[derive(Clone, Debug, PartialEq)]
+pub struct OpaqueProviderItem {
+    /// Parsed provider item for semantic inspection and legacy replay.
+    pub value: CborValue,
+    /// Raw provider item JSON used for cache-identity-preserving replay.
+    ///
+    /// This sidecar is provider-visible syntax only. Consumers that need to
+    /// inspect, validate, or make semantic decisions must use [`Self::value`].
+    pub raw_json: Option<String>,
+}
+
+impl OpaqueProviderItem {
+    /// Builds an opaque provider item from a parsed CBOR value.
+    #[must_use]
+    pub fn new(value: CborValue) -> Self {
+        Self {
+            value,
+            raw_json: None,
+        }
+    }
+
+    /// Builds an opaque provider item with a raw JSON replay sidecar.
+    #[must_use]
+    pub fn with_raw_json(value: CborValue, raw_json: impl Into<String>) -> Self {
+        Self {
+            value,
+            raw_json: Some(raw_json.into()),
+        }
+    }
+}
+
+impl Serialize for OpaqueProviderItem {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        #[derive(Serialize)]
+        struct Repr<'a> {
+            tau_opaque_provider_item_version: u8,
+            value: &'a CborValue,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            raw_json: Option<&'a str>,
+        }
+
+        Repr {
+            tau_opaque_provider_item_version: 1,
+            value: &self.value,
+            raw_json: self.raw_json.as_deref(),
+        }
+        .serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for OpaqueProviderItem {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Current {
+            tau_opaque_provider_item_version: u8,
+            value: CborValue,
+            #[serde(default)]
+            raw_json: Option<String>,
+        }
+
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Repr {
+            Current(Current),
+            Legacy(CborValue),
+        }
+
+        match Repr::deserialize(deserializer)? {
+            Repr::Current(Current {
+                tau_opaque_provider_item_version: 1,
+                value,
+                raw_json,
+            }) => Ok(Self { value, raw_json }),
+            Repr::Current(Current {
+                tau_opaque_provider_item_version,
+                ..
+            }) => Err(de::Error::custom(format!(
+                "unsupported opaque provider item version {tau_opaque_provider_item_version}"
+            ))),
+            Repr::Legacy(value) => Ok(Self::new(value)),
+        }
+    }
+}
 
 /// One message item in the prompt or assistant output timeline.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

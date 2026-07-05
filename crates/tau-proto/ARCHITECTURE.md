@@ -39,6 +39,19 @@ reconstructing provider history and fall back to serializing `arguments` only fo
 old persisted records or calls without provider-wire JSON. The sidecar is not a
 semantic authority and must not bypass CBOR validation/dispatch.
 
+## Opaque provider item dual representation
+
+`OpaqueProviderItem.value` is the parsed CBOR form of provider-owned output
+items such as Responses reasoning, compaction, and unknown future provider items.
+It exists for semantic inspection and compatibility with protocol consumers that
+need structured data.
+
+`OpaqueProviderItem.raw_json` is an optional provider-visible replay sidecar for
+the exact JSON item emitted by a backend. Responses request reconstruction should
+prefer this sidecar so key order and numeric spelling remain stable for upstream
+cache identity, and fall back to serializing `value` only for older records or
+items that were not captured from provider JSON.
+
 ## Event names and routing
 
 `Event` serde `rename` values, `EventName` constants, and `Event::name()` are one contract. When adding or renaming an event, update all three together and update `docs/events.md` when the selected guide should mention the event.

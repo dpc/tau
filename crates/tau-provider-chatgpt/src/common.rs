@@ -194,6 +194,7 @@ pub enum OutputItemAccumulator {
     ToolCall(ToolCallAccumulator),
     Reasoning(OpaqueProviderItem),
     Compaction(Option<OpaqueProviderItem>),
+    UnknownProviderItem(OpaqueProviderItem),
 }
 
 /// Accumulates one assistant message item across text deltas.
@@ -364,6 +365,9 @@ impl OutputItemAccumulator {
                 Some(ContextItem::Compaction(item.clone()))
             }
             OutputItemAccumulator::Compaction(None) => None,
+            OutputItemAccumulator::UnknownProviderItem(item) => {
+                Some(ContextItem::UnknownProviderItem(item.clone()))
+            }
         }
     }
 }
@@ -508,6 +512,11 @@ impl StreamState {
         }
     }
 
+    /// Reserves an output-item slot without committing a durable item yet.
+    pub fn reserve_output_item_at(&mut self, output_index: usize) {
+        self.ensure_output_len(output_index);
+    }
+
     pub fn message_at_mut(&mut self, output_index: usize) -> &mut MessageAccumulator {
         self.ensure_output_len(output_index);
         if !matches!(
@@ -612,6 +621,14 @@ impl StreamState {
         if let Some(item) = opaque_item_from_json(item) {
             self.ensure_output_len(output_index);
             self.output_items[output_index] = OutputItemAccumulator::Compaction(Some(item));
+        }
+    }
+
+    /// Stores an unrecognized provider output item at its provider index.
+    pub fn set_unknown_provider_item_json_at(&mut self, output_index: usize, item: &str) {
+        if let Some(item) = opaque_item_from_json(item) {
+            self.ensure_output_len(output_index);
+            self.output_items[output_index] = OutputItemAccumulator::UnknownProviderItem(item);
         }
     }
 
@@ -739,7 +756,10 @@ pub fn assistant_text_item_with_phase(
 
 fn opaque_item_from_json(item: &str) -> Option<OpaqueProviderItem> {
     let value: serde_json::Value = serde_json::from_str(item).ok()?;
-    Some(OpaqueProviderItem(json_to_cbor(&value)))
+    Some(OpaqueProviderItem::with_raw_json(
+        json_to_cbor(&value),
+        item.to_owned(),
+    ))
 }
 
 /// Maps `Effort` to the wire string the OpenAI Responses /

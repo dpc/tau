@@ -315,7 +315,10 @@ fn approx_context_item_provider_bytes(item: &ContextItem) -> u64 {
         ContextItem::ReasoningText(reasoning) => reasoning.text.len() as u64 + 16,
         ContextItem::Reasoning(item)
         | ContextItem::Compaction(item)
-        | ContextItem::UnknownProviderItem(item) => approx_cbor_json_bytes(&item.0),
+        | ContextItem::UnknownProviderItem(item) => item.raw_json.as_ref().map_or_else(
+            || approx_cbor_json_bytes(&item.value),
+            |raw| raw.len() as u64,
+        ),
         ContextItem::CompactionTrigger => 16,
     }
 }

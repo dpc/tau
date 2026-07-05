@@ -22,7 +22,7 @@ fn compaction_output_finishes_as_normal_end_turn() {
     // Regression: server-side compaction is now represented by a durable output
     // item, not a special provider lifecycle stop reason.
     let output_items = [tau_proto::ContextItem::Compaction(
-        tau_proto::OpaqueProviderItem(tau_proto::CborValue::Map(Vec::new())),
+        tau_proto::OpaqueProviderItem::new(tau_proto::CborValue::Map(Vec::new())),
     )];
 
     assert_eq!(
@@ -37,7 +37,7 @@ fn compaction_with_tool_calls_still_requests_tools() {
     // own the provider stop reason so the harness runs them instead of treating
     // the turn as a plain completed end turn.
     let output_items = [
-        tau_proto::ContextItem::Compaction(tau_proto::OpaqueProviderItem(
+        tau_proto::ContextItem::Compaction(tau_proto::OpaqueProviderItem::new(
             tau_proto::CborValue::Map(Vec::new()),
         )),
         tau_proto::ContextItem::ToolCall(tau_proto::ToolCallItem {

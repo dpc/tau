@@ -45,7 +45,7 @@ use tokio_tungstenite::tungstenite::{Message, Utf8Bytes};
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, tungstenite};
 
 use super::{
-    ProviderRawEventStream, ResponsesConfig, apply_event, build_ws_envelope,
+    ProviderRawEventStream, ResponsesConfig, apply_raw_json_event, build_ws_envelope,
     load_provider_stream_cassette, record_provider_raw_event_after,
 };
 use crate::common::{LlmError, PromptPayload, StreamState};
@@ -99,10 +99,7 @@ enum WsCommand {
 /// behavior as the SSE line-level resync).
 enum InboundEvent {
     /// One parsed `response.*` event and its upstream text frame.
-    Event {
-        text: Utf8Bytes,
-        value: serde_json::Value,
-    },
+    Event { text: Utf8Bytes },
     /// Server sent a `Close` frame (or the stream ended cleanly
     /// without one). The string is the close-frame reason for
     /// logging.
@@ -313,14 +310,14 @@ impl WsConn {
                 }
             };
             match event {
-                InboundEvent::Event { text, value } => {
+                InboundEvent::Event { text } => {
                     let now = Instant::now();
                     let delta = now.saturating_duration_since(last_event_at);
                     last_event_at = now;
                     if let Some(stream) = recording_stream.as_deref_mut() {
                         record_provider_raw_event_after(stream, delta, text.to_string());
                     }
-                    if apply_event(&mut state, &value, on_update)? {
+                    if apply_raw_json_event(&mut state, text.as_ref(), on_update)? {
                         break;
                     }
                 }
@@ -416,11 +413,7 @@ fn run_replay(
             std::time::Duration::from_micros(event.delta_micros),
             100.0,
         ));
-        let value: serde_json::Value = match serde_json::from_str(&event.raw) {
-            Ok(value) => value,
-            Err(_) => continue,
-        };
-        if apply_event(&mut state, &value, on_update)? {
+        if apply_raw_json_event(&mut state, &event.raw, on_update)? {
             break;
         }
     }
@@ -460,7 +453,7 @@ async fn read_loop(mut stream: Stream, tx: std_mpsc::Sender<InboundEvent>) {
         let (event, terminal) = match item {
             Ok(Message::Text(text)) => {
                 match serde_json::from_str::<serde_json::Value>(text.as_ref()) {
-                    Ok(value) => (InboundEvent::Event { text, value }, false),
+                    Ok(_) => (InboundEvent::Event { text }, false),
                     // Unparseable frames are skipped on the SSE path too
                     // (line-level resync). Mirror it here.
                     Err(_) => continue,

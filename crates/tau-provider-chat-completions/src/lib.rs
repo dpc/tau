@@ -1037,7 +1037,7 @@ fn function_call_arguments_json(call: &ToolCallItem) -> String {
 }
 
 fn chat_completions_reasoning_text(item: &OpaqueProviderItem) -> Option<String> {
-    let value = cbor_to_json(&item.0);
+    let value = cbor_to_json(&item.value);
     if value.get("type").and_then(|value| value.as_str()) != Some("chat_completions_reasoning") {
         return None;
     }

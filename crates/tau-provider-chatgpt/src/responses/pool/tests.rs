@@ -671,7 +671,7 @@ fn fresh_open_with_previous_response_preserves_compacted_items() {
     let mut on_update = |_: &crate::common::StreamState| {};
     let session_id = tau_proto::SessionId::new("session-compacted");
     let messages = vec![
-        tau_proto::ContextItem::Compaction(tau_proto::OpaqueProviderItem(
+        tau_proto::ContextItem::Compaction(tau_proto::OpaqueProviderItem::new(
             crate::common::json_to_cbor(&serde_json::json!({
                 "type": "message",
                 "role": "user",
