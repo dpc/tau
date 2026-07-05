@@ -107,6 +107,25 @@ impl BuiltinState {
         self.cancel_requested.remove(call_id);
     }
 
+    fn validate_cancel_request(
+        &mut self,
+        target: &ToolCallId,
+        is_owned_running_call: bool,
+        is_owned_completed_call: bool,
+    ) -> Result<(), String> {
+        if !is_owned_running_call {
+            if is_owned_completed_call {
+                return Err("Tool call is already done".to_owned());
+            }
+            return Err("Unknown tool call id".to_owned());
+        }
+        if self.cancel_requested.contains(target) {
+            return Err("Tool call already canceled".to_owned());
+        }
+        self.cancel_requested.insert(target.clone());
+        Ok(())
+    }
+
     fn initial_display(&self, call: &AgentToolCall) -> Option<ToolUseState> {
         let (args, status_text, payload) = match call.name.as_str() {
             SKILL_TOOL_NAME => {
@@ -1143,17 +1162,16 @@ impl BuiltinTools {
         let call_id = call.id.clone();
         host.ensure_internal_tool_tracking(conversation_id, call, &visible_tool_name);
         let result = parse_cancel_args(&call.arguments).and_then(|target| {
+            let is_owned_running_call =
+                host.is_running_cancellable_tool_call_for(conversation_id, &target);
+            let is_owned_completed_call =
+                !is_owned_running_call && host.is_completed_tool_call_for(conversation_id, &target);
             let mut state = self.state.lock().expect("builtin tool state poisoned");
-            if state.cancel_requested.contains(&target) {
-                return Err("Tool call already canceled".to_owned());
-            }
-            if !host.is_running_cancellable_tool_call_for(conversation_id, &target) {
-                if host.is_completed_tool_call_for(conversation_id, &target) {
-                    return Err("Tool call is already done".to_owned());
-                }
-                return Err("Unknown tool call id".to_owned());
-            }
-            state.cancel_requested.insert(target.clone());
+            state.validate_cancel_request(
+                &target,
+                is_owned_running_call,
+                is_owned_completed_call,
+            )?;
             drop(state);
             host.publish_tool_cancel_request_for(conversation_id, target)?;
             Ok(())
@@ -1593,7 +1611,7 @@ fn cancel_tool_spec() -> ToolSpec {
         name: ToolName::new(CANCEL_TOOL_NAME),
         model_visible_name: None,
         description: Some(
-            "Request cancellation of a running tool call. Requires `tool_call_id`.".to_owned(),
+            "Request cancellation of a running tool call owned by this conversation. Requires `tool_call_id`.".to_owned(),
         ),
         tool_type: ToolType::Function,
         parameters: Some(

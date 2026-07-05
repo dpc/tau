@@ -1395,8 +1395,8 @@ pub struct Harness {
     /// facts.
     pub(crate) pending_tools: std::collections::HashMap<ToolCallId, PendingTool>,
     /// Tool call ids that were known to this harness and reached a terminal
-    /// state. Used to distinguish completed calls from typos in user-facing
-    /// cancellation errors.
+    /// state. Used for same-session known-id collection; owner-scoped
+    /// cancellation diagnostics use `completed_tool_agents`.
     pub(crate) completed_tool_calls: std::collections::HashSet<ToolCallId>,
     /// `call_id` → owning agent for completed tool calls whose owner was known
     /// at completion time. Used by internal tools to keep completion

@@ -345,6 +345,44 @@ fn cancel_request_tracking_is_cleared_when_target_finishes() {
     assert!(!state.cancel_requested.contains(&call_id));
 }
 
+/// Ensures duplicate-cancel bookkeeping is checked only after owner-scoped
+/// target validation. Otherwise another conversation could learn that a guessed
+/// call id is real and already has a pending cancellation request.
+#[test]
+fn cancel_duplicate_request_state_does_not_leak_to_non_owner() {
+    let mut state = BuiltinState::default();
+    let call_id = ToolCallId::from("owned-call");
+    state.cancel_requested.insert(call_id.clone());
+
+    let err = state
+        .validate_cancel_request(&call_id, false, false)
+        .expect_err("non-owner should see unknown call");
+    assert_eq!(err, "Unknown tool call id");
+
+    let err = state
+        .validate_cancel_request(&call_id, true, false)
+        .expect_err("owner should still see duplicate cancel");
+    assert_eq!(err, "Tool call already canceled");
+}
+
+/// Ensures completed-call diagnostics are likewise emitted only for the owning
+/// conversation; non-owners get the same unknown-id response as absent calls.
+#[test]
+fn cancel_completed_request_state_is_owner_scoped() {
+    let mut state = BuiltinState::default();
+    let call_id = ToolCallId::from("completed-call");
+
+    let err = state
+        .validate_cancel_request(&call_id, false, false)
+        .expect_err("non-owner should see unknown call");
+    assert_eq!(err, "Unknown tool call id");
+
+    let err = state
+        .validate_cancel_request(&call_id, false, true)
+        .expect_err("owner should see completed call");
+    assert_eq!(err, "Tool call is already done");
+}
+
 /// Ensures session shutdown drops runtime-only bookkeeping for abandoned
 /// in-flight tools and agent watches, because session switching can occur
 /// without individual terminal events for every tracked call.

@@ -165,13 +165,16 @@ metadata pid is still live; dead-pid entries are eligible for cleanup on
 platforms where Tau has a safe pid-liveness backend, so a transient probe
 failure does not permanently hide a running daemon.
 
-## Harness-owned `wait` tool-call id scoping
+## Harness-owned tool-call id scoping
 
-The harness-owned `wait` tool treats explicit `tool_call_id` arguments as
-scoped to the waiting conversation. Exact `wait` requests must check that the
-target call is owned by the waiting conversation before duplicate-wait,
-queued-input preemption, or stored-result handling. Cross-owner probes use the
-same unknown-id behavior as absent calls so tool-call existence and completion
+The harness-owned `wait` and `cancel` tools treat explicit `tool_call_id`
+arguments as scoped to the calling conversation. Exact `wait` requests must check
+that the target call is owned by the waiting conversation before duplicate-wait,
+queued-input preemption, or stored-result handling. `cancel` requests must check
+that the target call is owned by the cancelling conversation before consulting
+duplicate-cancel or completed-call state and before publishing
+`tool.cancel_request`. Cross-owner probes use the same unknown-id behavior as
+absent calls so tool-call existence, completion state, and already-cancelled
 state do not leak across agents.
 
 ## Optional extension startup
