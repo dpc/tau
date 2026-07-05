@@ -100,10 +100,15 @@ extension, checks for active webhooks before polling, enforces
 `allowed_user_ids`, keeps a durable update offset/recent-update state file, and
 opens a private local status socket.
 
-This MVP intentionally does **not** route Telegram prompts to Tau sessions yet.
-Allowlisted users can use `/start`, `/help`, and `/status`; other text receives a
-"routing not implemented yet" reply in the configured or linked private chat.
-Unconfigured group/supergroup chats are ignored instead of linked or replied to.
+Allowlisted users can use `/start`, `/help`, `/status`, `/sessions`, `/agents`,
+`/select-session`, `/select`, `/to`, and `/where`. Session listings use
+gateway-local aliases instead of full session ids; selected or explicit routes
+queue inbound prompt deliveries for the owning sidecar. Plain text routes only
+when the selected target is live or exactly one agent is registered; ambiguous
+text gets a Telegram explanation instead of being guessed. Unconfigured
+group/supergroup chats are ignored instead of linked or replied to.
+Queued inbound deliveries are bounded live gateway state: they are removed when
+the sidecar drains them, unregisters, disconnects, or loses the route lease.
 
 Run it with the bot token in an environment variable rather than on the command
 line:
@@ -123,5 +128,6 @@ registrations as live leases, refreshes them on heartbeat, removes them on
 explicit unregister/goodbye or socket disconnect, and prunes them on lease expiry.
 `hello`/status responses include a gateway generation and reannouncement hint so
 sidecars reconnecting after a gateway restart know to re-send their current
-session/agent registrations. Routing and outbound `telegram_send` through the
-gateway remain out of scope for this slice.
+registrations. Heartbeat/register responses can include queued inbound prompt
+deliveries for the sidecar to submit to its local Tau harness. Outbound
+`telegram_send` through the gateway remains out of scope for this slice.

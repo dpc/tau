@@ -51,37 +51,45 @@ fails closed with the same behavior.
 
 ## Gateway daemon MVP
 
-`tau-telegram-gateway` is the first standalone owner for the planned
-multi-session gateway architecture. In this slice it is deliberately a
-single-process stream owner and status endpoint, not yet a Tau prompt router. It
+`tau-telegram-gateway` is the standalone owner for the planned multi-session
+gateway architecture. In this slice it is a single-process stream owner, status
+endpoint, live sidecar registry, and command router. It
 resolves the bot token from an environment variable, validates the Bot API base,
 creates private state/runtime directories, acquires the shared stream lock,
 checks `getWebhookInfo`, loads durable per-stream JSON state, binds a private
 Unix status socket, and then owns `getUpdates` polling.
 
 The durable state is scoped by the same non-secret stream fingerprint used for
-locking. It stores the next update offset, an optional private-chat link, recent
-update ids for restart duplicate suppression, and small counters. The gateway
-persists after each update is intentionally handled or rejected so a crash may
-redeliver but should not silently skip accepted input. On startup the loaded
-state is reconciled with the current config: fixed-chat mode clears private-chat
-links, and links owned by users no longer present in `allowed_user_ids` are
-cleared and persisted before polling starts.
+locking. It stores the next update offset, an optional private-chat link,
+chat/user-scoped selected route, recent update ids for restart duplicate
+suppression, and small counters; it does not store pending sidecar deliveries.
+The gateway persists after each update is intentionally handled or rejected. In
+this routing slice, successful enqueue into the bounded live sidecar queue counts
+as handling, so a gateway exit after offset advancement but before sidecar drain
+can lose that queued prompt. A future durable delivery/ack slice should prefer
+possible duplicate delivery over silent loss. On startup the loaded state is
+reconciled with the current config: fixed-chat mode clears private-chat links,
+and links or selections that no longer match the configured chat/user allowlist
+are cleared and persisted before polling starts.
 
-Until sidecar routing lands, Telegram-visible behavior is limited to `/start`,
-`/help`, and `/status`. The allowlist is checked before any side effects.
+Telegram-visible gateway behavior includes `/start`, `/help`, `/status`,
+`/sessions`, `/agents`, `/select-session`, `/select`, `/to`, and `/where`.
+Plain text routes only when a selected target or exactly one live registration
+makes the target unambiguous. The allowlist is checked before any side effects.
 Without a fixed `chat_id`, only one allowlisted private chat can link with
 `/start`; unconfigured group/supergroup chats are ignored rather than linked or
 replied to. The local socket accepts a one-shot versioned JSON-line `status`
 request and persistent sidecar `hello`, `heartbeat`, `register_agent`,
 `unregister_agent`, and `goodbye` requests up to a small fixed byte limit. It
-returns bounded status snapshots and sidecar lease parameters for future
-gateway-client discovery experiments. Sidecar registrations are live-only leases:
+returns bounded status snapshots, sidecar lease parameters, and queued inbound
+prompt deliveries on sidecar responses. Sidecar registrations are live-only leases:
 they are removed on explicit unregister, goodbye, socket disconnect, heartbeat
-expiry, or gateway restart/reannouncement. The socket is private same-UID local
-IPC, not an authentication boundary; this MVP bounds request size and closes
-protocol-error connections but does not attempt to defend against all same-user
-local denial-of-service patterns.
+expiry, or gateway restart/reannouncement. Pending deliveries are bounded per
+sidecar and are dropped if their route unregisters, transfers ownership,
+disconnects, or expires before the sidecar drains them. The socket is private
+same-UID local IPC, not an authentication boundary; this MVP bounds request size
+and closes protocol-error connections but does not attempt to defend against all
+same-user local denial-of-service patterns.
 
 On the idle-to-active transition for the first registered agent, after acquiring
 the local lock and before reporting registration success, the extension calls
@@ -144,6 +152,7 @@ Gateway daemon tests use a fake Telegram client plus test-only gateway resources
 to cover durable state round-trips/reconciliation, retry-vs-offset advancement
 semantics, same-batch redelivery stops, allowlist/group-chat behavior, local
 socket parser/response bounds, sidecar heartbeat/lease cleanup, disconnect and
-unregister pruning, gateway restart reannouncement hints, and CLI/env parsing.
-Future routing/outbound-send tests should keep using fake gateway clients rather
-than live Telegram.
+unregister pruning, gateway restart reannouncement hints, command routing,
+chat/user-scoped selections, stable alias churn, bounded/stale delivery queues,
+socket delivery response shape, and CLI/env parsing. Future outbound-send tests
+should keep using fake gateway clients rather than live Telegram.

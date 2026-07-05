@@ -2,9 +2,12 @@
 //!
 //! This module implements the single-owner gateway slice: stream locking,
 //! durable update offsets, Telegram allowlist/chat policy, help/status command
-//! handling, and private local socket support for gateway-side sidecar
-//! heartbeat and registration-lease bookkeeping. Prompt routing and outbound
-//! gateway sends are deliberately left for later stages.
+//! handling, inbound routing commands, bounded live queued prompt deliveries,
+//! and private local socket support for gateway-side sidecar heartbeat and
+//! registration-lease bookkeeping. Outbound gateway sends are deliberately left
+//! for later stages.
+
+mod routing;
 
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
@@ -18,6 +21,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use std::{env, thread};
+
+use routing::{
+    GatewayDelivery, GatewayRegistrationSnapshot, GatewayRegistrySnapshot, GatewaySessionSnapshot,
+    agent_alias, safe_metadata, session_alias, short_id, split_target_and_text,
+    telegram_source_label,
+};
 
 use crate::stream_owner::{
     UpdateStreamLock, telegram_contention_diagnostic, webhook_active_message,
@@ -44,6 +53,9 @@ const SIDECAR_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
 
 /// Maximum time a registration remains live without a sidecar heartbeat.
 const REGISTRATION_LEASE_DURATION: Duration = Duration::from_secs(30);
+
+/// Maximum queued prompt deliveries retained per sidecar connection.
+const MAX_PENDING_DELIVERIES_PER_SIDECAR: usize = 32;
 
 /// Default environment variable carrying the bot token.
 const DEFAULT_BOT_TOKEN_ENV: &str = "TELEGRAM_BOT_TOKEN";
@@ -411,18 +423,7 @@ impl Gateway {
         if !self.chat_is_active(message) {
             return self.reject_inactive_chat(message);
         }
-        let (command, rest) = parse_command(text);
-        UpdateOutcome::from_required_reply(match command {
-            Some("/help") => self.reply(message.chat_id, gateway_help_text()),
-            Some("/status") => self.reply(message.chat_id, &self.status_text()),
-            Some("/start") => self.reply(message.chat_id, gateway_help_text()),
-            Some(_) => self.reply(
-                message.chat_id,
-                "Unknown Telegram gateway command. Supported commands: /start, /help, /status.",
-            ),
-            None if rest.is_empty() => self.reply(message.chat_id, gateway_not_routing_text()),
-            None => self.reply(message.chat_id, gateway_not_routing_text()),
-        })
+        UpdateOutcome::from_required_reply(self.route_or_command(message, text))
     }
 
     /// Handle `/start` chat-linking before the generic active-chat check.
@@ -552,7 +553,7 @@ impl Gateway {
             .map(|link| link.chat_id.to_string())
             .unwrap_or_else(|| "none".to_owned());
         format!(
-            "Tau Telegram gateway status:\nstream: {}\nnext update offset: {}\nallowed users: {}\nconfigured chat: {}\nlinked chat: {}\nprocessed updates: {}\nrejected updates: {}\nrouting: help/status only",
+            "Tau Telegram gateway status:\nstream: {}\nnext update offset: {}\nallowed users: {}\nconfigured chat: {}\nlinked chat: {}\nprocessed updates: {}\nrejected updates: {}\nrouting: commands enabled",
             self.durable.stream_hash,
             self.durable
                 .next_update_offset
@@ -568,6 +569,280 @@ impl Gateway {
             self.durable.rejected_update_count,
         )
     }
+
+    /// Handle a command or plain text message once the Telegram chat is active.
+    fn route_or_command(&mut self, message: &TgMessage, text: &str) -> bool {
+        let (command, rest) = parse_command(text);
+        match command {
+            Some("/help") => self.reply(message.chat_id, gateway_help_text()),
+            Some("/status") => self.reply(message.chat_id, &self.status_text()),
+            Some("/start") => self.reply(message.chat_id, gateway_help_text()),
+            Some("/sessions") => self.reply(message.chat_id, &self.sessions_text(message)),
+            Some("/agents") => self.reply(message.chat_id, &self.agents_text(message, rest)),
+            Some("/select-session") => self.select_session(message, rest),
+            Some("/select") => self.select_agent(message, rest),
+            Some("/to") => self.route_to(message, rest),
+            Some("/where") => self.reply(message.chat_id, &self.where_text(message)),
+            Some(_) => self.reply(
+                message.chat_id,
+                "Unknown Telegram gateway command. Supported commands: /start, /help, /status, /sessions, /agents, /select-session, /select, /to, /where.",
+            ),
+            None => self.route_plain(message, text),
+        }
+    }
+
+    /// Build the `/sessions` response without exposing full session ids.
+    fn sessions_text(&self, message: &TgMessage) -> String {
+        let snapshot = self.socket_state.registry_snapshot();
+        if snapshot.sessions.is_empty() {
+            return "No live Tau sessions are registered with this Telegram gateway.".to_owned();
+        }
+        let mut lines = vec!["Live Tau sessions:".to_owned()];
+        for session in &snapshot.sessions {
+            let selected = if self
+                .selection_for_message(Some(message))
+                .is_some_and(|selection| selection.session_id == session.session_id)
+            {
+                " (selected)"
+            } else {
+                ""
+            };
+            lines.push(format!(
+                "{} — {} agent(s){}",
+                session_alias(session.alias),
+                session.agent_count,
+                selected
+            ));
+        }
+        lines.push("Use /select-session <alias> to choose a session.".to_owned());
+        lines.join("\n")
+    }
+
+    /// Build the `/agents [session]` response for the selected or named
+    /// session.
+    fn agents_text(&self, message: &TgMessage, arg: &str) -> String {
+        let snapshot = self.socket_state.registry_snapshot();
+        let session_id = if arg.trim().is_empty() {
+            match self.selected_or_single_session(message, &snapshot) {
+                Ok(session_id) => session_id,
+                Err(message) => return message,
+            }
+        } else {
+            match snapshot.resolve_session(arg) {
+                Ok(session_id) => session_id,
+                Err(message) => return message,
+            }
+        };
+        let agents = snapshot.agents_in_session(&session_id);
+        if agents.is_empty() {
+            return "No live agents are registered in that session.".to_owned();
+        }
+        let mut lines = vec![format!(
+            "Live agents in {}:",
+            snapshot.session_label(&session_id)
+        )];
+        for agent in &agents {
+            let selected = if self
+                .selection_for_message(Some(message))
+                .is_some_and(|selection| {
+                    selection.session_id == agent.session_id
+                        && selection.agent_id.as_deref() == Some(&agent.agent_id)
+                }) {
+                " (selected)"
+            } else {
+                ""
+            };
+            let display = agent
+                .display_name
+                .as_deref()
+                .map(safe_metadata)
+                .filter(|name| !name.is_empty())
+                .map(|name| format!(" — {name}"))
+                .unwrap_or_default();
+            lines.push(format!(
+                "{} — {}{}{}",
+                agent_alias(agent.alias),
+                short_id(&agent.agent_id),
+                display,
+                selected
+            ));
+        }
+        lines.push("Use /select <alias-or-agent-prefix> to choose an agent.".to_owned());
+        lines.join("\n")
+    }
+
+    /// Select a live session by alias or unambiguous id prefix.
+    fn select_session(&mut self, message: &TgMessage, arg: &str) -> bool {
+        let snapshot = self.socket_state.registry_snapshot();
+        match snapshot.resolve_session(arg) {
+            Ok(session_id) => {
+                self.durable.selected_route = Some(GatewaySelectedRoute {
+                    chat_id: message.chat_id,
+                    user_id: message.user_id,
+                    session_id,
+                    agent_id: None,
+                });
+                self.reply(
+                    message.chat_id,
+                    "Selected Telegram gateway session. Use /agents to list agents.",
+                )
+            }
+            Err(error) => self.reply(message.chat_id, &error),
+        }
+    }
+
+    /// Select a live agent in the selected session.
+    fn select_agent(&mut self, message: &TgMessage, arg: &str) -> bool {
+        let snapshot = self.socket_state.registry_snapshot();
+        let selection = match self.selection_for_message(Some(message)).cloned() {
+            Some(selection) => selection,
+            None => {
+                return self.reply(
+                    message.chat_id,
+                    "Select a session first with /select-session.",
+                );
+            }
+        };
+        match snapshot.resolve_agent_in_session(&selection.session_id, arg) {
+            Ok(agent_id) => {
+                self.durable.selected_route = Some(GatewaySelectedRoute {
+                    agent_id: Some(agent_id),
+                    ..selection
+                });
+                self.reply(
+                    message.chat_id,
+                    "Selected Telegram gateway agent. Plain text now routes to it.",
+                )
+            }
+            Err(error) => self.reply(message.chat_id, &error),
+        }
+    }
+
+    /// Route one explicit `/to` command.
+    fn route_to(&self, message: &TgMessage, rest: &str) -> bool {
+        let Some((target, text)) = split_target_and_text(rest) else {
+            return self.reply(
+                message.chat_id,
+                "Usage: /to <session>/<agent> <message> or /to <agent> <message>.",
+            );
+        };
+        let snapshot = self.socket_state.registry_snapshot();
+        let (session_id, agent_selector) = if let Some((session, agent)) = target.split_once('/') {
+            let session_id = match snapshot.resolve_session(session) {
+                Ok(session_id) => session_id,
+                Err(error) => return self.reply(message.chat_id, &error),
+            };
+            (session_id, agent)
+        } else {
+            let session_id = match self.selected_or_single_session(message, &snapshot) {
+                Ok(session_id) => session_id,
+                Err(error) => return self.reply(message.chat_id, &error),
+            };
+            (session_id, target)
+        };
+        let agent_id = match snapshot.resolve_agent_in_session(&session_id, agent_selector) {
+            Ok(agent_id) => agent_id,
+            Err(error) => return self.reply(message.chat_id, &error),
+        };
+        let target = GatewayRegistrationKey {
+            session_id,
+            agent_id,
+        };
+        self.queue_route_or_reply(message, target, text)
+    }
+
+    /// Route plain text through the selected target or only live registration.
+    fn route_plain(&self, message: &TgMessage, text: &str) -> bool {
+        let snapshot = self.socket_state.registry_snapshot();
+        if let Some(selection) = self.selection_for_message(Some(message))
+            && let Some(agent_id) = selection.agent_id.clone()
+        {
+            let session_id = selection.session_id.clone();
+            if snapshot.has_registration(&session_id, &agent_id) {
+                return self.queue_route_or_reply(
+                    message,
+                    GatewayRegistrationKey {
+                        session_id,
+                        agent_id,
+                    },
+                    text,
+                );
+            }
+            return self.reply(
+                message.chat_id,
+                "The selected Telegram gateway target is no longer live. Use /sessions and /select again.",
+            );
+        }
+        if snapshot.registrations.len() == 1 {
+            let target = snapshot.registrations[0].key.clone();
+            return self.queue_route_or_reply(message, target, text);
+        }
+        self.reply(
+            message.chat_id,
+            "Telegram text is ambiguous. Use /sessions, /select-session, /agents, /select, or /to.",
+        )
+    }
+
+    /// Show the selected session/agent for `/where`.
+    fn where_text(&self, message: &TgMessage) -> String {
+        let selection = self.selection_for_message(Some(message));
+        let session = selection
+            .map(|selection| selection.session_id.as_str())
+            .map(short_id)
+            .unwrap_or_else(|| "none".to_owned());
+        let agent = selection
+            .and_then(|selection| selection.agent_id.as_deref())
+            .map(short_id)
+            .unwrap_or_else(|| "none".to_owned());
+        format!("Current Telegram gateway route:\nsession: {session}\nagent: {agent}")
+    }
+
+    /// Resolve selected or only live session for commands that can infer it.
+    fn selected_or_single_session(
+        &self,
+        message: &TgMessage,
+        snapshot: &GatewayRegistrySnapshot,
+    ) -> Result<String, String> {
+        if let Some(selection) = self.selection_for_message(Some(message)) {
+            let session_id = &selection.session_id;
+            if snapshot
+                .sessions
+                .iter()
+                .any(|session| &session.session_id == session_id)
+            {
+                return Ok(session_id.clone());
+            }
+            return Err("The selected session is no longer live. Use /sessions.".to_owned());
+        }
+        if snapshot.sessions.len() == 1 {
+            return Ok(snapshot.sessions[0].session_id.clone());
+        }
+        Err("Select a session first with /select-session.".to_owned())
+    }
+
+    /// Return current selection only if it belongs to this Telegram chat/user.
+    fn selection_for_message(&self, message: Option<&TgMessage>) -> Option<&GatewaySelectedRoute> {
+        let selection = self.durable.selected_route.as_ref()?;
+        if let Some(message) = message
+            && (selection.chat_id != message.chat_id || selection.user_id != message.user_id)
+        {
+            return None;
+        }
+        Some(selection)
+    }
+
+    /// Queue a routed prompt for the target sidecar or explain why it failed.
+    fn queue_route_or_reply(
+        &self,
+        message: &TgMessage,
+        target: GatewayRegistrationKey,
+        text: &str,
+    ) -> bool {
+        match self.socket_state.enqueue_delivery(&target, message, text) {
+            Ok(()) => true,
+            Err(error) => self.reply(message.chat_id, &error),
+        }
+    }
 }
 
 /// Durable private-chat link learned with `/start`.
@@ -577,6 +852,19 @@ struct GatewayLinkedChat {
     chat_id: i64,
     /// Allowlisted user that established the link.
     user_id: i64,
+}
+
+/// Durable Telegram-chat-scoped gateway route selection.
+#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+struct GatewaySelectedRoute {
+    /// Telegram chat id that owns this selection.
+    chat_id: i64,
+    /// Telegram user id that made this selection.
+    user_id: i64,
+    /// Selected Tau session id.
+    session_id: String,
+    /// Selected Tau agent id, once an agent is selected.
+    agent_id: Option<String>,
 }
 
 /// Durable gateway state scoped to one stream fingerprint.
@@ -595,6 +883,8 @@ struct GatewayDurableState {
     processed_update_count: u64,
     /// Number of updates rejected before side effects due to allowlist policy.
     rejected_update_count: u64,
+    /// Telegram-chat-scoped selected Tau route.
+    selected_route: Option<GatewaySelectedRoute>,
 }
 
 impl GatewayDurableState {
@@ -648,15 +938,28 @@ impl GatewayDurableState {
     /// Clear durable chat state that is invalid under the current runtime
     /// configuration.
     fn reconcile_with_config(&mut self, cfg: &RuntimeConfig) -> bool {
-        let Some(linked_chat) = self.linked_chat else {
-            return false;
-        };
-        if cfg.configured_chat_id.is_some() || !cfg.allowed_user_ids.contains(&linked_chat.user_id)
+        let mut changed = false;
+        if let Some(linked_chat) = self.linked_chat
+            && (cfg.configured_chat_id.is_some()
+                || !cfg.allowed_user_ids.contains(&linked_chat.user_id))
         {
             self.linked_chat = None;
-            return true;
+            changed = true;
         }
-        false
+        if let Some(selection) = &self.selected_route {
+            let selection_valid = cfg.allowed_user_ids.contains(&selection.user_id)
+                && match cfg.configured_chat_id {
+                    Some(chat_id) => selection.chat_id == chat_id,
+                    None => self.linked_chat.is_some_and(|link| {
+                        link.chat_id == selection.chat_id && link.user_id == selection.user_id
+                    }),
+                };
+            if !selection_valid {
+                self.selected_route = None;
+                changed = true;
+            }
+        }
+        changed
     }
 
     /// Return whether an update id was recently processed.
@@ -736,7 +1039,7 @@ impl GatewayStatus {
             oldest_registration_age_seconds: None,
             heartbeat_interval_seconds: SIDECAR_HEARTBEAT_INTERVAL.as_secs(),
             registration_lease_seconds: REGISTRATION_LEASE_DURATION.as_secs(),
-            routing: "help/status-only",
+            routing: "commands-enabled",
         }
     }
 }
@@ -753,6 +1056,8 @@ struct GatewaySocketState {
     next_connection_id: AtomicU64,
     /// Per-process generation that tells reconnecting sidecars to reannounce.
     generation: String,
+    /// Monotonic request id allocator for queued inbound prompt deliveries.
+    next_delivery_id: AtomicU64,
 }
 
 impl GatewaySocketState {
@@ -769,6 +1074,7 @@ impl GatewaySocketState {
             registry: Mutex::new(GatewayRegistry::default()),
             next_connection_id: AtomicU64::new(1),
             generation: gateway_generation(),
+            next_delivery_id: AtomicU64::new(1),
         }
     }
 
@@ -833,6 +1139,27 @@ impl GatewaySocketState {
             "routing": status.routing,
         })
     }
+
+    /// Return a stable snapshot of currently live sessions and agents.
+    fn registry_snapshot(&self) -> GatewayRegistrySnapshot {
+        let now = Instant::now();
+        let mut registry = self.registry.lock().expect("registry lock");
+        registry.prune_expired(now);
+        registry.snapshot()
+    }
+
+    /// Queue one inbound prompt delivery for a registered sidecar.
+    fn enqueue_delivery(
+        &self,
+        target: &GatewayRegistrationKey,
+        message: &TgMessage,
+        text: &str,
+    ) -> Result<(), String> {
+        let request_id = self.next_delivery_id.fetch_add(1, Ordering::Relaxed);
+        let mut registry = self.registry.lock().expect("registry lock");
+        registry.prune_expired(Instant::now());
+        registry.enqueue_delivery(target, message, text, request_id)
+    }
 }
 
 /// Live registry summary used by status responses.
@@ -848,12 +1175,35 @@ struct GatewayRegistryCounts {
 }
 
 /// Live sidecar registry keyed by accepted socket connection id.
-#[derive(Default)]
 struct GatewayRegistry {
     /// Connected sidecars and their last heartbeat time.
     sidecars: HashMap<u64, GatewaySidecar>,
     /// Registered agent routes owned by connected sidecars.
     registrations: HashMap<GatewayRegistrationKey, GatewayRegistration>,
+    /// Prompt deliveries waiting for each sidecar's next socket response.
+    pending_deliveries: HashMap<u64, Vec<GatewayDelivery>>,
+    /// Stable alias numbers assigned to live or previously-seen session ids.
+    session_aliases: HashMap<String, usize>,
+    /// Stable alias numbers assigned to live or previously-seen agent routes.
+    agent_aliases: HashMap<GatewayRegistrationKey, usize>,
+    /// Next session alias number to allocate.
+    next_session_alias: usize,
+    /// Next agent alias number to allocate.
+    next_agent_alias: usize,
+}
+
+impl Default for GatewayRegistry {
+    fn default() -> Self {
+        Self {
+            sidecars: HashMap::new(),
+            registrations: HashMap::new(),
+            pending_deliveries: HashMap::new(),
+            session_aliases: HashMap::new(),
+            agent_aliases: HashMap::new(),
+            next_session_alias: 1,
+            next_agent_alias: 1,
+        }
+    }
 }
 
 impl GatewayRegistry {
@@ -896,6 +1246,21 @@ impl GatewayRegistry {
             session_id,
             agent_id,
         };
+        if let Some(previous) = self.registrations.get(&key)
+            && previous.connection_id != connection_id
+        {
+            self.remove_pending_for_key(&key);
+        }
+        if !self.session_aliases.contains_key(&key.session_id) {
+            self.session_aliases
+                .insert(key.session_id.clone(), self.next_session_alias);
+            self.next_session_alias += 1;
+        }
+        if !self.agent_aliases.contains_key(&key) {
+            self.agent_aliases
+                .insert(key.clone(), self.next_agent_alias);
+            self.next_agent_alias += 1;
+        }
         self.registrations.insert(
             key,
             GatewayRegistration {
@@ -927,6 +1292,7 @@ impl GatewayRegistry {
             .is_some_and(|registration| registration.connection_id == connection_id)
         {
             self.registrations.remove(&key);
+            self.remove_pending_for_key(&key);
         }
         Ok(())
     }
@@ -934,8 +1300,116 @@ impl GatewayRegistry {
     /// Remove all routes owned by a disconnected sidecar.
     fn disconnect(&mut self, connection_id: u64) {
         self.sidecars.remove(&connection_id);
+        let removed_keys = self
+            .registrations
+            .iter()
+            .filter_map(|(key, registration)| {
+                (registration.connection_id == connection_id).then_some(key.clone())
+            })
+            .collect::<Vec<_>>();
         self.registrations
             .retain(|_, registration| registration.connection_id != connection_id);
+        self.pending_deliveries.remove(&connection_id);
+        for key in removed_keys {
+            self.remove_pending_for_key(&key);
+        }
+    }
+
+    /// Return a deterministic snapshot of the currently live registry.
+    fn snapshot(&self) -> GatewayRegistrySnapshot {
+        let mut registrations = self
+            .registrations
+            .iter()
+            .map(|(key, registration)| GatewayRegistrationSnapshot {
+                key: key.clone(),
+                display_name: registration.display_name.clone(),
+                alias: *self
+                    .agent_aliases
+                    .get(key)
+                    .expect("registered agent should have alias"),
+            })
+            .collect::<Vec<_>>();
+        registrations.sort_by(|a, b| {
+            a.key
+                .session_id
+                .cmp(&b.key.session_id)
+                .then_with(|| a.key.agent_id.cmp(&b.key.agent_id))
+        });
+        let mut sessions = Vec::<GatewaySessionSnapshot>::new();
+        for registration in &registrations {
+            match sessions
+                .iter_mut()
+                .find(|session| session.session_id == registration.key.session_id)
+            {
+                Some(session) => session.agent_count += 1,
+                None => sessions.push(GatewaySessionSnapshot {
+                    session_id: registration.key.session_id.clone(),
+                    alias: *self
+                        .session_aliases
+                        .get(&registration.key.session_id)
+                        .expect("registered session should have alias"),
+                    agent_count: 1,
+                }),
+            }
+        }
+        sessions.sort_by_key(|session| session.alias);
+        GatewayRegistrySnapshot {
+            sessions,
+            registrations,
+        }
+    }
+
+    /// Queue one prompt delivery for the sidecar that owns `target`.
+    fn enqueue_delivery(
+        &mut self,
+        target: &GatewayRegistrationKey,
+        message: &TgMessage,
+        text: &str,
+        request_id: u64,
+    ) -> Result<(), String> {
+        let registration = self
+            .registrations
+            .get(target)
+            .ok_or_else(|| "The selected Telegram gateway target is no longer live.".to_owned())?;
+        let pending = self
+            .pending_deliveries
+            .entry(registration.connection_id)
+            .or_default();
+        if pending.len() >= MAX_PENDING_DELIVERIES_PER_SIDECAR {
+            return Err(
+                "Telegram gateway delivery queue is full; wait for the sidecar heartbeat."
+                    .to_owned(),
+            );
+        }
+        let source = telegram_source_label(message);
+        let delivery = GatewayDelivery {
+            request_id: format!("telegram-{request_id}"),
+            session_id: target.session_id.clone(),
+            agent_id: target.agent_id.clone(),
+            source: source.clone(),
+            text: format!("[telegram from {source}] {text}"),
+            ctx_id: format!("telegram:{}:{}", message.chat_id, request_id),
+        };
+        pending.push(delivery);
+        Ok(())
+    }
+
+    /// Drain prompt deliveries queued for one sidecar connection.
+    fn take_deliveries(&mut self, connection_id: u64) -> Vec<GatewayDelivery> {
+        self.pending_deliveries
+            .remove(&connection_id)
+            .unwrap_or_default()
+    }
+
+    /// Remove queued deliveries for one route after ownership becomes stale.
+    fn remove_pending_for_key(&mut self, key: &GatewayRegistrationKey) {
+        for deliveries in self.pending_deliveries.values_mut() {
+            deliveries.retain(|delivery| {
+                delivery.session_id != key.session_id || delivery.agent_id != key.agent_id
+            });
+        }
+        self.pending_deliveries
+            .retain(|_, deliveries| !deliveries.is_empty());
     }
 
     /// Return live registry counts for a status response.
@@ -977,6 +1451,8 @@ impl GatewayRegistry {
         }
         self.registrations
             .retain(|_, registration| registration.expires_at > now);
+        self.pending_deliveries
+            .retain(|connection_id, _| self.sidecars.contains_key(connection_id));
     }
 }
 
@@ -1141,13 +1617,13 @@ fn handle_gateway_socket_request(
                 .hello(connection_id, Instant::now());
             state.status_response(true)
         }
-        "heartbeat" => registry_result(state, |registry| {
+        "heartbeat" => registry_result(state, connection_id, |registry| {
             registry.heartbeat(connection_id, Instant::now())
         }),
-        "register_agent" => registry_result(state, |registry| {
+        "register_agent" => registry_result(state, connection_id, |registry| {
             registry.register_agent(connection_id, request, Instant::now())
         }),
-        "unregister_agent" => registry_result(state, |registry| {
+        "unregister_agent" => registry_result(state, connection_id, |registry| {
             registry.unregister_agent(connection_id, request)
         }),
         "goodbye" => serde_json::json!({
@@ -1164,14 +1640,20 @@ fn handle_gateway_socket_request(
 }
 
 /// Execute a registry mutation and return a JSON result response.
-fn registry_result<F>(state: &GatewaySocketState, f: F) -> serde_json::Value
+fn registry_result<F>(state: &GatewaySocketState, connection_id: u64, f: F) -> serde_json::Value
 where
     F: FnOnce(&mut GatewayRegistry) -> Result<(), String>,
 {
-    let result = {
+    let (result, deliveries) = {
         let mut registry = state.registry.lock().expect("registry lock");
         registry.prune_expired(Instant::now());
-        f(&mut registry)
+        let result = f(&mut registry);
+        let deliveries = if result.is_ok() {
+            registry.take_deliveries(connection_id)
+        } else {
+            Vec::new()
+        };
+        (result, deliveries)
     };
     match result {
         Ok(()) => serde_json::json!({
@@ -1180,6 +1662,7 @@ where
             "heartbeat_interval_seconds": SIDECAR_HEARTBEAT_INTERVAL.as_secs(),
             "registration_lease_seconds": REGISTRATION_LEASE_DURATION.as_secs(),
             "gateway_generation": state.generation,
+            "deliveries": deliveries,
         }),
         Err(error) => serde_json::json!({
             "protocol_version": SOCKET_PROTOCOL_VERSION,
@@ -1372,12 +1855,7 @@ fn gateway_usage() -> String {
 
 /// Return help text sent to Telegram users.
 fn gateway_help_text() -> &'static str {
-    "Tau Telegram gateway MVP is running. Supported commands: /start, /help, /status. Prompt routing to Tau sessions/agents is not enabled in this slice yet."
-}
-
-/// Return text for non-command messages before routing exists.
-fn gateway_not_routing_text() -> &'static str {
-    "Telegram gateway MVP is online, but prompt routing is not implemented yet. Use /help or /status."
+    "Tau Telegram gateway is running. Commands: /sessions, /select-session <session>, /agents [session], /select <agent>, /to <session>/<agent> <message>, /to <agent> <message>, /where, /status, /help. Plain text routes only when the target is unambiguous."
 }
 
 /// Bound a Telegram reply to the MVP output limit.

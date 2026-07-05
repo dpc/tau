@@ -114,8 +114,10 @@ interval, registration lease duration, a per-process gateway generation, and a
 reannouncement hint so a sidecar can detect gateway restart and rebuild its
 registrations. The gateway prunes live registrations on unregister, goodbye,
 socket disconnect, protocol-error disconnect, heartbeat/lease expiry, and gateway
-restart; routing commands and the outbound `telegram_send` gateway path remain
-separate future slices.
+restart. Gateway routing commands now resolve aliases/id prefixes, maintain the
+current chat's selected session/agent, reject ambiguous plain text, and queue
+inbound prompt deliveries on sidecar responses; the outbound `telegram_send`
+gateway path remains a separate future slice.
 
 Security requirements for gateway mode:
 
@@ -136,11 +138,13 @@ Security requirements for gateway mode:
 - message sizes, command output, pending sidecar deliveries, and outbound send
   rate are bounded.
 
-Gateway offset state should become small and durable: stream identity hash, next
+Gateway offset state should remain small and durable: stream identity hash, next
 Telegram update offset or last processed update id, chat link/selection state,
-and optional recent update ids for duplicate suppression. Persisting after an
-update is handled can redeliver a message after crash; persisting before handling
-can lose it. Prefer possible duplicate delivery over silent loss.
+and optional recent update ids for duplicate suppression. The current gateway
+advances offsets after command handling and queues sidecar deliveries in bounded
+live memory, not in a durable ack protocol; a gateway exit after offset
+advancement but before sidecar drain can lose that queued prompt. A future durable
+delivery/ack slice should prefer possible duplicate delivery over silent loss.
 
 Legacy `std-telegram` local-poll mode remains valid for a single session or
 separate bot tokens. Gateway mode is the recommended path when one bot token is

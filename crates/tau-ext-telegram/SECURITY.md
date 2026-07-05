@@ -37,8 +37,9 @@
 - In-flight poll responses captured under an older configuration are discarded
   so old Telegram streams cannot advance offsets, mark backlog draining complete,
   send replies, or submit prompts after reconfiguration.
-- The standalone `tau-telegram-gateway` MVP is a stream owner and status daemon
-  only. It reads the bot token from an environment variable, shares the same
+- The standalone `tau-telegram-gateway` MVP is a stream owner, sidecar registry,
+  and command router. It reads the bot token from an environment variable, shares
+  the same
   stream lock and webhook/409 diagnostics, stores durable per-stream offset and
   duplicate-suppression state under a private state directory, and exposes only
   private same-UID local IPC. The socket supports one-shot `status` and
@@ -47,8 +48,16 @@
   disconnect, protocol-error disconnect, heartbeat expiry, or gateway restart
   reannouncement. The socket bounds request size but is same-UID local IPC, not a
   sandbox or DoS boundary against the user's own processes. It handles `/start`,
-  `/help`, and `/status`; it does not submit Telegram text to Tau sessions or
-  send outbound `telegram_send` messages through the gateway yet.
+  `/help`, `/status`, `/sessions`, `/agents`, `/select-session`, `/select`,
+  `/to`, and `/where`; session listings use aliases by default and route
+  selection requires unambiguous aliases or stable id prefixes. It queues inbound
+  prompt deliveries for registered sidecars in bounded live state, drops queued
+  deliveries when route ownership becomes stale, and scopes selected routes to
+  the Telegram chat/user that selected them. This queue is not a durable
+  acknowledgement protocol: if the gateway exits after advancing the Telegram
+  offset but before a sidecar drains its queued delivery, that prompt can be
+  lost. It does not send outbound `telegram_send` messages through the gateway
+  yet.
 - Gateway mode must continue to reject non-allowlisted Telegram users before any
   side effects. Without an explicit configured `chat_id`, group/supergroup chats
   must not be linked or replied to; only an allowlisted private chat may link

@@ -577,11 +577,13 @@ instances publish namespaced register/send tools instead of reusing the
 The same crate also ships the experimental `tau-telegram-gateway` daemon for the
 first single-token gateway slice. It owns polling and durable offsets for one bot
 token, enforces the Telegram allowlist, exposes private same-UID local IPC, and
-answers only `/start`, `/help`, and `/status` until gateway-client routing is
-implemented. The local socket supports one-shot `status` plus persistent
+supports `/start`, `/help`, `/status`, `/sessions`, `/agents`,
+`/select-session`, `/select`, `/to`, and `/where`. The local socket supports one-shot `status` plus persistent
 `hello`/`heartbeat`/`register_agent`/`unregister_agent`/`goodbye` messages for
 future sidecars; registrations are live leases pruned on unregister, goodbye,
-disconnect, heartbeat expiry, or gateway restart reannouncement.
+disconnect, heartbeat expiry, or gateway restart reannouncement. Inbound routed
+prompts use bounded live sidecar delivery queues; outbound gateway
+`telegram_send` remains future work.
 
 ### `std-slack` — personal Slack Socket Mode text bridge
 

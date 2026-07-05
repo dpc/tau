@@ -62,6 +62,7 @@ fn durable_state_round_trips_with_recent_updates() {
         recent_update_ids: Vec::new(),
         processed_update_count: 1,
         rejected_update_count: 0,
+        selected_route: None,
     };
     state.remember_update(42);
     state.save(&path).expect("save durable state");
@@ -89,7 +90,7 @@ fn unallowlisted_update_is_ignored_without_reply() {
 }
 
 /// Ensures /start links one allowlisted private chat and /status replies
-/// through the same chat before full routing is implemented.
+/// through the same active chat before routing commands run.
 #[test]
 fn start_links_private_chat_and_status_replies() {
     let mut fixture = GatewayFixture::new(None, [7]);
@@ -111,7 +112,7 @@ fn start_links_private_chat_and_status_replies() {
     );
     let sent = fixture.client.sent.lock().expect("sent lock");
     assert_eq!(sent.len(), 2);
-    assert!(sent[0].1.contains("MVP is running"));
+    assert!(sent[0].1.contains("gateway is running"));
     assert!(sent[1].1.contains("Tau Telegram gateway status"));
 }
 
@@ -333,7 +334,7 @@ fn local_socket_status_response_contains_core_fields() {
     assert_eq!(value["protocol_version"], SOCKET_PROTOCOL_VERSION);
     assert_eq!(value["stream_hash"], "test-stream");
     assert_eq!(value["next_update_offset"], 42);
-    assert_eq!(value["routing"], "help/status-only");
+    assert_eq!(value["routing"], "commands-enabled");
 }
 
 /// Ensures sidecar hello advertises that clients must reannounce their live
@@ -517,6 +518,355 @@ fn sidecar_goodbye_disconnect_prunes_registered_routes() {
     assert_eq!(state.registry_counts().registrations, 0);
 }
 
+/// Ensures `/sessions` lists gateway-local aliases rather than full Tau
+/// session ids, preserving session privacy while still enabling selection.
+#[test]
+fn routing_sessions_lists_aliases_without_full_session_ids() {
+    let mut fixture = GatewayFixture::new(Some(10), [7]);
+    fixture.register_route(1, "session-secret-alpha", "agent-a");
+    fixture.register_route(2, "session-secret-beta", "agent-b");
+
+    fixture
+        .gateway
+        .process_update(update(20, message(7, 10, "/sessions")))
+        .expect("process sessions command");
+
+    let sent = fixture.client.sent.lock().expect("sent lock");
+    assert_eq!(sent.len(), 1);
+    assert!(sent[0].1.contains("s1"));
+    assert!(sent[0].1.contains("s2"));
+    assert!(!sent[0].1.contains("session-secret-alpha"));
+    assert!(!sent[0].1.contains("session-secret-beta"));
+}
+
+/// Ensures explicit selection by safe session/agent aliases allows later plain
+/// Telegram text to be queued for the owning sidecar without an ambiguity
+/// reply.
+#[test]
+fn routing_selection_queues_plain_text_delivery() {
+    let mut fixture = GatewayFixture::new(Some(10), [7]);
+    fixture.register_route(1, "session-alpha", "agent-alpha");
+
+    fixture
+        .gateway
+        .process_update(update(21, message(7, 10, "/select-session s1")))
+        .expect("select session");
+    fixture
+        .gateway
+        .process_update(update(22, message(7, 10, "/select a1")))
+        .expect("select agent");
+    fixture
+        .gateway
+        .process_update(update(23, message(7, 10, "hello from telegram")))
+        .expect("route plain text");
+
+    let deliveries = fixture.take_deliveries(1);
+    assert_eq!(deliveries.len(), 1);
+    assert_eq!(deliveries[0].session_id, "session-alpha");
+    assert_eq!(deliveries[0].agent_id, "agent-alpha");
+    assert!(deliveries[0].text.contains("[telegram from tester]"));
+    assert!(deliveries[0].text.contains("hello from telegram"));
+}
+
+/// Ensures ambiguous plain text is rejected with a Telegram reply instead of
+/// being guessed across multiple live gateway registrations.
+#[test]
+fn routing_plain_text_requires_unambiguous_target() {
+    let mut fixture = GatewayFixture::new(Some(10), [7]);
+    fixture.register_route(1, "session-alpha", "agent-alpha");
+    fixture.register_route(2, "session-beta", "agent-beta");
+
+    fixture
+        .gateway
+        .process_update(update(24, message(7, 10, "ambiguous")))
+        .expect("process ambiguous text");
+
+    assert!(fixture.take_deliveries(1).is_empty());
+    assert!(fixture.take_deliveries(2).is_empty());
+    let sent = fixture.client.sent.lock().expect("sent lock");
+    assert!(sent[0].1.contains("ambiguous"));
+}
+
+/// Ensures a route selected by one Telegram user/chat is not reused by another
+/// configured-chat user, preventing cross-user target inheritance.
+#[test]
+fn routing_selection_is_scoped_to_chat_user() {
+    let mut fixture = GatewayFixture::new(Some(10), [7, 8]);
+    fixture.register_route(1, "session-alpha", "agent-alpha");
+    fixture.register_route(2, "session-beta", "agent-beta");
+    fixture
+        .gateway
+        .process_update(update(25, message(7, 10, "/select-session s1")))
+        .expect("select session");
+    fixture
+        .gateway
+        .process_update(update(26, message(7, 10, "/select a1")))
+        .expect("select agent");
+
+    fixture
+        .gateway
+        .process_update(update(27, message(8, 10, "do not inherit")))
+        .expect("route other user text");
+
+    assert!(fixture.take_deliveries(1).is_empty());
+    assert!(fixture.take_deliveries(2).is_empty());
+    let sent = fixture.client.sent.lock().expect("sent lock");
+    assert!(sent.iter().any(|(_, text)| text.contains("ambiguous")));
+}
+
+/// Ensures live aliases remain bound to their originally listed routes when
+/// other sessions churn, instead of being recomputed by snapshot position.
+#[test]
+fn routing_session_aliases_survive_registry_churn() {
+    let mut fixture = GatewayFixture::new(Some(10), [7]);
+    fixture.register_route(1, "session-alpha", "agent-alpha");
+    fixture.register_route(2, "session-beta", "agent-beta");
+    fixture.unregister_route(1, "session-alpha", "agent-alpha");
+
+    fixture
+        .gateway
+        .process_update(update(28, message(7, 10, "/select-session s1")))
+        .expect("select stale alias");
+    fixture
+        .gateway
+        .process_update(update(29, message(7, 10, "/select-session s2")))
+        .expect("select live alias");
+
+    let sent = fixture.client.sent.lock().expect("sent lock");
+    assert!(
+        sent.iter()
+            .any(|(_, text)| text.contains("Unknown session alias"))
+    );
+    assert!(sent.iter().any(|(_, text)| text.contains("Selected")));
+}
+
+/// Ensures pending deliveries are removed if a route unregisters before the
+/// sidecar drains them, so stale prompts are not delivered after ownership
+/// loss.
+#[test]
+fn routing_unregister_drops_pending_delivery() {
+    let mut fixture = GatewayFixture::new(Some(10), [7]);
+    fixture.register_route(1, "session-alpha", "agent-alpha");
+    fixture
+        .gateway
+        .process_update(update(30, message(7, 10, "queued")))
+        .expect("queue route");
+
+    fixture.unregister_route(1, "session-alpha", "agent-alpha");
+
+    assert!(fixture.take_deliveries(1).is_empty());
+}
+
+/// Ensures a sidecar cannot accumulate an unbounded inbound delivery queue.
+#[test]
+fn routing_pending_delivery_queue_is_bounded() {
+    let mut fixture = GatewayFixture::new(Some(10), [7]);
+    fixture.register_route(1, "session-alpha", "agent-alpha");
+    for update_id in 31..(31 + MAX_PENDING_DELIVERIES_PER_SIDECAR as i64) {
+        fixture
+            .gateway
+            .process_update(update(update_id, message(7, 10, "queued")))
+            .expect("queue route");
+    }
+    fixture
+        .gateway
+        .process_update(update(99, message(7, 10, "overflow")))
+        .expect("overflow route");
+
+    let deliveries = fixture.take_deliveries(1);
+    assert_eq!(deliveries.len(), MAX_PENDING_DELIVERIES_PER_SIDECAR);
+    let sent = fixture.client.sent.lock().expect("sent lock");
+    assert!(sent.iter().any(|(_, text)| text.contains("queue is full")));
+}
+
+/// Ensures queued prompt deliveries are exposed through the persistent sidecar
+/// socket response shape and drained after one successful response.
+#[test]
+fn sidecar_heartbeat_drains_queued_delivery_response() {
+    let mut fixture = GatewayFixture::new(Some(10), [7]);
+    fixture.register_route(1, "session-alpha", "agent-alpha");
+    fixture
+        .gateway
+        .process_update(update(100, message(7, 10, "queued")))
+        .expect("queue route");
+
+    let response = handle_gateway_socket_request(
+        &fixture.gateway.socket_state,
+        1,
+        GatewaySocketRequest {
+            kind: "heartbeat".to_owned(),
+            ..GatewaySocketRequest::default()
+        },
+    );
+    let deliveries = response["deliveries"].as_array().expect("deliveries array");
+    assert_eq!(deliveries.len(), 1);
+    assert_eq!(deliveries[0]["session_id"], "session-alpha");
+    assert_eq!(deliveries[0]["agent_id"], "agent-alpha");
+
+    let drained = handle_gateway_socket_request(
+        &fixture.gateway.socket_state,
+        1,
+        GatewaySocketRequest {
+            kind: "heartbeat".to_owned(),
+            ..GatewaySocketRequest::default()
+        },
+    );
+    assert_eq!(
+        drained["deliveries"]
+            .as_array()
+            .expect("deliveries array")
+            .len(),
+        0
+    );
+}
+
+/// Ensures `/agents [session]` renders live agent aliases in the requested
+/// session without requiring it to be selected first.
+#[test]
+fn routing_agents_command_accepts_session_argument() {
+    let mut fixture = GatewayFixture::new(Some(10), [7]);
+    fixture.register_route(1, "session-alpha-long", "agent-alpha-long");
+
+    fixture
+        .gateway
+        .process_update(update(101, message(7, 10, "/agents session-alpha")))
+        .expect("agents command");
+
+    let sent = fixture.client.sent.lock().expect("sent lock");
+    assert!(sent[0].1.contains("a1"));
+    assert!(sent[0].1.contains("agent-alpha"));
+}
+
+/// Ensures `/where` reports the selected route after session and agent
+/// selection.
+#[test]
+fn routing_where_reports_selected_route() {
+    let mut fixture = GatewayFixture::new(Some(10), [7]);
+    fixture.register_route(1, "session-alpha-long", "agent-alpha-long");
+    fixture
+        .gateway
+        .process_update(update(102, message(7, 10, "/select-session s1")))
+        .expect("select session");
+    fixture
+        .gateway
+        .process_update(update(103, message(7, 10, "/select a1")))
+        .expect("select agent");
+    fixture
+        .gateway
+        .process_update(update(104, message(7, 10, "/where")))
+        .expect("where command");
+
+    let sent = fixture.client.sent.lock().expect("sent lock");
+    assert!(sent.iter().any(|(_, text)| text.contains("session-alph")));
+    assert!(sent.iter().any(|(_, text)| text.contains("agent-alpha")));
+}
+
+/// Ensures `/to <session>/<agent> <message>` queues a delivery using explicit
+/// session and agent selectors.
+#[test]
+fn routing_to_explicit_session_agent_queues_delivery() {
+    let mut fixture = GatewayFixture::new(Some(10), [7]);
+    fixture.register_route(1, "session-alpha-long", "agent-alpha-long");
+
+    fixture
+        .gateway
+        .process_update(update(
+            105,
+            message(7, 10, "/to session-alpha/agent-alpha explicit"),
+        ))
+        .expect("explicit to route");
+
+    let deliveries = fixture.take_deliveries(1);
+    assert_eq!(deliveries.len(), 1);
+    assert!(deliveries[0].text.contains("explicit"));
+}
+
+/// Ensures `/to <agent> <message>` resolves the agent within the selected
+/// session.
+#[test]
+fn routing_to_selected_session_agent_queues_delivery() {
+    let mut fixture = GatewayFixture::new(Some(10), [7]);
+    fixture.register_route(1, "session-alpha-long", "agent-alpha-long");
+    fixture
+        .gateway
+        .process_update(update(106, message(7, 10, "/select-session s1")))
+        .expect("select session");
+
+    fixture
+        .gateway
+        .process_update(update(107, message(7, 10, "/to agent-alpha selected")))
+        .expect("selected to route");
+
+    let deliveries = fixture.take_deliveries(1);
+    assert_eq!(deliveries.len(), 1);
+    assert!(deliveries[0].text.contains("selected"));
+}
+
+/// Ensures stable id prefixes route only when unambiguous and produce an
+/// ambiguity reply otherwise.
+#[test]
+fn routing_stable_prefixes_must_be_unambiguous() {
+    let mut fixture = GatewayFixture::new(Some(10), [7]);
+    fixture.register_route(1, "session-alpha-one", "agent-alpha-one");
+    fixture.register_route(1, "session-alpha-one", "agent-alpha-uno");
+    fixture.register_route(2, "session-alpha-two", "agent-alpha-two");
+
+    fixture
+        .gateway
+        .process_update(update(108, message(7, 10, "/select-session session-alpha")))
+        .expect("ambiguous session prefix");
+    fixture
+        .gateway
+        .process_update(update(
+            109,
+            message(7, 10, "/select-session session-alpha-o"),
+        ))
+        .expect("unambiguous session prefix");
+    fixture
+        .gateway
+        .process_update(update(110, message(7, 10, "/select agent-alpha")))
+        .expect("ambiguous agent prefix");
+    fixture
+        .gateway
+        .process_update(update(111, message(7, 10, "/select agent-alpha-on")))
+        .expect("unambiguous agent prefix");
+
+    let sent = fixture.client.sent.lock().expect("sent lock");
+    assert!(
+        sent.iter()
+            .any(|(_, text)| text.contains("Session selector is ambiguous"))
+    );
+    assert!(
+        sent.iter()
+            .any(|(_, text)| text.contains("Agent selector is ambiguous"))
+    );
+    assert!(
+        sent.iter()
+            .any(|(_, text)| text.contains("Selected Telegram gateway agent"))
+    );
+}
+
+/// Ensures Telegram source labels in queued deliveries are bounded and stripped
+/// of control characters before being reflected in prompt text.
+#[test]
+fn routing_source_labels_are_sanitized() {
+    let mut fixture = GatewayFixture::new(Some(10), [7]);
+    fixture.register_route(1, "session-alpha", "agent-alpha");
+    let mut incoming = message(7, 10, "sanitize");
+    incoming.from_name = Some(format!("bad\nname{}", "x".repeat(100)));
+
+    fixture
+        .gateway
+        .process_update(update(112, incoming))
+        .expect("route sanitized source");
+
+    let deliveries = fixture.take_deliveries(1);
+    assert_eq!(deliveries.len(), 1);
+    assert!(!deliveries[0].source.contains('\n'));
+    assert!(deliveries[0].source.len() <= 80);
+    assert!(deliveries[0].text.contains("[telegram from badname"));
+}
+
 /// Fake Telegram client state captured by gateway tests.
 #[derive(Default)]
 struct FakeGatewayClient {
@@ -614,6 +964,50 @@ impl GatewayFixture {
             client,
             _tempdir: tempdir,
         }
+    }
+
+    /// Register one live route owned by a fake sidecar connection.
+    fn register_route(&self, connection_id: u64, session_id: &str, agent_id: &str) {
+        let mut registry = self
+            .gateway
+            .socket_state
+            .registry
+            .lock()
+            .expect("registry lock");
+        let now = Instant::now();
+        registry.hello(connection_id, now);
+        registry
+            .register_agent(connection_id, register_request(session_id, agent_id), now)
+            .expect("register test route");
+    }
+
+    /// Unregister one fake sidecar-owned route.
+    fn unregister_route(&self, connection_id: u64, session_id: &str, agent_id: &str) {
+        self.gateway
+            .socket_state
+            .registry
+            .lock()
+            .expect("registry lock")
+            .unregister_agent(
+                connection_id,
+                GatewaySocketRequest {
+                    kind: "unregister_agent".to_owned(),
+                    session_id: Some(session_id.to_owned()),
+                    agent_id: Some(agent_id.to_owned()),
+                    ..GatewaySocketRequest::default()
+                },
+            )
+            .expect("unregister test route");
+    }
+
+    /// Drain queued deliveries for a fake sidecar connection.
+    fn take_deliveries(&self, connection_id: u64) -> Vec<GatewayDelivery> {
+        self.gateway
+            .socket_state
+            .registry
+            .lock()
+            .expect("registry lock")
+            .take_deliveries(connection_id)
     }
 }
 
