@@ -123,13 +123,15 @@ Optional flags include `--bot-token-env`, `--chat-id`, `--api-base`,
 same-UID local socket accepts a one-shot JSON-line
 `{"protocol_version":1,"kind":"status"}` request and returns a status snapshot.
 It also accepts persistent sidecar requests: `hello`, `heartbeat`,
-`register_agent`, `unregister_agent`, and `goodbye`. The gateway treats
-registrations as live leases, refreshes them on heartbeat, removes them on
+`register_agent`, `unregister_agent`, `send_message`, and `goodbye`. The gateway
+treats registrations as live leases, refreshes them on heartbeat, removes them on
 explicit unregister/goodbye or socket disconnect, and prunes them on lease expiry.
 `hello`/status responses include a gateway generation and reannouncement hint so
 sidecars reconnecting after a gateway restart know to re-send their current
 registrations. Heartbeat/register responses can include queued inbound prompt
-deliveries for the sidecar to submit to its local Tau harness.
+deliveries for the sidecar to submit to its local Tau harness. `send_message`
+responses report bounded operation errors without accepting any Telegram
+destination from the sidecar.
 
 The normal sidecar can run in no-poll gateway-client mode:
 
@@ -144,6 +146,7 @@ token, allowlist, chat policy, polling, and update offset. The sidecar still
 publishes the same `telegram_register`/`telegram_send` tool names (or the
 configured namespace), tracks the local session and registered agents, registers
 live `(session_id, agent_id)` routes with the gateway, and submits queued inbound
-deliveries locally as `extension.prompt_submit_request`. Outbound `telegram_send`
-through the gateway remains out of scope for this slice and currently returns a
-tool error in gateway-client mode.
+deliveries locally as `extension.prompt_submit_request`. Outbound
+`telegram_send` goes back through the gateway, which checks that the calling
+agent is still registered and sends to the configured or linked active Telegram
+chat without accepting a model-supplied destination.

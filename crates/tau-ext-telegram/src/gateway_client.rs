@@ -83,6 +83,7 @@ impl GatewayClient {
             GatewayClientRequest {
                 session_id: Some(session_id.to_owned()),
                 agent_id: Some(agent_id.to_owned()),
+                message: None,
                 display_name,
                 tool_namespace: Some(tool_namespace.to_owned()),
             },
@@ -100,6 +101,26 @@ impl GatewayClient {
             GatewayClientRequest {
                 session_id: Some(session_id.to_owned()),
                 agent_id: Some(agent_id.to_owned()),
+                message: None,
+                display_name: None,
+                tool_namespace: None,
+            },
+        )
+    }
+
+    /// Send one outbound Telegram message through the gateway.
+    pub(crate) fn send_message(
+        &self,
+        session_id: &str,
+        agent_id: &str,
+        message: &str,
+    ) -> Result<GatewaySocketResponse, String> {
+        self.request(
+            GatewayRequestKind::SendMessage,
+            GatewayClientRequest {
+                session_id: Some(session_id.to_owned()),
+                agent_id: Some(agent_id.to_owned()),
+                message: Some(message.to_owned()),
                 display_name: None,
                 tool_namespace: None,
             },
@@ -127,6 +148,7 @@ impl GatewayClient {
             kind: kind.as_str(),
             session_id: request.session_id,
             agent_id: request.agent_id,
+            message: request.message,
             display_name: request.display_name,
             tool_namespace: request.tool_namespace,
         };
@@ -186,6 +208,8 @@ enum GatewayRequestKind {
     RegisterAgent,
     /// Unregister one agent route.
     UnregisterAgent,
+    /// Send one Telegram message from a registered agent.
+    SendMessage,
     /// Close this sidecar connection.
     Goodbye,
 }
@@ -198,6 +222,7 @@ impl GatewayRequestKind {
             Self::Heartbeat => "heartbeat",
             Self::RegisterAgent => "register_agent",
             Self::UnregisterAgent => "unregister_agent",
+            Self::SendMessage => "send_message",
             Self::Goodbye => "goodbye",
         }
     }
@@ -210,6 +235,8 @@ struct GatewayClientRequest {
     session_id: Option<String>,
     /// Optional Tau agent id.
     agent_id: Option<String>,
+    /// Optional outbound Telegram message body.
+    message: Option<String>,
     /// Optional display name metadata.
     display_name: Option<String>,
     /// Optional tool namespace metadata.
@@ -229,6 +256,9 @@ struct GatewayWireRequest<'a> {
     /// Optional Tau agent id.
     #[serde(skip_serializing_if = "Option::is_none")]
     agent_id: Option<String>,
+    /// Optional outbound Telegram message body.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    message: Option<String>,
     /// Optional display name metadata.
     #[serde(skip_serializing_if = "Option::is_none")]
     display_name: Option<String>,

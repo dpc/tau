@@ -589,13 +589,14 @@ token, enforces the Telegram allowlist, exposes private same-UID local IPC, and
 supports `/start`, `/help`, `/status`, `/sessions`, `/agents`,
 `/select-session`, `/select`, `/to`, and `/where`. The local socket supports
 one-shot `status` plus persistent
-`hello`/`heartbeat`/`register_agent`/`unregister_agent`/`goodbye` messages for
-sidecars; registrations are live leases pruned on unregister, goodbye,
+`hello`/`heartbeat`/`register_agent`/`unregister_agent`/`send_message`/`goodbye`
+messages for sidecars; registrations are live leases pruned on unregister, goodbye,
 disconnect, heartbeat expiry, or gateway restart reannouncement. The
 `std-telegram` sidecar can run with `mode: gateway_client` and
 `gateway_socket_path` to avoid polling, register local session/agent routes with
-the gateway, and submit inbound routed prompts locally. Outbound gateway
-`telegram_send` remains future work and fails closed in gateway-client mode.
+the gateway, submit inbound routed prompts locally, and forward outbound
+`telegram_send` requests back to the gateway without any model-supplied
+destination.
 
 ### `std-slack` — personal Slack Socket Mode text bridge
 

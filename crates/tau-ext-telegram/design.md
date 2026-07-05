@@ -91,15 +91,15 @@ validating the loaded agent and recording normal `agent.prompt_submitted` facts.
 The gateway and sidecar must not forge transcript prompt facts directly or route
 Telegram prompts through `external_agent_message`.
 
-Outbound replies keep the current safety invariant but are not implemented in
-the current gateway-client slice. Today `telegram_send` in gateway-client mode
-verifies that the caller is registered and then fails closed; the separate
-outbound-send slice will add forwarding to the gateway. That future path should
-accept message text only, map the registered agent to a configured or selected
-Telegram reply context in the gateway, and call `sendMessage`. The model must
-never supply an arbitrary Telegram `chat_id`. If future multi-chat support is
-added, destinations should be gateway-minted conversation contexts selected by
-routing policy, not raw chat ids chosen by the model.
+Outbound replies keep the current safety invariant: `telegram_send` in
+gateway-client mode accepts message text only, verifies that the caller is a
+registered local agent, forwards `send_message` to the gateway, and the gateway
+checks that the sidecar owns the live `(session_id, agent_id)` registration
+before calling Telegram `sendMessage`. The gateway sends to its configured or
+linked active Telegram chat; the model must never supply an arbitrary Telegram
+`chat_id`. If future multi-chat support is added, destinations should be
+gateway-minted conversation contexts selected by routing policy, not raw chat ids
+chosen by the model.
 
 The gateway registry is authoritative but live-only: sidecar connection id,
 `session_id`, `agent_id`, display name, optional safe session label, tool
@@ -109,16 +109,18 @@ shutdown, agent unload, or explicit unregister. Reconnecting sidecars must
 re-announce their current session and registered agents after gateway restart.
 
 The implemented gateway socket slice currently supports one-shot `status` and
-persistent `hello`, `heartbeat`, `register_agent`, `unregister_agent`, and
-`goodbye` JSON-line requests. `hello` and status responses advertise heartbeat
-interval, registration lease duration, a per-process gateway generation, and a
-reannouncement hint so a sidecar can detect gateway restart and rebuild its
-registrations. The gateway prunes live registrations on unregister, goodbye,
-socket disconnect, protocol-error disconnect, heartbeat/lease expiry, and gateway
-restart. Gateway routing commands now resolve aliases/id prefixes, maintain the
-current chat's selected session/agent, reject ambiguous plain text, and queue
-inbound prompt deliveries on sidecar responses; the outbound `telegram_send`
-gateway path remains a separate future slice.
+persistent `hello`, `heartbeat`, `register_agent`, `unregister_agent`,
+`send_message`, and `goodbye` JSON-line requests. `hello` and status responses
+advertise heartbeat interval, registration lease duration, a per-process gateway
+generation, and a reannouncement hint so a sidecar can detect gateway restart and
+rebuild its registrations. The gateway prunes live registrations on unregister,
+goodbye, socket disconnect, protocol-error disconnect, heartbeat/lease expiry,
+and gateway restart. Gateway routing commands now resolve aliases/id prefixes,
+maintain the current chat's selected session/agent, reject ambiguous plain text,
+and queue inbound prompt deliveries on sidecar responses. Outbound
+`telegram_send` uses the same persistent socket as `send_message`: the gateway
+checks sidecar route ownership, applies a bounded outbound send rate limit, and
+sends to the configured or linked active Telegram chat.
 
 Security requirements for gateway mode:
 

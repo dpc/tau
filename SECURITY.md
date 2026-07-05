@@ -245,16 +245,17 @@ token, shares the same stream lock/webhook/409 safeguards, and exposes only
 private same-UID local IPC. It handles `/start`, `/help`, `/status`, `/sessions`,
 `/agents`, `/select-session`, `/select`, `/to`, and `/where`. Its socket supports
 one-shot `status` and persistent sidecar
-`hello`/`heartbeat`/`register_agent`/`unregister_agent`/`goodbye`; registrations
-are live leases pruned on unregister, goodbye, disconnect, protocol-error
+`hello`/`heartbeat`/`register_agent`/`unregister_agent`/`send_message`/`goodbye`;
+registrations are live leases pruned on unregister, goodbye, disconnect, protocol-error
 disconnect, heartbeat expiry, or gateway restart reannouncement. Selected routes
 are scoped to the Telegram chat/user that selected them. Routed prompts are
 queued in bounded live sidecar delivery state, not a durable ack protocol; a
 gateway exit after offset advancement but before sidecar drain can lose that
-delivery. Outbound `telegram_send` through the gateway remains future work. In
-gateway mode, non-allowlisted users are ignored before side effects, and
-unconfigured group/supergroup chats must not be linked or
-replied to.
+delivery. Outbound `telegram_send` in gateway-client mode is forwarded as
+`send_message`; the gateway checks live route ownership, applies a bounded
+outbound send rate limit, and sends only to its configured or linked active chat.
+In gateway mode, non-allowlisted users are ignored before side effects, and
+unconfigured group/supergroup chats must not be linked or replied to.
 
 ## XMPP extension
 

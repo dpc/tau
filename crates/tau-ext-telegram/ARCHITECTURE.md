@@ -80,11 +80,13 @@ Without a fixed `chat_id`, only one allowlisted private chat can link with
 `/start`; unconfigured group/supergroup chats are ignored rather than linked or
 replied to. The local socket accepts a one-shot versioned JSON-line `status`
 request and persistent sidecar `hello`, `heartbeat`, `register_agent`,
-`unregister_agent`, and `goodbye` requests up to a small fixed byte limit. It
-returns bounded status snapshots, sidecar lease parameters, and queued inbound
-prompt deliveries on sidecar responses. Sidecar registrations are live-only leases:
-they are removed on explicit unregister, goodbye, socket disconnect, heartbeat
-expiry, or gateway restart/reannouncement. Pending deliveries are bounded per
+`unregister_agent`, `send_message`, and `goodbye` requests up to a small fixed
+byte limit. It returns bounded status snapshots, sidecar lease parameters, and
+queued inbound prompt deliveries on sidecar responses; `send_message` returns
+bounded operation errors while keeping Telegram destination selection inside the
+gateway. Sidecar registrations are live-only leases: they are removed on explicit
+unregister, goodbye, socket disconnect, heartbeat expiry, or gateway
+restart/reannouncement. Pending deliveries are bounded per
 sidecar and are dropped if their route unregisters, transfers ownership,
 disconnects, or expires before the sidecar drains them. The socket is private
 same-UID local IPC, not an authentication boundary; this MVP bounds request size
@@ -100,8 +102,9 @@ session/agent lifecycle facts, sends `hello` and persistent
 emits gateway-delivered inbound text as `extension.prompt_submit_request` to its
 own harness. It does not acquire the stream lock, check webhooks, or call
 Telegram `getUpdates`; those remain solely in the gateway daemon. Outbound
-`telegram_send` over the gateway is intentionally left for the outbound-send
-slice and currently fails closed in gateway-client mode.
+`telegram_send` is forwarded over the same socket as `send_message`; the gateway
+verifies the sidecar-owned live registration and sends only to its configured or
+linked active chat, never to a model-supplied destination.
 
 On the idle-to-active transition for the first registered agent, after acquiring
 the local lock and before reporting registration success, the extension calls
@@ -168,6 +171,6 @@ unregister pruning, gateway restart reannouncement hints, command routing,
 chat/user-scoped selections, stable alias churn, bounded/stale delivery queues,
 socket delivery response shape, and CLI/env parsing. Gateway-client sidecar
 tests use fake Unix sockets and in-memory harness channels to cover no-poll
-registration, inbound prompt submission, fail-closed outbound send behavior, and
-stale-delivery filtering. Future outbound-send tests should keep using fake
-gateway clients rather than live Telegram.
+registration, inbound prompt submission, gateway-client outbound send forwarding,
+and stale-delivery filtering. Outbound-send tests use fake gateway clients rather
+than live Telegram.

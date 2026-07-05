@@ -55,6 +55,7 @@ const LEGACY_INSTANCE_NAME: &str = "std-telegram";
 const DEFAULT_API_BASE: &str = "https://api.telegram.org";
 const DEFAULT_POLL_TIMEOUT_SECONDS: u64 = 25;
 const HTTP_TIMEOUT: Duration = Duration::from_secs(35);
+const MAX_GATEWAY_OUTBOUND_MESSAGE_BYTES: usize = 3500;
 
 /// Run the Telegram extension over stdio.
 pub fn run_stdio() -> Result<(), Box<dyn Error>> {
@@ -1053,52 +1054,71 @@ impl Extension {
         if message.trim().is_empty() {
             return tool_error(invoke, "`message` must not be empty".to_owned());
         }
-        if self.gateway_client().is_some() {
-            let state = self.state.lock();
-            if !state.registered_agents.contains(&invoke.agent_id) {
+        if let Some(gateway) = self.gateway_client() {
+            if message.len() > MAX_GATEWAY_OUTBOUND_MESSAGE_BYTES {
                 return tool_error(
                     invoke,
-                    format!(
-                        "{} requires {}(enabled: true) first",
-                        self.tool_names.send, self.tool_names.register
-                    ),
+                    "`message` is too large for telegram gateway send".to_owned(),
                 );
             }
-            return tool_error(
-                invoke,
-                "telegram_send through the gateway is not implemented yet".to_owned(),
-            );
-        }
-        let (cfg, chat_id) = {
-            let state = self.state.lock();
-            if !state.registered_agents.contains(&invoke.agent_id) {
-                return tool_error(
-                    invoke,
-                    format!(
-                        "{} requires {}(enabled: true) first",
-                        self.tool_names.send, self.tool_names.register
-                    ),
-                );
+            let session_id = {
+                let state = self.state.lock();
+                if !state.registered_agents.contains(&invoke.agent_id) {
+                    return tool_error(
+                        invoke,
+                        format!(
+                            "{} requires {}(enabled: true) first",
+                            self.tool_names.send, self.tool_names.register
+                        ),
+                    );
+                }
+                let Some(session_id) = state.current_session_id.clone() else {
+                    return tool_error(
+                        invoke,
+                        "telegram gateway client has not observed session.started yet".to_owned(),
+                    );
+                };
+                session_id
+            };
+            match gateway.send_message(session_id.as_ref(), invoke.agent_id.as_ref(), &message) {
+                Ok(response) => {
+                    self.apply_gateway_response(response);
+                    tool_result(invoke, "sent Telegram message through gateway")
+                }
+                Err(message) => tool_error(invoke, message),
             }
-            let Some(cfg) = state.config.clone() else {
-                return tool_error(invoke, "telegram extension is not configured".to_owned());
+        } else {
+            let (cfg, chat_id) = {
+                let state = self.state.lock();
+                if !state.registered_agents.contains(&invoke.agent_id) {
+                    return tool_error(
+                        invoke,
+                        format!(
+                            "{} requires {}(enabled: true) first",
+                            self.tool_names.send, self.tool_names.register
+                        ),
+                    );
+                }
+                let Some(cfg) = state.config.clone() else {
+                    return tool_error(invoke, "telegram extension is not configured".to_owned());
+                };
+                let Some(chat_id) = cfg
+                    .configured_chat_id
+                    .or_else(|| state.learned_chat.map(|chat| chat.chat_id))
+                else {
+                    return tool_error(
+                        invoke,
+                        "telegram chat is not linked; send /start to the bot or configure chat_id"
+                            .to_owned(),
+                    );
+                };
+                (cfg, chat_id)
             };
-            let Some(chat_id) = cfg
-                .configured_chat_id
-                .or_else(|| state.learned_chat.map(|chat| chat.chat_id))
-            else {
-                return tool_error(
-                    invoke,
-                    "telegram chat is not linked; send /start to the bot or configure chat_id"
-                        .to_owned(),
-                );
-            };
-            (cfg, chat_id)
-        };
-        let text = format!("[{}] {message}", invoke.agent_id.as_ref());
-        match self.client.send_message(&cfg, chat_id, &text) {
-            Ok(()) => tool_result(invoke, "sent Telegram message"),
-            Err(message) => tool_error(invoke, message),
+            let text = format!("[{}] {message}", invoke.agent_id.as_ref());
+            match self.client.send_message(&cfg, chat_id, &text) {
+                Ok(()) => tool_result(invoke, "sent Telegram message"),
+                Err(message) => tool_error(invoke, message),
+            }
         }
     }
 

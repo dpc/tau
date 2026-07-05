@@ -459,22 +459,21 @@ fn gateway_client_registers_without_polling_and_submits_delivery() {
         let (mut stream, _) = listener.accept().expect("accept gateway client");
         let reader = stream.try_clone().expect("clone stream");
         let mut reader = std::io::BufReader::new(reader);
-        for index in 0..2 {
+        for index in 0..3 {
             let mut line = String::new();
             reader.read_line(&mut line).expect("read gateway request");
             let request: serde_json::Value =
                 serde_json::from_str(&line).expect("gateway request JSON");
             seen_requests_thread.lock().expect("requests").push(request);
-            let response = if index == 0 {
-                serde_json::json!({
+            let response = match index {
+                0 => serde_json::json!({
                     "protocol_version": 1,
                     "ok": true,
                     "gateway_generation": "test",
                     "reannounce_required": true,
                     "deliveries": [],
-                })
-            } else {
-                serde_json::json!({
+                }),
+                1 => serde_json::json!({
                     "protocol_version": 1,
                     "ok": true,
                     "deliveries": [{
@@ -485,7 +484,12 @@ fn gateway_client_registers_without_polling_and_submits_delivery() {
                         "text": "[telegram from alice] hello",
                         "ctx_id": "telegram:10:1"
                     }],
-                })
+                }),
+                _ => serde_json::json!({
+                    "protocol_version": 1,
+                    "ok": true,
+                    "deliveries": [],
+                }),
             };
             writeln!(stream, "{response}").expect("write gateway response");
             stream.flush().expect("flush gateway response");
@@ -506,6 +510,8 @@ fn gateway_client_registers_without_polling_and_submits_delivery() {
     let _progress = rx.recv().expect("progress");
     let prompt = expect_prompt(&rx);
     let _result = rx.recv().expect("tool result");
+    ext.dispatch_tool(tool(SEND_TOOL_NAME, "agent-1", message_args("reply")));
+    expect_tool_finished(&rx);
     server.join().expect("fake gateway thread");
 
     assert_eq!(prompt.agent_id, agent_id("agent-1"));
@@ -517,10 +523,69 @@ fn gateway_client_registers_without_polling_and_submits_delivery() {
     assert_eq!(requests[1]["kind"], "register_agent");
     assert_eq!(requests[1]["session_id"], "s1");
     assert_eq!(requests[1]["agent_id"], "agent-1");
+    assert_eq!(requests[2]["kind"], "send_message");
+    assert_eq!(requests[2]["session_id"], "s1");
+    assert_eq!(requests[2]["agent_id"], "agent-1");
+    assert_eq!(requests[2]["message"], "reply");
+    assert!(client.sent.lock().expect("sent").is_empty());
+}
+
+/// In gateway-client mode `telegram_send` must forward only message text plus
+/// local session/agent identity to the gateway, leaving Telegram destination
+/// selection entirely inside the gateway.
+#[test]
+fn gateway_client_send_forwards_registered_agent_to_gateway() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let socket_path = dir.path().join("gateway.sock");
+    let listener = UnixListener::bind(&socket_path).expect("bind fake gateway");
+    let seen_requests = Arc::new(Mutex::new(Vec::<serde_json::Value>::new()));
+    let seen_requests_thread = Arc::clone(&seen_requests);
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept gateway client");
+        let reader = stream.try_clone().expect("clone stream");
+        let mut reader = std::io::BufReader::new(reader);
+        for _ in 0..2 {
+            let mut line = String::new();
+            reader.read_line(&mut line).expect("read gateway request");
+            let request: serde_json::Value =
+                serde_json::from_str(&line).expect("gateway request JSON");
+            seen_requests_thread.lock().expect("requests").push(request);
+            writeln!(
+                stream,
+                "{}",
+                serde_json::json!({
+                    "protocol_version": 1,
+                    "ok": true,
+                    "deliveries": [],
+                })
+            )
+            .expect("write gateway response");
+            stream.flush().expect("flush gateway response");
+        }
+    });
+
+    let (tx, rx) = mpsc::channel();
+    let client = FakeClient::new();
+    let ext = Extension::new(client.clone(), tx);
+    ext.apply_config(gateway_mode(socket_path), Some(temp_state_dir()))
+        .expect("apply gateway client config");
+    {
+        let mut state = ext.state.lock();
+        state.current_session_id = Some("s1".into());
+        state.registered_agents.insert(agent_id("agent-1"));
+    }
 
     ext.dispatch_tool(tool(SEND_TOOL_NAME, "agent-1", message_args("reply")));
-    let message = expect_tool_error(&rx);
-    assert!(message.contains("not implemented yet"), "{message}");
+    expect_tool_finished(&rx);
+    server.join().expect("fake gateway thread");
+
+    let requests = seen_requests.lock().expect("requests");
+    assert_eq!(requests[0]["kind"], "hello");
+    assert_eq!(requests[1]["kind"], "send_message");
+    assert_eq!(requests[1]["session_id"], "s1");
+    assert_eq!(requests[1]["agent_id"], "agent-1");
+    assert_eq!(requests[1]["message"], "reply");
+    assert!(requests[1].get("chat_id").is_none());
     assert!(client.sent.lock().expect("sent").is_empty());
 }
 

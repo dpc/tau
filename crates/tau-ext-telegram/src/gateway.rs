@@ -4,12 +4,11 @@
 //! durable update offsets, Telegram allowlist/chat policy, help/status command
 //! handling, inbound routing commands, bounded live queued prompt deliveries,
 //! and private local socket support for gateway-side sidecar heartbeat and
-//! registration-lease bookkeeping. Outbound gateway sends are deliberately left
-//! for later stages.
+//! registration-lease bookkeeping and outbound sends.
 
 mod routing;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::error::Error;
 use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
@@ -38,6 +37,18 @@ use crate::{
 
 /// Maximum Telegram reply text emitted by the gateway MVP.
 const MAX_REPLY_BYTES: usize = 3500;
+
+/// Maximum model-authored outbound message accepted over the sidecar socket.
+const MAX_OUTBOUND_MESSAGE_BYTES: usize = 3500;
+
+/// Maximum error text returned over the sidecar socket.
+const MAX_SOCKET_ERROR_BYTES: usize = 512;
+
+/// Maximum accepted outbound sends per rate-limit window.
+const MAX_OUTBOUND_SENDS_PER_WINDOW: usize = 20;
+
+/// Gateway-owned outbound send rate-limit window.
+const OUTBOUND_SEND_RATE_WINDOW: Duration = Duration::from_secs(60);
 
 /// Number of update ids kept for restart duplicate suppression.
 const RECENT_UPDATE_LIMIT: usize = 128;
@@ -311,6 +322,7 @@ impl Gateway {
             &durable,
             stream_hash.clone(),
             socket_path.clone(),
+            Arc::clone(&client),
         ));
         let socket_guard = GatewaySocketGuard::bind(socket_path, Arc::clone(&socket_state))?;
         Ok(Self {
@@ -1048,10 +1060,16 @@ impl GatewayStatus {
 struct GatewaySocketState {
     /// Filesystem path of the private gateway socket.
     socket_path: PathBuf,
+    /// Shared Telegram runtime configuration used for outbound sends.
+    cfg: RuntimeConfig,
+    /// HTTP client used for outbound Telegram Bot API calls.
+    client: Arc<dyn TelegramClient>,
     /// Latest durable gateway status snapshot.
     status: Mutex<GatewayStatus>,
     /// Live sidecar connection and registration registry.
     registry: Mutex<GatewayRegistry>,
+    /// Recent outbound send attempts for gateway-owned rate limiting.
+    outbound_send_times: Mutex<VecDeque<Instant>>,
     /// Monotonic connection id allocator.
     next_connection_id: AtomicU64,
     /// Per-process generation that tells reconnecting sidecars to reannounce.
@@ -1067,11 +1085,15 @@ impl GatewaySocketState {
         durable: &GatewayDurableState,
         stream_hash: String,
         socket_path: PathBuf,
+        client: Arc<dyn TelegramClient>,
     ) -> Self {
         Self {
             socket_path,
+            cfg: cfg.clone(),
+            client,
             status: Mutex::new(GatewayStatus::new(cfg, durable, stream_hash)),
             registry: Mutex::new(GatewayRegistry::default()),
+            outbound_send_times: Mutex::new(VecDeque::new()),
             next_connection_id: AtomicU64::new(1),
             generation: gateway_generation(),
             next_delivery_id: AtomicU64::new(1),
@@ -1119,6 +1141,7 @@ impl GatewaySocketState {
         status.oldest_registration_age_seconds = counts.oldest_registration_age_seconds;
         serde_json::json!({
             "protocol_version": status.protocol_version,
+            "ok": true,
             "stream_hash": status.stream_hash,
             "socket_path": self.socket_path,
             "allowed_user_count": status.allowed_user_count,
@@ -1159,6 +1182,76 @@ impl GatewaySocketState {
         let mut registry = self.registry.lock().expect("registry lock");
         registry.prune_expired(Instant::now());
         registry.enqueue_delivery(target, message, text, request_id)
+    }
+
+    /// Send one outbound Telegram message for a currently registered route.
+    fn send_agent_message(
+        &self,
+        connection_id: u64,
+        request: GatewaySocketRequest,
+    ) -> Result<(), String> {
+        let session_id = required_request_field(request.session_id, "session_id")?;
+        let agent_id = required_request_field(request.agent_id, "agent_id")?;
+        let message = required_message_field(request.message)?;
+        if message.len() > MAX_OUTBOUND_MESSAGE_BYTES {
+            return Err("telegram gateway send message is too large".to_owned());
+        }
+        let key = GatewayRegistrationKey {
+            session_id,
+            agent_id,
+        };
+        {
+            let mut registry = self.registry.lock().expect("registry lock");
+            registry.prune_expired(Instant::now());
+            registry.ensure_owned_registration(connection_id, &key)?;
+        }
+        let chat_id = self.active_outbound_chat_id()?;
+        self.check_outbound_rate_limit()?;
+        let text = format!("[{}] {message}", short_id(&key.agent_id));
+        self.client
+            .send_message(&self.cfg, chat_id, &text)
+            .map_err(|error| {
+                tracing::warn!(
+                    target: crate::LOG_TARGET,
+                    error = %error,
+                    "telegram gateway outbound send failed"
+                );
+                "Telegram gateway could not send the message.".to_owned()
+            })
+    }
+
+    /// Return the configured or linked chat used for outbound replies.
+    fn active_outbound_chat_id(&self) -> Result<i64, String> {
+        let status = self.status.lock().expect("status lock");
+        status
+            .configured_chat_id
+            .or(status.linked_chat_id)
+            .ok_or_else(|| {
+                "Telegram gateway chat is not linked; send /start to the bot or configure chat_id."
+                    .to_owned()
+            })
+    }
+
+    /// Enforce a gateway-wide outbound rate limit for model-authored sends.
+    fn check_outbound_rate_limit(&self) -> Result<(), String> {
+        let now = Instant::now();
+        let mut sends = self
+            .outbound_send_times
+            .lock()
+            .expect("outbound rate limit lock");
+        while sends
+            .front()
+            .is_some_and(|sent_at| *sent_at + OUTBOUND_SEND_RATE_WINDOW <= now)
+        {
+            sends.pop_front();
+        }
+        if sends.len() >= MAX_OUTBOUND_SENDS_PER_WINDOW {
+            return Err(
+                "Telegram gateway outbound send rate limit reached; try again later.".to_owned(),
+            );
+        }
+        sends.push_back(now);
+        Ok(())
     }
 }
 
@@ -1295,6 +1388,19 @@ impl GatewayRegistry {
             self.remove_pending_for_key(&key);
         }
         Ok(())
+    }
+
+    /// Ensure a sidecar owns a currently live route before it can send as it.
+    fn ensure_owned_registration(
+        &self,
+        connection_id: u64,
+        key: &GatewayRegistrationKey,
+    ) -> Result<(), String> {
+        match self.registrations.get(key) {
+            Some(registration) if registration.connection_id == connection_id => Ok(()),
+            Some(_) => Err("telegram gateway route is owned by another sidecar".to_owned()),
+            None => Err("telegram gateway agent is not registered".to_owned()),
+        }
     }
 
     /// Remove all routes owned by a disconnected sidecar.
@@ -1492,12 +1598,14 @@ struct GatewaySocketRequest {
     /// Protocol version expected by the client.
     protocol_version: Option<u32>,
     /// Request kind such as `status`, `hello`, `heartbeat`,
-    /// `register_agent`, `unregister_agent`, or `goodbye`.
+    /// `register_agent`, `unregister_agent`, `send_message`, or `goodbye`.
     kind: String,
     /// Tau session id for registration requests.
     session_id: Option<String>,
     /// Tau agent id for registration requests.
     agent_id: Option<String>,
+    /// Outbound Telegram message body for send requests.
+    message: Option<String>,
     /// Optional display name supplied by the sidecar.
     display_name: Option<String>,
     /// Optional tool namespace supplied by the sidecar.
@@ -1511,6 +1619,7 @@ impl Default for GatewaySocketRequest {
             kind: "status".to_owned(),
             session_id: None,
             agent_id: None,
+            message: None,
             display_name: None,
             tool_namespace: None,
         }
@@ -1578,11 +1687,16 @@ fn handle_gateway_socket_client(mut stream: UnixStream, state: Arc<GatewaySocket
                 serde_json::json!({
                     "protocol_version": SOCKET_PROTOCOL_VERSION,
                     "ok": false,
-                    "error": error,
+                    "error": bounded_socket_error(&error),
                 })
             }
         };
-        if response.get("ok").and_then(serde_json::Value::as_bool) == Some(false) {
+        if response.get("ok").and_then(serde_json::Value::as_bool) == Some(false)
+            && response
+                .get("keep_connection")
+                .and_then(serde_json::Value::as_bool)
+                != Some(true)
+        {
             close_after_response = true;
         }
         if !write_gateway_socket_response(&mut stream, &response) {
@@ -1626,6 +1740,9 @@ fn handle_gateway_socket_request(
         "unregister_agent" => registry_result(state, connection_id, |registry| {
             registry.unregister_agent(connection_id, request)
         }),
+        "send_message" => socket_result(state, connection_id, || {
+            state.send_agent_message(connection_id, request)
+        }),
         "goodbye" => serde_json::json!({
             "protocol_version": SOCKET_PROTOCOL_VERSION,
             "ok": true,
@@ -1634,9 +1751,27 @@ fn handle_gateway_socket_request(
         kind => serde_json::json!({
             "protocol_version": SOCKET_PROTOCOL_VERSION,
             "ok": false,
-            "error": format!("unsupported gateway socket request kind `{kind}`"),
+            "error": bounded_socket_error(&format!("unsupported gateway socket request kind `{kind}`")),
         }),
     }
+}
+
+/// Execute a side-effecting socket operation and return a JSON result response.
+fn socket_result<F>(state: &GatewaySocketState, connection_id: u64, f: F) -> serde_json::Value
+where
+    F: FnOnce() -> Result<(), String>,
+{
+    let result = f();
+    let deliveries = if result.is_ok() {
+        state
+            .registry
+            .lock()
+            .expect("registry lock")
+            .take_deliveries(connection_id)
+    } else {
+        Vec::new()
+    };
+    socket_response(state, result, deliveries)
 }
 
 /// Execute a registry mutation and return a JSON result response.
@@ -1655,6 +1790,15 @@ where
         };
         (result, deliveries)
     };
+    socket_response(state, result, deliveries)
+}
+
+/// Build a standard sidecar operation response.
+fn socket_response(
+    state: &GatewaySocketState,
+    result: Result<(), String>,
+    deliveries: Vec<GatewayDelivery>,
+) -> serde_json::Value {
     match result {
         Ok(()) => serde_json::json!({
             "protocol_version": SOCKET_PROTOCOL_VERSION,
@@ -1667,7 +1811,8 @@ where
         Err(error) => serde_json::json!({
             "protocol_version": SOCKET_PROTOCOL_VERSION,
             "ok": false,
-            "error": error,
+            "error": bounded_socket_error(&error),
+            "keep_connection": true,
         }),
     }
 }
@@ -1739,6 +1884,13 @@ fn required_request_field(value: Option<String>, name: &str) -> Result<String, S
         .map(|value| value.trim().to_owned())
         .filter(|value| !value.is_empty())
         .ok_or_else(|| format!("gateway socket request requires `{name}`"))
+}
+
+/// Extract and validate a required outbound message without trimming content.
+fn required_message_field(value: Option<String>) -> Result<String, String> {
+    value
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| "gateway socket request requires `message`".to_owned())
 }
 
 /// Return a per-process gateway generation label for reconnect detection.
@@ -1868,6 +2020,27 @@ fn bounded_reply_text(text: &str) -> String {
         end -= 1;
     }
     format!("{}…", &text[..end])
+}
+
+/// Bound and strip control characters from same-UID socket error responses.
+fn bounded_socket_error(text: &str) -> String {
+    let mut out = String::new();
+    for ch in text.chars().filter(|ch| !ch.is_control()) {
+        let ch_len = ch.len_utf8();
+        if out.len() + ch_len > MAX_SOCKET_ERROR_BYTES {
+            while out.len() + '…'.len_utf8() > MAX_SOCKET_ERROR_BYTES {
+                out.pop();
+            }
+            out.push('…');
+            break;
+        }
+        out.push(ch);
+    }
+    if out.is_empty() {
+        "Telegram gateway request failed".to_owned()
+    } else {
+        out
+    }
 }
 
 #[cfg(test)]

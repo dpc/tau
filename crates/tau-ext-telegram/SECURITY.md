@@ -44,10 +44,13 @@
   duplicate-suppression state under a private state directory, and exposes only
   private same-UID local IPC. The socket supports one-shot `status` and
   persistent sidecar `hello`/`heartbeat`/`register_agent`/`unregister_agent`/
-  `goodbye`; registered routes are live leases pruned on unregister, goodbye,
-  disconnect, protocol-error disconnect, heartbeat expiry, or gateway restart
-  reannouncement. The socket bounds request size but is same-UID local IPC, not a
-  sandbox or DoS boundary against the user's own processes. It handles `/start`,
+  `send_message`/`goodbye`; registered routes are live leases pruned on
+  unregister, goodbye, disconnect, protocol-error disconnect, heartbeat expiry,
+  or gateway restart reannouncement. Outbound `send_message` checks live route
+  ownership, uses a gateway-owned rate limit, and never accepts a
+  sidecar-provided Telegram destination. The socket bounds request size but is
+  same-UID local IPC, not a sandbox or DoS boundary against the user's own
+  processes. It handles `/start`,
   `/help`, `/status`, `/sessions`, `/agents`, `/select-session`, `/select`,
   `/to`, and `/where`; session listings use aliases by default and route
   selection requires unambiguous aliases or stable id prefixes. It queues inbound
@@ -56,8 +59,9 @@
   the Telegram chat/user that selected them. This queue is not a durable
   acknowledgement protocol: if the gateway exits after advancing the Telegram
   offset but before a sidecar drains its queued delivery, that prompt can be
-  lost. It does not send outbound `telegram_send` messages through the gateway
-  yet.
+  lost. Outbound `telegram_send` requests are accepted only from the sidecar that
+  owns the live `(session_id, agent_id)` registration and are sent to the
+  gateway's configured or linked active chat.
 - In `mode: gateway_client`, the per-session sidecar does not receive the bot
   token, does not evaluate Telegram user allowlists, and never polls Telegram.
   Its local trust boundary is the private same-UID gateway socket configured by

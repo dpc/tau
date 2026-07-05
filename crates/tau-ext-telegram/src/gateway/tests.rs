@@ -1,5 +1,5 @@
 use std::collections::VecDeque;
-use std::io::{Read as _, Write as _};
+use std::io::{BufRead as _, Read as _, Write as _};
 
 use super::*;
 
@@ -319,6 +319,7 @@ fn local_socket_status_response_contains_core_fields() {
         &durable,
         "test-stream".to_owned(),
         PathBuf::from("/tmp/test.sock"),
+        Arc::new(FakeGatewayClient::default()),
     ));
     let (mut client, server) = UnixStream::pair().expect("socket pair");
     writeln!(client, r#"{{"protocol_version":1,"kind":"status"}}"#).expect("write request");
@@ -351,6 +352,7 @@ fn sidecar_hello_requires_registration_reannouncement() {
         &durable,
         "test-stream".to_owned(),
         PathBuf::from("/tmp/test.sock"),
+        Arc::new(FakeGatewayClient::default()),
     );
 
     let response = handle_gateway_socket_request(
@@ -720,6 +722,300 @@ fn sidecar_heartbeat_drains_queued_delivery_response() {
     );
 }
 
+/// Ensures outbound gateway sends require a live sidecar-owned registration and
+/// choose the gateway's configured chat instead of accepting any model-provided
+/// destination.
+#[test]
+fn outbound_send_uses_configured_chat_for_registered_agent() {
+    let fixture = GatewayFixture::new(Some(10), [7]);
+    fixture.register_route(1, "session-alpha", "agent-alpha");
+
+    let response = handle_gateway_socket_request(
+        &fixture.gateway.socket_state,
+        1,
+        GatewaySocketRequest {
+            kind: "send_message".to_owned(),
+            session_id: Some("session-alpha".to_owned()),
+            agent_id: Some("agent-alpha".to_owned()),
+            message: Some("hello from tau".to_owned()),
+            ..GatewaySocketRequest::default()
+        },
+    );
+
+    assert_eq!(response["ok"], true);
+    let sent = fixture.client.sent.lock().expect("sent");
+    assert_eq!(
+        sent.as_slice(),
+        [(10, "[agent-alpha] hello from tau".to_owned())]
+    );
+}
+
+/// Ensures a sidecar cannot send as an unregistered or stale agent route, which
+/// keeps `telegram_send` gated on explicit registration through the gateway.
+#[test]
+fn outbound_send_rejects_unregistered_agent() {
+    let fixture = GatewayFixture::new(Some(10), [7]);
+
+    let response = handle_gateway_socket_request(
+        &fixture.gateway.socket_state,
+        1,
+        GatewaySocketRequest {
+            kind: "send_message".to_owned(),
+            session_id: Some("session-alpha".to_owned()),
+            agent_id: Some("agent-alpha".to_owned()),
+            message: Some("hello from tau".to_owned()),
+            ..GatewaySocketRequest::default()
+        },
+    );
+
+    assert_eq!(response["ok"], false);
+    assert!(
+        response["error"]
+            .as_str()
+            .expect("error")
+            .contains("not registered")
+    );
+    assert!(fixture.client.sent.lock().expect("sent").is_empty());
+}
+
+/// Ensures outbound gateway send failures return a bounded generic error to the
+/// sidecar while detailed Telegram transport text stays in logs.
+#[test]
+fn outbound_send_failure_is_sanitized_for_sidecar() {
+    let fixture = GatewayFixture::new(Some(10), [7]);
+    fixture.register_route(1, "session-alpha", "agent-alpha");
+    fixture.client.fail_next_sends(1);
+
+    let response = handle_gateway_socket_request(
+        &fixture.gateway.socket_state,
+        1,
+        GatewaySocketRequest {
+            kind: "send_message".to_owned(),
+            session_id: Some("session-alpha".to_owned()),
+            agent_id: Some("agent-alpha".to_owned()),
+            message: Some("hello from tau".to_owned()),
+            ..GatewaySocketRequest::default()
+        },
+    );
+
+    assert_eq!(response["ok"], false);
+    assert_eq!(
+        response["error"].as_str(),
+        Some("Telegram gateway could not send the message.")
+    );
+}
+
+/// Ensures a route registered by one sidecar connection cannot be used for
+/// outbound sends by another same-UID socket connection.
+#[test]
+fn outbound_send_rejects_route_owned_by_another_sidecar() {
+    let fixture = GatewayFixture::new(Some(10), [7]);
+    fixture.register_route(1, "session-alpha", "agent-alpha");
+
+    let response = handle_gateway_socket_request(
+        &fixture.gateway.socket_state,
+        2,
+        GatewaySocketRequest {
+            kind: "send_message".to_owned(),
+            session_id: Some("session-alpha".to_owned()),
+            agent_id: Some("agent-alpha".to_owned()),
+            message: Some("hello from tau".to_owned()),
+            ..GatewaySocketRequest::default()
+        },
+    );
+
+    assert_eq!(response["ok"], false);
+    assert!(
+        response["error"]
+            .as_str()
+            .expect("error")
+            .contains("another sidecar")
+    );
+    assert!(fixture.client.sent.lock().expect("sent").is_empty());
+}
+
+/// Ensures outbound sends use a linked private chat when the gateway has no
+/// fixed configured chat.
+#[test]
+fn outbound_send_uses_linked_chat_without_configured_chat() {
+    let cfg = runtime_config(None, [7]);
+    let durable = GatewayDurableState {
+        stream_hash: "test-stream".to_owned(),
+        linked_chat: Some(GatewayLinkedChat {
+            chat_id: 77,
+            user_id: 7,
+        }),
+        ..GatewayDurableState::default()
+    };
+    let fixture = GatewayFixture::with_durable(cfg, durable);
+    fixture.register_route(1, "session-alpha", "agent-alpha");
+
+    let response = handle_gateway_socket_request(
+        &fixture.gateway.socket_state,
+        1,
+        GatewaySocketRequest {
+            kind: "send_message".to_owned(),
+            session_id: Some("session-alpha".to_owned()),
+            agent_id: Some("agent-alpha".to_owned()),
+            message: Some("hello linked chat".to_owned()),
+            ..GatewaySocketRequest::default()
+        },
+    );
+
+    assert_eq!(response["ok"], true);
+    let sent = fixture.client.sent.lock().expect("sent");
+    assert_eq!(
+        sent.as_slice(),
+        [(77, "[agent-alpha] hello linked chat".to_owned())]
+    );
+}
+
+/// Ensures outbound sends fail closed when no configured or linked active chat
+/// exists, rather than letting the sidecar provide a destination.
+#[test]
+fn outbound_send_rejects_missing_active_chat() {
+    let fixture = GatewayFixture::new(None, [7]);
+    fixture.register_route(1, "session-alpha", "agent-alpha");
+
+    let response = handle_gateway_socket_request(
+        &fixture.gateway.socket_state,
+        1,
+        GatewaySocketRequest {
+            kind: "send_message".to_owned(),
+            session_id: Some("session-alpha".to_owned()),
+            agent_id: Some("agent-alpha".to_owned()),
+            message: Some("hello from tau".to_owned()),
+            ..GatewaySocketRequest::default()
+        },
+    );
+
+    assert_eq!(response["ok"], false);
+    assert!(
+        response["error"]
+            .as_str()
+            .expect("error")
+            .contains("not linked")
+    );
+    assert!(fixture.client.sent.lock().expect("sent").is_empty());
+}
+
+/// Ensures oversized outbound messages are rejected before Telegram is called.
+#[test]
+fn outbound_send_rejects_oversized_message() {
+    let fixture = GatewayFixture::new(Some(10), [7]);
+    fixture.register_route(1, "session-alpha", "agent-alpha");
+
+    let response = handle_gateway_socket_request(
+        &fixture.gateway.socket_state,
+        1,
+        GatewaySocketRequest {
+            kind: "send_message".to_owned(),
+            session_id: Some("session-alpha".to_owned()),
+            agent_id: Some("agent-alpha".to_owned()),
+            message: Some("x".repeat(MAX_OUTBOUND_MESSAGE_BYTES + 1)),
+            ..GatewaySocketRequest::default()
+        },
+    );
+
+    assert_eq!(response["ok"], false);
+    assert!(
+        response["error"]
+            .as_str()
+            .expect("error")
+            .contains("too large")
+    );
+    assert!(fixture.client.sent.lock().expect("sent").is_empty());
+}
+
+/// Ensures the gateway owns a bounded outbound-send rate limit and rejects
+/// excess model-authored sends without calling Telegram.
+#[test]
+fn outbound_send_rate_limit_is_bounded() {
+    let fixture = GatewayFixture::new(Some(10), [7]);
+    fixture.register_route(1, "session-alpha", "agent-alpha");
+
+    for index in 0..MAX_OUTBOUND_SENDS_PER_WINDOW {
+        let response = handle_gateway_socket_request(
+            &fixture.gateway.socket_state,
+            1,
+            GatewaySocketRequest {
+                kind: "send_message".to_owned(),
+                session_id: Some("session-alpha".to_owned()),
+                agent_id: Some("agent-alpha".to_owned()),
+                message: Some(format!("hello {index}")),
+                ..GatewaySocketRequest::default()
+            },
+        );
+        assert_eq!(response["ok"], true);
+    }
+
+    let response = handle_gateway_socket_request(
+        &fixture.gateway.socket_state,
+        1,
+        GatewaySocketRequest {
+            kind: "send_message".to_owned(),
+            session_id: Some("session-alpha".to_owned()),
+            agent_id: Some("agent-alpha".to_owned()),
+            message: Some("one too many".to_owned()),
+            ..GatewaySocketRequest::default()
+        },
+    );
+
+    assert_eq!(response["ok"], false);
+    assert!(
+        response["error"]
+            .as_str()
+            .expect("error")
+            .contains("rate limit")
+    );
+    assert_eq!(
+        fixture.client.sent.lock().expect("sent").len(),
+        MAX_OUTBOUND_SENDS_PER_WINDOW
+    );
+}
+
+/// Ensures a transient Telegram send failure is an operation error only: it is
+/// reported to the sidecar but does not close the persistent socket or prune
+/// the sidecar's registrations.
+#[test]
+fn outbound_send_failure_keeps_sidecar_connection_live() {
+    let fixture = GatewayFixture::new(Some(10), [7]);
+    fixture.client.fail_next_sends(1);
+    let state = Arc::clone(&fixture.gateway.socket_state);
+    let (mut client, server) = UnixStream::pair().expect("socket pair");
+    let server_thread = std::thread::spawn(move || handle_gateway_socket_client(server, state));
+
+    writeln!(client, r#"{{"protocol_version":1,"kind":"hello"}}"#).expect("write hello");
+    assert_socket_ok(&mut client);
+    writeln!(
+        client,
+        r#"{{"protocol_version":1,"kind":"register_agent","session_id":"session-alpha","agent_id":"agent-alpha"}}"#
+    )
+    .expect("write register");
+    assert_socket_ok(&mut client);
+    writeln!(
+        client,
+        r#"{{"protocol_version":1,"kind":"send_message","session_id":"session-alpha","agent_id":"agent-alpha","message":"first"}}"#
+    )
+    .expect("write send");
+    let failed = read_socket_json(&mut client);
+    assert_eq!(failed["ok"], false);
+    assert_eq!(failed["keep_connection"], true);
+    writeln!(client, r#"{{"protocol_version":1,"kind":"heartbeat"}}"#).expect("write heartbeat");
+    assert_socket_ok(&mut client);
+    writeln!(
+        client,
+        r#"{{"protocol_version":1,"kind":"send_message","session_id":"session-alpha","agent_id":"agent-alpha","message":"second"}}"#
+    )
+    .expect("write second send");
+    assert_socket_ok(&mut client);
+
+    drop(client);
+    server_thread.join().expect("socket server");
+    let sent = fixture.client.sent.lock().expect("sent");
+    assert_eq!(sent.as_slice(), [(10, "[agent-alpha] second".to_owned())]);
+}
+
 /// Ensures `/agents [session]` renders live agent aliases in the requested
 /// session without requiring it to be selected first.
 #[test]
@@ -951,6 +1247,7 @@ impl GatewayFixture {
             &durable,
             "test-stream".to_owned(),
             PathBuf::from("/tmp/test.sock"),
+            Arc::clone(&gateway_client),
         ));
         Self {
             gateway: Gateway {
@@ -1056,6 +1353,21 @@ fn register_request(session_id: &str, agent_id: &str) -> GatewaySocketRequest {
     }
 }
 
+/// Read one JSON-line response from a gateway socket test client.
+fn read_socket_json(stream: &mut UnixStream) -> serde_json::Value {
+    let mut line = String::new();
+    std::io::BufReader::new(stream.try_clone().expect("clone socket client"))
+        .read_line(&mut line)
+        .expect("read socket response");
+    serde_json::from_str(&line).expect("socket response JSON")
+}
+
+/// Assert that one gateway socket response is an accepted operation.
+fn assert_socket_ok(stream: &mut UnixStream) {
+    let response = read_socket_json(stream);
+    assert_eq!(response["ok"], true, "{response}");
+}
+
 /// Build a gateway socket state for protocol tests.
 fn test_socket_state() -> GatewaySocketState {
     let cfg = runtime_config(Some(10), [7]);
@@ -1068,5 +1380,6 @@ fn test_socket_state() -> GatewaySocketState {
         &durable,
         "test-stream".to_owned(),
         PathBuf::from("/tmp/test.sock"),
+        Arc::new(FakeGatewayClient::default()),
     )
 }
