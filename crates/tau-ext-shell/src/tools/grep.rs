@@ -3,8 +3,7 @@
 use std::fmt;
 use std::io::{BufReader, Read};
 use std::process::Command;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, mpsc};
+use std::sync::mpsc;
 
 use tau_proto::CborValue;
 
@@ -249,16 +248,15 @@ fn run_ripgrep(
         .take()
         .ok_or_else(|| ToolFailure::from("ripgrep stderr pipe missing".to_owned()))?;
     let stderr_handle = std::thread::spawn(move || read_limited_bytes(stderr, MAX_OUTPUT_BYTES));
-    let stop_requested = Arc::new(AtomicBool::new(false));
-    let wait_stop = Arc::clone(&stop_requested);
-    let wait_handle = std::thread::spawn(move || wait_ripgrep(child, wait_stop, cancel_rx));
+    let (stop_tx, stop_rx) = mpsc::channel();
+    let wait_handle = std::thread::spawn(move || wait_ripgrep(child, stop_rx, cancel_rx));
 
     let stream = read_grep_json(stdout, options.limit);
 
     // If the limit fired we may have killed reading mid-stream; make
     // sure the child does not linger.
     if stream.match_limit_reached {
-        stop_requested.store(true, Ordering::SeqCst);
+        let _ = stop_tx.send(());
     }
 
     let wait = wait_handle
@@ -275,9 +273,194 @@ fn run_ripgrep(
     })
 }
 
+#[cfg(target_os = "linux")]
+enum RipgrepWaitEvent {
+    Exited,
+    ExitWaitFailed(String),
+    Cancelled,
+    MatchLimitReached,
+}
+
+/// Wait for ripgrep to exit while reacting to cancellation and match limits.
+///
+/// The Linux implementation uses short helper threads only to bridge blocking
+/// notifications into one coordinator channel: a pidfd waiter for child-exit
+/// readiness, a match-limit listener for `stop_rx`, and an optional
+/// cancellation listener. The stop/cancel listeners are intentionally unjoined;
+/// they exit when their channel is signalled or dropped, and failed sends only
+/// mean the coordinator already returned. The pidfd waiter exits after child
+/// readiness. The coordinator owns and reaps `Child`, which avoids pid reuse
+/// races; cancellation returns `cancelled = true`, while a match-limit stop
+/// only terminates ripgrep so the partial grep output can be returned normally.
+/// If pidfds are unavailable, or on non-Linux builds where
+/// `std::process::Child` has no portable readiness primitive, this falls back
+/// to polling to preserve cancellation and match-limit behavior. That fallback
+/// is intentionally scoped as a compatibility path; the non-polling guarantee
+/// applies to the normal Linux path used by current CI and production
+/// development.
 fn wait_ripgrep(
+    child: std::process::Child,
+    stop_rx: mpsc::Receiver<()>,
+    cancel_rx: Option<mpsc::Receiver<()>>,
+) -> Result<(Option<std::process::ExitStatus>, bool), ToolFailure> {
+    #[cfg(target_os = "linux")]
+    {
+        wait_ripgrep_linux(child, stop_rx, cancel_rx)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        wait_ripgrep_polling_fallback(child, stop_rx, cancel_rx)
+    }
+}
+
+/// Coordinate ripgrep child exit, cancellation, and match-limit stops without
+/// polling. A pidfd waiter reports child-exit readiness without reaping the
+/// child, while stop/cancel listener threads block until their channels are
+/// signalled or closed. The coordinator keeps ownership of `Child`, so
+/// cancellation and match-limit termination use the live child handle and then
+/// reap it directly; only cancellation sets the returned `cancelled` flag.
+#[cfg(target_os = "linux")]
+fn wait_ripgrep_linux(
     mut child: std::process::Child,
-    stop_requested: Arc<AtomicBool>,
+    stop_rx: mpsc::Receiver<()>,
+    cancel_rx: Option<mpsc::Receiver<()>>,
+) -> Result<(Option<std::process::ExitStatus>, bool), ToolFailure> {
+    let pid = child.id();
+    let (event_tx, event_rx) = mpsc::channel();
+    if spawn_ripgrep_exit_waiter(pid, event_tx.clone()).is_err() {
+        return wait_ripgrep_polling_fallback(child, stop_rx, cancel_rx);
+    }
+
+    let stop_tx = event_tx.clone();
+    std::thread::spawn(move || {
+        if stop_rx.recv().is_ok() {
+            let _ = stop_tx.send(RipgrepWaitEvent::MatchLimitReached);
+        }
+    });
+
+    if let Some(cancel_rx) = cancel_rx {
+        let cancel_tx = event_tx;
+        std::thread::spawn(move || {
+            if cancel_rx.recv().is_ok() {
+                let _ = cancel_tx.send(RipgrepWaitEvent::Cancelled);
+            }
+        });
+    }
+
+    let mut cancelled = false;
+    match event_rx.recv() {
+        Ok(RipgrepWaitEvent::Exited) => {
+            let status = child.wait().map_err(|error| {
+                ToolFailure::from(format!("failed to wait for ripgrep: {error}"))
+            })?;
+            Ok((Some(status), cancelled))
+        }
+        Ok(RipgrepWaitEvent::ExitWaitFailed(error)) => {
+            kill_ripgrep_child(&mut child, pid);
+            let _ = child.wait();
+            Err(ToolFailure::from(format!(
+                "failed to wait for ripgrep exit readiness: {error}"
+            )))
+        }
+        Ok(RipgrepWaitEvent::Cancelled) => {
+            cancelled = true;
+            kill_ripgrep_child(&mut child, pid);
+            let status = child.wait().ok();
+            Ok((status, cancelled))
+        }
+        Ok(RipgrepWaitEvent::MatchLimitReached) => {
+            kill_ripgrep_child(&mut child, pid);
+            let status = child.wait().ok();
+            Ok((status, cancelled))
+        }
+        Err(_) => Ok((None, cancelled)),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn spawn_ripgrep_exit_waiter(
+    pid: u32,
+    event_tx: mpsc::Sender<RipgrepWaitEvent>,
+) -> Result<(), ToolFailure> {
+    use std::os::fd::AsRawFd;
+
+    let pidfd = open_pidfd(pid)?;
+    std::thread::spawn(move || {
+        let mut poll_fd = libc::pollfd {
+            fd: pidfd.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        loop {
+            // SAFETY: `poll_fd` points at one valid `pollfd` backed by an owned
+            // pidfd that remains alive for the duration of this thread.
+            #[allow(unsafe_code)]
+            let result = unsafe { libc::poll(&mut poll_fd, 1, -1) };
+            if result < 0 {
+                let error = std::io::Error::last_os_error();
+                if error.raw_os_error() == Some(libc::EINTR) {
+                    continue;
+                }
+                let _ = event_tx.send(RipgrepWaitEvent::ExitWaitFailed(error.to_string()));
+                return;
+            }
+            if result == 0 {
+                continue;
+            }
+            if poll_fd.revents & libc::POLLIN != 0 {
+                let _ = event_tx.send(RipgrepWaitEvent::Exited);
+                return;
+            }
+            if poll_fd.revents & (libc::POLLERR | libc::POLLNVAL) != 0 {
+                let _ = event_tx.send(RipgrepWaitEvent::ExitWaitFailed(format!(
+                    "pidfd poll failed with revents={}",
+                    poll_fd.revents
+                )));
+                return;
+            }
+        }
+    });
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn open_pidfd(pid: u32) -> Result<std::os::fd::OwnedFd, ToolFailure> {
+    use std::os::fd::{FromRawFd, OwnedFd};
+
+    // SAFETY: `pidfd_open` is called with a pid returned by `Child::id` and no
+    // flags; on success it returns a new fd owned by this process.
+    #[allow(unsafe_code)]
+    let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid as libc::pid_t, 0) };
+    if fd < 0 {
+        return Err(ToolFailure::from(format!(
+            "failed to open ripgrep pidfd: {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+    // SAFETY: `fd` was returned by `pidfd_open` above and is uniquely owned here.
+    #[allow(unsafe_code)]
+    Ok(unsafe { OwnedFd::from_raw_fd(fd as std::os::fd::RawFd) })
+}
+
+#[cfg(target_os = "linux")]
+fn kill_ripgrep_child(child: &mut std::process::Child, pid: u32) {
+    // Production grep children run under `apply_command_isolation`, which makes
+    // the child pid the process-group id. Kill the group first so descendants do
+    // not linger, then kill through the still-owned child handle as a pid-safe
+    // fallback for tests or isolation failure.
+    // SAFETY: The negative pid targets the process group created for this child
+    // by `apply_command_isolation`; errors are ignored because the child may have
+    // exited already and `Child::kill` below is the pid-safe fallback.
+    #[allow(unsafe_code)]
+    unsafe {
+        libc::kill(-(pid as i32), libc::SIGKILL);
+    }
+    let _ = child.kill();
+}
+
+fn wait_ripgrep_polling_fallback(
+    mut child: std::process::Child,
+    stop_rx: mpsc::Receiver<()>,
     cancel_rx: Option<mpsc::Receiver<()>>,
 ) -> Result<(Option<std::process::ExitStatus>, bool), ToolFailure> {
     let mut cancelled = false;
@@ -293,10 +476,12 @@ fn wait_ripgrep(
         }
         if cancel_rx.as_ref().is_some_and(|rx| rx.try_recv().is_ok()) {
             cancelled = true;
-            stop_requested.store(true, Ordering::SeqCst);
-        }
-        if stop_requested.load(Ordering::SeqCst) {
             let _ = child.kill();
+            return Ok((child.wait().ok(), cancelled));
+        }
+        if stop_rx.try_recv().is_ok() {
+            let _ = child.kill();
+            return Ok((child.wait().ok(), cancelled));
         }
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
@@ -812,14 +997,35 @@ mod tests {
             .spawn()
             .expect("spawn sleeping child");
         let (cancel_tx, cancel_rx) = mpsc::channel();
-        let stop_requested = Arc::new(AtomicBool::new(false));
+        let (_stop_tx, stop_rx) = mpsc::channel();
         let started = std::time::Instant::now();
 
         cancel_tx.send(()).expect("send cancel");
         let (_status, cancelled) =
-            wait_ripgrep(child, stop_requested, Some(cancel_rx)).expect("wait child");
+            wait_ripgrep(child, stop_rx, Some(cancel_rx)).expect("wait child");
 
         assert!(cancelled);
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+    }
+
+    /// Ensures the match-limit stop path kills a running child promptly without
+    /// reporting the run as caller-cancelled.
+    #[test]
+    fn grep_waiter_kills_running_child_on_match_limit_stop() {
+        let child = Command::new("sh")
+            .arg("-c")
+            .arg("sleep 10")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn sleeping child");
+        let (stop_tx, stop_rx) = mpsc::channel();
+        let started = std::time::Instant::now();
+
+        stop_tx.send(()).expect("send stop");
+        let (_status, cancelled) = wait_ripgrep(child, stop_rx, None).expect("wait child");
+
+        assert!(!cancelled);
         assert!(started.elapsed() < std::time::Duration::from_secs(2));
     }
 
