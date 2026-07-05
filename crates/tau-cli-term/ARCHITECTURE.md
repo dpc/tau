@@ -19,6 +19,17 @@ Bounded subprocess execution lives in `src/bounded_command.rs`.
   mode, starts the command in an owned process group, hands that group the
   controlling terminal foreground pgrp, then restores Tau's pgrp before
   raw-mode/redraw resume. `tcsetpgrp` is guarded against `SIGTTOU`.
+- Bounded command monitoring is event-driven, not poll/sleep based. Captured
+  output commands use one monitor channel fed by the direct-child waiter thread,
+  stdout reader thread, and optional stdin writer thread. The monitor blocks on
+  that channel until the command deadline and treats timeout, stdout overflow,
+  stdin failure, and inherited-pipe failure as process-group cleanup paths.
+  After the direct child exits, short bounded post-exit waits for stdout/stdin
+  pipe closure remain intentional so Tau can detect descendants that inherited
+  prompt-owned pipes without waiting indefinitely.
+- Inherited-stdio commands use a child-waiter event for timeout monitoring, but
+  do not spawn stdout/stdin workers because stdio remains owned by the
+  caller/terminal.
 
 ## External-editor prompt trailer
 

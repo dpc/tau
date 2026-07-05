@@ -247,3 +247,25 @@ fn inherited_stdio_command_times_out_quiet_hung_child() {
     assert!(err.contains("timeout"));
     assert!(start.elapsed() < std::time::Duration::from_secs(2));
 }
+
+/// Covers the successful inherited-stdio path so child-waiter event handling
+/// returns the direct child's status without requiring captured pipe workers.
+#[test]
+fn inherited_stdio_command_returns_child_status() {
+    let mut command = std::process::Command::new("sh");
+    command
+        .arg("-c")
+        .arg("exit 7")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+
+    let output = run_with_inherited_stdio(
+        &mut command,
+        std::time::Duration::from_secs(5),
+        ProcessOwnership::ProcessGroup,
+    )
+    .expect("short inherited-stdio command should finish");
+
+    assert_eq!(output.status.code(), Some(7));
+}

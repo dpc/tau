@@ -105,19 +105,26 @@ pub(crate) fn run_with_bounded_stdout(
 }
 
 /// State for one bounded stdout child run.
+///
+/// The direct-child waiter, stdout reader, and optional stdin writer each send
+/// completion events into one channel. [`Self::finish`] blocks on that channel
+/// with the command deadline as its `recv_timeout` limit, so child monitoring
+/// does not need a poll/sleep loop. After the direct child exits, stdout and
+/// stdin still receive short bounded post-exit grace waits; those waits detect
+/// descendants that inherited prompt-owned pipes without letting Tau wait
+/// indefinitely. Cleanup and post-exit waits may observe unrelated pending
+/// events, so event handling must remain valid in every phase of the run.
 struct BoundedStdoutRun {
-    /// Spawned direct child being monitored.
-    child: std::process::Child,
     /// Owned process-group/foreground-terminal handle for the child.
     process_group: ProcessGroupHandle,
-    /// Reader-thread result channel for captured stdout.
-    stdout_rx: std::sync::mpsc::Receiver<io::Result<LimitedRead>>,
-    /// Optional writer-thread result channel for piped stdin.
-    stdin_rx: Option<std::sync::mpsc::Receiver<io::Result<()>>>,
+    /// Child/writer/reader event channel.
+    event_rx: std::sync::mpsc::Receiver<BoundedStdoutEvent>,
     /// Completed stdout read observed before the direct child exited.
     stdout_result: Option<io::Result<LimitedRead>>,
     /// Whether the optional stdin writer has completed.
     stdin_done: bool,
+    /// Completed direct-child wait result.
+    child_result: Option<io::Result<std::process::ExitStatus>>,
     /// Maximum number of stdout bytes allowed before terminating the child.
     stdout_limit: usize,
 }
@@ -134,48 +141,58 @@ impl BoundedStdoutRun {
             terminate_child(&mut child, process_group.child_pgid());
             return Err("command stdout was not captured".to_owned());
         };
-        let stdout_rx = spawn_stdout_reader(stdout, stdout_limit);
-        let stdin_rx = stdin_input.and_then(|input| spawn_stdin_writer(&mut child, input));
-        let stdin_done = stdin_rx.is_none();
+        let (event_tx, event_rx) = std::sync::mpsc::channel();
+        spawn_stdout_reader(stdout, stdout_limit, event_tx.clone());
+        let stdin_done = match spawn_stdin_writer(&mut child, stdin_input, event_tx.clone()) {
+            StdinWriterState::Done => true,
+            StdinWriterState::Running => false,
+        };
+        spawn_bounded_stdout_child_waiter(child, event_tx);
         Ok(Self {
-            child,
             process_group,
-            stdout_rx,
-            stdin_rx,
+            event_rx,
             stdout_result: None,
             stdin_done,
+            child_result: None,
             stdout_limit,
         })
     }
 
-    /// Polls the child until it exits, a pipe error occurs, or the timeout
+    /// Waits until the child exits, a pipe error occurs, or the timeout
     /// expires.
     fn finish(mut self, timeout: std::time::Duration) -> Result<BoundedCommandOutput, String> {
         let deadline = std::time::Instant::now() + timeout;
         loop {
-            if std::time::Instant::now() >= deadline {
+            let Some(remaining) = deadline.checked_duration_since(std::time::Instant::now()) else {
                 self.terminate();
                 self.wait_for_stdin_writer();
                 return Err(format!("command exceeded {}s timeout", timeout.as_secs()));
+            };
+
+            match self.event_rx.recv_timeout(remaining) {
+                Ok(event) => self.handle_event(event)?,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    self.terminate();
+                    self.wait_for_stdin_writer();
+                    return Err(format!("command exceeded {}s timeout", timeout.as_secs()));
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    self.terminate();
+                    self.wait_for_stdin_writer();
+                    return Err("command monitor stopped unexpectedly".to_owned());
+                }
             }
 
-            self.poll_stdout()?;
-            self.poll_stdin()?;
-            if let Some(output) = self.poll_child()? {
+            if let Some(output) = self.take_child_output()? {
                 return Ok(output);
             }
-
-            std::thread::sleep(std::time::Duration::from_millis(10));
         }
     }
 
-    /// Incorporates any completed stdout read, terminating on reader failures.
-    fn poll_stdout(&mut self) -> Result<(), String> {
-        if self.stdout_result.is_some() {
-            return Ok(());
-        }
-        match self.stdout_rx.try_recv() {
-            Ok(Ok(stdout)) if stdout.overflowed => {
+    /// Incorporates a completed child, stdin, or stdout event.
+    fn handle_event(&mut self, event: BoundedStdoutEvent) -> Result<(), String> {
+        match event {
+            BoundedStdoutEvent::Stdout(Ok(stdout)) if stdout.overflowed => {
                 self.terminate();
                 self.wait_for_stdin_writer();
                 Err(format!(
@@ -183,86 +200,91 @@ impl BoundedStdoutRun {
                     self.stdout_limit
                 ))
             }
-            Ok(Err(error)) => {
+            BoundedStdoutEvent::Stdout(Err(error)) => {
                 self.terminate();
                 self.wait_for_stdin_writer();
                 Err(format!("could not read command stdout: {error}"))
             }
-            Ok(result) => {
+            BoundedStdoutEvent::Stdout(result) => {
                 self.stdout_result = Some(result);
                 Ok(())
             }
-            Err(std::sync::mpsc::TryRecvError::Empty) => Ok(()),
-            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                self.terminate();
-                self.wait_for_stdin_writer();
-                Err("command stdout reader stopped unexpectedly".to_owned())
-            }
-        }
-    }
-
-    /// Incorporates any completed stdin write, terminating on writer failures.
-    fn poll_stdin(&mut self) -> Result<(), String> {
-        if self.stdin_done {
-            return Ok(());
-        }
-        let Some(rx) = self.stdin_rx.as_ref() else {
-            self.stdin_done = true;
-            return Ok(());
-        };
-        match rx.try_recv() {
-            Ok(Ok(())) => {
+            BoundedStdoutEvent::Stdin(Ok(())) => {
                 self.stdin_done = true;
                 Ok(())
             }
-            Ok(Err(error)) => {
+            BoundedStdoutEvent::Stdin(Err(error)) => {
                 self.terminate();
                 Err(format!("could not write to command stdin: {error}"))
             }
-            Err(std::sync::mpsc::TryRecvError::Empty) => Ok(()),
-            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                self.stdin_done = true;
+            BoundedStdoutEvent::Child(result) => {
+                self.child_result = Some(result);
                 Ok(())
             }
         }
     }
 
     /// Checks direct-child status and collects final pipe results after exit.
-    fn poll_child(&mut self) -> Result<Option<BoundedCommandOutput>, String> {
-        match self.child.try_wait() {
-            Ok(Some(status)) => {
-                let stdout = match receive_stdout_after_child_exit(
-                    self.stdout_result.take(),
-                    &self.stdout_rx,
-                    self.stdout_limit,
-                ) {
-                    Ok(stdout) => stdout,
-                    Err(error) => {
-                        self.terminate_process_group_if_owned();
-                        return Err(error);
-                    }
-                };
-                if let Err(error) = wait_for_stdin_after_child_exit(self.stdin_rx.as_ref()) {
-                    self.terminate_process_group_if_owned();
-                    return Err(error);
-                }
-                Ok(Some(BoundedCommandOutput {
-                    status,
-                    stdout: stdout.bytes,
-                }))
-            }
-            Ok(None) => Ok(None),
+    fn take_child_output(&mut self) -> Result<Option<BoundedCommandOutput>, String> {
+        let Some(result) = self.child_result.take() else {
+            return Ok(None);
+        };
+        let status = match result {
+            Ok(status) => status,
             Err(error) => {
-                self.terminate();
-                self.wait_for_stdin_writer();
-                Err(format!("could not wait for command: {error}"))
+                self.terminate_process_group_if_owned();
+                return Err(format!("could not wait for command: {error}"));
             }
+        };
+        let stdout = match self.receive_stdout_after_child_exit() {
+            Ok(stdout) => stdout,
+            Err(error) => {
+                self.terminate_process_group_if_owned();
+                return Err(error);
+            }
+        };
+        if let Err(error) = self.wait_for_stdin_after_child_exit() {
+            self.terminate_process_group_if_owned();
+            return Err(error);
         }
+        Ok(Some(BoundedCommandOutput {
+            status,
+            stdout: stdout.bytes,
+        }))
+    }
+
+    /// Waits briefly for stdout EOF after the direct child has exited.
+    fn receive_stdout_after_child_exit(&mut self) -> Result<LimitedRead, String> {
+        while self.stdout_result.is_none() {
+            let event = self
+                .event_rx
+                .recv_timeout(POST_EXIT_PIPE_CLOSE_TIMEOUT)
+                .map_err(|_| "command stdout pipe did not close after child exit".to_owned())?;
+            self.handle_event(event)?;
+        }
+        let stdout_result = self
+            .stdout_result
+            .take()
+            .expect("stdout result must be available after post-exit wait");
+        receive_stdout_result(stdout_result, self.stdout_limit)
+    }
+
+    /// Waits briefly for the stdin writer after the direct child has exited.
+    fn wait_for_stdin_after_child_exit(&mut self) -> Result<(), String> {
+        while !self.stdin_done {
+            let event = self
+                .event_rx
+                .recv_timeout(POST_EXIT_PIPE_CLOSE_TIMEOUT)
+                .map_err(|_| "command stdin pipe did not close after child exit".to_owned())?;
+            self.handle_event(event)?;
+        }
+        Ok(())
     }
 
     /// Terminates the direct child or its process group and reaps it.
     fn terminate(&mut self) {
-        terminate_child(&mut self.child, self.process_group.child_pgid());
+        terminate_process_group_if_owned(self.process_group.child_pgid());
+        let _ = self.wait_for_child_after_terminate();
     }
 
     /// Terminates the owned process group without waiting for the
@@ -272,38 +294,94 @@ impl BoundedStdoutRun {
     }
 
     /// Waits briefly for an in-flight stdin writer after child termination.
-    fn wait_for_stdin_writer(&self) {
-        wait_for_stdin_writer(self.stdin_rx.as_ref());
+    fn wait_for_stdin_writer(&mut self) {
+        let _ = self.wait_for_stdin_after_child_exit();
     }
+
+    /// Waits briefly for the child waiter after sending termination.
+    fn wait_for_child_after_terminate(&mut self) -> Result<(), String> {
+        while self.child_result.is_none() {
+            let event = self
+                .event_rx
+                .recv_timeout(POST_EXIT_PIPE_CLOSE_TIMEOUT)
+                .map_err(|_| "command child did not exit after termination".to_owned())?;
+            self.handle_event(event)?;
+        }
+        Ok(())
+    }
+}
+
+/// Events emitted by bounded stdout helper threads.
+enum BoundedStdoutEvent {
+    /// Direct child completed.
+    Child(io::Result<std::process::ExitStatus>),
+    /// Captured stdout reader completed.
+    Stdout(io::Result<LimitedRead>),
+    /// Optional stdin writer completed.
+    Stdin(io::Result<()>),
+}
+
+/// State of the optional stdin writer after setup.
+enum StdinWriterState {
+    /// No stdin writer is active.
+    Done,
+    /// A stdin writer thread was spawned and will report completion.
+    Running,
 }
 
 fn spawn_stdout_reader(
     stdout: impl Read + Send + 'static,
     stdout_limit: usize,
-) -> std::sync::mpsc::Receiver<io::Result<LimitedRead>> {
-    let (stdout_tx, stdout_rx) = std::sync::mpsc::channel();
+    event_tx: std::sync::mpsc::Sender<BoundedStdoutEvent>,
+) {
     std::thread::spawn(move || {
-        let _ = stdout_tx.send(read_to_limit(stdout, stdout_limit));
+        let _ = event_tx.send(BoundedStdoutEvent::Stdout(read_to_limit(
+            stdout,
+            stdout_limit,
+        )));
     });
-    stdout_rx
 }
 
 fn spawn_stdin_writer(
     child: &mut std::process::Child,
-    input: &[u8],
-) -> Option<std::sync::mpsc::Receiver<io::Result<()>>> {
-    let mut stdin = child.stdin.take()?;
+    input: Option<&[u8]>,
+    event_tx: std::sync::mpsc::Sender<BoundedStdoutEvent>,
+) -> StdinWriterState {
+    let Some(input) = input else {
+        return StdinWriterState::Done;
+    };
+    let Some(mut stdin) = child.stdin.take() else {
+        return StdinWriterState::Done;
+    };
     let input = input.to_vec();
-    let (stdin_tx, stdin_rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let result = match stdin.write_all(&input) {
             Ok(()) => Ok(()),
             Err(error) if error.kind() == io::ErrorKind::BrokenPipe => Ok(()),
             Err(error) => Err(error),
         };
-        let _ = stdin_tx.send(result);
+        let _ = event_tx.send(BoundedStdoutEvent::Stdin(result));
     });
-    Some(stdin_rx)
+    StdinWriterState::Running
+}
+
+fn spawn_bounded_stdout_child_waiter(
+    mut child: std::process::Child,
+    event_tx: std::sync::mpsc::Sender<BoundedStdoutEvent>,
+) {
+    std::thread::spawn(move || {
+        let _ = event_tx.send(BoundedStdoutEvent::Child(child.wait()));
+    });
+}
+
+fn spawn_child_waiter(
+    mut child: std::process::Child,
+) -> std::sync::mpsc::Receiver<io::Result<std::process::ExitStatus>> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(child.wait());
+    });
+    rx
 }
 
 /// Bounded stdout read result from the reader thread.
@@ -344,23 +422,22 @@ pub(crate) fn run_with_inherited_stdio(
         }
     };
 
-    let deadline = std::time::Instant::now() + timeout;
-    loop {
-        if std::time::Instant::now() >= deadline {
-            terminate_child(&mut child, process_group.child_pgid());
-            return Err(format!("command exceeded {}s timeout", timeout.as_secs()));
+    let child_rx = spawn_child_waiter(child);
+    match child_rx.recv_timeout(timeout) {
+        Ok(Ok(status)) => Ok(BoundedCommandStatus { status }),
+        Ok(Err(error)) => {
+            terminate_process_group_if_owned(process_group.child_pgid());
+            Err(format!("could not wait for command: {error}"))
         }
-
-        match child.try_wait() {
-            Ok(Some(status)) => return Ok(BoundedCommandStatus { status }),
-            Ok(None) => {}
-            Err(error) => {
-                terminate_child(&mut child, process_group.child_pgid());
-                return Err(format!("could not wait for command: {error}"));
-            }
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            terminate_process_group_if_owned(process_group.child_pgid());
+            let _ = child_rx.recv_timeout(POST_EXIT_PIPE_CLOSE_TIMEOUT);
+            Err(format!("command exceeded {}s timeout", timeout.as_secs()))
         }
-
-        std::thread::sleep(std::time::Duration::from_millis(10));
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            terminate_process_group_if_owned(process_group.child_pgid());
+            Err("command monitor stopped unexpectedly".to_owned())
+        }
     }
 }
 
@@ -388,43 +465,15 @@ fn read_to_limit(mut reader: impl Read, limit: usize) -> io::Result<LimitedRead>
     })
 }
 
-fn receive_stdout_after_child_exit(
-    stdout_result: Option<io::Result<LimitedRead>>,
-    stdout_rx: &std::sync::mpsc::Receiver<io::Result<LimitedRead>>,
+fn receive_stdout_result(
+    stdout_result: io::Result<LimitedRead>,
     stdout_limit: usize,
 ) -> Result<LimitedRead, String> {
-    let stdout = match stdout_result {
-        Some(result) => result,
-        None => stdout_rx
-            .recv_timeout(POST_EXIT_PIPE_CLOSE_TIMEOUT)
-            .map_err(|_| "command stdout pipe did not close after child exit".to_owned())?,
-    }
-    .map_err(|e| format!("could not read command stdout: {e}"))?;
+    let stdout = stdout_result.map_err(|e| format!("could not read command stdout: {e}"))?;
     if stdout.overflowed {
         return Err(format!("command stdout exceeded {} bytes", stdout_limit));
     }
     Ok(stdout)
-}
-
-fn wait_for_stdin_after_child_exit(
-    rx: Option<&std::sync::mpsc::Receiver<io::Result<()>>>,
-) -> Result<(), String> {
-    let Some(rx) = rx else {
-        return Ok(());
-    };
-    match rx.recv_timeout(POST_EXIT_PIPE_CLOSE_TIMEOUT) {
-        Ok(Ok(())) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Ok(()),
-        Ok(Err(error)) => Err(format!("could not write to command stdin: {error}")),
-        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-            Err("command stdin pipe did not close after child exit".to_owned())
-        }
-    }
-}
-
-fn wait_for_stdin_writer(rx: Option<&std::sync::mpsc::Receiver<io::Result<()>>>) {
-    if let Some(rx) = rx {
-        let _ = rx.recv_timeout(POST_EXIT_PIPE_CLOSE_TIMEOUT);
-    }
 }
 
 /// Process group id assigned to a spawned child.
