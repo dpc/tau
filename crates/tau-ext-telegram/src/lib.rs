@@ -5,6 +5,7 @@
 //! API only after an agent registers or another Telegram action needs the
 //! client.
 
+mod gateway;
 mod stream_owner;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -54,6 +55,13 @@ const HTTP_TIMEOUT: Duration = Duration::from_secs(35);
 pub fn run_stdio() -> Result<(), Box<dyn Error>> {
     tau_client::init_logging_for(LOG_TARGET);
     run(std::io::stdin(), std::io::stdout())
+}
+
+/// Run the standalone Telegram gateway daemon from process command-line
+/// arguments and environment variables.
+pub fn run_gateway_from_env() -> Result<(), Box<dyn Error>> {
+    tau_client::init_logging_for(LOG_TARGET);
+    gateway::run_from_env()
 }
 
 /// Run the Telegram extension over an arbitrary transport.

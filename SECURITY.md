@@ -231,6 +231,13 @@ than silently pretending the bridge still owns the stream. Avoid logs that
 include bot tokens, Bot API URLs, or unexpected private Telegram content.
 Additional Telegram extension instances use namespaced tools/groups so one
 harness does not route a model-visible tool call ambiguously between bot tokens.
+The experimental standalone `tau-telegram-gateway` daemon is a first gateway
+slice that owns polling and durable per-stream offset/dedup state for one bot
+token, shares the same stream lock/webhook/409 safeguards, and exposes only a
+private local status socket plus Telegram `/start`, `/help`, and `/status`
+responses until sidecar routing is implemented. In gateway mode, non-allowlisted
+users are ignored before side effects, and unconfigured group/supergroup chats
+must not be linked or replied to.
 
 ## XMPP extension
 

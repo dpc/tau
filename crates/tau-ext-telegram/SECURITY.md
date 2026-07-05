@@ -37,6 +37,18 @@
 - In-flight poll responses captured under an older configuration are discarded
   so old Telegram streams cannot advance offsets, mark backlog draining complete,
   send replies, or submit prompts after reconfiguration.
+- The standalone `tau-telegram-gateway` MVP is a stream owner and status daemon
+  only. It reads the bot token from an environment variable, shares the same
+  stream lock and webhook/409 diagnostics, stores durable per-stream offset and
+  duplicate-suppression state under a private state directory, and exposes only a
+  private local status socket. The socket bounds request size but is same-UID
+  local IPC, not a sandbox or DoS boundary against the user's own processes. It
+  handles `/start`, `/help`, and `/status`; it does not submit Telegram text to
+  Tau sessions yet.
+- Gateway mode must continue to reject non-allowlisted Telegram users before any
+  side effects. Without an explicit configured `chat_id`, group/supergroup chats
+  must not be linked or replied to; only an allowlisted private chat may link
+  with `/start`.
 - If `api_base` is overridden for tests, production endpoints must use HTTPS.
   Plaintext HTTP is accepted only for loopback hosts, and userinfo, query, and
   fragment components are rejected because the bot token is embedded in request

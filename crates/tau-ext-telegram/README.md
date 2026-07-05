@@ -79,13 +79,41 @@ startup; restart the extension after changing it.
 
 ## Limitations
 
-The MVP is text-only. Attachments are acknowledged as unsupported. Registrations,
-selected agents, learned chat link, and Telegram update offsets are in memory
-only. On lazy startup the extension drains Telegram's existing backlog without
-routing it; after restart, Telegram may still redeliver newer updates that were
-not acknowledged before shutdown. Telegram webhooks and `getUpdates` polling are
-mutually exclusive. Only one local Tau process can poll a given Bot API base plus
-bot token within the same Tau state root at a time; another process using the
-same stream is rejected with an advisory-lock contention error. Out-of-band
-consumers can still cause Telegram HTTP 409 conflicts; Tau surfaces those as
-warning notices and clears active registrations rather than silently continuing.
+The legacy extension MVP is text-only. Attachments are acknowledged as
+unsupported. Registrations, selected agents, learned chat link, and Telegram
+update offsets are in memory only in legacy local-poll mode. On lazy startup the
+extension drains Telegram's existing backlog without routing it; after restart,
+Telegram may still redeliver newer updates that were not acknowledged before
+shutdown. Telegram webhooks and `getUpdates` polling are mutually exclusive. Only
+one local Tau process can poll a given Bot API base plus bot token within the
+same Tau state root at a time; another process using the same stream is rejected
+with an advisory-lock contention error. Out-of-band consumers can still cause
+Telegram HTTP 409 conflicts; Tau surfaces those as warning notices and clears
+active registrations rather than silently continuing.
+
+## Gateway daemon MVP
+
+The crate also builds a standalone `tau-telegram-gateway` daemon. This is the
+first safe slice of the planned single-token multi-session gateway: it owns one
+Telegram update stream, takes the same advisory stream lock as the legacy
+extension, checks for active webhooks before polling, enforces
+`allowed_user_ids`, keeps a durable update offset/recent-update state file, and
+opens a private local status socket.
+
+This MVP intentionally does **not** route Telegram prompts to Tau sessions yet.
+Allowlisted users can use `/start`, `/help`, and `/status`; other text receives a
+"routing not implemented yet" reply in the configured or linked private chat.
+Unconfigured group/supergroup chats are ignored instead of linked or replied to.
+
+Run it with the bot token in an environment variable rather than on the command
+line:
+
+```sh
+TELEGRAM_BOT_TOKEN=... tau-telegram-gateway \
+  --allowed-user-id 123456789
+```
+
+Optional flags include `--bot-token-env`, `--chat-id`, `--api-base`,
+`--poll-timeout-seconds`, `--state-dir`, and `--runtime-dir`. The local socket
+accepts a JSON-line `{"protocol_version":1,"kind":"status"}` request and returns
+a status snapshot.

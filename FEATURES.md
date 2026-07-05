@@ -570,6 +570,12 @@ warning notices that clear active registrations. Additional Telegram extension
 instances publish namespaced register/send tools instead of reusing the
 `std-telegram` legacy tool names.
 
+The same crate also ships the experimental `tau-telegram-gateway` daemon for the
+first single-token gateway slice. It owns polling and durable offsets for one bot
+token, enforces the Telegram allowlist, exposes a private local status socket,
+and answers only `/start`, `/help`, and `/status` until gateway-client routing is
+implemented.
+
 ### `std-slack` — personal Slack Socket Mode text bridge
 
 Disabled by default, `std-slack` lets allowlisted Slack users send text to

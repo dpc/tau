@@ -49,6 +49,35 @@ and HTTP 409 contention classification. Legacy local-poll mode and the planned
 Telegram gateway owner must use this boundary so accidental same-token reuse
 fails closed with the same behavior.
 
+## Gateway daemon MVP
+
+`tau-telegram-gateway` is the first standalone owner for the planned
+multi-session gateway architecture. In this slice it is deliberately a
+single-process stream owner and status endpoint, not yet a Tau prompt router. It
+resolves the bot token from an environment variable, validates the Bot API base,
+creates private state/runtime directories, acquires the shared stream lock,
+checks `getWebhookInfo`, loads durable per-stream JSON state, binds a private
+Unix status socket, and then owns `getUpdates` polling.
+
+The durable state is scoped by the same non-secret stream fingerprint used for
+locking. It stores the next update offset, an optional private-chat link, recent
+update ids for restart duplicate suppression, and small counters. The gateway
+persists after each update is intentionally handled or rejected so a crash may
+redeliver but should not silently skip accepted input. On startup the loaded
+state is reconciled with the current config: fixed-chat mode clears private-chat
+links, and links owned by users no longer present in `allowed_user_ids` are
+cleared and persisted before polling starts.
+
+Until sidecar routing lands, Telegram-visible behavior is limited to `/start`,
+`/help`, and `/status`. The allowlist is checked before any side effects.
+Without a fixed `chat_id`, only one allowlisted private chat can link with
+`/start`; unconfigured group/supergroup chats are ignored rather than linked or
+replied to. The local socket accepts versioned JSON-line `status`/`hello`
+requests up to a small fixed byte limit and returns a bounded status snapshot
+for future gateway-client discovery experiments. The socket is private same-UID
+local IPC, not an authentication boundary; this MVP bounds request size but does
+not attempt to defend against all same-user local denial-of-service patterns.
+
 On the idle-to-active transition for the first registered agent, after acquiring
 the local lock and before reporting registration success, the extension calls
 `getWebhookInfo`. A non-empty webhook URL means Telegram will not serve
@@ -105,3 +134,9 @@ active-reconfigure lock contention, webhook-active registration refusal,
 `getUpdates` 409 conflict notices, tool namespace derivation/validation, and
 bot-token/Bot API URL redaction. Live
 Telegram checks are manual only and should not be required for normal CI.
+
+Gateway daemon tests use a fake Telegram client plus test-only gateway resources
+to cover durable state round-trips/reconciliation, retry-vs-offset advancement
+semantics, same-batch redelivery stops, allowlist/group-chat behavior, local
+socket parser/response bounds, and CLI/env parsing. Future sidecar routing tests
+should keep using fake gateway clients rather than live Telegram.

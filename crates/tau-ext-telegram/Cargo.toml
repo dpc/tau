@@ -28,3 +28,7 @@ url.workspace = true
 [dev-dependencies]
 tau-core.workspace = true
 tempfile.workspace = true
+
+[[bin]]
+name = "tau-telegram-gateway"
+path = "src/gateway_main.rs"
