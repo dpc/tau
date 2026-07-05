@@ -16,7 +16,8 @@ use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::time::{Duration, Instant};
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::Duration;
 
 use rhai::{Array, Dynamic, Engine, EvalAltResult, FnPtr, ImmutableString, Map, Scope};
 use serde::Deserialize;
@@ -169,6 +170,51 @@ struct PendingShellJob {
     cancel: shell::ShellCancel,
     /// Worker thread running the shell command.
     join_handle: std::thread::JoinHandle<()>,
+    /// Notification signaled by the worker immediately before it exits.
+    join_finished: ShellWorkerJoin,
+}
+
+/// Completion notification for bounded shell worker joins.
+#[derive(Clone, Default)]
+struct ShellWorkerJoin {
+    /// Shared state protected by the same mutex as its condition variable.
+    inner: Arc<ShellWorkerJoinInner>,
+}
+
+/// Shared state for `ShellWorkerJoin`.
+#[derive(Default)]
+struct ShellWorkerJoinInner {
+    /// Whether the worker has finished.
+    finished: Mutex<bool>,
+    /// Condition notified when the worker finishes.
+    changed: Condvar,
+}
+
+impl ShellWorkerJoin {
+    /// Mark the worker as finished and wake shutdown waiters.
+    fn mark_finished(&self) {
+        *self
+            .inner
+            .finished
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner()) = true;
+        self.inner.changed.notify_all();
+    }
+
+    /// Wait up to `timeout` for the worker to finish.
+    fn wait_timeout(&self, timeout: Duration) -> bool {
+        let finished = self
+            .inner
+            .finished
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let wait = self
+            .inner
+            .changed
+            .wait_timeout_while(finished, timeout, |finished| !*finished)
+            .unwrap_or_else(|poison| poison.into_inner());
+        *wait.0
+    }
 }
 
 /// Rhai-visible token identifying an asynchronous host shell job.
@@ -853,6 +899,8 @@ fn shell_spawn(
     let worker_cancel = cancel.clone();
     let sender = runtime_sender.clone();
     let worker_command = command.clone();
+    let join_finished = ShellWorkerJoin::default();
+    let worker_join_finished = join_finished.clone();
     let join_handle = std::thread::spawn(move || {
         let result = shell::run_shell_command(
             worker_command,
@@ -864,6 +912,7 @@ fn shell_spawn(
             job_id: id,
             result,
         }));
+        worker_join_finished.mark_finished();
     });
     state_guard.shell_jobs.insert(
         id,
@@ -875,6 +924,7 @@ fn shell_spawn(
             tag,
             cancel,
             join_handle,
+            join_finished,
         },
     );
     Ok(ShellJob { id })
@@ -1313,12 +1363,8 @@ impl Drop for ScriptRuntime {
 }
 
 fn join_shell_worker_bounded(job: PendingShellJob) {
-    let deadline = Instant::now() + SHELL_SHUTDOWN_JOIN_TIMEOUT;
-    while !job.join_handle.is_finished() && Instant::now() < deadline {
-        job.cancel.cancel();
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    if job.join_handle.is_finished() {
+    job.cancel.cancel();
+    if job.join_finished.wait_timeout(SHELL_SHUTDOWN_JOIN_TIMEOUT) {
         if let Err(err) = job.join_handle.join() {
             tracing::warn!(target: LOG_TARGET, ?err, "shell worker panicked during shutdown");
         }

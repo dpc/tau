@@ -22,6 +22,12 @@ protocol reader wake the loop after enqueueing work. The loop must drain ready
 sources fairly so a flood of harness events cannot indefinitely delay a shell
 completion callback.
 
+Shell supervision follows the same rule below the runtime loop: worker shutdown
+joins, child-process exit/timeout/cancellation, and Unix pipe capture are driven
+by completion notifications, channels, or OS readiness. Do not reintroduce
+`JoinHandle::is_finished`, `Child::try_wait`, or sleep-based readiness polling
+for these paths.
+
 Shell output capture is also bounded after foreground completion, timeout, or
 cancellation. Unix commands run in an owned process group/session, but detached
 descendants can survive with inherited stdout/stderr pipes; the runtime drains
