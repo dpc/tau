@@ -1994,6 +1994,37 @@ fn apply_event_accumulates_custom_tool_input_deltas() {
     );
 }
 
+/// Ensures Responses custom-tool input deltas expose cumulative UTF-8 byte
+/// progress before the tool call is actionable.
+#[test]
+fn streamed_tool_input_deltas_update_pending_byte_progress() {
+    use crate::common::StreamState;
+
+    let mut state = StreamState::new();
+    let added = serde_json::json!({
+        "type": "response.output_item.added",
+        "output_index": 0,
+        "item": {
+            "type": "custom_tool_call",
+            "call_id": "call_patch",
+            "name": "apply_patch",
+        }
+    });
+    apply_event(&mut state, &added, &mut |_| {}).expect("added");
+    let delta = serde_json::json!({
+        "type": "response.custom_tool_call_input.delta",
+        "output_index": 0,
+        "delta": "αβγ"
+    });
+    apply_event(&mut state, &delta, &mut |_| {}).expect("delta");
+
+    let progress = state.tool_input_progress().expect("tool input progress");
+    assert_eq!(progress.items.len(), 1);
+    assert_eq!(progress.items[0].output_index, 0);
+    assert_eq!(progress.items[0].counter_end_bytes, "αβγ".len() as u64);
+    assert_eq!(progress.items[0].label.as_deref(), Some("apply_patch"));
+}
+
 #[test]
 fn build_request_chain_keeps_custom_tool_output_type_from_prior_history() {
     let config = chain_test_config();

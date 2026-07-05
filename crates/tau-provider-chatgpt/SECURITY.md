@@ -45,3 +45,9 @@ rebase controlled semantic fields from typed Tau structures. In particular,
 assistant `message` sidecars may only replay as assistant messages, and their
 model-visible text/phase must come from `MessageItem` rather than from an
 unchecked raw blob.
+
+## Streaming progress metadata
+
+Provider response progress for pending tool-call/custom-tool input must stay
+content-free. Emit byte counters, sample-window durations, output indices, and
+bounded labels only; never copy raw argument/input bytes into progress status.

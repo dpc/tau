@@ -30,6 +30,75 @@ impl TurnAbort for RecordingRetrySleeper {
     }
 }
 
+/// Ensures the ChatGPT/Responses emission helper produces self-contained
+/// progress-only updates, honors throttling, and still attaches progress to a
+/// visible update inside the throttle window.
+#[test]
+fn progress_emitter_covers_progress_only_throttle_and_visible_attachment() {
+    let start = std::time::Instant::now();
+    let mut emitter = ProviderProgressEmitter::new(start);
+
+    let first = emitter
+        .progress_for_update(
+            test_progress(10),
+            false,
+            start + std::time::Duration::from_secs(1),
+        )
+        .expect("first progress-only update emits");
+    let update = ProviderResponseUpdated {
+        agent_prompt_id: "sp-progress".into(),
+        agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
+        deltas: Vec::new(),
+        compaction: None,
+        status: None,
+        progress: Some(first.clone()),
+        originator: tau_proto::PromptOriginator::User,
+    };
+    assert!(update.deltas.is_empty());
+    assert!(update.progress.is_some());
+    assert_eq!(first.total_counter_start_bytes, 0);
+    assert_eq!(first.total_counter_end_bytes, 10);
+    assert!(first.total_window_micros > 0);
+
+    assert!(
+        emitter
+            .progress_for_update(
+                test_progress(15),
+                false,
+                start + std::time::Duration::from_millis(1500),
+            )
+            .is_none(),
+        "progress-only updates should be throttled"
+    );
+
+    let visible = emitter
+        .progress_for_update(
+            test_progress(20),
+            true,
+            start + std::time::Duration::from_millis(1600),
+        )
+        .expect("visible update may attach progress");
+    assert_eq!(visible.total_counter_start_bytes, 10);
+    assert_eq!(visible.items[0].counter_start_bytes, 10);
+}
+
+fn test_progress(end: u64) -> Option<ProviderResponseProgressUpdate> {
+    Some(ProviderResponseProgressUpdate {
+        total_counter_start_bytes: 0,
+        total_counter_end_bytes: end,
+        total_window_micros: 0,
+        items: vec![tau_proto::ProviderResponseProgressItem {
+            output_index: 0,
+            kind: ProviderResponseProgressKind::ToolArguments,
+            counter_start_bytes: 0,
+            counter_end_bytes: end,
+            window_micros: 0,
+            label: Some("shell_command".to_owned()),
+        }],
+        omitted_items: 0,
+    })
+}
+
 #[derive(Default)]
 struct TransportCounts {
     http_post_requests: std::sync::atomic::AtomicUsize,

@@ -360,11 +360,21 @@ pub(crate) fn streaming_block(
     body_name: &str,
     body_text: impl Into<String>,
 ) -> tau_cli_term::StyledBlock {
+    streaming_block_with_indicator_suffix(theme, body_name, body_text, "")
+}
+
+pub(crate) fn streaming_block_with_indicator_suffix(
+    theme: &tau_themes::Theme,
+    body_name: &str,
+    body_text: impl Into<String>,
+    indicator_suffix: impl Into<String>,
+) -> tau_cli_term::StyledBlock {
     use tau_cli_term::resolve::{convert_color, resolve};
     use tau_cli_term::{Span, Style, StyledBlock, StyledText};
     use tau_themes::{StyleName, names};
 
     let body_text = body_text.into();
+    let indicator_suffix = indicator_suffix.into();
     let needs_space = body_text
         .chars()
         .next_back()
@@ -392,6 +402,9 @@ pub(crate) fn streaming_block(
         tau_proto::PROGRESS_INDICATOR_TEXT.to_owned(),
         progress_style,
     ));
+    if !indicator_suffix.is_empty() {
+        spans.push(Span::new(indicator_suffix, progress_style));
+    }
 
     let mut block = StyledBlock::new(StyledText::from(spans));
     if let Some(bg) = body_ts.bg {

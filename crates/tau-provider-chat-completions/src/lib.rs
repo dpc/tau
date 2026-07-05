@@ -5,14 +5,15 @@ pub mod openrouter;
 use std::collections::{BTreeMap, HashMap};
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use tau_proto::{
     AgentPromptId, ContentPart, ContextItem, ContextRole, Event, HarnessInputMessage, ModelId,
     ModelName, ModelTag, OpaqueProviderItem, PeerOutputWriter, ProviderBackend,
     ProviderBackendKind, ProviderBackendTransport, ProviderModelInfo, ProviderName,
-    ProviderResponseFinished, ProviderResponseStatusUpdate, ProviderResponseTextDelta,
+    ProviderResponseFinished, ProviderResponseProgressItem, ProviderResponseProgressKind,
+    ProviderResponseProgressUpdate, ProviderResponseStatusUpdate, ProviderResponseTextDelta,
     ProviderResponseUpdated, ProviderStopReason, ProviderTokenUsage, ReasoningTextItem,
     ReasoningTextKind, ThinkingSummary, ToolCallItem, ToolChoice, ToolDefinition,
     ToolResponseHeader, ToolResultStatus, ToolType,
@@ -166,9 +167,15 @@ fn run_prompt<W: Write>(
     loop {
         let result = {
             let mut delta_emitter = StreamDeltaEmitter::default();
+            let mut progress_emitter = ProviderProgressEmitter::new(Instant::now());
             let mut on_update = |state: &StreamState| {
                 let deltas = delta_emitter.deltas(state);
-                if deltas.is_empty() {
+                let progress = progress_emitter.progress_for_update(
+                    state.tool_input_progress(),
+                    !deltas.is_empty(),
+                    Instant::now(),
+                );
+                if deltas.is_empty() && progress.is_none() {
                     return;
                 }
                 let _ = writer.write_message(&HarnessInputMessage::emit(
@@ -178,6 +185,7 @@ fn run_prompt<W: Write>(
                         deltas,
                         compaction: None,
                         status: None,
+                        progress,
                         originator: prompt.originator.clone(),
                     }),
                 ));
@@ -233,6 +241,7 @@ fn emit_empty_response_retry_update<W: Write>(
                 text,
                 clear_response: true,
             }),
+            progress: None,
             originator: prompt.originator.clone(),
         },
     )));
@@ -258,6 +267,7 @@ fn emit_repetition_detected_update<W: Write>(
                 text,
                 clear_response: true,
             }),
+            progress: None,
             originator: prompt.originator.clone(),
         },
     )));
@@ -584,6 +594,142 @@ impl StreamState {
 
     fn is_empty_end_turn(&self) -> bool {
         self.stop_reason == ProviderStopReason::EndTurn && !self.has_output_items()
+    }
+
+    /// Returns pending non-displayable tool argument byte progress for live UI
+    /// status, if any streamed function-call arguments have been buffered.
+    fn tool_input_progress(&self) -> Option<ProviderResponseProgressUpdate> {
+        let mut total_pending_bytes = 0_u64;
+        let mut items = Vec::new();
+        let mut omitted_items = 0_u64;
+        for (output_index, item) in self.output_items.iter().enumerate() {
+            let OutputItemAccumulator::ToolCall(call) = item else {
+                continue;
+            };
+            let counter_end_bytes = call.arguments.len() as u64;
+            if counter_end_bytes == 0 {
+                continue;
+            }
+            total_pending_bytes = total_pending_bytes.saturating_add(counter_end_bytes);
+            if items.len() < 4 {
+                items.push(ProviderResponseProgressItem {
+                    output_index: output_index as u32,
+                    kind: ProviderResponseProgressKind::ToolArguments,
+                    counter_start_bytes: 0,
+                    counter_end_bytes,
+                    window_micros: 0,
+                    label: bounded_progress_label(&call.name),
+                });
+            } else {
+                omitted_items += 1;
+            }
+        }
+        (total_pending_bytes > 0).then_some(ProviderResponseProgressUpdate {
+            total_counter_start_bytes: 0,
+            total_counter_end_bytes: total_pending_bytes,
+            total_window_micros: 0,
+            items,
+            omitted_items,
+        })
+    }
+}
+
+fn bounded_progress_label(label: &str) -> Option<String> {
+    const MAX_LABEL_CHARS: usize = 32;
+    if label.is_empty() {
+        return None;
+    }
+    Some(label.chars().take(MAX_LABEL_CHARS).collect())
+}
+
+/// Provider-side sampler that makes progress updates self-contained for UIs.
+struct ProgressSampleState {
+    /// Time at which the last emitted progress sample ended.
+    last_sample_at: Instant,
+    /// Last emitted end counter for each detailed progress item.
+    last_counters: BTreeMap<(u32, ProviderResponseProgressKind), u64>,
+    /// Last emitted aggregate end counter across all pending items.
+    last_total_counter: u64,
+}
+
+impl ProgressSampleState {
+    fn new(started_at: Instant) -> Self {
+        Self {
+            last_sample_at: started_at,
+            last_counters: BTreeMap::new(),
+            last_total_counter: 0,
+        }
+    }
+
+    fn with_sample_window(
+        &mut self,
+        mut progress: ProviderResponseProgressUpdate,
+        now: Instant,
+    ) -> ProviderResponseProgressUpdate {
+        let window_micros = now
+            .saturating_duration_since(self.last_sample_at)
+            .as_micros()
+            .max(1) as u64;
+        progress.total_counter_start_bytes = self.last_total_counter;
+        progress.total_window_micros = window_micros;
+        for item in &mut progress.items {
+            let key = (item.output_index, item.kind);
+            item.counter_start_bytes = self
+                .last_counters
+                .get(&key)
+                .copied()
+                .unwrap_or(item.counter_start_bytes);
+            item.window_micros = window_micros;
+            self.last_counters.insert(key, item.counter_end_bytes);
+        }
+        self.last_total_counter = progress.total_counter_end_bytes;
+        self.last_sample_at = now;
+        progress
+    }
+}
+
+fn progress_current_bytes(progress: Option<&ProviderResponseProgressUpdate>) -> Option<u64> {
+    progress.map(|progress| progress.total_counter_end_bytes)
+}
+
+/// Decides when to emit provider progress and attaches sample-window counters.
+struct ProviderProgressEmitter {
+    /// Last aggregate byte counter emitted in a progress update.
+    last_progress_bytes: Option<u64>,
+    /// Last time a progress-only update was emitted.
+    last_progress_only_emit: Instant,
+    /// Sampler that fills start counters and window durations.
+    progress_sample: ProgressSampleState,
+}
+
+impl ProviderProgressEmitter {
+    fn new(now: Instant) -> Self {
+        Self {
+            last_progress_bytes: None,
+            last_progress_only_emit: now - Duration::from_secs(1),
+            progress_sample: ProgressSampleState::new(now),
+        }
+    }
+
+    fn progress_for_update(
+        &mut self,
+        progress: Option<ProviderResponseProgressUpdate>,
+        has_visible_update: bool,
+        now: Instant,
+    ) -> Option<ProviderResponseProgressUpdate> {
+        let progress_bytes = progress_current_bytes(progress.as_ref());
+        let progress_changed = progress_bytes != self.last_progress_bytes;
+        let can_emit_progress_only = progress_changed
+            && now.saturating_duration_since(self.last_progress_only_emit)
+                >= Duration::from_secs(1);
+        if !has_visible_update && !can_emit_progress_only {
+            return None;
+        }
+        if !has_visible_update {
+            self.last_progress_only_emit = now;
+        }
+        self.last_progress_bytes = progress_bytes;
+        progress.map(|progress| self.progress_sample.with_sample_window(progress, now))
     }
 }
 

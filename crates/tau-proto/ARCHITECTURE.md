@@ -132,7 +132,18 @@ Prefer additive optional fields with serde defaults for backward compatibility. 
 
 ## Provider response streaming updates
 
-`provider.response_updated` is transient append-delta protocol surface for visible assistant/reasoning progress. Providers must send newly appended text in `deltas`, not full accumulated message snapshots; retry/status diagnostics belong in the separate `status` field because they are provider-authored, not assistant-authored. `provider.response_finished.output_items` remains the complete durable response and replay source.
+`provider.response_updated` is transient append-delta protocol surface for
+visible assistant/reasoning progress. Providers must send newly appended text in
+`deltas`, not full accumulated message snapshots; retry/status diagnostics belong
+in the separate `status` field because they are provider-authored, not
+assistant-authored. Its optional `progress` field is also transient and carries
+content-free, self-contained sample-window counters for buffered
+non-displayable provider stream state such as pending tool-call argument bytes.
+Those counters must include aggregate totals over all pending items, even when
+per-item details are bounded and some items are omitted. `progress` must not be
+treated as transcript content or persisted/editor-captured response text.
+`provider.response_finished.output_items` remains the complete durable response
+and replay source.
 
 ## Prompt lifecycle versus provider prompt payloads
 

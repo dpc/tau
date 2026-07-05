@@ -19,3 +19,12 @@ events and assert that serialized event tags, parsed `EventName` values, and
 `Event::name()` stay aligned. Tests should also make transient/default
 durability expectations explicit for events where that affects routing,
 replay, or UI behavior.
+
+## Provider progress metadata is transient and self-contained
+
+Status: unconfirmed
+
+`provider.response_updated.progress` describes non-displayable buffered provider
+stream state, not assistant content. It must use content-free sample-window
+counters that include aggregate totals over all pending items so consumers can
+display pending bytes/rates from one update without keeping prior samples.

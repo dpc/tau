@@ -26,8 +26,9 @@ use crate::tool_render::{
     format_token_count, pending_tool_call_display, render_compaction_block,
     render_delegate_display, render_diff_tool_block, render_harness_notice,
     render_multi_diff_tool_block, render_shell_block, render_tool_block, render_tool_use_state,
-    render_turn_stats_block, session_status_block, streaming_block, synthesize_fallback_display,
-    system_loaded_block, tool_duration_suffix, ui_dir_block,
+    render_turn_stats_block, session_status_block, streaming_block,
+    streaming_block_with_indicator_suffix, synthesize_fallback_display, system_loaded_block,
+    tool_duration_suffix, ui_dir_block,
 };
 
 pub(crate) const UI_IO_MEDIUM_BYTES_PER_SEC: u64 = 10 * 1024;
@@ -833,6 +834,8 @@ struct PromptState {
     response_markdown_cache: MarkdownStreamCache,
     /// Append-aware Markdown-lite cache for the live thinking block.
     thinking_markdown_cache: MarkdownStreamCache,
+    /// Latest transient non-displayable provider stream progress.
+    response_progress: Option<tau_proto::ProviderResponseProgressUpdate>,
     /// Live provider-side compaction block. Created only while a provider emits
     /// an in-progress compaction item, then removed on completion/cancel.
     compaction_block_id: Option<tau_cli_term::BlockId>,
@@ -964,6 +967,41 @@ fn format_ui_io_scaled_rate(bytes_per_sec: u64, divisor: u64, suffix: &str) -> S
     } else {
         format!("{whole}{suffix}")
     }
+}
+
+fn provider_progress_indicator_suffix(
+    progress: Option<&tau_proto::ProviderResponseProgressUpdate>,
+) -> String {
+    let Some(progress) = progress else {
+        return String::new();
+    };
+    let total_bytes = progress.total_counter_end_bytes;
+    if total_bytes == 0 {
+        return String::new();
+    }
+    let item_count = (progress.items.len() as u64).saturating_add(progress.omitted_items);
+    let bytes = format_progress_bytes(total_bytes);
+    let bytes_per_sec = progress
+        .total_counter_end_bytes
+        .saturating_sub(progress.total_counter_start_bytes)
+        .saturating_mul(1_000_000)
+        / progress.total_window_micros.max(1);
+    let rate = format!("{}/s", format_progress_bytes(bytes_per_sec));
+    if item_count > 1 {
+        format!(" ({item_count} tools, {bytes}, {rate})")
+    } else {
+        format!(" ({bytes}, {rate} tool args)")
+    }
+}
+
+fn format_progress_bytes(bytes: u64) -> String {
+    if bytes < 1024 {
+        return format!("{bytes}B");
+    }
+    if bytes < 1024 * 1024 {
+        return format!("{}KB", bytes / 1024);
+    }
+    format!("{}MB", bytes / 1024 / 1024)
 }
 
 fn update_compaction_status(
@@ -3912,6 +3950,10 @@ impl EventRenderer {
             .entry(spid.to_owned())
             .or_insert_with(|| update.agent_id.to_string());
         self.ensure_live_response_block_for_update(update);
+        self.prompts
+            .entry(spid.to_owned())
+            .or_default()
+            .response_progress = update.progress.clone();
         if let Some(status) = &update.status {
             if status.clear_response {
                 self.clear_live_response_accumulators(spid);
@@ -3939,6 +3981,7 @@ impl EventRenderer {
             state.missing_thinking_prefix = false;
             state.response_markdown_cache = MarkdownStreamCache::default();
             state.thinking_markdown_cache = MarkdownStreamCache::default();
+            state.response_progress = None;
             if let Some(block_id) = state.thinking_block_id.take() {
                 self.handle.remove_block(block_id);
             }
@@ -4175,12 +4218,21 @@ impl EventRenderer {
             let Some(state) = self.prompts.get_mut(spid) else {
                 return;
             };
-            let block = markdown_streaming_block(
-                &self.theme,
-                names::AGENT_RESPONSE,
-                text,
-                &mut state.response_markdown_cache,
-            );
+            let block = if text.is_empty() {
+                streaming_block_with_indicator_suffix(
+                    &self.theme,
+                    names::AGENT_PENDING,
+                    "",
+                    provider_progress_indicator_suffix(state.response_progress.as_ref()),
+                )
+            } else {
+                markdown_streaming_block(
+                    &self.theme,
+                    names::AGENT_RESPONSE,
+                    text,
+                    &mut state.response_markdown_cache,
+                )
+            };
             self.handle.set_block(bid, block);
             self.handle.redraw();
         }

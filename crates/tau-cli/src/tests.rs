@@ -1273,6 +1273,7 @@ fn provider_response_delta_update(
         deltas,
         compaction: None,
         status: None,
+        progress: None,
         originator,
     }
 }
@@ -1391,6 +1392,7 @@ fn status_clear_response_removes_live_thinking_block() {
             text: "retrying".to_owned(),
             clear_response: true,
         }),
+        progress: None,
         originator: tau_proto::PromptOriginator::User,
     }));
     sync(&handle);
@@ -4165,6 +4167,54 @@ fn prompt_termination_clears_live_response_and_activity() {
     assert!(!vt.screen_contains(80, "…"));
 }
 
+/// Ensures non-displayable streamed tool arguments make the live response
+/// indicator look active without entering the final transcript.
+#[test]
+fn provider_progress_only_update_suffixes_live_indicator_until_finish() {
+    let (_term, handle, vt) = setup(80, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        cli_test_theme(),
+    );
+
+    renderer.handle(&Event::AgentPromptCreated(agent_prompt_created(
+        "sp-progress",
+        "s1",
+    )));
+    renderer.handle(&Event::ProviderResponseUpdated(ProviderResponseUpdated {
+        agent_prompt_id: "sp-progress".into(),
+        agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
+        deltas: Vec::new(),
+        compaction: None,
+        status: None,
+        progress: Some(tau_proto::ProviderResponseProgressUpdate {
+            total_counter_start_bytes: 4 * 1024,
+            total_counter_end_bytes: 12 * 1024,
+            total_window_micros: 1_000_000,
+            items: vec![tau_proto::ProviderResponseProgressItem {
+                output_index: 0,
+                kind: tau_proto::ProviderResponseProgressKind::ToolArguments,
+                counter_start_bytes: 4 * 1024,
+                counter_end_bytes: 12 * 1024,
+                window_micros: 1_000_000,
+                label: Some("shell_command".to_owned()),
+            }],
+            omitted_items: 0,
+        }),
+        originator: tau_proto::PromptOriginator::User,
+    }));
+    sync(&handle);
+    assert!(vt.screen_contains(80, "… (12KB, 8KB/s tool args)"));
+
+    renderer.handle(&Event::ProviderResponseFinished(finished_response(
+        "sp-progress",
+        Vec::new(),
+    )));
+    sync(&handle);
+    assert!(!vt.screen_contains(80, "… (12KB, 8KB/s tool args)"));
+}
+
 #[test]
 fn agent_in_progress_clears_when_tool_is_cancelled() {
     let (_term, handle, _vt) = setup(80, 24);
@@ -5288,6 +5338,7 @@ fn render_provider_compaction_update_as_compact_progress() {
             compacted_input_tokens: None,
         }),
         status: None,
+        progress: None,
         originator: tau_proto::PromptOriginator::User,
     }));
     sync(&handle);

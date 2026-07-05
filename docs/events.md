@@ -164,11 +164,14 @@ Emitted by the provider backend that owns the selected model.
   and started processing it. Echoes the originator. Transient.
 - **`provider.response_updated`** — Transient append-delta streaming update.
   Carries newly appended displayable assistant/reasoning text in `deltas`, plus
-  small compaction/status metadata when relevant. Provider retry/status text is
-  not assistant-authored and is carried separately from message deltas. The
-  event is not durable and is not replayed to late subscribers; UIs that attach
-  mid-stream may show an ellipsis prefix until the final complete response
-  arrives.
+  small compaction/status/progress metadata when relevant. `progress` is
+  content-free, self-contained sample-window metadata for non-displayable
+  buffered stream state such as pending tool-call argument bytes; aggregate
+  counters cover all pending items even when per-item details are bounded.
+  Provider retry/status text is not assistant-authored and is carried separately
+  from message deltas. The event is not durable and is not replayed to late
+  subscribers; UIs that attach mid-stream may show an ellipsis prefix until the
+  final complete response arrives.
 - **`provider.response_finished`** — Final assistant output in original
   item order via `output_items`, plus optional usage, provider
   response id, backend metadata, and echoed originator. Routed by the

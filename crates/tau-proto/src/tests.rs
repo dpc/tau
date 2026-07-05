@@ -505,6 +505,7 @@ fn representative_events() -> Vec<Event> {
             }],
             compaction: None,
             status: None,
+            progress: None,
             originator: PromptOriginator::User,
         }),
         Event::ProviderResponseFinished(ProviderResponseFinished {
@@ -1663,6 +1664,7 @@ fn execution_events_use_provider_wire_family() {
                 deltas: Vec::new(),
                 compaction: None,
                 status: None,
+                progress: None,
                 originator: PromptOriginator::User,
             }),
             "provider.response_updated",
@@ -1712,6 +1714,46 @@ fn provider_response_updated_requires_delta_routing_fields() {
         error.to_string().contains("text"),
         "unexpected error: {error}"
     );
+}
+
+/// Ensures provider response progress is an additive optional wire field and
+/// preserves structured pending tool-argument byte counts when present.
+#[test]
+fn provider_response_updated_progress_serde_round_trip() {
+    let absent = serde_json::json!({
+        "agent_prompt_id": "sp-1",
+        "agent_id": "engineer_abcd1234"
+    });
+    let decoded =
+        serde_json::from_value::<ProviderResponseUpdated>(absent).expect("absent progress");
+    assert_eq!(decoded.progress, None);
+
+    let update = ProviderResponseUpdated {
+        agent_prompt_id: "sp-1".into(),
+        agent_id: agent_id("engineer_abcd1234"),
+        deltas: Vec::new(),
+        compaction: None,
+        status: None,
+        progress: Some(ProviderResponseProgressUpdate {
+            total_counter_start_bytes: 4096,
+            total_counter_end_bytes: 12_345,
+            total_window_micros: 1_000_000,
+            items: vec![ProviderResponseProgressItem {
+                output_index: 2,
+                kind: ProviderResponseProgressKind::ToolArguments,
+                counter_start_bytes: 4096,
+                counter_end_bytes: 12_345,
+                window_micros: 1_000_000,
+                label: Some("shell_command".to_owned()),
+            }],
+            omitted_items: 0,
+        }),
+        originator: PromptOriginator::User,
+    };
+    let value = serde_json::to_value(&update).expect("serialize progress");
+    let round_trip =
+        serde_json::from_value::<ProviderResponseUpdated>(value).expect("decode progress");
+    assert_eq!(round_trip, update);
 }
 
 /// Ensures the provider repetition stop reason has a stable protocol spelling.
@@ -1937,6 +1979,7 @@ fn event_defaults_to_transient_marks_progress_kinds() {
             deltas: Vec::new(),
             compaction: None,
             status: None,
+            progress: None,
             originator: PromptOriginator::User,
         }),
         Event::ToolProgress(ToolProgress {

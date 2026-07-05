@@ -40,6 +40,13 @@ reasoning/thinking text. Tool calls, tool payloads/results, shell output,
 status/progress lines, and agent-to-agent message debug displays must stay on
 their existing renderers unless there is a separate product decision.
 
+Provider response progress is a live-indicator-only status suffix. The CLI may
+remember the latest `provider.response_updated.progress` for an in-flight prompt
+only to repaint the transient ellipsis block, and must derive bytes/rate from the
+self-contained counters in that update rather than from prior UI samples. It must
+not copy progress suffix text into editor current-response state, prompt-stdin
+capture, durable transcripts, or final response rendering.
+
 ## New-agent staging
 
 Status: unconfirmed

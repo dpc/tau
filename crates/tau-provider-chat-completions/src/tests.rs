@@ -812,3 +812,189 @@ fn repetition_error_finishes_with_clear_response_contract() {
     assert!(finished.output_items.is_empty());
     assert!(finished.error.as_deref().unwrap_or_default().len() <= 520);
 }
+
+/// Ensures Chat Completions streamed function-call argument chunks expose
+/// cumulative UTF-8 byte progress before the tool call is actionable.
+#[test]
+fn streamed_tool_arguments_update_pending_byte_progress() {
+    let mut state = StreamState::new();
+    apply_event(
+        &mut state,
+        &serde_json::json!({
+            "choices": [{
+                "delta": {
+                    "tool_calls": [{
+                        "index": 0,
+                        "id": "call-1",
+                        "function": {
+                            "name": "shell_command",
+                            "arguments": "{\"command\":\"αβγ\""
+                        }
+                    }]
+                }
+            }]
+        }),
+        &mut |_| {},
+    )
+    .expect("tool argument delta");
+
+    let progress = state.tool_input_progress().expect("tool argument progress");
+    assert_eq!(progress.items.len(), 1);
+    assert_eq!(progress.items[0].output_index, 0);
+    assert_eq!(
+        progress.items[0].counter_end_bytes,
+        "{\"command\":\"αβγ\"".len() as u64
+    );
+    assert_eq!(progress.items[0].label.as_deref(), Some("shell_command"));
+}
+
+/// Ensures aggregate counters include pending tool arguments that are omitted
+/// from the bounded per-item progress list.
+#[test]
+fn streamed_tool_argument_progress_aggregates_omitted_items() {
+    let mut state = StreamState::new();
+    for index in 0..5 {
+        apply_event(
+            &mut state,
+            &serde_json::json!({
+                "choices": [{
+                    "delta": {
+                        "tool_calls": [{
+                            "index": index,
+                            "id": format!("call-{index}"),
+                            "function": {
+                                "name": format!("tool_{index}"),
+                                "arguments": format!("arg-{index}")
+                            }
+                        }]
+                    }
+                }]
+            }),
+            &mut |_| {},
+        )
+        .expect("tool argument delta");
+    }
+
+    let progress = state.tool_input_progress().expect("tool argument progress");
+    assert_eq!(progress.items.len(), 4);
+    assert_eq!(progress.omitted_items, 1);
+    assert_eq!(progress.total_counter_end_bytes, 5 * "arg-0".len() as u64);
+}
+
+/// Ensures provider-side sampling makes consecutive progress updates
+/// self-contained by carrying the prior aggregate/item ends as the next starts.
+#[test]
+fn progress_sampler_uses_prior_sample_as_next_start() {
+    let start = std::time::Instant::now();
+    let mut sampler = ProgressSampleState::new(start);
+    let first = sampler.with_sample_window(
+        ProviderResponseProgressUpdate {
+            total_counter_start_bytes: 0,
+            total_counter_end_bytes: 10,
+            total_window_micros: 0,
+            items: vec![ProviderResponseProgressItem {
+                output_index: 0,
+                kind: ProviderResponseProgressKind::ToolArguments,
+                counter_start_bytes: 0,
+                counter_end_bytes: 10,
+                window_micros: 0,
+                label: None,
+            }],
+            omitted_items: 0,
+        },
+        start + std::time::Duration::from_millis(100),
+    );
+    assert_eq!(first.total_counter_start_bytes, 0);
+    assert_eq!(first.total_window_micros, 100_000);
+
+    let second = sampler.with_sample_window(
+        ProviderResponseProgressUpdate {
+            total_counter_start_bytes: 0,
+            total_counter_end_bytes: 25,
+            total_window_micros: 0,
+            items: vec![ProviderResponseProgressItem {
+                output_index: 0,
+                kind: ProviderResponseProgressKind::ToolArguments,
+                counter_start_bytes: 0,
+                counter_end_bytes: 25,
+                window_micros: 0,
+                label: None,
+            }],
+            omitted_items: 0,
+        },
+        start + std::time::Duration::from_millis(350),
+    );
+    assert_eq!(second.total_counter_start_bytes, 10);
+    assert_eq!(second.items[0].counter_start_bytes, 10);
+    assert_eq!(second.total_window_micros, 250_000);
+    assert!(second.items[0].window_micros > 0);
+}
+
+/// Ensures the non-network emission helper produces self-contained
+/// progress-only updates, honors throttling, and still attaches progress to a
+/// visible update inside the throttle window.
+#[test]
+fn progress_emitter_covers_progress_only_throttle_and_visible_attachment() {
+    let start = std::time::Instant::now();
+    let mut emitter = ProviderProgressEmitter::new(start);
+
+    let first = emitter
+        .progress_for_update(
+            test_progress(10),
+            false,
+            start + std::time::Duration::from_secs(1),
+        )
+        .expect("first progress-only update emits");
+    let update = ProviderResponseUpdated {
+        agent_prompt_id: "sp-progress".into(),
+        agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
+        deltas: Vec::new(),
+        compaction: None,
+        status: None,
+        progress: Some(first.clone()),
+        originator: tau_proto::PromptOriginator::User,
+    };
+    assert!(update.deltas.is_empty());
+    assert!(update.progress.is_some());
+    assert_eq!(first.total_counter_start_bytes, 0);
+    assert_eq!(first.total_counter_end_bytes, 10);
+    assert!(first.total_window_micros > 0);
+
+    assert!(
+        emitter
+            .progress_for_update(
+                test_progress(15),
+                false,
+                start + std::time::Duration::from_millis(1500),
+            )
+            .is_none(),
+        "progress-only updates should be throttled"
+    );
+
+    let visible = emitter
+        .progress_for_update(
+            test_progress(20),
+            true,
+            start + std::time::Duration::from_millis(1600),
+        )
+        .expect("visible update may attach progress");
+    assert_eq!(visible.total_counter_start_bytes, 10);
+    assert_eq!(visible.items[0].counter_start_bytes, 10);
+}
+
+fn test_progress(end: u64) -> Option<ProviderResponseProgressUpdate> {
+    Some(ProviderResponseProgressUpdate {
+        total_counter_start_bytes: 0,
+        total_counter_end_bytes: end,
+        total_window_micros: 0,
+        items: vec![ProviderResponseProgressItem {
+            output_index: 0,
+            kind: ProviderResponseProgressKind::ToolArguments,
+            counter_start_bytes: 0,
+            counter_end_bytes: end,
+            window_micros: 0,
+            label: Some("shell_command".to_owned()),
+        }],
+        omitted_items: 0,
+    })
+}

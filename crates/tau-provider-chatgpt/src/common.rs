@@ -6,7 +6,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tau_proto::{
     CborValue, ContentPart, ContextItem, ContextRole, MessageItem, OpaqueProviderItem,
     PromptContext, PromptOriginator, ProviderResponseCompactionStatus,
-    ProviderResponseCompactionUpdate, ProviderResponseTextDelta, ProviderTokenUsage,
+    ProviderResponseCompactionUpdate, ProviderResponseProgressItem, ProviderResponseProgressKind,
+    ProviderResponseProgressUpdate, ProviderResponseTextDelta, ProviderTokenUsage,
     ReasoningTextItem, ReasoningTextKind, ResponsesToolCallEnvelope, SessionId, ToolCallItem,
     ToolDefinition,
 };
@@ -573,6 +574,43 @@ impl StreamState {
         }
     }
 
+    /// Returns pending non-displayable tool input byte progress for live UI
+    /// status, if any tool-call arguments/custom input have been buffered.
+    pub fn tool_input_progress(&self) -> Option<ProviderResponseProgressUpdate> {
+        let mut total_pending_bytes = 0_u64;
+        let mut items = Vec::new();
+        let mut omitted_items = 0_u64;
+        for (output_index, item) in self.output_items.iter().enumerate() {
+            let OutputItemAccumulator::ToolCall(call) = item else {
+                continue;
+            };
+            let counter_end_bytes = call.arguments_json.len() as u64;
+            if counter_end_bytes == 0 {
+                continue;
+            }
+            total_pending_bytes = total_pending_bytes.saturating_add(counter_end_bytes);
+            if items.len() < 4 {
+                items.push(ProviderResponseProgressItem {
+                    output_index: output_index as u32,
+                    kind: ProviderResponseProgressKind::ToolArguments,
+                    counter_start_bytes: 0,
+                    counter_end_bytes,
+                    window_micros: 0,
+                    label: bounded_progress_label(&call.name),
+                });
+            } else {
+                omitted_items += 1;
+            }
+        }
+        (total_pending_bytes > 0).then_some(ProviderResponseProgressUpdate {
+            total_counter_start_bytes: 0,
+            total_counter_end_bytes: total_pending_bytes,
+            total_window_micros: 0,
+            items,
+            omitted_items,
+        })
+    }
+
     pub fn append_message_delta_at(&mut self, output_index: usize, delta: &str) {
         self.message_at_mut(output_index).text.push_str(delta);
         self.refresh_text();
@@ -769,6 +807,14 @@ impl StreamState {
             })
         }
     }
+}
+
+fn bounded_progress_label(label: &str) -> Option<String> {
+    const MAX_LABEL_CHARS: usize = 32;
+    if label.is_empty() {
+        return None;
+    }
+    Some(label.chars().take(MAX_LABEL_CHARS).collect())
 }
 
 pub fn assistant_text_item(text: impl Into<String>) -> ContextItem {

@@ -4836,6 +4836,7 @@ fn provider_execution_events_must_come_from_prompt_owner() {
             deltas: Vec::new(),
             compaction: None,
             status: None,
+            progress: None,
             originator: tau_proto::PromptOriginator::User,
         })),
     )
@@ -4848,6 +4849,7 @@ fn provider_execution_events_must_come_from_prompt_owner() {
             deltas: Vec::new(),
             compaction: None,
             status: None,
+            progress: None,
             originator: tau_proto::PromptOriginator::User,
         })),
     )
@@ -4892,6 +4894,20 @@ fn provider_execution_events_must_come_from_prompt_owner() {
             deltas: Vec::new(),
             compaction: None,
             status: None,
+            progress: Some(tau_proto::ProviderResponseProgressUpdate {
+                total_counter_start_bytes: 1024,
+                total_counter_end_bytes: 4096,
+                total_window_micros: 1_000_000,
+                items: vec![tau_proto::ProviderResponseProgressItem {
+                    output_index: 0,
+                    kind: tau_proto::ProviderResponseProgressKind::ToolArguments,
+                    counter_start_bytes: 1024,
+                    counter_end_bytes: 4096,
+                    window_micros: 1_000_000,
+                    label: Some("shell_command".to_owned()),
+                }],
+                omitted_items: 0,
+            }),
             originator: tau_proto::PromptOriginator::User,
         })),
     )
@@ -4911,10 +4927,22 @@ fn provider_execution_events_must_come_from_prompt_owner() {
         h.agents[&test_user_agent(&h)].turn_state,
         AgentTurnState::Idle
     ));
-    assert!(event_log_contains(&h, "provider-owner", |event| matches!(
+    assert!(event_log_contains_any_source(&h, |event| matches!(
         event,
-        Event::ProviderResponseUpdated(_)
+        Event::ProviderResponseUpdated(update)
+            if update
+                .progress
+                .as_ref()
+                .is_some_and(|progress| progress.items[0].counter_end_bytes == 4096)
     )));
+    assert_eq!(
+        agent_event_count(&h, |event| matches!(
+            event,
+            Event::ProviderResponseUpdated(_)
+        )),
+        0,
+        "provider response updates, including progress-only updates, must remain transient"
+    );
     assert!(event_log_contains(&h, "provider-owner", |event| matches!(
         event,
         Event::ProviderResponseFinished(_)

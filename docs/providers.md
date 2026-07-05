@@ -81,7 +81,8 @@ These should keep the semantics of the current agent execution events as much as
 
 - submitted = the provider accepted the prompt and started work
 - updated = transient append deltas for newly generated displayable assistant
-  text and reasoning text, plus small compaction/status metadata when relevant
+  text and reasoning text, plus small compaction/status/progress metadata when
+  relevant
 - finished = final response, tool calls, usage, stop reason, backend metadata
 
 Providers must not repeat the full accumulated assistant/reasoning text in
@@ -90,6 +91,14 @@ complete durable response and is where ordered final provider items, including
 tool calls and opaque provider items, are committed. Provider-authored retry or
 diagnostic text must be sent as update `status`, not as assistant message
 deltas.
+
+`provider.response_updated.progress` is content-free, transient liveness
+metadata for buffered non-displayable stream state such as pending tool-call
+argument/custom-tool input bytes. Progress updates are self-contained sample
+windows: they include aggregate and bounded per-item byte counters plus
+`window_micros` so UIs can render pending bytes and rates without remembering a
+previous sample. Progress must not be stored as transcript content, editor
+current response text, prompt-stdin capture, or final response output.
 
 First-party providers abort high-confidence tight stream loops with
 `stop_reason: repetition_detected`: assistant/reasoning/tool-argument deltas are
