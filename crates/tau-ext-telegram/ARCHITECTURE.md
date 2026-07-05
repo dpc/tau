@@ -41,6 +41,14 @@ reconfiguration, or shutdown can stop future polls without dropping the OS lock
 while an older `getUpdates` request is still in flight; the in-flight clone is
 released only after that request returns.
 
+Stream-owner mechanics live in `src/stream_owner.rs` rather than in the legacy
+extension runtime. The module takes a `StreamIdentity` built from Bot API base
+URL plus bot token, not the legacy `RuntimeConfig`, and owns the shared advisory
+lock, non-secret stream fingerprint, token redaction, webhook-active diagnostic,
+and HTTP 409 contention classification. Legacy local-poll mode and the planned
+Telegram gateway owner must use this boundary so accidental same-token reuse
+fails closed with the same behavior.
+
 On the idle-to-active transition for the first registered agent, after acquiring
 the local lock and before reporting registration success, the extension calls
 `getWebhookInfo`. A non-empty webhook URL means Telegram will not serve

@@ -61,15 +61,15 @@ fails closed.
 
 ## Multi-session Telegram uses a single-token gateway
 
-Status: accepted, 2026-07-05, issue tau-agent-549e
+Status: unconfirmed
 
 A single Telegram bot token can serve multiple active Tau sessions only through a
 single local gateway owner for that Telegram update stream. Telegram's
 `getUpdates` cursor, webhook state, and conflict behavior are global to one Bot
 API base plus bot token, so intentionally sharing a bot by running one poller per
-Tau session is not supported. The accepted architecture is one gateway daemon per
-bot token/API base, plus lightweight per-session gateway-client sidecar
-extensions.
+Tau session is not supported. The unconfirmed gateway architecture is one gateway
+daemon per bot token/API base, plus lightweight per-session gateway-client
+sidecar extensions.
 
 The gateway owns the bot token, Telegram client, `getWebhookInfo` preflight,
 `getUpdates` loop, update offset/dedup state, stream-owner advisory lock,
