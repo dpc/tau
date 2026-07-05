@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Barrier, Mutex};
+use std::sync::{Arc, Barrier, Mutex, mpsc as std_mpsc};
 use std::thread;
 
 use tau_proto::ContextItem;
@@ -14,6 +14,8 @@ use crate::{NeverAbort, TurnAbort, TurnAbortWaker};
 
 struct AtomicAbort {
     canceled: Arc<AtomicBool>,
+    waker: Arc<Mutex<Option<Arc<dyn Fn() + Send + Sync + 'static>>>>,
+    registered_tx: std_mpsc::Sender<()>,
 }
 
 impl TurnAbort for AtomicAbort {
@@ -23,8 +25,10 @@ impl TurnAbort for AtomicAbort {
 
     fn register_waker(
         &mut self,
-        _waker: Arc<dyn Fn() + Send + Sync + 'static>,
+        waker: Arc<dyn Fn() + Send + Sync + 'static>,
     ) -> Box<dyn TurnAbortWaker> {
+        *self.waker.lock().expect("abort waker lock") = Some(waker);
+        self.registered_tx.send(()).expect("registered receiver");
         Box::new(TestAbortWaker)
     }
 }
@@ -200,9 +204,9 @@ fn shared_pool_serializes_same_key_turns() {
 
 /// A prompt canceled while it is queued behind a same-key WS reservation
 /// must stop waiting instead of sending a stale network request after the
-/// active turn releases. The pool polls prompt cancellation while parked on
-/// the condvar so the waiter can unwind and let the worker emit its
-/// terminal canceled response/PromptDone.
+/// active turn releases. The pool registers prompt cancellation as a wake
+/// source while parked on the condvar so the waiter can unwind and let the
+/// worker emit its terminal canceled response/PromptDone.
 #[test]
 fn shared_pool_checkout_wait_aborts_when_canceled() {
     let config = make_config("https://chatgpt.com/backend-api", Some("acc"));
@@ -220,24 +224,45 @@ fn shared_pool_checkout_wait_aborts_when_canceled() {
         .insert(key.clone());
 
     let canceled = Arc::new(AtomicBool::new(false));
+    let abort_waker = Arc::new(Mutex::new(None));
+    let (registered_tx, registered_rx) = std_mpsc::channel();
+    let (result_tx, result_rx) = std_mpsc::channel();
     let started = Arc::new(Barrier::new(2));
     let handle = {
         let pool = pool.clone();
         let key = key.clone();
         let canceled = canceled.clone();
+        let abort_waker = Arc::clone(&abort_waker);
         let started = started.clone();
         thread::spawn(move || {
-            let mut abort = AtomicAbort { canceled };
+            let mut abort = AtomicAbort {
+                canceled,
+                waker: abort_waker,
+                registered_tx,
+            };
             started.wait();
-            pool.checkout_until(&key, "test", &mut abort)
+            let result = pool.checkout_until(&key, "test", &mut abort);
+            result_tx.send(result).expect("checkout result receiver");
         })
     };
 
     started.wait();
-    thread::sleep(Duration::from_millis(100));
+    registered_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("abort waker registered");
     canceled.store(true, Ordering::SeqCst);
+    let wake = abort_waker
+        .lock()
+        .expect("abort waker lock")
+        .as_ref()
+        .expect("registered abort waker")
+        .clone();
+    wake();
 
-    let result = handle.join().expect("checkout waiter join");
+    let result = result_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("checkout abort result");
+    handle.join().expect("checkout waiter join");
     assert!(matches!(result, Err(WsTurnError::Canceled)));
     assert!(
         pool.inner.lock().expect("pool lock").busy.contains(&key),

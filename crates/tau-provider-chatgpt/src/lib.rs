@@ -27,9 +27,11 @@ pub mod responses;
 /// Prompt-turn cancellation source used by the WebSocket transport.
 ///
 /// The synchronous provider loop needs a cancellation event that can wake a
-/// blocking WebSocket receive. Implementors should register the supplied waker
-/// with their native cancellation primitive and call it when the current turn
-/// is canceled or the provider is shutting down.
+/// blocked WebSocket path. A turn may block while waiting for a same-key pool
+/// reservation or while waiting for provider events on an already-reserved
+/// socket. Implementors should register the supplied waker with their native
+/// cancellation primitive and call it when the current turn is canceled or the
+/// provider is shutting down.
 pub trait TurnAbort {
     /// Return whether the current turn has already been canceled.
     fn is_aborted(&mut self) -> bool;
@@ -104,9 +106,9 @@ impl ChatGptRuntime {
     /// HTTP/SSE; retryable WS failures are surfaced until this turn's internal
     /// retry budget is exhausted, then also fall back to HTTP/SSE for this
     /// session. The `abort` source is checked before starting WS work and is
-    /// also registered as a wake source while a WS turn is blocked on
-    /// provider events; canceled turns return `LlmError::HttpStatus(499,
-    /// "cancelled by harness")`.
+    /// also registered as a wake source while a WS turn is blocked waiting for
+    /// a same-key pool reservation or provider events; canceled turns
+    /// return `LlmError::HttpStatus(499, "cancelled by harness")`.
     pub fn stream(
         &self,
         agent_prompt_id: &str,

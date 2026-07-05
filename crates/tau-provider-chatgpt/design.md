@@ -18,6 +18,13 @@ This keeps cancellation prompt without shortening the provider-event timeout.
 The 120 second timeout still means "no upstream events arrived for this long",
 not "wake periodically to poll cancellation".
 
+The shared WebSocket pool uses the same cancellation seam when a prompt turn is
+queued behind an active same-key reservation. Checkout waits on the pool
+condition variable until the busy key clears or a registered abort waker bumps
+the pool's abort-wake generation. A canceled waiter must return the standard 499
+path instead of starting a stale network turn after the earlier same-key turn
+releases.
+
 ## Backend transport behavior is covered by focused local tests
 
 Status: inferred

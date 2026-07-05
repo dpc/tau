@@ -16,3 +16,6 @@ has been dropped.
 The transport must preserve the 120 second no-provider-event timeout separately
 from cancellation wakeups. Do not replace abort wakers with periodic short
 timeouts that hide idle sockets or make cancellation latency depend on polling.
+Pool checkout cancellation uses the same wake discipline: an abort wake only
+causes checkout to re-check authoritative abort state, and a canceled same-key
+waiter must not send a delayed stale request after the prior reservation clears.

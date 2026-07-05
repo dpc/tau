@@ -23,12 +23,10 @@
 
 use std::collections::HashSet;
 use std::num::NonZeroUsize;
-use std::sync::{Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
 use lru::LruCache;
-
-const CHECKOUT_ABORT_POLL: Duration = Duration::from_millis(50);
 
 use super::ResponsesConfig;
 use super::ws::WsConn;
@@ -202,23 +200,25 @@ impl Default for WsPool {
 /// opening a second socket for the same chain. Different keys can still run
 /// their network turns concurrently.
 pub struct SharedWsPool {
-    inner: Mutex<SharedWsPoolInner>,
-    changed: Condvar,
+    inner: Arc<Mutex<SharedWsPoolInner>>,
+    changed: Arc<Condvar>,
 }
 
 struct SharedWsPoolInner {
     pool: WsPool,
     busy: HashSet<PoolKey>,
+    abort_wake_generation: u64,
 }
 
 impl SharedWsPool {
     pub fn new() -> Self {
         Self {
-            inner: Mutex::new(SharedWsPoolInner {
+            inner: Arc::new(Mutex::new(SharedWsPoolInner {
                 pool: WsPool::new(),
                 busy: HashSet::new(),
-            }),
-            changed: Condvar::new(),
+                abort_wake_generation: 0,
+            })),
+            changed: Arc::new(Condvar::new()),
         }
     }
 
@@ -256,22 +256,36 @@ impl SharedWsPool {
         current_bearer: &str,
         abort: &mut impl TurnAbort,
     ) -> Result<Option<WsConn>, WsTurnError> {
+        let _abort_waker = self.register_checkout_abort_waker(abort);
         let mut inner = self.lock_inner()?;
         while inner.busy.contains(key) {
             if abort.is_aborted() {
                 return Err(WsTurnError::Canceled);
             }
-            let (guard, _) = self
-                .changed
-                .wait_timeout(inner, CHECKOUT_ABORT_POLL)
-                .map_err(pool_poisoned)?;
-            inner = guard;
+            let wake_generation = inner.abort_wake_generation;
+            while inner.busy.contains(key) && inner.abort_wake_generation == wake_generation {
+                inner = self.changed.wait(inner).map_err(pool_poisoned)?;
+            }
         }
         if abort.is_aborted() {
             return Err(WsTurnError::Canceled);
         }
         inner.busy.insert(key.clone());
         Ok(inner.pool.checkout(key, current_bearer))
+    }
+
+    fn register_checkout_abort_waker(
+        &self,
+        abort: &mut impl TurnAbort,
+    ) -> Box<dyn crate::TurnAbortWaker> {
+        let inner = Arc::clone(&self.inner);
+        let changed = Arc::clone(&self.changed);
+        abort.register_waker(Arc::new(move || {
+            if let Ok(mut pool_inner) = inner.lock() {
+                pool_inner.abort_wake_generation = pool_inner.abort_wake_generation.wrapping_add(1);
+            }
+            changed.notify_all();
+        }))
     }
 
     fn release(&self, key: PoolKey, conn: WsConn) -> Result<(), WsTurnError> {

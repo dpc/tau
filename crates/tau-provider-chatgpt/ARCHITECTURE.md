@@ -32,3 +32,10 @@ returns `LlmError::HttpStatus(499, "cancelled by harness")`, matching the rest o
 the provider cancellation path. The waker guard unregisters on drop so completed
 turns do not leave callbacks that could enqueue stale wake hints into a pooled
 socket's later turn.
+
+The same `TurnAbort` waker seam is used while a prompt turn waits for a busy
+same-key WebSocket pool reservation. The pool records an abort-wake generation
+under its mutex and notifies its condition variable, so checkout waits only for
+either the busy key to clear or an abort wake to change the generation. This
+keeps a canceled queued same-key turn from later sending a stale request after
+the active turn releases.
