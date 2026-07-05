@@ -118,22 +118,51 @@ fn drop_cleanup_is_skipped_while_external_paused() {
     term.owns_raw_mode = false;
 }
 
-/// Real terminal poll errors must propagate through `get_next_event` instead
-/// of being treated as EOF.
+/// Virtual input shutdown should wake a blocked `get_next_event` without
+/// waiting for injected input. This prevents regressions to timeout polling for
+/// test terminals and exercises the shared shutdown wake channel.
 #[test]
-fn real_raw_event_propagates_poll_errors() {
-    let result = read_real_raw_event(
-        || false,
-        |_| Err(io::Error::other("synthetic poll error")),
-        || unreachable!("read should not be called"),
-        || Ok((80, 24)),
-    );
-    let err = match result {
-        Ok(_) => panic!("poll error should propagate"),
-        Err(err) => err,
-    };
+fn virtual_input_shutdown_wakes_blocked_reader() {
+    let buf = SharedBuffer::new();
+    let (term, handle, _input_tx) = Term::new_virtual(40, 5, "> ", Box::new(buf), CursorShape::Bar);
+    let (event_tx, event_rx) = std::sync::mpsc::channel();
+    thread::spawn(move || {
+        let _ = event_tx.send(term.get_next_event());
+    });
 
-    assert_eq!(err.to_string(), "synthetic poll error");
+    handle.request_input_shutdown();
+
+    let event = event_rx
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .expect("shutdown should wake the reader promptly")
+        .expect("shutdown should surface EOF, not an input error");
+    assert!(matches!(event, Event::Eof));
+}
+
+/// Once virtual input is closed, EOF must be sticky across repeated reads. The
+/// internal shutdown channel stays connected through `TermHandle`, so this test
+/// prevents a regression where only the first EOF wakeup is delivered and the
+/// next read blocks forever.
+#[test]
+fn virtual_input_disconnect_eof_is_sticky() {
+    let buf = SharedBuffer::new();
+    let (term, _handle, input_tx) = Term::new_virtual(40, 5, "> ", Box::new(buf), CursorShape::Bar);
+    let (event_tx, event_rx) = std::sync::mpsc::channel();
+    thread::spawn(move || {
+        let first = term.get_next_event();
+        let second = term.get_next_event();
+        let _ = event_tx.send((first, second));
+    });
+    drop(input_tx);
+
+    let (first, second) = event_rx
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .expect("closed virtual input should not leave repeated reads blocked");
+    let first = first.expect("closed virtual input should return EOF");
+    let second = second.expect("closed virtual input should keep returning EOF");
+
+    assert!(matches!(first, Event::Eof));
+    assert!(matches!(second, Event::Eof));
 }
 
 /// Real terminal read errors must propagate through `get_next_event` instead
@@ -141,8 +170,6 @@ fn real_raw_event_propagates_poll_errors() {
 #[test]
 fn real_raw_event_propagates_read_errors() {
     let result = read_real_raw_event(
-        || false,
-        |_| Ok(true),
         || Err(io::Error::other("synthetic read error")),
         || Ok((80, 24)),
     );
@@ -665,8 +692,8 @@ fn redraw_suppression_is_scoped() {
 }
 
 /// Input shutdown requests must wake a virtual input loop without requiring an
-/// injected key event; the real terminal path checks the same flag between
-/// short crossterm polls.
+/// injected key event; the real terminal path uses the same shutdown channel to
+/// stop waiting even if a one-shot crossterm read helper remains blocked.
 #[test]
 fn input_shutdown_request_returns_eof() {
     let buf = SharedBuffer::new();

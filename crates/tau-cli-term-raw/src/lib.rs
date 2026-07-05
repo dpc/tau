@@ -16,9 +16,6 @@ use std::collections::{HashMap, HashSet};
 use std::io::{self, BufWriter, Write};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
-
-const INPUT_SHUTDOWN_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const PROMPT_INPUT_MAX_HEIGHT_PERCENT: usize = 33;
 
 use crossterm::cursor::{MoveToColumn, MoveUp, SetCursorStyle};
@@ -253,7 +250,8 @@ struct SharedState {
     height: usize,
     /// Set by Term::drop to signal the redraw thread to exit.
     shutdown: bool,
-    /// Set by another UI owner to ask the blocking input loop to return EOF.
+    /// Set by another UI owner or virtual input disconnect to ask the blocking
+    /// input loop to return sticky EOF.
     input_shutdown: bool,
     /// Set while the terminal is released to an external program.
     /// The redraw thread must not write to stdout in this state.
@@ -835,6 +833,7 @@ pub struct TermHandle {
     state: Arc<Mutex<SharedState>>,
     sync_condvar: Arc<std::sync::Condvar>,
     redraw: tau_blocking_notify_channel::Sender,
+    input_tx: std::sync::mpsc::Sender<InputMessage>,
 }
 
 struct RedrawSuppressionGuard<'a> {
@@ -895,10 +894,14 @@ impl TermHandle {
 
     /// Requests that the prompt input loop stop and return EOF.
     ///
-    /// Real terminals poll crossterm input periodically, so this wakes within a
-    /// short timeout even when the user does not press another key.
+    /// The input loop waits on an internal channel rather than polling, so a
+    /// shutdown message is sent after the shared flag is set to wake any
+    /// blocked receiver immediately. Blocking crossterm reads that are
+    /// already in flight may finish later; their events are ignored after
+    /// this flag is set.
     pub fn request_input_shutdown(&self) {
         self.lock().input_shutdown = true;
+        let _ = self.input_tx.send(InputMessage::Shutdown);
     }
 
     /// Run `f` while redraw notifications from this handle are suppressed.
@@ -1373,7 +1376,7 @@ fn validate_osc1337_name(name: &str) -> Result<(), &'static str> {
     Ok(())
 }
 
-/// Raw terminal events from the crossterm reader thread.
+/// Raw terminal events from crossterm or a virtual test input channel.
 pub enum RawEvent {
     /// A decoded key press from crossterm.
     Key(KeyEvent),
@@ -1390,16 +1393,25 @@ pub enum RawEvent {
     Paste(String),
 }
 
+enum InputMessage {
+    /// A raw terminal event to process unless sticky shutdown/EOF already won.
+    Raw(RawEvent),
+    /// Wake the receiver and transition it to sticky EOF.
+    Shutdown,
+    /// A crossterm read error to surface unless shutdown/EOF already won.
+    Error(io::Error),
+}
+
 /// The terminal prompt engine.
 ///
 /// Owns the input event loop. Call [`Term::get_next_event`] in a loop to
 /// drive it.
 ///
-/// Real terminals read from stdin synchronously inside `get_next_event`
-/// — there is intentionally **no** background reader thread, so there
-/// is nobody to race a foreground program (like `$EDITOR`) for stdin
-/// bytes. While the main thread is blocked in `event::read()`, the
-/// redraw thread keeps repainting on its own clock.
+/// Real terminals isolate each blocking crossterm read in a short-lived helper
+/// thread and deliver the result through an internal channel. This lets
+/// shutdown wake the downstream input loop without timeout polling while still
+/// avoiding a persistent stdin reader that could race a foreground program such
+/// as `$EDITOR`.
 ///
 /// Virtual terminals (tests) use the injected channel branch.
 pub struct Term {
@@ -1407,10 +1419,8 @@ pub struct Term {
     /// to this so callers can use `term.print_output(...)` etc.
     /// without going through an explicit `.handle()` accessor.
     handle: TermHandle,
-    /// For virtual terms only: receives events injected via the test
-    /// sender returned from `new_virtual`. Real terms leave this
-    /// `None` and read directly from crossterm.
-    term_input_rx: Option<std::sync::mpsc::Receiver<RawEvent>>,
+    /// Receives raw input, read errors, and shutdown wakeups.
+    input_rx: std::sync::mpsc::Receiver<InputMessage>,
     /// Redraw thread handle — taken and joined on drop.
     redraw_thread: Option<JoinHandle<()>>,
     /// Whether to disable raw mode on drop (false for virtual terms).
@@ -1454,6 +1464,7 @@ impl Term {
 
         let (redraw_tx, redraw_rx) = tau_blocking_notify_channel::channel();
         let sync_condvar = Arc::new(std::sync::Condvar::new());
+        let (input_tx, input_rx) = std::sync::mpsc::channel();
 
         terminal::enable_raw_mode()?;
         // Opt into bracketed paste so the terminal wraps pasted content
@@ -1484,6 +1495,7 @@ impl Term {
             state,
             sync_condvar,
             redraw: redraw_tx,
+            input_tx,
         };
 
         handle.redraw.notify();
@@ -1491,7 +1503,7 @@ impl Term {
         Ok((
             Self {
                 handle: handle.clone(),
-                term_input_rx: None,
+                input_rx,
                 redraw_thread: Some(redraw_thread),
                 owns_raw_mode: true,
                 cursor_shape,
@@ -1506,7 +1518,8 @@ impl Term {
     ///
     /// No raw mode, no crossterm input reader. Output goes to the
     /// provided writer (e.g. a pipe). Input is injected via the
-    /// returned `Sender<RawEvent>`.
+    /// returned `Sender<RawEvent>`. Dropping every returned sender closes
+    /// virtual input and makes later reads return sticky [`Event::Eof`].
     pub fn new_virtual(
         width: usize,
         height: usize,
@@ -1522,6 +1535,7 @@ impl Term {
 
         let (redraw_tx, redraw_rx) = tau_blocking_notify_channel::channel();
         let sync_condvar = Arc::new(std::sync::Condvar::new());
+        let (input_tx, input_rx) = std::sync::mpsc::channel();
 
         let redraw_state = Arc::clone(&state);
         let redraw_sync_cv = Arc::clone(&sync_condvar);
@@ -1530,18 +1544,28 @@ impl Term {
         });
 
         let (term_input_tx, term_input_rx) = std::sync::mpsc::channel();
+        let virtual_input_tx = input_tx.clone();
+        thread::spawn(move || {
+            while let Ok(raw) = term_input_rx.recv() {
+                if virtual_input_tx.send(InputMessage::Raw(raw)).is_err() {
+                    break;
+                }
+            }
+            let _ = virtual_input_tx.send(InputMessage::Shutdown);
+        });
 
         let handle = TermHandle {
             state,
             sync_condvar,
             redraw: redraw_tx,
+            input_tx,
         };
 
         handle.redraw.notify();
 
         let term = Self {
             handle: handle.clone(),
-            term_input_rx: Some(term_input_rx),
+            input_rx,
             redraw_thread: Some(redraw_thread),
             owns_raw_mode: false,
             cursor_shape,
@@ -1567,9 +1591,9 @@ impl Term {
     ///
     /// # Errors
     ///
-    /// Returns terminal I/O errors from crossterm polling or reading on real
-    /// terminals. Virtual terminals return EOF when their injected input
-    /// channel is disconnected.
+    /// Returns terminal I/O errors from crossterm reading on real terminals.
+    /// Virtual terminals return EOF when their injected input channel is
+    /// disconnected.
     pub fn get_next_event(&self) -> io::Result<Event> {
         loop {
             let raw = match self.next_raw()? {
@@ -1633,29 +1657,44 @@ impl Term {
 
     /// Reads the next raw event, blocking until one arrives.
     ///
-    /// Real terminals call `crossterm::event::read()` inline so there
-    /// is no background reader thread fighting a foreground program
-    /// (e.g. `$EDITOR`) for stdin bytes. Virtual terminals receive
-    /// from the test sender returned by `new_virtual`.
+    /// Real terminals perform the blocking crossterm read in a one-shot helper
+    /// thread and wait on the same channel used for shutdown wakeups. The
+    /// helper is intentionally not persistent: callers only launch external
+    /// programs after `get_next_event` returns, so no reader remains active
+    /// to race those programs for stdin. If shutdown wins the race, any
+    /// later helper result is dropped by the closed or shutdown channel
+    /// path.
     fn next_raw(&self) -> io::Result<Option<RawEvent>> {
-        if let Some(rx) = self.term_input_rx.as_ref() {
-            loop {
-                if self.handle.lock().input_shutdown {
-                    return Ok(None);
-                }
-                match rx.recv_timeout(INPUT_SHUTDOWN_POLL_INTERVAL) {
-                    Ok(raw) => return Ok(Some(raw)),
-                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
-                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return Ok(None),
-                }
-            }
+        if self.handle.lock().input_shutdown {
+            return Ok(None);
         }
-        read_real_raw_event(
-            || self.handle.lock().input_shutdown,
-            event::poll,
-            event::read,
-            raw_term_size,
-        )
+
+        if self.owns_raw_mode {
+            let tx = self.handle.input_tx.clone();
+            thread::spawn(move || {
+                let message = match read_real_raw_event(event::read, raw_term_size) {
+                    Ok(raw) => InputMessage::Raw(raw),
+                    Err(error) => InputMessage::Error(error),
+                };
+                let _ = tx.send(message);
+            });
+        }
+
+        let message = match self.input_rx.recv() {
+            Ok(message) => message,
+            Err(_) => return Ok(None),
+        };
+        if self.handle.lock().input_shutdown {
+            return Ok(None);
+        }
+        match message {
+            InputMessage::Raw(raw) => Ok(Some(raw)),
+            InputMessage::Shutdown => {
+                self.handle.lock().input_shutdown = true;
+                Ok(None)
+            }
+            InputMessage::Error(error) => Err(error),
+        }
     }
 
     /// Plugs in (or replaces) the completion source. Pass `None` to
@@ -1736,10 +1775,10 @@ impl Term {
     /// cursor shape, and clears the screen so the editor starts on a clean
     /// canvas.
     ///
-    /// No reader-thread coordination is needed — the only reader is
-    /// the main thread, which is the same thread that drives the
-    /// external program to completion, so it can't be in `event::read()` at the
-    /// same time.
+    /// No reader-thread coordination is needed: the one-shot crossterm reader
+    /// is joined logically by `get_next_event` returning before callers can
+    /// launch the external program, so no persistent stdin reader remains
+    /// active while the program owns the terminal.
     ///
     /// # Errors
     ///
@@ -2506,18 +2545,10 @@ fn word_left_boundary(buffer: &str, cursor: usize) -> usize {
 }
 
 fn read_real_raw_event(
-    mut is_shutdown: impl FnMut() -> bool,
-    mut poll: impl FnMut(Duration) -> io::Result<bool>,
     mut read: impl FnMut() -> io::Result<CtEvent>,
     mut term_size: impl FnMut() -> io::Result<(u16, u16)>,
-) -> io::Result<Option<RawEvent>> {
+) -> io::Result<RawEvent> {
     loop {
-        if is_shutdown() {
-            return Ok(None);
-        }
-        if !poll(INPUT_SHUTDOWN_POLL_INTERVAL)? {
-            continue;
-        }
         let raw = read()?;
         tracing::trace!(target: "tau_cli_term_raw::input", ?raw, "terminal raw input event");
         match raw {
@@ -2527,18 +2558,18 @@ fn read_real_raw_event(
                 if key.kind == KeyEventKind::Release {
                     continue;
                 }
-                return Ok(Some(RawEvent::Key(key)));
+                return Ok(RawEvent::Key(key));
             }
             CtEvent::Resize(w, h) => {
                 let (actual_w, actual_h) = term_size().unwrap_or((0, 0));
-                return Ok(Some(RawEvent::Resize(
+                return Ok(RawEvent::Resize(
                     resample_resize_dimension(w, actual_w),
                     resample_resize_dimension(h, actual_h),
-                )));
+                ));
             }
-            CtEvent::FocusGained => return Ok(Some(RawEvent::FocusChanged { focused: true })),
-            CtEvent::FocusLost => return Ok(Some(RawEvent::FocusChanged { focused: false })),
-            CtEvent::Paste(text) => return Ok(Some(RawEvent::Paste(text))),
+            CtEvent::FocusGained => return Ok(RawEvent::FocusChanged { focused: true }),
+            CtEvent::FocusLost => return Ok(RawEvent::FocusChanged { focused: false }),
+            CtEvent::Paste(text) => return Ok(RawEvent::Paste(text)),
             // Mouse events: skip so the caller still observes stdin as
             // "blocking" without unbounded recursion under noisy input.
             _ => {}

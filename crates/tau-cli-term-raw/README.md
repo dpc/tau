@@ -189,13 +189,27 @@ ordered lists reference them for rendering (top to bottom):
 
 ## Threading model
 
-Two execution contexts cooperate:
+Several execution contexts cooperate:
 
 - **Downstream event loop** — the caller's thread. Calls
-  `Term::get_next_event()`, which reads `crossterm` events synchronously,
-  handles prompt editing internally, and surfaces high-level events. There is no
-  background input reader thread, so external programs such as `$EDITOR` do not
-  race Tau for stdin.
+  `Term::get_next_event()`, receives raw input through an internal channel,
+  handles prompt editing internally, and surfaces high-level events. Shutdown and
+  virtual input close are sticky EOF states: once observed, later input reads
+  return `Event::Eof` without waiting for another terminal event.
+- **One-shot real-input helper** — for real terminals, each blocking
+  `crossterm::event::read()` runs in a helper thread and sends one raw event or
+  read error back to the downstream event loop. Shutdown wakes the downstream
+  event loop through the same internal channel; because crossterm reads are not
+  portably cancellable, at most one detached helper may remain blocked until
+  stdin produces an event or the process exits. Any helper result that arrives
+  after shutdown is ignored, or dropped if the terminal has already gone away.
+  Helpers are not persistent, so normal external programs such as `$EDITOR` are
+  launched only after the current input read has completed and do not race Tau
+  for stdin.
+- **Virtual input bridge** — tests keep the public `Sender<RawEvent>` returned
+  by `Term::new_virtual()`. A small bridge thread forwards those events into the
+  internal input channel and sends the sticky EOF wakeup when all virtual input
+  senders are dropped.
 - **Redraw thread** — blocks on a coalescing notify channel, wakes up, reads
   shared state under a mutex, and renders via one of the three paths above.
 
