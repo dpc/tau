@@ -29,6 +29,8 @@ pub(crate) struct SubagentToolState {
 }
 
 static NEXT_AGENT_MESSAGE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+pub(crate) const EXTERNAL_AGENT_MESSAGE_AUTH_TIMEOUT: Duration = Duration::from_secs(25);
+pub(crate) const EXTERNAL_AGENT_MESSAGE_RESULT_TIMEOUT: Duration = Duration::from_secs(30);
 
 fn build_agent_message_id(
     sender_id: &AgentId,
@@ -876,10 +878,13 @@ fn authenticate_external_agent_message_sender(
         },
     ))
     .map_err(|err| format!("failed to send external auth request: {err}"))?;
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + EXTERNAL_AGENT_MESSAGE_AUTH_TIMEOUT;
     loop {
         let Some(timeout) = deadline.checked_duration_since(Instant::now()) else {
-            return Err("timed out waiting for external message authentication".to_owned());
+            return Err(format!(
+                "timed out after {}s waiting for external message authentication",
+                EXTERNAL_AGENT_MESSAGE_AUTH_TIMEOUT.as_secs()
+            ));
         };
         match peer
             .recv_timeout(timeout)
@@ -897,7 +902,10 @@ fn authenticate_external_agent_message_sender(
             }
             tau_socket::SocketReceive::Message { .. } => continue,
             tau_socket::SocketReceive::Timeout => {
-                return Err("timed out waiting for external message authentication".to_owned());
+                return Err(format!(
+                    "timed out after {}s waiting for external message authentication",
+                    EXTERNAL_AGENT_MESSAGE_AUTH_TIMEOUT.as_secs()
+                ));
             }
             tau_socket::SocketReceive::Closed => {
                 return Err("sender harness closed before external auth result".to_owned());
@@ -931,10 +939,13 @@ fn send_external_agent_message_request(
         request.clone(),
     ))
     .map_err(|err| format!("failed to send external message request: {err}"))?;
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + EXTERNAL_AGENT_MESSAGE_RESULT_TIMEOUT;
     loop {
         let Some(timeout) = deadline.checked_duration_since(Instant::now()) else {
-            return Err("timed out waiting for external message result".to_owned());
+            return Err(format!(
+                "timed out after {}s waiting for external message result",
+                EXTERNAL_AGENT_MESSAGE_RESULT_TIMEOUT.as_secs()
+            ));
         };
         match peer
             .recv_timeout(timeout)
@@ -947,7 +958,10 @@ fn send_external_agent_message_request(
             }
             tau_socket::SocketReceive::Message { .. } => continue,
             tau_socket::SocketReceive::Timeout => {
-                return Err("timed out waiting for external message result".to_owned());
+                return Err(format!(
+                    "timed out after {}s waiting for external message result",
+                    EXTERNAL_AGENT_MESSAGE_RESULT_TIMEOUT.as_secs()
+                ));
             }
             tau_socket::SocketReceive::Closed => {
                 return Err("target harness closed before external message result".to_owned());

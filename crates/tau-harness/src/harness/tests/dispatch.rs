@@ -12785,6 +12785,21 @@ fn external_agent_message_authentication_starts_without_blocking_client_handler(
     h.shutdown().expect("shutdown");
 }
 
+/// Sender-side result waiting must outlast receiver-side sender authentication.
+/// The target cannot send `external_agent_message_result` until its auth helper
+/// finishes, so equal deadlines can make the sender close the socket exactly
+/// when the receiver is ready to report an auth timeout or late success.
+#[test]
+fn external_agent_message_result_timeout_outlasts_auth_timeout() {
+    let auth_timeout = crate::harness::subagents_tool::EXTERNAL_AGENT_MESSAGE_AUTH_TIMEOUT;
+    let result_timeout = crate::harness::subagents_tool::EXTERNAL_AGENT_MESSAGE_RESULT_TIMEOUT;
+
+    assert!(
+        auth_timeout < result_timeout,
+        "result timeout must leave room for target-side auth completion"
+    );
+}
+
 /// Sender-side external message projections should represent confirmed
 /// delivery, not a failed lookup or target-side rejection.
 #[test]
