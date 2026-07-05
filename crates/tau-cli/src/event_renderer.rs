@@ -119,9 +119,10 @@ pub(crate) struct EventRenderer {
     /// Updated in place as progress chunks arrive, finalized on
     /// `ShellCommandFinished`.
     shell_blocks: HashMap<String, ShellBlockState>,
-    /// Live extension blocks keyed by instance_id. Shown in
-    /// above_active while starting, moved to history when ready.
-    extension_blocks: HashMap<tau_proto::ExtensionInstanceId, tau_cli_term::BlockId>,
+    /// Live extension lifecycle blocks keyed by instance_id. Shown in
+    /// above_active while starting, then completed in the same transcript
+    /// snapshot that originally owned the starting block.
+    extension_blocks: HashMap<tau_proto::ExtensionInstanceId, ExtensionBlockState>,
     /// Extensions that are already up in this daemon. `/session new` starts a
     /// fresh session, but these processes are intentionally kept.
     ready_extensions: HashSet<String>,
@@ -322,6 +323,23 @@ struct AgentUiState {
 struct EditorConversationContext {
     current_response: Option<String>,
     last_response: Option<String>,
+}
+
+/// UI snapshot that currently owns an in-flight extension lifecycle block.
+#[derive(Clone)]
+enum ExtensionBlockOwner {
+    /// The no-agent/global output snapshot owns the block.
+    NoAgent,
+    /// A concrete agent transcript snapshot owns the block.
+    Agent(String),
+}
+
+/// Bookkeeping for a rendered extension lifecycle block.
+struct ExtensionBlockState {
+    /// Terminal block id for the in-flight "starting" line.
+    block_id: tau_cli_term::BlockId,
+    /// Snapshot that must receive the matching ready/exited update.
+    owner: ExtensionBlockOwner,
 }
 
 enum EventAgentIdResolution {
@@ -1221,8 +1239,9 @@ impl EventRenderer {
     }
 
     fn show_agent_transcript(&mut self, agent_id: String) {
-        let needs_snapshot_swap =
-            self.displayed_agent_id.is_some() || self.agents_ui_state.contains_key(&agent_id);
+        let needs_snapshot_swap = self.displayed_agent_id.is_some()
+            || self.agents_ui_state.contains_key(&agent_id)
+            || self.visible_no_agent_extension_blocks_exist();
         if needs_snapshot_swap {
             self.store_visible_agent_state();
             let state = self.agents_ui_state.remove(&agent_id).unwrap_or_default();
@@ -1230,6 +1249,14 @@ impl EventRenderer {
             self.rerender_visible_for_current_settings();
         }
         self.displayed_agent_id = Some(agent_id);
+    }
+
+    fn visible_no_agent_extension_blocks_exist(&self) -> bool {
+        self.displayed_agent_id.is_none()
+            && self
+                .extension_blocks
+                .values()
+                .any(|state| matches!(state.owner, ExtensionBlockOwner::NoAgent))
     }
 
     fn set_current_agent_id(&mut self, agent_id: Option<String>) {
@@ -2638,6 +2665,11 @@ impl EventRenderer {
 
     pub(crate) fn handle_recorded_at(&mut self, event: &Event, recorded_at: UnixMicros) {
         self.learn_agent_metadata(event);
+        if let Some(owner) = self.extension_lifecycle_owner(event) {
+            self.handle_recorded_at_for_extension_owner(event, recorded_at, owner);
+            self.update_agent_in_progress();
+            return;
+        }
         let target_agent_id = self.agent_id_for_event(event);
         let Some(target_agent_id) = target_agent_id else {
             self.handle_recorded_at_for_visible_agent(event, recorded_at);
@@ -2731,6 +2763,114 @@ impl EventRenderer {
         self.displayed_agent_id = Some(visible_agent_id);
         self.publish_editor_conversation_context();
         self.update_agent_in_progress();
+    }
+
+    fn extension_lifecycle_owner(&self, event: &Event) -> Option<ExtensionBlockOwner> {
+        let instance_id = match event {
+            Event::ExtensionReady(ready) => ready.instance_id,
+            Event::ExtensionExited(exited) => exited.instance_id,
+            _ => return None,
+        };
+        self.extension_blocks
+            .get(&instance_id)
+            .map(|state| state.owner.clone())
+    }
+
+    fn current_extension_block_owner(&self) -> ExtensionBlockOwner {
+        self.displayed_agent_id
+            .clone()
+            .map(ExtensionBlockOwner::Agent)
+            .unwrap_or(ExtensionBlockOwner::NoAgent)
+    }
+
+    fn handle_recorded_at_for_extension_owner(
+        &mut self,
+        event: &Event,
+        recorded_at: UnixMicros,
+        owner: ExtensionBlockOwner,
+    ) {
+        match owner {
+            ExtensionBlockOwner::Agent(agent_id)
+                if self.displayed_agent_id.as_deref() == Some(agent_id.as_str()) =>
+            {
+                self.handle_recorded_at_for_visible_agent(event, recorded_at);
+            }
+            ExtensionBlockOwner::NoAgent if self.displayed_agent_id.is_none() => {
+                self.handle_recorded_at_for_visible_agent(event, recorded_at);
+            }
+            ExtensionBlockOwner::Agent(agent_id) => {
+                self.handle_recorded_at_for_hidden_agent(event, recorded_at, agent_id);
+            }
+            ExtensionBlockOwner::NoAgent => {
+                self.handle_recorded_at_for_hidden_no_agent(event, recorded_at);
+            }
+        }
+    }
+
+    fn handle_recorded_at_for_hidden_agent(
+        &mut self,
+        event: &Event,
+        recorded_at: UnixMicros,
+        target_agent_id: String,
+    ) {
+        let visible_agent_id = self.displayed_agent_id.clone();
+        let visible_state = self.take_visible_agent_state();
+        if let Some(visible_agent_id) = visible_agent_id.as_ref() {
+            self.agents_ui_state
+                .insert(visible_agent_id.clone(), visible_state);
+        } else {
+            self.no_agent_ui_state = visible_state;
+        }
+        let target_state = self
+            .agents_ui_state
+            .remove(&target_agent_id)
+            .unwrap_or_default();
+        let handle = self.handle.clone();
+        handle.with_redraw_suppressed(|| {
+            self.with_editor_context_publish_suppressed(|this| {
+                this.restore_hidden_agent_state(target_state);
+                this.displayed_agent_id = Some(target_agent_id.clone());
+                this.handle_recorded_at_for_visible_agent(event, recorded_at);
+                let target_state = this.take_visible_agent_state();
+                this.agents_ui_state
+                    .insert(target_agent_id.clone(), target_state);
+                let visible_state = visible_agent_id
+                    .as_ref()
+                    .and_then(|id| this.agents_ui_state.remove(id))
+                    .unwrap_or_else(|| std::mem::take(&mut this.no_agent_ui_state));
+                this.restore_hidden_agent_state(visible_state);
+            });
+        });
+        self.displayed_agent_id = visible_agent_id;
+        self.publish_editor_conversation_context();
+    }
+
+    fn handle_recorded_at_for_hidden_no_agent(&mut self, event: &Event, recorded_at: UnixMicros) {
+        let visible_agent_id = self.displayed_agent_id.clone();
+        let visible_state = self.take_visible_agent_state();
+        if let Some(visible_agent_id) = visible_agent_id.as_ref() {
+            self.agents_ui_state
+                .insert(visible_agent_id.clone(), visible_state);
+        } else {
+            self.no_agent_ui_state = visible_state;
+        }
+        let no_agent_state = std::mem::take(&mut self.no_agent_ui_state);
+        let handle = self.handle.clone();
+        handle.with_redraw_suppressed(|| {
+            self.with_editor_context_publish_suppressed(|this| {
+                this.restore_hidden_agent_state(no_agent_state);
+                this.displayed_agent_id = None;
+                this.handle_recorded_at_for_visible_agent(event, recorded_at);
+                this.no_agent_ui_state = this.take_visible_agent_state();
+                let visible_state = visible_agent_id
+                    .as_ref()
+                    .and_then(|id| this.agents_ui_state.remove(id))
+                    .unwrap_or_default();
+                this.restore_hidden_agent_state(visible_state);
+            });
+        });
+        self.displayed_agent_id = visible_agent_id;
+        self.publish_editor_conversation_context();
     }
 
     fn agent_message_visible_on_empty_screen(&self, event: &Event, target_agent_id: &str) -> bool {
@@ -5087,6 +5227,7 @@ impl EventRenderer {
         if !self.notice_visible(tau_proto::NoticeLevel::Info, false) {
             return;
         }
+        let owner = self.current_extension_block_owner();
         let block = extension_status_block(&self.theme, &starting.extension_name, "starting");
         let id = self.handle.new_block(
             format!("extension-starting:{}", starting.instance_id),
@@ -5094,16 +5235,29 @@ impl EventRenderer {
         );
         self.handle.push_above_active(id);
         self.handle.redraw();
-        self.extension_blocks.insert(starting.instance_id, id);
+        self.extension_blocks.insert(
+            starting.instance_id,
+            ExtensionBlockState {
+                block_id: id,
+                owner,
+            },
+        );
     }
 
     fn handle_extension_ready(&mut self, ready: &tau_proto::ExtensionReady) {
-        if let Some(bid) = self.extension_blocks.remove(&ready.instance_id) {
-            self.handle.remove_block(bid);
-        }
+        let removed_starting = if let Some(state) = self.extension_blocks.remove(&ready.instance_id)
+        {
+            self.handle.remove_block(state.block_id);
+            true
+        } else {
+            false
+        };
         self.ready_extensions
             .insert(ready.extension_name.to_string());
         if !self.notice_visible(tau_proto::NoticeLevel::Info, false) {
+            if removed_starting {
+                self.handle.redraw();
+            }
             return;
         }
         self.handle.print_output(
@@ -5113,11 +5267,18 @@ impl EventRenderer {
     }
 
     fn handle_extension_exited(&mut self, exited: &tau_proto::ExtensionExited) {
-        if let Some(bid) = self.extension_blocks.remove(&exited.instance_id) {
-            self.handle.remove_block(bid);
-        }
+        let removed_starting =
+            if let Some(state) = self.extension_blocks.remove(&exited.instance_id) {
+                self.handle.remove_block(state.block_id);
+                true
+            } else {
+                false
+            };
         self.ready_extensions.remove(exited.extension_name.as_str());
         if !self.notice_visible(tau_proto::NoticeLevel::Info, false) {
+            if removed_starting {
+                self.handle.redraw();
+            }
             return;
         }
         self.handle.print_output(

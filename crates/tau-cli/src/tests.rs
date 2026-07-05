@@ -825,6 +825,17 @@ fn eventually_screen_contains(vt: &VtWriter, w: u16, needle: &str) -> bool {
     false
 }
 
+fn eventually_screen_lacks(vt: &VtWriter, w: u16, needle: &str) -> bool {
+    let deadline = Instant::now() + Duration::from_millis(500);
+    while Instant::now() < deadline {
+        if !vt.screen_contains(w, needle) {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    false
+}
+
 fn assistant_message_item(text: impl Into<String>) -> ContextItem {
     ContextItem::Message(MessageItem {
         role: ContextRole::Assistant,
@@ -1779,6 +1790,121 @@ fn extension_context_ready_routes_to_agent_ui_state() {
     renderer.switch_agent("worker-1".to_owned());
     sync(&handle);
     assert!(vt.screen_contains(80, "agent @worker-1 context ready"));
+}
+
+/// Extension lifecycle completion must update the same snapshot that received
+/// the starting block. Otherwise switching the viewed agent between
+/// `extension.starting` and `extension.ready` leaves a stale starting line in
+/// the old transcript and prints the ready line in an unrelated one.
+#[test]
+fn extension_lifecycle_completion_routes_to_starting_snapshot() {
+    let (_term, handle, vt) = setup(80, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        cli_test_theme(),
+    );
+
+    renderer.switch_agent("agent-a".to_owned());
+    renderer.handle(&Event::ExtensionStarting(tau_proto::ExtensionStarting {
+        instance_id: 7.into(),
+        extension_name: "std-test".into(),
+        pid: Some(123),
+    }));
+    sync(&handle);
+    assert!(vt.screen_contains(80, "extension std-test starting"));
+
+    renderer.switch_agent("agent-b".to_owned());
+    renderer.handle(&Event::ExtensionReady(ExtensionReady {
+        instance_id: 7.into(),
+        extension_name: "std-test".into(),
+        pid: Some(123),
+    }));
+    sync(&handle);
+    assert!(!vt.screen_contains(80, "extension std-test ready"));
+    assert!(!vt.screen_contains(80, "extension std-test starting"));
+
+    renderer.switch_agent("agent-a".to_owned());
+    sync(&handle);
+    assert!(vt.screen_contains(80, "extension std-test ready"));
+    assert!(!vt.screen_contains(80, "extension std-test starting"));
+}
+
+/// Extension lifecycle blocks that start on the no-agent screen must stay owned
+/// by that global snapshot when the user switches to a new agent with no prior
+/// hidden state. This prevents the new agent transcript from adopting the
+/// no-agent starting line and leaving it stale when the extension exits.
+#[test]
+fn no_agent_extension_lifecycle_completion_routes_to_no_agent_snapshot() {
+    let (_term, handle, vt) = setup(80, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        cli_test_theme(),
+    );
+
+    renderer.handle(&Event::ExtensionStarting(tau_proto::ExtensionStarting {
+        instance_id: 8.into(),
+        extension_name: "std-global".into(),
+        pid: Some(456),
+    }));
+    sync(&handle);
+    assert!(vt.screen_contains(80, "extension std-global starting"));
+
+    renderer.switch_agent("fresh-agent".to_owned());
+    sync(&handle);
+    assert!(!vt.screen_contains(80, "extension std-global starting"));
+
+    renderer.handle(&Event::ExtensionExited(tau_proto::ExtensionExited {
+        instance_id: 8.into(),
+        extension_name: "std-global".into(),
+        pid: Some(456),
+        exit_code: Some(1),
+        signal: None,
+    }));
+    sync(&handle);
+    assert!(!vt.screen_contains(80, "extension std-global exited"));
+    assert!(!vt.screen_contains(80, "extension std-global starting"));
+
+    renderer.clear_selected_agent();
+    sync(&handle);
+    assert!(vt.screen_contains(80, "extension std-global exited"));
+    assert!(!vt.screen_contains(80, "extension std-global starting"));
+}
+
+/// Removing a visible starting block must request a redraw even when the
+/// matching completion is filtered by the current notice level. Without this,
+/// the stale starting line stays on screen until some unrelated redraw happens.
+#[test]
+fn extension_lifecycle_removal_redraws_when_completion_is_filtered() {
+    let (_term, handle, vt) = setup(80, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        cli_test_theme(),
+    );
+
+    renderer.handle(&Event::ExtensionStarting(tau_proto::ExtensionStarting {
+        instance_id: 9.into(),
+        extension_name: "std-filtered".into(),
+        pid: Some(789),
+    }));
+    sync(&handle);
+    assert!(vt.screen_contains(80, "extension std-filtered starting"));
+
+    renderer.apply_setting("notice-level", "warning");
+    renderer.handle(&Event::ExtensionReady(ExtensionReady {
+        instance_id: 9.into(),
+        extension_name: "std-filtered".into(),
+        pid: Some(789),
+    }));
+
+    assert!(eventually_screen_lacks(
+        &vt,
+        80,
+        "extension std-filtered starting"
+    ));
+    assert!(!vt.screen_contains(80, "extension std-filtered ready"));
 }
 
 #[test]

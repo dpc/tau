@@ -226,6 +226,13 @@ last assistant response context belongs to the viewed/no-agent transcript, while
 prompt-local fields such as previous prompt and trailer recovery stay with the
 active input/editor flow.
 
+Live UI blocks that have a distinct start/completion lifecycle must complete in
+the same transcript snapshot that rendered their start block, even if the user
+switches viewed agents before completion arrives. Hidden completion folding may
+temporarily restore the owning agent or no-agent snapshot, update/remove the live
+block there, then restore the actually visible transcript without publishing
+hidden prompt-editor context.
+
 When routing an event for a hidden agent, the renderer may temporarily restore
 that hidden snapshot into renderer fields to reuse normal folding code. During
 that hidden fold it must not publish hidden response context through shared
