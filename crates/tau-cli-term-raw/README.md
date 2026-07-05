@@ -216,6 +216,12 @@ Several execution contexts cooperate:
 Any thread holding a `TermHandle` can mutate zones and trigger a redraw.
 Multiple redraws coalesce into one via the notify channel.
 
+Callers that temporarily install an off-screen output snapshot and then restore
+the visible snapshot must wrap the whole sequence in
+`TermHandle::with_output_transaction`. Ordinary `TermHandle` output mutations
+from cloned handles wait for that transaction, so local terminal output cannot
+attach to the temporary snapshot.
+
 ## Test strategy
 
 Most tests use `Term::new_virtual()` so the input loop receives injected

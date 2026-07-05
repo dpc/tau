@@ -691,6 +691,66 @@ fn redraw_suppression_is_scoped() {
     drop(term);
 }
 
+/// Output transactions must make multi-step snapshot swaps atomic with respect
+/// to cloned handles that print local terminal output from other threads. This
+/// prevents local messages from attaching to a temporary hidden transcript
+/// snapshot while the CLI folds a background-agent event.
+#[test]
+fn output_transaction_blocks_concurrent_local_output_until_visible_snapshot_restored() {
+    let buf = SharedBuffer::new();
+    let (term, handle, _input_tx) =
+        Term::new_virtual(80, 24, "> ", Box::new(buf), CursorShape::Bar);
+
+    handle.print_output("visible-base", plain_block("visible base"));
+    let visible_snapshot = handle.output_snapshot();
+    handle.clear_output();
+    handle.print_output("hidden-base", plain_block("hidden base"));
+    let hidden_snapshot = handle.output_snapshot();
+
+    let (attempt_tx, attempt_rx) = std::sync::mpsc::channel();
+    let (printed_tx, printed_rx) = std::sync::mpsc::channel();
+    let local_handle = handle.clone();
+
+    let worker = handle.with_output_transaction(|| {
+        handle.replace_output_snapshot_quiet(hidden_snapshot);
+        let worker = std::thread::spawn(move || {
+            attempt_tx.send(()).expect("attempt signal should send");
+            local_handle.print_output("local-output", plain_block("local visible output"));
+            printed_tx.send(()).expect("printed signal should send");
+        });
+        attempt_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("local output thread should attempt to print");
+        assert!(
+            printed_rx
+                .recv_timeout(std::time::Duration::from_millis(50))
+                .is_err(),
+            "local output printed while hidden snapshot was installed"
+        );
+
+        handle.replace_output_snapshot_quiet(visible_snapshot);
+        worker
+    });
+
+    printed_rx
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .expect("local output should print after transaction exits");
+    worker.join().expect("local output worker should finish");
+    let snapshot = handle.output_snapshot();
+    let rendered_text = snapshot
+        .history
+        .iter()
+        .filter_map(|id| snapshot.blocks.get(id))
+        .flat_map(|block| block.content.spans().iter())
+        .map(|span| span.text.as_str())
+        .collect::<String>();
+    assert!(rendered_text.contains("visible base"));
+    assert!(rendered_text.contains("local visible output"));
+    assert!(!rendered_text.contains("hidden base"));
+
+    drop(term);
+}
+
 /// Input shutdown requests must wake a virtual input loop without requiring an
 /// injected key event; the real terminal path uses the same shutdown channel to
 /// stop waiting even if a one-shot crossterm read helper remains blocked.

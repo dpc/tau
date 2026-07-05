@@ -2736,20 +2736,22 @@ impl EventRenderer {
                 self.update_agent_in_progress();
                 return;
             }
-            let visible_state = self.take_visible_agent_state();
-            let target_state = self
-                .agents_ui_state
-                .remove(&target_agent_id)
-                .unwrap_or_default();
             let handle = self.handle.clone();
-            handle.with_redraw_suppressed(|| {
-                self.with_editor_context_publish_suppressed(|this| {
-                    this.restore_hidden_agent_state(target_state);
-                    this.displayed_agent_id = Some(target_agent_id.clone());
-                    this.handle_recorded_at_for_visible_agent(event, recorded_at);
-                    let target_state = this.take_visible_agent_state();
-                    this.agents_ui_state.insert(target_agent_id, target_state);
-                    this.restore_hidden_agent_state(visible_state);
+            handle.with_output_transaction(|| {
+                let visible_state = self.take_visible_agent_state();
+                let target_state = self
+                    .agents_ui_state
+                    .remove(&target_agent_id)
+                    .unwrap_or_default();
+                handle.with_redraw_suppressed(|| {
+                    self.with_editor_context_publish_suppressed(|this| {
+                        this.restore_hidden_agent_state(target_state);
+                        this.displayed_agent_id = Some(target_agent_id.clone());
+                        this.handle_recorded_at_for_visible_agent(event, recorded_at);
+                        let target_state = this.take_visible_agent_state();
+                        this.agents_ui_state.insert(target_agent_id, target_state);
+                        this.restore_hidden_agent_state(visible_state);
+                    });
                 });
             });
             self.displayed_agent_id = None;
@@ -2768,26 +2770,28 @@ impl EventRenderer {
             .clone()
             .or_else(|| self.current_agent_id.clone())
             .unwrap_or_else(|| target_agent_id.clone());
-        let visible_state = self.take_visible_agent_state();
-        self.agents_ui_state
-            .insert(visible_agent_id.clone(), visible_state);
-        let target_state = self
-            .agents_ui_state
-            .remove(&target_agent_id)
-            .unwrap_or_default();
         let handle = self.handle.clone();
-        handle.with_redraw_suppressed(|| {
-            self.with_editor_context_publish_suppressed(|this| {
-                this.restore_hidden_agent_state(target_state);
-                this.displayed_agent_id = Some(target_agent_id.clone());
-                this.handle_recorded_at_for_visible_agent(event, recorded_at);
-                let target_state = this.take_visible_agent_state();
-                this.agents_ui_state.insert(target_agent_id, target_state);
-                let visible_state = this
-                    .agents_ui_state
-                    .remove(&visible_agent_id)
-                    .unwrap_or_default();
-                this.restore_hidden_agent_state(visible_state);
+        handle.with_output_transaction(|| {
+            let visible_state = self.take_visible_agent_state();
+            self.agents_ui_state
+                .insert(visible_agent_id.clone(), visible_state);
+            let target_state = self
+                .agents_ui_state
+                .remove(&target_agent_id)
+                .unwrap_or_default();
+            handle.with_redraw_suppressed(|| {
+                self.with_editor_context_publish_suppressed(|this| {
+                    this.restore_hidden_agent_state(target_state);
+                    this.displayed_agent_id = Some(target_agent_id.clone());
+                    this.handle_recorded_at_for_visible_agent(event, recorded_at);
+                    let target_state = this.take_visible_agent_state();
+                    this.agents_ui_state.insert(target_agent_id, target_state);
+                    let visible_state = this
+                        .agents_ui_state
+                        .remove(&visible_agent_id)
+                        .unwrap_or_default();
+                    this.restore_hidden_agent_state(visible_state);
+                });
             });
         });
         self.displayed_agent_id = Some(visible_agent_id);
@@ -2852,32 +2856,34 @@ impl EventRenderer {
         recorded_at: UnixMicros,
         target_agent_id: String,
     ) {
-        let visible_agent_id = self.displayed_agent_id.clone();
-        let visible_state = self.take_visible_agent_state();
-        if let Some(visible_agent_id) = visible_agent_id.as_ref() {
-            self.agents_ui_state
-                .insert(visible_agent_id.clone(), visible_state);
-        } else {
-            self.no_agent_ui_state = visible_state;
-        }
-        let target_state = self
-            .agents_ui_state
-            .remove(&target_agent_id)
-            .unwrap_or_default();
         let handle = self.handle.clone();
-        handle.with_redraw_suppressed(|| {
-            self.with_editor_context_publish_suppressed(|this| {
-                this.restore_hidden_agent_state(target_state);
-                this.displayed_agent_id = Some(target_agent_id.clone());
-                this.handle_recorded_at_for_visible_agent(event, recorded_at);
-                let target_state = this.take_visible_agent_state();
-                this.agents_ui_state
-                    .insert(target_agent_id.clone(), target_state);
-                let visible_state = visible_agent_id
-                    .as_ref()
-                    .and_then(|id| this.agents_ui_state.remove(id))
-                    .unwrap_or_else(|| std::mem::take(&mut this.no_agent_ui_state));
-                this.restore_hidden_agent_state(visible_state);
+        let visible_agent_id = self.displayed_agent_id.clone();
+        handle.with_output_transaction(|| {
+            let visible_state = self.take_visible_agent_state();
+            if let Some(visible_agent_id) = visible_agent_id.as_ref() {
+                self.agents_ui_state
+                    .insert(visible_agent_id.clone(), visible_state);
+            } else {
+                self.no_agent_ui_state = visible_state;
+            }
+            let target_state = self
+                .agents_ui_state
+                .remove(&target_agent_id)
+                .unwrap_or_default();
+            handle.with_redraw_suppressed(|| {
+                self.with_editor_context_publish_suppressed(|this| {
+                    this.restore_hidden_agent_state(target_state);
+                    this.displayed_agent_id = Some(target_agent_id.clone());
+                    this.handle_recorded_at_for_visible_agent(event, recorded_at);
+                    let target_state = this.take_visible_agent_state();
+                    this.agents_ui_state
+                        .insert(target_agent_id.clone(), target_state);
+                    let visible_state = visible_agent_id
+                        .as_ref()
+                        .and_then(|id| this.agents_ui_state.remove(id))
+                        .unwrap_or_else(|| std::mem::take(&mut this.no_agent_ui_state));
+                    this.restore_hidden_agent_state(visible_state);
+                });
             });
         });
         self.displayed_agent_id = visible_agent_id;
@@ -2885,27 +2891,29 @@ impl EventRenderer {
     }
 
     fn handle_recorded_at_for_hidden_no_agent(&mut self, event: &Event, recorded_at: UnixMicros) {
-        let visible_agent_id = self.displayed_agent_id.clone();
-        let visible_state = self.take_visible_agent_state();
-        if let Some(visible_agent_id) = visible_agent_id.as_ref() {
-            self.agents_ui_state
-                .insert(visible_agent_id.clone(), visible_state);
-        } else {
-            self.no_agent_ui_state = visible_state;
-        }
-        let no_agent_state = std::mem::take(&mut self.no_agent_ui_state);
         let handle = self.handle.clone();
-        handle.with_redraw_suppressed(|| {
-            self.with_editor_context_publish_suppressed(|this| {
-                this.restore_hidden_agent_state(no_agent_state);
-                this.displayed_agent_id = None;
-                this.handle_recorded_at_for_visible_agent(event, recorded_at);
-                this.no_agent_ui_state = this.take_visible_agent_state();
-                let visible_state = visible_agent_id
-                    .as_ref()
-                    .and_then(|id| this.agents_ui_state.remove(id))
-                    .unwrap_or_default();
-                this.restore_hidden_agent_state(visible_state);
+        let visible_agent_id = self.displayed_agent_id.clone();
+        handle.with_output_transaction(|| {
+            let visible_state = self.take_visible_agent_state();
+            if let Some(visible_agent_id) = visible_agent_id.as_ref() {
+                self.agents_ui_state
+                    .insert(visible_agent_id.clone(), visible_state);
+            } else {
+                self.no_agent_ui_state = visible_state;
+            }
+            let no_agent_state = std::mem::take(&mut self.no_agent_ui_state);
+            handle.with_redraw_suppressed(|| {
+                self.with_editor_context_publish_suppressed(|this| {
+                    this.restore_hidden_agent_state(no_agent_state);
+                    this.displayed_agent_id = None;
+                    this.handle_recorded_at_for_visible_agent(event, recorded_at);
+                    this.no_agent_ui_state = this.take_visible_agent_state();
+                    let visible_state = visible_agent_id
+                        .as_ref()
+                        .and_then(|id| this.agents_ui_state.remove(id))
+                        .unwrap_or_default();
+                    this.restore_hidden_agent_state(visible_state);
+                });
             });
         });
         self.displayed_agent_id = visible_agent_id;

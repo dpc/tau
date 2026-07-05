@@ -12,6 +12,7 @@
 //! - **Full render** — on resize/invalidation, clears screen + scrollback and
 //!   replays the capped log/history suffix plus fixed tail without rubber
 
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::io::{self, BufWriter, Write};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -831,9 +832,39 @@ impl OutputSnapshot {
 #[derive(Clone)]
 pub struct TermHandle {
     state: Arc<Mutex<SharedState>>,
+    output_transaction: Arc<Mutex<()>>,
     sync_condvar: Arc<std::sync::Condvar>,
     redraw: tau_blocking_notify_channel::Sender,
     input_tx: std::sync::mpsc::Sender<InputMessage>,
+}
+
+thread_local! {
+    static HELD_OUTPUT_TRANSACTIONS: RefCell<HashMap<usize, usize>> = RefCell::new(HashMap::new());
+}
+
+struct OutputTransactionDepthGuard {
+    key: usize,
+}
+
+impl Drop for OutputTransactionDepthGuard {
+    fn drop(&mut self) {
+        HELD_OUTPUT_TRANSACTIONS.with(|held| {
+            let mut held = held.borrow_mut();
+            let depth = held
+                .get_mut(&self.key)
+                .expect("output transaction depth missing");
+            *depth -= 1;
+            if *depth == 0 {
+                held.remove(&self.key);
+            }
+        });
+    }
+}
+
+/// Guard that serializes terminal output snapshot mutations.
+struct OutputTransactionGuard<'a> {
+    _guard: MutexGuard<'a, ()>,
+    _depth: OutputTransactionDepthGuard,
 }
 
 struct RedrawSuppressionGuard<'a> {
@@ -871,6 +902,39 @@ impl Drop for RedrawSuppressionGuard<'_> {
 impl TermHandle {
     fn lock(&self) -> MutexGuard<'_, SharedState> {
         self.state.lock().expect("term state mutex poisoned")
+    }
+
+    fn output_transaction_key(&self) -> usize {
+        Arc::as_ptr(&self.output_transaction) as usize
+    }
+
+    fn output_transaction_is_held(&self) -> bool {
+        let key = self.output_transaction_key();
+        HELD_OUTPUT_TRANSACTIONS.with(|held| held.borrow().contains_key(&key))
+    }
+
+    fn mark_output_transaction_held(&self) -> OutputTransactionDepthGuard {
+        let key = self.output_transaction_key();
+        HELD_OUTPUT_TRANSACTIONS.with(|held| {
+            let mut held = held.borrow_mut();
+            *held.entry(key).or_insert(0) += 1;
+        });
+        OutputTransactionDepthGuard { key }
+    }
+
+    fn output_transaction_barrier(&self) -> Option<OutputTransactionGuard<'_>> {
+        if self.output_transaction_is_held() {
+            return None;
+        }
+        let guard = self
+            .output_transaction
+            .lock()
+            .expect("term output transaction mutex poisoned");
+        let depth = self.mark_output_transaction_held();
+        Some(OutputTransactionGuard {
+            _guard: guard,
+            _depth: depth,
+        })
     }
 
     fn request_redraw_locked(st: &mut SharedState) -> bool {
@@ -912,6 +976,18 @@ impl TermHandle {
         f()
     }
 
+    /// Run `f` while terminal output snapshot mutations from other threads are
+    /// blocked.
+    ///
+    /// This transaction is intentionally narrower than the shared
+    /// terminal-state mutex: callers can perform a multi-step snapshot swap
+    /// using ordinary [`TermHandle`] methods without exposing the temporary
+    /// snapshot to local output producers that own only a cloned handle.
+    pub fn with_output_transaction<R>(&self, f: impl FnOnce() -> R) -> R {
+        let _transaction = self.output_transaction_barrier();
+        f()
+    }
+
     /// Triggers a redraw of the terminal.
     ///
     /// Call this after updating one or more blocks/zones. Multiple
@@ -939,6 +1015,7 @@ impl TermHandle {
     /// Returns a clone of all output blocks/zones, excluding prompt input and
     /// prompt-history state.
     pub fn output_snapshot(&self) -> OutputSnapshot {
+        let _transaction = self.output_transaction_barrier();
         let st = self.lock();
         OutputSnapshot {
             blocks: st.blocks.clone(),
@@ -969,6 +1046,7 @@ impl TermHandle {
         invalidate_screen: bool,
         notify: bool,
     ) {
+        let _transaction = self.output_transaction_barrier();
         let mut st = self.lock();
         st.blocks = snapshot.blocks;
         st.block_debug_ids = snapshot.block_debug_ids;
@@ -1002,6 +1080,7 @@ impl TermHandle {
     /// stale fossils that disagree with current state. See
     /// `README.md` § "When mutations need a full redraw".
     pub fn invalidate_screen(&self) {
+        let _transaction = self.output_transaction_barrier();
         self.lock().invalidate_screen = true;
         self.notify_redraw();
     }
@@ -1059,6 +1138,7 @@ impl TermHandle {
 
     /// Allocates a new [`BlockId`] and stores the block.
     pub fn new_block(&self, debug_id: impl Into<String>, block: impl Into<StyledBlock>) -> BlockId {
+        let _transaction = self.output_transaction_barrier();
         let mut st = self.lock();
         let id = st.alloc_id();
         let debug_id = debug_id.into();
@@ -1073,6 +1153,7 @@ impl TermHandle {
     /// Updates the content of an existing block (or inserts it at
     /// the given id).
     pub fn set_block(&self, id: BlockId, block: impl Into<StyledBlock>) {
+        let _transaction = self.output_transaction_barrier();
         let block = block.into();
         let content_empty = block.content.is_empty();
         let mut st = self.lock();
@@ -1090,6 +1171,7 @@ impl TermHandle {
     /// Removes a block from the central store **and** from every zone
     /// list that references it.
     pub fn remove_block(&self, id: BlockId) {
+        let _transaction = self.output_transaction_barrier();
         let mut st = self.lock();
         let existed = st.blocks.remove(&id).is_some();
         let debug_id = st.block_debug_ids.remove(&id);
@@ -1106,6 +1188,7 @@ impl TermHandle {
 
     /// Appends a block id to the history (persistent output).
     pub fn push_history(&self, id: BlockId) {
+        let _transaction = self.output_transaction_barrier();
         let mut st = self.lock();
         st.history.push(id);
         st.add_history_ref(id);
@@ -1115,6 +1198,7 @@ impl TermHandle {
     /// Appends a block id to the above-active zone (if not already
     /// present).
     pub fn push_above_active(&self, id: BlockId) {
+        let _transaction = self.output_transaction_barrier();
         let mut st = self.lock();
         if !st.above_active.contains(&id) {
             st.above_active.push(id);
@@ -1132,6 +1216,7 @@ impl TermHandle {
     where
         I: IntoIterator<Item = BlockId>,
     {
+        let _transaction = self.output_transaction_barrier();
         let anchors = anchors.into_iter().collect::<HashSet<_>>();
         let mut st = self.lock();
         st.above_active.retain(|&x| x != id);
@@ -1146,6 +1231,7 @@ impl TermHandle {
 
     /// Removes a block id from the above-active zone.
     pub fn remove_above_active(&self, id: BlockId) {
+        let _transaction = self.output_transaction_barrier();
         self.lock().above_active.retain(|&x| x != id);
         tracing::trace!(target: "tau_cli_term_raw::blocks", ?id, zone = "above_active", "remove block zone");
     }
@@ -1153,6 +1239,7 @@ impl TermHandle {
     /// Appends a block id to the above-sticky zone (if not already
     /// present).
     pub fn push_above_sticky(&self, id: BlockId) {
+        let _transaction = self.output_transaction_barrier();
         let mut st = self.lock();
         if !st.above_sticky.contains(&id) {
             st.above_sticky.push(id);
@@ -1162,6 +1249,7 @@ impl TermHandle {
 
     /// Removes a block id from the above-sticky zone.
     pub fn remove_above_sticky(&self, id: BlockId) {
+        let _transaction = self.output_transaction_barrier();
         self.lock().above_sticky.retain(|&x| x != id);
         tracing::trace!(target: "tau_cli_term_raw::blocks", ?id, zone = "above_sticky", "remove block zone");
     }
@@ -1169,6 +1257,7 @@ impl TermHandle {
     /// Appends a block id to the suggestions zone (if not already
     /// present). Rendered between the prompt and below blocks.
     pub fn push_suggestions(&self, id: BlockId) {
+        let _transaction = self.output_transaction_barrier();
         let mut st = self.lock();
         if !st.suggestions.contains(&id) {
             st.suggestions.push(id);
@@ -1178,12 +1267,14 @@ impl TermHandle {
 
     /// Removes a block id from the suggestions zone.
     pub fn remove_suggestions(&self, id: BlockId) {
+        let _transaction = self.output_transaction_barrier();
         self.lock().suggestions.retain(|&x| x != id);
         tracing::trace!(target: "tau_cli_term_raw::blocks", ?id, zone = "suggestions", "remove block zone");
     }
 
     /// Appends a block id to the below zone (if not already present).
     pub fn push_below(&self, id: BlockId) {
+        let _transaction = self.output_transaction_barrier();
         let mut st = self.lock();
         if !st.below.contains(&id) {
             st.below.push(id);
@@ -1193,6 +1284,7 @@ impl TermHandle {
 
     /// Removes a block id from the below zone.
     pub fn remove_below(&self, id: BlockId) {
+        let _transaction = self.output_transaction_barrier();
         self.lock().below.retain(|&x| x != id);
         tracing::trace!(target: "tau_cli_term_raw::blocks", ?id, zone = "below", "remove block zone");
     }
@@ -1206,6 +1298,7 @@ impl TermHandle {
         debug_id: impl Into<String>,
         block: impl Into<StyledBlock>,
     ) -> BlockId {
+        let _transaction = self.output_transaction_barrier();
         let mut st = self.lock();
         let id = st.alloc_id();
         let debug_id = debug_id.into();
@@ -1493,6 +1586,7 @@ impl Term {
 
         let handle = TermHandle {
             state,
+            output_transaction: Arc::new(Mutex::new(())),
             sync_condvar,
             redraw: redraw_tx,
             input_tx,
@@ -1556,6 +1650,7 @@ impl Term {
 
         let handle = TermHandle {
             state,
+            output_transaction: Arc::new(Mutex::new(())),
             sync_condvar,
             redraw: redraw_tx,
             input_tx,

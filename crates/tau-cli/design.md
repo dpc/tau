@@ -240,6 +240,13 @@ input-loop mirrors such as `EditorContext`; Ctrl+O and other prompt actions must
 continue seeing the actually visible/no-agent context until the user explicitly
 switches transcripts.
 
+The hidden restore/fold/save/restore sequence must also be atomic with respect
+to terminal output emitted through cloned `TermHandle`s, such as local
+client-side notices. Hidden folding installs a temporary output snapshot in the
+shared terminal handle; local output must wait until the actually visible
+snapshot is restored so it cannot be appended to a hidden agent transcript by a
+cross-thread race.
+
 ## Dynamic action completion snapshot ownership
 
 Status: unconfirmed
