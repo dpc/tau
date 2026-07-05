@@ -173,6 +173,10 @@ pub(crate) enum PendingPromptSource {
     AgentMessageReceived,
     /// Internal loop-guard pivot prompt.
     LoopGuard,
+    /// A passive background-completion notice that should be folded into the
+    /// next real user prompt, but must not make an idle agent runnable by
+    /// itself.
+    PassiveBackgroundCompletion,
 }
 
 /// A queued prompt plus its user/internal classification.
@@ -248,6 +252,17 @@ impl PendingPrompt {
         }
     }
 
+    /// Create a hidden background-completion notice that waits for the next
+    /// user-driven continuation instead of starting a standalone model turn.
+    pub(crate) fn passive_background_completion(text: String) -> Self {
+        Self {
+            text,
+            message_class: PromptMessageClass::Internal,
+            source: PendingPromptSource::PassiveBackgroundCompletion,
+            ctx_id: None,
+        }
+    }
+
     /// Attach a caller correlation id to this exact queued prompt.
     pub(crate) fn with_ctx_id(mut self, ctx_id: Option<String>) -> Self {
         self.ctx_id = ctx_id;
@@ -270,6 +285,12 @@ impl PendingPrompt {
     #[must_use]
     pub(crate) fn is_loop_guard(&self) -> bool {
         self.source == PendingPromptSource::LoopGuard
+    }
+
+    /// Whether this prompt is a passive background-completion notice.
+    #[must_use]
+    pub(crate) fn is_passive_background_completion(&self) -> bool {
+        self.source == PendingPromptSource::PassiveBackgroundCompletion
     }
 }
 

@@ -1,5 +1,5 @@
 use super::*;
-use crate::harness::PendingTool;
+use crate::harness::{PendingTool, background_completion_prompt};
 
 fn prompt_created_count(h: &Harness) -> u64 {
     let mut cursor = crate::event_log::EventLogSeq::new(0);
@@ -1400,6 +1400,94 @@ fn interception_user_prompt_dispatch_waits_for_commit() {
                 )
         ),
         "c.head points at the just-committed user prompt"
+    );
+}
+
+#[test]
+fn passive_background_notice_and_user_prompt_dispatch_as_one_intercepted_batch() {
+    // Regression: passive background notices published before a real user prompt
+    // must not let interception wake provider dispatch before the user prompt
+    // itself commits. The passive notice and user prompt are treated as one
+    // publish batch and dispatch only after both intercepted submissions pass.
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(tmp.path()).expect("harness");
+    let session_id = h.current_session_id.clone();
+    h.initialized_sessions.insert(session_id);
+    h.selected_model = Some("test/model".into());
+
+    let _interceptor = connect_test_tool(&mut h, "interceptor-passive-batch");
+    h.handle_extension_event(
+        "interceptor-passive-batch",
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(
+                tau_proto::EventName::AGENT_PROMPT_SUBMITTED,
+            )],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("intercept registration");
+
+    let cid = ensure_test_user_agent(&mut h);
+    let passive_text = background_completion_prompt(&"passive-intercept-bg".into());
+    h.agents
+        .get_mut(&cid)
+        .expect("conversation")
+        .pending_prompts
+        .push_back(PendingPrompt::passive_background_completion(
+            passive_text.clone(),
+        ));
+    let prompts_before = prompt_created_count(&h);
+
+    h.dispatch_prompt_for_agent(&cid, "real follow-up".to_owned())
+        .expect("dispatch user prompt with passive notice");
+
+    assert_eq!(prompt_created_count(&h), prompts_before);
+    assert_eq!(
+        h.pending_publish_idle_dispatches.len(),
+        1,
+        "dispatch should be deferred for the whole passive+user batch"
+    );
+
+    h.handle_extension_event(
+        "interceptor-passive-batch",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Pass(None),
+        })),
+    )
+    .expect("pass passive notice");
+
+    assert_eq!(
+        prompt_created_count(&h),
+        prompts_before,
+        "provider dispatch must still wait for the real user prompt"
+    );
+    assert_eq!(h.pending_publish_idle_dispatches.len(), 1);
+
+    h.handle_extension_event(
+        "interceptor-passive-batch",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Pass(None),
+        })),
+    )
+    .expect("pass user prompt");
+
+    assert_eq!(h.pending_publish_idle_dispatches.len(), 0);
+    assert_eq!(prompt_created_count(&h), prompts_before + 1);
+    let submitted: Vec<String> = event_log_events(&h)
+        .into_iter()
+        .filter_map(|event| match event {
+            Event::AgentPromptSubmitted(submitted)
+                if submitted.text == passive_text || submitted.text == "real follow-up" =>
+            {
+                Some(submitted.text)
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        submitted,
+        vec![passive_text, "real follow-up".to_owned()],
+        "passive notice should commit immediately before the user prompt"
     );
 }
 

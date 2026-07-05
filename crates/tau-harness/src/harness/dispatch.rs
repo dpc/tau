@@ -1,10 +1,11 @@
 //! Agent prompt-queue dispatch.
 //!
-//! Each live agent owns a `pending_prompts` queue. The harness has no global
-//! agent slot — the agent extension serializes its own consumption of
-//! `AgentPromptCreated` from the event log — so the dispatch logic here just
-//! drains one prompt per *runnable* agent (Idle turn state, non-empty queue)
-//! and lets the agent interleave them on its side.
+//! Each live agent owns a `pending_prompts` queue. Some internal notices are
+//! passive and do not make an idle agent runnable by themselves. The harness
+//! has no global agent slot — the agent extension serializes its own
+//! consumption of `AgentPromptCreated` from the event log — so the dispatch
+//! logic here just drains one non-passive prompt per *runnable* agent and lets
+//! the agent interleave them on its side.
 //!
 //! [`Harness::dispatch_user_prompt`] is the direct entry point for interactive
 //! submissions and creates/reuses the session's durable user agent;
@@ -111,8 +112,13 @@ impl Harness {
         let prompt = prompt.into();
         if !prompt.is_internal() {
             self.reset_loop_guard_for_progress(agent_id);
+            let passive_background_prompts =
+                self.take_passive_background_completion_prompts_for_user_prompt(agent_id);
             let restore_prompts = self.take_pending_restore_prompts_for_user_prompt(agent_id);
-            if !restore_prompts.is_empty() {
+            if !passive_background_prompts.is_empty() || !restore_prompts.is_empty() {
+                for passive_prompt in passive_background_prompts {
+                    self.publish_pending_prompt_for_agent(agent_id, passive_prompt)?;
+                }
                 for restore_prompt in restore_prompts {
                     self.publish_pending_prompt_for_agent(agent_id, restore_prompt)?;
                 }
@@ -167,9 +173,7 @@ impl Harness {
             }
 
             let prompt = self
-                .agents
-                .get_mut(&agent_id)
-                .and_then(|c| c.pending_prompts.pop_front())
+                .pop_next_runnable_prompt(&agent_id)
                 .expect("runnable agent has a prompt");
             if let Err(error) = self.dispatch_prompt_for_agent(&agent_id, prompt) {
                 self.emit_harness_failure(&format!("failed to dispatch queued prompt: {error}"));
@@ -187,11 +191,22 @@ impl Harness {
         self.agents
             .iter()
             .find(|(agent_id, conv)| {
-                !conv.pending_prompts.is_empty()
+                conv.pending_prompts
+                    .iter()
+                    .any(|prompt| !prompt.is_passive_background_completion())
                     && matches!(conv.turn_state, AgentTurnState::Idle)
                     && !self.has_deferred_prompt_dispatch_for(agent_id)
             })
             .map(|(agent_id, _)| agent_id.clone())
+    }
+
+    fn pop_next_runnable_prompt(&mut self, agent_id: &AgentId) -> Option<PendingPrompt> {
+        let conv = self.agents.get_mut(agent_id)?;
+        let index = conv
+            .pending_prompts
+            .iter()
+            .position(|prompt| !prompt.is_passive_background_completion())?;
+        conv.pending_prompts.remove(index)
     }
 
     /// True when a fresh prompt for one agent should *not* be sent

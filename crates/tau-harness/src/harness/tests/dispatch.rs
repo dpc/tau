@@ -2,7 +2,7 @@ use super::*;
 use crate::AgentId;
 use crate::agent::{Agent, AgentTurnState, PendingPrompt};
 use crate::harness::{
-    AgentState, PendingTool, background_completion_prompt,
+    AgentState, BackgroundCompletionPromptMode, PendingTool, background_completion_prompt,
     extension_disconnected_background_tool_call_error_message,
     extension_disconnected_tool_call_error_message, is_restore_notice_prompt_text,
     restore_notice_prompt_for_elapsed, unavailable_tool_error_message,
@@ -3940,7 +3940,12 @@ fn cancel_remaining_backgrounded_extension_call_publishes_background_error_only(
     assert_eq!(background_placeholder_count(&h, call_id.as_str()), 1);
     assert!(h.tool_turn.is_backgrounded(&call_id));
 
-    h.cancel_remaining_tool_calls(&cid, vec![call_id.clone()], "test cancel");
+    h.cancel_remaining_tool_calls(
+        &cid,
+        vec![call_id.clone()],
+        "test cancel",
+        BackgroundCompletionPromptMode::QueuePassive,
+    );
 
     assert!(event_log_contains_any_source(&h, |event| matches!(
         event,
@@ -3962,6 +3967,280 @@ fn cancel_remaining_backgrounded_extension_call_publishes_background_error_only(
     assert!(!h.tool_turn.is_backgrounded(&call_id));
     assert!(!h.pending_tool_providers.contains_key(&call_id));
     assert!(!h.tool_agents.contains_key(&call_id));
+    assert!(
+        h.agents[&cid].pending_prompts.iter().any(|prompt| {
+            prompt.text == background_completion_prompt(&call_id) && prompt.is_internal()
+        }),
+        "live-branch cancellation should leave a queued internal completion notice"
+    );
+
+    h.shutdown().expect("shutdown");
+}
+
+/// Regression: live user cancellation of a turn with an already-backgrounded
+/// call must keep a queued internal completion notice on the live branch. The
+/// notice should not auto-advance immediately, otherwise canceling a turn could
+/// cause the model to restart solely to observe harness-authored cancellation.
+#[test]
+fn live_cancel_backgrounded_tool_queues_completion_notice_without_advancing() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    h.selected_model = Some("test/model".into());
+
+    let cid = ensure_test_user_agent(&mut h);
+    let target_agent_id = h.agents[&cid].agent_id.clone().expect("agent id");
+    let call_id: ToolCallId = "live-cancel-bg-call".into();
+    h.pending_tools.insert(
+        call_id.clone(),
+        PendingTool {
+            name: ToolName::new("live_cancel_bg_tool"),
+            internal_name: ToolName::new("live_cancel_bg_tool"),
+            tool_type: tau_proto::ToolType::Function,
+        },
+    );
+    h.tool_agents.insert(call_id.clone(), cid.clone());
+    h.tool_turn
+        .record_in_flight_for_test(cid.clone(), call_id.clone());
+    assert!(h.tool_turn.mark_backgrounded(&call_id));
+    h.publish_synthetic_background_result(&call_id);
+    seed_tools_running(&mut h, &cid, vec![call_id.clone()]);
+    h.agents
+        .get_mut(&cid)
+        .expect("conversation")
+        .pending_prompts
+        .push_back(PendingPrompt::user(
+            "queued user prompt to discard".to_owned(),
+        ));
+
+    h.handle_cancel_prompt(&tau_proto::UiCancelPrompt {
+        session_id: "s1".into(),
+        target_agent_id: Some(crate::parse_agent_id(&target_agent_id)),
+        agent_prompt_id: None,
+    });
+
+    let completion_prompt = background_completion_prompt(&call_id);
+    assert_eq!(
+        event_log_count(&h, |event| matches!(
+            event,
+            Event::ToolBackgroundError(error) if error.call_id == call_id
+        )),
+        1
+    );
+    assert!(matches!(h.agents[&cid].turn_state, AgentTurnState::Idle));
+    assert!(h.agents[&cid].pending_cancel.is_none());
+    assert!(
+        h.agents[&cid]
+            .pending_prompts
+            .iter()
+            .any(|prompt| prompt.text == completion_prompt
+                && prompt.is_passive_background_completion()),
+        "live branch should retain the internal background completion notice"
+    );
+    assert!(
+        h.agents[&cid]
+            .pending_prompts
+            .iter()
+            .all(PendingPrompt::is_passive_background_completion),
+        "live cancel should still discard stale non-internal queued prompts"
+    );
+    h.try_advance_queue();
+    assert!(!event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::AgentPromptSubmitted(submitted) if submitted.text == completion_prompt
+    )));
+    assert!(matches!(h.agents[&cid].turn_state, AgentTurnState::Idle));
+
+    let submission = h
+        .submit_user_prompt("s1".into(), "continue after cancel".to_owned())
+        .expect("submit follow-up user prompt");
+    assert_eq!(submission, PromptSubmission::Dispatched);
+    assert!(event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::AgentPromptSubmitted(submitted)
+            if submitted.text == completion_prompt
+                && submitted.message_class == tau_proto::PromptMessageClass::Internal
+    )));
+    assert!(event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::AgentPromptSubmitted(submitted)
+            if submitted.text == "continue after cancel"
+                && submitted.message_class == tau_proto::PromptMessageClass::User
+    )));
+    assert!(
+        h.agents[&cid]
+            .pending_prompts
+            .iter()
+            .all(|prompt| prompt.text != completion_prompt),
+        "follow-up user prompt should consume the passive background notice"
+    );
+    assert!(!h.tool_turn.is_backgrounded(&call_id));
+    assert!(!h.pending_tools.contains_key(&call_id));
+    assert!(!h.tool_agents.contains_key(&call_id));
+
+    h.shutdown().expect("shutdown");
+}
+
+/// Regression: a passive background notice left on the canceled live branch
+/// must not block ordinary queued work for other agents. Once passive-only
+/// queues are ignored by `next_runnable_agent`, live cancellation should still
+/// advance the global queue so another agent's normal prompt can run.
+#[test]
+fn live_cancel_passive_notice_still_advances_other_runnable_agent() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    h.selected_model = Some("test/model".into());
+
+    let cancel_cid = ensure_test_user_agent(&mut h);
+    let cancel_agent_id = h.agents[&cancel_cid].agent_id.clone().expect("agent id");
+    let other_cid =
+        h.create_durable_user_agent(h.current_session_id.clone(), &h.selected_role.clone());
+    h.agents
+        .get_mut(&other_cid)
+        .expect("other conversation")
+        .pending_prompts
+        .push_back(PendingPrompt::user("other agent prompt".to_owned()));
+
+    let call_id: ToolCallId = "live-cancel-bg-with-other-agent".into();
+    h.pending_tools.insert(
+        call_id.clone(),
+        PendingTool {
+            name: ToolName::new("live_cancel_bg_tool"),
+            internal_name: ToolName::new("live_cancel_bg_tool"),
+            tool_type: tau_proto::ToolType::Function,
+        },
+    );
+    h.tool_agents.insert(call_id.clone(), cancel_cid.clone());
+    h.tool_turn
+        .record_in_flight_for_test(cancel_cid.clone(), call_id.clone());
+    assert!(h.tool_turn.mark_backgrounded(&call_id));
+    h.publish_synthetic_background_result(&call_id);
+    seed_tools_running(&mut h, &cancel_cid, vec![call_id.clone()]);
+
+    h.handle_cancel_prompt(&tau_proto::UiCancelPrompt {
+        session_id: "s1".into(),
+        target_agent_id: Some(crate::parse_agent_id(&cancel_agent_id)),
+        agent_prompt_id: None,
+    });
+
+    assert!(
+        h.agents[&cancel_cid].pending_prompts.iter().any(|prompt| {
+            prompt.text == background_completion_prompt(&call_id)
+                && prompt.is_passive_background_completion()
+        }),
+        "canceled agent should keep only a passive completion notice"
+    );
+    assert!(!event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::AgentPromptSubmitted(submitted)
+            if submitted.text == background_completion_prompt(&call_id)
+    )));
+    assert!(event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::AgentPromptSubmitted(submitted) if submitted.text == "other agent prompt"
+    )));
+    assert!(matches!(
+        h.agents[&other_cid].turn_state,
+        AgentTurnState::AgentThinking { .. }
+    ));
+
+    h.shutdown().expect("shutdown");
+}
+
+/// Regression: live cancellation must include backgrounded calls that have
+/// already left `ToolsRunning.remaining_calls` while a sibling foreground tool
+/// keeps the same turn active. Otherwise the background placeholder would stay
+/// unresolved until the background task eventually reported back.
+#[test]
+fn live_cancel_tools_running_includes_already_backgrounded_siblings() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    h.selected_model = Some("test/model".into());
+
+    let _tool_events = connect_test_tool(&mut h, "conn-live-mixed-cancel");
+    h.registry.register(
+        "conn-live-mixed-cancel",
+        instant_background_test_tool_spec("live_bg_tool"),
+    );
+    h.registry.register(
+        "conn-live-mixed-cancel",
+        shared_test_tool_spec("live_foreground_tool"),
+    );
+
+    let cid = ensure_test_user_agent(&mut h);
+    let spid: AgentPromptId = "sp-live-mixed-cancel".into();
+    seed_agent_thinking(&mut h, &cid, spid.as_str());
+    let target_agent_id = h.agents[&cid].agent_id.clone().expect("agent id");
+    h.prompt_agents.insert(spid.clone(), cid.clone());
+    let bg_call_id: ToolCallId = "live-bg-sibling".into();
+    let fg_call_id: ToolCallId = "live-fg-sibling".into();
+    h.handle_provider_response_finished(ProviderResponseFinished {
+        agent_prompt_id: spid,
+        agent_id: crate::parse_agent_id(&target_agent_id),
+        output_items: vec![
+            ContextItem::ToolCall(ToolCallItem {
+                call_id: bg_call_id.clone(),
+                name: ToolName::new("live_bg_tool"),
+                tool_type: tau_proto::ToolType::Function,
+                arguments: CborValue::Map(Vec::new()),
+                raw_arguments_json: None,
+                responses_envelope: None,
+            }),
+            ContextItem::ToolCall(ToolCallItem {
+                call_id: fg_call_id.clone(),
+                name: ToolName::new("live_foreground_tool"),
+                tool_type: tau_proto::ToolType::Function,
+                arguments: CborValue::Map(Vec::new()),
+                raw_arguments_json: None,
+                responses_envelope: None,
+            }),
+        ],
+        stop_reason: tau_proto::ProviderStopReason::ToolCalls,
+        error: None,
+        usage: None,
+        originator: tau_proto::PromptOriginator::User,
+        compaction_original_input_tokens: None,
+        compaction_compacted_input_tokens: None,
+        backend: None,
+        provider_response_id: None,
+        ws_pool_delta: None,
+    })
+    .expect("mixed tool turn starts");
+
+    assert!(h.tool_turn.is_backgrounded(&bg_call_id));
+    assert!(matches!(
+        h.agents[&cid].turn_state,
+        AgentTurnState::ToolsRunning { .. }
+    ));
+    assert!(h.agents[&cid].pending_prompts.is_empty());
+
+    h.handle_cancel_prompt(&tau_proto::UiCancelPrompt {
+        session_id: "s1".into(),
+        target_agent_id: Some(crate::parse_agent_id(&target_agent_id)),
+        agent_prompt_id: None,
+    });
+
+    assert_eq!(background_error_count(&h, bg_call_id.as_str()), 1);
+    assert!(event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::ToolCancelled(cancelled) if cancelled.call_id == fg_call_id
+    )));
+    assert!(!event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::ToolCancelled(cancelled) if cancelled.call_id == bg_call_id
+    )));
+    assert!(
+        h.agents[&cid].pending_prompts.iter().any(|prompt| {
+            prompt.text == background_completion_prompt(&bg_call_id)
+                && prompt.is_passive_background_completion()
+        }),
+        "backgrounded sibling should receive a passive completion notice"
+    );
+    assert!(!h.tool_turn.is_backgrounded(&bg_call_id));
+    assert!(!h.pending_tools.contains_key(&bg_call_id));
+    assert!(!h.pending_tools.contains_key(&fg_call_id));
 
     h.shutdown().expect("shutdown");
 }
@@ -3993,30 +4272,55 @@ impl crate::InternalToolHandler for TestAgentStartBuiltin {
         host: &mut crate::InternalToolHost<'_>,
         event: &Event,
     ) -> Result<(), HarnessError> {
-        let Event::ToolStarted(started) = event else {
-            return Ok(());
-        };
-        let Some((_conversation_id, call, _visible_tool_name)) =
-            host.internal_started_call(started)
-        else {
-            return Ok(());
-        };
-        let query_id = format!("test-agent-start-{}", call.id);
-        host.enqueue_start_agent_request_without_draining(tau_proto::StartAgentRequest {
-            parent_agent: None,
-            query_id,
-            instruction: "test builtin agent_start".to_owned(),
-            role: None,
-            input_stats: tau_proto::ToolUseStats::default(),
-            tool_call_id: Some(call.id.clone()),
-            task_name: Some("test agent_start".to_owned()),
-        })
-        .map_err(HarnessError::Participant)?;
-        host.background_tool_call(
-            &call.id,
-            CborValue::Text("test builtin agent_start running in background".to_owned()),
-        );
-        host.drain_start_agent_requests()
+        match event {
+            Event::ToolStarted(started) => {
+                let Some((_conversation_id, call, _visible_tool_name)) =
+                    host.internal_started_call(started)
+                else {
+                    return Ok(());
+                };
+                let query_id = format!("test-agent-start-{}", call.id);
+                host.enqueue_start_agent_request_without_draining(tau_proto::StartAgentRequest {
+                    parent_agent: None,
+                    query_id,
+                    instruction: "test builtin agent_start".to_owned(),
+                    role: None,
+                    input_stats: tau_proto::ToolUseStats::default(),
+                    tool_call_id: Some(call.id.clone()),
+                    task_name: Some("test agent_start".to_owned()),
+                })
+                .map_err(HarnessError::Participant)?;
+                host.background_tool_call(
+                    &call.id,
+                    CborValue::Text("test builtin agent_start running in background".to_owned()),
+                );
+                host.drain_start_agent_requests()
+            }
+            Event::ToolCancelRequest(request) => {
+                let query_id = format!("test-agent-start-{}", request.target_call_id);
+                let _ = host.cancel_start_agent_request(&query_id, &request.target_call_id, true);
+                Ok(())
+            }
+            Event::StartAgentResult(result) => {
+                let Some(call_id) = result.query_id.strip_prefix("test-agent-start-") else {
+                    return Ok(());
+                };
+                host.finish_prebuilt_tool_error(tau_proto::ToolError {
+                    call_id: call_id.into(),
+                    tool_name: ToolName::new("agent_start"),
+                    tool_type: tau_proto::ToolType::Function,
+                    message: result
+                        .error
+                        .clone()
+                        .unwrap_or_else(|| "test agent_start failed".to_owned()),
+                    details: None,
+                    display: None,
+                    originator: tau_proto::PromptOriginator::User,
+                });
+                Ok(())
+            }
+            _ => Ok(()),
+        }
     }
 }
 
@@ -4072,7 +4376,12 @@ fn cancel_backgrounded_builtin_agent_start_publishes_background_error_only() {
         Some(&call_id)
     );
 
-    h.cancel_remaining_tool_calls(&parent_cid, vec![call_id.clone()], "harness teardown");
+    h.cancel_remaining_tool_calls(
+        &parent_cid,
+        vec![call_id.clone()],
+        "harness teardown",
+        BackgroundCompletionPromptMode::DoNotQueue,
+    );
 
     assert_eq!(background_error_count(&h, call_id.as_str()), 1);
     assert_eq!(
@@ -4086,6 +4395,78 @@ fn cancel_backgrounded_builtin_agent_start_publishes_background_error_only() {
         event,
         Event::HarnessNotice(notice) if notice.kind == tau_proto::notice_kind::HARNESS_FAILURE
     )));
+    assert!(!h.tool_turn.is_backgrounded(&call_id));
+    assert!(!h.pending_tools.contains_key(&call_id));
+    assert!(!h.tool_agents.contains_key(&call_id));
+
+    h.shutdown().expect("shutdown");
+}
+
+/// Regression: live turn cancellation of backgrounded builtin `agent_start`
+/// must still leave a passive completion notice even though the builtin cancel
+/// handler suppresses normal background prompts while synchronously resolving
+/// the `StartAgentResult`.
+#[test]
+fn live_cancel_backgrounded_builtin_agent_start_keeps_passive_completion_notice() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    h.selected_model = Some("test/model".into());
+    h.install_internal_tool_handlers(vec![std::sync::Arc::new(TestAgentStartBuiltin)]);
+
+    let parent_cid = ensure_test_user_agent(&mut h);
+    let spid: AgentPromptId = "sp-live-builtin-agent-start-bg".into();
+    seed_agent_thinking(&mut h, &parent_cid, spid.as_str());
+    let parent_agent_id = h.agents[&parent_cid].agent_id.clone().expect("agent id");
+    h.prompt_agents.insert(spid.clone(), parent_cid.clone());
+    let call_id: ToolCallId = "live-builtin-agent-start-bg".into();
+    h.handle_provider_response_finished(ProviderResponseFinished {
+        agent_prompt_id: spid,
+        agent_id: crate::parse_agent_id(&parent_agent_id),
+        output_items: vec![ContextItem::ToolCall(ToolCallItem {
+            call_id: call_id.clone(),
+            name: ToolName::new("agent_start"),
+            tool_type: tau_proto::ToolType::Function,
+            arguments: CborValue::Map(Vec::new()),
+            raw_arguments_json: None,
+            responses_envelope: None,
+        })],
+        stop_reason: tau_proto::ProviderStopReason::ToolCalls,
+        error: None,
+        usage: None,
+        originator: tau_proto::PromptOriginator::User,
+        compaction_original_input_tokens: None,
+        compaction_compacted_input_tokens: None,
+        backend: None,
+        provider_response_id: None,
+        ws_pool_delta: None,
+    })
+    .expect("builtin agent_start dispatched");
+    assert!(h.tool_turn.is_backgrounded(&call_id));
+
+    seed_tools_running(&mut h, &parent_cid, vec![call_id.clone()]);
+    h.handle_cancel_prompt(&tau_proto::UiCancelPrompt {
+        session_id: "s1".into(),
+        target_agent_id: Some(crate::parse_agent_id(&parent_agent_id)),
+        agent_prompt_id: None,
+    });
+
+    assert_eq!(background_error_count(&h, call_id.as_str()), 1);
+    assert!(!event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::ToolCancelled(cancelled) if cancelled.call_id == call_id
+    )));
+    assert!(
+        h.agents[&parent_cid].pending_prompts.iter().any(|prompt| {
+            prompt.text == background_completion_prompt(&call_id)
+                && prompt.is_passive_background_completion()
+        }),
+        "live builtin cancellation should not lose the passive completion notice"
+    );
+    assert!(
+        !h.suppressed_background_completion_prompts
+            .contains(&call_id)
+    );
     assert!(!h.tool_turn.is_backgrounded(&call_id));
     assert!(!h.pending_tools.contains_key(&call_id));
     assert!(!h.tool_agents.contains_key(&call_id));

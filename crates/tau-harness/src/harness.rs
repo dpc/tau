@@ -1821,9 +1821,15 @@ fn instance_id_factory() -> impl FnMut() -> tau_proto::ExtensionInstanceId {
     }
 }
 
-enum BackgroundCompletionPromptMode {
+#[derive(Clone, Copy)]
+pub(crate) enum BackgroundCompletionPromptMode {
+    /// Queue a completion notice and immediately try to advance the agent.
     QueueAndAdvance,
+    /// Queue a completion notice without advancing immediately.
     QueueOnly,
+    /// Queue a passive completion notice that is folded only into the next real
+    /// user prompt.
+    QueuePassive,
     // Cancellation/teardown after a background placeholder still needs a
     // durable background error and wait completion, but must not prompt the
     // model about work from a canceled/removed branch.
@@ -6633,10 +6639,23 @@ impl Harness {
                 self.try_advance_queue();
             }
             AgentTurnState::ToolsRunning { remaining_calls } => {
-                self.cancel_remaining_tool_calls(cid, remaining_calls, &cancel.reason);
+                let mut cancelled_calls = remaining_calls;
+                cancelled_calls.extend(self.tool_turn.backgrounded_calls_for(cid));
+                cancelled_calls.sort();
+                cancelled_calls.dedup();
+                self.cancel_remaining_tool_calls(
+                    cid,
+                    cancelled_calls,
+                    &cancel.reason,
+                    BackgroundCompletionPromptMode::QueuePassive,
+                );
                 if let Some(conv) = self.agents.get_mut(cid) {
                     conv.pending_cancel = None;
-                    conv.pending_prompts.clear();
+                    // User cancellation discards stale queued work, but keeps
+                    // passive background notices so the next user prompt can
+                    // observe terminal background cancellation events.
+                    conv.pending_prompts
+                        .retain(PendingPrompt::is_passive_background_completion);
                     conv.in_flight_prompt = None;
                 }
                 self.set_agent_turn_state(cid, AgentTurnState::Idle);
@@ -6680,6 +6699,7 @@ impl Harness {
         cid: &AgentId,
         remaining_calls: Vec<ToolCallId>,
         _reason: &str,
+        background_completion_prompt_mode: BackgroundCompletionPromptMode,
     ) {
         let remaining: std::collections::HashSet<ToolCallId> =
             remaining_calls.iter().cloned().collect();
@@ -6728,7 +6748,24 @@ impl Harness {
                 // result. After broadcasting cancellation, synthesize a
                 // background error only if no synchronous handler completed the
                 // call while processing the request.
-                self.finish_backgrounded_tool_cancelled_by_harness(target);
+                let call_id = target.call_id.clone();
+                if matches!(
+                    background_completion_prompt_mode,
+                    BackgroundCompletionPromptMode::QueuePassive
+                ) {
+                    self.suppressed_background_completion_prompts
+                        .remove(&call_id);
+                }
+                self.finish_backgrounded_tool_cancelled_by_harness(
+                    target,
+                    background_completion_prompt_mode,
+                );
+                if matches!(
+                    background_completion_prompt_mode,
+                    BackgroundCompletionPromptMode::QueuePassive
+                ) {
+                    self.queue_existing_passive_background_completion_prompt(&call_id);
+                }
                 continue;
             }
             if !self.pending_tools.contains_key(&target.call_id) {
@@ -6750,18 +6787,22 @@ impl Harness {
         }
     }
 
-    fn finish_backgrounded_tool_cancelled_by_harness(&mut self, target: CancelTarget) {
+    fn finish_backgrounded_tool_cancelled_by_harness(
+        &mut self,
+        target: CancelTarget,
+        completion_prompt_mode: BackgroundCompletionPromptMode,
+    ) {
         if !self.tool_turn.is_backgrounded(&target.call_id) {
             return;
         }
         if !self.tool_agents.contains_key(&target.call_id) {
             return;
         }
-        // Complete the actual-running background call without queuing a
-        // model-visible completion prompt. `handle_background_tool_error_inner`
-        // still records wait/background completion state, decrements in-flight
-        // progress, publishes the durable `ToolBackgroundError`, and clears
-        // call tracking so late extension terminals are ignored.
+        // Complete the actual-running background call. Delegate teardown skips
+        // model-visible completion prompts for work from a removed branch,
+        // while live-branch turn cancellation keeps a queued internal notice so
+        // the placeholder has an observable completion on that branch without
+        // immediately auto-advancing the model.
         let error = ToolError {
             call_id: target.call_id,
             tool_name: target.tool_name,
@@ -6774,7 +6815,7 @@ impl Harness {
         self.handle_background_tool_error_inner(
             Some(HARNESS_CONNECTION_ID),
             error,
-            BackgroundCompletionPromptMode::DoNotQueue,
+            completion_prompt_mode,
         );
     }
 
@@ -6893,7 +6934,12 @@ impl Harness {
         cancelled_calls.extend(self.background_completion_call_ids_for_teardown(&cid));
         cancelled_calls.sort();
         cancelled_calls.dedup();
-        self.cancel_remaining_tool_calls(&cid, cancelled_calls, "delegate cancel tool");
+        self.cancel_remaining_tool_calls(
+            &cid,
+            cancelled_calls,
+            "delegate cancel tool",
+            BackgroundCompletionPromptMode::DoNotQueue,
+        );
         if let Some(spid) = spid {
             self.canceled_prompts.insert(spid.clone());
             self.publish_prompt_terminated(
@@ -9720,6 +9766,30 @@ impl Harness {
         prompts
     }
 
+    /// Consume passive background-completion notices before the next real user
+    /// prompt. These notices are queued on live cancellation so a background
+    /// placeholder has a visible terminal event, but they must not create a
+    /// standalone automatic model turn.
+    pub(crate) fn take_passive_background_completion_prompts_for_user_prompt(
+        &mut self,
+        cid: &AgentId,
+    ) -> Vec<PendingPrompt> {
+        let Some(conv) = self.agents.get_mut(cid) else {
+            return Vec::new();
+        };
+        let mut prompts = Vec::new();
+        let mut remaining = std::collections::VecDeque::with_capacity(conv.pending_prompts.len());
+        while let Some(prompt) = conv.pending_prompts.pop_front() {
+            if prompt.is_passive_background_completion() {
+                prompts.push(prompt);
+            } else {
+                remaining.push_back(prompt);
+            }
+        }
+        conv.pending_prompts = remaining;
+        prompts
+    }
+
     fn repair_restored_foreground_tool_calls(&mut self, session_id: &SessionId) -> usize {
         if session_id != &self.current_session_id {
             return 0;
@@ -12378,6 +12448,11 @@ impl Harness {
                     .insert(call_id.clone(), cid.clone());
                 self.queue_background_completion_prompt_without_advancing(&cid, &call_id);
             }
+            BackgroundCompletionPromptMode::QueuePassive => {
+                self.background_completion_targets
+                    .insert(call_id.clone(), cid.clone());
+                self.queue_passive_background_completion_prompt(&cid, &call_id);
+            }
             BackgroundCompletionPromptMode::DoNotQueue => {}
         }
         self.clear_tool_call_tracking(call_id.as_str());
@@ -12395,11 +12470,32 @@ impl Harness {
         self.queue_background_completion_prompt_inner(cid, call_id, false);
     }
 
+    fn queue_passive_background_completion_prompt(&mut self, cid: &AgentId, call_id: &ToolCallId) {
+        self.queue_background_completion_prompt_inner_with(cid, call_id, false, |prompt| {
+            PendingPrompt::passive_background_completion(prompt)
+        });
+    }
+
     fn queue_background_completion_prompt_inner(
         &mut self,
         cid: &AgentId,
         call_id: &ToolCallId,
         advance_queue: bool,
+    ) {
+        self.queue_background_completion_prompt_inner_with(
+            cid,
+            call_id,
+            advance_queue,
+            PendingPrompt::internal,
+        );
+    }
+
+    fn queue_background_completion_prompt_inner_with(
+        &mut self,
+        cid: &AgentId,
+        call_id: &ToolCallId,
+        advance_queue: bool,
+        make_prompt: impl FnOnce(String) -> PendingPrompt,
     ) {
         if self
             .suppressed_background_completion_prompts
@@ -12416,11 +12512,18 @@ impl Harness {
             {
                 return;
             }
-            conv.pending_prompts
-                .push_back(PendingPrompt::internal(prompt));
+            conv.pending_prompts.push_back(make_prompt(prompt));
         }
         if advance_queue {
             self.try_advance_queue();
+        }
+    }
+
+    fn queue_existing_passive_background_completion_prompt(&mut self, call_id: &ToolCallId) {
+        self.suppressed_background_completion_prompts
+            .remove(call_id);
+        if let Some(cid) = self.background_completion_targets.get(call_id).cloned() {
+            self.queue_passive_background_completion_prompt(&cid, call_id);
         }
     }
 
@@ -12680,6 +12783,27 @@ impl Harness {
             if !restore_prompts.is_empty() {
                 pending.splice(user_prompt_pos..user_prompt_pos, restore_prompts);
             }
+        } else {
+            let mut active = Vec::new();
+            let mut passive = Vec::new();
+            for prompt in pending {
+                if prompt.is_passive_background_completion() {
+                    passive.push(prompt);
+                } else {
+                    active.push(prompt);
+                }
+            }
+            if !passive.is_empty()
+                && let Some(conv) = self.agents.get_mut(cid)
+            {
+                for prompt in passive.into_iter().rev() {
+                    conv.pending_prompts.push_front(prompt);
+                }
+            }
+            pending = active;
+        }
+        if pending.is_empty() {
+            return;
         }
         if pending.iter().any(PendingPrompt::is_loop_guard) {
             self.mark_loop_guard_breakers_dispatched(cid);
