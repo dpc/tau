@@ -532,26 +532,74 @@ fn read_available_user_shell<R: std::io::Read>(
 }
 
 #[cfg(unix)]
-fn collect_user_shell_status(
-    status_rx: &mpsc::Receiver<Option<std::process::ExitStatus>>,
+enum UserShellEvent {
+    Exited(std::process::ExitStatus),
+    WaitFailed,
+    Cancelled,
+}
+
+#[cfg(unix)]
+fn apply_user_shell_event(
+    event: UserShellEvent,
     status: &mut Option<std::process::ExitStatus>,
     wait_failed: &mut bool,
+    cancelled: &mut bool,
+) -> bool {
+    match event {
+        UserShellEvent::Exited(received) => {
+            *status = Some(received);
+            true
+        }
+        UserShellEvent::WaitFailed => {
+            *wait_failed = true;
+            true
+        }
+        UserShellEvent::Cancelled => {
+            *cancelled = true;
+            false
+        }
+    }
+}
+
+#[cfg(unix)]
+fn collect_user_shell_status(
+    event_rx: &mpsc::Receiver<UserShellEvent>,
+    status: &mut Option<std::process::ExitStatus>,
+    wait_failed: &mut bool,
+    cancelled: &mut bool,
 ) -> bool {
     use std::sync::mpsc::TryRecvError;
 
     if status.is_some() || *wait_failed {
         return true;
     }
-    match status_rx.try_recv() {
-        Ok(Some(received)) => {
-            *status = Some(received);
-            true
-        }
-        Ok(None) | Err(TryRecvError::Disconnected) => {
+    match event_rx.try_recv() {
+        Ok(event) => apply_user_shell_event(event, status, wait_failed, cancelled),
+        Err(TryRecvError::Disconnected) => {
             *wait_failed = true;
             true
         }
         Err(TryRecvError::Empty) => false,
+    }
+}
+
+#[cfg(unix)]
+fn wait_for_user_shell_event_until(
+    event_rx: &mpsc::Receiver<UserShellEvent>,
+    deadline: std::time::Instant,
+    status: &mut Option<std::process::ExitStatus>,
+    wait_failed: &mut bool,
+    cancelled: &mut bool,
+) {
+    let timeout = deadline.saturating_duration_since(std::time::Instant::now());
+    match event_rx.recv_timeout(timeout) {
+        Ok(event) => {
+            let _ = apply_user_shell_event(event, status, wait_failed, cancelled);
+        }
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+            *wait_failed = true;
+        }
+        Err(mpsc::RecvTimeoutError::Timeout) => {}
     }
 }
 
@@ -686,11 +734,14 @@ fn dispatch_user_shell_command_unix(
             None
         }
     });
+    let (event_tx, event_rx) = mpsc::channel::<UserShellEvent>();
+    let cancel_event_tx = event_tx.clone();
     let cancelled_by_request = Arc::new(AtomicBool::new(false));
     let cancel_flag = Arc::clone(&cancelled_by_request);
     let _cancel_waiter = std::thread::spawn(move || {
         if cancel_rx.recv().is_ok() {
             cancel_flag.store(true, Ordering::SeqCst);
+            let _ = cancel_event_tx.send(UserShellEvent::Cancelled);
             if let Some(wake_write) = cancel_wake_write {
                 let byte = [1u8];
                 #[allow(unsafe_code)]
@@ -705,12 +756,18 @@ fn dispatch_user_shell_command_unix(
         }
     });
 
-    let (status_tx, status_rx) = mpsc::channel::<Option<std::process::ExitStatus>>();
     let _waiter = std::thread::spawn(move || {
         let _wake_read_guard = waiter_wake_read;
-        let status = child.wait().ok();
+        let status = child.wait();
         debug!(pid, status = ?status, "user shell child waiter finished");
-        let _ = status_tx.send(status);
+        match status {
+            Ok(status) => {
+                let _ = event_tx.send(UserShellEvent::Exited(status));
+            }
+            Err(_) => {
+                let _ = event_tx.send(UserShellEvent::WaitFailed);
+            }
+        }
         if let Some(wake_write) = wake_write {
             let byte = [1u8];
             #[allow(unsafe_code)]
@@ -749,7 +806,7 @@ fn dispatch_user_shell_command_unix(
             &mut stderr,
             tx,
         );
-        if collect_user_shell_status(&status_rx, &mut status, &mut wait_failed) {
+        if collect_user_shell_status(&event_rx, &mut status, &mut wait_failed, &mut cancelled) {
             break;
         }
         if cancelled_by_request.load(Ordering::SeqCst) {
@@ -771,8 +828,13 @@ fn dispatch_user_shell_command_unix(
         );
 
         if poll_fds.is_empty() {
-            let sleep_for = (deadline - now).min(std::time::Duration::from_millis(25));
-            std::thread::sleep(sleep_for);
+            wait_for_user_shell_event_until(
+                &event_rx,
+                deadline,
+                &mut status,
+                &mut wait_failed,
+                &mut cancelled,
+            );
             continue;
         }
 
@@ -812,7 +874,7 @@ fn dispatch_user_shell_command_unix(
             &mut stderr,
             tx,
         );
-        let _ = collect_user_shell_status(&status_rx, &mut status, &mut wait_failed);
+        let _ = collect_user_shell_status(&event_rx, &mut status, &mut wait_failed, &mut cancelled);
         if (stdout_pipe.is_none() && stderr_pipe.is_none())
             || drain_deadline <= std::time::Instant::now()
         {
@@ -1071,8 +1133,33 @@ fn shell_wait_read_available<R: std::io::Read>(
 }
 
 #[cfg(unix)]
+enum ShellWaitEvent {
+    Exited(std::process::ExitStatus),
+    WaitFailed,
+    Cancelled,
+}
+
+#[cfg(unix)]
+fn shell_wait_apply_event(
+    event: ShellWaitEvent,
+    status: &mut Option<std::process::ExitStatus>,
+) -> bool {
+    match event {
+        ShellWaitEvent::Exited(received) => {
+            *status = Some(received);
+            true
+        }
+        ShellWaitEvent::WaitFailed => {
+            *status = None;
+            true
+        }
+        ShellWaitEvent::Cancelled => false,
+    }
+}
+
+#[cfg(unix)]
 fn shell_wait_collect_status(
-    status_rx: &mpsc::Receiver<Option<std::process::ExitStatus>>,
+    event_rx: &mpsc::Receiver<ShellWaitEvent>,
     status: &mut Option<std::process::ExitStatus>,
 ) -> bool {
     use std::sync::mpsc::TryRecvError;
@@ -1080,14 +1167,20 @@ fn shell_wait_collect_status(
     if status.is_some() {
         return true;
     }
-    match status_rx.try_recv() {
-        Ok(received) => {
-            *status = received;
-            true
-        }
+    match event_rx.try_recv() {
+        Ok(event) => shell_wait_apply_event(event, status),
         Err(TryRecvError::Empty) => false,
         Err(TryRecvError::Disconnected) => true,
     }
+}
+
+#[cfg(unix)]
+fn shell_wait_recv_event_until(
+    event_rx: &mpsc::Receiver<ShellWaitEvent>,
+    deadline: std::time::Instant,
+) -> Option<ShellWaitEvent> {
+    let timeout = deadline.saturating_duration_since(std::time::Instant::now());
+    event_rx.recv_timeout(timeout).ok()
 }
 
 #[cfg(unix)]
@@ -1213,8 +1306,8 @@ struct ShellWaitState {
     stderr_pipe: Option<std::process::ChildStderr>,
     /// Wake fd signalled when the child exits or cancellation arrives.
     wake_read: Option<std::os::fd::OwnedFd>,
-    /// Receiver for the child waiter thread's exit status.
-    status_rx: mpsc::Receiver<Option<std::process::ExitStatus>>,
+    /// Receiver for child-exit and cancellation events.
+    event_rx: mpsc::Receiver<ShellWaitEvent>,
     /// Cross-thread cancellation flag set by the cancellation waiter.
     cancelled_by_request: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
@@ -1249,24 +1342,26 @@ impl ShellWaitState {
         let waiter_wake_read = wake_pipe
             .as_ref()
             .and_then(|wake_pipe| shell_wait_dup_owned_fd(&wake_pipe.read));
+        let (event_tx, event_rx) = mpsc::channel::<ShellWaitEvent>();
         let cancelled_by_request = Arc::new(AtomicBool::new(false));
         spawn_shell_cancel_waiter(
             pid,
             cancel_rx,
             Arc::clone(&cancelled_by_request),
             cancel_wake_write,
+            event_tx.clone(),
         );
 
         let (wake_read, wake_write) = wake_pipe
             .map(|wake_pipe| (Some(wake_pipe.read), Some(wake_pipe.write)))
             .unwrap_or((None, None));
-        let status_rx = spawn_shell_child_waiter(pid, child, wake_write, waiter_wake_read);
+        spawn_shell_child_waiter(pid, child, wake_write, waiter_wake_read, event_tx);
         Self {
             pid,
             stdout_pipe,
             stderr_pipe,
             wake_read,
-            status_rx,
+            event_rx,
             cancelled_by_request,
         }
     }
@@ -1313,7 +1408,7 @@ impl ShellWaitState {
         use std::sync::atomic::Ordering;
 
         self.read_available_output(output);
-        if shell_wait_collect_status(&self.status_rx, status) {
+        if shell_wait_collect_status(&self.event_rx, status) {
             debug!(pid = self.pid, status = ?status, "shell wait loop observed child status");
             return ShellWaitPoll::Finished;
         }
@@ -1336,7 +1431,28 @@ impl ShellWaitState {
             return ShellWaitPoll::TimedOut;
         }
 
-        self.wait_for_io_or_wake(deadline, now);
+        if let Some(event) = self.wait_for_io_or_wake(deadline) {
+            match event {
+                ShellWaitEvent::Exited(received) => {
+                    *status = Some(received);
+                    debug!(pid = self.pid, status = ?status, "shell wait loop observed child status");
+                    return ShellWaitPoll::Finished;
+                }
+                ShellWaitEvent::WaitFailed => {
+                    *status = None;
+                    debug!(pid = self.pid, status = ?status, "shell wait loop observed child status");
+                    return ShellWaitPoll::Finished;
+                }
+                ShellWaitEvent::Cancelled => {
+                    debug!(
+                        pid = self.pid,
+                        "shell wait loop observed cancellation; killing process group"
+                    );
+                    kill_process_group_by_pid(self.pid);
+                    return ShellWaitPoll::Cancelled;
+                }
+            }
+        }
         ShellWaitPoll::Continue
     }
 
@@ -1348,7 +1464,7 @@ impl ShellWaitState {
         let drain_deadline = std::time::Instant::now() + SHELL_WAIT_DRAIN_AFTER_DONE;
         loop {
             self.read_available_output(output);
-            let _ = shell_wait_collect_status(&self.status_rx, status);
+            let _ = shell_wait_collect_status(&self.event_rx, status);
             if self.stdout_pipe.is_none() && self.stderr_pipe.is_none() {
                 trace!(pid = self.pid, "shell output drain completed");
                 break;
@@ -1371,18 +1487,17 @@ impl ShellWaitState {
         shell_wait_read_available(&mut self.stderr_pipe, OutputStream::Stderr, output);
     }
 
-    fn wait_for_io_or_wake(&self, deadline: std::time::Instant, now: std::time::Instant) {
+    fn wait_for_io_or_wake(&self, deadline: std::time::Instant) -> Option<ShellWaitEvent> {
         let mut poll_fds = self.output_and_wake_poll_fds();
         if poll_fds.is_empty() {
-            let sleep_for = (deadline - now).min(std::time::Duration::from_millis(25));
-            std::thread::sleep(sleep_for);
-            return;
+            return shell_wait_recv_event_until(&self.event_rx, deadline);
         }
 
         shell_wait_poll_fds_until(&mut poll_fds, deadline);
         if let Some(wake_read) = self.wake_read.as_ref() {
             shell_wait_drain_wake_fd(wake_read);
         }
+        None
     }
 
     fn output_poll_fds(&self) -> Vec<libc::pollfd> {
@@ -1427,6 +1542,7 @@ fn spawn_shell_cancel_waiter(
     cancel_rx: Option<mpsc::Receiver<()>>,
     cancelled_by_request: std::sync::Arc<std::sync::atomic::AtomicBool>,
     cancel_wake_write: Option<std::os::fd::OwnedFd>,
+    event_tx: mpsc::Sender<ShellWaitEvent>,
 ) {
     use std::sync::Arc;
     use std::sync::atomic::Ordering;
@@ -1439,6 +1555,7 @@ fn spawn_shell_cancel_waiter(
         if cancel_rx.recv().is_ok() {
             debug!(pid, "shell cancellation signal received");
             cancelled_by_request.store(true, Ordering::SeqCst);
+            let _ = event_tx.send(ShellWaitEvent::Cancelled);
             if let Some(cancel_wake_write) = cancel_wake_write {
                 trace!(pid, "waking shell wait loop after cancellation");
                 shell_wait_write_wake_byte(&cancel_wake_write);
@@ -1453,22 +1570,28 @@ fn spawn_shell_child_waiter(
     mut child: std::process::Child,
     wake_write: Option<std::os::fd::OwnedFd>,
     waiter_wake_read: Option<std::os::fd::OwnedFd>,
-) -> mpsc::Receiver<Option<std::process::ExitStatus>> {
-    let (status_tx, status_rx) = mpsc::channel::<Option<std::process::ExitStatus>>();
+    event_tx: mpsc::Sender<ShellWaitEvent>,
+) {
     let _waiter = std::thread::spawn(move || {
         // Keep a duplicate read end alive until the waiter publishes status and
         // writes the final wake byte. Otherwise a foreground loop that returns
         // early after timeout/cancellation could drop the last reader first,
         // turning this best-effort wake into an avoidable no-reader write.
         let _wake_read_guard = waiter_wake_read;
-        let status = child.wait().ok();
+        let status = child.wait();
         debug!(pid, status = ?status, "shell child waiter finished");
-        let _ = status_tx.send(status);
+        match status {
+            Ok(status) => {
+                let _ = event_tx.send(ShellWaitEvent::Exited(status));
+            }
+            Err(_) => {
+                let _ = event_tx.send(ShellWaitEvent::WaitFailed);
+            }
+        }
         if let Some(wake_write) = wake_write {
             shell_wait_write_wake_byte(&wake_write);
         }
     });
-    status_rx
 }
 
 #[cfg(unix)]
