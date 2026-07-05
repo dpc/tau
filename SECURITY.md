@@ -223,8 +223,12 @@ agents, learned chat id, and update offsets are in-memory only. Telegram
 `getUpdates` is a singleton stream per Bot API base plus bot token; Tau takes an
 advisory OS lock before polling so another Tau process sharing the same Tau state
 root and stream fails closed with non-secret owner/hash diagnostics instead of
-racing the cursor. Avoid logs that include bot tokens, Bot API URLs, or
-unexpected private Telegram content.
+racing the cursor. Starting Telegram polling also checks `getWebhookInfo` and
+fails visibly when a webhook is active; Tau does not delete webhooks or drop
+pending updates on the user's behalf. Out-of-band `getUpdates` HTTP 409
+conflicts are surfaced as warning notices and clear active registrations rather
+than silently pretending the bridge still owns the stream. Avoid logs that
+include bot tokens, Bot API URLs, or unexpected private Telegram content.
 
 ## XMPP extension
 

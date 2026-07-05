@@ -25,6 +25,14 @@
   plus bot token for Tau processes sharing the same Tau state root. Lock
   sidecars and contention diagnostics include only the API base, owner metadata,
   and a non-secret stream hash, never the raw bot token.
+- The idle-to-active polling transition checks `getWebhookInfo` after taking the
+  local lock. Active webhooks fail registration visibly because Telegram will
+  not serve `getUpdates`; Tau must not automatically delete the webhook or
+  request dropping pending updates.
+- Telegram HTTP 409 `getUpdates` conflicts indicate webhook mode changes or an
+  out-of-band long-poll consumer. They are surfaced as user-visible notices and
+  clear active registrations instead of silently leaving the bridge apparently
+  connected.
 - In-flight poll responses captured under an older configuration are discarded
   so old Telegram streams cannot advance offsets, mark backlog draining complete,
   send replies, or submit prompts after reconfiguration.

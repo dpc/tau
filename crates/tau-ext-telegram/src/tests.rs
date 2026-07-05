@@ -31,6 +31,7 @@ struct FakeClient {
     sent: Mutex<Vec<(i64, String)>>,
     update_batches: Mutex<Vec<Vec<TgUpdate>>>,
     poll_timeouts: Mutex<Vec<u64>>,
+    webhook_info: Mutex<Result<TgWebhookInfo, String>>,
 }
 
 impl FakeClient {
@@ -39,6 +40,7 @@ impl FakeClient {
             sent: Mutex::new(Vec::new()),
             update_batches: Mutex::new(Vec::new()),
             poll_timeouts: Mutex::new(Vec::new()),
+            webhook_info: Mutex::new(Ok(TgWebhookInfo::default())),
         })
     }
 
@@ -47,11 +49,25 @@ impl FakeClient {
             sent: Mutex::new(Vec::new()),
             update_batches: Mutex::new(update_batches),
             poll_timeouts: Mutex::new(Vec::new()),
+            webhook_info: Mutex::new(Ok(TgWebhookInfo::default())),
+        })
+    }
+
+    fn with_webhook_info(info: Result<TgWebhookInfo, String>) -> Arc<Self> {
+        Arc::new(Self {
+            sent: Mutex::new(Vec::new()),
+            update_batches: Mutex::new(Vec::new()),
+            poll_timeouts: Mutex::new(Vec::new()),
+            webhook_info: Mutex::new(info),
         })
     }
 }
 
 impl TelegramClient for FakeClient {
+    fn get_webhook_info(&self, _cfg: &RuntimeConfig) -> Result<TgWebhookInfo, String> {
+        self.webhook_info.lock().expect("lock").clone()
+    }
+
     fn get_updates(
         &self,
         _cfg: &RuntimeConfig,
@@ -81,6 +97,10 @@ impl TelegramClient for FakeClient {
 struct SlowPollClient;
 
 impl TelegramClient for SlowPollClient {
+    fn get_webhook_info(&self, _cfg: &RuntimeConfig) -> Result<TgWebhookInfo, String> {
+        Ok(TgWebhookInfo::default())
+    }
+
     fn get_updates(
         &self,
         _cfg: &RuntimeConfig,
@@ -143,6 +163,10 @@ impl ControlledPollClient {
 }
 
 impl TelegramClient for ControlledPollClient {
+    fn get_webhook_info(&self, _cfg: &RuntimeConfig) -> Result<TgWebhookInfo, String> {
+        Ok(TgWebhookInfo::default())
+    }
+
     fn get_updates(
         &self,
         _cfg: &RuntimeConfig,
@@ -252,6 +276,17 @@ fn expect_tool_error(rx: &mpsc::Receiver<HarnessInputMessage>) -> String {
         panic!("tool error")
     };
     error.message
+}
+
+fn expect_notice(rx: &mpsc::Receiver<HarnessInputMessage>) -> HarnessNotice {
+    let msg = rx.recv().expect("notice");
+    let HarnessInputMessage::Emit(emit) = msg else {
+        panic!("emit")
+    };
+    let Event::HarnessNotice(notice) = *emit.event else {
+        panic!("notice")
+    };
+    notice
 }
 
 /// Telegram bridge tools are disabled by default because each role must make an
@@ -426,6 +461,91 @@ fn telegram_register_fails_when_update_stream_lock_is_held() {
     );
 }
 
+/// A configured Telegram webhook and getUpdates polling are mutually exclusive,
+/// so registration must fail visibly instead of claiming success and leaving
+/// the background poller to fail later. Tau must not delete the webhook or drop
+/// pending updates on the user's behalf.
+#[test]
+fn telegram_register_fails_when_webhook_is_active() {
+    let (tx, rx) = mpsc::channel();
+    let client = FakeClient::with_webhook_info(Ok(TgWebhookInfo {
+        url: "https://example.invalid/hook".to_owned(),
+        pending_update_count: Some(7),
+        last_error_message: Some("delivery failed".to_owned()),
+    }));
+    let ext = Extension::new(client, tx);
+    ext.apply_config(cfg(), Some(temp_state_dir()))
+        .expect("apply config");
+
+    ext.dispatch_tool(tool(REGISTER_TOOL_NAME, "agent-1", bool_args(true)));
+
+    let message = expect_tool_error(&rx);
+    assert!(message.contains("active webhook"), "{message}");
+    assert!(message.contains("did not delete"), "{message}");
+    assert!(message.contains("7 pending"), "{message}");
+    assert!(
+        !ext.state
+            .lock()
+            .registered_agents
+            .contains(&agent_id("agent-1"))
+    );
+}
+
+/// If webhook status cannot be checked, registration fails closed so the tool
+/// result cannot imply that Tau owns Telegram's singleton update stream.
+#[test]
+fn telegram_register_fails_when_webhook_preflight_fails() {
+    let (tx, rx) = mpsc::channel();
+    let ext = Extension::new(
+        FakeClient::with_webhook_info(Err("Telegram transport error".to_owned())),
+        tx,
+    );
+    ext.apply_config(cfg(), Some(temp_state_dir()))
+        .expect("apply config");
+
+    ext.dispatch_tool(tool(REGISTER_TOOL_NAME, "agent-1", bool_args(true)));
+
+    let message = expect_tool_error(&rx);
+    assert!(
+        message.contains("could not verify Telegram webhook status"),
+        "{message}"
+    );
+    assert!(
+        !ext.state
+            .lock()
+            .registered_agents
+            .contains(&agent_id("agent-1"))
+    );
+}
+
+/// Once Tau already owns and polls the update stream, additional local agents
+/// should not lose ownership because a later webhook status check fails.
+/// Runtime webhook/consumer contention after ownership is detected reactively
+/// through `getUpdates` errors.
+#[test]
+fn additional_registration_does_not_drop_existing_stream_ownership_on_webhook_state() {
+    let (tx, rx) = mpsc::channel();
+    let client = FakeClient::with_webhook_info(Ok(TgWebhookInfo::default()));
+    let ext = Extension::new(client.clone(), tx);
+    ext.apply_config(cfg(), Some(temp_state_dir()))
+        .expect("apply config");
+
+    ext.dispatch_tool(tool(REGISTER_TOOL_NAME, "agent-1", bool_args(true)));
+    expect_tool_finished(&rx);
+    *client.webhook_info.lock().expect("lock") = Ok(TgWebhookInfo {
+        url: "https://example.invalid/hook".to_owned(),
+        pending_update_count: None,
+        last_error_message: None,
+    });
+    ext.dispatch_tool(tool(REGISTER_TOOL_NAME, "agent-2", bool_args(true)));
+    expect_tool_finished(&rx);
+
+    let state = ext.state.lock();
+    assert!(state.registered_agents.contains(&agent_id("agent-1")));
+    assert!(state.registered_agents.contains(&agent_id("agent-2")));
+    assert!(state.update_stream_lock.is_some());
+}
+
 /// The advisory lock identity includes the bot token as hashed input, not just
 /// the API base, so independent bots served from the same endpoint can poll
 /// concurrently.
@@ -521,6 +641,96 @@ fn in_flight_poll_keeps_update_stream_lock_after_unregister() {
     std::thread::sleep(Duration::from_millis(100));
     ext2.dispatch_tool(tool(REGISTER_TOOL_NAME, "agent-2", bool_args(true)));
     expect_tool_finished(&rx2);
+}
+
+/// Telegram reports out-of-band long-poll contention as HTTP 409 conflicts. The
+/// background poller must turn that into a user-visible diagnostic and clear
+/// the active registration instead of silently leaving the agent apparently
+/// connected.
+#[test]
+fn get_updates_409_conflict_emits_notice_and_unregisters_agents() {
+    let (tx, rx) = mpsc::channel();
+    let client = ControlledPollClient::new();
+    let ext = Extension::new(client.clone(), tx);
+    ext.apply_config(cfg(), Some(temp_state_dir()))
+        .expect("apply config");
+
+    ext.dispatch_tool(tool(REGISTER_TOOL_NAME, "agent-1", bool_args(true)));
+    expect_tool_finished(&rx);
+    client.wait_for_call();
+    client.release_error(
+        "Telegram returned HTTP 409: Conflict: terminated by other getUpdates request; \
+         make sure that only one bot instance is running",
+    );
+
+    let notice = expect_notice(&rx);
+    assert_eq!(notice.kind, tau_proto::notice_kind::EXTENSION_NOTICE);
+    assert_eq!(notice.level, tau_proto::NoticeLevel::Warning);
+    assert!(!notice.always_show);
+    assert!(
+        notice.message.contains("another long-poll consumer"),
+        "{}",
+        notice.message
+    );
+    assert!(
+        notice.message.contains("stopped Telegram polling"),
+        "{}",
+        notice.message
+    );
+    let state = ext.state.lock();
+    assert!(state.registered_agents.is_empty());
+    assert!(state.update_stream_lock.is_none());
+}
+
+/// 409 conflict classification must remain robust enough to distinguish the
+/// actionable webhook and competing-long-poll cases while ignoring unrelated
+/// transient polling failures.
+#[test]
+fn telegram_contention_diagnostic_classifies_409_conflicts() {
+    let cases = [
+        (
+            "Telegram returned HTTP 409: Conflict: terminated by setWebhook request",
+            Some("webhook"),
+        ),
+        (
+            "Telegram returned HTTP 409: Conflict: terminated by other getUpdates request; make sure that only one bot instance is running",
+            Some("another long-poll consumer"),
+        ),
+        (
+            "Telegram returned HTTP 409: Conflict: unknown",
+            Some("HTTP 409 conflict"),
+        ),
+        ("Telegram transport error", None),
+    ];
+
+    for (input, expected) in cases {
+        let diagnostic = telegram_contention_diagnostic(input);
+        match expected {
+            Some(expected) => assert!(
+                diagnostic
+                    .as_deref()
+                    .is_some_and(|text| text.contains(expected)),
+                "{input}: {diagnostic:?}"
+            ),
+            None => assert_eq!(diagnostic, None, "{input}"),
+        }
+    }
+}
+
+/// Webhook error text is Telegram-provided diagnostic content, so it must be
+/// bounded and stripped of non-whitespace control characters before being shown
+/// to the user.
+#[test]
+fn webhook_active_message_bounds_and_sanitizes_last_error() {
+    let message = webhook_active_message(&TgWebhookInfo {
+        url: "https://example.invalid/hook".to_owned(),
+        pending_update_count: None,
+        last_error_message: Some(format!("bad\u{1b}{}", "x".repeat(2000))),
+    });
+
+    assert!(message.contains("bad�"));
+    assert!(message.ends_with('…'));
+    assert!(message.len() < 1300, "message too long: {}", message.len());
 }
 
 /// Active reconfiguration to a Telegram stream already locked by another Tau

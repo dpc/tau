@@ -29,6 +29,19 @@ reconfiguration, or shutdown can stop future polls without dropping the OS lock
 while an older `getUpdates` request is still in flight; the in-flight clone is
 released only after that request returns.
 
+On the idle-to-active transition for the first registered agent, after acquiring
+the local lock and before reporting registration success, the extension calls
+`getWebhookInfo`. A non-empty webhook URL means Telegram will not serve
+`getUpdates`, so registration fails with a user-visible tool error. Tau does not
+call `deleteWebhook` or request `drop_pending_updates`; the user must remove the
+webhook or choose another bot token. Later local registrations join the already
+owned stream and do not re-run this webhook preflight. `getWebhookInfo` cannot
+detect another long-poll consumer, so post-activation webhook changes and other
+out-of-band consumers are detected reactively through HTTP 409 `getUpdates`
+conflicts. When such a conflict is observed, the poller clears active
+registrations, releases the stream lock, and emits a warning notice instead of
+leaving agents apparently registered.
+
 ## Harness boundary
 
 Incoming Telegram text is emitted as `extension.prompt_submit_request`. The
@@ -68,5 +81,6 @@ Unit tests use a fake Telegram client and in-memory harness channels. They cover
 config validation, tool specs/examples, allowlist enforcement, active-chat and
 linking privacy invariants, command routing, update offset/backlog behavior,
 shutdown lifecycle, advisory update-stream lock acquisition/contention/release,
-active-reconfigure lock contention, and bot-token/Bot API URL redaction. Live
+active-reconfigure lock contention, webhook-active registration refusal,
+`getUpdates` 409 conflict notices, and bot-token/Bot API URL redaction. Live
 Telegram checks are manual only and should not be required for normal CI.

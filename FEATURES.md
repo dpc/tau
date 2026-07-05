@@ -563,7 +563,9 @@ outgoing messages use only a configured or linked chat id, never a model-chosen
 destination. Runtime registrations and Telegram update offsets are in-memory,
 unconfigured group chats are refused, and Bot API `getUpdates` polling is
 protected by a same-state-root advisory lock for the singleton Telegram update
-stream.
+stream. Activating Telegram polling fails visibly when Telegram reports an
+active webhook, and out-of-band `getUpdates` HTTP 409 conflicts are surfaced as
+warning notices that clear active registrations.
 
 ### `std-slack` — personal Slack Socket Mode text bridge
 

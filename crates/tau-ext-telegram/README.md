@@ -28,8 +28,11 @@ configured.
 
 ## Usage
 
-Ask an agent to call `telegram_register` with `enabled: true`. Allowed Telegram
-users can then use:
+Ask an agent to call `telegram_register` with `enabled: true`. The first
+registration that starts polling checks that Telegram has no active webhook
+before claiming success. If a webhook is active, Tau reports a tool error and
+does not delete the webhook or drop updates; remove the webhook yourself or
+configure a different bot token. Allowed Telegram users can then use:
 
 - `/start` — link a private chat when no `chat_id` is configured and show help;
 - `/agents` — list registered Tau agents;
@@ -66,6 +69,9 @@ The MVP is text-only. Attachments are acknowledged as unsupported. Registrations
 selected agents, learned chat link, and Telegram update offsets are in memory
 only. On lazy startup the extension drains Telegram's existing backlog without
 routing it; after restart, Telegram may still redeliver newer updates that were
-not acknowledged before shutdown. Only one local Tau process can poll a given
-Bot API base plus bot token within the same Tau state root at a time; another
-process using the same stream is rejected with an advisory-lock contention error.
+not acknowledged before shutdown. Telegram webhooks and `getUpdates` polling are
+mutually exclusive. Only one local Tau process can poll a given Bot API base plus
+bot token within the same Tau state root at a time; another process using the
+same stream is rejected with an advisory-lock contention error. Out-of-band
+consumers can still cause Telegram HTTP 409 conflicts; Tau surfaces those as
+warning notices and clears active registrations rather than silently continuing.

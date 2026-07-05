@@ -15,8 +15,9 @@ use std::time::Duration;
 
 use tau_client::{ClientError, ClientHandle, ClientResult, ExtensionBuilder, TauExtension};
 use tau_proto::{
-    AgentId, CborValue, Event, ExtPromptSubmitRequest, HarnessInputMessage, ToolError, ToolExample,
-    ToolProgress, ToolResult, ToolSpec, ToolStarted, ToolUseState, ToolUseStatus,
+    AgentId, CborValue, Event, ExtPromptSubmitRequest, HarnessInputMessage, HarnessNotice,
+    NoticeLevel, ToolError, ToolExample, ToolProgress, ToolResult, ToolSpec, ToolStarted,
+    ToolUseState, ToolUseStatus,
 };
 use update_stream_lock::UpdateStreamLock;
 
@@ -41,6 +42,7 @@ pub const SEND_TOOL_TAG: &str = "telegram:send";
 const DEFAULT_API_BASE: &str = "https://api.telegram.org";
 const DEFAULT_POLL_TIMEOUT_SECONDS: u64 = 25;
 const HTTP_TIMEOUT: Duration = Duration::from_secs(35);
+const MAX_DIAGNOSTIC_TEXT_BYTES: usize = 1024;
 
 /// Run the Telegram extension over stdio.
 pub fn run_stdio() -> Result<(), Box<dyn Error>> {
@@ -59,6 +61,9 @@ where
 
 /// Small Bot API surface used by the extension and faked by unit tests.
 trait TelegramClient: Send + Sync + 'static {
+    /// Fetch webhook status without consuming the update stream.
+    fn get_webhook_info(&self, cfg: &RuntimeConfig) -> Result<TgWebhookInfo, String>;
+
     /// Fetch message updates from Telegram using the configured poll timeout.
     fn get_updates(
         &self,
@@ -151,6 +156,17 @@ struct TgUpdate {
     update_id: i64,
     /// Text message payload, or `None` for updates kept only to advance offset.
     message: Option<TgMessage>,
+}
+
+/// Telegram webhook state relevant to long-poll ownership.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct TgWebhookInfo {
+    /// Configured webhook URL, empty when the bot is in getUpdates mode.
+    url: String,
+    /// Telegram's reported number of pending updates, if present.
+    pending_update_count: Option<i64>,
+    /// Last webhook delivery error, if Telegram reported one.
+    last_error_message: Option<String>,
 }
 
 /// Telegram text message details consumed by routing logic.
@@ -480,8 +496,48 @@ impl Extension {
                     return tool_error(invoke, "telegram extension is not configured".to_owned());
                 }
             };
-            if let Err(message) = state.ensure_update_stream_locked(&cfg) {
-                return tool_error(invoke, message);
+            if was_unregistered {
+                if let Err(message) = state.ensure_update_stream_locked(&cfg) {
+                    return tool_error(invoke, message);
+                }
+                let config_generation = state.config_generation;
+                drop(state);
+                if let Err(message) = self.check_webhook_allows_get_updates(&cfg, config_generation)
+                {
+                    return tool_error(invoke, message);
+                }
+                state = self.state.lock();
+                if state.config_generation != config_generation
+                    || state
+                        .config
+                        .as_ref()
+                        .is_none_or(|current| !current.uses_same_update_stream_as(&cfg))
+                {
+                    return tool_error(
+                        invoke,
+                        "telegram configuration changed while checking webhook status".to_owned(),
+                    );
+                }
+                if !state
+                    .update_stream_lock
+                    .as_ref()
+                    .is_some_and(|lock| lock.covers(&cfg))
+                {
+                    return tool_error(
+                        invoke,
+                        "telegram update-stream lock was lost while checking webhook status"
+                            .to_owned(),
+                    );
+                }
+            } else if !state
+                .update_stream_lock
+                .as_ref()
+                .is_some_and(|lock| lock.covers(&cfg))
+            {
+                return tool_error(
+                    invoke,
+                    "telegram update-stream lock is not held by this registration".to_owned(),
+                );
             }
             self.ensure_poller_started_locked(&mut state);
             state.registered_agents.insert(invoke.agent_id.clone());
@@ -513,6 +569,76 @@ impl Extension {
                 "unregistered from Telegram messages"
             },
         )
+    }
+
+    fn check_webhook_allows_get_updates(
+        &self,
+        cfg: &RuntimeConfig,
+        config_generation: ConfigGeneration,
+    ) -> Result<(), String> {
+        match self.client.get_webhook_info(cfg) {
+            Ok(info) if !info.url.trim().is_empty() => {
+                let message = webhook_active_message(&info);
+                self.release_update_stream_lock_if_current(cfg, config_generation);
+                Err(message)
+            }
+            Ok(_) => Ok(()),
+            Err(message) => {
+                let message = format!(
+                    "telegram_register could not verify Telegram webhook status before polling; \
+                     registration was refused so Tau does not silently contend for the update \
+                     stream: {message}"
+                );
+                self.release_update_stream_lock_if_current(cfg, config_generation);
+                Err(message)
+            }
+        }
+    }
+
+    fn release_update_stream_lock_if_current(
+        &self,
+        cfg: &RuntimeConfig,
+        config_generation: ConfigGeneration,
+    ) {
+        let mut state = self.state.lock();
+        if state.config_generation == config_generation
+            && state
+                .config
+                .as_ref()
+                .is_some_and(|current| current.uses_same_update_stream_as(cfg))
+        {
+            state.update_stream_lock = None;
+            state.mark_coordination_changed();
+            self.state.notify_all();
+        }
+    }
+
+    fn fail_active_polling_with_notice(&self, cfg: &RuntimeConfig, message: &str) {
+        {
+            let mut state = self.state.lock();
+            if state
+                .config
+                .as_ref()
+                .is_some_and(|current| current.uses_same_update_stream_as(cfg))
+            {
+                state.update_stream_lock = None;
+                state.registered_agents.clear();
+                state.selected_agent_by_chat.clear();
+                state.poller_drained_initial_backlog = false;
+                state.mark_coordination_changed();
+                self.state.notify_all();
+            }
+        }
+        self.report_telegram_polling_notice(message);
+    }
+
+    fn report_telegram_polling_notice(&self, message: &str) {
+        self.output.emit(Event::HarnessNotice(HarnessNotice {
+            kind: tau_proto::notice_kind::EXTENSION_NOTICE.to_owned(),
+            message: message.to_owned(),
+            level: NoticeLevel::Warning,
+            always_show: false,
+        }));
     }
 
     fn ensure_poller_started_locked(&self, state: &mut State) {
@@ -1122,6 +1248,11 @@ fn poll_loop(
                 if !ext.poll_response_matches_config(poll_request.config_generation) {
                     continue;
                 }
+                if let Some(diagnostic) = telegram_contention_diagnostic(&message) {
+                    tracing::warn!(target: LOG_TARGET, error = %message, "telegram update stream contention detected");
+                    ext.fail_active_polling_with_notice(&poll_request.cfg, &diagnostic);
+                    continue;
+                }
                 tracing::warn!(target: LOG_TARGET, error = %message, "telegram polling failed");
                 wait_for_coordination_change_or_shutdown(
                     &ext.state,
@@ -1527,6 +1658,11 @@ impl Default for HttpTelegramClient {
 }
 
 impl TelegramClient for HttpTelegramClient {
+    fn get_webhook_info(&self, cfg: &RuntimeConfig) -> Result<TgWebhookInfo, String> {
+        let value = self.post(cfg, "getWebhookInfo", serde_json::json!({}))?;
+        decode_webhook_info(&value)
+    }
+
     fn get_updates(
         &self,
         cfg: &RuntimeConfig,
@@ -1593,6 +1729,94 @@ fn redact_token(text: &str, token: &str) -> String {
     } else {
         text.replace(token, "<redacted>")
     }
+}
+
+fn decode_webhook_info(value: &serde_json::Value) -> Result<TgWebhookInfo, String> {
+    let result = value
+        .get("result")
+        .ok_or_else(|| "Telegram getWebhookInfo response missing result".to_owned())?;
+    let url = result
+        .get("url")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default()
+        .to_owned();
+    let pending_update_count = result
+        .get("pending_update_count")
+        .and_then(|value| value.as_i64());
+    let last_error_message = result
+        .get("last_error_message")
+        .and_then(|value| value.as_str())
+        .map(str::to_owned);
+    Ok(TgWebhookInfo {
+        url,
+        pending_update_count,
+        last_error_message,
+    })
+}
+
+fn webhook_active_message(info: &TgWebhookInfo) -> String {
+    let mut message = "Telegram bot has an active webhook, so getUpdates polling cannot be used. \
+                       Tau did not delete the webhook or drop updates; remove the webhook yourself \
+                       or configure a different bot token."
+        .to_owned();
+    if let Some(count) = info.pending_update_count {
+        message.push_str(&format!(" Telegram reports {count} pending update(s)."));
+    }
+    if let Some(error) = info
+        .last_error_message
+        .as_deref()
+        .filter(|error| !error.trim().is_empty())
+    {
+        message.push_str(" Last webhook error: ");
+        message.push_str(&bounded_diagnostic_text(error));
+    }
+    message
+}
+
+fn bounded_diagnostic_text(text: &str) -> String {
+    let mut sanitized = String::new();
+    for ch in text.trim().chars() {
+        let ch_len = ch.len_utf8();
+        if sanitized.len() + ch_len > MAX_DIAGNOSTIC_TEXT_BYTES {
+            sanitized.push('…');
+            break;
+        }
+        if ch.is_control() && ch != '\n' && ch != '\t' {
+            sanitized.push('�');
+        } else {
+            sanitized.push(ch);
+        }
+    }
+    sanitized
+}
+
+fn telegram_contention_diagnostic(message: &str) -> Option<String> {
+    let lower = message.to_ascii_lowercase();
+    if !lower.contains("http 409") && !lower.contains("conflict") {
+        return None;
+    }
+    if lower.contains("webhook") {
+        return Some(
+            "Telegram getUpdates returned HTTP 409 because a webhook is active or was changed. \
+             Tau stopped Telegram polling for this registration; it did not delete the webhook \
+             or drop updates. Remove the webhook yourself or configure a different bot token."
+                .to_owned(),
+        );
+    }
+    if lower.contains("getupdates") || lower.contains("bot instance") {
+        return Some(
+            "Telegram getUpdates returned HTTP 409 because another long-poll consumer is using \
+             this bot token. Tau stopped Telegram polling for this registration to avoid racing \
+             the singleton update stream; stop the other bot/session or configure a different \
+             bot token."
+                .to_owned(),
+        );
+    }
+    Some(
+        "Telegram getUpdates returned HTTP 409 conflict. Tau stopped Telegram polling for this \
+         registration because the bot update stream is not exclusively available."
+            .to_owned(),
+    )
 }
 
 fn decode_update(value: &serde_json::Value) -> Option<TgUpdate> {
