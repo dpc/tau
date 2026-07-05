@@ -39,15 +39,6 @@
       "crate": "tau-ext-pim"
     },
     {
-      "file": "/build/source/crates/tau-cli-term-raw/src/main.rs",
-      "function": "main",
-      "line": 9,
-      "cyclomatic": 17.0,
-      "coverage": 0.0,
-      "crap": 306.0,
-      "crate": "tau-cli-term-raw"
-    },
-    {
       "file": "/build/source/crates/tau-provider-chat-completions/src/openrouter.rs",
       "function": "fetch_openrouter_models",
       "line": 53,
@@ -28630,15 +28621,6 @@
       "coverage": 100.0,
       "crap": 2.0,
       "crate": "tau-cli-term"
-    },
-    {
-      "file": "/build/source/crates/tau-cli-term-raw/src/main.rs",
-      "function": "spawn_animator",
-      "line": 144,
-      "cyclomatic": 1.0,
-      "coverage": 0.0,
-      "crap": 2.0,
-      "crate": "tau-cli-term-raw"
     },
     {
       "file": "/build/source/crates/tau-cli-term-raw/src/lib.rs",

@@ -23,9 +23,5 @@ tau-term-screen.workspace = true
 tracing.workspace = true
 unicode-segmentation.workspace = true
 
-[[bin]]
-name = "tau-cli-term-raw-demo"
-path = "src/main.rs"
-
 [dev-dependencies]
 vt100.workspace = true
