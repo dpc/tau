@@ -6,15 +6,20 @@
 //! client.
 
 mod gateway;
+mod gateway_client;
 mod stream_owner;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::error::Error;
 use std::io::{Read, Write};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, mpsc};
 use std::time::Duration;
 
+use gateway_client::{
+    GatewayClient, GatewayClientConfig, GatewayPromptDelivery, GatewaySocketResponse,
+};
 use stream_owner::{
     StreamIdentity, TelegramWebhookInfo, UpdateStreamLock, telegram_contention_diagnostic,
     webhook_active_message,
@@ -104,6 +109,41 @@ struct RuntimeConfig {
     poll_timeout_seconds: u64,
 }
 
+/// Runtime mode selected for one extension instance.
+#[derive(Clone)]
+enum BridgeMode {
+    /// Legacy single-harness mode where the sidecar owns `getUpdates`.
+    LocalPoll(RuntimeConfig),
+    /// Gateway-client mode where a standalone daemon owns Telegram polling.
+    GatewayClient(GatewayClientConfig),
+}
+
+impl std::fmt::Debug for BridgeMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::LocalPoll(_) => f.write_str("LocalPoll(<redacted>)"),
+            Self::GatewayClient(config) => f.debug_tuple("GatewayClient").field(config).finish(),
+        }
+    }
+}
+
+impl From<RuntimeConfig> for BridgeMode {
+    fn from(cfg: RuntimeConfig) -> Self {
+        Self::LocalPoll(cfg)
+    }
+}
+
+/// Configured sidecar mode in `harness.yaml`.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ExtMode {
+    /// Legacy local polling mode.
+    #[default]
+    LocalPoll,
+    /// No-poll client mode backed by the standalone gateway daemon.
+    GatewayClient,
+}
+
 impl RuntimeConfig {
     /// Telegram update offsets are scoped to the Bot API endpoint plus bot
     /// token; switching either value starts reading a different update stream.
@@ -178,6 +218,8 @@ impl ToolNames {
 #[derive(Clone, Debug, Default, serde::Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct ExtConfig {
+    /// Runtime mode for this Telegram sidecar.
+    mode: ExtMode,
     /// Optional model-visible tool namespace/prefix for multi-bot setups.
     tool_namespace: Option<String>,
     /// Secret name carrying the Telegram bot token.
@@ -190,13 +232,26 @@ struct ExtConfig {
     api_base: Option<String>,
     /// Optional long-poll timeout in seconds.
     poll_timeout_seconds: Option<u64>,
+    /// Unix socket used in `gateway_client` mode.
+    gateway_socket_path: Option<PathBuf>,
 }
 
 impl ExtConfig {
     fn validate(
         self,
         secrets: &BTreeMap<String, tau_proto::SecretValue>,
-    ) -> Result<RuntimeConfig, String> {
+    ) -> Result<BridgeMode, String> {
+        if self.mode == ExtMode::GatewayClient {
+            let socket_path = self
+                .gateway_socket_path
+                .filter(|path| !path.as_os_str().is_empty())
+                .ok_or_else(|| {
+                    "telegram gateway_client mode requires `gateway_socket_path`".to_owned()
+                })?;
+            return Ok(BridgeMode::GatewayClient(GatewayClientConfig {
+                socket_path,
+            }));
+        }
         let secret_name = self
             .bot_token_secret
             .ok_or_else(|| "telegram config requires `bot_token_secret`".to_owned())?;
@@ -217,13 +272,13 @@ impl ExtConfig {
         let poll_timeout_seconds = self
             .poll_timeout_seconds
             .unwrap_or(DEFAULT_POLL_TIMEOUT_SECONDS);
-        Ok(RuntimeConfig {
+        Ok(BridgeMode::LocalPoll(RuntimeConfig {
             bot_token: token.to_owned(),
             allowed_user_ids: self.allowed_user_ids.into_iter().collect(),
             configured_chat_id: self.chat_id,
             api_base,
             poll_timeout_seconds,
-        })
+        }))
     }
 }
 
@@ -299,6 +354,11 @@ struct State {
     config_generation: ConfigGeneration,
     registered_agents: HashSet<AgentId>,
     agent_labels: HashMap<AgentId, String>,
+    /// Current local Tau session observed from `session.started`.
+    /// Gateway-client mode never announces agent routes until this is
+    /// known, and deliveries must match it before they are submitted
+    /// locally.
+    current_session_id: Option<tau_proto::SessionId>,
     selected_agent_by_chat: HashMap<i64, AgentId>,
     learned_chat: Option<LinkedChat>,
     poller_started: bool,
@@ -306,6 +366,78 @@ struct State {
     update_stream_lock: Option<Arc<UpdateStreamLock>>,
     poller_drained_initial_backlog: bool,
     next_update_offset: Option<i64>,
+}
+
+/// Submit all gateway-delivered prompts that target the current local session.
+fn emit_gateway_deliveries(
+    state: &SharedState,
+    output: &Output,
+    deliveries: Vec<GatewayPromptDelivery>,
+) {
+    for delivery in deliveries {
+        let Ok(agent_id) = AgentId::parse(&delivery.agent_id) else {
+            tracing::warn!(
+                target: LOG_TARGET,
+                request_id = delivery.request_id,
+                "telegram gateway delivery had invalid agent id"
+            );
+            continue;
+        };
+        let delivery_is_live = {
+            let state = state.lock();
+            state
+                .current_session_id
+                .as_ref()
+                .is_some_and(|session_id| delivery.session_id == session_id.as_ref())
+                && state.registered_agents.contains(&agent_id)
+        };
+        if !delivery_is_live {
+            tracing::warn!(
+                target: LOG_TARGET,
+                request_id = delivery.request_id,
+                source = delivery.source,
+                "telegram gateway delivery targeted a non-live local registration"
+            );
+            continue;
+        };
+        output.emit(Event::ExtPromptSubmitRequest(ExtPromptSubmitRequest {
+            agent_id,
+            text: delivery.text,
+            ctx_id: Some(delivery.ctx_id),
+        }));
+    }
+}
+
+/// Clear gateway-client registration state only when a failure belongs to the
+/// currently active gateway connection.
+fn fail_gateway_client_if_current(
+    gateway_cell: &Mutex<Option<Arc<GatewayClient>>>,
+    state: &SharedState,
+    failed_gateway: &Arc<GatewayClient>,
+) -> bool {
+    let is_current = {
+        let mut slot = gateway_cell.lock().expect("gateway lock");
+        if slot
+            .as_ref()
+            .is_some_and(|current| Arc::ptr_eq(current, failed_gateway))
+        {
+            *slot = None;
+            true
+        } else {
+            false
+        }
+    };
+    if !is_current {
+        return false;
+    }
+    {
+        let mut state = state.lock();
+        state.registered_agents.clear();
+        state.selected_agent_by_chat.clear();
+        state.mark_coordination_changed();
+    }
+    state.notify_all();
+    true
 }
 
 /// Shared Telegram state plus a condition variable for waking the poller.
@@ -446,6 +578,7 @@ impl Output {
 struct Extension {
     state: Arc<SharedState>,
     client: Arc<dyn TelegramClient>,
+    gateway: Arc<Mutex<Option<Arc<GatewayClient>>>>,
     output: Output,
     shutdown: Arc<AtomicBool>,
     tool_names: ToolNames,
@@ -464,6 +597,7 @@ impl Extension {
         Self {
             state: Arc::new(SharedState::new()),
             client,
+            gateway: Arc::new(Mutex::new(None)),
             output: output.into(),
             shutdown: Arc::new(AtomicBool::new(false)),
             tool_names,
@@ -472,11 +606,29 @@ impl Extension {
 
     fn apply_config(
         &self,
+        mode: impl Into<BridgeMode>,
+        state_dir: Option<std::path::PathBuf>,
+    ) -> Result<(), String> {
+        match mode.into() {
+            BridgeMode::LocalPoll(cfg) => self.apply_local_poll_config(cfg, state_dir),
+            BridgeMode::GatewayClient(cfg) => self.apply_gateway_client_config(cfg, state_dir),
+        }
+    }
+
+    fn apply_local_poll_config(
+        &self,
         cfg: RuntimeConfig,
         state_dir: Option<std::path::PathBuf>,
     ) -> Result<(), String> {
+        let switched_from_gateway = self.gateway.lock().expect("gateway lock").is_some();
+        if let Some(gateway) = self.gateway.lock().expect("gateway lock").take() {
+            gateway.goodbye();
+        }
         let mut state = self.state.lock();
         state.config_generation = state.config_generation.next();
+        if switched_from_gateway {
+            state.clear_active_bridge_state();
+        }
         state.state_dir = state_dir;
         let update_stream_changed = state
             .config
@@ -520,12 +672,104 @@ impl Extension {
         Ok(())
     }
 
+    fn apply_gateway_client_config(
+        &self,
+        cfg: GatewayClientConfig,
+        _state_dir: Option<std::path::PathBuf>,
+    ) -> Result<(), String> {
+        if let Some(gateway) = self.gateway.lock().expect("gateway lock").take() {
+            gateway.goodbye();
+        }
+        {
+            let mut state = self.state.lock();
+            state.config_generation = state.config_generation.next();
+            state.clear_active_bridge_state();
+            state.mark_coordination_changed();
+            self.state.notify_all();
+        }
+        let gateway = Arc::new(GatewayClient::new(cfg));
+        let response = gateway.connect()?;
+        *self.gateway.lock().expect("gateway lock") = Some(Arc::clone(&gateway));
+        self.apply_gateway_response(response);
+        self.ensure_gateway_heartbeat_started(Arc::clone(&gateway));
+        Ok(())
+    }
+
     fn clear_config_after_error(&self) {
+        if let Some(gateway) = self.gateway.lock().expect("gateway lock").take() {
+            gateway.goodbye();
+        }
         let mut state = self.state.lock();
         state.config_generation = state.config_generation.next();
         state.clear_active_bridge_state();
         state.mark_coordination_changed();
         self.state.notify_all();
+    }
+
+    fn gateway_client(&self) -> Option<Arc<GatewayClient>> {
+        self.gateway.lock().expect("gateway lock").clone()
+    }
+
+    fn ensure_gateway_heartbeat_started(&self, gateway: Arc<GatewayClient>) {
+        let state = Arc::clone(&self.state);
+        let output = self.output.clone();
+        let shutdown = Arc::clone(&self.shutdown);
+        let gateway_cell = Arc::clone(&self.gateway);
+        std::thread::spawn(move || {
+            while !shutdown.load(Ordering::Relaxed) {
+                std::thread::sleep(gateway.heartbeat_interval());
+                if shutdown.load(Ordering::Relaxed) {
+                    break;
+                }
+                match gateway.heartbeat() {
+                    Ok(response) => emit_gateway_deliveries(&state, &output, response.deliveries),
+                    Err(message) => {
+                        if fail_gateway_client_if_current(&gateway_cell, &state, &gateway) {
+                            output.emit(Event::HarnessNotice(HarnessNotice {
+                                kind: tau_proto::notice_kind::EXTENSION_NOTICE.to_owned(),
+                                message,
+                                level: NoticeLevel::Warning,
+                                always_show: false,
+                            }));
+                        }
+                        break;
+                    }
+                }
+            }
+        });
+    }
+
+    fn apply_gateway_response(&self, response: GatewaySocketResponse) {
+        if response.reannounce_required {
+            self.reannounce_gateway_registrations();
+        }
+        emit_gateway_deliveries(&self.state, &self.output, response.deliveries);
+    }
+
+    fn reannounce_gateway_registrations(&self) {
+        let Some(gateway) = self.gateway_client() else {
+            return;
+        };
+        let (session_id, agents) = {
+            let state = self.state.lock();
+            let Some(session_id) = state.current_session_id.clone() else {
+                return;
+            };
+            let agents = state
+                .registered_agents
+                .iter()
+                .map(|agent_id| (agent_id.clone(), state.agent_labels.get(agent_id).cloned()))
+                .collect::<Vec<_>>();
+            (session_id, agents)
+        };
+        for (agent_id, display_name) in agents {
+            let _ = gateway.register_agent(
+                session_id.as_ref(),
+                agent_id.as_ref(),
+                display_name,
+                &self.tool_names.namespace,
+            );
+        }
     }
 
     fn request_shutdown(&self) {
@@ -573,6 +817,9 @@ impl Extension {
             Ok(enabled) => enabled,
             Err(message) => return tool_error(invoke, message),
         };
+        if self.gateway_client().is_some() {
+            return self.handle_gateway_register(invoke, enabled);
+        }
         let mut state = self.state.lock();
         if enabled {
             let was_unregistered = state.registered_agents.is_empty();
@@ -655,6 +902,59 @@ impl Extension {
                 "unregistered from Telegram messages"
             },
         )
+    }
+
+    fn handle_gateway_register(&self, invoke: ToolStarted, enabled: bool) -> Event {
+        let Some(gateway) = self.gateway_client() else {
+            return tool_error(
+                invoke,
+                "telegram gateway client is not configured".to_owned(),
+            );
+        };
+        let (session_id, display_name) = {
+            let state = self.state.lock();
+            let Some(session_id) = state.current_session_id.clone() else {
+                return tool_error(
+                    invoke,
+                    "telegram gateway client has not observed session.started yet".to_owned(),
+                );
+            };
+            let display_name = state.agent_labels.get(&invoke.agent_id).cloned();
+            (session_id, display_name)
+        };
+        let response = if enabled {
+            gateway.register_agent(
+                session_id.as_ref(),
+                invoke.agent_id.as_ref(),
+                display_name,
+                &self.tool_names.namespace,
+            )
+        } else {
+            gateway.unregister_agent(session_id.as_ref(), invoke.agent_id.as_ref())
+        };
+        match response {
+            Ok(response) => {
+                {
+                    let mut state = self.state.lock();
+                    if enabled {
+                        state.registered_agents.insert(invoke.agent_id.clone());
+                    } else {
+                        state.registered_agents.remove(&invoke.agent_id);
+                    }
+                    state.mark_coordination_changed();
+                }
+                self.apply_gateway_response(response);
+                tool_result(
+                    invoke,
+                    if enabled {
+                        "registered with Telegram gateway"
+                    } else {
+                        "unregistered from Telegram gateway"
+                    },
+                )
+            }
+            Err(message) => tool_error(invoke, message),
+        }
     }
 
     fn check_webhook_allows_get_updates(
@@ -752,6 +1052,22 @@ impl Extension {
         };
         if message.trim().is_empty() {
             return tool_error(invoke, "`message` must not be empty".to_owned());
+        }
+        if self.gateway_client().is_some() {
+            let state = self.state.lock();
+            if !state.registered_agents.contains(&invoke.agent_id) {
+                return tool_error(
+                    invoke,
+                    format!(
+                        "{} requires {}(enabled: true) first",
+                        self.tool_names.send, self.tool_names.register
+                    ),
+                );
+            }
+            return tool_error(
+                invoke,
+                "telegram_send through the gateway is not implemented yet".to_owned(),
+            );
         }
         let (cfg, chat_id) = {
             let state = self.state.lock();
@@ -1200,6 +1516,9 @@ fn is_loopback_host(host: url::Host<&str>) -> bool {
 
 impl Drop for Extension {
     fn drop(&mut self) {
+        if let Some(gateway) = self.gateway.lock().expect("gateway lock").take() {
+            gateway.goodbye();
+        }
         self.request_shutdown();
     }
 }
@@ -1270,6 +1589,7 @@ fn poll_loop_with_tool_names(
     let ext = Extension {
         state,
         client,
+        gateway: Arc::new(Mutex::new(None)),
         output,
         shutdown: Arc::clone(&shutdown),
         tool_names,
@@ -1480,6 +1800,7 @@ fn send_startup_declarations(
 ) -> ClientResult<()> {
     runtime.startup_subscribe([
         tau_proto::EventSelector::Exact(tau_proto::EventName::TOOL_STARTED),
+        tau_proto::EventSelector::Exact(tau_proto::EventName::SESSION_STARTED),
         tau_proto::EventSelector::Exact(tau_proto::EventName::AGENT_DISPLAY_NAME_SET),
         tau_proto::EventSelector::Exact(tau_proto::EventName::AGENT_STARTED),
         tau_proto::EventSelector::Exact(tau_proto::EventName::SESSION_AGENT_UNLOADED),
@@ -1570,6 +1891,25 @@ fn handle_live_event_value(runtime: &TelegramRuntime, event: Event) {
             state
                 .agent_labels
                 .insert(name.agent_id.clone(), name.display_name.clone());
+            if let (Some(gateway), Some(session_id)) = (
+                runtime.ext.gateway_client(),
+                state.current_session_id.clone(),
+            ) && state.registered_agents.contains(&name.agent_id)
+            {
+                drop(state);
+                if let Ok(response) = gateway.register_agent(
+                    session_id.as_ref(),
+                    name.agent_id.as_ref(),
+                    Some(name.display_name),
+                    &runtime.ext.tool_names.namespace,
+                ) {
+                    runtime.ext.apply_gateway_response(response);
+                }
+            }
+        }
+        Event::SessionStarted(started) => {
+            let mut state = runtime.ext.state.lock();
+            state.current_session_id = Some(started.session_id);
         }
         Event::AgentStarted(started) => {
             if let Some(display_name) = started.display_name.clone() {
@@ -1578,6 +1918,19 @@ fn handle_live_event_value(runtime: &TelegramRuntime, event: Event) {
             }
         }
         Event::SessionAgentUnloaded(unloaded) => {
+            let (gateway, session_id) = {
+                let state = runtime.ext.state.lock();
+                (
+                    runtime.ext.gateway_client(),
+                    state
+                        .current_session_id
+                        .clone()
+                        .or(Some(unloaded.session_id.clone())),
+                )
+            };
+            if let (Some(gateway), Some(session_id)) = (gateway, session_id) {
+                let _ = gateway.unregister_agent(session_id.as_ref(), unloaded.agent_id.as_ref());
+            }
             let mut state = runtime.ext.state.lock();
             state.registered_agents.remove(&unloaded.agent_id);
             state.agent_labels.remove(&unloaded.agent_id);
@@ -1591,15 +1944,33 @@ fn handle_live_event_value(runtime: &TelegramRuntime, event: Event) {
             runtime.ext.state.notify_all();
         }
         Event::SessionShutdown(_) => {
+            let gateway = runtime.ext.gateway_client();
+            let (session_id, agents) = {
+                let state = runtime.ext.state.lock();
+                (
+                    state.current_session_id.clone(),
+                    state.registered_agents.iter().cloned().collect::<Vec<_>>(),
+                )
+            };
+            if let (Some(gateway), Some(session_id)) = (gateway.as_ref(), session_id.as_ref()) {
+                for agent_id in &agents {
+                    let _ = gateway.unregister_agent(session_id.as_ref(), agent_id.as_ref());
+                }
+            }
             let mut state = runtime.ext.state.lock();
+            state.current_session_id = None;
             state.registered_agents.clear();
             state.agent_labels.clear();
             state.selected_agent_by_chat.clear();
             state.poller_drained_initial_backlog = false;
             state.update_stream_lock = None;
-            state.shutdown_requested = true;
+            if gateway.is_none() {
+                state.shutdown_requested = true;
+            }
             state.mark_coordination_changed();
-            runtime.ext.shutdown.store(true, Ordering::Relaxed);
+            if gateway.is_none() {
+                runtime.ext.shutdown.store(true, Ordering::Relaxed);
+            }
             runtime.ext.state.notify_all();
         }
         _ => {}

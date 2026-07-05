@@ -58,6 +58,17 @@
   offset but before a sidecar drains its queued delivery, that prompt can be
   lost. It does not send outbound `telegram_send` messages through the gateway
   yet.
+- In `mode: gateway_client`, the per-session sidecar does not receive the bot
+  token, does not evaluate Telegram user allowlists, and never polls Telegram.
+  Its local trust boundary is the private same-UID gateway socket configured by
+  `gateway_socket_path`; the gateway remains responsible for Telegram
+  authorization and chat policy. The sidecar only registers locally observed
+  `(session_id, agent_id)` routes and converts gateway-delivered prompts into
+  `extension.prompt_submit_request` for its own harness. It filters gateway
+  deliveries against the current local session and registered-agent set, sends
+  best-effort unregister/goodbye on unload, shutdown, drop, config loss, and mode
+  switches, and clears local registrations on heartbeat/socket failure so stale
+  gateway leases fail closed instead of authorizing later sends.
 - Gateway mode must continue to reject non-allowlisted Telegram users before any
   side effects. Without an explicit configured `chat_id`, group/supergroup chats
   must not be linked or replied to; only an allowlisted private chat may link

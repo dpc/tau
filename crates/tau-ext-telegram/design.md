@@ -91,14 +91,15 @@ validating the loaded agent and recording normal `agent.prompt_submitted` facts.
 The gateway and sidecar must not forge transcript prompt facts directly or route
 Telegram prompts through `external_agent_message`.
 
-Outbound replies keep the current safety invariant. An agent calls the local
-send tool with message text only. The sidecar verifies that the caller is a
-registered local agent and forwards the request to the gateway; the gateway maps
-that registered agent to the configured or selected Telegram reply context and
-calls `sendMessage`. The model never supplies an arbitrary Telegram `chat_id`.
-If future multi-chat support is added, destinations should be gateway-minted
-conversation contexts selected by routing policy, not raw chat ids chosen by the
-model.
+Outbound replies keep the current safety invariant but are not implemented in
+the current gateway-client slice. Today `telegram_send` in gateway-client mode
+verifies that the caller is registered and then fails closed; the separate
+outbound-send slice will add forwarding to the gateway. That future path should
+accept message text only, map the registered agent to a configured or selected
+Telegram reply context in the gateway, and call `sendMessage`. The model must
+never supply an arbitrary Telegram `chat_id`. If future multi-chat support is
+added, destinations should be gateway-minted conversation contexts selected by
+routing policy, not raw chat ids chosen by the model.
 
 The gateway registry is authoritative but live-only: sidecar connection id,
 `session_id`, `agent_id`, display name, optional safe session label, tool

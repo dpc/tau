@@ -129,5 +129,21 @@ explicit unregister/goodbye or socket disconnect, and prunes them on lease expir
 `hello`/status responses include a gateway generation and reannouncement hint so
 sidecars reconnecting after a gateway restart know to re-send their current
 registrations. Heartbeat/register responses can include queued inbound prompt
-deliveries for the sidecar to submit to its local Tau harness. Outbound
-`telegram_send` through the gateway remains out of scope for this slice.
+deliveries for the sidecar to submit to its local Tau harness.
+
+The normal sidecar can run in no-poll gateway-client mode:
+
+```yaml
+mode: gateway_client
+gateway_socket_path: /run/user/1000/tau/telegram-gateway/<stream>.sock
+```
+
+In this mode the sidecar does not need `bot_token_secret`, does not use
+`allowed_user_ids`, and never calls Telegram `getUpdates`; the gateway owns the
+token, allowlist, chat policy, polling, and update offset. The sidecar still
+publishes the same `telegram_register`/`telegram_send` tool names (or the
+configured namespace), tracks the local session and registered agents, registers
+live `(session_id, agent_id)` routes with the gateway, and submits queued inbound
+deliveries locally as `extension.prompt_submit_request`. Outbound `telegram_send`
+through the gateway remains out of scope for this slice and currently returns a
+tool error in gateway-client mode.

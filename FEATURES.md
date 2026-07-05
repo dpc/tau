@@ -587,12 +587,15 @@ The same crate also ships the experimental `tau-telegram-gateway` daemon for the
 first single-token gateway slice. It owns polling and durable offsets for one bot
 token, enforces the Telegram allowlist, exposes private same-UID local IPC, and
 supports `/start`, `/help`, `/status`, `/sessions`, `/agents`,
-`/select-session`, `/select`, `/to`, and `/where`. The local socket supports one-shot `status` plus persistent
+`/select-session`, `/select`, `/to`, and `/where`. The local socket supports
+one-shot `status` plus persistent
 `hello`/`heartbeat`/`register_agent`/`unregister_agent`/`goodbye` messages for
-future sidecars; registrations are live leases pruned on unregister, goodbye,
-disconnect, heartbeat expiry, or gateway restart reannouncement. Inbound routed
-prompts use bounded live sidecar delivery queues; outbound gateway
-`telegram_send` remains future work.
+sidecars; registrations are live leases pruned on unregister, goodbye,
+disconnect, heartbeat expiry, or gateway restart reannouncement. The
+`std-telegram` sidecar can run with `mode: gateway_client` and
+`gateway_socket_path` to avoid polling, register local session/agent routes with
+the gateway, and submit inbound routed prompts locally. Outbound gateway
+`telegram_send` remains future work and fails closed in gateway-client mode.
 
 ### `std-slack` — personal Slack Socket Mode text bridge
 

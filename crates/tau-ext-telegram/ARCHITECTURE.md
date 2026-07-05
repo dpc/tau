@@ -91,6 +91,18 @@ same-UID local IPC, not an authentication boundary; this MVP bounds request size
 and closes protocol-error connections but does not attempt to defend against all
 same-user local denial-of-service patterns.
 
+The regular `std-telegram`/`tau-ext-telegram` sidecar supports
+`mode: gateway_client` for this architecture. In that mode its startup
+configuration names `gateway_socket_path` instead of a bot token secret. The
+sidecar still declares the existing register/send tools, subscribes to
+session/agent lifecycle facts, sends `hello` and persistent
+`register_agent`/`unregister_agent`/`heartbeat` requests to the gateway, and
+emits gateway-delivered inbound text as `extension.prompt_submit_request` to its
+own harness. It does not acquire the stream lock, check webhooks, or call
+Telegram `getUpdates`; those remain solely in the gateway daemon. Outbound
+`telegram_send` over the gateway is intentionally left for the outbound-send
+slice and currently fails closed in gateway-client mode.
+
 On the idle-to-active transition for the first registered agent, after acquiring
 the local lock and before reporting registration success, the extension calls
 `getWebhookInfo`. A non-empty webhook URL means Telegram will not serve
@@ -154,5 +166,8 @@ semantics, same-batch redelivery stops, allowlist/group-chat behavior, local
 socket parser/response bounds, sidecar heartbeat/lease cleanup, disconnect and
 unregister pruning, gateway restart reannouncement hints, command routing,
 chat/user-scoped selections, stable alias churn, bounded/stale delivery queues,
-socket delivery response shape, and CLI/env parsing. Future outbound-send tests
-should keep using fake gateway clients rather than live Telegram.
+socket delivery response shape, and CLI/env parsing. Gateway-client sidecar
+tests use fake Unix sockets and in-memory harness channels to cover no-poll
+registration, inbound prompt submission, fail-closed outbound send behavior, and
+stale-delivery filtering. Future outbound-send tests should keep using fake
+gateway clients rather than live Telegram.

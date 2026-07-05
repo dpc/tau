@@ -1,3 +1,6 @@
+use std::io::BufRead;
+use std::os::unix::net::UnixListener;
+use std::path::PathBuf;
 use std::sync::{Condvar, Mutex};
 
 use tau_proto::{HarnessInputMessage, HarnessInputReader, HarnessOutputMessage, ToolStarted};
@@ -243,6 +246,10 @@ fn message_args(value: &str) -> CborValue {
     )])
 }
 
+fn gateway_mode(socket_path: std::path::PathBuf) -> BridgeMode {
+    BridgeMode::GatewayClient(GatewayClientConfig { socket_path })
+}
+
 fn extension() -> (
     Extension,
     mpsc::Receiver<HarnessInputMessage>,
@@ -287,6 +294,17 @@ fn expect_notice(rx: &mpsc::Receiver<HarnessInputMessage>) -> HarnessNotice {
         panic!("notice")
     };
     notice
+}
+
+fn expect_prompt(rx: &mpsc::Receiver<HarnessInputMessage>) -> ExtPromptSubmitRequest {
+    let msg = rx.recv().expect("prompt");
+    let HarnessInputMessage::Emit(emit) = msg else {
+        panic!("emit")
+    };
+    let Event::ExtPromptSubmitRequest(prompt) = *emit.event else {
+        panic!("prompt submit request")
+    };
+    prompt
 }
 
 /// Telegram bridge tools are disabled by default because each role must make an
@@ -390,8 +408,7 @@ fn telegram_tool_examples_are_schema_valid() {
 fn config_rejects_missing_token_or_empty_allowlist() {
     let err = ExtConfig::default()
         .validate(&BTreeMap::new())
-        .err()
-        .expect("missing token secret");
+        .expect_err("missing token secret");
     assert!(err.contains("bot_token_secret"));
 
     let mut secrets = BTreeMap::new();
@@ -401,9 +418,363 @@ fn config_rejects_missing_token_or_empty_allowlist() {
         ..Default::default()
     }
     .validate(&secrets)
-    .err()
-    .expect("empty allowlist");
+    .expect_err("empty allowlist");
     assert!(err.contains("allowed_user_ids"));
+}
+
+/// Gateway-client mode deliberately does not read a bot token or require a
+/// Telegram allowlist in the sidecar; those belong to the standalone gateway
+/// process that owns polling.
+#[test]
+fn gateway_client_config_requires_only_socket_path() {
+    let err = ExtConfig {
+        mode: ExtMode::GatewayClient,
+        ..ExtConfig::default()
+    }
+    .validate(&BTreeMap::new())
+    .expect_err("missing socket should fail");
+    assert!(err.contains("gateway_socket_path"));
+
+    let mode = ExtConfig {
+        mode: ExtMode::GatewayClient,
+        gateway_socket_path: Some(PathBuf::from("/tmp/tau-telegram-test.sock")),
+        ..ExtConfig::default()
+    }
+    .validate(&BTreeMap::new())
+    .expect("gateway client config");
+    assert!(matches!(mode, BridgeMode::GatewayClient(_)));
+}
+
+/// In gateway-client mode the sidecar must not touch Telegram polling APIs.
+/// Registration goes to the local gateway socket, and any queued inbound
+/// delivery is submitted locally through `extension.prompt_submit_request`.
+#[test]
+fn gateway_client_registers_without_polling_and_submits_delivery() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let socket_path = dir.path().join("gateway.sock");
+    let listener = UnixListener::bind(&socket_path).expect("bind fake gateway");
+    let seen_requests = Arc::new(Mutex::new(Vec::<serde_json::Value>::new()));
+    let seen_requests_thread = Arc::clone(&seen_requests);
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept gateway client");
+        let reader = stream.try_clone().expect("clone stream");
+        let mut reader = std::io::BufReader::new(reader);
+        for index in 0..2 {
+            let mut line = String::new();
+            reader.read_line(&mut line).expect("read gateway request");
+            let request: serde_json::Value =
+                serde_json::from_str(&line).expect("gateway request JSON");
+            seen_requests_thread.lock().expect("requests").push(request);
+            let response = if index == 0 {
+                serde_json::json!({
+                    "protocol_version": 1,
+                    "ok": true,
+                    "gateway_generation": "test",
+                    "reannounce_required": true,
+                    "deliveries": [],
+                })
+            } else {
+                serde_json::json!({
+                    "protocol_version": 1,
+                    "ok": true,
+                    "deliveries": [{
+                        "request_id": "telegram-1",
+                        "session_id": "s1",
+                        "agent_id": "agent-1",
+                        "source": "alice",
+                        "text": "[telegram from alice] hello",
+                        "ctx_id": "telegram:10:1"
+                    }],
+                })
+            };
+            writeln!(stream, "{response}").expect("write gateway response");
+            stream.flush().expect("flush gateway response");
+        }
+    });
+
+    let (tx, rx) = mpsc::channel();
+    let client = FakeClient::new();
+    let ext = Extension::new(client.clone(), tx);
+    ext.apply_config(gateway_mode(socket_path), Some(temp_state_dir()))
+        .expect("apply gateway client config");
+    {
+        let mut state = ext.state.lock();
+        state.current_session_id = Some("s1".into());
+    }
+    ext.dispatch_tool(tool(REGISTER_TOOL_NAME, "agent-1", bool_args(true)));
+
+    let _progress = rx.recv().expect("progress");
+    let prompt = expect_prompt(&rx);
+    let _result = rx.recv().expect("tool result");
+    server.join().expect("fake gateway thread");
+
+    assert_eq!(prompt.agent_id, agent_id("agent-1"));
+    assert_eq!(prompt.text, "[telegram from alice] hello");
+    assert_eq!(prompt.ctx_id.as_deref(), Some("telegram:10:1"));
+    assert!(client.poll_timeouts.lock().expect("polls").is_empty());
+    let requests = seen_requests.lock().expect("requests");
+    assert_eq!(requests[0]["kind"], "hello");
+    assert_eq!(requests[1]["kind"], "register_agent");
+    assert_eq!(requests[1]["session_id"], "s1");
+    assert_eq!(requests[1]["agent_id"], "agent-1");
+
+    ext.dispatch_tool(tool(SEND_TOOL_NAME, "agent-1", message_args("reply")));
+    let message = expect_tool_error(&rx);
+    assert!(message.contains("not implemented yet"), "{message}");
+    assert!(client.sent.lock().expect("sent").is_empty());
+}
+
+/// Registering before the sidecar has observed `session.started` must fail
+/// locally and must not create an incomplete gateway route.
+#[test]
+fn gateway_client_register_before_session_started_does_not_announce() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let socket_path = dir.path().join("gateway.sock");
+    let listener = UnixListener::bind(&socket_path).expect("bind fake gateway");
+    let seen_requests = Arc::new(Mutex::new(Vec::<serde_json::Value>::new()));
+    let seen_requests_thread = Arc::clone(&seen_requests);
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept gateway client");
+        let reader = stream.try_clone().expect("clone stream");
+        let mut reader = std::io::BufReader::new(reader);
+        for _ in 0..2 {
+            let mut line = String::new();
+            reader.read_line(&mut line).expect("read gateway request");
+            if line.trim().is_empty() {
+                break;
+            }
+            seen_requests_thread
+                .lock()
+                .expect("requests")
+                .push(serde_json::from_str(&line).expect("gateway request JSON"));
+            writeln!(
+                stream,
+                "{}",
+                serde_json::json!({
+                    "protocol_version": 1,
+                    "ok": true,
+                    "deliveries": [],
+                })
+            )
+            .expect("write gateway response");
+            stream.flush().expect("flush gateway response");
+        }
+    });
+
+    let (tx, rx) = mpsc::channel();
+    let ext = Extension::new(FakeClient::new(), tx);
+    ext.apply_config(gateway_mode(socket_path), Some(temp_state_dir()))
+        .expect("apply gateway client config");
+    ext.dispatch_tool(tool(REGISTER_TOOL_NAME, "agent-1", bool_args(true)));
+    let message = expect_tool_error(&rx);
+    assert!(message.contains("session.started"), "{message}");
+    drop(ext);
+    server.join().expect("fake gateway thread");
+
+    let requests = seen_requests.lock().expect("requests");
+    assert_eq!(requests[0]["kind"], "hello");
+    assert!(
+        requests
+            .iter()
+            .all(|request| request["kind"] != "register_agent"),
+        "{requests:?}"
+    );
+}
+
+/// Gateway deliveries are only accepted for the current session and a currently
+/// registered local agent; stale gateway queues cannot submit prompts after
+/// local state has failed closed or unregistered.
+#[test]
+fn gateway_delivery_requires_live_local_registration() {
+    let (tx, rx) = mpsc::channel();
+    let state = SharedState::new();
+    {
+        let mut state = state.lock();
+        state.current_session_id = Some("s1".into());
+    }
+    emit_gateway_deliveries(
+        &state,
+        &Output::Channel(tx.clone()),
+        vec![GatewayPromptDelivery {
+            request_id: "telegram-1".to_owned(),
+            session_id: "s1".to_owned(),
+            agent_id: "agent-1".to_owned(),
+            source: "alice".to_owned(),
+            text: "[telegram from alice] hello".to_owned(),
+            ctx_id: "telegram:1:1".to_owned(),
+        }],
+    );
+    assert!(rx.try_recv().is_err());
+
+    state.lock().registered_agents.insert(agent_id("agent-1"));
+    emit_gateway_deliveries(
+        &state,
+        &Output::Channel(tx),
+        vec![GatewayPromptDelivery {
+            request_id: "telegram-2".to_owned(),
+            session_id: "s1".to_owned(),
+            agent_id: "agent-1".to_owned(),
+            source: "alice".to_owned(),
+            text: "[telegram from alice] hello again".to_owned(),
+            ctx_id: "telegram:1:2".to_owned(),
+        }],
+    );
+    let prompt = expect_prompt(&rx);
+    assert_eq!(prompt.text, "[telegram from alice] hello again");
+}
+
+/// A heartbeat failure from a stale gateway connection must not clear
+/// registrations that belong to a newer active gateway or mode.
+#[test]
+fn stale_gateway_heartbeat_failure_does_not_clear_new_registration_state() {
+    let gateway_cell = Mutex::new(None);
+    let state = SharedState::new();
+    let old_gateway = Arc::new(GatewayClient::new(GatewayClientConfig {
+        socket_path: PathBuf::from("/tmp/old-gateway.sock"),
+    }));
+    let new_gateway = Arc::new(GatewayClient::new(GatewayClientConfig {
+        socket_path: PathBuf::from("/tmp/new-gateway.sock"),
+    }));
+    *gateway_cell.lock().expect("gateway lock") = Some(Arc::clone(&new_gateway));
+    {
+        let mut state = state.lock();
+        state.registered_agents.insert(agent_id("agent-1"));
+        state.selected_agent_by_chat.insert(10, agent_id("agent-1"));
+    }
+
+    assert!(!fail_gateway_client_if_current(
+        &gateway_cell,
+        &state,
+        &old_gateway
+    ));
+    assert!(
+        state
+            .lock()
+            .registered_agents
+            .contains(&agent_id("agent-1"))
+    );
+    assert!(gateway_cell.lock().expect("gateway lock").is_some());
+
+    assert!(fail_gateway_client_if_current(
+        &gateway_cell,
+        &state,
+        &new_gateway
+    ));
+    assert!(state.lock().registered_agents.is_empty());
+    assert!(gateway_cell.lock().expect("gateway lock").is_none());
+}
+
+/// Clearing malformed configuration must send `goodbye` to release gateway
+/// leases instead of silently dropping local state.
+#[test]
+fn gateway_client_config_error_sends_goodbye() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let socket_path = dir.path().join("gateway.sock");
+    let listener = UnixListener::bind(&socket_path).expect("bind fake gateway");
+    let seen_requests = Arc::new(Mutex::new(Vec::<serde_json::Value>::new()));
+    let seen_requests_thread = Arc::clone(&seen_requests);
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept gateway client");
+        let reader = stream.try_clone().expect("clone stream");
+        let mut reader = std::io::BufReader::new(reader);
+        for _ in 0..2 {
+            let mut line = String::new();
+            reader.read_line(&mut line).expect("read gateway request");
+            seen_requests_thread
+                .lock()
+                .expect("requests")
+                .push(serde_json::from_str(&line).expect("gateway request JSON"));
+            writeln!(
+                stream,
+                "{}",
+                serde_json::json!({
+                    "protocol_version": 1,
+                    "ok": true,
+                    "deliveries": [],
+                })
+            )
+            .expect("write gateway response");
+            stream.flush().expect("flush gateway response");
+        }
+    });
+
+    let (tx, _rx) = mpsc::channel();
+    let ext = Extension::new(FakeClient::new(), tx);
+    ext.apply_config(gateway_mode(socket_path), Some(temp_state_dir()))
+        .expect("apply gateway client config");
+    ext.clear_config_after_error();
+    server.join().expect("fake gateway thread");
+
+    let requests = seen_requests.lock().expect("requests");
+    assert_eq!(requests[0]["kind"], "hello");
+    assert_eq!(requests[1]["kind"], "goodbye");
+}
+
+/// Agent unload must explicitly unregister the route from the gateway before
+/// local state is cleared.
+#[test]
+fn gateway_client_agent_unload_sends_unregister() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let socket_path = dir.path().join("gateway.sock");
+    let listener = UnixListener::bind(&socket_path).expect("bind fake gateway");
+    let seen_requests = Arc::new(Mutex::new(Vec::<serde_json::Value>::new()));
+    let seen_requests_thread = Arc::clone(&seen_requests);
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept gateway client");
+        let reader = stream.try_clone().expect("clone stream");
+        let mut reader = std::io::BufReader::new(reader);
+        for _ in 0..4 {
+            let mut line = String::new();
+            reader.read_line(&mut line).expect("read gateway request");
+            if line.trim().is_empty() {
+                break;
+            }
+            seen_requests_thread
+                .lock()
+                .expect("requests")
+                .push(serde_json::from_str(&line).expect("gateway request JSON"));
+            writeln!(
+                stream,
+                "{}",
+                serde_json::json!({
+                    "protocol_version": 1,
+                    "ok": true,
+                    "deliveries": [],
+                })
+            )
+            .expect("write gateway response");
+            stream.flush().expect("flush gateway response");
+        }
+    });
+
+    let (tx, rx) = mpsc::channel();
+    let ext = Extension::new(FakeClient::new(), tx);
+    ext.apply_config(gateway_mode(socket_path), Some(temp_state_dir()))
+        .expect("apply gateway client config");
+    {
+        let mut state = ext.state.lock();
+        state.current_session_id = Some("s1".into());
+    }
+    ext.dispatch_tool(tool(REGISTER_TOOL_NAME, "agent-1", bool_args(true)));
+    expect_tool_finished(&rx);
+    let runtime = TelegramRuntime { ext };
+    handle_live_event_value(
+        &runtime,
+        Event::SessionAgentUnloaded(tau_proto::SessionAgentUnloaded {
+            session_id: "s1".into(),
+            agent_id: agent_id("agent-1"),
+        }),
+    );
+    drop(runtime);
+    server.join().expect("fake gateway thread");
+
+    let requests = seen_requests.lock().expect("requests");
+    assert_eq!(requests[0]["kind"], "hello");
+    assert_eq!(requests[1]["kind"], "register_agent");
+    assert_eq!(requests[2]["kind"], "unregister_agent");
+    assert_eq!(requests[2]["session_id"], "s1");
+    assert_eq!(requests[2]["agent_id"], "agent-1");
+    assert_eq!(requests[3]["kind"], "goodbye");
 }
 
 /// Bot tokens are embedded in Bot API request paths, so endpoint overrides must
@@ -426,8 +797,7 @@ fn config_rejects_unsafe_api_base_overrides() {
             ..Default::default()
         }
         .validate(&secrets)
-        .err()
-        .expect("unsafe api_base should be rejected");
+        .expect_err("unsafe api_base should be rejected");
         assert!(err.contains("api_base"), "{api_base}: {err}");
     }
 
