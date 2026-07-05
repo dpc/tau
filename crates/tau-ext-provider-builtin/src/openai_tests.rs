@@ -225,6 +225,7 @@ fn prompt() -> tau_proto::AgentPromptCreated {
                             text: "hello".to_owned(),
                         }],
                         phase: None,
+                        responses_raw_json: None,
                     })],
                 },
             )],

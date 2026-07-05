@@ -761,6 +761,7 @@ impl AgentTree {
                     role: ContextRole::User,
                     content: vec![ContentPart::Text { text }],
                     phase: None,
+                    responses_raw_json: None,
                 })],
             },
         )

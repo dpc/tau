@@ -888,6 +888,7 @@ fn user_text(text: &str) -> ContextItem {
         role: ContextRole::User,
         content: vec![ContentPart::Text { text: text.into() }],
         phase: None,
+        responses_raw_json: None,
     })
 }
 
@@ -896,6 +897,7 @@ fn assistant_text(text: &str) -> ContextItem {
         role: ContextRole::Assistant,
         content: vec![ContentPart::Text { text: text.into() }],
         phase: None,
+        responses_raw_json: None,
     })
 }
 
@@ -904,6 +906,20 @@ fn assistant_text_with_phase(text: &str, phase: tau_proto::MessagePhase) -> Cont
         role: ContextRole::Assistant,
         content: vec![ContentPart::Text { text: text.into() }],
         phase: Some(phase),
+        responses_raw_json: None,
+    })
+}
+
+fn assistant_text_with_phase_and_raw(
+    text: &str,
+    phase: tau_proto::MessagePhase,
+    raw_json: &str,
+) -> ContextItem {
+    ContextItem::Message(MessageItem {
+        role: ContextRole::Assistant,
+        content: vec![ContentPart::Text { text: text.into() }],
+        phase: Some(phase),
+        responses_raw_json: Some(raw_json.to_owned()),
     })
 }
 
@@ -1287,6 +1303,193 @@ fn build_request_replays_reasoning_item_from_raw_json_sidecar() {
     );
 }
 
+/// Assistant Responses `message` items carry provider-owned envelope and
+/// content-part metadata that Tau does not otherwise model. When the typed text
+/// and phase still match, full replay should embed the raw sidecar unchanged so
+/// ids, status, annotations, part ids, and unknown fields keep their original
+/// provider-visible shape.
+#[test]
+fn build_request_replays_matching_assistant_message_from_raw_sidecar() {
+    let config = phase_test_config();
+    let raw_message = r#"{"type":"message","id":"msg_raw","status":"completed","role":"assistant","phase":"commentary","content":[{"type":"output_text","id":"part_a","text":"hello","annotations":[{"type":"url_citation","url":"https://example.test"}],"future_part":true}],"future_message":123}"#;
+    let messages = vec![assistant_text_with_phase_and_raw(
+        "hello",
+        tau_proto::MessagePhase::Commentary,
+        raw_message,
+    )];
+    let request = request_for_items(&messages);
+
+    let body = serde_json::to_string(&build_request(&config, &request, None)).expect("serialize");
+
+    assert!(
+        body.contains(raw_message),
+        "matching raw assistant message sidecar must be embedded verbatim; body={body}"
+    );
+}
+
+/// A captured Responses message can contain multiple text content parts with
+/// independent provider ids/annotations. Tau's typed assistant text is a
+/// semantic projection, so unchanged text must still replay through the raw
+/// sidecar instead of collapsing those provider-visible part boundaries.
+#[test]
+fn build_request_keeps_raw_assistant_message_part_boundaries() {
+    let config = phase_test_config();
+    let raw_message = r#"{"type":"message","id":"msg_raw","role":"assistant","phase":"commentary","content":[{"type":"output_text","id":"part_a","text":"he","annotations":[]},{"type":"output_text","id":"part_b","text":"llo","annotations":[{"type":"file_citation","file_id":"file_1"}]}]}"#;
+    let messages = vec![assistant_text_with_phase_and_raw(
+        "hello",
+        tau_proto::MessagePhase::Commentary,
+        raw_message,
+    )];
+    let request = request_for_items(&messages);
+
+    let body = serde_json::to_string(&build_request(&config, &request, None)).expect("serialize");
+
+    assert!(
+        body.contains(raw_message),
+        "raw assistant message content-part boundaries must be embedded verbatim; body={body}"
+    );
+}
+
+/// Raw assistant-message sidecars are provider syntax, not semantic authority.
+/// A sidecar whose text and phase match typed Tau fields but whose role/type is
+/// not an assistant Responses message must be ignored rather than replayed
+/// verbatim.
+#[test]
+fn build_request_rejects_raw_assistant_message_with_wrong_role() {
+    let config = phase_test_config();
+    let raw_message = r#"{"type":"message","id":"msg_bad","role":"user","phase":"commentary","content":[{"type":"output_text","text":"hello","annotations":[]}]}"#;
+    let messages = vec![assistant_text_with_phase_and_raw(
+        "hello",
+        tau_proto::MessagePhase::Commentary,
+        raw_message,
+    )];
+    let request = request_for_items(&messages);
+
+    let body = serde_json::to_string(&build_request(&config, &request, None)).expect("serialize");
+    assert!(
+        !body.contains(r#""role":"user""#),
+        "invalid raw sidecar must not override typed assistant role; body={body}"
+    );
+    assert!(
+        body.contains(r#""role":"assistant""#),
+        "typed assistant message should be synthesized instead; body={body}"
+    );
+}
+
+/// Matching text and phase are not enough to trust a raw sidecar; the item must
+/// also be a Responses `message`, not another provider item shape.
+#[test]
+fn build_request_rejects_raw_assistant_message_with_wrong_type() {
+    let config = phase_test_config();
+    let raw_message = r#"{"type":"future_item","id":"msg_bad","role":"assistant","phase":"commentary","content":[{"type":"output_text","text":"hello","annotations":[]}]}"#;
+    let messages = vec![assistant_text_with_phase_and_raw(
+        "hello",
+        tau_proto::MessagePhase::Commentary,
+        raw_message,
+    )];
+    let request = request_for_items(&messages);
+
+    let body = serde_json::to_string(&build_request(&config, &request, None)).expect("serialize");
+    assert!(
+        !body.contains(r#""type":"future_item""#),
+        "invalid raw sidecar must not override typed assistant item type; body={body}"
+    );
+    assert!(
+        body.contains(r#""type":"message""#),
+        "typed assistant message should be synthesized instead; body={body}"
+    );
+}
+
+/// When replaying to a model that does not support assistant-message `phase`,
+/// the raw sidecar still preserves provider-owned metadata, but the outgoing
+/// item must strip `phase` to satisfy that model's wire contract.
+#[test]
+fn build_request_strips_phase_from_raw_assistant_message_when_unsupported() {
+    let config = chain_test_config();
+    let raw_message = r#"{"type":"message","id":"msg_raw","status":"completed","role":"assistant","phase":"commentary","content":[{"type":"output_text","id":"part_a","text":"hello","annotations":[]}],"future_message":123}"#;
+    let messages = vec![assistant_text_with_phase_and_raw(
+        "hello",
+        tau_proto::MessagePhase::Commentary,
+        raw_message,
+    )];
+    let request = request_for_items(&messages);
+
+    let body = serde_json::to_value(build_request(&config, &request, None)).expect("serialize");
+    let message = body["input"]
+        .as_array()
+        .expect("input")
+        .iter()
+        .find(|item| item["type"].as_str() == Some("message"))
+        .expect("assistant message");
+
+    assert_eq!(message["id"], "msg_raw");
+    assert_eq!(message["status"], "completed");
+    assert_eq!(message["future_message"], 123);
+    assert!(message.get("phase").is_none(), "phase must be stripped");
+}
+
+/// Non-string raw `phase` values still violate models that do not support the
+/// field. They must force the rebase path so the key is removed instead of
+/// passing the raw item through unchanged.
+#[test]
+fn build_request_strips_non_string_phase_from_raw_assistant_message_when_unsupported() {
+    let config = chain_test_config();
+    let raw_message = r#"{"type":"message","id":"msg_raw","role":"assistant","phase":{"future":true},"content":[{"type":"output_text","id":"part_a","text":"hello","annotations":[]}]}"#;
+    let messages = vec![assistant_text_with_phase_and_raw(
+        "hello",
+        tau_proto::MessagePhase::Commentary,
+        raw_message,
+    )];
+    let request = request_for_items(&messages);
+
+    let body = serde_json::to_value(build_request(&config, &request, None)).expect("serialize");
+    let message = body["input"]
+        .as_array()
+        .expect("input")
+        .iter()
+        .find(|item| item["type"].as_str() == Some("message"))
+        .expect("assistant message");
+
+    assert_eq!(message["id"], "msg_raw");
+    assert_eq!(message["content"][0]["id"], "part_a");
+    assert!(message.get("phase").is_none(), "phase must be stripped");
+}
+
+/// The raw Responses message sidecar is not semantic authority. If typed Tau
+/// text/phase differ from the captured provider item, replay must keep the
+/// provider-owned envelope where possible but update only the model-visible
+/// text and phase from the typed fields.
+#[test]
+fn build_request_rebases_raw_assistant_message_text_and_phase() {
+    let config = phase_test_config();
+    let raw_message = r#"{"type":"message","id":"msg_raw","status":"completed","role":"assistant","phase":"final_answer","content":[{"type":"output_text","id":"part_a","text":"old","annotations":[{"type":"url_citation","url":"https://example.test"}],"future_part":true}],"future_message":123}"#;
+    let messages = vec![assistant_text_with_phase_and_raw(
+        "new",
+        tau_proto::MessagePhase::Commentary,
+        raw_message,
+    )];
+    let request = request_for_items(&messages);
+
+    let body = serde_json::to_value(build_request(&config, &request, None)).expect("serialize");
+    let input = body["input"].as_array().expect("input");
+    let message = input
+        .iter()
+        .find(|item| item["type"].as_str() == Some("message"))
+        .expect("assistant message");
+
+    assert_eq!(message["id"], "msg_raw");
+    assert_eq!(message["status"], "completed");
+    assert_eq!(message["future_message"], 123);
+    assert_eq!(message["phase"], "commentary");
+    assert_eq!(message["content"][0]["id"], "part_a");
+    assert_eq!(message["content"][0]["future_part"], true);
+    assert_eq!(
+        message["content"][0]["annotations"][0]["url"],
+        "https://example.test"
+    );
+    assert_eq!(message["content"][0]["text"], "new");
+}
+
 #[test]
 fn build_request_emits_custom_tool_definition_and_round_trips_custom_tool_output() {
     let config = chain_test_config();
@@ -1608,6 +1811,50 @@ fn apply_raw_json_event_preserves_reasoning_item_raw_json_for_replay() {
     assert!(
         body.contains(raw_reasoning),
         "raw reasoning JSON sidecar must be embedded verbatim; body={body}"
+    );
+}
+
+/// Message capture on the raw SSE/WS event path must keep the full Responses
+/// assistant item sidecar, not only the typed text and phase, so replay can
+/// preserve provider-owned envelope and content-part metadata.
+#[test]
+fn apply_raw_json_event_preserves_assistant_message_raw_json_for_replay() {
+    let mut state = crate::common::StreamState::new();
+    let raw_message = r#"{"type":"message","id":"msg_raw","status":"completed","role":"assistant","phase":"commentary","content":[{"type":"output_text","id":"part_a","text":"hello","annotations":[{"type":"url_citation","url":"https://example.test"}]}],"future_message":true}"#;
+    let raw_event =
+        format!(r#"{{"type":"response.output_item.done","output_index":0,"item":{raw_message}}}"#);
+
+    apply_raw_json_event(&mut state, &raw_event, &mut |_| {}).expect("message done");
+
+    let items = state.into_output_items();
+    let tau_proto::ContextItem::Message(message) = &items[0] else {
+        panic!("expected message item");
+    };
+    assert_eq!(message.responses_raw_json.as_deref(), Some(raw_message));
+    let request = request_for_items(&items);
+    let body =
+        serde_json::to_string(&build_request(&phase_test_config(), &request, None)).expect("body");
+    assert!(
+        body.contains(raw_message),
+        "raw assistant message JSON sidecar must be embedded verbatim; body={body}"
+    );
+}
+
+/// The parser should not persist raw sidecars for non-assistant `message`
+/// items. Sidecars must remain subordinate to typed Tau assistant semantics
+/// even before they reach request replay.
+#[test]
+fn apply_raw_json_event_ignores_non_assistant_message_sidecar() {
+    let mut state = crate::common::StreamState::new();
+    let raw_message = r#"{"type":"message","id":"msg_user","role":"user","content":[{"type":"output_text","text":"hello"}]}"#;
+    let raw_event =
+        format!(r#"{{"type":"response.output_item.done","output_index":0,"item":{raw_message}}}"#);
+
+    apply_raw_json_event(&mut state, &raw_event, &mut |_| {}).expect("message done");
+
+    assert!(
+        state.into_output_items().is_empty(),
+        "non-assistant message output item should not become assistant transcript"
     );
 }
 
@@ -2399,6 +2646,7 @@ fn repeated_output_item_done_message_aborts_without_appending_snapshot() {
         "output_index": 0,
         "item": {
             "type": "message",
+            "role": "assistant",
             "content": [{ "type": "output_text", "text": ".".repeat(1024) }]
         }
     });

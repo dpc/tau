@@ -1186,6 +1186,7 @@ fn user_msg(text: &str) -> tau_proto::ContextItem {
             text: text.to_owned(),
         }],
         phase: None,
+        responses_raw_json: None,
     })
 }
 

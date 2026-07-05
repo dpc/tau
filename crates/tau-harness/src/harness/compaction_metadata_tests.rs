@@ -16,6 +16,7 @@ fn compacted_estimate_uses_items_from_latest_compaction_forward() {
             text: "large post-compaction assistant item".repeat(20),
         }],
         phase: None,
+        responses_raw_json: None,
     });
     let items = vec![
         ContextItem::Message(MessageItem {
@@ -24,6 +25,7 @@ fn compacted_estimate_uses_items_from_latest_compaction_forward() {
                 text: "pre-compaction item".to_owned(),
             }],
             phase: None,
+            responses_raw_json: None,
         }),
         compaction.clone(),
         after,

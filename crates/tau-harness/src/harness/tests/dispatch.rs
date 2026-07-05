@@ -546,6 +546,7 @@ fn provider_text_response(
                 text: text.to_owned(),
             }],
             phase: None,
+            responses_raw_json: None,
         })],
         stop_reason: tau_proto::ProviderStopReason::EndTurn,
         error: None,
@@ -3992,6 +3993,7 @@ fn cancel_while_thinking_terminates_prompt_and_drops_late_response() {
                 text: "(cancelled by harness)".to_owned(),
             }],
             phase: None,
+            responses_raw_json: None,
         })],
         stop_reason: tau_proto::ProviderStopReason::EndTurn,
         error: None,
@@ -5224,6 +5226,7 @@ fn tool_calls_stop_reason_without_tool_items_does_not_wedge_turn() {
                 text: "done".to_owned(),
             }],
             phase: None,
+            responses_raw_json: None,
         })],
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
@@ -5276,6 +5279,7 @@ fn agent_prompt_created_uses_refs_for_linear_extension() {
             }],
 
             phase: None,
+            responses_raw_json: None,
         })],
 
         stop_reason: tau_proto::ProviderStopReason::EndTurn,
@@ -5335,6 +5339,7 @@ fn linear_agent_prompts_strictly_extend_previous_messages() {
             }],
 
             phase: None,
+            responses_raw_json: None,
         })],
 
         stop_reason: tau_proto::ProviderStopReason::EndTurn,
@@ -5413,6 +5418,7 @@ fn response_id_anchors_next_prompt_with_previous_response() {
             }],
 
             phase: None,
+            responses_raw_json: None,
         })],
 
         stop_reason: tau_proto::ProviderStopReason::EndTurn,
@@ -5470,6 +5476,7 @@ fn chained_sub_chunk_cacheable_tokens_does_not_emit_diagnostic() {
             }],
 
             phase: None,
+            responses_raw_json: None,
         })],
 
         stop_reason: tau_proto::ProviderStopReason::EndTurn,
@@ -5508,6 +5515,7 @@ fn chained_sub_chunk_cacheable_tokens_does_not_emit_diagnostic() {
             }],
 
             phase: None,
+            responses_raw_json: None,
         })],
 
         stop_reason: tau_proto::ProviderStopReason::EndTurn,
@@ -5570,6 +5578,7 @@ fn model_switch_invalidates_chain_anchor() {
             }],
 
             phase: None,
+            responses_raw_json: None,
         })],
 
         stop_reason: tau_proto::ProviderStopReason::EndTurn,
@@ -5641,6 +5650,7 @@ fn params_drift_invalidates_chain_anchor() {
             }],
 
             phase: None,
+            responses_raw_json: None,
         })],
 
         stop_reason: tau_proto::ProviderStopReason::EndTurn,
@@ -5710,6 +5720,7 @@ fn system_prompt_drift_invalidates_chain_anchor() {
             }],
 
             phase: None,
+            responses_raw_json: None,
         })],
 
         stop_reason: tau_proto::ProviderStopReason::EndTurn,
@@ -5791,6 +5802,7 @@ fn tools_drift_invalidates_chain_anchor() {
             }],
 
             phase: None,
+            responses_raw_json: None,
         })],
 
         stop_reason: tau_proto::ProviderStopReason::EndTurn,
@@ -5872,6 +5884,7 @@ fn stable_params_preserve_chain_anchor() {
             }],
 
             phase: None,
+            responses_raw_json: None,
         })],
 
         stop_reason: tau_proto::ProviderStopReason::EndTurn,
@@ -5932,6 +5945,7 @@ fn missing_response_id_leaves_chain_unset() {
             }],
 
             phase: None,
+            responses_raw_json: None,
         })],
 
         stop_reason: tau_proto::ProviderStopReason::EndTurn,
@@ -6003,6 +6017,7 @@ fn queued_prompt_extends_completed_first_prompt() {
             }],
 
             phase: None,
+            responses_raw_json: None,
         })],
 
         stop_reason: tau_proto::ProviderStopReason::EndTurn,
@@ -7314,6 +7329,7 @@ fn start_agent_request_dispatches_while_tool_is_running_and_restores_turn() {
             }],
 
             phase: None,
+            responses_raw_json: None,
         })],
 
         stop_reason: tau_proto::ProviderStopReason::EndTurn,
@@ -7441,6 +7457,7 @@ fn delegated_agent_user_interaction_prevents_auto_suspend() {
                 text: "delegated answer".to_owned(),
             }],
             phase: None,
+            responses_raw_json: None,
         })],
         stop_reason: tau_proto::ProviderStopReason::EndTurn,
         error: None,
@@ -7530,6 +7547,7 @@ fn side_agent_drains_agent_message_before_extension_teardown() {
                 text: "initial answer".to_owned(),
             }],
             phase: None,
+            responses_raw_json: None,
         })],
         stop_reason: tau_proto::ProviderStopReason::EndTurn,
         error: None,
@@ -7583,6 +7601,7 @@ fn side_agent_drains_agent_message_before_extension_teardown() {
                 text: "final answer".to_owned(),
             }],
             phase: None,
+            responses_raw_json: None,
         })],
         stop_reason: tau_proto::ProviderStopReason::EndTurn,
         error: None,
@@ -7867,6 +7886,7 @@ fn non_tool_start_agent_request_starts_fresh_agent_branch() {
             }],
 
             phase: None,
+            responses_raw_json: None,
         })],
 
         stop_reason: tau_proto::ProviderStopReason::EndTurn,
@@ -8017,6 +8037,7 @@ fn non_tool_start_agent_request_preserves_tool_choice_without_parent_chain_ancho
             }],
 
             phase: None,
+            responses_raw_json: None,
         })],
 
         stop_reason: tau_proto::ProviderStopReason::EndTurn,
@@ -8598,6 +8619,7 @@ fn background_completion_from_preserved_delegate_queues_on_delegate() {
                 text: "side answer".to_owned(),
             }],
             phase: None,
+            responses_raw_json: None,
         })],
         stop_reason: tau_proto::ProviderStopReason::EndTurn,
         error: None,
@@ -10755,6 +10777,7 @@ fn sibling_side_conv_teardown_does_not_misplace_other_side_conv_tool_result() {
             }],
 
             phase: None,
+            responses_raw_json: None,
         })],
 
         stop_reason: tau_proto::ProviderStopReason::EndTurn,
@@ -11124,6 +11147,7 @@ fn completed_side_conversation_tool_result_reprompts_parent() {
             }],
 
             phase: None,
+            responses_raw_json: None,
         })],
 
         stop_reason: tau_proto::ProviderStopReason::EndTurn,

@@ -23,6 +23,16 @@ compaction, and unknown output items should be stored with
 transcript replay should prefer that sidecar over the parsed CBOR
 `OpaqueProviderItem.value`.
 
+Responses assistant `message` items also carry a replay sidecar. Tau keeps the
+typed message text and `phase` as semantic truth, but the raw Responses item
+preserves provider-owned ids, status, annotations, content-part boundaries, and
+unknown fields that may affect server-side replay/cache behavior. Full
+transcript replay should emit the raw item unchanged when its text and phase
+already match the typed fields and the raw item validates as a Responses
+assistant `message`; otherwise it may parse the raw item and update only
+text/phase before sending it, or synthesize from typed fields when validation
+fails.
+
 Responses tool-call output items split semantic tool-call routing from provider
 envelope fidelity. `ToolCallItem.call_id`, name, type, and arguments remain the
 validated Tau fields used for dispatch and tool-result pairing, while

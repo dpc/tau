@@ -830,6 +830,7 @@ fn assistant_message_item(text: impl Into<String>) -> ContextItem {
         role: ContextRole::Assistant,
         content: vec![ContentPart::Text { text: text.into() }],
         phase: None,
+        responses_raw_json: None,
     })
 }
 
@@ -5477,6 +5478,7 @@ fn backgrounded_tool_stays_visibly_running_until_background_result() {
                 text: "done for now".into(),
             }],
             phase: None,
+            responses_raw_json: None,
         })],
     )));
     sync(&handle);

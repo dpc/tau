@@ -403,6 +403,7 @@ fn assistant_finished_response_for_agent(
                 text: text.to_owned(),
             }],
             phase: None,
+            responses_raw_json: None,
         })],
         stop_reason: ProviderStopReason::EndTurn,
         error: None,

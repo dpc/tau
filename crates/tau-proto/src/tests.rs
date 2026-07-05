@@ -27,7 +27,35 @@ fn user_text_item(text: &str) -> ContextItem {
             text: text.to_owned(),
         }],
         phase: None,
+        responses_raw_json: None,
     })
+}
+
+/// Ensures the optional Responses assistant-message replay sidecar is additive
+/// for older persisted message items and round-trips when present.
+#[test]
+fn message_item_responses_raw_json_is_optional_and_round_trips() {
+    let legacy = serde_json::json!({
+        "role": "assistant",
+        "content": [{ "type": "text", "text": "hello" }],
+        "phase": "commentary"
+    });
+    let decoded: MessageItem = serde_json::from_value(legacy).expect("legacy message item");
+    assert_eq!(decoded.responses_raw_json, None);
+
+    let raw = r#"{"type":"message","id":"msg_raw","role":"assistant","content":[{"type":"output_text","text":"hello","annotations":[]}]}"#;
+    let message = MessageItem {
+        role: ContextRole::Assistant,
+        content: vec![ContentPart::Text {
+            text: "hello".to_owned(),
+        }],
+        phase: Some(MessagePhase::Commentary),
+        responses_raw_json: Some(raw.to_owned()),
+    };
+    let encoded = serde_json::to_value(&message).expect("encode message");
+    let decoded: MessageItem = serde_json::from_value(encoded).expect("round-trip message");
+
+    assert_eq!(decoded.responses_raw_json.as_deref(), Some(raw));
 }
 
 /// Ensures the optional tool-call replay sidecars are additive for old
@@ -471,6 +499,7 @@ fn representative_events() -> Vec<Event> {
                     text: "Hi there".to_owned(),
                 }],
                 phase: None,
+                responses_raw_json: None,
             })],
             stop_reason: ProviderStopReason::EndTurn,
             error: None,

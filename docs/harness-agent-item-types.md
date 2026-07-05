@@ -22,6 +22,7 @@ struct MessageItem {
     role: ContextRole,
     content: Vec<ContentPart>,
     phase: Option<MessagePhase>,
+    responses_raw_json: Option<String>,
 }
 
 enum ContextRole {
@@ -58,6 +59,10 @@ struct OpaqueProviderItem(CborValue);
 Notes:
 
 - `ContextItem` is the provider-ish item timeline Tau reasons about.
+- `MessageItem::responses_raw_json` is an optional Responses assistant-message
+  replay sidecar. It preserves provider-owned item envelope/content fields for
+  cache and replay fidelity, while typed `role`, `content`, and `phase` remain
+  semantic truth.
 - `ToolCallItem::name` is already the strict Tau-visible tool name. Provider
   names that cannot be normalized to a valid `ToolName` are rejected before
   becoming transcript items.

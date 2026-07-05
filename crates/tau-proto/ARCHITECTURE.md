@@ -61,6 +61,21 @@ prefer this sidecar so key order and numeric spelling remain stable for upstream
 cache identity, and fall back to serializing `value` only for older records or
 items that were not captured from provider JSON.
 
+## Responses assistant message dual representation
+
+`MessageItem.role`, `MessageItem.content`, and `MessageItem.phase` are Tau's
+semantic assistant-message truth. Rendering, prompt display, and any future
+message-level validation must use those typed fields.
+
+`MessageItem.responses_raw_json` is an optional Responses-only replay sidecar for
+assistant `message` output items. Responses request reconstruction may reuse it
+to preserve provider item ids, statuses, annotations, content-part boundaries,
+and unknown fields that are not semantically modeled by Tau. Replay must still
+rebase the provider-visible text and `phase` from the typed fields, and must
+drop the sidecar for non-Responses providers. The sidecar is replay-eligible
+only when it decodes as a Responses assistant `message`; otherwise providers
+must synthesize replay from the typed fields.
+
 ## Event names and routing
 
 `Event` serde `rename` values, `EventName` constants, and `Event::name()` are one contract. When adding or renaming an event, update all three together and update `docs/events.md` when the selected guide should mention the event.

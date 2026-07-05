@@ -61,6 +61,7 @@ fn assistant_finished(
                 text: text.to_owned(),
             }],
             phase: None,
+            responses_raw_json: None,
         })],
         stop_reason,
         originator: PromptOriginator::User,

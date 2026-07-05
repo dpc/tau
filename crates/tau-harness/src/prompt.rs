@@ -692,6 +692,7 @@ pub(crate) fn assemble_prompt_context_from(
                                 },
                                 content: vec![tau_proto::ContentPart::Text { text: message_text }],
                                 phase: None,
+                                responses_raw_json: None,
                             })],
                         },
                     ));
@@ -713,6 +714,7 @@ pub(crate) fn assemble_prompt_context_from(
                                         ),
                                     }],
                                     phase: None,
+                                    responses_raw_json: None,
                                 })],
                             },
                         ));

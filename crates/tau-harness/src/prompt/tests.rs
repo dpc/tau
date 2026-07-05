@@ -12,6 +12,7 @@ fn assistant_message(text: &str) -> ContextItem {
             text: text.to_owned(),
         }],
         phase: None,
+        responses_raw_json: None,
     })
 }
 
@@ -771,6 +772,7 @@ fn assemble_conversation_preserves_agent_phase() {
                     text: "draft answer".to_owned(),
                 }],
                 phase: Some(tau_proto::MessagePhase::Commentary),
+                responses_raw_json: None,
             })],
             stop_reason: tau_proto::ProviderStopReason::EndTurn,
             error: None,

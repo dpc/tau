@@ -471,8 +471,10 @@ fn provider_backend_transport_label(
 /// Applies one decoded `response.*` event when raw JSON is unavailable.
 ///
 /// This compatibility path preserves semantic stream handling but cannot keep
-/// raw provider item JSON for opaque replay. HTTP+SSE, WebSocket, and VCR
-/// replay should call the raw JSON event helper with the original event text.
+/// raw provider item JSON for replay sidecars. HTTP+SSE, WebSocket, and VCR
+/// replay should call the raw JSON event helper with the original event text so
+/// opaque provider items and assistant message items can preserve provider
+/// envelope/content metadata.
 pub fn apply_event(
     state: &mut StreamState,
     event: &serde_json::Value,
@@ -481,7 +483,7 @@ pub fn apply_event(
     apply_event_with_raw_item(state, event, None, on_update)
 }
 
-/// Applies one raw upstream Responses event while preserving opaque item JSON.
+/// Applies one raw upstream Responses event while preserving replay sidecars.
 ///
 /// Returns `Ok(true)` when the event terminates the stream
 /// (`response.completed` / `response.done`), `Ok(false)` to keep reading, or an
@@ -751,7 +753,7 @@ fn apply_output_item_event(
     };
     let output_index = event_output_index(event);
     let mut changed = apply_output_item_tool(state, item, output_index, kind)?;
-    changed |= apply_output_item_message(state, item, output_index, kind)?;
+    changed |= apply_output_item_message(state, item, raw_item_json, output_index, kind)?;
     changed |= apply_output_item_reasoning(state, item, raw_item_json, output_index, kind);
     changed |= apply_output_item_compaction(state, item, raw_item_json, output_index, kind);
     changed |= apply_output_item_unknown(state, item, raw_item_json, output_index, kind);
@@ -840,10 +842,14 @@ fn final_tool_input(item: &serde_json::Value, tool_type: tau_proto::ToolType) ->
 fn apply_output_item_message(
     state: &mut StreamState,
     item: &serde_json::Value,
+    raw_item_json: Option<&str>,
     output_index: usize,
     kind: OutputItemEventKind,
 ) -> Result<bool, LlmError> {
     if item["type"].as_str() != Some("message") {
+        return Ok(false);
+    }
+    if !is_responses_assistant_message(item) {
         return Ok(false);
     }
     state.set_message_phase_at(output_index, parse_phase_from_item(item));
@@ -852,6 +858,11 @@ fn apply_output_item_message(
     {
         state.check_message_snapshot(output_index, &text)?;
         state.set_message_text_at(output_index, &text);
+    }
+    if kind.is_done()
+        && let Some(raw_item_json) = raw_item_json
+    {
+        state.set_message_responses_raw_json_at(output_index, raw_item_json);
     }
     Ok(true)
 }
@@ -1381,12 +1392,8 @@ fn message_text_from_output_item(item: &serde_json::Value) -> Option<String> {
         .into_iter()
         .flatten()
     {
-        let is_text_part = matches!(
-            part.get("type").and_then(serde_json::Value::as_str),
-            Some("output_text") | Some("text")
-        );
-        if is_text_part
-            && let Some(part_text) = part.get("text").and_then(serde_json::Value::as_str)
+        if is_responses_text_part(part)
+            && let Some(part_text) = responses_text_part_text(part)
         {
             text.push_str(part_text);
         }
@@ -1535,30 +1542,191 @@ fn convert_assistant_message(
     supports_phase: bool,
     out: &mut Vec<ResponsesInputItem>,
 ) {
-    let text_parts: Vec<&str> = msg
-        .content
-        .iter()
-        .map(|block| match block {
-            ContentPart::Text { text } => text.as_str(),
-        })
-        .collect();
+    let text_parts = assistant_message_text_parts(msg);
     if text_parts.is_empty() {
+        return;
+    }
+
+    if let Some(raw_item) = convert_raw_assistant_message(msg, supports_phase, &text_parts) {
+        out.push(raw_item);
         return;
     }
 
     let mut item = serde_json::json!({
         "type": "message",
         "role": "assistant",
-        "content": [{
-            "type": "output_text",
-            "text": text_parts.join("\n"),
-            "annotations": [],
-        }],
+        "content": [rebuilt_output_text_part(&text_parts.join("\n"))],
     });
     if let Some(phase) = assistant_message_phase_wire(msg, supports_phase) {
         item["phase"] = serde_json::Value::String(phase.to_owned());
     }
     out.push(ResponsesInputItem::json(item));
+}
+
+fn assistant_message_text_parts(msg: &MessageItem) -> Vec<&str> {
+    msg.content
+        .iter()
+        .map(|block| match block {
+            ContentPart::Text { text } => text.as_str(),
+        })
+        .collect()
+}
+
+fn convert_raw_assistant_message(
+    msg: &MessageItem,
+    supports_phase: bool,
+    text_parts: &[&str],
+) -> Option<ResponsesInputItem> {
+    let raw_json = msg.responses_raw_json.as_deref()?;
+    if raw_assistant_message_matches_replay(msg, supports_phase, text_parts, raw_json) {
+        return ResponsesInputItem::raw_json(raw_json);
+    }
+
+    let mut item: serde_json::Value = serde_json::from_str(raw_json).ok()?;
+    update_raw_assistant_message(&mut item, msg, supports_phase, text_parts)?;
+    Some(ResponsesInputItem::json(item))
+}
+
+fn raw_assistant_message_matches_replay(
+    msg: &MessageItem,
+    supports_phase: bool,
+    text_parts: &[&str],
+    raw_json: &str,
+) -> bool {
+    let Ok(item) = serde_json::from_str::<serde_json::Value>(raw_json) else {
+        return false;
+    };
+    if !is_responses_assistant_message(&item) {
+        return false;
+    }
+    raw_message_text_matches(&item, text_parts)
+        && raw_message_phase_matches(&item, msg, supports_phase)
+}
+
+fn is_responses_assistant_message(item: &serde_json::Value) -> bool {
+    item.get("type").and_then(serde_json::Value::as_str) == Some("message")
+        && item.get("role").and_then(serde_json::Value::as_str) == Some("assistant")
+}
+
+fn raw_message_phase_matches(
+    item: &serde_json::Value,
+    msg: &MessageItem,
+    supports_phase: bool,
+) -> bool {
+    match assistant_message_phase_wire(msg, supports_phase) {
+        Some(expected) => item.get("phase").and_then(serde_json::Value::as_str) == Some(expected),
+        None => item.get("phase").is_none(),
+    }
+}
+
+fn update_raw_assistant_message(
+    item: &mut serde_json::Value,
+    msg: &MessageItem,
+    supports_phase: bool,
+    text_parts: &[&str],
+) -> Option<()> {
+    if !is_responses_assistant_message(item) {
+        return None;
+    }
+
+    let object = item.as_object_mut()?;
+    update_raw_message_text_parts(object, text_parts);
+    match assistant_message_phase_wire(msg, supports_phase) {
+        Some(phase) => {
+            object.insert(
+                "phase".to_owned(),
+                serde_json::Value::String(phase.to_owned()),
+            );
+        }
+        None => {
+            object.remove("phase");
+        }
+    }
+    Some(())
+}
+
+fn raw_message_text_parts(item: &serde_json::Value) -> Option<Vec<&str>> {
+    let content = item.get("content")?.as_array()?;
+    let mut parts = Vec::new();
+    for part in content {
+        if is_responses_text_part(part) {
+            parts.push(part.get("text")?.as_str()?);
+        }
+    }
+    Some(parts)
+}
+
+fn raw_message_text_matches(item: &serde_json::Value, text_parts: &[&str]) -> bool {
+    // Captured Responses items may split one Tau semantic assistant text across
+    // multiple provider content parts. Treat exact part equality and identical
+    // concatenated text as a match so unchanged replay preserves provider-owned
+    // part ids, annotations, and unknown part fields.
+    raw_message_text_parts(item).is_some_and(|raw_parts| {
+        raw_parts == text_parts || raw_parts.concat() == text_parts.join("\n")
+    })
+}
+
+fn update_raw_message_text_parts(
+    object: &mut serde_json::Map<String, serde_json::Value>,
+    text_parts: &[&str],
+) {
+    let Some(content) = object
+        .get_mut("content")
+        .and_then(serde_json::Value::as_array_mut)
+    else {
+        object.insert("content".to_owned(), rebuilt_message_content(text_parts));
+        return;
+    };
+
+    let text_indexes = content
+        .iter()
+        .enumerate()
+        .filter_map(|(index, part)| is_responses_text_part(part).then_some(index))
+        .collect::<Vec<_>>();
+    if text_indexes.len() == text_parts.len() {
+        for (index, text) in text_indexes.into_iter().zip(text_parts.iter().copied()) {
+            if let Some(part) = content[index].as_object_mut() {
+                part.insert(
+                    "text".to_owned(),
+                    serde_json::Value::String(text.to_owned()),
+                );
+            }
+        }
+        return;
+    }
+
+    *content = text_parts
+        .iter()
+        .map(|text| rebuilt_output_text_part(text))
+        .collect();
+}
+
+fn is_responses_text_part(part: &serde_json::Value) -> bool {
+    matches!(
+        part.get("type").and_then(serde_json::Value::as_str),
+        Some("output_text") | Some("text")
+    ) && responses_text_part_text(part).is_some()
+}
+
+fn responses_text_part_text(part: &serde_json::Value) -> Option<&str> {
+    part.get("text").and_then(serde_json::Value::as_str)
+}
+
+fn rebuilt_message_content(text_parts: &[&str]) -> serde_json::Value {
+    serde_json::Value::Array(
+        text_parts
+            .iter()
+            .map(|text| rebuilt_output_text_part(text))
+            .collect(),
+    )
+}
+
+fn rebuilt_output_text_part(text: &str) -> serde_json::Value {
+    serde_json::json!({
+        "type": "output_text",
+        "text": text,
+        "annotations": [],
+    })
 }
 
 fn assistant_message_phase_wire(msg: &MessageItem, supports_phase: bool) -> Option<&'static str> {

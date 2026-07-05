@@ -1693,6 +1693,7 @@ where
                             role: ContextRole::Assistant,
                             content: vec![ContentPart::Text { text }],
                             phase: None,
+                            responses_raw_json: None,
                         })],
                         stop_reason: ProviderStopReason::EndTurn,
                         error: None,

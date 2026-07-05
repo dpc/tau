@@ -7,6 +7,7 @@ fn assistant_message(text: impl Into<String>) -> ContextItem {
         role: ContextRole::Assistant,
         content: vec![ContentPart::Text { text: text.into() }],
         phase: None,
+        responses_raw_json: None,
     })
 }
 

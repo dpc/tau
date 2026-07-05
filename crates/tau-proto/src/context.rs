@@ -138,6 +138,16 @@ pub struct MessageItem {
     /// Optional assistant-message phase metadata.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub phase: Option<MessagePhase>,
+    /// Optional raw Responses assistant message item for replay fidelity.
+    ///
+    /// This sidecar is provider-visible syntax only. Consumers that render,
+    /// validate, or make semantic decisions must use [`Self::role`],
+    /// [`Self::content`], and [`Self::phase`]. The ChatGPT/Codex Responses
+    /// backend may use this to preserve provider item ids, statuses,
+    /// annotations, content-part boundaries, and unknown fields while
+    /// deliberately rebasing replayed text and phase from the typed fields.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub responses_raw_json: Option<String>,
 }
 
 /// One tool call item in the prompt or assistant output timeline.

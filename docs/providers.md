@@ -106,6 +106,12 @@ string in `ToolCallItem.raw_arguments_json` for provider replay/cache identity.
 Replay should prefer the raw sidecar when present and serialize parsed CBOR only
 for old persisted records or calls that never had provider-wire JSON.
 
+Responses providers should likewise preserve raw assistant `message` output
+items in `MessageItem.responses_raw_json` when available. The typed role,
+content text, and phase remain semantic truth; the raw sidecar is a replay/cache
+fidelity aid for provider-owned ids, statuses, annotations, content-part
+boundaries, and unknown fields.
+
 ## Roles
 
 Roles are harness-owned.

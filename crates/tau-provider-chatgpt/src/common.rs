@@ -201,8 +201,12 @@ pub enum OutputItemAccumulator {
 /// Accumulates one assistant message item across text deltas.
 #[derive(Clone, Debug, Default)]
 pub struct MessageAccumulator {
+    /// Accumulated visible assistant text for this output item.
     pub text: String,
+    /// Optional Responses assistant message phase captured for this item.
     pub phase: Option<tau_proto::MessagePhase>,
+    /// Raw Responses assistant message item used for replay fidelity.
+    pub responses_raw_json: Option<String>,
 }
 
 /// Accumulated streaming state shared by both backends.
@@ -362,8 +366,13 @@ impl OutputItemAccumulator {
     fn context_item(&self) -> Option<ContextItem> {
         match self {
             OutputItemAccumulator::Empty => None,
-            OutputItemAccumulator::Message(message) => (!message.text.is_empty())
-                .then(|| assistant_text_item_with_phase(message.text.clone(), message.phase)),
+            OutputItemAccumulator::Message(message) => (!message.text.is_empty()).then(|| {
+                assistant_text_item_with_phase_and_raw(
+                    message.text.clone(),
+                    message.phase,
+                    message.responses_raw_json.clone(),
+                )
+            }),
             OutputItemAccumulator::ToolCall(call) => call.context_item(),
             OutputItemAccumulator::Reasoning(item) => Some(ContextItem::Reasoning(item.clone())),
             OutputItemAccumulator::Compaction(Some(item)) => {
@@ -571,6 +580,11 @@ impl StreamState {
         }
     }
 
+    /// Stores the raw Responses assistant message item for one output index.
+    pub fn set_message_responses_raw_json_at(&mut self, output_index: usize, raw_json: &str) {
+        self.message_at_mut(output_index).responses_raw_json = Some(raw_json.to_owned());
+    }
+
     pub fn append_chat_message_delta(&mut self, delta: &str) {
         let output_index = match self.chat_message_item_index {
             Some(output_index) => output_index,
@@ -752,10 +766,20 @@ pub fn assistant_text_item_with_phase(
     text: impl Into<String>,
     phase: Option<tau_proto::MessagePhase>,
 ) -> ContextItem {
+    assistant_text_item_with_phase_and_raw(text, phase, None)
+}
+
+/// Builds an assistant text item with optional Responses replay sidecar.
+pub fn assistant_text_item_with_phase_and_raw(
+    text: impl Into<String>,
+    phase: Option<tau_proto::MessagePhase>,
+    responses_raw_json: Option<String>,
+) -> ContextItem {
     ContextItem::Message(MessageItem {
         role: ContextRole::Assistant,
         content: vec![ContentPart::Text { text: text.into() }],
         phase,
+        responses_raw_json,
     })
 }
 

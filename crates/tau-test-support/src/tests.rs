@@ -234,6 +234,7 @@ fn deterministic_provider_and_tool_complete_one_vertical_slice() {
                             text: "hello".to_owned(),
                         }],
                         phase: None,
+                        responses_raw_json: None,
                     })],
                 },
             )],
