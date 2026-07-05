@@ -102,6 +102,7 @@ fn startup_uses_exact_notification_subscriptions() {
         tau_proto::EventSelector::Exact(tau_proto::EventName::AGENT_STATE),
         tau_proto::EventSelector::Exact(tau_proto::EventName::SESSION_AGENT_LOADED),
         tau_proto::EventSelector::Exact(tau_proto::EventName::SESSION_AGENT_UNLOADED),
+        tau_proto::EventSelector::Exact(tau_proto::EventName::SESSION_SHUTDOWN),
         tau_proto::EventSelector::Exact(tau_proto::EventName::AGENT_START_ACCEPTED),
         tau_proto::EventSelector::Exact(tau_proto::EventName::UI_PROMPT_DRAFT),
         tau_proto::EventSelector::Exact(tau_proto::EventName::TOOL_RESULT),
@@ -359,6 +360,11 @@ fn session_agent_unloaded(session_id: &str, agent_id: &str) -> Event {
     Event::SessionAgentUnloaded(tau_proto::SessionAgentUnloaded {
         session_id: session_id.into(),
         agent_id: tau_proto::AgentId::parse(agent_id).expect("agent id"),
+    })
+}
+fn session_shutdown(session_id: &str) -> Event {
+    Event::SessionShutdown(tau_proto::SessionShutdown {
+        session_id: session_id.into(),
     })
 }
 fn agent_state(agent_id: &str, state: tau_proto::AgentRuntimeState) -> Event {
@@ -1369,6 +1375,113 @@ fn agent_idle_all_timer_survives_provider_prompt_in_other_session() {
     assert_eq!(osc.value, "agent_idle_all:main");
 }
 
+/// Session shutdown must discard a pending `agent_idle_all` timer for the
+/// closing session. Without this regression guard, EOF idle-draining can emit a
+/// notification for a session the harness has already left.
+#[test]
+fn agent_idle_all_timer_is_cleared_on_session_shutdown() {
+    let mut input = Vec::new();
+    let mut writer = EventWriter::new(&mut input);
+    writer
+        .write_frame(&configure_frame(tau_proto::json_to_cbor(
+            &serde_json::json!({
+                "agent_idle_all": [{
+                    "delay_seconds": 1,
+                    "osc1337": { "key": TEXT_VAR_NAME, "value": "stale all idle" },
+                }],
+            }),
+        )))
+        .expect("write config");
+    writer
+        .write_event(&session_agent_loaded("s1", "main"))
+        .expect("load main");
+    writer
+        .write_event(&agent_state("main", tau_proto::AgentRuntimeState::Running))
+        .expect("main running");
+    writer
+        .write_event(&Event::ProviderResponseFinished(
+            assistant_finished_response_for_agent(
+                "main",
+                "sp-main",
+                "done",
+                tau_proto::PromptOriginator::User,
+            ),
+        ))
+        .expect("finish main");
+    writer
+        .write_event(&agent_state("main", tau_proto::AgentRuntimeState::Idle))
+        .expect("main idle");
+    writer
+        .write_event(&session_shutdown("s1"))
+        .expect("shutdown session");
+    writer.flush().expect("flush");
+
+    let output = run_with_idle_output(input, Duration::from_millis(1));
+
+    let mut reader = EventReader::new(Cursor::new(output));
+    drain_lifecycle(&mut reader);
+    assert!(reader.read_event().expect("read eof").is_none());
+}
+
+/// Session shutdown must also clear the all-idle session/agent membership
+/// tracker. Otherwise a later state transition for the same agent id can arm a
+/// duplicate notification for the already-closed session.
+#[test]
+fn agent_idle_all_tracker_forgets_shutdown_session_membership() {
+    let mut input = Vec::new();
+    let mut writer = EventWriter::new(&mut input);
+    writer
+        .write_frame(&configure_frame(tau_proto::json_to_cbor(
+            &serde_json::json!({
+                "agent_idle_all": [{
+                    "delay_seconds": 0,
+                    "osc1337": { "key": TEXT_VAR_NAME, "value": "all idle" },
+                }],
+            }),
+        )))
+        .expect("write config");
+    writer
+        .write_event(&session_agent_loaded("s1", "main"))
+        .expect("load main in old session");
+    writer
+        .write_event(&agent_state("main", tau_proto::AgentRuntimeState::Running))
+        .expect("main running in old session");
+    writer
+        .write_event(&session_shutdown("s1"))
+        .expect("shutdown old session");
+    writer
+        .write_event(&session_agent_loaded("s2", "main"))
+        .expect("load main in new session");
+    writer
+        .write_event(&agent_state("main", tau_proto::AgentRuntimeState::Running))
+        .expect("main running in new session");
+    writer
+        .write_event(&Event::ProviderResponseFinished(
+            assistant_finished_response_for_agent(
+                "main",
+                "sp-main",
+                "done",
+                tau_proto::PromptOriginator::User,
+            ),
+        ))
+        .expect("finish main in new session");
+    writer
+        .write_event(&agent_state("main", tau_proto::AgentRuntimeState::Idle))
+        .expect("main idle in new session");
+    writer.flush().expect("flush");
+
+    let output = run_with_idle_output(input, Duration::from_millis(1));
+
+    let mut reader = EventReader::new(Cursor::new(output));
+    drain_lifecycle(&mut reader);
+    let all_idle = reader.read_event().expect("read").expect("all idle event");
+    let Event::Osc1337SetUserVar(osc) = all_idle else {
+        panic!("expected all-idle OSC, got {all_idle:?}");
+    };
+    assert_eq!(osc.value, "all idle");
+    assert!(reader.read_event().expect("read eof").is_none());
+}
+
 /// An `agent_idle_all` hook with `agent_summary` spawns a side conversation.
 /// That side prompt must not clear the pending all-idle hook before the
 /// matching `StartAgentResult` arrives.
@@ -1456,6 +1569,114 @@ fn agent_idle_all_summary_side_prompt_does_not_cancel_pending_notification() {
             },
         ))
         .expect("side prompt");
+    writer
+        .write_event(&Event::StartAgentResult(tau_proto::StartAgentResult {
+            query_id: query.query_id,
+            text: "all done".into(),
+            error: None,
+        }))
+        .expect("summary result");
+    writer.flush().expect("flush");
+
+    let text = reader.read_event().expect("read").expect("notification");
+    let Event::Osc1337SetUserVar(osc) = text else {
+        panic!("expected all-idle notification, got {text:?}");
+    };
+    assert_eq!(osc.value, "agent_idle_all:all done");
+
+    writer
+        .write_frame(&disconnect_frame(None))
+        .expect("disconnect");
+    writer.flush().expect("flush");
+    drop(writer);
+    drop(reader);
+    handle.join().expect("ext thread");
+}
+
+/// A shutdown for an unrelated session must not remove the ignore entry for an
+/// accepted all-idle summary side agent. This prevents the later side-agent
+/// load and running events from being tracked as real session work and
+/// canceling the pending summary-backed notification.
+#[test]
+fn unrelated_session_shutdown_preserves_pending_all_idle_summary_ignore() {
+    use std::os::unix::net::UnixStream;
+
+    let (test_side, ext_side) = UnixStream::pair().expect("pair");
+    let ext_reader = ext_side.try_clone().expect("clone");
+    let ext_writer = ext_side;
+    let handle = thread::spawn(move || {
+        run_with_idle_and_summary_timeout(
+            ext_reader,
+            ext_writer,
+            Duration::from_millis(1),
+            Duration::from_secs(5),
+        )
+        .expect("run");
+    });
+
+    let test_writer_stream = test_side.try_clone().expect("clone");
+    let mut writer = EventWriter::new(test_writer_stream);
+    let mut reader = EventReader::new(test_side);
+    drain_lifecycle(&mut reader);
+
+    writer
+        .write_frame(&configure_frame(tau_proto::json_to_cbor(
+            &serde_json::json!({
+                "agent_idle_all": [{
+                    "delay_seconds": 0,
+                    "agent_summary": true,
+                    "osc1337": {
+                        "key": TEXT_VAR_NAME,
+                        "value": "{{hook}}:{{turn.agent_summary}}",
+                    },
+                }],
+            }),
+        )))
+        .expect("write config");
+    writer
+        .write_event(&session_agent_loaded("s1", "main"))
+        .expect("load main");
+    writer
+        .write_event(&agent_state("main", tau_proto::AgentRuntimeState::Running))
+        .expect("main running");
+    writer
+        .write_event(&Event::ProviderResponseFinished(
+            assistant_finished_response_for_agent(
+                "main",
+                "sp-main",
+                "done",
+                tau_proto::PromptOriginator::User,
+            ),
+        ))
+        .expect("finish main");
+    writer
+        .write_event(&agent_state("main", tau_proto::AgentRuntimeState::Idle))
+        .expect("main idle");
+    writer.flush().expect("flush");
+
+    let query = reader.read_event().expect("read").expect("summary query");
+    let Event::StartAgentRequest(query) = query else {
+        panic!("expected StartAgentRequest, got {query:?}");
+    };
+
+    writer
+        .write_event(&Event::StartAgentAccepted(tau_proto::StartAgentAccepted {
+            query_id: query.query_id.clone(),
+            agent_id: tau_proto::AgentId::parse("summary").expect("agent id"),
+        }))
+        .expect("accepted");
+    writer
+        .write_event(&session_shutdown("s2"))
+        .expect("shutdown unrelated session");
+    writer
+        .write_event(&session_agent_loaded("s1", "summary"))
+        .expect("load summary side agent");
+    writer
+        .write_event(&agent_state(
+            "summary",
+            tau_proto::AgentRuntimeState::Running,
+        ))
+        .expect("summary running");
     writer
         .write_event(&Event::StartAgentResult(tau_proto::StartAgentResult {
             query_id: query.query_id,

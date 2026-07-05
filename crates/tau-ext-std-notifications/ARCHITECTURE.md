@@ -49,6 +49,14 @@ terminal background result/error events.
 
 `agent_idle` timers are per completed user turn. `agent_idle_all` timers are keyed by session and are armed when a tracked session transitions from at least one running loaded agent to no running loaded agents. A visible `agent.state = running` clears only pending all-idle timers for sessions containing that running agent. Summary side agents spawned by this extension are correlated through `agent.start_accepted` for pending `idle-*` query ids and ignored for all-idle membership/busy tracking until the matching `agent.start_result`, so they cannot cancel the notification they are producing. `ui.prompt_draft` extends idle timers that have not yet started summary side queries.
 
+`session.shutdown` drops all-idle timers and all-idle membership/busy tracking
+for the closing session. This prevents delayed EOF idle draining or later state
+events for a reused agent id from emitting notifications for a session the
+harness has already left. If the dropped timer was already waiting for a summary
+side-agent result, only that timer's query id is removed from summary-agent
+ignore tracking; unrelated in-flight summary side agents remain ignored until
+their own result arrives.
+
 Idle summary side-agent requests include a bounded copy of the captured user
 prompt and assistant response in the instruction. Do not assume the side
 conversation has inherited the transcript that triggered the notification.

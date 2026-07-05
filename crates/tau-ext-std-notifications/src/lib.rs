@@ -363,6 +363,24 @@ impl SessionIdleTracker {
         (was_busy && session_is_idle).then(|| session_id.clone())
     }
 
+    fn shutdown_session(&mut self, session_id: &tau_proto::SessionId) -> Vec<tau_proto::AgentId> {
+        let Some(agents) = self.session_agents.remove(session_id) else {
+            return Vec::new();
+        };
+        let mut removed_agents = Vec::new();
+        for agent_id in agents {
+            if let Some(sessions) = self.agent_sessions.get_mut(&agent_id) {
+                sessions.remove(session_id);
+                if sessions.is_empty() {
+                    self.agent_sessions.remove(&agent_id);
+                    self.busy_agents.remove(&agent_id);
+                    removed_agents.push(agent_id);
+                }
+            }
+        }
+        removed_agents
+    }
+
     fn mark_busy(&mut self, agent_id: tau_proto::AgentId) {
         self.busy_agents.insert(agent_id);
     }
@@ -630,7 +648,7 @@ impl TauExtension for StdNotificationsExtension {
     }
 }
 
-fn subscribed_events() -> [tau_proto::EventName; 19] {
+fn subscribed_events() -> [tau_proto::EventName; 20] {
     [
         tau_proto::EventName::PROVIDER_PROMPT_SUBMITTED,
         tau_proto::EventName::PROVIDER_RESPONSE_FINISHED,
@@ -642,6 +660,7 @@ fn subscribed_events() -> [tau_proto::EventName; 19] {
         tau_proto::EventName::AGENT_STATE,
         tau_proto::EventName::SESSION_AGENT_LOADED,
         tau_proto::EventName::SESSION_AGENT_UNLOADED,
+        tau_proto::EventName::SESSION_SHUTDOWN,
         tau_proto::EventName::AGENT_START_ACCEPTED,
         // Trailing-edge debounced typing pings from the UI bump the idle
         // deadline so the desktop notification doesn't fire mid-sentence.
@@ -848,6 +867,9 @@ impl NotificationLoop {
             Event::SessionAgentUnloaded(unloaded) => {
                 self.track_unloaded_agent(unloaded, idle_duration);
             }
+            Event::SessionShutdown(shutdown) => {
+                self.track_session_shutdown(&shutdown.session_id);
+            }
             Event::AgentState(state) => self.track_agent_state(state, idle_duration),
             Event::StartAgentAccepted(accepted)
                 if pending_idle_summary_query(&self.idle, &self.idle_all, &accepted.query_id) =>
@@ -872,6 +894,25 @@ impl NotificationLoop {
                 );
             }
             _ => {}
+        }
+    }
+
+    fn track_session_shutdown(&mut self, session_id: &tau_proto::SessionId) {
+        let removed_agents = self.session_idle.shutdown_session(session_id);
+        let removed_summary_queries: HashSet<_> = self
+            .idle_all
+            .iter()
+            .filter(|pending| pending.session_id.as_ref() == Some(session_id))
+            .filter_map(pending_idle_summary_query_id)
+            .map(str::to_owned)
+            .collect();
+        self.idle_all
+            .retain(|pending| pending.session_id.as_ref() != Some(session_id));
+        for agent_id in removed_agents {
+            self.all_idle_context.remove(&agent_id);
+        }
+        for query_id in removed_summary_queries {
+            self.ignored_summary_agents.remove(&query_id);
         }
     }
 
@@ -1664,6 +1705,14 @@ fn idle_summary_query_matches(pending: &PendingIdleHook, expected_query_id: &str
         IdleState::WaitingSummary { query_id, .. } if query_id == expected_query_id
     )
 }
+
+fn pending_idle_summary_query_id(pending: &PendingIdleHook) -> Option<&str> {
+    match &pending.state {
+        IdleState::WaitingSummary { query_id, .. } => Some(query_id),
+        IdleState::WaitingIdle { .. } => None,
+    }
+}
+
 fn idle_hook_name(kind: IdleHookKind) -> &'static str {
     match kind {
         IdleHookKind::Agent => "agent_idle",
