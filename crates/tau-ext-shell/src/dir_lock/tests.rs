@@ -1,4 +1,7 @@
-use super::fs::{registry_generation, registry_waiter_count, set_fail_reap_for_test};
+use super::fs::{
+    liveness_cap_consumes_backoff_for_test, registry_generation, registry_waiter_count,
+    set_fail_reap_for_test, wait_after_observed_wake_for_test, wait_backoff_delays_for_test,
+};
 use super::*;
 
 fn path(value: &str) -> PathBuf {
@@ -704,6 +707,117 @@ fn filesystem_backend_cancellation_removes_registry_waiter() {
         .expect("manual lock c");
 }
 
+/// Ensures filesystem `release_agent` notifies same-process waiters even when
+/// it only cancels a queued waiter and does not release any manual lock.
+#[test]
+fn filesystem_backend_release_agent_notifies_queued_only_cancellation() {
+    let tempdir = tempfile::TempDir::new().expect("tempdir");
+    let manager_a = filesystem_lock_manager(tempdir.path());
+    let manager_b = filesystem_lock_manager(tempdir.path());
+
+    manager_a
+        .acquire_manual("manual-a".into(), agent_id("agent-a"), path("/repo"), || {})
+        .expect("manual lock a");
+    let (tx, rx) = std::sync::mpsc::channel();
+    let waiter = std::thread::spawn({
+        let manager_b = manager_b.clone();
+        move || {
+            let result = manager_b.acquire_manual(
+                "manual-b".into(),
+                agent_id("agent-b"),
+                path("/repo"),
+                || {},
+            );
+            tx.send(result).expect("send waiter result");
+        }
+    });
+    wait_until(|| registry_waiter_count(tempdir.path()).expect("registry") == 1);
+    let wake_generation = manager_b.wake_generation();
+
+    assert_eq!(manager_b.release_agent(&agent_id("agent-b")), 0);
+    assert!(
+        manager_b.wake_generation() > wake_generation,
+        "queued-only filesystem release_agent should notify lock waiters"
+    );
+    assert!(matches!(
+        rx.recv_timeout(Duration::from_millis(50))
+            .expect("waiter should be woken promptly"),
+        Err(ManualLockAcquireError::Cancelled)
+    ));
+    waiter.join().expect("waiter thread");
+}
+
+/// Ensures a same-process filesystem waiter that advances the FIFO queue wakes
+/// later same-process waiters instead of making them wait for adaptive polling.
+#[test]
+fn filesystem_backend_front_waiter_grant_notifies_later_waiter() {
+    let tempdir = tempfile::TempDir::new().expect("tempdir");
+    let manager = filesystem_lock_manager(tempdir.path());
+    manager
+        .acquire_manual(
+            "manual-a".into(),
+            agent_id("agent-a"),
+            path("/repo/a"),
+            || {},
+        )
+        .expect("blocking manual lock");
+
+    let (first_tx, first_rx) = std::sync::mpsc::channel();
+    let first = std::thread::spawn({
+        let manager = manager.clone();
+        move || {
+            let result = manager.acquire_manual(
+                "manual-b".into(),
+                agent_id("agent-b"),
+                path("/repo"),
+                || {},
+            );
+            first_tx.send(result).expect("send first waiter result");
+        }
+    });
+    wait_until(|| registry_waiter_count(tempdir.path()).expect("registry") == 1);
+
+    let (second_tx, second_rx) = std::sync::mpsc::channel();
+    let second = std::thread::spawn({
+        let manager = manager.clone();
+        move || {
+            let result = manager
+                .acquire_auto(
+                    "auto-c".into(),
+                    agent_id("agent-c"),
+                    vec![path("/other")],
+                    || {},
+                )
+                .map(drop);
+            second_tx.send(result).expect("send second waiter result");
+        }
+    });
+    wait_until(|| registry_waiter_count(tempdir.path()).expect("registry") == 2);
+
+    manager
+        .unlock_manual(&agent_id("agent-a"), Path::new("/repo/a"))
+        .expect("unlock blocker");
+    let generation_after_unlock = manager.wake_generation();
+    first_rx
+        .recv_timeout(Duration::from_millis(50))
+        .expect("front waiter should acquire")
+        .expect("front waiter result");
+    assert!(
+        manager.wake_generation() > generation_after_unlock,
+        "front filesystem waiter grant should notify later same-process waiters"
+    );
+    second_rx
+        .recv_timeout(Duration::from_millis(50))
+        .expect("later waiter should be woken promptly")
+        .expect("later waiter result");
+
+    manager
+        .unlock_manual(&agent_id("agent-b"), Path::new("/repo"))
+        .expect("unlock front waiter manual lock");
+    first.join().expect("first waiter thread");
+    second.join().expect("second waiter thread");
+}
+
 /// Ensures filesystem backend shutdown removes this instance's registry records
 /// so a later manager can acquire the same path without waiting.
 #[test]
@@ -942,6 +1056,60 @@ fn filesystem_wait_polling_does_not_bump_registry_generation() {
         waiter.join().expect("waiter"),
         Err(ManualLockAcquireError::Cancelled)
     ));
+}
+
+/// Ensures filesystem waiters do not re-check the cross-process registry on a
+/// fixed 50 ms cadence forever. The first timed wait remains responsive, but
+/// subsequent waits back off while liveness checks keep their own deadline.
+#[test]
+fn filesystem_wait_polling_uses_adaptive_backoff() {
+    let delays = wait_backoff_delays_for_test(8);
+    assert_eq!(delays[0], Duration::from_millis(50));
+    assert_eq!(delays[1], Duration::from_millis(100));
+    assert_eq!(delays[2], Duration::from_millis(200));
+    assert!(
+        delays.windows(2).all(|pair| pair[0] <= pair[1]),
+        "backoff delays should never shrink without an in-process wake"
+    );
+    assert_eq!(
+        *delays.last().expect("delay"),
+        Duration::from_secs(1),
+        "cross-process polling must cap at the slow backoff ceiling"
+    );
+}
+
+/// Ensures same-process wake notifications are paired with a generation
+/// predicate. A wake observed after the registry check but before timed sleep
+/// must skip the full backoff delay instead of losing the notification.
+#[test]
+fn filesystem_wait_polling_skips_sleep_after_observed_wake() {
+    let (elapsed, next_delay) = wait_after_observed_wake_for_test(&DirLockManager::default());
+    assert!(
+        elapsed < Duration::from_millis(50),
+        "observed same-process wake must not sleep for the cross-process backoff: {elapsed:?}"
+    );
+    assert_eq!(
+        next_delay,
+        Duration::from_millis(50),
+        "same-process wake should reset the next cross-process poll delay"
+    );
+}
+
+/// Ensures the liveness deadline caps the actual timed wait without resetting
+/// or preserving the current cross-process backoff step.
+#[test]
+fn filesystem_wait_polling_liveness_cap_consumes_backoff() {
+    let (selected, next_delay) = liveness_cap_consumes_backoff_for_test();
+    assert_eq!(
+        selected,
+        Duration::from_millis(5),
+        "the liveness deadline should cap the selected wait duration"
+    );
+    assert_eq!(
+        next_delay,
+        Duration::from_secs(1),
+        "a liveness-capped timed wait should still consume one max-backoff step"
+    );
 }
 
 /// Ensures backend reconfiguration fails closed while a memory-backend

@@ -62,6 +62,12 @@ reconfiguration preserving the previous backend on failure, automatic guards
 surviving backend disable/reconfiguration until drop, and read-only polling that
 does not rewrite the registry.
 
+Filesystem-backend wait tests should cover the adaptive cross-process polling
+schedule, liveness-deadline caps, and same-process condition-variable wake/reset
+behavior. Same-process release, cancellation, shutdown, and backend-swap
+notifications must be predicate-backed so a wake between registry observation and
+timed sleep cannot be lost behind the cross-process backoff ceiling.
+
 
 ## Scheduler coverage
 

@@ -58,6 +58,16 @@ covering manual-lock ownership at the moment the automatic lock is granted;
 otherwise it falls back to read-only execution instead of running under stale
 coverage.
 
+Filesystem-backend waiters keep the process-local condition-variable wake path
+used by the memory backend for same-process releases and cancellation. These
+notifications are paired with a process-local wake generation under the
+`DirLockManager` state mutex, so a notification that arrives between a registry
+check and the timed wait cannot be lost. For cross-process registry changes,
+where there is no portable peer wake primitive, waiters use adaptive timed
+re-checks starting at 50 ms and doubling to a 1 s ceiling. The separate
+abandoned-lock liveness deadline caps actual sleeps; timed sleeps consume
+backoff, while same-process condition-variable notifications reset it.
+
 ## Shell process lifecycle
 
 Shell execution keeps foreground child ownership in the coordinator that reports

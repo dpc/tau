@@ -178,10 +178,22 @@ struct DirLockInner {
 
 #[derive(Debug, Default)]
 struct LockState {
+    /// Process-local wake generation paired with `DirLockInner::changed`.
+    ///
+    /// Filesystem-backend waiters use this as the condvar predicate so
+    /// same-process notifications cannot be lost between a registry check and a
+    /// timed cross-process re-check sleep.
+    wake_generation: u64,
+    /// Manual locks owned by agents in this process when using the memory
+    /// backend.
     manual: Vec<ManualLock>,
+    /// Automatic writer locks currently held by mutating tool calls.
     automatic: Vec<AutomaticLock>,
+    /// FIFO queue of blocked memory-backend acquisitions.
     waiters: VecDeque<Waiter>,
+    /// Next FIFO waiter id, unique within this process-local state.
     next_waiter_id: u64,
+    /// Next automatic lock id, unique within this process-local state.
     next_auto_id: u64,
 }
 
@@ -293,7 +305,7 @@ impl DirLockManager {
                     .take();
                 if let Some(backend) = removed_backend {
                     let _ = backend.shutdown();
-                    self.inner.changed.notify_all();
+                    self.notify_lock_waiters();
                 }
                 Ok(())
             }
@@ -333,7 +345,7 @@ impl DirLockManager {
                 if let Some(old_backend) = old_backend {
                     let _ = old_backend.shutdown();
                 }
-                self.inner.changed.notify_all();
+                self.notify_lock_waiters();
                 let backend = self
                     .inner
                     .fs_backend
@@ -394,6 +406,23 @@ impl DirLockManager {
             .lock()
             .expect("dir lock backend poisoned")
             .clone()
+    }
+
+    fn wake_generation(&self) -> u64 {
+        self.inner
+            .state
+            .lock()
+            .expect("dir lock state poisoned")
+            .wake_generation
+    }
+
+    fn notify_lock_waiters(&self) {
+        self.inner
+            .state
+            .lock()
+            .expect("dir lock state poisoned")
+            .record_wake();
+        self.inner.changed.notify_all();
     }
 
     /// Acquire an automatic update lock for one mutating tool invocation.
@@ -511,6 +540,7 @@ impl DirLockManager {
                 let queued = state.waiters.front().expect("position says front exists");
                 if require_manual_cover && !state.manual_covers(&queued.owner, &queued.dirs) {
                     state.waiters.pop_front().expect("front exists");
+                    state.record_wake();
                     self.inner.changed.notify_all();
                     return Err(LockAcquireError::NotCovered);
                 }
@@ -532,6 +562,7 @@ impl DirLockManager {
                         policy.abandoned_after,
                     ) {
                         state.waiters.pop_front().expect("front exists");
+                        state.record_wake();
                         self.inner.changed.notify_all();
                         return Err(LockAcquireError::Abandoned(blocker));
                     }
@@ -599,6 +630,7 @@ impl DirLockManager {
         }
         if state.can_grant_now(&owner, &dirs, WaitKind::Manual) {
             state.add_manual(owner, dirs, Instant::now());
+            state.record_wake();
             self.inner.changed.notify_all();
             drop(admission_guard);
             return Ok(());
@@ -622,12 +654,14 @@ impl DirLockManager {
                     state.manual_lock_owned_overlapping(&queued.owner, &queued.dirs)
                 {
                     state.waiters.pop_front().expect("front exists");
+                    state.record_wake();
                     self.inner.changed.notify_all();
                     return Err(ManualLockAcquireError::AlreadyHeld { dir: held_dir });
                 }
                 if !state.has_conflict(&queued.owner, &queued.dirs, queued.kind) {
                     let queued = state.waiters.pop_front().expect("front exists");
                     state.add_manual(queued.owner, queued.dirs, Instant::now());
+                    state.record_wake();
                     self.inner.changed.notify_all();
                     return Ok(());
                 }
@@ -641,6 +675,7 @@ impl DirLockManager {
                         policy.abandoned_after,
                     ) {
                         state.waiters.pop_front().expect("front exists");
+                        state.record_wake();
                         self.inner.changed.notify_all();
                         return Err(ManualLockAcquireError::Abandoned(blocker));
                     }
@@ -675,7 +710,7 @@ impl DirLockManager {
         if let Some(backend) = self.fs_backend() {
             let result = backend.unlock_manual(owner, dir, scope);
             if result.is_ok() {
-                self.inner.changed.notify_all();
+                self.notify_lock_waiters();
             }
             return result;
         }
@@ -691,6 +726,7 @@ impl DirLockManager {
             ));
         };
         state.manual.remove(pos);
+        state.record_wake();
         self.inner.changed.notify_all();
         Ok(())
     }
@@ -702,6 +738,7 @@ impl DirLockManager {
         state.manual.clear();
         state.waiters.clear();
         if 0 < removed + cancelled {
+            state.record_wake();
             self.inner.changed.notify_all();
         }
         (removed, cancelled)
@@ -712,7 +749,7 @@ impl DirLockManager {
         if let Some(backend) = self.fs_backend() {
             let removed = backend.cancel_waiting_call(call_id);
             if removed {
-                self.inner.changed.notify_all();
+                self.notify_lock_waiters();
             }
             return removed;
         }
@@ -721,6 +758,7 @@ impl DirLockManager {
         state.waiters.retain(|waiter| &waiter.call_id != call_id);
         let removed = state.waiters.len() != before;
         if removed {
+            state.record_wake();
             self.inner.changed.notify_all();
         }
         removed
@@ -738,7 +776,7 @@ impl DirLockManager {
         if let Some(backend) = self.fs_backend() {
             let removed = backend.force_unlock_overlapping(dir)?;
             if !removed.is_empty() {
-                self.inner.changed.notify_all();
+                self.notify_lock_waiters();
             }
             return Ok(removed);
         }
@@ -755,6 +793,7 @@ impl DirLockManager {
             !should_remove
         });
         if !removed.is_empty() {
+            state.record_wake();
             self.inner.changed.notify_all();
         }
         Ok(removed)
@@ -763,9 +802,9 @@ impl DirLockManager {
     /// Release all manual locks owned by an unloaded agent.
     pub(crate) fn release_agent(&self, owner: &AgentId) -> usize {
         if let Some(backend) = self.fs_backend() {
-            let removed = backend.release_agent(owner);
-            if 0 < removed {
-                self.inner.changed.notify_all();
+            let (removed, cancelled) = backend.release_agent(owner);
+            if 0 < removed + cancelled {
+                self.notify_lock_waiters();
             }
             return removed;
         }
@@ -777,6 +816,7 @@ impl DirLockManager {
         let removed = before_manual - state.manual.len();
         let cancelled = before_waiters - state.waiters.len();
         if 0 < removed + cancelled {
+            state.record_wake();
             self.inner.changed.notify_all();
         }
         removed
@@ -791,7 +831,7 @@ impl DirLockManager {
     pub(crate) fn shutdown(&self) -> (usize, usize) {
         if let Some(backend) = self.fs_backend() {
             let result = backend.shutdown();
-            self.inner.changed.notify_all();
+            self.notify_lock_waiters();
             return result;
         }
         let mut state = self.inner.state.lock().expect("dir lock state poisoned");
@@ -800,6 +840,7 @@ impl DirLockManager {
         state.manual.clear();
         state.waiters.clear();
         if 0 < removed + cancelled {
+            state.record_wake();
             self.inner.changed.notify_all();
         }
         (removed, cancelled)
@@ -810,7 +851,7 @@ impl DirLockManager {
     pub(crate) fn disable(&self) -> (usize, usize) {
         if let Some(backend) = self.fs_backend() {
             let result = backend.shutdown();
-            self.inner.changed.notify_all();
+            self.notify_lock_waiters();
             return result;
         }
         let mut state = self.inner.state.lock().expect("dir lock state poisoned");
@@ -819,6 +860,7 @@ impl DirLockManager {
         state.manual.clear();
         state.waiters.clear();
         if 0 < removed_manual || 0 < cancelled_waiters {
+            state.record_wake();
             self.inner.changed.notify_all();
         }
         (removed_manual, cancelled_waiters)
@@ -827,7 +869,7 @@ impl DirLockManager {
     fn release_auto(&self, token: &AutoLockToken) {
         if let AutoLockToken::Filesystem { backend, id } = token {
             backend.release_auto(*id);
-            self.inner.changed.notify_all();
+            self.notify_lock_waiters();
             return;
         }
         let AutoLockToken::Memory(id) = token else {
@@ -838,6 +880,7 @@ impl DirLockManager {
         state.automatic.retain(|lock| lock.id != *id);
         if state.automatic.len() != before {
             state.mark_auto_released(*id, Instant::now());
+            state.record_wake();
             self.inner.changed.notify_all();
         }
     }
@@ -883,6 +926,10 @@ fn pause_configure_after_active_check_for_test() {
 fn pause_configure_after_active_check_for_test() {}
 
 impl LockState {
+    fn record_wake(&mut self) {
+        self.wake_generation = self.wake_generation.saturating_add(1);
+    }
+
     fn push_waiter(
         &mut self,
         call_id: ToolCallId,

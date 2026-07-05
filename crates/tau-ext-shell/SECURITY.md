@@ -32,6 +32,12 @@ used for abandoned-lock diagnostics, not process liveness. Automatic lock guards
 keep the lease and release handle that granted them alive until the running tool
 drops the guard, including across backend reconfiguration.
 
+Filesystem-backend waiters may use bounded adaptive timed registry re-checks for
+cross-process lock availability, but same-process release, cancellation,
+shutdown, and backend-swap paths remain notification-driven through a
+predicate-backed condition variable so cleanup does not wait for the
+cross-process polling ceiling.
+
 The filesystem backend remains advisory. If ext-shell exits while a spawned shell
 descendant deliberately detaches and keeps mutating files, the lease is released
 and another Tau instance may proceed while that detached process is still

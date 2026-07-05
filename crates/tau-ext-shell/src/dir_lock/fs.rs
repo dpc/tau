@@ -18,7 +18,8 @@ use super::{
 };
 
 const FS_REGISTRY_VERSION: u32 = 1;
-const FS_POLL_INTERVAL: Duration = Duration::from_millis(50);
+const FS_WAIT_POLL_INITIAL_INTERVAL: Duration = Duration::from_millis(50);
+const FS_WAIT_POLL_MAX_INTERVAL: Duration = Duration::from_secs(1);
 
 #[cfg(test)]
 static FAIL_REAP_FOR_TEST: std::sync::LazyLock<std::sync::Mutex<Option<PathBuf>>> =
@@ -212,8 +213,13 @@ impl FsLockBackend {
         let mut waiter_id = None;
         let mut on_wait = Some(on_wait);
         let mut next_liveness_check = Instant::now() + policy.liveness_interval;
+        let mut wait_backoff = FsWaitBackoff::default();
         let mut admission_guard = Some(admission_guard);
         loop {
+            // Snapshot before registry observation so same-process wakes that
+            // land between the registry check and timed sleep are not lost.
+            let observed_wake_generation = request.manager.wake_generation();
+            let mut wake_waiters = false;
             let outcome = with_registry_lock(&self.state_dir, |registry| {
                 self.reap_dead_instances(registry)?;
                 if waiter_id.is_some()
@@ -221,10 +227,12 @@ impl FsLockBackend {
                     && !request.manager.is_current_fs_backend(self)
                 {
                     registry.remove_waiter(waiter_id);
+                    wake_waiters = true;
                     return Ok(FsAcquireOutcome::Cancelled);
                 }
                 if request.require_manual_cover && !registry.manual_covers(&owner, &dirs) {
                     registry.remove_waiter(waiter_id);
+                    wake_waiters = waiter_id.is_some();
                     return Ok(FsAcquireOutcome::NotCovered);
                 }
                 if !registry.manual_covers(&owner, &dirs)
@@ -255,6 +263,7 @@ impl FsLockBackend {
                     {
                         registry.waiters.pop_front();
                         registry.bump();
+                        wake_waiters = true;
                         return Ok(FsAcquireOutcome::NotCovered);
                     }
                     if !registry.has_conflict(&queued.owner, &queued.dirs, queued.kind) {
@@ -263,6 +272,7 @@ impl FsLockBackend {
                         }
                         let queued = registry.waiters.pop_front().expect("front waiter");
                         let id = registry.add_auto(queued.owner, queued.dirs, now_ms());
+                        wake_waiters = true;
                         return Ok(FsAcquireOutcome::Granted(id));
                     }
                     if next_liveness_check <= Instant::now()
@@ -276,6 +286,7 @@ impl FsLockBackend {
                     {
                         registry.waiters.pop_front();
                         registry.bump();
+                        wake_waiters = true;
                         return Ok(FsAcquireOutcome::Abandoned(blocker));
                     }
                 }
@@ -285,6 +296,9 @@ impl FsLockBackend {
                 cleanup_waiter_after_backend_error(self, waiter_id);
                 LockAcquireError::Backend(error)
             })?;
+            if wake_waiters {
+                request.manager.notify_lock_waiters();
+            }
             drop(admission_guard.take());
             match outcome {
                 FsAcquireOutcome::Granted(id) => {
@@ -314,7 +328,12 @@ impl FsLockBackend {
             if next_liveness_check <= Instant::now() {
                 next_liveness_check = Instant::now() + policy.liveness_interval;
             }
-            sleep_for_lock_poll(request.manager, next_liveness_check);
+            wait_for_lock_change(
+                request.manager,
+                next_liveness_check,
+                &mut wait_backoff,
+                observed_wake_generation,
+            );
         }
     }
 
@@ -333,8 +352,13 @@ impl FsLockBackend {
         let mut waiter_id = None;
         let mut on_wait = Some(on_wait);
         let mut next_liveness_check = Instant::now() + policy.liveness_interval;
+        let mut wait_backoff = FsWaitBackoff::default();
         let mut admission_guard = Some(admission_guard);
         loop {
+            // Snapshot before registry observation so same-process wakes that
+            // land between the registry check and timed sleep are not lost.
+            let observed_wake_generation = request.manager.wake_generation();
+            let mut wake_waiters = false;
             let outcome = with_registry_lock(&self.state_dir, |registry| {
                 self.reap_dead_instances(registry)?;
                 if waiter_id.is_some()
@@ -342,10 +366,12 @@ impl FsLockBackend {
                     && !request.manager.is_current_fs_backend(self)
                 {
                     registry.remove_waiter(waiter_id);
+                    wake_waiters = true;
                     return Ok(FsManualOutcome::Cancelled);
                 }
                 if let Some(held_dir) = registry.manual_lock_owned_overlapping(&owner, &dirs) {
                     registry.remove_waiter(waiter_id);
+                    wake_waiters = waiter_id.is_some();
                     return Ok(FsManualOutcome::AlreadyHeld(held_dir));
                 }
                 if waiter_id.is_none() && registry.can_grant_now(&owner, &dirs, WaitKind::Manual) {
@@ -370,6 +396,7 @@ impl FsLockBackend {
                     {
                         registry.waiters.pop_front();
                         registry.bump();
+                        wake_waiters = true;
                         return Ok(FsManualOutcome::AlreadyHeld(held_dir));
                     }
                     if !registry.has_conflict(&queued.owner, &queued.dirs, queued.kind) {
@@ -378,6 +405,7 @@ impl FsLockBackend {
                         }
                         let queued = registry.waiters.pop_front().expect("front waiter");
                         registry.add_manual(queued.owner, queued.dirs, now_ms());
+                        wake_waiters = true;
                         return Ok(FsManualOutcome::Granted);
                     }
                     if next_liveness_check <= Instant::now()
@@ -391,6 +419,7 @@ impl FsLockBackend {
                     {
                         registry.waiters.pop_front();
                         registry.bump();
+                        wake_waiters = true;
                         return Ok(FsManualOutcome::Abandoned(blocker));
                     }
                 }
@@ -400,6 +429,9 @@ impl FsLockBackend {
                 cleanup_waiter_after_backend_error(self, waiter_id);
                 ManualLockAcquireError::Backend(error)
             })?;
+            if wake_waiters {
+                request.manager.notify_lock_waiters();
+            }
             match outcome {
                 FsManualOutcome::Granted => return Ok(()),
                 FsManualOutcome::Cancelled => return Err(ManualLockAcquireError::Cancelled),
@@ -422,7 +454,12 @@ impl FsLockBackend {
             if next_liveness_check <= Instant::now() {
                 next_liveness_check = Instant::now() + policy.liveness_interval;
             }
-            sleep_for_lock_poll(request.manager, next_liveness_check);
+            wait_for_lock_change(
+                request.manager,
+                next_liveness_check,
+                &mut wait_backoff,
+                observed_wake_generation,
+            );
         }
     }
 
@@ -509,7 +546,7 @@ impl FsLockBackend {
         })
     }
 
-    pub(super) fn release_agent(&self, agent_id: &AgentId) -> usize {
+    pub(super) fn release_agent(&self, agent_id: &AgentId) -> (usize, usize) {
         with_registry_lock(&self.state_dir, |registry| {
             let before_manual = registry.manual.len();
             let before_waiters = registry.waiters.len();
@@ -521,12 +558,13 @@ impl FsLockBackend {
                     && &waiter.owner.agent_id == agent_id)
             });
             let removed = before_manual - registry.manual.len();
-            if removed + before_waiters - registry.waiters.len() > 0 {
+            let cancelled = before_waiters - registry.waiters.len();
+            if removed + cancelled > 0 {
                 registry.bump();
             }
-            Ok(removed)
+            Ok((removed, cancelled))
         })
-        .unwrap_or(0)
+        .unwrap_or((0, 0))
     }
 
     pub(super) fn shutdown(&self) -> (usize, usize) {
@@ -793,15 +831,101 @@ impl FsRegistry {
     }
 }
 
-fn sleep_for_lock_poll(manager: &DirLockManager, next_liveness_check: Instant) {
-    let now = Instant::now();
-    let wait_for = FS_POLL_INTERVAL.min(next_liveness_check.saturating_duration_since(now));
+/// Adaptive delay used when filesystem waiters must re-check cross-process
+/// registry state without a peer notification.
+#[derive(Debug)]
+struct FsWaitBackoff {
+    /// Duration for the next timed cross-process registry re-check.
+    next_delay: Duration,
+}
+
+impl Default for FsWaitBackoff {
+    fn default() -> Self {
+        Self {
+            next_delay: FS_WAIT_POLL_INITIAL_INTERVAL,
+        }
+    }
+}
+
+impl FsWaitBackoff {
+    /// Return the current delay, then grow future cross-process waits up to the
+    /// configured ceiling.
+    fn advance(&mut self) -> Duration {
+        let current = self.next_delay;
+        self.next_delay = (self.next_delay * 2).min(FS_WAIT_POLL_MAX_INTERVAL);
+        current
+    }
+
+    /// Reset timed polling after an in-process condition-variable wake.
+    fn reset(&mut self) {
+        self.next_delay = FS_WAIT_POLL_INITIAL_INTERVAL;
+    }
+}
+
+fn wait_for_lock_change(
+    manager: &DirLockManager,
+    next_liveness_check: Instant,
+    backoff: &mut FsWaitBackoff,
+    observed_wake_generation: u64,
+) {
     let guard = manager.inner.state.lock().expect("dir lock state poisoned");
-    let _ = manager
+    if guard.wake_generation != observed_wake_generation {
+        backoff.reset();
+        return;
+    }
+    let now = Instant::now();
+    // Timed waits intentionally consume backoff even when the liveness deadline
+    // caps the actual sleep. The liveness deadline remains the faster cadence in
+    // that case, while normal cross-process availability checks back off.
+    let wait_for =
+        select_wait_duration(backoff, next_liveness_check.saturating_duration_since(now));
+    let (guard, wait_timeout) = manager
         .inner
         .changed
-        .wait_timeout(guard, wait_for)
+        .wait_timeout_while(guard, wait_for, |state| {
+            state.wake_generation == observed_wake_generation
+        })
         .expect("dir lock state poisoned");
+    if guard.wake_generation != observed_wake_generation || !wait_timeout.timed_out() {
+        backoff.reset();
+    }
+}
+
+fn select_wait_duration(backoff: &mut FsWaitBackoff, until_liveness_check: Duration) -> Duration {
+    backoff.advance().min(until_liveness_check)
+}
+
+#[cfg(test)]
+pub(super) fn wait_backoff_delays_for_test(count: usize) -> Vec<Duration> {
+    let mut backoff = FsWaitBackoff::default();
+    (0..count).map(|_| backoff.advance()).collect()
+}
+
+#[cfg(test)]
+pub(super) fn wait_after_observed_wake_for_test(manager: &DirLockManager) -> (Duration, Duration) {
+    let observed_wake_generation = manager.wake_generation();
+    let mut backoff = FsWaitBackoff {
+        next_delay: FS_WAIT_POLL_MAX_INTERVAL,
+    };
+    manager.notify_lock_waiters();
+    let started = Instant::now();
+    wait_for_lock_change(
+        manager,
+        started + Duration::from_secs(60),
+        &mut backoff,
+        observed_wake_generation,
+    );
+    (started.elapsed(), backoff.advance())
+}
+
+#[cfg(test)]
+pub(super) fn liveness_cap_consumes_backoff_for_test() -> (Duration, Duration) {
+    let mut backoff = FsWaitBackoff {
+        next_delay: Duration::from_millis(500),
+    };
+    let selected = select_wait_duration(&mut backoff, Duration::from_millis(5));
+    let next_delay = backoff.advance();
+    (selected, next_delay)
 }
 
 fn with_registry_lock<T>(
