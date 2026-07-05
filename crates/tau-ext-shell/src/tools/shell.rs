@@ -863,17 +863,34 @@ fn dispatch_user_shell_command_blocking(
         command_id: tau_proto::ShellCommandId,
         target_agent_id: Option<tau_proto::AgentId>,
         tx: Output,
-    ) -> std::thread::JoinHandle<UserStreamCapture> {
+        capture: std::sync::Arc<std::sync::Mutex<UserStreamCapture>>,
+        stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        progress_gate: std::sync::Arc<std::sync::Mutex<()>>,
+        done_tx: mpsc::Sender<()>,
+    ) {
         std::thread::spawn(move || {
-            let mut capture = UserStreamCapture::default();
             let mut buf = [0u8; 4096];
             loop {
                 match pipe.read(&mut buf) {
                     Ok(0) | Err(_) => break,
                     Ok(n) => {
                         let chunk = String::from_utf8_lossy(&buf[..n]).into_owned();
-                        capture.push_chunk(&chunk);
-                        if let Some(chunk) = capture.progress_chunk(&chunk) {
+                        if stop.load(std::sync::atomic::Ordering::SeqCst) {
+                            break;
+                        }
+                        let progress_chunk = {
+                            let mut capture =
+                                capture.lock().unwrap_or_else(|error| error.into_inner());
+                            capture.push_chunk(&chunk);
+                            capture.progress_chunk(&chunk)
+                        };
+                        if let Some(chunk) = progress_chunk {
+                            let _progress_guard = progress_gate
+                                .lock()
+                                .unwrap_or_else(|error| error.into_inner());
+                            if stop.load(std::sync::atomic::Ordering::SeqCst) {
+                                break;
+                            }
                             let _ = tx.send(HarnessInputMessage::emit(
                                 Event::ShellCommandProgress(tau_proto::ShellCommandProgress {
                                     command_id: command_id.clone(),
@@ -886,86 +903,98 @@ fn dispatch_user_shell_command_blocking(
                     }
                 }
             }
-            capture
-        })
+            let _ = done_tx.send(());
+        });
     }
 
     let stdout_pipe = child.stdout.take();
     let stderr_pipe = child.stderr.take();
-    let stdout_handle = stdout_pipe.map(|p| {
+    let stdout = std::sync::Arc::new(std::sync::Mutex::new(UserStreamCapture::default()));
+    let stderr = std::sync::Arc::new(std::sync::Mutex::new(UserStreamCapture::default()));
+    let stop_pipe_readers = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let progress_gate = std::sync::Arc::new(std::sync::Mutex::new(()));
+    let (pipe_done_tx, pipe_done_rx) = mpsc::channel();
+    if let Some(p) = stdout_pipe {
         pump(
             p,
             tau_proto::ShellStream::Stdout,
             cmd.command_id.clone(),
             cmd.target_agent_id.clone(),
             tx.clone(),
-        )
-    });
-    let stderr_handle = stderr_pipe.map(|p| {
+            std::sync::Arc::clone(&stdout),
+            std::sync::Arc::clone(&stop_pipe_readers),
+            std::sync::Arc::clone(&progress_gate),
+            pipe_done_tx.clone(),
+        );
+    } else {
+        let _ = pipe_done_tx.send(());
+    }
+    if let Some(p) = stderr_pipe {
         pump(
             p,
             tau_proto::ShellStream::Stderr,
             cmd.command_id.clone(),
             cmd.target_agent_id.clone(),
             tx.clone(),
-        )
-    });
+            std::sync::Arc::clone(&stderr),
+            std::sync::Arc::clone(&stop_pipe_readers),
+            std::sync::Arc::clone(&progress_gate),
+            pipe_done_tx,
+        );
+    } else {
+        let _ = pipe_done_tx.send(());
+    }
 
     let timeout = std::time::Duration::from_secs(timeout_secs);
+    let child_wait = NonUnixChildWait::start(&child, timeout, Some(cancel_rx));
     let pid = child.id();
     debug!(
         pid,
         timeout_ms = timeout.as_millis(),
         "waiting for user shell child"
     );
-    let (done_tx, done_rx) = mpsc::channel::<Option<std::process::ExitStatus>>();
-    let waiter = std::thread::spawn(move || {
-        let status = child.wait().ok();
-        let _ = done_tx.send(status);
-    });
-
-    let started = std::time::Instant::now();
-    let (exit_code, status_note, cancelled) = loop {
-        if cancel_rx.try_recv().is_ok() {
-            #[cfg(unix)]
-            kill_process_group_by_pid(pid);
-            let status = done_rx.recv().ok().flatten();
-            let _ = waiter.join();
-            break (
-                status.and_then(|s| s.code()),
-                Some("command cancelled".to_owned()),
-                true,
-            );
-        }
-        let elapsed = started.elapsed();
-        if timeout <= elapsed {
-            #[cfg(unix)]
-            kill_process_group_by_pid(pid);
-            let status = done_rx.recv().ok().flatten();
-            let _ = waiter.join();
-            break (
-                status.and_then(|s| s.code()),
-                Some(format!("command killed after {timeout_secs}s timeout")),
-                true,
-            );
-        }
-        let remaining = timeout - elapsed;
-        match done_rx.recv_timeout(remaining.min(std::time::Duration::from_millis(25))) {
-            Ok(Some(status)) => break (status.code(), None, false),
-            Ok(None) => break (None, Some("wait failed".to_owned()), false),
-            Err(mpsc::RecvTimeoutError::Timeout) => {}
-            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                break (None, Some("waiter thread vanished".to_owned()), false);
+    let child_event = child_wait.recv();
+    let (status, status_note, cancelled) = match child_event {
+        NonUnixChildEvent::Exited => (child.wait().ok(), None, false),
+        NonUnixChildEvent::Cancelled => match child.try_wait() {
+            Ok(Some(status)) => (Some(status), None, false),
+            _ => {
+                let _ = child.kill();
+                (
+                    child.wait().ok(),
+                    Some("command cancelled".to_owned()),
+                    true,
+                )
             }
+        },
+        NonUnixChildEvent::TimedOut => match child.try_wait() {
+            Ok(Some(status)) => (Some(status), None, false),
+            _ => {
+                let _ = child.kill();
+                (
+                    child.wait().ok(),
+                    Some(format!("command killed after {timeout_secs}s timeout")),
+                    true,
+                )
+            }
+        },
+        NonUnixChildEvent::WaitFailed => {
+            let _ = child.kill();
+            (child.wait().ok(), Some("wait failed".to_owned()), false)
         }
     };
+    child_wait.join_exit_and_timeout_watchers();
+    drain_nonunix_pipe_captures(&pipe_done_rx, NON_UNIX_PIPE_CAPTURE_COUNT);
+    {
+        let _progress_guard = progress_gate
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        stop_pipe_readers.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+    let exit_code = status.and_then(|status| status.code());
 
-    let stdout = stdout_handle
-        .map(|h| h.join().unwrap_or_default())
-        .unwrap_or_default();
-    let stderr = stderr_handle
-        .map(|h| h.join().unwrap_or_default())
-        .unwrap_or_default();
+    let stdout = std::mem::take(&mut *stdout.lock().unwrap_or_else(|error| error.into_inner()));
+    let stderr = std::mem::take(&mut *stderr.lock().unwrap_or_else(|error| error.into_inner()));
     let output = merged_user_shell_output(stdout, stderr, status_note);
     send_user_shell_finished(cmd, output, exit_code, cancelled, tx);
 }
@@ -991,10 +1020,13 @@ fn append_guaranteed_output_truncated_marker(output: &mut String) {
     output.push_str(USER_OUTPUT_TRUNCATED_MARKER);
 }
 
-#[cfg(unix)]
 const SHELL_WAIT_READ_CHUNK_BYTES: usize = 8192;
 #[cfg(unix)]
 const SHELL_WAIT_DRAIN_AFTER_DONE: std::time::Duration = std::time::Duration::from_millis(50);
+#[cfg(not(unix))]
+const NON_UNIX_PIPE_DRAIN_AFTER_DONE: std::time::Duration = std::time::Duration::from_millis(50);
+#[cfg(not(unix))]
+const NON_UNIX_PIPE_CAPTURE_COUNT: usize = 2;
 
 #[cfg(unix)]
 fn shell_wait_set_nonblocking(fd: std::os::fd::RawFd) {
@@ -1457,9 +1489,8 @@ fn wait_with_timeout(
 /// Wait for a child process with a timeout, preserving output even when
 /// the timeout is reached.
 ///
-/// Non-Unix keeps the older blocking-pipe fallback. The crate's process-group
-/// isolation is Unix-only, so the hard timeout/read-loop guarantees are
-/// provided by the Unix implementation above.
+/// Non-Unix waits for child/cancel/deadline events without fixed polling and
+/// performs only a bounded drain after the child reaches a terminal state.
 #[cfg(not(unix))]
 fn wait_with_timeout(
     mut child: std::process::Child,
@@ -1469,47 +1500,234 @@ fn wait_with_timeout(
     let stdout_pipe = child.stdout.take();
     let stderr_pipe = child.stderr.take();
 
-    let stdout_handle = std::thread::spawn(move || read_pipe(stdout_pipe, OutputStream::Stdout));
-    let stderr_handle = std::thread::spawn(move || read_pipe(stderr_pipe, OutputStream::Stderr));
+    let output = std::sync::Arc::new(std::sync::Mutex::new(CapturedOutput::default()));
+    let stop_pipe_readers = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let pipe_done_rx =
+        spawn_nonunix_shell_pipe_captures(stdout_pipe, stderr_pipe, &output, &stop_pipe_readers);
 
-    let deadline = std::time::Instant::now() + timeout;
+    let child_wait = NonUnixChildWait::start(&child, timeout, cancel_rx);
     let mut timed_out = false;
     let mut cancelled = false;
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break Some(status),
-            Ok(None) => {}
-            Err(_) => break None,
-        }
-
-        if cancel_rx.as_ref().is_some_and(|rx| rx.try_recv().is_ok()) {
-            cancelled = true;
+    let status = match child_wait.recv() {
+        NonUnixChildEvent::Exited => child.wait().ok(),
+        NonUnixChildEvent::Cancelled => match child.try_wait() {
+            Ok(Some(status)) => Some(status),
+            _ => {
+                cancelled = true;
+                let _ = child.kill();
+                child.wait().ok()
+            }
+        },
+        NonUnixChildEvent::TimedOut => match child.try_wait() {
+            Ok(Some(status)) => Some(status),
+            _ => {
+                timed_out = true;
+                let _ = child.kill();
+                child.wait().ok()
+            }
+        },
+        NonUnixChildEvent::WaitFailed => {
             let _ = child.kill();
-            break child.wait().ok();
+            child.wait().ok()
         }
+    };
+    child_wait.join_exit_and_timeout_watchers();
+    drain_nonunix_pipe_captures(&pipe_done_rx, NON_UNIX_PIPE_CAPTURE_COUNT);
+    stop_pipe_readers.store(true, std::sync::atomic::Ordering::SeqCst);
 
+    let mut output = std::mem::take(&mut *output.lock().unwrap_or_else(|error| error.into_inner()));
+    output.finish();
+    wait_result_from_parts(status, timed_out, cancelled, output)
+}
+
+#[cfg(not(unix))]
+fn spawn_nonunix_shell_pipe_captures(
+    stdout_pipe: Option<impl std::io::Read + Send + 'static>,
+    stderr_pipe: Option<impl std::io::Read + Send + 'static>,
+    output: &std::sync::Arc<std::sync::Mutex<CapturedOutput>>,
+    stop: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+) -> mpsc::Receiver<()> {
+    let (done_tx, done_rx) = mpsc::channel();
+    spawn_nonunix_shell_pipe_capture(
+        stdout_pipe,
+        OutputStream::Stdout,
+        std::sync::Arc::clone(output),
+        std::sync::Arc::clone(stop),
+        done_tx.clone(),
+    );
+    spawn_nonunix_shell_pipe_capture(
+        stderr_pipe,
+        OutputStream::Stderr,
+        std::sync::Arc::clone(output),
+        std::sync::Arc::clone(stop),
+        done_tx,
+    );
+    done_rx
+}
+
+#[cfg(not(unix))]
+fn spawn_nonunix_shell_pipe_capture(
+    pipe: Option<impl std::io::Read + Send + 'static>,
+    stream: OutputStream,
+    output: std::sync::Arc<std::sync::Mutex<CapturedOutput>>,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    done_tx: mpsc::Sender<()>,
+) {
+    let Some(mut pipe) = pipe else {
+        let _ = done_tx.send(());
+        return;
+    };
+    std::thread::spawn(move || {
+        let mut buf = [0u8; SHELL_WAIT_READ_CHUNK_BYTES];
+        loop {
+            match pipe.read(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    if stop.load(std::sync::atomic::Ordering::SeqCst) {
+                        break;
+                    }
+                    output
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .push_bytes(stream, &buf[..n]);
+                }
+            }
+        }
+        let _ = done_tx.send(());
+    });
+}
+
+#[cfg(not(unix))]
+fn drain_nonunix_pipe_captures(done_rx: &mpsc::Receiver<()>, pipe_count: usize) {
+    let deadline = std::time::Instant::now() + NON_UNIX_PIPE_DRAIN_AFTER_DONE;
+    let mut closed = 0;
+    while closed < pipe_count {
         let now = std::time::Instant::now();
         if deadline <= now {
-            timed_out = true;
-            let _ = child.kill();
-            break child.wait().ok();
+            break;
+        }
+        match done_rx.recv_timeout(deadline - now) {
+            Ok(()) => closed += 1,
+            Err(mpsc::RecvTimeoutError::Timeout) | Err(mpsc::RecvTimeoutError::Disconnected) => {
+                break;
+            }
+        }
+    }
+}
+
+#[cfg(not(unix))]
+enum NonUnixChildEvent {
+    Exited,
+    Cancelled,
+    TimedOut,
+    WaitFailed,
+}
+
+#[cfg(not(unix))]
+// Coordinates non-Unix process completion without taking ownership of `Child`.
+// The foreground caller keeps the only `Child`, so it can call `kill()` and
+// `wait()` on cancellation or timeout. Watchers only report child-exit,
+// cancellation, and deadline events; the cancel watcher is intentionally
+// detached because `std::sync::mpsc::Receiver` cannot be woken by the stopper
+// channel used for the timeout watcher.
+struct NonUnixChildWait {
+    event_rx: mpsc::Receiver<NonUnixChildEvent>,
+    exit_handle: std::thread::JoinHandle<()>,
+    timeout_stop_tx: mpsc::Sender<()>,
+    timeout_handle: std::thread::JoinHandle<()>,
+}
+
+#[cfg(not(unix))]
+impl NonUnixChildWait {
+    fn start(
+        child: &std::process::Child,
+        timeout: std::time::Duration,
+        cancel_rx: Option<mpsc::Receiver<()>>,
+    ) -> Self {
+        let (event_tx, event_rx) = mpsc::channel();
+        let (timeout_stop_tx, timeout_stop_rx) = mpsc::channel();
+        let exit_handle = Self::spawn_exit_watcher(child, event_tx.clone());
+        let timeout_handle = std::thread::spawn({
+            let event_tx = event_tx.clone();
+            move || match timeout_stop_rx.recv_timeout(timeout) {
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    let _ = event_tx.send(NonUnixChildEvent::TimedOut);
+                }
+                Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => {}
+            }
+        });
+        if let Some(cancel_rx) = cancel_rx {
+            let _cancel_handle = std::thread::spawn(move || {
+                if cancel_rx.recv().is_ok() {
+                    let _ = event_tx.send(NonUnixChildEvent::Cancelled);
+                }
+            });
         }
 
-        std::thread::sleep((deadline - now).min(std::time::Duration::from_millis(25)));
-    };
+        Self {
+            event_rx,
+            exit_handle,
+            timeout_stop_tx,
+            timeout_handle,
+        }
+    }
 
-    let mut output = CapturedOutput::default();
-    let stdout_output = stdout_handle.join().unwrap_or_default();
-    output.mark_invalid_utf8(OutputStream::Stdout, stdout_output.had_invalid_utf8);
-    for line in stdout_output.lines {
-        output.push_line(line.stream, line.content);
+    fn recv(&self) -> NonUnixChildEvent {
+        self.event_rx
+            .recv()
+            .unwrap_or(NonUnixChildEvent::WaitFailed)
     }
-    let stderr_output = stderr_handle.join().unwrap_or_default();
-    output.mark_invalid_utf8(OutputStream::Stderr, stderr_output.had_invalid_utf8);
-    for line in stderr_output.lines {
-        output.push_line(line.stream, line.content);
+
+    fn join_exit_and_timeout_watchers(self) {
+        let _ = self.timeout_stop_tx.send(());
+        let _ = self.timeout_handle.join();
+        let _ = self.exit_handle.join();
     }
-    wait_result_from_parts(status, timed_out, cancelled, output)
+
+    #[cfg(windows)]
+    fn spawn_exit_watcher(
+        child: &std::process::Child,
+        event_tx: mpsc::Sender<NonUnixChildEvent>,
+    ) -> std::thread::JoinHandle<()> {
+        use std::os::windows::io::AsRawHandle;
+
+        const INFINITE: u32 = u32::MAX;
+        const WAIT_FAILED: u32 = u32::MAX;
+
+        // SAFETY: the raw process handle is borrowed from `Child`; the caller
+        // keeps the `Child` alive and joins this watcher before dropping it.
+        #[allow(unsafe_code)]
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn WaitForSingleObject(handle: *mut std::ffi::c_void, milliseconds: u32) -> u32;
+        }
+
+        let handle = child.as_raw_handle() as usize;
+        std::thread::spawn(move || {
+            // SAFETY: `handle` is a borrowed process handle that remains valid
+            // until this watcher is joined before the owning `Child` is dropped.
+            #[allow(unsafe_code)]
+            unsafe {
+                let result = WaitForSingleObject(handle as *mut std::ffi::c_void, INFINITE);
+                let event = if result == WAIT_FAILED {
+                    NonUnixChildEvent::WaitFailed
+                } else {
+                    NonUnixChildEvent::Exited
+                };
+                let _ = event_tx.send(event);
+            }
+        })
+    }
+
+    #[cfg(all(not(unix), not(windows)))]
+    fn spawn_exit_watcher(
+        _child: &std::process::Child,
+        event_tx: mpsc::Sender<NonUnixChildEvent>,
+    ) -> std::thread::JoinHandle<()> {
+        std::thread::spawn(move || {
+            let _ = event_tx.send(NonUnixChildEvent::WaitFailed);
+        })
+    }
 }
 
 #[cfg(unix)]
@@ -1667,17 +1885,6 @@ impl CapturedOutput {
         }
         for line in self.stderr.finish() {
             self.push_line(OutputStream::Stderr, line);
-        }
-    }
-
-    #[cfg(not(unix))]
-    fn mark_invalid_utf8(&mut self, stream: OutputStream, had_invalid_utf8: bool) {
-        if !had_invalid_utf8 {
-            return;
-        }
-        match stream {
-            OutputStream::Stdout => self.stdout.had_invalid_utf8 = true,
-            OutputStream::Stderr => self.stderr.had_invalid_utf8 = true,
         }
     }
 
@@ -1906,39 +2113,6 @@ fn formatted_output_line_len(stream: OutputStream, content: &OutputContent) -> u
         content: content.clone(),
     })
     .len()
-}
-
-#[cfg(not(unix))]
-#[derive(Default)]
-struct PipeOutput {
-    lines: Vec<OutputLine>,
-    had_invalid_utf8: bool,
-}
-
-#[cfg(not(unix))]
-fn read_pipe(pipe: Option<impl std::io::Read>, stream: OutputStream) -> PipeOutput {
-    let Some(mut pipe) = pipe else {
-        return PipeOutput::default();
-    };
-    let mut decoder = StreamDecoder::default();
-    let mut lines = Vec::new();
-    let mut buf = [0u8; 8192];
-    loop {
-        match pipe.read(&mut buf) {
-            Ok(0) | Err(_) => break,
-            Ok(n) => {
-                lines.extend(decoder.push_bytes(&buf[..n]));
-            }
-        }
-    }
-    lines.extend(decoder.finish());
-    PipeOutput {
-        lines: lines
-            .into_iter()
-            .map(|content| OutputLine { stream, content })
-            .collect(),
-        had_invalid_utf8: decoder.had_invalid_utf8,
-    }
 }
 
 fn command_display_args(command: &str) -> String {

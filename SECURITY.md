@@ -121,10 +121,14 @@ return.
 
 Shell timeout and cancellation paths terminate the spawned Unix process group
 where supported, but descendants that deliberately detach into another process
-group or session may survive. The shell extension therefore must not treat
-stdout/stderr pipe EOF as a required completion signal after foreground exit,
-timeout, or cancellation; it should perform only bounded output draining before
-returning.
+group or session may survive. On non-Unix platforms, Tau can only rely on direct
+foreground-child termination unless a platform-specific process-tree mechanism is
+added; descendants may survive there as well. The shell extension therefore must
+not treat stdout/stderr pipe EOF as a required completion signal after foreground
+exit, timeout, or cancellation; it should perform only bounded output draining
+before returning. On non-Unix, a pipe-reader thread blocked in the operating
+system on a quiet descendant-held pipe may remain until that pipe becomes
+readable or closes, but it must not publish output after the terminal result.
 
 Read-only shell mode is a defense-in-depth feature of the opt-in directory-lock mechanism. When `dir_lock.enable` is true, shell tool calls are inferred read-only unless the calling agent holds a manual lock covering the command cwd; `dir_lock.enforce_ro_bind` controls whether inferred read-only calls also require a native read-only bind mount. With the default `enforce_ro_bind: true`, unsupported or failed native isolation makes the shell call fail closed. If users explicitly set `enforce_ro_bind: false`, inferred read-only shell execution degrades to ordinary command execution and must not be treated as a hard sandbox. Directory update locks are advisory coordination between Tau agents and ext-shell tools, not an operating-system access-control boundary. They do not prevent commands from writing outside their locked working directory or other local processes from changing files. The filesystem directory-lock backend coordinates multiple Tau/ext-shell instances for the same host and user through a private local registry, but its leases end when ext-shell exits; detached shell descendants can keep mutating files after the lease is gone. The shell extension remembers each agent's current cwd in durable metadata (`ext_<extension-instance>_cwd`); that value is visible to extensions and should be treated as non-secret path context.
 

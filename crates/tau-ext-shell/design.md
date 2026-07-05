@@ -37,6 +37,12 @@ completion, timeout, or cancellation rather than waiting for pipe EOF. Tests tha
 depend on Unix-only helpers such as `setsid` should be `#[cfg(unix)]` and may
 skip at runtime when the host lacks the required command.
 
+Non-Unix lifecycle coverage should verify the same foreground-exit,
+timeout/cancellation, and bounded-drain semantics on a supported non-Unix target,
+with Windows as the primary supported platform. Changes to Windows-only process
+waiting code should be compiled for a Windows target when practical, because Unix
+CI does not type-check `std::os::windows` imports or platform FFI declarations.
+
 
 ## Directory-lock coverage
 

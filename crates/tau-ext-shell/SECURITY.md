@@ -10,6 +10,16 @@ hit, ext-shell keeps draining child pipes for process liveness and final
 truncation metadata but stops forwarding arbitrary output volume into the event
 stream.
 
+Shell timeout and cancellation terminate the Unix process group where supported.
+On non-Unix platforms, including Windows, ext-shell's portable fallback kills and
+reaps only the direct foreground child; descendants may survive if the operating
+system does not provide a process-group equivalent through the current backend.
+Foreground completion, timeout, or cancellation must still return after only a
+bounded stdout/stderr drain rather than waiting indefinitely for descendant-held
+pipe handles to close. Pipe-reader threads stop publishing after the terminal
+result is finalized, but a reader blocked in the operating system on a quiet
+descendant-held pipe may remain until that pipe becomes readable or closes.
+
 The filesystem directory-lock backend coordinates multiple ext-shell instances
 for the same host and user through a private local registry. The registry
 directory must be private (`0700` on Unix) when explicitly configured; unsafe

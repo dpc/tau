@@ -58,6 +58,30 @@ covering manual-lock ownership at the moment the automatic lock is granted;
 otherwise it falls back to read-only execution instead of running under stale
 coverage.
 
+## Shell process lifecycle
+
+Shell execution keeps foreground child ownership in the coordinator that reports
+the tool or user-command result. Watcher threads may report process exit,
+cancellation, deadlines, pipe readiness, or bounded pipe drain completion, but
+they must not own or reap the foreground `Child`; the coordinator remains
+responsible for `kill()` / `wait()` on cancellation and timeout.
+
+On Unix, commands run in a separate session/process group and cancellation or
+timeout kills that process group. Unix pipe readers are nonblocking and shell
+completion does not depend on stdout/stderr EOF, because escaped descendants can
+keep pipe file descriptors open after the foreground shell exits. On
+non-Unix/Windows, cancellation and timeout use direct-child termination and a
+bounded post-terminal pipe drain; descendants outside the direct child may still
+survive, but they must not make the shell result wait indefinitely for pipe EOF.
+After the bounded drain, a terminal flag prevents non-Unix pipe readers from
+mutating final captures or publishing user-shell progress; a reader already
+blocked in the OS may remain dormant until the descendant-held pipe wakes or
+closes.
+
+Shell lifecycle waits should use event/readiness channels or platform wait
+primitives where available. Fixed sleep polling of child exit, cancellation, or
+deadlines is not intended for supported lifecycle paths.
+
 ## tau-client runtime boundary
 
 The shell extension uses `tau-client` for protocol startup, exact
