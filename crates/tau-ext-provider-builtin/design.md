@@ -34,9 +34,9 @@ loop runtime. Startup publishes `ClientKind::Provider`, exact subscriptions for
 prewarm/session-dir/cancel events, the current `ProviderModelsUpdated` snapshot,
 and then `Ready`. Direct `agent.prompt.created` deliveries are handled as routed
 live provider events without adding a subscription, so prompt execution does not
-request replay catch-up. Worker-produced provider progress/result frames return
-to the main provider loop as typed protocol messages and are serialized through
-the normal tau-client writer path. The worker side channel is event-driven:
+request replay catch-up. Worker-produced provider result/update frames return to
+the main provider loop as typed protocol messages and are serialized through the
+normal tau-client writer path. The worker side channel is event-driven:
 each worker message must be enqueued before calling `ManualRuntimeWaker::wake`.
 Wakes are coalesced and payload-free, so the main loop must drain harness input
 and worker messages until both are empty before blocking in

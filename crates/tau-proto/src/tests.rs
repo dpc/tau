@@ -365,6 +365,18 @@ fn representative_events() -> Vec<Event> {
             kind: AgentMessageKind::Message,
             message: "hello back".to_owned(),
         }),
+        Event::AgentTurnStatsUpdated(AgentTurnStatsUpdated {
+            turn_id: "sp-1".into(),
+            agent_id: agent_id("engineer_abcd1234"),
+            session_id: "session_123".into(),
+            agent_prompt_id: Some("sp-1".into()),
+            originator: PromptOriginator::User,
+            current: AgentTurnStatsSample {
+                output_bytes_sent: 42,
+                elapsed_micros: 1_000_000,
+            },
+            previous: AgentTurnStatsSample::default(),
+        }),
         Event::SessionStarted(SessionStarted {
             session_id: "s1".into(),
             reason: SessionStartReason::Initial,
@@ -505,7 +517,6 @@ fn representative_events() -> Vec<Event> {
             }],
             compaction: None,
             status: None,
-            progress: None,
             originator: PromptOriginator::User,
         }),
         Event::ProviderResponseFinished(ProviderResponseFinished {
@@ -1083,6 +1094,7 @@ fn expected_default_transient(event: &Event) -> bool {
             | Event::AgentPromptCreated(_)
             | Event::AgentPromptStarted(_)
             | Event::AgentPromptTerminated(_)
+            | Event::AgentTurnStatsUpdated(_)
             | Event::AgentPromptPrewarmRequested(_)
             | Event::AgentState(_)
             | Event::UiCompactRequest(_)
@@ -1120,6 +1132,7 @@ fn expected_first_party_event_names() -> std::collections::BTreeSet<String> {
         "agent.start_result",
         "agent.started",
         "agent.state",
+        "agent.turn_stats_updated",
         "agent.user_message_injected",
         "extension.agent_context_publish",
         "extension.agents_md_available",
@@ -1664,7 +1677,6 @@ fn execution_events_use_provider_wire_family() {
                 deltas: Vec::new(),
                 compaction: None,
                 status: None,
-                progress: None,
                 originator: PromptOriginator::User,
             }),
             "provider.response_updated",
@@ -1716,61 +1728,27 @@ fn provider_response_updated_requires_delta_routing_fields() {
     );
 }
 
-/// Ensures provider response progress is an additive optional wire field and
-/// preserves structured generic provider-output byte counts when present.
+/// Ensures agent turn stats keep current and previous samples together so
+/// consumers can calculate deltas without remembering prior protocol events.
 #[test]
-fn provider_response_updated_progress_serde_round_trip() {
-    let absent = serde_json::json!({
-        "agent_prompt_id": "sp-1",
-        "agent_id": "engineer_abcd1234"
-    });
-    let decoded =
-        serde_json::from_value::<ProviderResponseUpdated>(absent).expect("absent progress");
-    assert_eq!(decoded.progress, None);
-
-    let update = ProviderResponseUpdated {
-        agent_prompt_id: "sp-1".into(),
+fn agent_turn_stats_updated_serde_round_trip() {
+    let update = AgentTurnStatsUpdated {
+        turn_id: "sp-1".into(),
         agent_id: agent_id("engineer_abcd1234"),
-        deltas: Vec::new(),
-        compaction: None,
-        status: None,
-        progress: Some(ProviderResponseProgressUpdate {
-            total_counter_start_bytes: 4096,
-            total_counter_end_bytes: 12_345,
-            total_window_micros: 1_000_000,
-            items: vec![
-                ProviderResponseProgressItem {
-                    output_index: 0,
-                    kind: ProviderResponseProgressKind::AssistantText,
-                    counter_start_bytes: 0,
-                    counter_end_bytes: 5,
-                    window_micros: 1_000_000,
-                    label: None,
-                },
-                ProviderResponseProgressItem {
-                    output_index: 1,
-                    kind: ProviderResponseProgressKind::ReasoningText,
-                    counter_start_bytes: 5,
-                    counter_end_bytes: 10,
-                    window_micros: 1_000_000,
-                    label: None,
-                },
-                ProviderResponseProgressItem {
-                    output_index: 2,
-                    kind: ProviderResponseProgressKind::ToolArguments,
-                    counter_start_bytes: 4096,
-                    counter_end_bytes: 12_345,
-                    window_micros: 1_000_000,
-                    label: Some("shell_command".to_owned()),
-                },
-            ],
-            omitted_items: 0,
-        }),
+        session_id: "session_123".into(),
+        agent_prompt_id: Some("sp-1".into()),
         originator: PromptOriginator::User,
+        current: AgentTurnStatsSample {
+            output_bytes_sent: 12_345,
+            elapsed_micros: 2_000_000,
+        },
+        previous: AgentTurnStatsSample {
+            output_bytes_sent: 4096,
+            elapsed_micros: 1_000_000,
+        },
     };
-    let value = serde_json::to_value(&update).expect("serialize progress");
-    let round_trip =
-        serde_json::from_value::<ProviderResponseUpdated>(value).expect("decode progress");
+    let value = serde_json::to_value(&update).expect("serialize stats");
+    let round_trip = serde_json::from_value::<AgentTurnStatsUpdated>(value).expect("decode stats");
     assert_eq!(round_trip, update);
 }
 
@@ -1997,7 +1975,6 @@ fn event_defaults_to_transient_marks_progress_kinds() {
             deltas: Vec::new(),
             compaction: None,
             status: None,
-            progress: None,
             originator: PromptOriginator::User,
         }),
         Event::ToolProgress(ToolProgress {

@@ -834,8 +834,8 @@ struct PromptState {
     response_markdown_cache: MarkdownStreamCache,
     /// Append-aware Markdown-lite cache for the live thinking block.
     thinking_markdown_cache: MarkdownStreamCache,
-    /// Latest transient provider semantic-output byte progress.
-    response_progress: Option<tau_proto::ProviderResponseProgressUpdate>,
+    /// Latest transient agent-turn stats for repainting the live indicator.
+    turn_stats: Option<tau_proto::AgentTurnStatsUpdated>,
     /// Live provider-side compaction block. Created only while a provider emits
     /// an in-progress compaction item, then removed on completion/cancel.
     compaction_block_id: Option<tau_cli_term::BlockId>,
@@ -969,22 +969,24 @@ fn format_ui_io_scaled_rate(bytes_per_sec: u64, divisor: u64, suffix: &str) -> S
     }
 }
 
-fn provider_progress_indicator_suffix(
-    progress: Option<&tau_proto::ProviderResponseProgressUpdate>,
-) -> String {
-    let Some(progress) = progress else {
+fn turn_stats_indicator_suffix(stats: Option<&tau_proto::AgentTurnStatsUpdated>) -> String {
+    let Some(stats) = stats else {
         return String::new();
     };
-    let total_bytes = progress.total_counter_end_bytes;
+    let total_bytes = stats.current.output_bytes_sent;
     if total_bytes == 0 {
         return String::new();
     }
     let bytes = format_progress_bytes(total_bytes);
-    let bytes_per_sec = progress
-        .total_counter_end_bytes
-        .saturating_sub(progress.total_counter_start_bytes)
-        .saturating_mul(1_000_000)
-        / progress.total_window_micros.max(1);
+    let delta_micros = stats
+        .current
+        .elapsed_micros
+        .saturating_sub(stats.previous.elapsed_micros);
+    let delta_bytes = stats
+        .current
+        .output_bytes_sent
+        .saturating_sub(stats.previous.output_bytes_sent);
+    let bytes_per_sec = delta_bytes.saturating_mul(1_000_000) / delta_micros.max(1);
     let rate = format!("{}/s", format_progress_bytes(bytes_per_sec));
     format!(" ({bytes}, {rate})")
 }
@@ -3050,6 +3052,7 @@ impl EventRenderer {
             Event::AgentPromptStarted(prompt) => !prompt.originator.is_user(),
             Event::AgentPromptTerminated(terminated) => !terminated.originator.is_user(),
             Event::ProviderPromptSubmitted(submitted) => !submitted.originator.is_user(),
+            Event::AgentTurnStatsUpdated(stats) => !stats.originator.is_user(),
             Event::ProviderResponseUpdated(update) => !update.originator.is_user(),
             Event::ProviderResponseFinished(finished) => !finished.originator.is_user(),
             Event::ToolResult(result) | Event::ProviderToolResult(result) => {
@@ -3211,6 +3214,15 @@ impl EventRenderer {
                     self.mark_agent_live(agent_id);
                 } else {
                     self.mark_agent_suspended(&agent_id);
+                }
+                true
+            }
+            Event::AgentTurnStatsUpdated(stats) => {
+                let agent_id = stats.agent_id.to_string();
+                self.mark_agent_live(agent_id.clone());
+                if let Some(agent_prompt_id) = stats.agent_prompt_id.as_ref() {
+                    self.prompt_agents
+                        .insert(agent_prompt_id.to_string(), agent_id);
                 }
                 true
             }
@@ -3396,6 +3408,9 @@ impl EventRenderer {
             }
             Event::HarnessAgentContextUsageChanged(changed) => {
                 EventAgentIdResolution::Agent(changed.agent_id.to_string())
+            }
+            Event::AgentTurnStatsUpdated(stats) => {
+                EventAgentIdResolution::Agent(stats.agent_id.to_string())
             }
             Event::ExtensionContextReady(ready) => {
                 EventAgentIdResolution::Agent(ready.agent_id.to_string())
@@ -3908,6 +3923,10 @@ impl EventRenderer {
                 self.handle_provider_response_finished(finished);
                 true
             }
+            Event::AgentTurnStatsUpdated(stats) => {
+                self.handle_agent_turn_stats_updated(stats);
+                true
+            }
             _ => false,
         }
     }
@@ -3925,12 +3944,6 @@ impl EventRenderer {
             .entry(spid.to_owned())
             .or_insert_with(|| update.agent_id.to_string());
         self.ensure_live_response_block_for_update(update);
-        if let Some(progress) = &update.progress {
-            self.prompts
-                .entry(spid.to_owned())
-                .or_default()
-                .response_progress = Some(progress.clone());
-        }
         if let Some(status) = &update.status {
             if status.clear_response {
                 self.clear_live_response_accumulators(spid);
@@ -3949,6 +3962,24 @@ impl EventRenderer {
         self.update_live_response_block(spid, &text);
     }
 
+    fn handle_agent_turn_stats_updated(&mut self, stats: &tau_proto::AgentTurnStatsUpdated) {
+        let Some(agent_prompt_id) = stats.agent_prompt_id.as_ref() else {
+            return;
+        };
+        let spid = agent_prompt_id.as_str();
+        self.prompt_agents
+            .entry(spid.to_owned())
+            .or_insert_with(|| stats.agent_id.to_string());
+        if !self.prompts.contains_key(spid) {
+            return;
+        }
+        self.ensure_live_response_block_for_prompt(spid);
+        if let Some(state) = self.prompts.get_mut(spid) {
+            state.turn_stats = Some(stats.clone());
+        }
+        self.update_live_response_block(spid, "");
+    }
+
     fn clear_live_response_accumulators(&mut self, spid: &str) {
         if let Some(state) = self.prompts.get_mut(spid) {
             state.response_text_by_index.clear();
@@ -3958,7 +3989,7 @@ impl EventRenderer {
             state.missing_thinking_prefix = false;
             state.response_markdown_cache = MarkdownStreamCache::default();
             state.thinking_markdown_cache = MarkdownStreamCache::default();
-            state.response_progress = None;
+            state.turn_stats = None;
             if let Some(block_id) = state.thinking_block_id.take() {
                 self.handle.remove_block(block_id);
             }
@@ -3969,9 +4000,12 @@ impl EventRenderer {
         &mut self,
         update: &tau_proto::ProviderResponseUpdated,
     ) {
+        self.ensure_live_response_block_for_prompt(update.agent_prompt_id.as_str());
+    }
+
+    fn ensure_live_response_block_for_prompt(&mut self, spid: &str) {
         use tau_themes::names;
 
-        let spid = update.agent_prompt_id.as_str();
         let state = self.prompts.entry(spid.to_owned()).or_default();
         if state.response_block_id.is_some() {
             return;
@@ -3979,10 +4013,9 @@ impl EventRenderer {
         state.missing_response_prefix = true;
         state.missing_thinking_prefix = true;
         let block = streaming_block(&self.theme, names::AGENT_PENDING, "");
-        let id = self.handle.new_block(
-            format!("agent-response-live:{}", update.agent_prompt_id),
-            block,
-        );
+        let id = self
+            .handle
+            .new_block(format!("agent-response-live:{spid}"), block);
         self.push_live_response_block(id);
         self.handle.redraw();
         self.prompts
@@ -4200,7 +4233,7 @@ impl EventRenderer {
                     &self.theme,
                     names::AGENT_PENDING,
                     "",
-                    provider_progress_indicator_suffix(state.response_progress.as_ref()),
+                    turn_stats_indicator_suffix(state.turn_stats.as_ref()),
                 )
             } else {
                 markdown_streaming_block(

@@ -425,6 +425,14 @@ reports.
 
 ## Provider streaming trust boundary
 
-Provider response progress updates are transient and untrusted. The harness validates the provider prompt owner and derives the published `agent_id` from harness state so a provider cannot route streaming deltas to another agent by forging ids. Provider-authored retry/status diagnostics must stay separate from assistant text deltas to avoid confusing diagnostics with model-authored transcript content; durable truth remains the final response event.
+Provider response updates are transient and untrusted until the harness validates
+the provider prompt owner and derives the published `agent_id` from harness
+state, so a provider cannot route streaming deltas to another agent by forging
+ids. The harness, not providers, publishes content-free
+`agent.turn_stats_updated` operational stats; the ephemeral-agent debug-log
+classifier must cover those id-bearing events. Provider-authored retry/status
+diagnostics must stay separate from assistant text deltas to avoid confusing
+diagnostics with model-authored transcript content; durable truth remains the
+final response event.
 
 First-party providers also run a bounded exact streaming repetition guard before accepting assistant text, reasoning summaries, or tool-argument deltas. This is a resource-safety guard for tight provider/model loops, not a semantic quality filter: it only checks substantial exact suffix repetitions inside one stream component and clears transient output before publishing a `repetition_detected` final response.

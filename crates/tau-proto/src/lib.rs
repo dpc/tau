@@ -244,6 +244,8 @@ impl AsRef<str> for AgentId {
 
 string_newtype!(/// Stable identifier for one agent transcript prompt.
     AgentPromptId);
+string_newtype!(/// Stable identifier for one active agent turn.
+    AgentTurnId);
 string_newtype!(/// Stable identifier for one global agent message.
     AgentMessageId);
 // ToolName is defined manually below with validation.

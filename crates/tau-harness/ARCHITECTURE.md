@@ -40,6 +40,24 @@ and `always_show` warnings such as extension config errors) are replayable,
 published with a call-site `must_pass` override, and protected from interceptor
 rewrite/drop.
 
+## Agent turn stats lifecycle
+
+The harness is the authoritative publisher for transient
+`agent.turn_stats_updated` events. A stats turn starts with the first provider
+prompt for an agent turn, mints a stable `AgentTurnId`, and moves
+`agent_prompt_id` to each active provider prompt while the same turn continues
+through tool results and follow-up model calls. While the turn is waiting on
+tools, the harness emits only prompt-less stats (`agent_prompt_id: null`) so UI
+consumers do not attach tool-wait samples to a completed provider prompt.
+
+Terminal prompt-associated samples must be emitted before
+`provider.response_finished` or `agent.prompt_terminated`; after the terminal
+event, runtime stats are cleared without another prompt-associated emit. Paths
+that abandon a turn without another provider prompt, such as tool-phase
+cancellation or queued-tool preemption, must clear the in-memory stats so the
+next prompt starts with a fresh `AgentTurnId`, zero output bytes, and a default
+previous sample.
+
 ## Session and agent stores
 
 The session store owns durable membership facts such as
@@ -308,6 +326,10 @@ call-site policy says otherwise.
 ## Provider response update routing
 
 The harness treats `provider.response_updated` as non-durable live progress. It validates that the publishing connection owns the in-flight provider prompt, overwrites the update `agent_id` from harness prompt ownership, enriches best-effort compaction metadata, and does not include these transient deltas in durable replay.
+The harness also owns `agent.turn_stats_updated`: after accepted provider deltas
+and turn phase transitions it publishes content-free current/previous turn stats
+samples as transient operational events. Providers and UI clients must not forge
+those stats through fallback emit paths.
 
 ## Prompt dispatch lifecycle split
 

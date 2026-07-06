@@ -882,6 +882,16 @@ fn event_log_contains_any_source(h: &Harness, matches_event: impl Fn(&Event) -> 
     false
 }
 
+fn agent_turn_stats_events(h: &Harness) -> Vec<tau_proto::AgentTurnStatsUpdated> {
+    event_log_events(h)
+        .into_iter()
+        .filter_map(|event| match event {
+            Event::AgentTurnStatsUpdated(stats) => Some(stats),
+            _ => None,
+        })
+        .collect()
+}
+
 fn event_log_count(h: &Harness, matches_event: impl Fn(&Event) -> bool) -> usize {
     let mut count = 0;
     let mut seq = crate::event_log::EventLogSeq::new(0);
@@ -4883,7 +4893,6 @@ fn provider_execution_events_must_come_from_prompt_owner() {
             deltas: Vec::new(),
             compaction: None,
             status: None,
-            progress: None,
             originator: tau_proto::PromptOriginator::User,
         })),
     )
@@ -4896,7 +4905,6 @@ fn provider_execution_events_must_come_from_prompt_owner() {
             deltas: Vec::new(),
             compaction: None,
             status: None,
-            progress: None,
             originator: tau_proto::PromptOriginator::User,
         })),
     )
@@ -4938,23 +4946,13 @@ fn provider_execution_events_must_come_from_prompt_owner() {
         TestProtocolItem::Event(Event::ProviderResponseUpdated(ProviderResponseUpdated {
             agent_prompt_id: spid.clone(),
             agent_id: durable_agent_id_for_conversation(&h, &test_user_agent(&h)),
-            deltas: Vec::new(),
+            deltas: vec![tau_proto::ProviderResponseTextDelta::Message {
+                output_index: 0,
+                text: "real".to_owned(),
+                phase: None,
+            }],
             compaction: None,
             status: None,
-            progress: Some(tau_proto::ProviderResponseProgressUpdate {
-                total_counter_start_bytes: 1024,
-                total_counter_end_bytes: 4096,
-                total_window_micros: 1_000_000,
-                items: vec![tau_proto::ProviderResponseProgressItem {
-                    output_index: 0,
-                    kind: tau_proto::ProviderResponseProgressKind::ToolArguments,
-                    counter_start_bytes: 1024,
-                    counter_end_bytes: 4096,
-                    window_micros: 1_000_000,
-                    label: Some("shell_command".to_owned()),
-                }],
-                omitted_items: 0,
-            }),
             originator: tau_proto::PromptOriginator::User,
         })),
     )
@@ -4976,24 +4974,213 @@ fn provider_execution_events_must_come_from_prompt_owner() {
     ));
     assert!(event_log_contains_any_source(&h, |event| matches!(
         event,
-        Event::ProviderResponseUpdated(update)
-            if update
-                .progress
-                .as_ref()
-                .is_some_and(|progress| progress.items[0].counter_end_bytes == 4096)
+        Event::AgentTurnStatsUpdated(stats)
+            if stats.current.output_bytes_sent == 4
+                && stats.previous.output_bytes_sent == 0
     )));
     assert_eq!(
         agent_event_count(&h, |event| matches!(
             event,
-            Event::ProviderResponseUpdated(_)
+            Event::ProviderResponseUpdated(_) | Event::AgentTurnStatsUpdated(_)
         )),
         0,
-        "provider response updates, including progress-only updates, must remain transient"
+        "provider response updates and agent turn stats must remain transient"
     );
     assert!(event_log_contains(&h, "provider-owner", |event| matches!(
         event,
         Event::ProviderResponseFinished(_)
     )));
+
+    h.shutdown().expect("shutdown");
+}
+
+/// Ensures agent-turn stats samples chain `previous` to the prior published
+/// sample and do not emit prompt-associated stats after the final response.
+#[test]
+fn agent_turn_stats_chain_and_clear_after_final_response() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    h.selected_model = Some("test/model".into());
+
+    let cid = ensure_test_user_agent(&mut h);
+    let spid: AgentPromptId = "sp-turn-stats-final".into();
+    seed_agent_thinking(&mut h, &cid, spid.as_str());
+    h.prompt_agents.insert(spid.clone(), cid.clone());
+    h.start_or_update_agent_turn_stats(&cid, spid.clone());
+    h.add_agent_turn_output_bytes(&cid, 4);
+    h.emit_agent_turn_stats(&cid, crate::harness::AgentTurnStatsEmitMode::Forced);
+    h.add_agent_turn_output_bytes(&cid, 3);
+    h.emit_agent_turn_stats(&cid, crate::harness::AgentTurnStatsEmitMode::Forced);
+
+    let stats = agent_turn_stats_events(&h);
+    let first = stats
+        .get(stats.len().saturating_sub(2))
+        .expect("first forced stats sample");
+    let second = stats.last().expect("second forced stats sample");
+    assert_eq!(first.current.output_bytes_sent, 4);
+    assert_eq!(second.current.output_bytes_sent, 7);
+    assert_eq!(second.previous, first.current);
+
+    let target_agent_id = h.agents[&cid].agent_id.clone().expect("agent id");
+    h.handle_provider_response_finished(provider_text_response(
+        &spid,
+        crate::parse_agent_id(&target_agent_id),
+        "done",
+    ))
+    .expect("final response");
+
+    let final_seq = event_log_position(&h, |event| {
+        matches!(
+            event,
+            Event::ProviderResponseFinished(finished) if finished.agent_prompt_id == spid
+        )
+    })
+    .expect("provider final response");
+    assert!(
+        event_log_position_after(&h, final_seq, |event| matches!(
+            event,
+            Event::AgentTurnStatsUpdated(stats)
+                if stats.agent_prompt_id.as_ref() == Some(&spid)
+        ))
+        .is_none()
+    );
+    assert!(h.agents[&cid].turn_stats.is_none());
+
+    h.shutdown().expect("shutdown");
+}
+
+/// Ensures tool-call turns count provider-generated raw tool arguments, switch
+/// post-final stats to prompt-less tool-wait state, and keep the same turn id
+/// when the next provider prompt continues the turn.
+#[test]
+fn agent_turn_stats_tool_wait_counts_arguments_and_keeps_turn_id() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    h.selected_model = Some("test/model".into());
+    h.registry
+        .register("tool-owner", shared_test_tool_spec("stats_tool"));
+
+    let cid = ensure_test_user_agent(&mut h);
+    let spid: AgentPromptId = "sp-turn-stats-tool".into();
+    seed_agent_thinking(&mut h, &cid, spid.as_str());
+    h.prompt_agents.insert(spid.clone(), cid.clone());
+    h.start_or_update_agent_turn_stats(&cid, spid.clone());
+    let target_agent_id = h.agents[&cid].agent_id.clone().expect("agent id");
+    let raw_arguments = r#"{"x":1}"#;
+
+    h.handle_provider_response_finished(ProviderResponseFinished {
+        agent_prompt_id: spid.clone(),
+        agent_id: crate::parse_agent_id(&target_agent_id),
+        output_items: vec![ContextItem::ToolCall(ToolCallItem {
+            call_id: "stats-tool-call".into(),
+            name: ToolName::new("stats_tool"),
+            tool_type: tau_proto::ToolType::Function,
+            arguments: CborValue::Map(Vec::new()),
+            raw_arguments_json: Some(raw_arguments.to_owned()),
+            responses_envelope: None,
+        })],
+        stop_reason: tau_proto::ProviderStopReason::ToolCalls,
+        error: None,
+        usage: None,
+        originator: tau_proto::PromptOriginator::User,
+        compaction_original_input_tokens: None,
+        compaction_compacted_input_tokens: None,
+        backend: None,
+        provider_response_id: None,
+        ws_pool_delta: None,
+    })
+    .expect("tool response");
+
+    assert_eq!(
+        h.agents[&cid]
+            .turn_stats
+            .as_ref()
+            .expect("tool wait stats remain active")
+            .turn_id
+            .as_str(),
+        spid.as_str()
+    );
+    let stats = agent_turn_stats_events(&h);
+    assert!(stats.iter().any(|stats| {
+        stats.agent_prompt_id.as_ref() == Some(&spid)
+            && stats.current.output_bytes_sent == raw_arguments.len() as u64
+    }));
+    assert!(stats.iter().any(|stats| {
+        stats.turn_id.as_str() == spid.as_str()
+            && stats.agent_prompt_id.is_none()
+            && stats.current.output_bytes_sent == raw_arguments.len() as u64
+    }));
+
+    let follow_up_spid: AgentPromptId = "sp-turn-stats-tool-2".into();
+    h.start_or_update_agent_turn_stats(&cid, follow_up_spid.clone());
+    let runtime = h.agents[&cid].turn_stats.as_ref().expect("continued stats");
+    assert_eq!(runtime.turn_id.as_str(), spid.as_str());
+    assert_eq!(runtime.current_prompt_id, Some(follow_up_spid));
+
+    h.shutdown().expect("shutdown");
+}
+
+/// Ensures cancelling during tool execution abandons the in-memory stats turn
+/// so the next prompt starts with a fresh turn id and zeroed samples.
+#[test]
+fn agent_turn_stats_clear_on_tool_cancel() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    h.selected_model = Some("test/model".into());
+    h.registry
+        .register("tool-owner", shared_test_tool_spec("cancel_stats_tool"));
+
+    let cid = ensure_test_user_agent(&mut h);
+    let spid: AgentPromptId = "sp-turn-stats-cancel".into();
+    seed_agent_thinking(&mut h, &cid, spid.as_str());
+    h.prompt_agents.insert(spid.clone(), cid.clone());
+    h.start_or_update_agent_turn_stats(&cid, spid.clone());
+    h.add_agent_turn_output_bytes(&cid, 9);
+    let target_agent_id = h.agents[&cid].agent_id.clone().expect("agent id");
+
+    h.handle_provider_response_finished(ProviderResponseFinished {
+        agent_prompt_id: spid,
+        agent_id: crate::parse_agent_id(&target_agent_id),
+        output_items: vec![ContextItem::ToolCall(ToolCallItem {
+            call_id: "cancel-stats-call".into(),
+            name: ToolName::new("cancel_stats_tool"),
+            tool_type: tau_proto::ToolType::Function,
+            arguments: CborValue::Map(Vec::new()),
+            raw_arguments_json: None,
+            responses_envelope: None,
+        })],
+        stop_reason: tau_proto::ProviderStopReason::ToolCalls,
+        error: None,
+        usage: None,
+        originator: tau_proto::PromptOriginator::User,
+        compaction_original_input_tokens: None,
+        compaction_compacted_input_tokens: None,
+        backend: None,
+        provider_response_id: None,
+        ws_pool_delta: None,
+    })
+    .expect("tool response");
+    assert!(h.agents[&cid].turn_stats.is_some());
+
+    h.handle_cancel_prompt(&tau_proto::UiCancelPrompt {
+        session_id: "s1".into(),
+        target_agent_id: Some(crate::parse_agent_id(&target_agent_id)),
+        agent_prompt_id: None,
+    });
+    assert!(h.agents[&cid].turn_stats.is_none());
+
+    let fresh_spid: AgentPromptId = "sp-turn-stats-fresh".into();
+    h.start_or_update_agent_turn_stats(&cid, fresh_spid.clone());
+    let fresh = h.agents[&cid].turn_stats.as_ref().expect("fresh stats");
+    assert_eq!(fresh.turn_id.as_str(), fresh_spid.as_str());
+    assert_eq!(fresh.output_bytes_sent, 0);
+    assert_eq!(
+        fresh.last_emitted,
+        tau_proto::AgentTurnStatsSample::default()
+    );
 
     h.shutdown().expect("shutdown");
 }
@@ -9932,7 +10119,6 @@ fn backgrounded_tool_progress_is_not_published() {
             tool_name: ToolName::new("slow"),
             message: Some("running shell command".to_owned()),
             progress: None,
-
             display: None,
         }),
     )

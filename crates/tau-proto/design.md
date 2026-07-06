@@ -20,13 +20,12 @@ events and assert that serialized event tags, parsed `EventName` values, and
 durability expectations explicit for events where that affects routing,
 replay, or UI behavior.
 
-## Provider progress metadata is transient and self-contained
+## Agent turn stats are transient and harness-owned
 
 Status: unconfirmed
 
-`provider.response_updated.progress` describes provider-generated semantic output
-byte progress for the in-flight response: assistant text, reasoning text, and
-tool/custom-tool input bytes. It must use content-free sample-window counters
-that include aggregate totals over all counted items so consumers can display
-bytes/rates from one update without keeping prior samples. It must not count raw
-wire framing or tool execution output/results.
+`agent.turn_stats_updated` describes content-free live stats for an active agent
+turn. The harness publishes it with current and previous cumulative samples so
+consumers can calculate byte/rate deltas without depending on provider-owned
+progress metadata. It must not count raw wire framing, prompts, tool execution
+output/results, or UI rendering text, and it must not be folded into transcripts.

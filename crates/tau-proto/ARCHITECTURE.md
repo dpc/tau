@@ -86,6 +86,13 @@ must synthesize replay from the typed fields.
 First-party event categories (`tool`, `action`, `agent`, `extension`, `provider`, `harness`, `ui`, `shell`, `session`, and `term`) are reserved for typed protocol events. `CustomEvent` names must use extension-owned categories so extension payloads cannot spoof first-party routing or policy keys.
 Parsed event names and custom event payload names must have non-empty category and call segments; empty segments are malformed protocol data rather than extension-owned names.
 
+`agent.turn_stats_updated` is a transient agent runtime event owned by the
+harness. Its samples are cumulative and content-free; `previous` is always
+present and must describe the last emitted sample for the same turn. `turn_id`
+is an opaque [`AgentTurnId`], while `agent_prompt_id` identifies only the
+provider prompt currently active; it is absent during tool-wait samples and
+after a prompt is no longer active.
+
 ## Tree navigation targets
 
 UI tree navigation is protocol-modeled in user-facing terms. The default
@@ -136,14 +143,9 @@ Prefer additive optional fields with serde defaults for backward compatibility. 
 visible assistant/reasoning progress. Providers must send newly appended text in
 `deltas`, not full accumulated message snapshots; retry/status diagnostics belong
 in the separate `status` field because they are provider-authored, not
-assistant-authored. Its optional `progress` field is also transient and carries
-content-free, self-contained sample-window counters for provider-generated
-semantic output bytes in the in-flight response: assistant text, reasoning text,
-and tool/custom-tool input bytes. Those counters must include aggregate totals
-over all counted items, even when per-item details are bounded and some items are
-omitted. `progress` must not count raw wire framing or tool execution
-output/results, and must not be treated as transcript content or
-persisted/editor-captured response text.
+assistant-authored. Live byte/duration stats are not provider-response metadata;
+the harness publishes content-free `agent.turn_stats_updated` events for active
+agent turns after validating provider ownership and observing accepted deltas.
 `provider.response_finished.output_items` remains the complete durable response
 and replay source.
 

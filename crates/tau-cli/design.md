@@ -40,14 +40,13 @@ reasoning/thinking text. Tool calls, tool payloads/results, shell output,
 status/progress lines, and agent-to-agent message debug displays must stay on
 their existing renderers unless there is a separate product decision.
 
-Provider response progress is a standalone live-indicator status line. The CLI may
-remember the latest `provider.response_updated.progress` for an in-flight prompt
-only to repaint the transient ellipsis block, and must derive bytes/rate from the
-self-contained counters in that update rather than from prior UI samples. The CLI
-renders a generic `(bytes, bytes/s)` suffix only on that transient indicator, not
-on visible assistant text, and must not copy progress text into editor
-current-response state, prompt-stdin capture, durable transcripts, or final
-response rendering.
+Agent turn stats are a standalone live-indicator status line. The CLI may
+remember the latest `agent.turn_stats_updated` sample for an in-flight prompt
+only to repaint the transient ellipsis block, and derives bytes/rate from the
+event's `current` and `previous` samples. The CLI renders a generic
+`(bytes, bytes/s)` suffix only on that transient indicator, not on visible
+assistant text, and must not copy stats text into editor current-response state,
+prompt-stdin capture, durable transcripts, or final response rendering.
 
 ## New-agent staging
 

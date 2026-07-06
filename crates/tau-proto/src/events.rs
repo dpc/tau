@@ -11,10 +11,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     ActionInvocationId, AgentContextKey, AgentId, AgentMessageId, AgentMetadataKey, AgentPromptId,
-    CborValue, ContextItem, DiffSummary, EventCategory, EventName, ExtensionInstanceId,
-    ExtensionName, MessagePhase, ModelId, ModelTag, PromptContext, PromptFragment,
-    ProviderTokenUsage, ReasoningTextKind, SessionId, SkillName, ToolCallId, ToolDefinition,
-    ToolGroupName, ToolName, ToolTag,
+    AgentTurnId, CborValue, ContextItem, DiffSummary, EventCategory, EventName,
+    ExtensionInstanceId, ExtensionName, MessagePhase, ModelId, ModelTag, PromptContext,
+    PromptFragment, ProviderTokenUsage, ReasoningTextKind, SessionId, SkillName, ToolCallId,
+    ToolDefinition, ToolGroupName, ToolName, ToolTag,
 };
 
 fn default_true() -> bool {
@@ -24,11 +24,6 @@ fn default_true() -> bool {
 #[allow(clippy::trivially_copy_pass_by_ref)]
 fn is_false(b: &bool) -> bool {
     !*b
-}
-
-#[allow(clippy::trivially_copy_pass_by_ref)]
-fn is_zero_u64(value: &u64) -> bool {
-    *value == 0
 }
 
 #[allow(clippy::trivially_copy_pass_by_ref)]
@@ -3102,6 +3097,42 @@ pub struct AgentPromptPrewarmRequested {
     pub share_user_cache_key: bool,
 }
 
+/// Live, content-free statistics for one active agent turn.
+///
+/// The harness owns publication of this event. It is an operational snapshot,
+/// not transcript content: consumers may use it to render live progress, but
+/// must not store it as assistant/user text or feed it back into prompts.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AgentTurnStatsUpdated {
+    /// Stable id for this agent turn.
+    pub turn_id: AgentTurnId,
+    /// Agent transcript this turn belongs to.
+    pub agent_id: AgentId,
+    /// Session where the turn is running.
+    pub session_id: SessionId,
+    /// Provider prompt currently active for this turn, when the turn is in a
+    /// provider phase. Absent while the turn is waiting on tools.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_prompt_id: Option<AgentPromptId>,
+    /// Prompt provenance for user-facing filtering.
+    #[serde(default)]
+    pub originator: PromptOriginator,
+    /// Latest cumulative turn statistics sample.
+    pub current: AgentTurnStatsSample,
+    /// Previously emitted cumulative sample for this turn.
+    pub previous: AgentTurnStatsSample,
+}
+
+/// One cumulative content-free statistics sample for an agent turn.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AgentTurnStatsSample {
+    /// Monotonic UTF-8 byte count of provider-generated semantic output sent
+    /// during this agent turn.
+    pub output_bytes_sent: u64,
+    /// Monotonic elapsed time since this agent turn started, in microseconds.
+    pub elapsed_micros: u64,
+}
+
 // ---------------------------------------------------------------------------
 // Provider execution events — facts from the provider backend
 // ---------------------------------------------------------------------------
@@ -3141,69 +3172,11 @@ pub struct ProviderResponseUpdated {
     /// Provider-authored transient status text, such as retry diagnostics.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status: Option<ProviderResponseStatusUpdate>,
-    /// Content-free transient byte progress sample for provider-generated
-    /// output in the current in-flight response. `None` means this update does
-    /// not carry a fresh sampled progress payload; it is not a clear/completion
-    /// signal.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub progress: Option<ProviderResponseProgressUpdate>,
     /// Echo of [`AgentPromptCreated::originator`]. UIs filter on
     /// `originator.is_user()` so the streaming text from a side
     /// conversation doesn't paint into the user's chat window.
     #[serde(default)]
     pub originator: PromptOriginator,
-}
-
-/// Content-free byte progress for provider-generated response output.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ProviderResponseProgressUpdate {
-    /// Aggregate UTF-8 byte counter over all generated semantic output at the
-    /// start of this sample window.
-    pub total_counter_start_bytes: u64,
-    /// Aggregate UTF-8 byte counter over all generated semantic output at the
-    /// end of this sample window.
-    pub total_counter_end_bytes: u64,
-    /// Aggregate sample-window duration in microseconds.
-    pub total_window_micros: u64,
-    /// Bounded per-item progress details.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub items: Vec<ProviderResponseProgressItem>,
-    /// Number of additional items omitted from `items`.
-    #[serde(default, skip_serializing_if = "is_zero_u64")]
-    pub omitted_items: u64,
-}
-
-/// Per-output-item progress for provider-generated response output.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ProviderResponseProgressItem {
-    /// Provider output index when available.
-    pub output_index: u32,
-    /// Kind of generated stream data.
-    pub kind: ProviderResponseProgressKind,
-    /// UTF-8 byte counter at the start of this sample window.
-    pub counter_start_bytes: u64,
-    /// UTF-8 byte counter at the end of this sample window.
-    pub counter_end_bytes: u64,
-    /// Duration of the sample window in microseconds.
-    pub window_micros: u64,
-    /// Optional bounded provider/tool label for diagnostic UIs. First-party CLI
-    /// rendering intentionally ignores labels so progress stays generic.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub label: Option<String>,
-}
-
-/// Kind of provider-generated stream data counted by progress metadata.
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ProviderResponseProgressKind {
-    /// Visible assistant response text bytes.
-    AssistantText,
-    /// Reasoning/thinking text bytes.
-    ReasoningText,
-    /// Function-call arguments or custom-tool input bytes.
-    ToolArguments,
 }
 
 /// Newly appended displayable text in a provider response update.
@@ -3643,6 +3616,8 @@ pub enum Event {
     AgentPromptTerminated(AgentPromptTerminated),
     #[serde(rename = "agent.prompt_prewarm_requested")]
     AgentPromptPrewarmRequested(AgentPromptPrewarmRequested),
+    #[serde(rename = "agent.turn_stats_updated")]
+    AgentTurnStatsUpdated(AgentTurnStatsUpdated),
     #[serde(rename = "agent.user_message_injected")]
     AgentUserMessageInjected(AgentUserMessageInjected),
     #[serde(rename = "agent.head_moved")]
@@ -3856,6 +3831,7 @@ impl Event {
             Self::AgentPromptStarted(_) => EventName::AGENT_PROMPT_STARTED,
             Self::AgentPromptTerminated(_) => EventName::AGENT_PROMPT_TERMINATED,
             Self::AgentPromptPrewarmRequested(_) => EventName::AGENT_PROMPT_PREWARM_REQUESTED,
+            Self::AgentTurnStatsUpdated(_) => EventName::AGENT_TURN_STATS_UPDATED,
             Self::AgentUserMessageInjected(_) => EventName::AGENT_USER_MESSAGE_INJECTED,
             Self::AgentHeadMoved(_) => EventName::AGENT_HEAD_MOVED,
             Self::AgentStarted(_) => EventName::AGENT_STARTED,
@@ -3897,6 +3873,7 @@ impl Event {
             self,
             Self::ToolCancelled(_)
                 | Self::ProviderResponseUpdated(_)
+                | Self::AgentTurnStatsUpdated(_)
                 | Self::ProviderPromptSubmitted(_)
                 | Self::ToolProgress(_)
                 | Self::ToolDelegateProgress(_)

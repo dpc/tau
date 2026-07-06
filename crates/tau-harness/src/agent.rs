@@ -14,12 +14,13 @@
 mod loop_guard;
 
 use std::collections::VecDeque;
+use std::time::Instant;
 
 pub(crate) use loop_guard::{LoopCycleState, LoopGuardState, LoopGuardTrigger, LoopTurnSignature};
 use tau_core::{AgentPersistenceMode, NodeId};
 use tau_proto::{
-    AgentId, AgentPromptId, ConnectionId, ModelId, PromptMessageClass, PromptOriginator, SessionId,
-    ToolCallId, ToolUseStats,
+    AgentId, AgentPromptId, AgentTurnId, AgentTurnStatsSample, ConnectionId, ModelId,
+    PromptMessageClass, PromptOriginator, SessionId, ToolCallId, ToolUseStats,
 };
 
 use crate::dedup::ResultDedupMap;
@@ -42,6 +43,23 @@ pub(crate) enum AgentTurnState {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct PendingCancel {
     pub(crate) reason: String,
+}
+
+/// Runtime-only stats state for one active agent turn.
+#[derive(Debug)]
+pub(crate) struct AgentTurnStatsRuntime {
+    /// Stable id for this turn.
+    pub(crate) turn_id: AgentTurnId,
+    /// Provider prompt currently active, or `None` during tool waits.
+    pub(crate) current_prompt_id: Option<AgentPromptId>,
+    /// Monotonic start instant for elapsed turn duration.
+    pub(crate) started_at: Instant,
+    /// Cumulative semantic provider output bytes observed in this turn.
+    pub(crate) output_bytes_sent: u64,
+    /// Last sample emitted to protocol consumers.
+    pub(crate) last_emitted: AgentTurnStatsSample,
+    /// Last wall-clock time a sample was emitted.
+    pub(crate) last_emitted_at: Instant,
 }
 
 /// One loaded agent tracked by the harness.
@@ -104,6 +122,8 @@ pub(crate) struct Agent {
     /// when that exact prompt is dispatched.
     pub(crate) next_ctx_id: Option<String>,
     pub(crate) turn_state: AgentTurnState,
+    /// Runtime-only live stats for the currently active agent turn.
+    pub(crate) turn_stats: Option<AgentTurnStatsRuntime>,
     /// For side agents spawned by a tool-implementing extension
     /// (currently just `agent_start`): the parent agent's tool call id
     /// that this conversation is fulfilling. Lets the harness emit
@@ -316,6 +336,7 @@ impl Agent {
             prompt_index_initialized: false,
             next_ctx_id: None,
             turn_state: AgentTurnState::Idle,
+            turn_stats: None,
             parent_tool_call_id: None,
             parent_agent_id: None,
             display_name: None,

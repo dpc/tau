@@ -46,9 +46,9 @@ assistant `message` sidecars may only replay as assistant messages, and their
 model-visible text/phase must come from `MessageItem` rather than from an
 unchecked raw blob.
 
-## Streaming progress metadata
+## Streaming status boundary
 
-Provider response progress for streamed assistant text, reasoning text, and
-tool-call/custom-tool input must stay content-free. Emit byte counters,
-sample-window durations, output indices, and bounded labels only; never copy raw
-text/reasoning/argument/input bytes into progress status.
+Providers must not copy raw streamed assistant text, reasoning text,
+tool-call arguments, or custom-tool input into status text or diagnostics. Live
+byte stats are harness-owned `agent.turn_stats_updated` events, not provider
+metadata.

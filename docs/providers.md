@@ -81,8 +81,7 @@ These should keep the semantics of the current agent execution events as much as
 
 - submitted = the provider accepted the prompt and started work
 - updated = transient append deltas for newly generated displayable assistant
-  text and reasoning text, plus small compaction/status/progress metadata when
-  relevant
+  text and reasoning text, plus small compaction/status metadata when relevant
 - finished = final response, tool calls, usage, stop reason, backend metadata
 
 Providers must not repeat the full accumulated assistant/reasoning text in
@@ -92,16 +91,11 @@ tool calls and opaque provider items, are committed. Provider-authored retry or
 diagnostic text must be sent as update `status`, not as assistant message
 deltas.
 
-`provider.response_updated.progress` is content-free, transient byte progress
-metadata for provider-generated semantic output in the in-flight response:
-assistant text, reasoning text, and tool/custom-tool input bytes. Progress
-updates are self-contained sample windows: they include aggregate and bounded
-per-item byte counters plus `window_micros` so UIs can render bytes and rates
-without remembering a previous sample. Providers may omit `progress` on
-otherwise-visible rate-limited updates; consumers should not clear cached live
-progress from absence alone. Progress must not count raw wire framing or tool
-execution output/results, and must not be stored as transcript content, editor
-current response text, prompt-stdin capture, or final response output.
+Providers do not publish public byte-progress metadata. The harness derives
+content-free `agent.turn_stats_updated` events after validating provider prompt
+ownership; those events carry current and previous cumulative turn samples for
+UI rates and must not be stored as transcript content, editor current-response
+text, prompt-stdin capture, or final response output.
 
 First-party providers abort high-confidence tight stream loops with
 `stop_reason: repetition_detected`: assistant/reasoning/tool-argument deltas are

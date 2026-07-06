@@ -358,6 +358,8 @@ impl EventName {
         Self::from_static(EventCategory::Agent, "prompt_terminated");
     pub const AGENT_PROMPT_PREWARM_REQUESTED: Self =
         Self::from_static(EventCategory::Agent, "prompt_prewarm_requested");
+    pub const AGENT_TURN_STATS_UPDATED: Self =
+        Self::from_static(EventCategory::Agent, "turn_stats_updated");
     pub const AGENT_USER_MESSAGE_INJECTED: Self =
         Self::from_static(EventCategory::Agent, "user_message_injected");
     pub const AGENT_HEAD_MOVED: Self = Self::from_static(EventCategory::Agent, "head_moved");

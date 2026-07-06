@@ -58,15 +58,13 @@ cannot override rebuilt structured fields such as `id`, `status`, `call_id`,
 `name`, `arguments`, or `input`. Full transcript replay must fall back to the
 historical `fc_`/`ctc_` id synthesis when that sidecar is absent.
 
-## Streaming provider-output progress
+## Streaming provider output
 
 Responses streams may deliver visible assistant text, reasoning summaries, large
-function-call arguments, or custom-tool input during an agent turn. The provider
-reports aggregate semantic-output byte progress through transient
-`provider.response_updated` progress metadata. Progress contains only byte
-counters and bounded labels, never raw text/reasoning/argument content, and each
-emitted sample includes aggregate start/end counters and a window duration so UIs
-can render liveness and rates without storing prior samples.
+function-call arguments, or custom-tool input during an agent turn. Providers
+emit displayable assistant/reasoning append deltas and final tool-call items, but
+do not publish public byte-progress metadata. The harness derives content-free
+agent-turn stats from accepted events.
 
 ## Model metadata tags
 

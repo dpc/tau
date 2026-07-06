@@ -21,20 +21,21 @@ use tau_core::{
 use tau_proto::{
     ActionError, ActionInvocationId, ActionInvoke, ActionResult, ActionSchemaPublished, AgentHead,
     AgentId, AgentPromptCreated, AgentPromptId, AgentPromptQueued, AgentPromptRecalled,
-    AgentPromptTerminated, AgentPromptTerminationReason, BackgroundSupport, CborValue, ClientKind,
-    ConnectionId, ContentPart, ContextItem, ContextRole, Disconnect, Event, EventSelector,
-    ExtensionName, HarnessAgentContextUsageChanged, HarnessContextUsageChanged,
-    HarnessInputMessage, HarnessOutputMessage, HarnessRoleSelected, Hello, MessageItem, ModelId,
-    PROTOCOL_VERSION, PromptFragment, PromptOriginator, ProviderModelInfo,
-    ProviderResponseFinished, ProviderStopReason, ProviderTokenUsage, SecretValue, SessionId,
+    AgentPromptTerminated, AgentPromptTerminationReason, AgentTurnId, AgentTurnStatsSample,
+    AgentTurnStatsUpdated, BackgroundSupport, CborValue, ClientKind, ConnectionId, ContentPart,
+    ContextItem, ContextRole, Disconnect, Event, EventSelector, ExtensionName,
+    HarnessAgentContextUsageChanged, HarnessContextUsageChanged, HarnessInputMessage,
+    HarnessOutputMessage, HarnessRoleSelected, Hello, MessageItem, ModelId, PROTOCOL_VERSION,
+    PromptFragment, PromptOriginator, ProviderModelInfo, ProviderResponseFinished,
+    ProviderResponseTextDelta, ProviderStopReason, ProviderTokenUsage, SecretValue, SessionId,
     ToolBackgroundError, ToolBackgroundResult, ToolCallId, ToolCallItem, ToolCancelled,
     ToolDefinition, ToolError, ToolName, ToolRegister, ToolRejected, ToolRequest, ToolResult,
     ToolResultKind, ToolType, UiCancelPrompt, UiTreeNavigationTarget, nearest_name_suggestion,
 };
 
 use crate::agent::{
-    Agent, AgentTurnState, LoopCycleState, LoopGuardTrigger, LoopTurnSignature, PendingCancel,
-    PendingPrompt,
+    Agent, AgentTurnState, AgentTurnStatsRuntime, LoopCycleState, LoopGuardTrigger,
+    LoopTurnSignature, PendingCancel, PendingPrompt,
 };
 use crate::daemon::InteractionOutcome;
 use crate::debug_log::DebugEventLog;
@@ -100,6 +101,7 @@ use crate::turn::{PromptSubmission, TurnState};
 
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(2);
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(120);
+const AGENT_TURN_STATS_SAMPLE_INTERVAL: Duration = Duration::from_secs(1);
 const BUILT_IN_SKILLS_SOURCE_ID: &str = "harness:built-in-skills";
 const SELF_KNOWLEDGE_VERSION_TOKEN: &str = "__TAU_SELF_KNOWLEDGE_VERSION__";
 const SELF_KNOWLEDGE_HASH_TOKEN: &str = "__TAU_SELF_KNOWLEDGE_HASH__";
@@ -111,6 +113,18 @@ const SELF_KNOWLEDGE_HARNESS_CONFIG: &str =
 const SELF_KNOWLEDGE_UI_CONFIG: &str = include_str!("../../tau-config/config/built-in.cli.yaml");
 const SELF_KNOWLEDGE_PIM_CONFIG: &str =
     include_str!("../../tau-ext-pim/config/self-knowledge.harness.yaml");
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AgentTurnStatsEmitMode {
+    Sampled,
+    Forced,
+}
+
+impl AgentTurnStatsEmitMode {
+    fn is_forced(self) -> bool {
+        matches!(self, Self::Forced)
+    }
+}
 
 fn session_dir_status_from_reason(
     reason: tau_proto::SessionStartReason,
@@ -157,6 +171,31 @@ fn agent_runtime_state_for_turn(state: &AgentTurnState) -> tau_proto::AgentRunti
             tau_proto::AgentRuntimeState::Running
         }
     }
+}
+
+fn provider_response_delta_bytes(deltas: &[ProviderResponseTextDelta]) -> u64 {
+    deltas
+        .iter()
+        .map(|delta| match delta {
+            ProviderResponseTextDelta::Message { text, .. }
+            | ProviderResponseTextDelta::ReasoningText { text, .. } => text.len() as u64,
+        })
+        .sum()
+}
+
+fn final_tool_argument_bytes(output_items: &[ContextItem]) -> u64 {
+    // Tool-call arguments are provider-generated semantic output that can be
+    // dispatched to tools, even when they were never streamed as visible text.
+    // Tool execution output/results are excluded because they are not generated
+    // by the agent turn itself.
+    output_items
+        .iter()
+        .filter_map(|item| match item {
+            ContextItem::ToolCall(call) => call.raw_arguments_json.as_ref(),
+            _ => None,
+        })
+        .map(|arguments| arguments.len() as u64)
+        .sum()
 }
 
 /// Text for the one-shot model-visible notice folded into the first user turn
@@ -3648,6 +3687,7 @@ impl Harness {
             );
             self.clear_tool_call_tracking(call_id.as_str());
         }
+        self.clear_agent_turn_stats(cid);
         self.set_agent_turn_state(cid, AgentTurnState::Idle);
     }
 
@@ -3801,6 +3841,7 @@ impl Harness {
             Event::AgentPromptRecalled(prompt) => Some(&prompt.agent_id),
             Event::AgentPromptTerminated(prompt) => Some(&prompt.agent_id),
             Event::AgentPromptPrewarmRequested(prompt) => Some(&prompt.agent_id),
+            Event::AgentTurnStatsUpdated(stats) => Some(&stats.agent_id),
             Event::ExtPromptSubmitRequest(request) => Some(&request.agent_id),
             Event::ProviderResponseUpdated(updated) => Some(&updated.agent_id),
             Event::ToolRequest(request) => Some(&request.agent_id),
@@ -3874,6 +3915,7 @@ impl Harness {
             Event::AgentUserMessageInjected(injected) => Some(injected.agent_id.clone()),
             Event::AgentMessageSent(message) => Some(message.sender_id.clone()),
             Event::AgentMessageReceived(message) => Some(message.recipient_id.clone()),
+            Event::AgentTurnStatsUpdated(stats) => Some(stats.agent_id.clone()),
             Event::AgentHeadMoved(moved) => Some(moved.agent_id.clone()),
             Event::ProviderResponseFinished(finished) => Some(finished.agent_id.clone()),
             Event::ProviderToolResult(result) => self
@@ -5589,7 +5631,13 @@ impl Harness {
                         updated.agent_id = agent_id;
                     }
                     self.enrich_provider_response_updated_compaction(&mut updated);
+                    let stats_cid = self.agent_id_for_prompt(&updated.agent_prompt_id);
+                    let output_bytes = provider_response_delta_bytes(&updated.deltas);
                     self.publish_event(Some(source_id), Event::ProviderResponseUpdated(updated));
+                    if let Some(cid) = stats_cid.as_ref() {
+                        self.add_agent_turn_output_bytes(cid, output_bytes);
+                        self.emit_agent_turn_stats(cid, AgentTurnStatsEmitMode::Sampled);
+                    }
                 }
                 Ok(None)
             }
@@ -6658,6 +6706,7 @@ impl Harness {
                         .retain(PendingPrompt::is_passive_background_completion);
                     conv.in_flight_prompt = None;
                 }
+                self.clear_agent_turn_stats(cid);
                 self.set_agent_turn_state(cid, AgentTurnState::Idle);
                 self.emit_info("cancelled current turn");
                 self.try_advance_queue();
@@ -7922,13 +7971,16 @@ impl Harness {
         reason: AgentPromptTerminationReason,
         originator: PromptOriginator,
     ) {
+        let cid = self.prompt_agents.get(&agent_prompt_id).cloned();
         let agent_id = crate::parse_agent_id(
-            self.prompt_agents
-                .get(&agent_prompt_id)
+            cid.as_ref()
                 .and_then(|cid| self.agents.get(cid))
                 .and_then(|conv| conv.agent_id.clone())
                 .expect("agent has durable id"),
         );
+        if let Some(cid) = cid.as_ref() {
+            self.finish_agent_turn_stats(cid);
+        }
         self.publish_event(
             None,
             Event::AgentPromptTerminated(AgentPromptTerminated {
@@ -10298,6 +10350,116 @@ impl Harness {
         );
     }
 
+    /// Starts a new stats turn, or moves the current stats turn to a new
+    /// provider prompt after a tool wait.
+    fn start_or_update_agent_turn_stats(&mut self, cid: &AgentId, agent_prompt_id: AgentPromptId) {
+        let now = Instant::now();
+        if let Some(agent) = self.agents.get_mut(cid) {
+            if let Some(stats) = agent.turn_stats.as_mut() {
+                stats.current_prompt_id = Some(agent_prompt_id);
+            } else {
+                agent.turn_stats = Some(AgentTurnStatsRuntime {
+                    turn_id: AgentTurnId::from(agent_prompt_id.as_str()),
+                    current_prompt_id: Some(agent_prompt_id),
+                    started_at: now,
+                    output_bytes_sent: 0,
+                    last_emitted: AgentTurnStatsSample::default(),
+                    last_emitted_at: now,
+                });
+            }
+        }
+    }
+
+    /// Adds provider-generated semantic output bytes to the current stats turn.
+    fn add_agent_turn_output_bytes(&mut self, cid: &AgentId, bytes: u64) {
+        if bytes == 0 {
+            return;
+        }
+        if let Some(stats) = self
+            .agents
+            .get_mut(cid)
+            .and_then(|agent| agent.turn_stats.as_mut())
+        {
+            stats.output_bytes_sent = stats.output_bytes_sent.saturating_add(bytes);
+        }
+    }
+
+    /// Marks the current stats turn as waiting on tools.
+    fn mark_agent_turn_stats_waiting_on_tools(&mut self, cid: &AgentId) {
+        if let Some(stats) = self
+            .agents
+            .get_mut(cid)
+            .and_then(|agent| agent.turn_stats.as_mut())
+        {
+            stats.current_prompt_id = None;
+        }
+    }
+
+    /// Emits the current stats snapshot for an active turn when useful.
+    fn emit_agent_turn_stats(&mut self, cid: &AgentId, mode: AgentTurnStatsEmitMode) {
+        let now = Instant::now();
+        let Some((event, current)) = self.agents.get(cid).and_then(|agent| {
+            let stats = agent.turn_stats.as_ref()?;
+            let current = AgentTurnStatsSample {
+                output_bytes_sent: stats.output_bytes_sent,
+                elapsed_micros: now
+                    .saturating_duration_since(stats.started_at)
+                    .as_micros()
+                    .min(u128::from(u64::MAX)) as u64,
+            };
+            let bytes_changed = current.output_bytes_sent != stats.last_emitted.output_bytes_sent;
+            let first_byte_sample =
+                stats.last_emitted.output_bytes_sent == 0 && current.output_bytes_sent > 0;
+            let interval_elapsed = now.saturating_duration_since(stats.last_emitted_at)
+                >= AGENT_TURN_STATS_SAMPLE_INTERVAL;
+            if !mode.is_forced() && !(bytes_changed && (first_byte_sample || interval_elapsed)) {
+                return None;
+            }
+            let agent_id = agent.agent_id.as_ref().map(crate::parse_agent_id)?;
+            Some((
+                AgentTurnStatsUpdated {
+                    turn_id: stats.turn_id.clone(),
+                    agent_id,
+                    session_id: agent.session_id.clone(),
+                    agent_prompt_id: stats.current_prompt_id.clone(),
+                    originator: agent.originator.clone(),
+                    current,
+                    previous: stats.last_emitted,
+                },
+                current,
+            ))
+        }) else {
+            return;
+        };
+
+        if let Some(stats) = self
+            .agents
+            .get_mut(cid)
+            .and_then(|agent| agent.turn_stats.as_mut())
+        {
+            stats.last_emitted = current;
+            stats.last_emitted_at = now;
+        }
+        self.publish_event(
+            Some(HARNESS_CONNECTION_ID),
+            Event::AgentTurnStatsUpdated(event),
+        );
+    }
+
+    /// Emits the final stats snapshot and clears runtime stats for the turn.
+    fn finish_agent_turn_stats(&mut self, cid: &AgentId) {
+        self.emit_agent_turn_stats(cid, AgentTurnStatsEmitMode::Forced);
+        self.clear_agent_turn_stats(cid);
+    }
+
+    /// Clears runtime stats for a turn that already emitted its terminal sample
+    /// or was abandoned while no provider prompt is active.
+    fn clear_agent_turn_stats(&mut self, cid: &AgentId) {
+        if let Some(agent) = self.agents.get_mut(cid) {
+            agent.turn_stats = None;
+        }
+    }
+
     fn remove_agent(&mut self, cid: &AgentId) -> Option<Agent> {
         self.shown_tool_failure_examples
             .retain(|(agent_id, _, _)| agent_id != cid);
@@ -10780,6 +10942,7 @@ impl Harness {
         let agent_prompt_id = prompt.agent_prompt_id.clone();
         self.publish_event(None, Event::AgentPromptStarted((&prompt).into()));
         self.publish_event(None, Event::AgentPromptCreated(prompt));
+        self.emit_agent_turn_stats(cid, AgentTurnStatsEmitMode::Forced);
         Some(agent_prompt_id)
     }
 
@@ -10867,6 +11030,7 @@ impl Harness {
         if let Some(c) = self.agents.get_mut(cid) {
             c.in_flight_prompt = Some(agent_prompt_id.clone());
         }
+        self.start_or_update_agent_turn_stats(cid, agent_prompt_id.clone());
         self.set_agent_turn_state(
             cid,
             AgentTurnState::AgentThinking {
@@ -11524,6 +11688,8 @@ impl Harness {
             );
         }
 
+        self.add_agent_turn_output_bytes(&cid, final_tool_argument_bytes(&response.output_items));
+        self.emit_agent_turn_stats(&cid, AgentTurnStatsEmitMode::Forced);
         self.publish_finished_response_for_agent(&cid, source, &response);
         if self.handle_finished_response_side_conversation(
             &cid,
@@ -12002,6 +12168,7 @@ impl Harness {
         // Release before removing or detaching the side agent so
         // queued descendants can still resolve their parent agent
         // while starting. Active descendants keep their own copied state.
+        self.clear_agent_turn_stats(cid);
         self.set_agent_turn_state(cid, AgentTurnState::Idle);
         self.release_start_agent_request(cid);
         if keep_tool_backed_conversation {
@@ -12040,6 +12207,8 @@ impl Harness {
             .collect();
         self.register_finished_response_pending_tools(&normalized_tool_calls.calls);
         self.set_agent_turn_state(cid, AgentTurnState::ToolsRunning { remaining_calls });
+        self.mark_agent_turn_stats_waiting_on_tools(cid);
+        self.emit_agent_turn_stats(cid, AgentTurnStatsEmitMode::Forced);
         if self
             .agents
             .get(cid)
@@ -12095,6 +12264,7 @@ impl Harness {
         } else {
             self.record_assistant_loop_signature(cid, assistant_text);
         }
+        self.clear_agent_turn_stats(cid);
         self.set_agent_turn_state(cid, AgentTurnState::Idle);
         if self.agents.get(cid).is_some_and(|conv| {
             conv.pending_prompts

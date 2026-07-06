@@ -151,6 +151,13 @@ but keep it in memory only; `agent.started.ephemeral` marks that boundary.
 - **`agent.head_moved`** — Durable fact that changes an agent's selected tree
   head after navigation, so future prompts branch from the requested root or
   node target.
+- **`agent.turn_stats_updated`** — Transient, content-free live stats for an
+  active agent turn. The harness publishes `current` and `previous` cumulative
+  samples containing semantic output bytes sent and elapsed turn microseconds so
+  consumers can calculate deltas/rates directly. Treat `turn_id` as an opaque
+  turn identifier; `agent_prompt_id` is absent while waiting on tools.
+  It is operational UI state, not transcript content, and is not replayed from
+  durable history.
 
 ## Provider execution
 
@@ -164,16 +171,11 @@ Emitted by the provider backend that owns the selected model.
   and started processing it. Echoes the originator. Transient.
 - **`provider.response_updated`** — Transient append-delta streaming update.
   Carries newly appended displayable assistant/reasoning text in `deltas`, plus
-  small compaction/status/progress metadata when relevant. `progress` is
-  content-free, self-contained sample-window metadata for provider-generated
-  semantic output bytes in the in-flight response: assistant text, reasoning
-  text, and tool/custom-tool input bytes. It does not count raw wire framing or
-  tool execution output/results. An update with absent `progress` has no fresh
-  sampled progress payload; absence is not a clear or completion signal.
-  Provider retry/status text is not assistant-authored and is carried separately
-  from message deltas. The event is not durable and is not replayed to late
-  subscribers; UIs that attach mid-stream may show an ellipsis prefix until the
-  final complete response arrives.
+  small compaction/status metadata when relevant. Provider retry/status text is
+  not assistant-authored and is carried separately from message deltas. The event
+  is not durable and is not replayed to late subscribers; UIs that attach
+  mid-stream may show an ellipsis prefix until the final complete response
+  arrives.
 - **`provider.response_finished`** — Final assistant output in original
   item order via `output_items`, plus optional usage, provider
   response id, backend metadata, and echoed originator. Routed by the
