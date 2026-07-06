@@ -574,37 +574,69 @@ impl StreamState {
         }
     }
 
-    /// Returns pending non-displayable tool input byte progress for live UI
-    /// status, if any tool-call arguments/custom input have been buffered.
-    pub fn tool_input_progress(&self) -> Option<ProviderResponseProgressUpdate> {
-        let mut total_pending_bytes = 0_u64;
+    /// Returns content-free byte progress for provider-generated semantic
+    /// output in the current response.
+    pub fn streaming_progress(&self) -> Option<ProviderResponseProgressUpdate> {
+        let mut total_bytes = 0_u64;
         let mut items = Vec::new();
         let mut omitted_items = 0_u64;
         for (output_index, item) in self.output_items.iter().enumerate() {
-            let OutputItemAccumulator::ToolCall(call) = item else {
-                continue;
+            let (kind, counter_end_bytes, label) = match item {
+                OutputItemAccumulator::Message(message) => (
+                    ProviderResponseProgressKind::AssistantText,
+                    message.text.len() as u64,
+                    None,
+                ),
+                OutputItemAccumulator::ToolCall(call) => (
+                    ProviderResponseProgressKind::ToolArguments,
+                    call.arguments_json.len() as u64,
+                    bounded_progress_label(&call.name),
+                ),
+                OutputItemAccumulator::Empty
+                | OutputItemAccumulator::Reasoning(_)
+                | OutputItemAccumulator::Compaction(_)
+                | OutputItemAccumulator::UnknownProviderItem(_) => continue,
             };
-            let counter_end_bytes = call.arguments_json.len() as u64;
             if counter_end_bytes == 0 {
                 continue;
             }
-            total_pending_bytes = total_pending_bytes.saturating_add(counter_end_bytes);
+            total_bytes = total_bytes.saturating_add(counter_end_bytes);
             if items.len() < 4 {
                 items.push(ProviderResponseProgressItem {
                     output_index: output_index as u32,
-                    kind: ProviderResponseProgressKind::ToolArguments,
+                    kind,
                     counter_start_bytes: 0,
                     counter_end_bytes,
                     window_micros: 0,
-                    label: bounded_progress_label(&call.name),
+                    label,
                 });
             } else {
                 omitted_items += 1;
             }
         }
-        (total_pending_bytes > 0).then_some(ProviderResponseProgressUpdate {
+        if let Some(thinking) = self
+            .thinking
+            .as_deref()
+            .filter(|thinking| !thinking.is_empty())
+        {
+            let counter_end_bytes = thinking.len() as u64;
+            total_bytes = total_bytes.saturating_add(counter_end_bytes);
+            if items.len() < 4 {
+                items.push(ProviderResponseProgressItem {
+                    output_index: self.thinking_output_index.unwrap_or(0) as u32,
+                    kind: ProviderResponseProgressKind::ReasoningText,
+                    counter_start_bytes: 0,
+                    counter_end_bytes,
+                    window_micros: 0,
+                    label: None,
+                });
+            } else {
+                omitted_items += 1;
+            }
+        }
+        (total_bytes > 0).then_some(ProviderResponseProgressUpdate {
             total_counter_start_bytes: 0,
-            total_counter_end_bytes: total_pending_bytes,
+            total_counter_end_bytes: total_bytes,
             total_window_micros: 0,
             items,
             omitted_items,

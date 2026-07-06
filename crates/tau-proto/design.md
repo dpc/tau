@@ -24,7 +24,9 @@ replay, or UI behavior.
 
 Status: unconfirmed
 
-`provider.response_updated.progress` describes non-displayable buffered provider
-stream state, not assistant content. It must use content-free sample-window
-counters that include aggregate totals over all pending items so consumers can
-display pending bytes/rates from one update without keeping prior samples.
+`provider.response_updated.progress` describes provider-generated semantic output
+byte progress for the in-flight response: assistant text, reasoning text, and
+tool/custom-tool input bytes. It must use content-free sample-window counters
+that include aggregate totals over all counted items so consumers can display
+bytes/rates from one update without keeping prior samples. It must not count raw
+wire framing or tool execution output/results.

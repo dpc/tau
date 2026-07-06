@@ -44,4 +44,10 @@ Prompt execution concurrency defaults to 4 and can be overridden with `TAU_BUILT
 
 Provider response streaming note: built-in providers publish transient `provider.response_updated` append deltas for visible assistant/reasoning text. Retry diagnostics are provider status updates, and complete durable assistant output is committed through `provider.response_finished`.
 
+Provider progress metadata is transient and content-free. Built-in providers may
+publish aggregate semantic-output byte counters for assistant text, reasoning
+text, and tool/custom-tool input while a response is in flight; these counters
+exclude raw wire bytes and tool execution outputs/results, and they are not
+transcript or final-response content.
+
 Built-in providers also run a conservative exact streaming repetition guard over assistant text, reasoning text, and tool-call argument deltas. When a high-volume tight exact loop is detected, the provider clears transient streamed output and finishes with `stop_reason: repetition_detected`, empty final output items, and bounded display-only error text; the harness treats this as a loop-guard trigger rather than retrying the provider turn.

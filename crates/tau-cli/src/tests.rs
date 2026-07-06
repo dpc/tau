@@ -4150,7 +4150,11 @@ fn prompt_termination_clears_live_response_and_activity() {
     )));
     sync(&handle);
     assert!(in_progress.load(std::sync::atomic::Ordering::Relaxed));
-    assert!(vt.screen_contains(80, "…"));
+    assert!(
+        !vt.screen_contains(80, "…"),
+        "prompt creation should not render provider-progress ellipsis before provider bytes: {:?}",
+        vt.screen_text(80)
+    );
 
     // Regression: if the harness discards a stale provider response, it now
     // publishes this terminal lifecycle fact instead of leaving the UI's live
@@ -4167,8 +4171,8 @@ fn prompt_termination_clears_live_response_and_activity() {
     assert!(!vt.screen_contains(80, "…"));
 }
 
-/// Ensures non-displayable streamed tool arguments make the live response
-/// indicator look active without entering the final transcript.
+/// Ensures progress-only provider output makes the standalone live indicator
+/// look active without entering the final transcript.
 #[test]
 fn provider_progress_only_update_suffixes_live_indicator_until_finish() {
     let (_term, handle, vt) = setup(80, 24);
@@ -4205,14 +4209,71 @@ fn provider_progress_only_update_suffixes_live_indicator_until_finish() {
         originator: tau_proto::PromptOriginator::User,
     }));
     sync(&handle);
-    assert!(vt.screen_contains(80, "… (12KB, 8KB/s tool args)"));
+    assert!(vt.screen_contains(80, "… (12KB, 8KB/s)"));
+    assert!(!vt.screen_contains(80, "shell_command"));
+    assert!(!vt.screen_contains(80, "tool args"));
+    assert!(!vt.screen_contains(80, "tools,"));
 
     renderer.handle(&Event::ProviderResponseFinished(finished_response(
         "sp-progress",
         Vec::new(),
     )));
     sync(&handle);
-    assert!(!vt.screen_contains(80, "… (12KB, 8KB/s tool args)"));
+    assert!(!vt.screen_contains(80, "… (12KB, 8KB/s)"));
+}
+
+/// Ensures visible assistant streaming remains content-focused: generic byte
+/// progress is not appended to the response text while text is visibly active.
+#[test]
+fn provider_visible_update_omits_progress_suffix() {
+    let (_term, handle, vt) = setup(80, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        cli_test_theme(),
+    );
+
+    renderer.handle(&Event::AgentPromptCreated(agent_prompt_created(
+        "sp-visible-progress",
+        "s1",
+    )));
+    renderer.handle(&Event::ProviderResponseUpdated(ProviderResponseUpdated {
+        agent_prompt_id: "sp-visible-progress".into(),
+        agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
+        deltas: vec![tau_proto::ProviderResponseTextDelta::Message {
+            output_index: 0,
+            text: "Hello".to_owned(),
+            phase: None,
+        }],
+        compaction: None,
+        status: None,
+        progress: Some(tau_proto::ProviderResponseProgressUpdate {
+            total_counter_start_bytes: 0,
+            total_counter_end_bytes: 5,
+            total_window_micros: 1_000_000,
+            items: vec![tau_proto::ProviderResponseProgressItem {
+                output_index: 0,
+                kind: tau_proto::ProviderResponseProgressKind::AssistantText,
+                counter_start_bytes: 0,
+                counter_end_bytes: 5,
+                window_micros: 1_000_000,
+                label: None,
+            }],
+            omitted_items: 0,
+        }),
+        originator: tau_proto::PromptOriginator::User,
+    }));
+    sync(&handle);
+    assert!(vt.screen_contains(80, "Hello …"));
+    assert!(!vt.screen_contains(80, "Hello … (5B, 5B/s)"));
+
+    renderer.handle(&Event::ProviderResponseFinished(finished_response(
+        "sp-visible-progress",
+        vec![assistant_message_item("Hello")],
+    )));
+    sync(&handle);
+    assert!(vt.screen_contains(80, "Hello"));
+    assert!(!vt.screen_contains(80, "(5B, 5B/s)"));
 }
 
 #[test]
@@ -4584,7 +4645,11 @@ fn single_prompt_response_cycle() {
         "sp-0", "s1",
     )));
     sync(&handle);
-    assert!(vt.screen_contains(80, "…"));
+    assert!(
+        !vt.screen_contains(80, "…"),
+        "prompt creation should not render provider-progress ellipsis before provider bytes: {:?}",
+        vt.screen_text(80)
+    );
 
     // Agent streams response.
     renderer.handle(&Event::ProviderResponseUpdated(
@@ -5226,7 +5291,11 @@ fn streaming_indicator_appends_during_updates() {
         "sp-0", "s1",
     )));
     sync(&handle);
-    assert!(vt.screen_contains(80, "…"));
+    assert!(
+        !vt.screen_contains(80, "…"),
+        "prompt creation should not render provider-progress ellipsis before provider bytes: {:?}",
+        vt.screen_text(80)
+    );
 
     renderer.handle(&Event::ProviderResponseUpdated(
         provider_response_delta_update("sp-0", "Hello", None, tau_proto::PromptOriginator::User),

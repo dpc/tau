@@ -2018,11 +2018,79 @@ fn streamed_tool_input_deltas_update_pending_byte_progress() {
     });
     apply_event(&mut state, &delta, &mut |_| {}).expect("delta");
 
-    let progress = state.tool_input_progress().expect("tool input progress");
+    let progress = state.streaming_progress().expect("tool input progress");
     assert_eq!(progress.items.len(), 1);
     assert_eq!(progress.items[0].output_index, 0);
     assert_eq!(progress.items[0].counter_end_bytes, "αβγ".len() as u64);
     assert_eq!(progress.items[0].label.as_deref(), Some("apply_patch"));
+}
+
+/// Ensures generic streaming progress counts visible assistant text and
+/// reasoning summaries as provider-generated semantic output.
+#[test]
+fn streamed_output_text_and_reasoning_update_byte_progress() {
+    use crate::common::StreamState;
+
+    let mut state = StreamState::new();
+    state.append_message_delta_at(0, "Hello");
+    state.append_reasoning_summary_delta_at(1, "think");
+
+    let progress = state
+        .streaming_progress()
+        .expect("assistant and reasoning progress");
+    assert_eq!(progress.total_counter_end_bytes, "Hellothink".len() as u64);
+    assert!(progress.items.iter().any(|item| {
+        item.kind == tau_proto::ProviderResponseProgressKind::AssistantText
+            && item.counter_end_bytes == "Hello".len() as u64
+    }));
+    assert!(progress.items.iter().any(|item| {
+        item.kind == tau_proto::ProviderResponseProgressKind::ReasoningText
+            && item.counter_end_bytes == "think".len() as u64
+    }));
+}
+
+/// Ensures progress counts only semantic output byte streams and excludes
+/// provider-owned opaque/raw items that are retained for replay/debug fidelity.
+#[test]
+fn streamed_progress_excludes_opaque_compaction_and_unknown_items() {
+    use crate::common::{OutputItemAccumulator, StreamState};
+
+    let opaque = |label: &str| {
+        let raw_json = format!(r#"{{"type":"{label}","payload":"do-not-count"}}"#);
+        OpaqueProviderItem::with_raw_json(
+            crate::common::json_to_cbor(&serde_json::json!({
+                "type": label,
+                "payload": "do-not-count",
+            })),
+            raw_json,
+        )
+    };
+    let mut state = StreamState::new();
+    state.append_message_delta_at(0, "Hi");
+    state.append_reasoning_summary_delta_at(1, "why");
+    state
+        .output_items
+        .push(OutputItemAccumulator::Reasoning(opaque("reasoning")));
+    state
+        .output_items
+        .push(OutputItemAccumulator::Compaction(Some(opaque(
+            "compaction",
+        ))));
+    state
+        .output_items
+        .push(OutputItemAccumulator::UnknownProviderItem(opaque("future")));
+
+    let progress = state
+        .streaming_progress()
+        .expect("semantic output progress");
+    assert_eq!(progress.total_counter_end_bytes, "Hiwhy".len() as u64);
+    assert_eq!(progress.items.len(), 2);
+    assert_eq!(progress.omitted_items, 0);
+    assert!(progress.items.iter().all(|item| matches!(
+        item.kind,
+        tau_proto::ProviderResponseProgressKind::AssistantText
+            | tau_proto::ProviderResponseProgressKind::ReasoningText
+    )));
 }
 
 #[test]

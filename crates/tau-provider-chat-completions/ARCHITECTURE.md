@@ -16,11 +16,11 @@ provider-visible history preserves argument key order, whitespace, and numeric
 spelling. Serializing parsed CBOR is only a fallback for old persisted records or
 records that never had provider-wire JSON.
 
-Streamed function-call argument chunks are also the source for transient
-`provider.response_updated.progress` metadata while a turn is in flight.
-Progress samples are content-free byte counters with aggregate start/end totals
-and a sample-window duration; they let UIs show pending bytes/rates for large
-non-displayable argument streams without storing previous samples or exposing
+Streamed assistant text, reasoning text, and function-call argument chunks are
+the source for transient `provider.response_updated.progress` metadata while a
+turn is in flight. Progress samples are content-free byte counters with
+aggregate start/end totals and a sample-window duration; they let UIs show
+generic bytes/rates without storing previous samples or exposing response or
 argument content in status text.
 
 ## Transcript replay boundary

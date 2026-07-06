@@ -92,13 +92,14 @@ tool calls and opaque provider items, are committed. Provider-authored retry or
 diagnostic text must be sent as update `status`, not as assistant message
 deltas.
 
-`provider.response_updated.progress` is content-free, transient liveness
-metadata for buffered non-displayable stream state such as pending tool-call
-argument/custom-tool input bytes. Progress updates are self-contained sample
-windows: they include aggregate and bounded per-item byte counters plus
-`window_micros` so UIs can render pending bytes and rates without remembering a
-previous sample. Progress must not be stored as transcript content, editor
-current response text, prompt-stdin capture, or final response output.
+`provider.response_updated.progress` is content-free, transient byte progress
+metadata for provider-generated semantic output in the in-flight response:
+assistant text, reasoning text, and tool/custom-tool input bytes. Progress
+updates are self-contained sample windows: they include aggregate and bounded
+per-item byte counters plus `window_micros` so UIs can render bytes and rates
+without remembering a previous sample. Progress must not count raw wire framing
+or tool execution output/results, and must not be stored as transcript content,
+editor current response text, prompt-stdin capture, or final response output.
 
 First-party providers abort high-confidence tight stream loops with
 `stop_reason: repetition_detected`: assistant/reasoning/tool-argument deltas are

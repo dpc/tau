@@ -1717,7 +1717,7 @@ fn provider_response_updated_requires_delta_routing_fields() {
 }
 
 /// Ensures provider response progress is an additive optional wire field and
-/// preserves structured pending tool-argument byte counts when present.
+/// preserves structured generic provider-output byte counts when present.
 #[test]
 fn provider_response_updated_progress_serde_round_trip() {
     let absent = serde_json::json!({
@@ -1738,14 +1738,32 @@ fn provider_response_updated_progress_serde_round_trip() {
             total_counter_start_bytes: 4096,
             total_counter_end_bytes: 12_345,
             total_window_micros: 1_000_000,
-            items: vec![ProviderResponseProgressItem {
-                output_index: 2,
-                kind: ProviderResponseProgressKind::ToolArguments,
-                counter_start_bytes: 4096,
-                counter_end_bytes: 12_345,
-                window_micros: 1_000_000,
-                label: Some("shell_command".to_owned()),
-            }],
+            items: vec![
+                ProviderResponseProgressItem {
+                    output_index: 0,
+                    kind: ProviderResponseProgressKind::AssistantText,
+                    counter_start_bytes: 0,
+                    counter_end_bytes: 5,
+                    window_micros: 1_000_000,
+                    label: None,
+                },
+                ProviderResponseProgressItem {
+                    output_index: 1,
+                    kind: ProviderResponseProgressKind::ReasoningText,
+                    counter_start_bytes: 5,
+                    counter_end_bytes: 10,
+                    window_micros: 1_000_000,
+                    label: None,
+                },
+                ProviderResponseProgressItem {
+                    output_index: 2,
+                    kind: ProviderResponseProgressKind::ToolArguments,
+                    counter_start_bytes: 4096,
+                    counter_end_bytes: 12_345,
+                    window_micros: 1_000_000,
+                    label: Some("shell_command".to_owned()),
+                },
+            ],
             omitted_items: 0,
         }),
         originator: PromptOriginator::User,

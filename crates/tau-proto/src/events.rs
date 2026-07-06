@@ -3141,8 +3141,8 @@ pub struct ProviderResponseUpdated {
     /// Provider-authored transient status text, such as retry diagnostics.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status: Option<ProviderResponseStatusUpdate>,
-    /// Transient progress for buffered provider stream data that is not
-    /// displayable assistant/reasoning text yet.
+    /// Content-free transient byte progress for provider-generated output in
+    /// the current in-flight response.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub progress: Option<ProviderResponseProgressUpdate>,
     /// Echo of [`AgentPromptCreated::originator`]. UIs filter on
@@ -3152,33 +3152,33 @@ pub struct ProviderResponseUpdated {
     pub originator: PromptOriginator,
 }
 
-/// Progress for non-displayable provider response stream data.
+/// Content-free byte progress for provider-generated response output.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProviderResponseProgressUpdate {
-    /// Aggregate UTF-8 byte counter over all pending non-displayable items at
-    /// the start of this sample window.
+    /// Aggregate UTF-8 byte counter over all generated semantic output at the
+    /// start of this sample window.
     pub total_counter_start_bytes: u64,
-    /// Aggregate UTF-8 byte counter over all pending non-displayable items at
-    /// the end of this sample window.
+    /// Aggregate UTF-8 byte counter over all generated semantic output at the
+    /// end of this sample window.
     pub total_counter_end_bytes: u64,
     /// Aggregate sample-window duration in microseconds.
     pub total_window_micros: u64,
-    /// Bounded per-item pending progress details.
+    /// Bounded per-item progress details.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub items: Vec<ProviderResponseProgressItem>,
-    /// Number of additional pending items omitted from `items`.
+    /// Number of additional items omitted from `items`.
     #[serde(default, skip_serializing_if = "is_zero_u64")]
     pub omitted_items: u64,
 }
 
-/// Per-output-item progress for non-displayable provider response stream data.
+/// Per-output-item progress for provider-generated response output.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProviderResponseProgressItem {
     /// Provider output index when available.
     pub output_index: u32,
-    /// Kind of pending non-displayable stream data.
+    /// Kind of generated stream data.
     pub kind: ProviderResponseProgressKind,
     /// UTF-8 byte counter at the start of this sample window.
     pub counter_start_bytes: u64,
@@ -3186,15 +3186,20 @@ pub struct ProviderResponseProgressItem {
     pub counter_end_bytes: u64,
     /// Duration of the sample window in microseconds.
     pub window_micros: u64,
-    /// Optional bounded provider/tool label suitable for UI status text.
+    /// Optional bounded provider/tool label for diagnostic UIs. First-party CLI
+    /// rendering intentionally ignores labels so progress stays generic.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
 }
 
-/// Kind of pending non-displayable provider stream data.
+/// Kind of provider-generated stream data counted by progress metadata.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProviderResponseProgressKind {
+    /// Visible assistant response text bytes.
+    AssistantText,
+    /// Reasoning/thinking text bytes.
+    ReasoningText,
     /// Function-call arguments or custom-tool input bytes.
     ToolArguments,
 }

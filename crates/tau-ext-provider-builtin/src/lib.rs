@@ -1811,7 +1811,7 @@ where
                 let deltas = delta_emitter.deltas(state);
                 let compaction = state.compaction_update();
                 let progress = progress_emitter.progress_for_update(
-                    state.tool_input_progress(),
+                    state.streaming_progress(),
                     !deltas.is_empty() || compaction.is_some(),
                     Instant::now(),
                 );
@@ -2155,7 +2155,7 @@ struct ProgressSampleState {
     last_sample_at: Instant,
     /// Last emitted end counter for each detailed progress item.
     last_counters: BTreeMap<(u32, ProviderResponseProgressKind), u64>,
-    /// Last emitted aggregate end counter across all pending items.
+    /// Last emitted aggregate end counter across all counted output items.
     last_total_counter: u64,
 }
 

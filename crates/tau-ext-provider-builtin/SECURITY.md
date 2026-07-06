@@ -21,11 +21,12 @@ provider events bounded and deterministic, and treat provider diagnostics as
 model-visible content unless they are kept entirely inside private debug
 captures.
 
-Provider response progress for pending tool-call/custom-tool input crosses the
-same external-provider boundary but must stay content-free: emit only byte
-counters, sample-window durations, output indices, omitted-item counts, and
-bounded labels. Never copy raw streamed argument/input bytes into progress
-metadata, status text, notices, traces, or final transcript rendering.
+Provider response progress for streamed assistant text, reasoning text, and
+tool-call/custom-tool input crosses the same external-provider boundary but must
+stay content-free: emit only byte counters, sample-window durations, output
+indices, omitted-item counts, and bounded labels. Never copy raw streamed
+text/reasoning/argument/input bytes into progress metadata, status text, notices,
+traces, or final transcript rendering.
 
 ## Prompt worker wakeups
 

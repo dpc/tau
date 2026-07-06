@@ -165,9 +165,10 @@ Emitted by the provider backend that owns the selected model.
 - **`provider.response_updated`** — Transient append-delta streaming update.
   Carries newly appended displayable assistant/reasoning text in `deltas`, plus
   small compaction/status/progress metadata when relevant. `progress` is
-  content-free, self-contained sample-window metadata for non-displayable
-  buffered stream state such as pending tool-call argument bytes; aggregate
-  counters cover all pending items even when per-item details are bounded.
+  content-free, self-contained sample-window metadata for provider-generated
+  semantic output bytes in the in-flight response: assistant text, reasoning
+  text, and tool/custom-tool input bytes. It does not count raw wire framing or
+  tool execution output/results.
   Provider retry/status text is not assistant-authored and is carried separately
   from message deltas. The event is not durable and is not replayed to late
   subscribers; UIs that attach mid-stream may show an ellipsis prefix until the

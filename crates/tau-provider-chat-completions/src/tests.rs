@@ -838,7 +838,7 @@ fn streamed_tool_arguments_update_pending_byte_progress() {
     )
     .expect("tool argument delta");
 
-    let progress = state.tool_input_progress().expect("tool argument progress");
+    let progress = state.streaming_progress().expect("tool argument progress");
     assert_eq!(progress.items.len(), 1);
     assert_eq!(progress.items[0].output_index, 0);
     assert_eq!(
@@ -875,10 +875,39 @@ fn streamed_tool_argument_progress_aggregates_omitted_items() {
         .expect("tool argument delta");
     }
 
-    let progress = state.tool_input_progress().expect("tool argument progress");
+    let progress = state.streaming_progress().expect("tool argument progress");
     assert_eq!(progress.items.len(), 4);
     assert_eq!(progress.omitted_items, 1);
     assert_eq!(progress.total_counter_end_bytes, 5 * "arg-0".len() as u64);
+}
+
+/// Ensures generic streaming progress counts visible assistant text and
+/// reasoning text as provider-generated semantic output, not just tool input.
+#[test]
+fn streamed_output_progress_counts_message_and_reasoning_bytes() {
+    let mut state = StreamState::new();
+    state
+        .append_assistant_text_delta("hello")
+        .expect("assistant text should apply");
+    state
+        .append_reasoning_delta("think")
+        .expect("reasoning text should apply");
+
+    let progress = state
+        .streaming_progress()
+        .expect("message and reasoning progress");
+    assert_eq!(progress.total_counter_end_bytes, "hellothink".len() as u64);
+    assert_eq!(progress.items.len(), 2);
+    assert_eq!(
+        progress.items[0].kind,
+        ProviderResponseProgressKind::AssistantText
+    );
+    assert_eq!(progress.items[0].counter_end_bytes, "hello".len() as u64);
+    assert_eq!(
+        progress.items[1].kind,
+        ProviderResponseProgressKind::ReasoningText
+    );
+    assert_eq!(progress.items[1].counter_end_bytes, "think".len() as u64);
 }
 
 /// Ensures provider-side sampling makes consecutive progress updates

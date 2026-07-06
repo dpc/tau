@@ -811,8 +811,8 @@ struct TurnStatsBlockEntry {
 /// `AgentPromptTerminated`.
 #[derive(Default)]
 struct PromptState {
-    /// Live agent-response block. `None` until `AgentPromptStarted` or a
-    /// late/mid-stream provider update allocates it.
+    /// Live agent-response block. `None` until the first provider update
+    /// allocates a response/progress block.
     response_block_id: Option<tau_cli_term::BlockId>,
     /// Live thinking block. Lazy-created the first time the agent emits
     /// non-empty `thinking`, so backends that don't return reasoning
@@ -834,7 +834,7 @@ struct PromptState {
     response_markdown_cache: MarkdownStreamCache,
     /// Append-aware Markdown-lite cache for the live thinking block.
     thinking_markdown_cache: MarkdownStreamCache,
-    /// Latest transient non-displayable provider stream progress.
+    /// Latest transient provider semantic-output byte progress.
     response_progress: Option<tau_proto::ProviderResponseProgressUpdate>,
     /// Live provider-side compaction block. Created only while a provider emits
     /// an in-progress compaction item, then removed on completion/cancel.
@@ -979,7 +979,6 @@ fn provider_progress_indicator_suffix(
     if total_bytes == 0 {
         return String::new();
     }
-    let item_count = (progress.items.len() as u64).saturating_add(progress.omitted_items);
     let bytes = format_progress_bytes(total_bytes);
     let bytes_per_sec = progress
         .total_counter_end_bytes
@@ -987,11 +986,7 @@ fn provider_progress_indicator_suffix(
         .saturating_mul(1_000_000)
         / progress.total_window_micros.max(1);
     let rate = format!("{}/s", format_progress_bytes(bytes_per_sec));
-    if item_count > 1 {
-        format!(" ({item_count} tools, {bytes}, {rate})")
-    } else {
-        format!(" ({bytes}, {rate} tool args)")
-    }
+    format!(" ({bytes}, {rate})")
 }
 
 fn format_progress_bytes(bytes: u64) -> String {
@@ -3861,13 +3856,9 @@ impl EventRenderer {
             return;
         }
         state.started_at = Some(Instant::now());
-        let has_response_block = state.response_block_id.is_some();
         self.clear_editor_current_response_for_user_prompt(prompt.originator.is_user());
         self.last_user_block = None;
         self.promote_next_queued_prompt("user-prompt-created");
-        if !has_response_block {
-            self.create_live_response_block(prompt);
-        }
     }
 
     fn clear_editor_current_response_for_user_prompt(&mut self, is_user_prompt: bool) {
@@ -3901,22 +3892,6 @@ impl EventRenderer {
             self.handle
                 .print_output(label, self.submitted_prompt_block(names::USER_PROMPT, text));
         }
-    }
-
-    fn create_live_response_block(&mut self, prompt: &tau_proto::AgentPromptStarted) {
-        use tau_themes::names;
-
-        let block = streaming_block(&self.theme, names::AGENT_PENDING, "");
-        let id = self.handle.new_block(
-            format!("agent-response-live:{}", prompt.agent_prompt_id),
-            block,
-        );
-        self.push_live_response_block(id);
-        self.handle.redraw();
-        self.prompts
-            .entry(prompt.agent_prompt_id.to_string())
-            .or_default()
-            .response_block_id = Some(id);
     }
 
     fn handle_provider_response_events(&mut self, event: &Event) -> bool {

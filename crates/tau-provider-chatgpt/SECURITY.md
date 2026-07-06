@@ -48,6 +48,7 @@ unchecked raw blob.
 
 ## Streaming progress metadata
 
-Provider response progress for pending tool-call/custom-tool input must stay
-content-free. Emit byte counters, sample-window durations, output indices, and
-bounded labels only; never copy raw argument/input bytes into progress status.
+Provider response progress for streamed assistant text, reasoning text, and
+tool-call/custom-tool input must stay content-free. Emit byte counters,
+sample-window durations, output indices, and bounded labels only; never copy raw
+text/reasoning/argument/input bytes into progress status.

@@ -57,6 +57,11 @@ regression coverage. Reusable steps live in
 
 Tests for `provider.response_updated` should use append-delta semantics: multi-update assistant/reasoning cases send only the newly appended suffix in each update. Do not feed full accumulated snapshots through delta helpers unless the test is explicitly checking legacy/invalid payload handling. Final-response tests should continue to assert complete `provider.response_finished.output_items`.
 
+Progress metadata tests should assert byte-counter boundaries explicitly:
+provider-side tests should prove which semantic output byte streams are counted
+or excluded, and UI tests should prove progress remains transient and absent from
+editor/final rendering.
+
 
 ## Provider stream repetition guard
 

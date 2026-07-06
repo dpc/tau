@@ -58,15 +58,15 @@ cannot override rebuilt structured fields such as `id`, `status`, `call_id`,
 `name`, `arguments`, or `input`. Full transcript replay must fall back to the
 historical `fc_`/`ctc_` id synthesis when that sidecar is absent.
 
-## Streaming tool-input progress
+## Streaming provider-output progress
 
-Responses streams may deliver large function-call arguments or custom-tool input
-before any displayable assistant text appears. The provider reports that
-non-displayable buffered state through transient `provider.response_updated`
-progress metadata. Progress contains only byte counters and bounded labels, never
-argument content, and each emitted sample includes aggregate start/end counters
-and a window duration so UIs can render liveness and rates without storing prior
-samples.
+Responses streams may deliver visible assistant text, reasoning summaries, large
+function-call arguments, or custom-tool input during an agent turn. The provider
+reports aggregate semantic-output byte progress through transient
+`provider.response_updated` progress metadata. Progress contains only byte
+counters and bounded labels, never raw text/reasoning/argument content, and each
+emitted sample includes aggregate start/end counters and a window duration so UIs
+can render liveness and rates without storing prior samples.
 
 ## Model metadata tags
 
