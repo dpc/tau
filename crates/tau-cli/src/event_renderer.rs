@@ -3925,10 +3925,12 @@ impl EventRenderer {
             .entry(spid.to_owned())
             .or_insert_with(|| update.agent_id.to_string());
         self.ensure_live_response_block_for_update(update);
-        self.prompts
-            .entry(spid.to_owned())
-            .or_default()
-            .response_progress = update.progress.clone();
+        if let Some(progress) = &update.progress {
+            self.prompts
+                .entry(spid.to_owned())
+                .or_default()
+                .response_progress = Some(progress.clone());
+        }
         if let Some(status) = &update.status {
             if status.clear_response {
                 self.clear_live_response_accumulators(spid);

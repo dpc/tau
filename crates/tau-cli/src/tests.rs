@@ -4214,6 +4214,26 @@ fn provider_progress_only_update_suffixes_live_indicator_until_finish() {
     assert!(!vt.screen_contains(80, "tool args"));
     assert!(!vt.screen_contains(80, "tools,"));
 
+    renderer.handle(&Event::ProviderResponseUpdated(ProviderResponseUpdated {
+        agent_prompt_id: "sp-progress".into(),
+        agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
+        deltas: vec![tau_proto::ProviderResponseTextDelta::ReasoningText {
+            output_index: 1,
+            kind: tau_proto::ReasoningTextKind::Summary,
+            text: "thinking".to_owned(),
+        }],
+        compaction: None,
+        status: None,
+        progress: None,
+        originator: tau_proto::PromptOriginator::User,
+    }));
+    sync(&handle);
+    assert!(
+        vt.screen_contains(80, "… (12KB, 8KB/s)"),
+        "updates without a fresh progress sample must not clear cached progress: {:?}",
+        vt.screen_text(80)
+    );
+
     renderer.handle(&Event::ProviderResponseFinished(finished_response(
         "sp-progress",
         Vec::new(),

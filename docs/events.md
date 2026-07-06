@@ -168,7 +168,8 @@ Emitted by the provider backend that owns the selected model.
   content-free, self-contained sample-window metadata for provider-generated
   semantic output bytes in the in-flight response: assistant text, reasoning
   text, and tool/custom-tool input bytes. It does not count raw wire framing or
-  tool execution output/results.
+  tool execution output/results. An update with absent `progress` has no fresh
+  sampled progress payload; absence is not a clear or completion signal.
   Provider retry/status text is not assistant-authored and is carried separately
   from message deltas. The event is not durable and is not replayed to late
   subscribers; UIs that attach mid-stream may show an ellipsis prefix until the

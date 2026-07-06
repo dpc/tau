@@ -3141,8 +3141,10 @@ pub struct ProviderResponseUpdated {
     /// Provider-authored transient status text, such as retry diagnostics.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status: Option<ProviderResponseStatusUpdate>,
-    /// Content-free transient byte progress for provider-generated output in
-    /// the current in-flight response.
+    /// Content-free transient byte progress sample for provider-generated
+    /// output in the current in-flight response. `None` means this update does
+    /// not carry a fresh sampled progress payload; it is not a clear/completion
+    /// signal.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub progress: Option<ProviderResponseProgressUpdate>,
     /// Echo of [`AgentPromptCreated::originator`]. UIs filter on

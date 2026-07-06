@@ -959,20 +959,15 @@ fn progress_sampler_uses_prior_sample_as_next_start() {
     assert!(second.items[0].window_micros > 0);
 }
 
-/// Ensures the non-network emission helper produces self-contained
-/// progress-only updates, honors throttling, and still attaches progress to a
-/// visible update inside the throttle window.
+/// Ensures the non-network emission helper produces self-contained progress
+/// updates and rate-limits metadata even when visible text is also streaming.
 #[test]
-fn progress_emitter_covers_progress_only_throttle_and_visible_attachment() {
+fn progress_emitter_throttles_progress_metadata_independent_of_visible_updates() {
     let start = std::time::Instant::now();
     let mut emitter = ProviderProgressEmitter::new(start);
 
     let first = emitter
-        .progress_for_update(
-            test_progress(10),
-            false,
-            start + std::time::Duration::from_secs(1),
-        )
+        .progress_for_update(test_progress(10), start)
         .expect("first progress-only update emits");
     let update = ProviderResponseUpdated {
         agent_prompt_id: "sp-progress".into(),
@@ -987,28 +982,34 @@ fn progress_emitter_covers_progress_only_throttle_and_visible_attachment() {
     assert!(update.progress.is_some());
     assert_eq!(first.total_counter_start_bytes, 0);
     assert_eq!(first.total_counter_end_bytes, 10);
-    assert!(first.total_window_micros > 0);
+    assert!(first.total_window_micros >= 1_000_000);
 
     assert!(
         emitter
             .progress_for_update(
                 test_progress(15),
-                false,
-                start + std::time::Duration::from_millis(1500),
+                start + std::time::Duration::from_millis(500),
             )
             .is_none(),
         "progress-only updates should be throttled"
     );
 
-    let visible = emitter
-        .progress_for_update(
-            test_progress(20),
-            true,
-            start + std::time::Duration::from_millis(1600),
-        )
-        .expect("visible update may attach progress");
-    assert_eq!(visible.total_counter_start_bytes, 10);
-    assert_eq!(visible.items[0].counter_start_bytes, 10);
+    assert!(
+        emitter
+            .progress_for_update(
+                test_progress(20),
+                start + std::time::Duration::from_millis(600),
+            )
+            .is_none(),
+        "first-window updates must not bypass progress metadata throttling"
+    );
+
+    let later_progress = emitter
+        .progress_for_update(test_progress(25), start + std::time::Duration::from_secs(2))
+        .expect("progress metadata emits after the throttle window");
+    assert_eq!(later_progress.total_counter_start_bytes, 10);
+    assert_eq!(later_progress.items[0].counter_start_bytes, 10);
+    assert_eq!(later_progress.total_counter_end_bytes, 25);
 }
 
 fn test_progress(end: u64) -> Option<ProviderResponseProgressUpdate> {

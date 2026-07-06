@@ -44,6 +44,7 @@ pub const LOG_TARGET: &str = "provider-builtin";
 
 const EXTENSION_NAME: &str = "tau-ext-provider-builtin";
 const CHATGPT_PROVIDER_NAME: &str = "chatgpt";
+const PROGRESS_METADATA_MIN_INTERVAL: Duration = Duration::from_secs(1);
 /// One built-in provider profile loaded from `auth.d/<provider>.json`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -1810,11 +1811,8 @@ where
             let mut on_update = |state: &common::StreamState| {
                 let deltas = delta_emitter.deltas(state);
                 let compaction = state.compaction_update();
-                let progress = progress_emitter.progress_for_update(
-                    state.streaming_progress(),
-                    !deltas.is_empty() || compaction.is_some(),
-                    Instant::now(),
-                );
+                let progress = progress_emitter
+                    .progress_for_update(state.streaming_progress(), Instant::now());
                 if deltas.is_empty() && compaction.is_none() && progress.is_none() {
                     return;
                 }
@@ -2203,38 +2201,36 @@ fn progress_current_bytes(progress: Option<&ProviderResponseProgressUpdate>) -> 
 struct ProviderProgressEmitter {
     /// Last aggregate byte counter emitted in a progress update.
     last_progress_bytes: Option<u64>,
-    /// Last time a progress-only update was emitted.
-    last_progress_only_emit: Instant,
+    /// Last time progress metadata was emitted.
+    last_progress_emit: Instant,
     /// Sampler that fills start counters and window durations.
     progress_sample: ProgressSampleState,
 }
 
 impl ProviderProgressEmitter {
     fn new(now: Instant) -> Self {
+        let initial_sample_at = now - PROGRESS_METADATA_MIN_INTERVAL;
         Self {
             last_progress_bytes: None,
-            last_progress_only_emit: now - Duration::from_secs(1),
-            progress_sample: ProgressSampleState::new(now),
+            last_progress_emit: initial_sample_at,
+            progress_sample: ProgressSampleState::new(initial_sample_at),
         }
     }
 
     fn progress_for_update(
         &mut self,
         progress: Option<ProviderResponseProgressUpdate>,
-        has_visible_update: bool,
         now: Instant,
     ) -> Option<ProviderResponseProgressUpdate> {
         let progress_bytes = progress_current_bytes(progress.as_ref());
         let progress_changed = progress_bytes != self.last_progress_bytes;
-        let can_emit_progress_only = progress_changed
-            && now.saturating_duration_since(self.last_progress_only_emit)
-                >= Duration::from_secs(1);
-        if !has_visible_update && !can_emit_progress_only {
+        let can_emit_progress = progress_changed
+            && now.saturating_duration_since(self.last_progress_emit)
+                >= PROGRESS_METADATA_MIN_INTERVAL;
+        if !can_emit_progress {
             return None;
         }
-        if !has_visible_update {
-            self.last_progress_only_emit = now;
-        }
+        self.last_progress_emit = now;
         self.last_progress_bytes = progress_bytes;
         progress.map(|progress| self.progress_sample.with_sample_window(progress, now))
     }

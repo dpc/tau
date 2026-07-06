@@ -97,9 +97,11 @@ metadata for provider-generated semantic output in the in-flight response:
 assistant text, reasoning text, and tool/custom-tool input bytes. Progress
 updates are self-contained sample windows: they include aggregate and bounded
 per-item byte counters plus `window_micros` so UIs can render bytes and rates
-without remembering a previous sample. Progress must not count raw wire framing
-or tool execution output/results, and must not be stored as transcript content,
-editor current response text, prompt-stdin capture, or final response output.
+without remembering a previous sample. Providers may omit `progress` on
+otherwise-visible rate-limited updates; consumers should not clear cached live
+progress from absence alone. Progress must not count raw wire framing or tool
+execution output/results, and must not be stored as transcript content, editor
+current response text, prompt-stdin capture, or final response output.
 
 First-party providers abort high-confidence tight stream loops with
 `stop_reason: repetition_detected`: assistant/reasoning/tool-argument deltas are
