@@ -4501,7 +4501,10 @@ fn cancel_target_rechecks_background_state_after_cancel_request() {
     h.publish_synthetic_background_result(&call_id);
 
     assert!(h.cancel_target_should_finish_as_background_error(&target));
-    h.finish_backgrounded_tool_cancelled_by_harness(target);
+    h.finish_backgrounded_tool_cancelled_by_harness(
+        target,
+        BackgroundCompletionPromptMode::QueuePassive,
+    );
 
     assert!(!event_log_contains_any_source(&h, |event| matches!(
         event,
