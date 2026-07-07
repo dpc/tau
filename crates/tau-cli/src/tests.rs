@@ -22,7 +22,7 @@ use super::chat::{
     queue_prompt_draft_snapshot, redacted_command_echo_line, redacted_prompt_history_line,
     retarget_prompt_draft_snapshot, role_cycling_enabled, should_send_draft_snapshot,
 };
-use super::event_renderer::EventRenderer;
+use super::event_renderer::{EventRenderer, watched_agent_tool_display};
 
 fn cli_test_theme() -> tau_themes::Theme {
     tau_themes::Theme::parse(
@@ -2734,12 +2734,12 @@ fn watched_agent_stats_route_to_hidden_watcher_owner() {
         context: tau_proto::AgentContextStats::default(),
     }));
     sync(&handle);
-    assert!(!vt.screen_contains(90, "watching engineer_1"));
+    assert!(!vt.screen_contains(90, "watching [engineer_1]"));
 
     renderer.switch_agent("worker-1".to_owned());
     sync(&handle);
-    assert!(vt.screen_contains(90, "watching engineer_1"));
-    assert!(vt.screen_contains(90, "tools 1/2"));
+    assert!(vt.screen_contains(90, "watching [engineer_1]"));
+    assert!(vt.screen_contains(90, "%1/2"));
 }
 
 #[test]
@@ -5684,7 +5684,7 @@ fn watched_agent_stats_redraw_active_indicator() {
         },
     ));
     sync(&handle);
-    assert!(!vt.screen_contains(100, "watching engineer_1"));
+    assert!(!vt.screen_contains(100, "watching [engineer_1]"));
 
     renderer.handle(&Event::AgentStatsUpdated(tau_proto::AgentStatsUpdated {
         session_id: "s1".into(),
@@ -5698,13 +5698,18 @@ fn watched_agent_stats_redraw_active_indicator() {
     }));
 
     assert!(
-        eventually_screen_contains(&vt, 100, "watching engineer_1"),
+        eventually_screen_contains(&vt, 100, "watching [engineer_1]"),
         "watched-agent stats should repaint without an explicit test redraw: {:?}",
         vt.screen_text(100)
     );
     assert!(
-        eventually_screen_contains(&vt, 100, "tools 3/3"),
-        "watched-agent stats should repaint progress counters without an explicit test redraw: {:?}",
+        eventually_screen_contains(&vt, 100, "watching [engineer_1] %3/3"),
+        "watched-agent stats should repaint with tool-call-style counters without an explicit test redraw: {:?}",
+        vt.screen_text(100)
+    );
+    assert!(
+        !vt.screen_contains(100, "running tools"),
+        "watched-agent block should use the old agent_start in-progress layout, not prose: {:?}",
         vt.screen_text(100)
     );
 }
@@ -7069,6 +7074,66 @@ fn render_tool_use_state_token_progress_formats_context_like_status_bar() {
     assert_eq!(
         texts,
         vec!["#133.4k/200k", tau_proto::PROGRESS_INDICATOR_TEXT]
+    );
+}
+
+/// Ensures the generic watched-agent indicator keeps the old `agent_start`
+/// in-progress block shape while replacing only the leading tool name with the
+/// user-facing `watching` label.
+#[test]
+fn watched_agent_display_uses_tool_block_styles_and_counters() {
+    let theme = cli_test_theme();
+    let stats = tau_proto::AgentStatsUpdated {
+        session_id: "s1".into(),
+        agent_id: agent_id("engineer_1"),
+        runtime_state: tau_proto::AgentRuntimeState::Running,
+        tools: tau_proto::AgentToolStats {
+            in_flight: 1,
+            started_total: 3,
+        },
+        context: tau_proto::AgentContextStats {
+            input_tokens: Some(133_400),
+            cached_tokens: None,
+            context_window: Some(200_000),
+            percent_used: Some(67),
+        },
+    };
+
+    let display = watched_agent_tool_display("review", Some(&stats));
+    assert_eq!(display.tool_name, "watching");
+    assert_eq!(display.args, "[review]");
+    let texts: Vec<&str> = display.suffixes.iter().map(|s| s.text.as_str()).collect();
+    assert_eq!(
+        texts,
+        vec!["%2/3", "#133.4k/200k", tau_proto::PROGRESS_INDICATOR_TEXT]
+    );
+
+    let block = render_tool_block(&theme, &display);
+    let watching = block
+        .content
+        .spans()
+        .iter()
+        .find(|span| span.text == "watching")
+        .expect("watching tool-name span");
+    assert_eq!(
+        watching.style,
+        tau_cli_term::resolve::resolve(&theme, tau_themes::names::TOOL_NAME)
+    );
+
+    let percent_only_stats = tau_proto::AgentStatsUpdated {
+        context: tau_proto::AgentContextStats {
+            input_tokens: None,
+            cached_tokens: None,
+            context_window: None,
+            percent_used: Some(67),
+        },
+        ..stats
+    };
+    let display = watched_agent_tool_display("review", Some(&percent_only_stats));
+    let texts: Vec<&str> = display.suffixes.iter().map(|s| s.text.as_str()).collect();
+    assert_eq!(
+        texts,
+        vec!["%2/3", "#67%", tau_proto::PROGRESS_INDICATOR_TEXT]
     );
 }
 

@@ -1088,6 +1088,58 @@ fn tool_calls_from_output_items(output_items: &[ContextItem]) -> Vec<ToolCallIte
         .collect()
 }
 
+/// Builds the generic tool-call display for a live watched-agent indicator.
+///
+/// This intentionally synthesizes a [`tau_proto::ToolUseState`] so `watching`
+/// keeps the same layout, counters, and theming as ordinary in-progress tool
+/// blocks instead of reintroducing watched-agent-specific tool UI.
+pub(crate) fn watched_agent_tool_display(
+    label: &str,
+    stats: Option<&tau_proto::AgentStatsUpdated>,
+) -> ToolCallDisplay {
+    use tau_proto::{ProgressCounter, ProgressUnit, ToolUseState, ToolUseStatus};
+
+    let mut progress_counters = Vec::new();
+    if let Some(stats) = stats {
+        progress_counters.push(ProgressCounter {
+            label: Some("tools".to_owned()),
+            unit: ProgressUnit::Count,
+            complete: Some(u64::from(
+                stats
+                    .tools
+                    .started_total
+                    .saturating_sub(stats.tools.in_flight),
+            )),
+            total: Some(u64::from(stats.tools.started_total)),
+        });
+
+        if stats.context.input_tokens.is_some() || stats.context.context_window.is_some() {
+            progress_counters.push(ProgressCounter {
+                label: Some("ctx".to_owned()),
+                unit: ProgressUnit::Tokens,
+                complete: stats.context.input_tokens,
+                total: stats.context.context_window,
+            });
+        } else if let Some(percent) = stats.context.percent_used {
+            progress_counters.push(ProgressCounter {
+                label: Some("ctx".to_owned()),
+                unit: ProgressUnit::Percent,
+                complete: Some(u64::from(percent)),
+                total: None,
+            });
+        }
+    }
+
+    let display = ToolUseState {
+        args: format!("[{label}]"),
+        progress_counters,
+        status: ToolUseStatus::InProgress,
+        status_text: tau_proto::PROGRESS_INDICATOR_TEXT.to_owned(),
+        ..Default::default()
+    };
+    render_tool_use_state("watching", &display)
+}
+
 impl EventRenderer {
     #[cfg(test)]
     pub(crate) fn new(
@@ -1463,9 +1515,6 @@ impl EventRenderer {
     }
 
     fn watched_agent_block(&self, agent_id: &str) -> tau_cli_term::StyledBlock {
-        use tau_cli_term::resolve::themed_block;
-        use tau_themes::names;
-
         let label = self
             .agent_display_names
             .lock()
@@ -1473,27 +1522,8 @@ impl EventRenderer {
             .and_then(|names| names.get(agent_id).cloned())
             .unwrap_or_else(|| agent_id.to_owned());
         let stats = self.agent_stats.get(agent_id);
-        let tools = stats
-            .map(|stats| {
-                format!(
-                    "{}/{}",
-                    stats
-                        .tools
-                        .started_total
-                        .saturating_sub(stats.tools.in_flight),
-                    stats.tools.started_total
-                )
-            })
-            .unwrap_or_else(|| "-".to_owned());
-        let ctx = stats
-            .and_then(|stats| stats.context.percent_used)
-            .map(|percent| format!(" ctx {percent}%"))
-            .unwrap_or_default();
-        themed_block(
-            &self.theme,
-            names::SESSION_STATUS,
-            format!("watching {label}: running tools {tools}{ctx}"),
-        )
+        let display = watched_agent_tool_display(&label, stats);
+        render_tool_block(&self.theme, &display)
     }
 
     fn retarget_prompt_draft(&self) {
