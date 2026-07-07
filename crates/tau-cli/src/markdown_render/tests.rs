@@ -401,10 +401,10 @@ fn inline_parser_avoids_common_false_positives() {
     assert!(inline_code.style.bg.is_some());
 }
 
-/// Ensures live rendering leaves the unsealed suffix plain until a blank
-/// line seals it.
+/// Ensures live rendering formats completed lines before a blank-line seal,
+/// while still leaving the current incomplete streamed line plain.
 #[test]
-fn live_stream_formats_only_sealed_paragraphs() {
+fn live_stream_formats_complete_lines_and_leaves_current_line_plain() {
     let theme = markdown_test_theme();
     let mut cache = MarkdownStreamCache::default();
 
@@ -416,6 +416,22 @@ fn live_stream_formats_only_sealed_paragraphs() {
         .find(|span| span.text == "*bold*")
         .expect("expected styled markdown span");
     assert!(!bold.style.bold);
+
+    let block = markdown_streaming_block(&theme, names::SHELL_OUTPUT, "*bold*\nnext", &mut cache);
+    let bold = block
+        .content
+        .spans()
+        .iter()
+        .find(|span| span.text == "*bold*")
+        .expect("expected styled markdown span");
+    assert!(bold.style.bold);
+    let next = block
+        .content
+        .spans()
+        .iter()
+        .find(|span| span.text == "next")
+        .expect("expected styled markdown span");
+    assert!(!next.style.bold);
 
     let block = markdown_streaming_block(&theme, names::SHELL_OUTPUT, "*bold*\n\nnext", &mut cache);
     let bold = block
@@ -434,13 +450,112 @@ fn live_stream_formats_only_sealed_paragraphs() {
     assert!(!next.style.bold);
 }
 
+/// Ensures the live parser applies line-level and inline Markdown-lite styling
+/// to newline-terminated text even before a blank line finalizes the block.
+#[test]
+fn live_stream_formats_complete_lines_before_blank_line() {
+    let theme = markdown_test_theme();
+    let mut cache = MarkdownStreamCache::default();
+    let block = markdown_streaming_block(
+        &theme,
+        names::SHELL_OUTPUT,
+        "# Heading\n- *bold*\nplain",
+        &mut cache,
+    );
+    let spans = block.content.spans();
+
+    let heading = spans
+        .iter()
+        .find(|span| span.text == "# Heading")
+        .expect("heading span");
+    assert!(heading.style.underline);
+    let marker = spans
+        .iter()
+        .find(|span| span.text == "-")
+        .expect("list marker span");
+    assert_eq!(marker.style.fg, Some(tau_cli_term::Color::Green));
+    let bold = spans
+        .iter()
+        .find(|span| span.text == "*bold*")
+        .expect("bold span");
+    assert!(bold.style.bold);
+    let plain = spans
+        .iter()
+        .find(|span| span.text == "plain")
+        .expect("incomplete line span");
+    assert!(!plain.style.bold);
+    assert!(!plain.style.underline);
+}
+
+/// Ensures a syntactically complete-looking inline marker on the final
+/// no-newline line does not receive provisional streaming styles.
+#[test]
+fn live_stream_keeps_incomplete_current_line_plain() {
+    let theme = markdown_test_theme();
+    let mut cache = MarkdownStreamCache::default();
+    let block = markdown_streaming_block(&theme, names::SHELL_OUTPUT, "_maybe_", &mut cache);
+    let span = block
+        .content
+        .spans()
+        .iter()
+        .find(|span| span.text == "_maybe_")
+        .expect("incomplete line span");
+
+    assert!(!span.style.italic);
+}
+
+/// Ensures an opening code fence starts provisional code highlighting as soon
+/// as the fence line and following code line are complete, even before a
+/// closing fence or blank-line seal arrives.
+#[test]
+fn live_stream_highlights_unclosed_fenced_code_after_newline() {
+    let theme = markdown_test_theme();
+    let mut cache = MarkdownStreamCache::default();
+    let block = markdown_streaming_block(
+        &theme,
+        names::SHELL_OUTPUT,
+        "```rust\nlet x = 1;\n",
+        &mut cache,
+    );
+    let spans = block.content.spans();
+    for text in ["```rust", "let x = 1;"] {
+        let span = spans
+            .iter()
+            .find(|span| span.text == text)
+            .unwrap_or_else(|| panic!("missing code span {text}"));
+        assert_eq!(
+            span.style.bg,
+            Some(tau_cli_term::Color::Rgb {
+                r: 0x11,
+                g: 0x11,
+                b: 0x11,
+            })
+        );
+    }
+}
+
+/// Documents that live tables use the same provisional padding as final
+/// tables, so later wider rows can still alter earlier table display widths.
+#[test]
+fn live_stream_pads_complete_table_lines_before_blank_line() {
+    let theme = markdown_test_theme();
+    let mut cache = MarkdownStreamCache::default();
+    let source = "| A | Longer |\n| --- | --- |\n| one | two |\nnext";
+    let block = markdown_streaming_block(&theme, names::SHELL_OUTPUT, source, &mut cache);
+
+    assert_eq!(
+        rendered_text(&block),
+        "| A   | Longer |\n| --- | ------ |\n| one | two    |\nnext …"
+    );
+}
+
 /// Ensures non-append provider replacements reset the streaming cache
-/// safely.
+/// safely, including any provisional live-block parse.
 #[test]
 fn live_stream_cache_resets_on_replacement() {
     let theme = markdown_test_theme();
     let mut cache = MarkdownStreamCache::default();
-    let _ = markdown_streaming_block(&theme, names::SHELL_OUTPUT, "*old*\n\n", &mut cache);
+    let _ = markdown_streaming_block(&theme, names::SHELL_OUTPUT, "*old*\n_live_\n", &mut cache);
     let block = markdown_streaming_block(&theme, names::SHELL_OUTPUT, "_new_\n\n", &mut cache);
 
     assert_eq!(rendered_text(&block), "_new_\n\n…");
@@ -451,6 +566,25 @@ fn live_stream_cache_resets_on_replacement() {
         .find(|span| span.text == "_new_")
         .expect("expected styled markdown span");
     assert!(!emphasis.style.bold);
+    assert!(emphasis.style.italic);
+}
+
+/// Ensures a same-shape non-append replacement cannot reuse the prior
+/// provisional live parse when the completed-line boundary is unchanged.
+#[test]
+fn live_stream_replacement_reparses_same_boundary_live_lines() {
+    let theme = markdown_test_theme();
+    let mut cache = MarkdownStreamCache::default();
+    let _ = markdown_streaming_block(&theme, names::SHELL_OUTPUT, "*old*\n", &mut cache);
+    let block = markdown_streaming_block(&theme, names::SHELL_OUTPUT, "_new_\n", &mut cache);
+    let spans = block.content.spans();
+
+    assert_eq!(rendered_text(&block), "_new_\n…");
+    assert!(!spans.iter().any(|span| span.text == "*old*"));
+    let emphasis = spans
+        .iter()
+        .find(|span| span.text == "_new_")
+        .expect("replacement emphasis span");
     assert!(emphasis.style.italic);
 }
 

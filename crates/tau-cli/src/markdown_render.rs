@@ -22,9 +22,10 @@
 //! padding is disabled in code contexts.
 //!
 //! Live rendering uses [`MarkdownStreamCache`]. Blank lines seal earlier text;
-//! sealed chunks are parsed once and cached, while the current unsealed suffix
-//! is left plain until a future blank line makes it stable. Final/static
-//! rendering parses the complete string immediately.
+//! sealed chunks are parsed once and cached. The current unsealed block is also
+//! parsed through its last completed newline, while the currently incomplete
+//! streamed line remains plain until it receives a newline or final/static
+//! rendering parses the complete string.
 
 use tau_themes::{SpanTree, StyleIdx, StyleName, ThemedText, names};
 
@@ -140,12 +141,65 @@ struct MarkdownRun {
 /// line, parsed exactly once, and stored in `finalized_runs`. `in_fence` is the
 /// parser context after those sealed runs, so a fenced code block remains plain
 /// even when blank lines inside it cause multiple sealed chunks.
+///
+/// `live_start..live_complete_until` identifies the provisionally parsed
+/// completed-line range after `finalized_until`. `live_source` stores the exact
+/// text for that range, and `live_runs` may be reused only when both the byte
+/// boundaries and source text still match. The provisional parse uses a local
+/// copy of `in_fence`; only blank-line finalization commits parser state.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) struct MarkdownStreamCache {
     source: String,
     finalized_until: usize,
     finalized_runs: Vec<MarkdownRun>,
     in_fence: Option<FenceKind>,
+    live_start: usize,
+    live_complete_until: usize,
+    live_source: String,
+    live_runs: Vec<MarkdownRun>,
+}
+
+impl MarkdownStreamCache {
+    fn reset_for_replacement(&mut self) {
+        self.source.clear();
+        self.finalized_until = 0;
+        self.finalized_runs.clear();
+        self.in_fence = None;
+        self.live_start = 0;
+        self.live_complete_until = 0;
+        self.live_source.clear();
+        self.live_runs.clear();
+    }
+
+    fn advance_finalized(&mut self, text: &str, sealed_until: usize) {
+        self.finalized_runs.extend(parse_markdown_with_state(
+            &text[self.finalized_until..sealed_until],
+            &mut self.in_fence,
+        ));
+        self.finalized_until = sealed_until;
+        if self.live_start != self.finalized_until {
+            self.live_start = self.finalized_until;
+            self.live_complete_until = self.finalized_until;
+            self.live_source.clear();
+            self.live_runs.clear();
+        }
+    }
+
+    fn refresh_live_runs(&mut self, text: &str, complete_until: usize) {
+        let live_source = &text[self.finalized_until..complete_until];
+        if self.live_start == self.finalized_until
+            && self.live_complete_until == complete_until
+            && self.live_source == live_source
+        {
+            return;
+        }
+
+        let mut live_fence = self.in_fence;
+        self.live_runs = parse_markdown_with_state(live_source, &mut live_fence);
+        self.live_start = self.finalized_until;
+        self.live_complete_until = complete_until;
+        self.live_source = live_source.to_owned();
+    }
 }
 
 /// Render final/static transcript text with Markdown-lite semantic styles.
@@ -185,8 +239,9 @@ pub(crate) fn markdown_prompt_block(
     )
 }
 
-/// Render live append-only text with sealed paragraphs formatted and the live
-/// suffix left plain until a following empty line makes it stable.
+/// Render live append-only text with sealed paragraphs cached, completed lines
+/// in the current block formatted provisionally, and only the current
+/// incomplete line left plain.
 pub(crate) fn markdown_streaming_block(
     theme: &tau_themes::Theme,
     base_style_name: &str,
@@ -194,26 +249,24 @@ pub(crate) fn markdown_streaming_block(
     cache: &mut MarkdownStreamCache,
 ) -> tau_cli_term::StyledBlock {
     if !text.starts_with(&cache.source) {
-        cache.source.clear();
-        cache.finalized_until = 0;
-        cache.finalized_runs.clear();
-        cache.in_fence = None;
+        cache.reset_for_replacement();
     }
 
     let sealed_until = latest_sealed_boundary(text).unwrap_or(0);
     if cache.finalized_until < sealed_until {
-        cache.finalized_runs.extend(parse_markdown_with_state(
-            &text[cache.finalized_until..sealed_until],
-            &mut cache.in_fence,
-        ));
-        cache.finalized_until = sealed_until;
+        cache.advance_finalized(text, sealed_until);
     }
+    let complete_until = latest_complete_line_boundary(text)
+        .unwrap_or(cache.finalized_until)
+        .max(cache.finalized_until);
+    cache.refresh_live_runs(text, complete_until);
     cache.source = text.to_owned();
 
     let mut runs = cache.finalized_runs.clone();
-    if cache.finalized_until < text.len() {
+    runs.extend(cache.live_runs.clone());
+    if complete_until < text.len() {
         runs.push(MarkdownRun {
-            text: text[cache.finalized_until..].to_owned(),
+            text: text[complete_until..].to_owned(),
             style: MarkdownStyle::Base,
         });
     }
@@ -386,6 +439,10 @@ fn latest_sealed_boundary(text: &str) -> Option<usize> {
         }
     }
     latest
+}
+
+fn latest_complete_line_boundary(text: &str) -> Option<usize> {
+    text.rfind('\n').map(|index| index + 1)
 }
 
 fn parse_markdown_with_state(text: &str, in_fence: &mut Option<FenceKind>) -> Vec<MarkdownRun> {

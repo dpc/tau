@@ -45,6 +45,8 @@ fn cli_test_theme() -> tau_themes::Theme {
                 "token.stats.symbol.sigma": { bold: true },
                 "token.stats.metric.cache_warn": { fg: "dark_yellow" },
                 "token.stats.metric.cache_miss": { fg: "red" },
+                "markdown.strong": { fg: "red", bold: true },
+                "markdown.code": { fg: "green" },
             }
         }
         "##,
@@ -1352,6 +1354,43 @@ fn response_delta_updates_append_live_text() {
 
     assert!(vt.screen_contains(80, "Hello"));
     assert!(!vt.screen_contains(80, "HelHel"));
+}
+
+/// Ensures streaming Markdown styles are applied as each line completes, so a
+/// later blank-line seal does not restyle already-hidden scrollback and force a
+/// full redraw.
+#[test]
+fn live_markdown_blank_line_seal_does_not_full_redraw_scrollback() {
+    let (_term, handle, vt) = setup(80, 8);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        cli_test_theme(),
+    );
+
+    renderer.handle(&Event::AgentPromptCreated(agent_prompt_created(
+        "sp-md", "s1",
+    )));
+    for index in 0..24 {
+        renderer.handle(&Event::ProviderResponseUpdated(
+            provider_response_delta_update(
+                "sp-md",
+                &format!("*line {index}*\n"),
+                None,
+                tau_proto::PromptOriginator::User,
+            ),
+        ));
+    }
+    sync(&handle);
+    assert!(vt.screen_contains(80, "*line 23*"));
+    let full_render_count = handle.full_render_count();
+
+    renderer.handle(&Event::ProviderResponseUpdated(
+        provider_response_delta_update("sp-md", "\n", None, tau_proto::PromptOriginator::User),
+    ));
+    sync(&handle);
+
+    assert_eq!(handle.full_render_count(), full_render_count);
 }
 
 /// A UI that missed the prompt-created event can still route later deltas by

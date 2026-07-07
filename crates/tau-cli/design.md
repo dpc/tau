@@ -30,10 +30,12 @@ live terminal wrapping, scrollback, and copy/paste behavior stable outside
 intentional table padding.
 
 Live response and thinking blocks use an append-aware cache. Text before a blank
-line is treated as sealed and parsed once; the current unsealed suffix remains
-base-styled until a future update seals it. The cache also preserves parser
-context, including open fenced code blocks, across sealed chunks. Final/static
-blocks parse the complete string immediately.
+line is treated as sealed and parsed once; the current unsealed block is parsed
+provisionally through its last completed newline, leaving only the current
+incomplete streamed line base-styled until it receives a newline or the final
+render parses it. The cache also preserves parser context, including open fenced
+code blocks, across sealed chunks. Final/static blocks parse the complete string
+immediately.
 
 Formatting is scoped to submitted user prompts, assistant response text, and
 reasoning/thinking text. Tool calls, tool payloads/results, shell output,
