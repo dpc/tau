@@ -1376,7 +1376,7 @@ fn live_markdown_blank_line_seal_does_not_full_redraw_scrollback() {
         renderer.handle(&Event::ProviderResponseUpdated(
             provider_response_delta_update(
                 "sp-md",
-                &format!("*line {index}*\n"),
+                format!("*line {index}*\n"),
                 None,
                 tau_proto::PromptOriginator::User,
             ),
@@ -1418,6 +1418,36 @@ fn late_response_delta_update_uses_ellipsis_prefix() {
     sync(&handle);
     assert!(vt.screen_contains(80, "hello world"));
     assert!(!vt.screen_contains(80, "…world"));
+}
+
+/// Normal streaming after the prompt lifecycle was observed must not reuse the
+/// late-subscription ellipsis prefix, which otherwise appears before the first
+/// streamed assistant text.
+#[test]
+fn observed_response_delta_update_does_not_use_ellipsis_prefix() {
+    let (_term, handle, vt) = setup(80, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        cli_test_theme(),
+    );
+
+    renderer.handle(&Event::AgentPromptCreated(agent_prompt_created(
+        "sp-observed",
+        "s1",
+    )));
+    renderer.handle(&Event::ProviderResponseUpdated(
+        provider_response_delta_update(
+            "sp-observed",
+            "hello",
+            None,
+            tau_proto::PromptOriginator::User,
+        ),
+    ));
+    sync(&handle);
+
+    assert!(vt.screen_contains(80, "hello"));
+    assert!(!vt.screen_contains(80, "…hello"));
 }
 
 /// A provider retry/status reset hides reasoning from the failed attempt so

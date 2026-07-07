@@ -4155,14 +4155,21 @@ impl EventRenderer {
     }
 
     fn ensure_live_response_block_for_prompt(&mut self, spid: &str) {
+        use std::collections::hash_map::Entry;
+
         use tau_themes::names;
 
-        let state = self.prompts.entry(spid.to_owned()).or_default();
+        let (state, prompt_was_unknown) = match self.prompts.entry(spid.to_owned()) {
+            Entry::Occupied(entry) => (entry.into_mut(), false),
+            Entry::Vacant(entry) => (entry.insert(PromptState::default()), true),
+        };
         if state.response_block_id.is_some() {
             return;
         }
-        state.missing_response_prefix = true;
-        state.missing_thinking_prefix = true;
+        if prompt_was_unknown {
+            state.missing_response_prefix = true;
+            state.missing_thinking_prefix = true;
+        }
         let block = streaming_block(&self.theme, names::AGENT_PENDING, "");
         let id = self
             .handle
