@@ -10507,11 +10507,10 @@ impl Harness {
                     .as_micros()
                     .min(u128::from(u64::MAX)) as u64,
             };
-            let first_byte_sample =
-                stats.last_emitted.output_bytes_sent == 0 && current.output_bytes_sent > 0;
+            let bytes_changed = current.output_bytes_sent != stats.last_emitted.output_bytes_sent;
             let interval_elapsed = now.saturating_duration_since(stats.last_emitted_at)
                 >= AGENT_TURN_STATS_SAMPLE_INTERVAL;
-            if !(mode.is_forced() || first_byte_sample || interval_elapsed) {
+            if !(mode.is_forced() || bytes_changed || interval_elapsed) {
                 return None;
             }
             let agent_id = agent.agent_id.as_ref().map(crate::parse_agent_id)?;

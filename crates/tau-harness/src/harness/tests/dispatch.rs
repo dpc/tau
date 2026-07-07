@@ -5054,6 +5054,58 @@ fn agent_turn_stats_deadline_wakes_idle_runtime_loop() {
     h.shutdown().expect("shutdown");
 }
 
+/// Ensures an idle zero-delta stats sample does not delay the next real byte
+/// sample. Without this, the runtime could publish `Δ0B/s` during a quiet
+/// period, then suppress provider byte progress that arrived just after the
+/// idle sample until the next one-second deadline.
+#[test]
+fn agent_turn_stats_bytes_emit_immediately_after_idle_sample() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    h.selected_model = Some("test/model".into());
+
+    let cid = ensure_test_user_agent(&mut h);
+    let spid: AgentPromptId = "sp-turn-stats-idle-then-bytes".into();
+    seed_agent_thinking(&mut h, &cid, spid.as_str());
+    h.prompt_agents.insert(spid.clone(), cid.clone());
+    h.start_or_update_agent_turn_stats(&cid, spid.clone());
+    h.add_agent_turn_output_bytes(&cid, 1024);
+    h.emit_agent_turn_stats(&cid, crate::harness::AgentTurnStatsEmitMode::Sampled);
+
+    {
+        let stats = h
+            .agents
+            .get_mut(&cid)
+            .expect("agent should remain loaded")
+            .turn_stats
+            .as_mut()
+            .expect("turn stats should be active");
+        stats.last_emitted_at = stats
+            .last_emitted_at
+            .checked_sub(crate::harness::AGENT_TURN_STATS_SAMPLE_INTERVAL)
+            .expect("backdate idle deadline");
+    }
+    h.process_agent_turn_stats_deadlines();
+    let idle = agent_turn_stats_events(&h)
+        .last()
+        .cloned()
+        .expect("idle stats sample");
+    assert_eq!(idle.current.output_bytes_sent, 1024);
+    assert_eq!(idle.previous.output_bytes_sent, 1024);
+
+    h.add_agent_turn_output_bytes(&cid, 2048);
+    h.emit_agent_turn_stats(&cid, crate::harness::AgentTurnStatsEmitMode::Sampled);
+    let resumed = agent_turn_stats_events(&h)
+        .last()
+        .cloned()
+        .expect("resumed byte stats sample");
+    assert_eq!(resumed.current.output_bytes_sent, 3072);
+    assert_eq!(resumed.previous, idle.current);
+
+    h.shutdown().expect("shutdown");
+}
+
 /// Ensures provider-private semantic-output snapshots for streamed tool input
 /// produce harness-owned public turn stats before the provider final response,
 /// without leaking an empty provider progress event to subscribers or durable
