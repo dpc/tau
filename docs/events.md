@@ -129,6 +129,12 @@ but keep it in memory only; `agent.started.ephemeral` marks that boundary.
 - **`agent.state`** — Transient live runtime snapshot for one agent. Carries
   `agent_id` plus `idle`/`running` state so UIs can show work in progress
   without treating it as transcript history.
+- **`agent.watches_updated`** — Transient session-local full snapshot of the
+  agents watched by one watcher agent. Empty watched sets are valid after a
+  disable; late subscribers receive only current non-empty snapshots.
+- **`agent.stats_updated`** — Transient, content-free operational snapshot for
+  one loaded agent: runtime state, current/cumulative tool counters, and latest
+  context usage. It replaces the old delegation-specific progress stream.
 - **`agent.prompt_terminated`** — A prompt ended without an accepted
   `provider.response_finished` (stale or canceled). Runtime lifecycle state.
 - **`agent.prompt_prewarm_requested`** — Best-effort provider cache prewarm for
@@ -250,10 +256,6 @@ the agent requests calls, and the harness orchestrates dispatch.
   cancelled and its foreground transcript tool round is terminal. Operational
   only; transient. Backgrounded calls that already emitted a placeholder must
   use `tool.background_error` for cancellation instead.
-- **`tool.delegate_progress`** *(harness)* — Live snapshot of a sub-agent
-  spawned by the `agent_start` tool: task name, resolved delegate role,
-  tools-in-flight, total, context tokens, percent. Transient; the UI
-  re-renders the parent tool block.
 
 ## Actions
 

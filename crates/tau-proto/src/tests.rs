@@ -377,6 +377,23 @@ fn representative_events() -> Vec<Event> {
             },
             previous: AgentTurnStatsSample::default(),
         }),
+        Event::AgentWatchesUpdated(AgentWatchesUpdated {
+            session_id: "session_123".into(),
+            watcher_id: agent_id("engineer_parent"),
+            watched_agent_ids: vec![agent_id("engineer_child")],
+            changed_agent_id: Some(agent_id("engineer_child")),
+            cause: AgentWatchUpdateCause::AgentWatchEnable,
+        }),
+        Event::AgentStatsUpdated(AgentStatsUpdated {
+            session_id: "session_123".into(),
+            agent_id: agent_id("engineer_child"),
+            runtime_state: AgentRuntimeState::Running,
+            tools: AgentToolStats {
+                in_flight: 1,
+                started_total: 1,
+            },
+            context: AgentContextStats::default(),
+        }),
         Event::SessionStarted(SessionStarted {
             session_id: "s1".into(),
             reason: SessionStartReason::Initial,
@@ -1080,6 +1097,8 @@ fn expected_default_transient(event: &Event) -> bool {
         Event::ToolCancelled(_)
             | Event::ProviderResponseUpdated(_)
             | Event::ProviderPromptSubmitted(_)
+            | Event::AgentWatchesUpdated(_)
+            | Event::AgentStatsUpdated(_)
             | Event::ToolProgress(_)
             | Event::ToolDelegateProgress(_)
             | Event::ToolError(_)
@@ -1133,8 +1152,10 @@ fn expected_first_party_event_names() -> std::collections::BTreeSet<String> {
         "agent.start_result",
         "agent.started",
         "agent.state",
+        "agent.stats_updated",
         "agent.turn_stats_updated",
         "agent.user_message_injected",
+        "agent.watches_updated",
         "extension.agent_context_publish",
         "extension.agents_md_available",
         "extension.context_provider_register",
@@ -1778,6 +1799,52 @@ fn agent_turn_stats_updated_serde_round_trip() {
     assert_eq!(round_trip, update);
 }
 
+/// Ensures generic watched-agent watch snapshots keep optional change metadata
+/// optional while preserving the authoritative full watched set.
+#[test]
+fn agent_watches_updated_serde_round_trip() {
+    let update = AgentWatchesUpdated {
+        session_id: "session_123".into(),
+        watcher_id: agent_id("engineer_parent"),
+        watched_agent_ids: vec![agent_id("engineer_child")],
+        changed_agent_id: None,
+        cause: AgentWatchUpdateCause::SessionSnapshot,
+    };
+    let value = serde_json::to_value(Event::AgentWatchesUpdated(update.clone()))
+        .expect("serialize watches");
+    assert_eq!(value["event"], "agent.watches_updated");
+    assert!(value["payload"].get("changed_agent_id").is_none());
+    let round_trip = serde_json::from_value::<Event>(value).expect("decode watches");
+    assert_eq!(round_trip, Event::AgentWatchesUpdated(update));
+}
+
+/// Ensures generic agent stats snapshots support partial/unknown context usage
+/// while carrying runtime state and complete tool counters.
+#[test]
+fn agent_stats_updated_serde_round_trip() {
+    let update = AgentStatsUpdated {
+        session_id: "session_123".into(),
+        agent_id: agent_id("engineer_child"),
+        runtime_state: AgentRuntimeState::Running,
+        tools: AgentToolStats {
+            in_flight: 1,
+            started_total: 3,
+        },
+        context: AgentContextStats {
+            input_tokens: Some(42_000),
+            cached_tokens: None,
+            context_window: Some(200_000),
+            percent_used: Some(21),
+        },
+    };
+    let value =
+        serde_json::to_value(Event::AgentStatsUpdated(update.clone())).expect("serialize stats");
+    assert_eq!(value["event"], "agent.stats_updated");
+    assert!(value["payload"]["context"].get("cached_tokens").is_none());
+    let round_trip = serde_json::from_value::<Event>(value).expect("decode stats");
+    assert_eq!(round_trip, Event::AgentStatsUpdated(update));
+}
+
 /// Ensures the provider repetition stop reason has a stable protocol spelling.
 #[test]
 fn provider_stop_reason_repetition_detected_uses_snake_case_wire_value() {
@@ -2335,9 +2402,10 @@ fn start_agent_request_role_is_optional() {
     assert_eq!(parsed.role, None);
 }
 
-/// `DelegateProgress` UI metadata is additive. Omitting role must stay
-/// readable, while delegated agent ids keep their string wire shape and are
-/// validated by the protocol newtype.
+/// Legacy `DelegateProgress` metadata remains readable for old persisted
+/// protocol samples. First-party sub-agent UI now uses generic watch/stat
+/// events, but the legacy agent-id wire shape still validates through the
+/// protocol newtype.
 #[test]
 fn delegate_progress_optional_metadata_and_agent_id_wire_contract() {
     let parsed: DelegateProgress = serde_json::from_value(serde_json::json!({

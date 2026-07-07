@@ -16,7 +16,7 @@ The long-term direction is a single UI model/reducer that owns protocol state, w
 
 UI code must render tool calls through generic `ToolUseState`, `ToolUsePayload`, progress counters, and fallback tool displays. Do not add tool-name-specific rendering for ordinary extension tools.
 
-The current documented exception is harness delegation. The harness emits `agent_start` tool calls together with side-conversation lifecycle events and `DelegateProgress`; the UI suppresses nested sub-agent tool spam and rolls it up into the parent delegation line. Delegate-specific code exists only to connect those harness-owned side-conversation events to the generic tool display shape and status chips. New delegate UI behavior should still prefer expressing data in `ToolUseState` / `DelegateProgress` rather than parsing tool names or payloads.
+Harness sub-agent activity is rendered from generic watch/stat events. The UI subscribes to `agent.watches_updated`, `agent.stats_updated`, and `agent.turn_stats_updated`, combines them with normal agent lifecycle/display metadata, and suppresses nested sub-agent tool spam in favor of watched-agent activity indicators. Do not add new delegation-specific rendering paths.
 
 There is also a narrow temporary action-input redaction exception: `/email auth
 google finish ...` command echo and prompt-history entries are redacted because

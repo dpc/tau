@@ -6,9 +6,10 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use tau_proto::{
-    AgentContextKey, AgentContextValue, AgentId, AgentMessageReceived, AgentMessageSent, CborValue,
-    Event, ToolBackgroundError, ToolBackgroundResult, ToolCallId, ToolError, ToolName, ToolResult,
-    ToolResultKind, ToolType, ToolUseState, ToolUseStatus,
+    AgentContextKey, AgentContextValue, AgentId, AgentMessageReceived, AgentMessageSent,
+    AgentWatchUpdateCause, AgentWatchesUpdated, CborValue, Event, ToolBackgroundError,
+    ToolBackgroundResult, ToolCallId, ToolError, ToolName, ToolResult, ToolResultKind, ToolType,
+    ToolUseState, ToolUseStatus,
 };
 
 use crate::error::HarnessError;
@@ -241,6 +242,90 @@ impl Harness {
             message,
             tau_proto::AgentMessageKind::WatchResponse,
         )
+    }
+
+    /// Enable or disable one session-local watch relation and publish the
+    /// authoritative watcher snapshot.
+    pub(crate) fn set_agent_watch(
+        &mut self,
+        watcher_id: &str,
+        watched_agent_id: &str,
+        enable: bool,
+        cause: AgentWatchUpdateCause,
+    ) {
+        if watcher_id == watched_agent_id {
+            return;
+        }
+        if enable {
+            self.agent_watches
+                .entry(watcher_id.to_owned())
+                .or_default()
+                .insert(watched_agent_id.to_owned());
+            self.agent_watchers
+                .entry(watched_agent_id.to_owned())
+                .or_default()
+                .insert(watcher_id.to_owned());
+        } else {
+            if let Some(watched) = self.agent_watches.get_mut(watcher_id) {
+                watched.remove(watched_agent_id);
+                if watched.is_empty() {
+                    self.agent_watches.remove(watcher_id);
+                }
+            }
+            if let Some(watchers) = self.agent_watchers.get_mut(watched_agent_id) {
+                watchers.remove(watcher_id);
+                if watchers.is_empty() {
+                    self.agent_watchers.remove(watched_agent_id);
+                }
+            }
+        }
+        self.publish_agent_watches_snapshot(watcher_id, Some(watched_agent_id), cause);
+    }
+
+    /// Return a sorted snapshot of current watcher ids for a watched agent.
+    pub(crate) fn watchers_for_agent(&self, watched_agent_id: &str) -> Vec<String> {
+        self.agent_watchers
+            .get(watched_agent_id)
+            .map(|watchers| watchers.iter().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    /// Remove a stale watch relation and publish the updated watcher snapshot.
+    pub(crate) fn prune_agent_watch(&mut self, watcher_id: &str, watched_agent_id: &str) {
+        self.set_agent_watch(
+            watcher_id,
+            watched_agent_id,
+            false,
+            AgentWatchUpdateCause::WatcherPruned,
+        );
+    }
+
+    fn publish_agent_watches_snapshot(
+        &mut self,
+        watcher_id: &str,
+        changed_agent_id: Option<&str>,
+        cause: AgentWatchUpdateCause,
+    ) {
+        let watched_agent_ids = self
+            .agent_watches
+            .get(watcher_id)
+            .map(|watched| {
+                watched
+                    .iter()
+                    .map(crate::parse_agent_id)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        self.publish_event(
+            Some(super::HARNESS_CONNECTION_ID),
+            Event::AgentWatchesUpdated(AgentWatchesUpdated {
+                session_id: self.current_session_id.clone(),
+                watcher_id: crate::parse_agent_id(watcher_id),
+                watched_agent_ids,
+                changed_agent_id: changed_agent_id.map(crate::parse_agent_id),
+                cause,
+            }),
+        );
     }
 
     fn publish_agent_delivery_from_agent(

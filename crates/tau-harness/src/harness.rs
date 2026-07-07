@@ -19,19 +19,19 @@ use tau_core::{
     validate_tool_arguments,
 };
 use tau_proto::{
-    ActionError, ActionInvocationId, ActionInvoke, ActionResult, ActionSchemaPublished, AgentHead,
-    AgentId, AgentPromptCreated, AgentPromptId, AgentPromptQueued, AgentPromptRecalled,
-    AgentPromptTerminated, AgentPromptTerminationReason, AgentTurnId, AgentTurnStatsSample,
-    AgentTurnStatsUpdated, BackgroundSupport, CborValue, ClientKind, ConnectionId, ContentPart,
-    ContextItem, ContextRole, Disconnect, Event, EventSelector, ExtensionName,
-    HarnessAgentContextUsageChanged, HarnessContextUsageChanged, HarnessInputMessage,
-    HarnessOutputMessage, HarnessRoleSelected, Hello, MessageItem, ModelId, PROTOCOL_VERSION,
-    PromptFragment, PromptOriginator, ProviderModelInfo, ProviderResponseFinished,
-    ProviderResponseTextDelta, ProviderResponseUpdated, ProviderStopReason, ProviderTokenUsage,
-    SecretValue, SessionId, ToolBackgroundError, ToolBackgroundResult, ToolCallId, ToolCallItem,
-    ToolCancelled, ToolDefinition, ToolError, ToolName, ToolRegister, ToolRejected, ToolRequest,
-    ToolResult, ToolResultKind, ToolType, UiCancelPrompt, UiTreeNavigationTarget,
-    nearest_name_suggestion,
+    ActionError, ActionInvocationId, ActionInvoke, ActionResult, ActionSchemaPublished,
+    AgentContextStats, AgentHead, AgentId, AgentPromptCreated, AgentPromptId, AgentPromptQueued,
+    AgentPromptRecalled, AgentPromptTerminated, AgentPromptTerminationReason, AgentStatsUpdated,
+    AgentToolStats, AgentTurnId, AgentTurnStatsSample, AgentTurnStatsUpdated, BackgroundSupport,
+    CborValue, ClientKind, ConnectionId, ContentPart, ContextItem, ContextRole, Disconnect, Event,
+    EventSelector, ExtensionName, HarnessAgentContextUsageChanged, HarnessContextUsageChanged,
+    HarnessInputMessage, HarnessOutputMessage, HarnessRoleSelected, Hello, MessageItem, ModelId,
+    PROTOCOL_VERSION, PromptFragment, PromptOriginator, ProviderModelInfo,
+    ProviderResponseFinished, ProviderResponseTextDelta, ProviderResponseUpdated,
+    ProviderStopReason, ProviderTokenUsage, SecretValue, SessionId, ToolBackgroundError,
+    ToolBackgroundResult, ToolCallId, ToolCallItem, ToolCancelled, ToolDefinition, ToolError,
+    ToolName, ToolRegister, ToolRejected, ToolRequest, ToolResult, ToolResultKind, ToolType,
+    UiCancelPrompt, UiTreeNavigationTarget, nearest_name_suggestion,
 };
 
 use crate::agent::{
@@ -1256,8 +1256,6 @@ mod agent_context_tests;
 #[cfg(test)]
 mod compaction_metadata_tests;
 #[cfg(test)]
-mod delegate_display_tests;
-#[cfg(test)]
 mod semantic_event_router_tests;
 #[cfg(test)]
 mod tests;
@@ -1511,6 +1509,10 @@ pub struct Harness {
     pub(crate) session_loaded_agents: HashSet<AgentId>,
     /// Harness-owned lifecycle state for current-session agents.
     pub(crate) agent_states: HashMap<String, AgentState>,
+    /// Session-local watch sets keyed by watcher public agent id.
+    pub(crate) agent_watches: HashMap<String, BTreeSet<String>>,
+    /// Reverse session-local watch index keyed by watched public agent id.
+    pub(crate) agent_watchers: HashMap<String, BTreeSet<String>>,
     /// Agent ids that were once known but can no longer receive messages.
     pub(crate) stopped_agent_ids: HashSet<String>,
     /// Global harness state. Currently only tracks per-session init
@@ -2113,6 +2115,8 @@ impl Harness {
             agent_routes: HashMap::new(),
             session_loaded_agents: HashSet::new(),
             agent_states: HashMap::new(),
+            agent_watches: HashMap::new(),
+            agent_watchers: HashMap::new(),
             stopped_agent_ids: HashSet::new(),
             turn_state: TurnState::Idle,
             debug_log: None,
@@ -3815,8 +3819,27 @@ impl Harness {
     ) -> bool {
         self.agent_creation_event_targets_ephemeral_agent(event)
             || self.agent_addressed_event_targets_ephemeral_agent(event)
+            || self.agent_operational_event_targets_ephemeral_agent(event)
             || self.tool_event_targets_ephemeral_agent(event)
             || self.agent_scoped_event_targets_ephemeral_agent(event, sync_head_for)
+    }
+
+    fn agent_operational_event_targets_ephemeral_agent(&self, event: &Event) -> bool {
+        match event {
+            Event::AgentStatsUpdated(stats) => self.agent_is_ephemeral(&stats.agent_id),
+            Event::AgentWatchesUpdated(watches) => {
+                self.agent_is_ephemeral(&watches.watcher_id)
+                    || watches
+                        .watched_agent_ids
+                        .iter()
+                        .any(|agent_id| self.agent_is_ephemeral(agent_id))
+                    || watches
+                        .changed_agent_id
+                        .as_ref()
+                        .is_some_and(|agent_id| self.agent_is_ephemeral(agent_id))
+            }
+            _ => false,
+        }
     }
 
     fn agent_creation_event_targets_ephemeral_agent(&self, event: &Event) -> bool {
@@ -8706,10 +8729,9 @@ impl Harness {
             initial_head,
             Some(source_id.into()),
         );
-        // For tool-backed extensions (currently just `agent_start`)
-        // record the parent call id and task name so subsequent
-        // sub-agent state changes can be surfaced to the user under
-        // that tool block via `DelegateProgress`.
+        // For tool-backed extensions (currently just `agent_start`) record the
+        // parent call id and task metadata for teardown/background ownership and
+        // child display metadata.
         conv.parent_tool_call_id = parent_call_id;
         conv.parent_agent_id = parent_agent_id;
         conv.display_name = display_name;
@@ -8739,11 +8761,9 @@ impl Harness {
             self.set_agent_state(&agent_id, AgentState::ActiveDelegated);
         }
 
-        // Emit the initial progress snapshot (`%0/0`, no ctx
-        // info yet) so the parent's tool block flips from `…` to the
-        // structured form as soon as the side agent exists,
-        // without waiting for the sub-agent's first event.
-        self.emit_delegate_progress(&cid);
+        // Emit the initial generic agent stats snapshot as soon as the side
+        // agent exists, before it spends tokens or starts nested tools.
+        self.emit_agent_stats_updated(&cid);
 
         // Publish the accepted instruction into the side agent transcript and
         // dispatch only after that prompt folds into the agent head.
@@ -8768,47 +8788,35 @@ impl Harness {
         }
     }
 
-    /// Publish a `DelegateProgress` snapshot for `cid` if it is a side
-    /// conversation backing an `agent_start` tool call. No-op for user
-    /// agents and for non-tool start-agent requests.
-    fn emit_delegate_progress(&mut self, cid: &AgentId) {
-        let Some(conv) = self.agents.get(cid) else {
-            return;
-        };
-        let (Some(call_id), Some(task_name)) =
-            (conv.parent_tool_call_id.clone(), conv.task_name.clone())
-        else {
-            return;
-        };
-        let role = conv.role.clone();
-        let agent_id = conv.agent_id.as_deref().map(crate::parse_agent_id);
-        let ctx_window = conv.context_input_tokens.and_then(|_| {
-            self.model_for_agent_role(conv)
+    fn agent_stats_snapshot(&self, cid: &AgentId) -> Option<AgentStatsUpdated> {
+        let agent = self.agents.get(cid)?;
+        let agent_id = agent.agent_id.as_ref()?;
+        let context_window = agent.context_input_tokens.and_then(|_| {
+            self.model_for_agent_role(agent)
                 .as_ref()
-                .and_then(|m| context_window_for_model(&self.provider_model_info, m))
+                .and_then(|model| context_window_for_model(&self.provider_model_info, model))
         });
-        let display = build_delegate_progress_display(
-            &task_name,
-            conv.context_input_tokens,
-            conv.context_percent_used,
-            ctx_window,
-            conv.tools_in_flight,
-            conv.tools_total,
-            conv.delegate_input_stats,
-        );
-        let progress = tau_proto::DelegateProgress {
-            call_id,
-            task_name,
-            agent_id,
-            role,
-            ctx_percent: conv.context_percent_used,
-            ctx_input_tokens: conv.context_input_tokens,
-            ctx_window,
-            tools_in_flight: conv.tools_in_flight,
-            tools_total: conv.tools_total,
-            display: Some(display),
-        };
-        self.publish_event(None, Event::ToolDelegateProgress(progress));
+        Some(AgentStatsUpdated {
+            session_id: self.current_session_id.clone(),
+            agent_id: crate::parse_agent_id(agent_id),
+            runtime_state: agent_runtime_state_for_turn(&agent.turn_state),
+            tools: AgentToolStats {
+                in_flight: agent.tools_in_flight,
+                started_total: agent.tools_total,
+            },
+            context: AgentContextStats {
+                input_tokens: agent.context_input_tokens,
+                cached_tokens: agent.context_cached_tokens,
+                context_window,
+                percent_used: agent.context_percent_used,
+            },
+        })
+    }
+
+    fn emit_agent_stats_updated(&mut self, cid: &AgentId) {
+        if let Some(stats) = self.agent_stats_snapshot(cid) {
+            self.publish_event(None, Event::AgentStatsUpdated(stats));
+        }
     }
 
     fn handle_compact_request(&mut self, session_id: SessionId, target_agent_id: Option<&str>) {
@@ -9565,6 +9573,8 @@ impl Harness {
         self.agents.clear();
         self.agent_routes.clear();
         self.agent_states.clear();
+        self.agent_watches.clear();
+        self.agent_watchers.clear();
         self.stopped_agent_ids.clear();
 
         self.current_session_id = new_session_id.clone();
@@ -10394,6 +10404,7 @@ impl Harness {
                 state: new_state,
             }),
         );
+        self.emit_agent_stats_updated(cid);
     }
 
     /// Starts a new stats turn, or moves the current stats turn to a new
@@ -10904,6 +10915,7 @@ impl Harness {
             if self.agent_states.get(&agent_id).copied() != Some(AgentState::ActiveDelegated) {
                 self.set_agent_state(&agent_id, AgentState::Active);
             }
+            self.emit_agent_stats_updated(cid);
             return Some(agent_id);
         }
         let role = self
@@ -10930,6 +10942,7 @@ impl Harness {
         }
         self.ensure_loaded_agent_for_agent(cid, &agent_id);
         self.set_agent_state(&agent_id, AgentState::Active);
+        self.emit_agent_stats_updated(cid);
         Some(agent_id)
     }
 
@@ -11879,14 +11892,12 @@ impl Harness {
         input_tokens: Option<u64>,
         cached_tokens: Option<u64>,
     ) {
-        // Per-conversation usage: separate from the global tracker
-        // because side agents shouldn't clobber the user's
-        // status bar, but the harness still needs their context %
-        // to surface via `DelegateProgress`.
+        // Per-conversation usage: separate from the global tracker because side
+        // agents shouldn't clobber the user's status bar, but generic agent
+        // stats still need their context usage.
         if let Some(cid) = response_cid {
             let usage_model = self.prompt_models.get(agent_prompt_id).cloned();
             self.update_agent_context_usage(cid, usage_model.as_ref(), input_tokens, cached_tokens);
-            self.emit_delegate_progress(cid);
         }
     }
 
@@ -12465,6 +12476,7 @@ impl Harness {
                 percent_used,
             }),
         );
+        self.emit_agent_stats_updated(cid);
     }
 
     /// True iff every configured extension has either reached `Ready`
@@ -12620,7 +12632,7 @@ impl Harness {
     pub(crate) fn on_tool_call_foreground_complete(&mut self, call_id: &str) {
         let owner = self.tool_agents.get(call_id).cloned();
         if let Some(cid) = owner {
-            self.emit_delegate_progress(&cid);
+            self.emit_agent_stats_updated(&cid);
         }
         self.drain_pending_tool_invocations_or_report();
         self.maybe_complete_agent_turn(call_id);
@@ -12718,7 +12730,7 @@ impl Harness {
         if let Some(conv) = self.agents.get_mut(&cid) {
             conv.tools_in_flight = conv.tools_in_flight.saturating_sub(1);
         }
-        self.emit_delegate_progress(&cid);
+        self.emit_agent_stats_updated(&cid);
         let background = ToolBackgroundError {
             call_id: error.call_id,
             tool_name: error.tool_name,
@@ -12952,7 +12964,7 @@ impl Harness {
         // `tool_agents` is still populated here: the call
         // sites clear it *after* this function returns. Decrement
         // the agent's in-flight counter and surface the new
-        // state to any UI watching this delegate flow before the
+        // state to any UI watching this agent before the
         // mapping is cleared.
         let owner = self.tool_agents.get(call_id).cloned();
         if let Some(cid) = owner.as_ref()
@@ -12961,22 +12973,21 @@ impl Harness {
             conv.tools_in_flight = conv.tools_in_flight.saturating_sub(1);
         }
         if let Some(cid) = owner.as_ref() {
-            self.emit_delegate_progress(cid);
+            self.emit_agent_stats_updated(cid);
         }
         owner
     }
 
     /// Bump the per-agent tool counters for a freshly-started
-    /// tool call. Always emits a `DelegateProgress` snapshot when the
-    /// conversation is a delegate side agent (no-op otherwise),
-    /// so the UI updates the moment the sub-agent starts a new call
-    /// rather than waiting for completion.
+    /// tool call. Emits a generic stats snapshot so watched-agent UI updates
+    /// the moment an agent starts a new call rather than waiting for
+    /// completion.
     pub(crate) fn bump_tools_started_for(&mut self, cid: &AgentId) {
         if let Some(conv) = self.agents.get_mut(cid) {
             conv.tools_in_flight = conv.tools_in_flight.saturating_add(1);
             conv.tools_total = conv.tools_total.saturating_add(1);
         }
-        self.emit_delegate_progress(cid);
+        self.emit_agent_stats_updated(cid);
     }
 
     fn maybe_complete_agent_turn(&mut self, completed_call_id: &str) {
@@ -13137,6 +13148,7 @@ impl Harness {
     ) {
         let call_id: ToolCallId = call.id.clone();
         self.tool_agents.insert(call_id.clone(), cid.clone());
+        self.bump_tools_started_for(cid);
         self.publish_terminal_tool_error(
             Some(cid),
             None,
@@ -13776,49 +13788,6 @@ impl Harness {
 
 fn provider_disconnected_error() -> HarnessError {
     HarnessError::Participant("provider disconnected".to_owned())
-}
-
-fn build_delegate_progress_display(
-    task_name: &str,
-    ctx_input_tokens: Option<u64>,
-    ctx_percent: Option<u8>,
-    ctx_window: Option<u64>,
-    tools_in_flight: u32,
-    tools_total: u32,
-    input_stats: tau_proto::ToolUseStats,
-) -> tau_proto::ToolUseState {
-    use tau_proto::{ProgressCounter, ProgressUnit, ToolUseStatus};
-
-    let tools_completed = tools_total.saturating_sub(tools_in_flight);
-    let mut counters: Vec<ProgressCounter> = vec![ProgressCounter {
-        label: Some("tools".to_owned()),
-        unit: ProgressUnit::Count,
-        complete: Some(u64::from(tools_completed)),
-        total: Some(u64::from(tools_total)),
-    }];
-    if ctx_input_tokens.is_some() || ctx_window.is_some() {
-        counters.push(ProgressCounter {
-            label: Some("ctx".to_owned()),
-            unit: ProgressUnit::Tokens,
-            complete: ctx_input_tokens,
-            total: ctx_window,
-        });
-    } else if ctx_percent.is_some() {
-        counters.push(ProgressCounter {
-            label: Some("ctx".to_owned()),
-            unit: ProgressUnit::Percent,
-            complete: ctx_percent.map(u64::from),
-            total: None,
-        });
-    }
-    tau_proto::ToolUseState {
-        args: format!("[{task_name}]"),
-        stats: input_stats,
-        progress_counters: counters,
-        status: ToolUseStatus::InProgress,
-        status_text: tau_proto::PROGRESS_INDICATOR_TEXT.to_owned(),
-        ..Default::default()
-    }
 }
 
 /// Replace the `originator` on a tool-related event with the owning

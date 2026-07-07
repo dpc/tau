@@ -23,10 +23,9 @@ use crate::skill_commands::SkillCommandState;
 use crate::tool_render::{
     CompactionStatus, ToolCallDisplay, ToolSummaryDisplay, build_delegate_completion_display,
     build_tool_summary_display, diff_payload_counts, extension_status_block, extract_diff,
-    format_token_count, pending_tool_call_display, render_compaction_block,
-    render_delegate_display, render_diff_tool_block, render_harness_notice,
-    render_multi_diff_tool_block, render_shell_block, render_tool_block, render_tool_use_state,
-    render_turn_stats_block, session_status_block, streaming_block,
+    format_token_count, pending_tool_call_display, render_compaction_block, render_diff_tool_block,
+    render_harness_notice, render_multi_diff_tool_block, render_shell_block, render_tool_block,
+    render_tool_use_state, render_turn_stats_block, session_status_block, streaming_block,
     streaming_block_with_indicator_suffix, synthesize_fallback_display, system_loaded_block,
     tool_duration_suffix, ui_dir_block,
 };
@@ -99,6 +98,12 @@ pub(crate) struct EventRenderer {
     tool_agents: HashMap<String, String>,
     /// Map user-shell command ids to the agent transcript where they started.
     shell_agents: HashMap<String, String>,
+    /// Current watch sets keyed by watcher agent id.
+    watched_agents: HashMap<String, Vec<String>>,
+    /// Latest generic operational stats keyed by agent id.
+    agent_stats: HashMap<String, tau_proto::AgentStatsUpdated>,
+    /// Active watched-agent indicator blocks keyed by watched agent id.
+    watched_agent_blocks: HashMap<String, tau_cli_term::BlockId>,
     /// Shared current visible agent mirror for prompt submission.
     current_agent_state: std::sync::Arc<std::sync::Mutex<Option<String>>>,
     /// Shared prompt-draft mailbox used to retarget pending drafts when remote
@@ -122,7 +127,7 @@ pub(crate) struct EventRenderer {
     /// the first entry is popped and moved back to history.
     queued_user_blocks: VecDeque<(tau_cli_term::BlockId, String)>,
     /// Per-`call_id` UI state. Tracks the live block (if any), the
-    /// cached delegate args/progress for in-place re-renders, and
+    /// cached tool args/progress for in-place re-renders, and
     /// whether the call belongs to a sub-agent side-conversation (in
     /// which case the UI suppresses its progress and result events).
     /// Entries are removed on terminal logical completion events.
@@ -856,8 +861,8 @@ struct PromptState {
 #[derive(Default)]
 struct ToolCallState {
     /// Live tool-call block in the active-tools area. `None` for sub-agent
-    /// tool calls whose UI is suppressed (their progress is rolled up into the
-    /// parent `agent_start` block via `DelegateProgress` instead).
+    /// tool calls whose UI is suppressed while generic watched-agent indicators
+    /// summarize their owner agent's activity.
     block_id: Option<tau_cli_term::BlockId>,
     /// Empty history placeholder allocated at the tool call's logical
     /// transcript position. Final results fill this block so live progress
@@ -875,11 +880,6 @@ struct ToolCallState {
     /// to. `None` for stray events without a preceding tool-call
     /// announcement.
     summary_block_id: Option<tau_cli_term::BlockId>,
-    /// Most recent `DelegateProgress` snapshot. On `ToolResult` we
-    /// render the completion line with the final `#…` / `%…`
-    /// chips so the user sees the delegation cost alongside the
-    /// response stats.
-    delegate_last_progress: Option<tau_proto::DelegateProgress>,
     /// `true` for the user-facing parent `agent_start` tool call that
     /// spawned a side conversation. While it is live, side-conversation
     /// prompt lifecycle events must not hide the main tool usage chip.
@@ -1143,6 +1143,9 @@ impl EventRenderer {
             prompt_agents: HashMap::new(),
             tool_agents: HashMap::new(),
             shell_agents: HashMap::new(),
+            watched_agents: HashMap::new(),
+            agent_stats: HashMap::new(),
+            watched_agent_blocks: HashMap::new(),
             current_agent_state: std::sync::Arc::new(std::sync::Mutex::new(None)),
             draft_retargeter: None,
             prompts: HashMap::new(),
@@ -1386,6 +1389,111 @@ impl EventRenderer {
         if retarget_draft {
             self.retarget_prompt_draft();
         }
+        self.refresh_watched_agent_blocks();
+    }
+
+    fn handle_agent_watches_updated(&mut self, updated: &tau_proto::AgentWatchesUpdated) {
+        self.watched_agents.insert(
+            updated.watcher_id.to_string(),
+            updated
+                .watched_agent_ids
+                .iter()
+                .map(ToString::to_string)
+                .collect(),
+        );
+        self.refresh_watched_agent_blocks();
+    }
+
+    fn handle_agent_stats_updated(&mut self, updated: &tau_proto::AgentStatsUpdated) {
+        self.agent_stats
+            .insert(updated.agent_id.to_string(), updated.clone());
+        self.refresh_watched_agent_blocks();
+    }
+
+    fn refresh_watched_agent_blocks(&mut self) {
+        let Some(current) = self.current_agent_id.clone() else {
+            self.clear_watched_agent_blocks();
+            return;
+        };
+        let watched = self
+            .watched_agents
+            .get(&current)
+            .cloned()
+            .unwrap_or_default();
+        let active: Vec<String> = watched
+            .into_iter()
+            .filter(|agent_id| {
+                self.agent_stats.get(agent_id).is_some_and(|stats| {
+                    stats.runtime_state == tau_proto::AgentRuntimeState::Running
+                })
+            })
+            .collect();
+        let active_set: HashSet<_> = active.iter().cloned().collect();
+        let stale: Vec<_> = self
+            .watched_agent_blocks
+            .keys()
+            .filter(|agent_id| !active_set.contains(*agent_id))
+            .cloned()
+            .collect();
+        for agent_id in stale {
+            if let Some(block_id) = self.watched_agent_blocks.remove(&agent_id) {
+                self.handle.remove_block(block_id);
+            }
+        }
+        for agent_id in active {
+            let block = self.watched_agent_block(&agent_id);
+            if let Some(block_id) = self.watched_agent_blocks.get(&agent_id).copied() {
+                self.handle.set_block(block_id, block);
+            } else {
+                let block_id = self
+                    .handle
+                    .new_block(format!("watched-agent:{agent_id}"), block);
+                self.handle.push_above_active(block_id);
+                self.watched_agent_blocks.insert(agent_id, block_id);
+            }
+        }
+        self.handle.redraw();
+    }
+
+    fn clear_watched_agent_blocks(&mut self) {
+        for (_, block_id) in self.watched_agent_blocks.drain() {
+            self.handle.remove_block(block_id);
+        }
+        self.handle.redraw();
+    }
+
+    fn watched_agent_block(&self, agent_id: &str) -> tau_cli_term::StyledBlock {
+        use tau_cli_term::resolve::themed_block;
+        use tau_themes::names;
+
+        let label = self
+            .agent_display_names
+            .lock()
+            .ok()
+            .and_then(|names| names.get(agent_id).cloned())
+            .unwrap_or_else(|| agent_id.to_owned());
+        let stats = self.agent_stats.get(agent_id);
+        let tools = stats
+            .map(|stats| {
+                format!(
+                    "{}/{}",
+                    stats
+                        .tools
+                        .started_total
+                        .saturating_sub(stats.tools.in_flight),
+                    stats.tools.started_total
+                )
+            })
+            .unwrap_or_else(|| "-".to_owned());
+        let ctx = stats
+            .and_then(|stats| stats.context.percent_used)
+            .map(|percent| format!(" ctx {percent}%"))
+            .unwrap_or_default();
+        themed_block(
+            &self.theme,
+            names::SESSION_STATUS,
+            format!("watching {label}: running tools {tools}{ctx}"),
+        )
     }
 
     fn retarget_prompt_draft(&self) {
@@ -2206,6 +2314,9 @@ impl EventRenderer {
         self.prompt_agents.clear();
         self.tool_agents.clear();
         self.shell_agents.clear();
+        self.watched_agents.clear();
+        self.agent_stats.clear();
+        self.clear_watched_agent_blocks();
         if let Ok(mut agents) = self.known_agents.lock() {
             agents.clear();
         }
@@ -2515,60 +2626,9 @@ impl EventRenderer {
     }
 
     fn main_tools_status_chip(&self) -> Option<String> {
-        self.live_main_delegate_tools_status_chip().or_else(|| {
-            ((self.main_tools_visible || !self.main_backgrounded_tools.is_empty())
-                && self.main_tools_total != 0)
-                .then(|| format!("{}/{}", self.main_tools_completed, self.main_tools_total))
-        })
-    }
-
-    fn live_main_delegate_tools_status_chip(&self) -> Option<String> {
-        self.tool_calls
-            .values()
-            .filter(|state| {
-                state.is_main_delegate && !state.is_sub_agent && state.block_id.is_some()
-            })
-            .filter_map(|state| state.delegate_last_progress.as_ref())
-            .find_map(Self::delegate_progress_tools_status_chip)
-    }
-
-    fn delegate_progress_tools_status_chip(
-        progress: &tau_proto::DelegateProgress,
-    ) -> Option<String> {
-        progress
-            .display
-            .as_ref()
-            .and_then(|display| {
-                display
-                    .progress_counters
-                    .iter()
-                    .find_map(Self::tools_progress_counter_status_chip)
-            })
-            .or_else(|| {
-                (progress.tools_total != 0).then(|| {
-                    format!(
-                        "{}/{}",
-                        progress
-                            .tools_total
-                            .saturating_sub(progress.tools_in_flight),
-                        progress.tools_total
-                    )
-                })
-            })
-    }
-
-    fn tools_progress_counter_status_chip(counter: &tau_proto::ProgressCounter) -> Option<String> {
-        if counter.label.as_deref() != Some("tools")
-            || counter.unit != tau_proto::ProgressUnit::Count
-        {
-            return None;
-        }
-        Some(match (counter.complete, counter.total) {
-            (Some(complete), Some(total)) => format!("{complete}/{total}"),
-            (Some(complete), None) => complete.to_string(),
-            (None, Some(total)) => format!("-/{total}"),
-            (None, None) => "-".to_owned(),
-        })
+        ((self.main_tools_visible || !self.main_backgrounded_tools.is_empty())
+            && self.main_tools_total != 0)
+            .then(|| format!("{}/{}", self.main_tools_completed, self.main_tools_total))
     }
 
     fn record_main_tool_completed(&mut self) {
@@ -3197,11 +3257,13 @@ impl EventRenderer {
                 }
                 true
             }
-            Event::ToolDelegateProgress(progress) => {
-                if let Some(agent_id) = progress.agent_id.as_deref() {
-                    self.remember_agent(agent_id.to_owned());
-                    self.mark_agent_live(agent_id.to_owned());
-                }
+            Event::AgentWatchesUpdated(updated) => {
+                self.handle_agent_watches_updated(updated);
+                true
+            }
+            Event::AgentStatsUpdated(updated) => {
+                self.remember_agent(updated.agent_id.to_string());
+                self.handle_agent_stats_updated(updated);
                 true
             }
             Event::SessionAgentUnloaded(unloaded) => {
@@ -3390,9 +3452,6 @@ impl EventRenderer {
                     .or_else(|| Some(started.agent_id.to_string())),
             ),
             Event::ToolProgress(progress) => EventAgentIdResolution::from_agent_id(
-                self.tool_agents.get(progress.call_id.as_str()).cloned(),
-            ),
-            Event::ToolDelegateProgress(progress) => EventAgentIdResolution::from_agent_id(
                 self.tool_agents.get(progress.call_id.as_str()).cloned(),
             ),
             Event::ToolResult(result) | Event::ProviderToolResult(result) => {
@@ -4439,9 +4498,9 @@ impl EventRenderer {
     ) {
         // The event has already been routed into the owning agent transcript.
         // Only the main agent's tool calls land in the UI as their own blocks.
-        // Sub-agent activity is summarized live under the parent's `agent_start`
-        // block via `DelegateProgress` instead, so the user sees one line per
-        // delegation rather than a flood of nested invocations.
+        // Sub-agent activity is summarized through generic watched-agent stats,
+        // so the user sees one activity line per watched agent rather than a
+        // flood of nested invocations.
         self.main_agent_turn_active = true;
         if finished.output_items.is_empty() {
             self.finish_prompt_tool_summary();
@@ -4657,10 +4716,6 @@ impl EventRenderer {
             }
             Event::ToolProgress(progress) => {
                 self.handle_tool_progress(progress);
-                true
-            }
-            Event::ToolDelegateProgress(progress) => {
-                self.handle_tool_delegate_progress(progress);
                 true
             }
             Event::ProviderToolResult(result)
@@ -4892,49 +4947,6 @@ impl EventRenderer {
         display.suffixes.insert(insert_at, suffix);
     }
 
-    fn handle_tool_delegate_progress(&mut self, progress: &tau_proto::DelegateProgress) {
-        let call_id = progress.call_id.as_str();
-        let (bid, display) = {
-            // Snapshot the latest counters and ctx info regardless of whether the
-            // block is still live; the `ToolResult` handler reuses them on the
-            // completion line.
-            let freeze_multiline_payloads = self.freeze_multiline_live_payloads();
-            let state = self.tool_calls.entry(call_id.to_owned()).or_default();
-            state.delegate_last_progress = Some(progress.clone());
-            let Some(bid) = state.block_id else {
-                // Block already torn down (delegate finished or never rendered) —
-                // nothing to update.
-                return;
-            };
-            let mut display = match &progress.display {
-                Some(descriptor) => render_delegate_display(
-                    descriptor,
-                    progress.agent_id.as_deref(),
-                    progress.role.as_deref(),
-                ),
-                None => render_delegate_display(
-                    &synthesize_fallback_display("agent_start", None),
-                    progress.agent_id.as_deref(),
-                    progress.role.as_deref(),
-                ),
-            };
-            if Self::use_static_live_duration(freeze_multiline_payloads, &display) {
-                Self::upsert_static_tool_duration_suffix(&mut display);
-            } else if let Some(duration) = Self::live_tool_duration(state) {
-                Self::upsert_tool_duration_suffix(&mut display, duration);
-            }
-            state.live_display = Some(display.clone());
-            (bid, display)
-        };
-        let block = self.render_tool_history_block(&display);
-        self.handle.set_block(bid, block);
-        if self.model_status_block.is_some() {
-            self.render_model_status();
-        } else {
-            self.handle.redraw();
-        }
-    }
-
     fn take_finished_tool_call(
         &mut self,
         call_id: &str,
@@ -4970,15 +4982,14 @@ impl EventRenderer {
             self.handle_tool_background_placeholder(call_id);
             return;
         }
-        // Sub-agent tool activity stays out of the user's transcript — its
-        // progress is rolled up under the parent's `agent_start` block by
-        // `DelegateProgress`.
+        // Sub-agent tool activity stays out of the user's transcript; generic
+        // watched-agent stats provide the live activity signal.
         let Some((prior, known_main_tool)) =
             self.take_finished_tool_call(call_id, result.originator.is_user())
         else {
             return;
         };
-        let mut display = Self::tool_result_display(result, prior.delegate_last_progress.as_ref());
+        let mut display = Self::tool_result_display(result);
         if let Some(duration) = Self::finished_tool_duration(&prior, recorded_at) {
             Self::upsert_tool_duration_suffix(&mut display, duration);
         }
@@ -5024,7 +5035,7 @@ impl EventRenderer {
         else {
             return;
         };
-        let mut display = Self::tool_result_display(&result, prior.delegate_last_progress.as_ref());
+        let mut display = Self::tool_result_display(&result);
         if let Some(duration) = Self::finished_tool_duration(&prior, recorded_at) {
             Self::upsert_tool_duration_suffix(&mut display, duration);
         }
@@ -5039,22 +5050,13 @@ impl EventRenderer {
         self.render_model_status_after_tool_completion(known_main_tool);
     }
 
-    fn tool_result_display(
-        result: &tau_proto::ToolResult,
-        last_progress: Option<&tau_proto::DelegateProgress>,
-    ) -> ToolCallDisplay {
+    fn tool_result_display(result: &tau_proto::ToolResult) -> ToolCallDisplay {
         if result.tool_name.as_str() == AGENT_START_TOOL_NAME {
-            let role = last_progress.and_then(|p| p.role.as_deref());
-            let agent_id = last_progress.and_then(|p| p.agent_id.as_deref());
             if let Some(descriptor) = &result.display {
-                return render_delegate_display(descriptor, agent_id, role);
+                return render_tool_use_state(&result.tool_name, descriptor);
             }
-            let descriptor = build_delegate_completion_display(
-                last_progress.and_then(|p| p.display.as_ref()),
-                &result.result,
-                None,
-            );
-            render_delegate_display(&descriptor, agent_id, role)
+            let descriptor = build_delegate_completion_display(None, &result.result, None);
+            render_tool_use_state(&result.tool_name, &descriptor)
         } else if let Some(descriptor) = &result.display {
             render_tool_use_state(&result.tool_name, descriptor)
         } else {
@@ -5122,7 +5124,7 @@ impl EventRenderer {
         else {
             return;
         };
-        let mut display = Self::tool_error_display(error, prior.delegate_last_progress.as_ref());
+        let mut display = Self::tool_error_display(error);
         if let Some(duration) = Self::finished_tool_duration(&prior, recorded_at) {
             Self::upsert_tool_duration_suffix(&mut display, duration);
         }
@@ -5150,7 +5152,7 @@ impl EventRenderer {
         else {
             return;
         };
-        let mut display = Self::tool_error_display(&error, prior.delegate_last_progress.as_ref());
+        let mut display = Self::tool_error_display(&error);
         if let Some(duration) = Self::finished_tool_duration(&prior, recorded_at) {
             Self::upsert_tool_duration_suffix(&mut display, duration);
         }
@@ -5159,23 +5161,18 @@ impl EventRenderer {
         self.render_model_status_after_tool_completion(known_main_tool);
     }
 
-    fn tool_error_display(
-        error: &tau_proto::ToolError,
-        last_progress: Option<&tau_proto::DelegateProgress>,
-    ) -> ToolCallDisplay {
+    fn tool_error_display(error: &tau_proto::ToolError) -> ToolCallDisplay {
         let cbor = error.details.as_ref();
         if error.tool_name.as_str() == AGENT_START_TOOL_NAME {
-            let role = last_progress.and_then(|p| p.role.as_deref());
-            let agent_id = last_progress.and_then(|p| p.agent_id.as_deref());
             if let Some(descriptor) = &error.display {
-                return render_delegate_display(descriptor, agent_id, role);
+                return render_tool_use_state(&error.tool_name, descriptor);
             }
             let descriptor = build_delegate_completion_display(
-                last_progress.and_then(|p| p.display.as_ref()),
+                None,
                 cbor.unwrap_or(&CborValue::Null),
                 Some(&error.message),
             );
-            render_delegate_display(&descriptor, agent_id, role)
+            render_tool_use_state(&error.tool_name, &descriptor)
         } else if let Some(descriptor) = &error.display {
             render_tool_use_state(&error.tool_name, descriptor)
         } else {

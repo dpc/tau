@@ -451,6 +451,28 @@ impl<'a> InternalToolHost<'a> {
             .publish_agent_watch_response_from_agent(&sender_cid, recipient_id, message)
     }
 
+    /// Enable or disable a session-local agent watch relationship.
+    pub fn set_agent_watch(
+        &mut self,
+        watcher_id: &str,
+        watched_agent_id: &str,
+        enable: bool,
+        cause: tau_proto::AgentWatchUpdateCause,
+    ) {
+        self.harness
+            .set_agent_watch(watcher_id, watched_agent_id, enable, cause);
+    }
+
+    /// Return public watcher ids currently watching `watched_agent_id`.
+    pub fn watchers_for_agent(&self, watched_agent_id: &str) -> Vec<String> {
+        self.harness.watchers_for_agent(watched_agent_id)
+    }
+
+    /// Prune a stale watch relationship after notification delivery failed.
+    pub fn prune_agent_watch(&mut self, watcher_id: &str, watched_agent_id: &str) {
+        self.harness.prune_agent_watch(watcher_id, watched_agent_id);
+    }
+
     fn sender_conversation_id(&self, sender_agent_id: &str) -> Result<AgentId, String> {
         self.harness
             .agent_routes

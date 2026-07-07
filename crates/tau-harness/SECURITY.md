@@ -23,6 +23,11 @@ counts, elapsed turn duration, routing ids, and originator are allowed. Do not
 include provider text snippets, tool names, raw arguments, tool results, prompt
 text, or backend wire payloads in stats events.
 
+`agent.stats_updated` and `agent.watches_updated` are likewise transient,
+content-free operational events. They may expose local agent ids, watch
+relationships, runtime state, tool counters, and token counts, but must not carry
+prompts, responses, tool arguments, or tool outputs.
+
 Stats samples are transient and must not be folded into agent transcripts,
 editor state, prompt stdin output, or final assistant rendering. The harness
 derives byte counts only after provider prompt ownership validation and clears

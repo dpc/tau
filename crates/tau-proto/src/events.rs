@@ -1608,14 +1608,13 @@ pub struct ToolProgress {
     pub display: Option<ToolUseState>,
 }
 
-/// Live snapshot of a sub-agent spawned by the `agent_start` tool.
+/// Legacy live snapshot of a sub-agent spawned by the old `agent_start` path.
 ///
-/// Emitted by the harness whenever the side conversation backing a
-/// `agent_start` invocation makes observable progress: a tool call starts
-/// or finishes, or the sub-agent reports new context-token usage. The
-/// CLI re-renders the running `agent_start` tool block to surface this
-/// to the user without persisting per-update history. Transient — not
-/// folded into any durable semantic log.
+/// First-party harness code no longer emits this event; generic
+/// [`AgentWatchesUpdated`] and [`AgentStatsUpdated`] events carry current watch
+/// relationships and per-agent operational stats instead. The type remains only
+/// as legacy protocol surface for old logs/tests. Transient — not folded into
+/// any durable semantic log.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct DelegateProgress {
     /// The original parent `agent_start` call — the tool block under
@@ -2007,15 +2006,13 @@ pub struct StartAgentRequest {
     #[serde(default, skip_serializing_if = "ToolUseStats::is_empty")]
     pub input_stats: ToolUseStats,
     /// `ToolCallId` of the tool invocation that triggered this query,
-    /// when the extension is implementing a tool whose live progress
-    /// the harness should attribute back to that call. Used by the
-    /// `agent_start` tool: the harness emits [`DelegateProgress`] under
-    /// this id as the side conversation runs. Optional — non-tool
-    /// extensions issuing queries leave it `None`.
+    /// when the extension is implementing a tool-backed side query. The current
+    /// first-party `agent_start` path uses this only for side-agent teardown
+    /// and background ownership; progress is reported with generic agent
+    /// stats.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<ToolCallId>,
-    /// Human-readable name for the delegated task, surfaced in the
-    /// UI alongside [`DelegateProgress`]. Optional for the same reason
+    /// Human-readable name for the delegated task. Optional for the same reason
     /// `tool_call_id` is.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub task_name: Option<String>,
@@ -2068,6 +2065,80 @@ pub struct AgentStateChanged {
     pub agent_id: AgentId,
     /// New transient runtime state for the agent.
     pub state: AgentRuntimeState,
+}
+
+/// Cause associated with an [`AgentWatchesUpdated`] snapshot.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentWatchUpdateCause {
+    /// A successful `agent_start` tool call enabled the watch automatically.
+    AgentStart,
+    /// A successful `agent_watch` tool call enabled the watch.
+    AgentWatchEnable,
+    /// A successful `agent_watch` tool call disabled the watch.
+    AgentWatchDisable,
+    /// The harness pruned a stale watcher after delivery failed.
+    WatcherPruned,
+    /// Current in-memory state replayed to a late subscriber.
+    SessionSnapshot,
+}
+
+/// Complete session-local watch set for one watcher agent.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AgentWatchesUpdated {
+    /// Session that owns these transient watch relationships.
+    pub session_id: SessionId,
+    /// Agent receiving watch notifications.
+    pub watcher_id: AgentId,
+    /// Complete replacement set of agents currently watched by `watcher_id`.
+    pub watched_agent_ids: Vec<AgentId>,
+    /// Agent whose relationship changed, when the snapshot follows one
+    /// mutation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub changed_agent_id: Option<AgentId>,
+    /// Reason this snapshot was emitted.
+    pub cause: AgentWatchUpdateCause,
+}
+
+/// Current tool counters for an agent.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AgentToolStats {
+    /// Tool calls currently in flight for this agent.
+    pub in_flight: u32,
+    /// Cumulative tool calls started while the agent is loaded in this harness.
+    pub started_total: u32,
+}
+
+/// Most recently known context usage for an agent.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AgentContextStats {
+    /// Latest provider-reported input token count.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_tokens: Option<u64>,
+    /// Latest provider-reported cached input token count.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cached_tokens: Option<u64>,
+    /// Model context window in tokens, if known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<u64>,
+    /// Percent of the context window used, if known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub percent_used: Option<u8>,
+}
+
+/// Complete operational snapshot for one loaded agent.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AgentStatsUpdated {
+    /// Session that owns this transient agent runtime state.
+    pub session_id: SessionId,
+    /// Agent described by this snapshot.
+    pub agent_id: AgentId,
+    /// Current harness runtime state for the agent.
+    pub runtime_state: AgentRuntimeState,
+    /// Current and cumulative tool counters.
+    pub tools: AgentToolStats,
+    /// Latest context usage known to the harness.
+    pub context: AgentContextStats,
 }
 /// Metadata for one model currently served by a provider extension.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -3567,6 +3638,10 @@ pub enum Event {
     HarnessAgentContextUsageChanged(HarnessAgentContextUsageChanged),
     #[serde(rename = "agent.state")]
     AgentState(AgentStateChanged),
+    #[serde(rename = "agent.watches_updated")]
+    AgentWatchesUpdated(AgentWatchesUpdated),
+    #[serde(rename = "agent.stats_updated")]
+    AgentStatsUpdated(AgentStatsUpdated),
     #[serde(rename = "harness.efforts_available")]
     HarnessEffortsAvailable(HarnessEffortsAvailable),
     #[serde(rename = "harness.verbosities_available")]
@@ -3800,6 +3875,8 @@ impl Event {
                 EventName::HARNESS_AGENT_CONTEXT_USAGE_CHANGED
             }
             Self::AgentState(_) => EventName::AGENT_STATE,
+            Self::AgentWatchesUpdated(_) => EventName::AGENT_WATCHES_UPDATED,
+            Self::AgentStatsUpdated(_) => EventName::AGENT_STATS_UPDATED,
             Self::HarnessEffortsAvailable(_) => EventName::HARNESS_EFFORTS_AVAILABLE,
             Self::HarnessVerbositiesAvailable(_) => EventName::HARNESS_VERBOSITIES_AVAILABLE,
             Self::HarnessThinkingSummariesAvailable(_) => {
@@ -3917,6 +3994,8 @@ impl Event {
                 | Self::AgentPromptTerminated(_)
                 | Self::AgentPromptPrewarmRequested(_)
                 | Self::AgentState(_)
+                | Self::AgentWatchesUpdated(_)
+                | Self::AgentStatsUpdated(_)
                 | Self::UiCompactRequest(_)
                 | Self::UiCreateAgent(_)
                 | Self::UiDebugEventStatsRequest(_)

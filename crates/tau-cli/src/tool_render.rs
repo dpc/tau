@@ -223,8 +223,6 @@ pub(crate) enum ToolStatus {
     Progress,
     DiffAdded,
     DiffRemoved,
-    /// Agent id or legacy role suffix, painted like the status-bar role chip.
-    Role,
     Context,
     Tools,
     Time,
@@ -275,12 +273,11 @@ pub(crate) struct ToolSummaryDisplay {
     pub(crate) removed: u64,
 }
 
-/// Build the completion descriptor for a finished `agent_start` call by
-/// carrying the cached progress (args + counters from the latest
-/// [`tau_proto::DelegateProgress`]) and replacing the trailing
-/// in-progress chip with output stats + the final `ok`/`err: message`
-/// status. The input stats stay as a marked chip so delegate rendering
-/// can show input first, then output, then progress counters.
+/// Build the completion descriptor for a finished `agent_start` call.
+///
+/// Current first-party rendering uses generic watched-agent indicators for live
+/// child activity, so this helper only shapes the final metadata/error line for
+/// the already-completed spawn tool.
 pub(crate) fn build_delegate_completion_display(
     cached: Option<&ToolUseState>,
     details: &CborValue,
@@ -445,119 +442,6 @@ fn abbreviate_inline_text(text: &str) -> String {
         .copied()
         .collect();
     format!("{head}┄{tail}")
-}
-
-/// Render an `agent_start` display with a dedicated suffix for the delegated
-/// agent. Completed delegates show input stats (`↘︎`) before output stats (`↖︎`),
-/// then progress counters and the final status. Cached descriptors may still
-/// have ` +role` embedded in `args`; strip that legacy copy so the line does
-/// not render both the old role chip and the new agent chip.
-pub(crate) fn render_delegate_display(
-    display: &ToolUseState,
-    agent_id: Option<&str>,
-    legacy_role: Option<&str>,
-) -> ToolCallDisplay {
-    let mut rendered = render_tool_use_state("agent_start", display);
-    let stats_chip = format_tool_use_state_stats(&display.stats);
-    if !stats_chip.is_empty() {
-        let marker = match display.status {
-            ToolUseStatus::InProgress => "↘︎",
-            ToolUseStatus::Success | ToolUseStatus::Warning | ToolUseStatus::Error => "↖︎",
-        };
-        if let Some(suffix) = rendered
-            .suffixes
-            .iter_mut()
-            .find(|suffix| suffix.text == stats_chip)
-        {
-            suffix.text = format!("{marker}{}", suffix.text);
-        }
-    }
-    for suffix in &mut rendered.suffixes {
-        normalize_delegate_input_stats_suffix(suffix);
-    }
-    if !matches!(display.status, ToolUseStatus::InProgress) {
-        move_delegate_completion_stats_first(&mut rendered.suffixes, &stats_chip);
-    }
-
-    if let Some(role) = legacy_role.filter(|role| !role.is_empty()) {
-        let legacy_suffix = format!(" +{role}");
-        if let Some(args) = rendered.args.strip_suffix(&legacy_suffix) {
-            rendered.args = args.to_owned();
-        }
-    }
-
-    if let Some(agent_id) = agent_id.filter(|agent_id| !agent_id.is_empty()) {
-        rendered
-            .suffixes
-            .insert(0, tool_suffix(format!("@{agent_id}"), ToolStatus::Role));
-    } else if let Some(role) = legacy_role.filter(|role| !role.is_empty()) {
-        rendered
-            .suffixes
-            .insert(0, tool_suffix(format!("+{role}"), ToolStatus::Role));
-    }
-    rendered
-}
-
-fn normalize_delegate_input_stats_suffix(suffix: &mut ToolSuffixSegment) {
-    if !matches!(suffix.status, ToolStatus::Info) {
-        return;
-    }
-    let normalized = suffix
-        .text
-        .strip_prefix("↘︎ ")
-        .or_else(|| suffix.text.strip_prefix("↘︎"))
-        .filter(|stats| !stats.is_empty())
-        .map(|stats| format!("↘︎{stats}"));
-    if let Some(normalized) = normalized {
-        suffix.text = normalized;
-    }
-}
-
-fn is_delegate_input_stats_suffix(suffix: &ToolSuffixSegment) -> bool {
-    matches!(suffix.status, ToolStatus::Info)
-        && suffix.text.starts_with("↘︎")
-        && suffix.text.len() > "↘︎".len()
-}
-
-fn move_delegate_completion_stats_first(
-    suffixes: &mut Vec<ToolSuffixSegment>,
-    output_stats_chip: &str,
-) {
-    let mut input_stats = Vec::new();
-    let mut rest = Vec::with_capacity(suffixes.len());
-    for suffix in suffixes.drain(..) {
-        if is_delegate_input_stats_suffix(&suffix) {
-            input_stats.push(suffix);
-        } else {
-            rest.push(suffix);
-        }
-    }
-    if input_stats.is_empty() {
-        *suffixes = rest;
-        return;
-    }
-
-    let output_stats_text =
-        (!output_stats_chip.is_empty()).then(|| format!("↖︎{output_stats_chip}"));
-    let insert_at = rest
-        .iter()
-        .position(|suffix| {
-            output_stats_text
-                .as_deref()
-                .is_some_and(|text| suffix.text == text)
-                || matches!(
-                    suffix.status,
-                    ToolStatus::Tools
-                        | ToolStatus::Context
-                        | ToolStatus::Success
-                        | ToolStatus::Warning
-                        | ToolStatus::Error
-                        | ToolStatus::Progress
-                )
-        })
-        .unwrap_or(rest.len());
-    rest.splice(insert_at..insert_at, input_stats);
-    *suffixes = rest;
 }
 
 /// Render a [`ToolUseState`] descriptor directly to a
@@ -874,7 +758,6 @@ pub(crate) fn render_tool_block(
             ToolStatus::Progress => names::PROGRESS_INDICATOR,
             ToolStatus::DiffAdded => names::DIFF_ADDED,
             ToolStatus::DiffRemoved => names::DIFF_REMOVED,
-            ToolStatus::Role => names::STATUS_ROLE,
             ToolStatus::Context => names::STATUS_CONTEXT,
             ToolStatus::Tools => names::STATUS_TOOLS,
             ToolStatus::Time => names::TOOL_STATUS_TIME,

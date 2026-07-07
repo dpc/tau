@@ -131,9 +131,8 @@ pub(crate) struct Agent {
     pub(crate) turn_stats: Option<AgentTurnStatsRuntime>,
     /// For side agents spawned by a tool-implementing extension
     /// (currently just `agent_start`): the parent agent's tool call id
-    /// that this conversation is fulfilling. Lets the harness emit
-    /// [`tau_proto::DelegateProgress`] under that call id as the
-    /// sub-agent runs. `None` for user agents and for non-tool
+    /// that this conversation is fulfilling. Kept for teardown/routing of
+    /// tool-backed side agents. `None` for user agents and for non-tool
     /// ext-queries (e.g. notifications' idle summary).
     pub(crate) parent_tool_call_id: Option<ToolCallId>,
     /// Direct parent agent resolved when this side agent is
@@ -164,10 +163,10 @@ pub(crate) struct Agent {
     /// Number of tool calls currently in flight on this conversation.
     pub(crate) tools_in_flight: u32,
     /// Cumulative tool calls this conversation has started (in-flight
-    /// + completed). Used as the `total` in `DelegateProgress`.
+    /// + completed). Used in generic agent stats snapshots.
     pub(crate) tools_total: u32,
     /// Most recent input-token count this agent's agent
-    /// reported on a finished response. Used for `DelegateProgress`.
+    /// reported on a finished response. Used for generic agent stats snapshots.
     pub(crate) context_input_tokens: Option<u64>,
     /// Most recent cached input-token count this agent's provider reported on
     /// a finished response.

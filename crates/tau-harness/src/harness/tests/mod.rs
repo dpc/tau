@@ -1526,59 +1526,10 @@ fn outer_side_cid_str(h: &Harness) -> &str {
         .unwrap_or("")
 }
 
-/// Subscribe a fresh test sink to `tool.delegate_progress` events and
-/// hand back its accumulator.
-fn collect_event_sink(h: &mut Harness) -> Arc<Mutex<Vec<RoutedFrame>>> {
-    let events = connect_test_tool(h, "test-delegate-progress-sink");
-    h.bus
-        .set_subscriptions(
-            "test-delegate-progress-sink",
-            vec![tau_proto::EventSelector::Exact(
-                tau_proto::EventName::TOOL_DELEGATE_PROGRESS,
-            )],
-        )
-        .expect("subscribe");
-    events
-}
-
 /// Peel a routed message to its bus-event payload. Returns `None` for
 /// non-event output messages (configure, intercept request, …).
 fn peel_inner_event(message: &HarnessOutputMessage) -> Option<&Event> {
     message.delivered_event()
-}
-
-fn pop_delegate_progress(
-    sink: &Arc<Mutex<Vec<RoutedFrame>>>,
-    call_id: &str,
-) -> Option<tau_proto::DelegateProgress> {
-    let mut events = sink.lock().expect("sink");
-    let pos = events.iter().position(|routed| {
-        matches!(
-            peel_inner_event(&routed.frame),
-            Some(Event::ToolDelegateProgress(p)) if p.call_id.as_str() == call_id
-        )
-    })?;
-    let removed = events.remove(pos);
-    match removed.frame.into_delivered_event() {
-        Some(Event::ToolDelegateProgress(p)) => Some(p),
-        _ => unreachable!(),
-    }
-}
-
-fn drain_delegate_progress(
-    sink: &Arc<Mutex<Vec<RoutedFrame>>>,
-    call_id: &str,
-) -> Vec<tau_proto::DelegateProgress> {
-    let mut events = sink.lock().expect("sink");
-    let mut out = Vec::new();
-    events.retain(|routed| match peel_inner_event(&routed.frame) {
-        Some(Event::ToolDelegateProgress(p)) if p.call_id.as_str() == call_id => {
-            out.push(p.clone());
-            false
-        }
-        _ => true,
-    });
-    out
 }
 
 fn read_raw_prompt_created(h: &Harness, spid: &AgentPromptId) -> AgentPromptCreated {

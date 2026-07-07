@@ -58,9 +58,9 @@ fn agent_id(value: &str) -> tau_proto::AgentId {
 use super::tool_render::{
     CompactionStatus, ToolStatus, build_delegate_completion_display, cache_hit_percent,
     format_turn_stats_line, render_action_error_block, render_action_output_block,
-    render_compaction_block, render_delegate_display, render_diff_tool_block,
-    render_multi_diff_tool_block, render_shell_block, render_tool_block, render_tool_use_state,
-    render_turn_stats_block, streaming_block, synthesize_fallback_display,
+    render_compaction_block, render_diff_tool_block, render_multi_diff_tool_block,
+    render_shell_block, render_tool_block, render_tool_use_state, render_turn_stats_block,
+    streaming_block, synthesize_fallback_display,
 };
 
 #[test]
@@ -2228,10 +2228,9 @@ fn hidden_agent_events_do_not_force_visible_full_redraw() {
 }
 
 #[test]
-fn delegate_progress_does_not_overwrite_display_name_with_task_name() {
-    // `/agent switch` completions are backed by durable display names. Delegate
-    // progress carries the raw task title for the parent tool block, but it must
-    // not replace the display name chosen by the harness template.
+fn agent_stats_does_not_overwrite_display_name() {
+    // `/agent switch` completions are backed by durable display names. Agent stats
+    // must not replace the display name chosen by the harness template.
     let (_term, handle, _vt) = setup(80, 24);
     let mut renderer = EventRenderer::new(
         handle,
@@ -2247,17 +2246,12 @@ fn delegate_progress_does_not_overwrite_display_name_with_task_name() {
         metadata: Vec::new(),
         ephemeral: false,
     }));
-    renderer.handle(&Event::ToolDelegateProgress(tau_proto::DelegateProgress {
-        call_id: "delegate-call".into(),
-        task_name: "look it up".into(),
-        agent_id: Some(agent_id("engineer-Ab12")),
-        role: Some("senior-engineer".to_owned()),
-        ctx_percent: None,
-        ctx_input_tokens: None,
-        ctx_window: None,
-        tools_in_flight: 0,
-        tools_total: 0,
-        display: None,
+    renderer.handle(&Event::AgentStatsUpdated(tau_proto::AgentStatsUpdated {
+        session_id: "s1".into(),
+        agent_id: agent_id("engineer-Ab12"),
+        runtime_state: tau_proto::AgentRuntimeState::Idle,
+        tools: tau_proto::AgentToolStats::default(),
+        context: tau_proto::AgentContextStats::default(),
     }));
 
     let display_names = renderer.agent_display_names();
@@ -2290,17 +2284,15 @@ fn suspended_agent_stays_blocked_after_lifecycle_updates_until_resume() {
         agent_id: agent_id("worker-1"),
     }));
     renderer.suspend_agent("worker-1");
-    renderer.handle(&Event::ToolDelegateProgress(tau_proto::DelegateProgress {
-        call_id: "delegate-call".into(),
-        task_name: "still running".into(),
-        agent_id: Some(agent_id("worker-1")),
-        role: Some("engineer".to_owned()),
-        ctx_percent: None,
-        ctx_input_tokens: None,
-        ctx_window: None,
-        tools_in_flight: 1,
-        tools_total: 1,
-        display: None,
+    renderer.handle(&Event::AgentStatsUpdated(tau_proto::AgentStatsUpdated {
+        session_id: "s1".into(),
+        agent_id: agent_id("worker-1"),
+        runtime_state: tau_proto::AgentRuntimeState::Running,
+        tools: tau_proto::AgentToolStats {
+            in_flight: 1,
+            started_total: 1,
+        },
+        context: tau_proto::AgentContextStats::default(),
     }));
     renderer.handle(&Event::AgentPromptCreated(AgentPromptCreated {
         agent_id: agent_id("worker-1"),
@@ -2668,7 +2660,7 @@ fn switched_agent_shows_its_tool_usage() {
 }
 
 #[test]
-fn delegate_progress_routes_to_hidden_tool_owner() {
+fn watched_agent_stats_route_to_hidden_watcher_owner() {
     let (_term, handle, vt) = setup(90, 24);
     let mut renderer = EventRenderer::new(
         handle.clone(),
@@ -2683,64 +2675,32 @@ fn delegate_progress_routes_to_hidden_tool_owner() {
         query_id: "q-worker".to_owned(),
         agent_id: agent_id("worker-1"),
     }));
-    let originator = tau_proto::PromptOriginator::Extension {
-        name: "core-subagents".into(),
-        query_id: "q-worker".to_owned(),
-    };
-    let delegate_args = CborValue::Map(vec![(
-        CborValue::Text("task_name".into()),
-        CborValue::Text("nested".into()),
-    )]);
-
-    renderer.handle(&Event::ProviderResponseFinished(ProviderResponseFinished {
-        agent_id: agent_id("worker-1"),
-        originator,
-        ..finished_response(
-            "worker-sp",
-            vec![ContextItem::ToolCall(ToolCallItem {
-                call_id: "worker-delegate".into(),
-                name: tau_proto::ToolName::new("agent_start"),
-                tool_type: tau_proto::ToolType::Function,
-                arguments: delegate_args.clone(),
-                raw_arguments_json: None,
-                responses_envelope: None,
-            })],
-        )
-    }));
-    renderer.handle(&tool_started(
-        "worker-delegate",
-        "agent_start",
-        delegate_args,
+    renderer.handle(&Event::AgentWatchesUpdated(
+        tau_proto::AgentWatchesUpdated {
+            session_id: "s1".into(),
+            watcher_id: agent_id("worker-1"),
+            watched_agent_ids: vec![agent_id("engineer_1")],
+            changed_agent_id: Some(agent_id("engineer_1")),
+            cause: tau_proto::AgentWatchUpdateCause::AgentStart,
+        },
     ));
-    renderer.handle(&Event::ToolDelegateProgress(tau_proto::DelegateProgress {
-        call_id: "worker-delegate".into(),
-        task_name: "nested".into(),
-        agent_id: Some(agent_id("engineer_1")),
-        role: Some("engineer".to_owned()),
-        ctx_percent: None,
-        ctx_input_tokens: None,
-        ctx_window: None,
-        tools_in_flight: 1,
-        tools_total: 2,
-        display: Some(tau_proto::ToolUseState {
-            args: "nested".into(),
-            progress_counters: vec![tau_proto::ProgressCounter {
-                label: Some("tools".into()),
-                unit: tau_proto::ProgressUnit::Count,
-                complete: Some(1),
-                total: Some(2),
-            }],
-            status: tau_proto::ToolUseStatus::InProgress,
-            status_text: tau_proto::PROGRESS_INDICATOR_TEXT.into(),
-            ..Default::default()
-        }),
+    renderer.handle(&Event::AgentStatsUpdated(tau_proto::AgentStatsUpdated {
+        session_id: "s1".into(),
+        agent_id: agent_id("engineer_1"),
+        runtime_state: tau_proto::AgentRuntimeState::Running,
+        tools: tau_proto::AgentToolStats {
+            in_flight: 1,
+            started_total: 2,
+        },
+        context: tau_proto::AgentContextStats::default(),
     }));
     sync(&handle);
-    assert!(!vt.screen_contains(90, "%1/2"));
+    assert!(!vt.screen_contains(90, "watching engineer_1"));
 
     renderer.switch_agent("worker-1".to_owned());
     sync(&handle);
-    assert!(vt.screen_contains(90, "%1/2"));
+    assert!(vt.screen_contains(90, "watching engineer_1"));
+    assert!(vt.screen_contains(90, "tools 1/2"));
 }
 
 #[test]
@@ -4103,7 +4063,7 @@ fn model_status_shows_main_tool_usage_before_context() {
     ));
 
     // Regression coverage for the bottom status bar: main-agent tool
-    // usage should mirror delegate progress chips (`%complete/total`)
+    // usage should mirror generic tool progress chips (`%complete/total`)
     // and should render immediately before the context chip, while
     // side-conversation tool calls stay rolled up under their delegate.
     renderer.handle(&Event::ProviderResponseFinished(ProviderResponseFinished {
@@ -4635,44 +4595,25 @@ fn delegate_side_conversation_keeps_parent_tool_status_visible() {
         .expect("status row during delegate side conversation");
     assert!(status_row.ends_with("%0/1 @2 #12k/200k"));
 
-    // Once the delegated side conversation reports its own tool progress,
-    // the status bar should prefer that live `%complete/total` chip over the
-    // parent aggregate `%0/1`, and the progress event should repaint it.
-    renderer.handle(&Event::ToolDelegateProgress(tau_proto::DelegateProgress {
-        call_id: "delegate-call".into(),
-        task_name: "probe".into(),
-        agent_id: Some(agent_id("engineer_1")),
-        role: Some("engineer".to_owned()),
-        ctx_percent: None,
-        ctx_input_tokens: None,
-        ctx_window: None,
-        tools_in_flight: 2,
-        tools_total: 3,
-        display: Some(tau_proto::ToolUseState {
-            args: "[probe]".into(),
-            progress_counters: vec![tau_proto::ProgressCounter {
-                label: Some("tools".into()),
-                unit: tau_proto::ProgressUnit::Count,
-                complete: Some(1),
-                total: Some(3),
-            }],
-            status: tau_proto::ToolUseStatus::InProgress,
-            status_text: tau_proto::PROGRESS_INDICATOR_TEXT.into(),
-            ..Default::default()
-        }),
+    // Generic watched-agent stats no longer mutate the parent tool status chip.
+    renderer.handle(&Event::AgentStatsUpdated(tau_proto::AgentStatsUpdated {
+        session_id: "s1".into(),
+        agent_id: agent_id("engineer_1"),
+        runtime_state: tau_proto::AgentRuntimeState::Running,
+        tools: tau_proto::AgentToolStats {
+            in_flight: 2,
+            started_total: 3,
+        },
+        context: tau_proto::AgentContextStats::default(),
     }));
-    assert!(
-        eventually_screen_contains(&vt, 100, "%1/3 @2 #12k/200k"),
-        "delegate progress should repaint the status bar with sub-agent tool progress: {:?}",
-        vt.screen_text(100)
-    );
+    sync(&handle);
     let status_row = vt
         .screen_text(100)
         .into_iter()
         .find(|row| row.contains("#12k/200k"))
-        .expect("status row after delegate progress");
+        .expect("status row after watched-agent stats");
     assert!(status_row.contains("@main"));
-    assert!(status_row.ends_with("%1/3 @2 #12k/200k"));
+    assert!(status_row.ends_with("%0/1 @2 #12k/200k"));
 
     renderer.handle(&Event::ToolCancelled(ToolCancelled {
         call_id: "delegate-call".into(),
@@ -5685,7 +5626,7 @@ fn render_provider_compaction_item_when_response_finishes() {
 }
 
 #[test]
-fn delegate_progress_redraws_live_parent_block() {
+fn watched_agent_stats_redraw_active_indicator() {
     let (_term, handle, vt) = setup(100, 24);
     let mut renderer = EventRenderer::new(
         handle.clone(),
@@ -5693,74 +5634,42 @@ fn delegate_progress_redraws_live_parent_block() {
         cli_test_theme(),
     );
 
-    let delegate_args = CborValue::Map(vec![(
-        CborValue::Text("task_name".into()),
-        CborValue::Text("[probe]".into()),
-    )]);
-    renderer.handle(&Event::ProviderResponseFinished(finished_response(
-        "sp-0",
-        vec![ContextItem::ToolCall(ToolCallItem {
-            call_id: "call-delegate".into(),
-            name: tau_proto::ToolName::new("agent_start"),
-            tool_type: tau_proto::ToolType::Function,
-            arguments: delegate_args.clone(),
-            raw_arguments_json: None,
-            responses_envelope: None,
-        })],
-    )));
-    renderer.handle(&tool_started("call-delegate", "agent_start", delegate_args));
-    renderer.handle(&initial_tool_progress(
-        "call-delegate",
-        "agent_start",
-        "[probe]",
-        "",
+    renderer.switch_agent("parent_1".to_owned());
+    renderer.handle(&Event::AgentWatchesUpdated(
+        tau_proto::AgentWatchesUpdated {
+            session_id: "s1".into(),
+            watcher_id: agent_id("parent_1"),
+            watched_agent_ids: vec![agent_id("engineer_1")],
+            changed_agent_id: Some(agent_id("engineer_1")),
+            cause: tau_proto::AgentWatchUpdateCause::AgentStart,
+        },
     ));
     sync(&handle);
-    assert!(vt.screen_contains(100, "[probe]"));
-    assert!(!vt.screen_contains(100, "%3/3"));
+    assert!(!vt.screen_contains(100, "watching engineer_1"));
 
-    // Regression: `ToolDelegateProgress` mutates the already-visible
-    // parent `agent_start` block. That live mutation must request its own
-    // redraw because suppressed sub-agent tool events will not repaint it.
-    renderer.handle(&Event::ToolDelegateProgress(tau_proto::DelegateProgress {
-        call_id: "call-delegate".into(),
-        task_name: "probe".into(),
-        agent_id: Some(agent_id("engineer_1")),
-        role: Some("engineer".to_owned()),
-        ctx_percent: None,
-        ctx_input_tokens: None,
-        ctx_window: None,
-        tools_in_flight: 0,
-        tools_total: 3,
-        display: Some(tau_proto::ToolUseState {
-            args: "[probe]".into(),
-            progress_counters: vec![tau_proto::ProgressCounter {
-                label: Some("tools".into()),
-                unit: tau_proto::ProgressUnit::Count,
-                complete: Some(3),
-                total: Some(3),
-            }],
-            status: tau_proto::ToolUseStatus::InProgress,
-            status_text: tau_proto::PROGRESS_INDICATOR_TEXT.into(),
-            ..Default::default()
-        }),
+    renderer.handle(&Event::AgentStatsUpdated(tau_proto::AgentStatsUpdated {
+        session_id: "s1".into(),
+        agent_id: agent_id("engineer_1"),
+        runtime_state: tau_proto::AgentRuntimeState::Running,
+        tools: tau_proto::AgentToolStats {
+            in_flight: 0,
+            started_total: 3,
+        },
+        context: tau_proto::AgentContextStats::default(),
     }));
 
     assert!(
-        eventually_screen_contains(&vt, 100, "@engineer_1"),
-        "delegate progress should repaint the agent id suffix without an explicit test redraw: {:?}",
+        eventually_screen_contains(&vt, 100, "watching engineer_1"),
+        "watched-agent stats should repaint without an explicit test redraw: {:?}",
         vt.screen_text(100)
     );
     assert!(
-        eventually_screen_contains(&vt, 100, "%3/3"),
-        "delegate progress should repaint without an explicit test redraw: {:?}",
+        eventually_screen_contains(&vt, 100, "tools 3/3"),
+        "watched-agent stats should repaint progress counters without an explicit test redraw: {:?}",
         vt.screen_text(100)
     );
 }
 
-/// Provider-facing tool errors are model plumbing, not user-visible logical
-/// tool state. Without a logical `ToolError`, the UI must not invent a history
-/// line.
 #[test]
 fn provider_tool_error_before_tool_started_is_ignored() {
     let (_term, handle, vt) = setup(80, 24);
@@ -7010,113 +6919,6 @@ fn render_tool_block_paints_mode_with_dedicated_style() {
     assert_eq!(
         mode_span.style,
         tau_cli_term::resolve::resolve(&theme, tau_themes::names::TOOL_MODE)
-    );
-}
-
-#[test]
-fn render_delegate_display_pulls_legacy_role_args_into_first_suffix() {
-    use tau_proto::{ProgressCounter, ProgressUnit, ToolUseState, ToolUseStatus};
-
-    // Regression: delegate roles used to be embedded in `ToolUseState.args`,
-    // which made `+engineer` inherit the tool-args color. Rendering delegates now
-    // strips that legacy suffix and reinserts the role as the first dedicated
-    // suffix so later progress chips keep their existing order.
-    let display = ToolUseState {
-        args: "[probe] +engineer".into(),
-        progress_counters: vec![ProgressCounter {
-            label: Some("tools".into()),
-            unit: ProgressUnit::Count,
-            complete: Some(3),
-            total: Some(3),
-        }],
-        status: ToolUseStatus::InProgress,
-        status_text: tau_proto::PROGRESS_INDICATOR_TEXT.into(),
-        ..Default::default()
-    };
-
-    let rendered = render_delegate_display(&display, Some("senior-engineer_a8"), Some("engineer"));
-    assert_eq!(rendered.tool_name, "agent_start");
-    assert_eq!(rendered.args, "[probe]");
-    let texts: Vec<&str> = rendered.suffixes.iter().map(|s| s.text.as_str()).collect();
-    assert_eq!(
-        texts,
-        vec![
-            "@senior-engineer_a8",
-            "%3/3",
-            tau_proto::PROGRESS_INDICATOR_TEXT,
-        ]
-    );
-    assert!(matches!(rendered.suffixes[0].status, ToolStatus::Role));
-}
-
-#[test]
-fn render_delegate_display_marks_input_and_output_stats() {
-    use tau_proto::{ProgressCounter, ProgressUnit, ToolUseState, ToolUseStats, ToolUseStatus};
-
-    let input = ToolUseState {
-        args: "[audit]".into(),
-        stats: ToolUseStats {
-            matches: None,
-            lines: Some(2),
-            bytes: Some(12),
-        },
-        status: ToolUseStatus::InProgress,
-        status_text: tau_proto::PROGRESS_INDICATOR_TEXT.into(),
-        ..Default::default()
-    };
-    let rendered = render_delegate_display(&input, None, None);
-    let texts: Vec<&str> = rendered.suffixes.iter().map(|s| s.text.as_str()).collect();
-    assert_eq!(texts, vec!["↘︎2L, 12B", tau_proto::PROGRESS_INDICATOR_TEXT]);
-
-    let output = ToolUseState {
-        args: "[audit]".into(),
-        stats: ToolUseStats {
-            matches: None,
-            lines: Some(3),
-            bytes: Some(24),
-        },
-        progress_counters: vec![ProgressCounter {
-            label: Some("tools".into()),
-            unit: ProgressUnit::Count,
-            complete: Some(2),
-            total: Some(2),
-        }],
-        status: ToolUseStatus::Success,
-        status_text: "ok".into(),
-        info_chips: vec!["↘︎2L, 12B".into()],
-        ..Default::default()
-    };
-    let rendered = render_delegate_display(&output, None, None);
-    let texts: Vec<&str> = rendered.suffixes.iter().map(|s| s.text.as_str()).collect();
-    assert_eq!(texts, vec!["↘︎2L, 12B", "↖︎3L, 24B", "%2/2", "ok"]);
-}
-
-#[test]
-fn render_delegate_display_styles_agent_id_like_status_bar() {
-    use tau_proto::{ToolUseState, ToolUseStatus};
-
-    // Regression: the delegated agent id is visually the same semantic chip as
-    // the bottom status-bar agent id, not part of the free-form tool args string.
-    let theme = cli_test_theme();
-    let display = ToolUseState {
-        args: "[probe]".into(),
-        status: ToolUseStatus::InProgress,
-        status_text: tau_proto::PROGRESS_INDICATOR_TEXT.into(),
-        ..Default::default()
-    };
-
-    let rendered = render_delegate_display(&display, Some("senior-engineer_a8"), Some("engineer"));
-    let block = render_tool_block(&theme, &rendered);
-    let agent_span = block
-        .content
-        .spans()
-        .iter()
-        .find(|span| span.text == "@senior-engineer_a8")
-        .expect("delegate agent id span");
-
-    assert_eq!(
-        agent_span.style,
-        tau_cli_term::resolve::resolve(&theme, tau_themes::names::STATUS_ROLE)
     );
 }
 

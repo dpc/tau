@@ -264,6 +264,9 @@ impl EventName {
     pub const AGENT_MESSAGE_RECEIVED: Self =
         Self::from_static(EventCategory::Agent, "message_received");
     pub const AGENT_STATE: Self = Self::from_static(EventCategory::Agent, "state");
+    pub const AGENT_WATCHES_UPDATED: Self =
+        Self::from_static(EventCategory::Agent, "watches_updated");
+    pub const AGENT_STATS_UPDATED: Self = Self::from_static(EventCategory::Agent, "stats_updated");
     pub const PROVIDER_MODELS_UPDATED: Self =
         Self::from_static(EventCategory::Provider, "models_updated");
     pub const PROVIDER_TOOL_RESULT: Self =

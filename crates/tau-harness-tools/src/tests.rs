@@ -384,36 +384,18 @@ fn cancel_completed_request_state_is_owner_scoped() {
 }
 
 /// Ensures session shutdown drops runtime-only bookkeeping for abandoned
-/// in-flight tools and stale `agent_watch` subscriptions, because session
-/// switching can occur without individual terminal events for every tracked
-/// call or watch. This locks down the tau-agent-ybq finding that watches must
-/// not survive `/session new`.
+/// in-flight tools and pending delegate routing. Watch relationships now live
+/// in harness session state and are covered by harness-level cleanup tests.
 #[test]
 fn session_runtime_state_cleanup_clears_in_flight_bookkeeping() {
     let mut state = BuiltinState::default();
     let call_id = ToolCallId::from("shell-call");
     state.cancel_requested.insert(call_id.clone());
     state.record_tool_started(call_id.clone(), ToolName::new("shell"));
-    state
-        .agent_watchers
-        .entry("agent-child".to_owned())
-        .or_default()
-        .extend(["agent-parent".to_owned(), "agent-observer".to_owned()]);
-    state
-        .agent_watchers
-        .entry("agent-reviewer".to_owned())
-        .or_default()
-        .insert("agent-parent".to_owned());
     state.pending_delegates.insert(
         "delegate-1".to_owned(),
         PendingDelegate {
-            call_id,
-            tool_name: ToolName::new(AGENT_START_TOOL_NAME),
-            started_at: Instant::now(),
-            self_agent_id: "agent-parent".to_owned(),
             agent_id: "agent-child".to_owned(),
-            task_name: "review".to_owned(),
-            input_stats: ToolUseStats::default(),
         },
     );
 
@@ -423,7 +405,6 @@ fn session_runtime_state_cleanup_clears_in_flight_bookkeeping() {
 
     assert!(state.cancel_requested.is_empty());
     assert!(state.in_progress_tool_names.is_empty());
-    assert!(state.agent_watchers.is_empty());
     assert!(state.pending_delegates.is_empty());
 }
 
@@ -464,7 +445,7 @@ fn delegate_result_includes_only_caller_and_sub_agent_ids() {
     // `agent_start` no longer returns the sub-agent's first final text as tool
     // output. That content is delivered through the unified `agent_watch`
     // notification path, while the tool result keeps routing metadata.
-    let value = delegate_result_value(None, None, Some("engineer_parent"), Some("engineer_child"));
+    let value = delegate_result_value("engineer_parent", "engineer_child");
 
     assert_eq!(
         cbor_map_text(&value, "self_agent_id"),

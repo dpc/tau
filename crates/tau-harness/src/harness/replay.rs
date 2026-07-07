@@ -426,6 +426,41 @@ impl Harness {
                 HarnessOutputMessage::deliver(context_event),
             );
         }
+        let stats_events: Vec<_> = self
+            .agents
+            .keys()
+            .filter_map(|cid| self.agent_stats_snapshot(cid))
+            .map(Event::AgentStatsUpdated)
+            .collect();
+        for event in stats_events {
+            if selector_matches_event(selectors, &event) {
+                let _ = self
+                    .bus
+                    .send_to(client_id, None, HarnessOutputMessage::deliver(event));
+            }
+        }
+        let mut watch_entries = self.agent_watches.iter().collect::<Vec<_>>();
+        watch_entries.sort_by_key(|(watcher, _)| *watcher);
+        let watch_events: Vec<_> = watch_entries
+            .into_iter()
+            .filter(|(_, watched)| !watched.is_empty())
+            .map(|(watcher, watched)| {
+                Event::AgentWatchesUpdated(tau_proto::AgentWatchesUpdated {
+                    session_id: self.current_session_id.clone(),
+                    watcher_id: crate::parse_agent_id(watcher),
+                    watched_agent_ids: watched.iter().map(crate::parse_agent_id).collect(),
+                    changed_agent_id: None,
+                    cause: tau_proto::AgentWatchUpdateCause::SessionSnapshot,
+                })
+            })
+            .collect();
+        for event in watch_events {
+            if selector_matches_event(selectors, &event) {
+                let _ = self
+                    .bus
+                    .send_to(client_id, None, HarnessOutputMessage::deliver(event));
+            }
+        }
         let effort_levels = self
             .selected_model
             .as_ref()

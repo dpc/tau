@@ -430,67 +430,6 @@ fn resume_rehydrates_default_agent_conversation_from_durable_routing() {
     h.shutdown().expect("shutdown");
 }
 
-fn assert_delegate_tools_counter(
-    progress: &tau_proto::DelegateProgress,
-    complete: Option<u64>,
-    total: Option<u64>,
-) {
-    let display = progress
-        .display
-        .as_ref()
-        .expect("delegate progress display");
-    let counter = display
-        .progress_counters
-        .iter()
-        .find(|counter| counter.label.as_deref() == Some("tools"))
-        .expect("tools progress counter");
-    assert_eq!(counter.complete, complete);
-    assert_eq!(counter.total, total);
-}
-
-fn assert_delegate_input_stats(
-    progress: &tau_proto::DelegateProgress,
-    expected: tau_proto::ToolUseStats,
-) {
-    let display = progress
-        .display
-        .as_ref()
-        .expect("delegate progress display");
-    assert_eq!(display.stats, expected);
-}
-
-fn assert_delegate_counter_order(progress: &tau_proto::DelegateProgress, labels: &[&str]) {
-    let display = progress
-        .display
-        .as_ref()
-        .expect("delegate progress display");
-    let actual: Vec<&str> = display
-        .progress_counters
-        .iter()
-        .map(|counter| counter.label.as_deref().expect("progress label"))
-        .collect();
-    assert_eq!(actual, labels);
-}
-
-fn assert_delegate_ctx_counter(
-    progress: &tau_proto::DelegateProgress,
-    complete: Option<u64>,
-    total: Option<u64>,
-) {
-    let display = progress
-        .display
-        .as_ref()
-        .expect("delegate progress display");
-    let counter = display
-        .progress_counters
-        .iter()
-        .find(|counter| counter.label.as_deref() == Some("ctx"))
-        .expect("ctx progress counter");
-    assert_eq!(counter.unit, tau_proto::ProgressUnit::Tokens);
-    assert_eq!(counter.complete, complete);
-    assert_eq!(counter.total, total);
-}
-
 fn text_part(item: &ContextItem) -> Option<&str> {
     match item {
         ContextItem::Message(message) => message.content.first().map(|part| match part {
@@ -11034,670 +10973,6 @@ fn mutating_tools_in_distinct_side_conversations_dispatch_concurrently() {
     h.shutdown().expect("shutdown");
 }
 
-/// Sub-agent state changes (tool start, response usage, tool finish)
-/// must surface to the user as `DelegateProgress` events keyed on the
-/// parent's `agent_start` tool call_id. The side agent's display name
-/// includes the starting parent's id/name snapshot so UI agent chips stay
-/// understandable when multiple children have similar task names.
-#[test]
-fn delegate_emits_progress_as_sub_agent_makes_progress() {
-    let td = TempDir::new().expect("tempdir");
-    let sp = td.path().join("state");
-    let mut h = echo_harness(&sp).expect("start");
-
-    h.selected_model = Some("test/model".into());
-    let _delegate_events = connect_test_tool(&mut h, "conn-delegate");
-    h.registry.register(
-        "conn-delegate",
-        ToolSpec {
-            name: tau_proto::ToolName::new("agent_start"),
-            model_visible_name: None,
-            description: None,
-            parameters: None,
-            tool_type: tau_proto::ToolType::Function,
-            format: None,
-            tags: Vec::new(),
-            enabled_by_default: true,
-            background_support: None,
-            examples: Vec::new(),
-        },
-    );
-    let _websearch_events = connect_test_tool(&mut h, "conn-websearch");
-    h.registry.register(
-        "conn-websearch",
-        ToolSpec {
-            name: tau_proto::ToolName::new("websearch"),
-            model_visible_name: None,
-            description: None,
-            parameters: None,
-            tool_type: tau_proto::ToolType::Function,
-            format: None,
-            tags: Vec::new(),
-            enabled_by_default: true,
-            background_support: None,
-            examples: Vec::new(),
-        },
-    );
-
-    let cid = ensure_test_user_agent(&mut h);
-    let parent_agent_id = h
-        .agents
-        .get(&cid)
-        .and_then(|conversation| conversation.agent_id.as_deref())
-        .expect("parent agent id")
-        .to_owned();
-    let main_spid: AgentPromptId = "sp-main".into();
-    seed_agent_thinking(&mut h, &cid, "sp-main");
-    h.prompt_agents.insert(main_spid.clone(), cid.clone());
-    h.publish_for_agent(
-        &cid,
-        Event::UiPromptSubmitted(UiPromptSubmitted {
-            session_id: "s1".into(),
-            text: "delegate something".to_owned(),
-            agent_id: tau_proto::AgentId::parse("agent").expect("agent id"),
-            message_class: tau_proto::PromptMessageClass::User,
-            originator: tau_proto::PromptOriginator::User,
-            ctx_id: None,
-        }),
-    );
-    h.handle_provider_response_finished(ProviderResponseFinished {
-        agent_prompt_id: main_spid,
-        agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
-        output_items: vec![ContextItem::ToolCall(ToolCallItem {
-            call_id: "delegate-call".into(),
-            name: tau_proto::ToolName::new("agent_start"),
-            tool_type: tau_proto::ToolType::Function,
-            arguments: CborValue::Map(Vec::new()),
-            raw_arguments_json: None,
-            responses_envelope: None,
-        })],
-        stop_reason: tau_proto::ProviderStopReason::ToolCalls,
-        error: None,
-        usage: match (None, None, None) {
-            (None, None, None) => None,
-            (input_tokens, cached_tokens, output_tokens) => Some(tau_proto::ProviderTokenUsage {
-                model: None,
-                prompt_sent_tokens: input_tokens.unwrap_or(0),
-                prompt_cached_tokens: cached_tokens.unwrap_or(0),
-                response_received_tokens: output_tokens.unwrap_or(0),
-                stats: Default::default(),
-            }),
-        },
-        originator: tau_proto::PromptOriginator::User,
-
-        compaction_original_input_tokens: None,
-        compaction_compacted_input_tokens: None,
-        backend: None,
-        provider_response_id: None,
-        ws_pool_delta: None,
-    })
-    .expect("main response");
-
-    let sink = collect_event_sink(&mut h);
-    h.bus
-        .set_subscriptions(
-            "test-delegate-progress-sink",
-            vec![
-                tau_proto::EventSelector::Exact(tau_proto::EventName::TOOL_DELEGATE_PROGRESS),
-                tau_proto::EventSelector::Exact(tau_proto::EventName::AGENT_DISPLAY_NAME_SET),
-            ],
-        )
-        .expect("subscribe display names");
-    let input_stats = tau_proto::ToolUseStats::for_text("prompt\nbody");
-    h.handle_start_agent_request(
-        "conn-delegate",
-        StartAgentRequest {
-            parent_agent: None,
-            query_id: "q1".to_owned(),
-            instruction: "side task".to_owned(),
-            role: None,
-            input_stats,
-            tool_call_id: Some("delegate-call".into()),
-            task_name: Some("look it up".to_owned()),
-        },
-    )
-    .expect("query");
-
-    // First snapshot: side conversation just spawned, sub-agent has
-    // not yet acted. Counters at zero, no context info.
-    let initial = pop_delegate_progress(&sink, "delegate-call")
-        .expect("initial DelegateProgress on side conv spawn");
-    assert_eq!(initial.task_name, "look it up");
-    assert!(initial.agent_id.is_some());
-    let side_agent_id = initial.agent_id.as_deref().expect("side agent id");
-    let side_events = h
-        .agent_store
-        .agent_events(side_agent_id)
-        .expect("side agent events");
-    let expected_display_name = format!("look it up; child of {parent_agent_id} senior-engineer");
-    assert!(side_events.iter().any(|record| matches!(
-        &record.event,
-        Event::AgentDisplayNameSet(name) if name.display_name == expected_display_name
-    )));
-    assert!(sink.lock().expect("sink").iter().any(|routed| matches!(
-        peel_inner_event(&routed.frame),
-        Some(Event::AgentDisplayNameSet(name)) if name.display_name == expected_display_name
-    )));
-    assert_eq!(initial.role.as_deref(), Some("senior-engineer"));
-    assert_eq!(initial.tools_in_flight, 0);
-    assert_eq!(initial.tools_total, 0);
-    assert_delegate_tools_counter(&initial, Some(0), Some(0));
-    assert_delegate_input_stats(&initial, input_stats);
-    assert_delegate_counter_order(&initial, &["tools"]);
-
-    let side_spid = h
-        .prompt_agents
-        .iter()
-        .find_map(|(spid, prompt_cid)| (prompt_cid.as_str() != "default").then_some(spid.clone()))
-        .expect("side prompt id");
-    h.handle_provider_response_finished(ProviderResponseFinished {
-        agent_prompt_id: side_spid,
-        agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
-        output_items: vec![ContextItem::ToolCall(ToolCallItem {
-            call_id: "websearch-call".into(),
-            name: tau_proto::ToolName::new("websearch"),
-            tool_type: tau_proto::ToolType::Function,
-            arguments: CborValue::Map(Vec::new()),
-            raw_arguments_json: None,
-            responses_envelope: None,
-        })],
-        stop_reason: tau_proto::ProviderStopReason::ToolCalls,
-        error: None,
-        usage: match (Some(1234), None, None) {
-            (None, None, None) => None,
-            (input_tokens, cached_tokens, output_tokens) => Some(tau_proto::ProviderTokenUsage {
-                model: None,
-                prompt_sent_tokens: input_tokens.unwrap_or(0),
-                prompt_cached_tokens: cached_tokens.unwrap_or(0),
-                response_received_tokens: output_tokens.unwrap_or(0),
-                stats: Default::default(),
-            }),
-        },
-        originator: tau_proto::PromptOriginator::Extension {
-            name: "core-subagents".into(),
-            query_id: "q1".to_owned(),
-        },
-
-        compaction_original_input_tokens: None,
-        compaction_compacted_input_tokens: None,
-        backend: None,
-        provider_response_id: None,
-        ws_pool_delta: None,
-    })
-    .expect("side response");
-
-    // After the side response finishes (which carries usage) and the
-    // sub-agent's tool starts dispatching, we should observe at
-    // least one `DelegateProgress` reflecting the new state. The
-    // exact emit count is not load-bearing — the *latest* snapshot
-    // is what the UI renders.
-    let latest = drain_delegate_progress(&sink, "delegate-call")
-        .pop()
-        .expect("at least one DelegateProgress after side response");
-    assert_eq!(latest.task_name, "look it up");
-    assert_eq!(latest.agent_id.as_deref(), initial.agent_id.as_deref());
-    assert_eq!(latest.role.as_deref(), Some("senior-engineer"));
-    assert_eq!(latest.tools_in_flight, 1, "websearch is in flight");
-    assert_eq!(latest.tools_total, 1, "websearch counts toward total");
-    assert_delegate_tools_counter(&latest, Some(0), Some(1));
-    assert_eq!(latest.ctx_input_tokens, Some(1234));
-    assert_delegate_ctx_counter(&latest, Some(1234), Some(128_000));
-    // Regression coverage for the live delegate line: renderers preserve
-    // progress_counters order, so tools must precede context in the UI.
-    assert_delegate_counter_order(&latest, &["tools", "ctx"]);
-    assert_eq!(h.current_session_state.context_input_tokens, None);
-
-    // Complete the sub-agent's tool — counters should drop and a
-    // fresh progress event should show 0 in flight, 1 total.
-    h.handle_extension_event(
-        "conn-websearch",
-        TestProtocolItem::Event(Event::ToolResult(ToolResult {
-            call_id: "websearch-call".into(),
-            tool_name: tau_proto::ToolName::new("websearch"),
-            tool_type: tau_proto::ToolType::Function,
-            result: CborValue::Text("fake result".to_owned()),
-            kind: tau_proto::ToolResultKind::Final,
-            originator: tau_proto::PromptOriginator::User,
-
-            display: None,
-        })),
-    )
-    .expect("ws result");
-    let after_complete = drain_delegate_progress(&sink, "delegate-call")
-        .pop()
-        .expect("DelegateProgress after sub-tool completion");
-    assert_eq!(after_complete.tools_in_flight, 0);
-    assert_eq!(after_complete.tools_total, 1);
-    assert_delegate_tools_counter(&after_complete, Some(1), Some(1));
-
-    h.shutdown().expect("shutdown");
-}
-
-/// A backgrounded tool inside a delegate must clean up like a normal late
-/// background error when its provider disconnects. Otherwise the delegate UI
-/// can stay stuck at one running tool and a suppressed completion prompt cannot
-/// be restored when `wait` is interrupted.
-#[test]
-fn provider_disconnect_for_backgrounded_delegate_tool_updates_progress_and_target() {
-    let td = TempDir::new().expect("tempdir");
-    let sp = td.path().join("state");
-    let mut h = echo_harness(&sp).expect("start");
-
-    h.selected_model = Some("test/model".into());
-    let _delegate_events = connect_test_tool(&mut h, "conn-delegate");
-    h.registry.register(
-        "conn-delegate",
-        ToolSpec {
-            name: tau_proto::ToolName::new("agent_start"),
-            model_visible_name: None,
-            description: None,
-            parameters: None,
-            tool_type: tau_proto::ToolType::Function,
-            format: None,
-            tags: Vec::new(),
-            enabled_by_default: true,
-            background_support: None,
-            examples: Vec::new(),
-        },
-    );
-    let _websearch_events = connect_test_tool(&mut h, "conn-websearch");
-    h.registry.register(
-        "conn-websearch",
-        ToolSpec {
-            name: tau_proto::ToolName::new("websearch"),
-            model_visible_name: None,
-            description: None,
-            parameters: None,
-            tool_type: tau_proto::ToolType::Function,
-            format: None,
-            tags: Vec::new(),
-            enabled_by_default: true,
-            background_support: Some(tau_proto::BackgroundSupport::Instant),
-            examples: Vec::new(),
-        },
-    );
-
-    let parent_cid = ensure_test_user_agent(&mut h);
-    let main_spid: AgentPromptId = "sp-main".into();
-    seed_agent_thinking(&mut h, &parent_cid, "sp-main");
-    h.prompt_agents
-        .insert(main_spid.clone(), parent_cid.clone());
-    h.publish_for_agent(
-        &parent_cid,
-        Event::UiPromptSubmitted(UiPromptSubmitted {
-            session_id: "s1".into(),
-            text: "delegate something".to_owned(),
-            agent_id: tau_proto::AgentId::parse("agent").expect("agent id"),
-            message_class: tau_proto::PromptMessageClass::User,
-            originator: tau_proto::PromptOriginator::User,
-            ctx_id: None,
-        }),
-    );
-    h.handle_provider_response_finished(ProviderResponseFinished {
-        agent_prompt_id: main_spid,
-        agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
-        output_items: vec![ContextItem::ToolCall(ToolCallItem {
-            call_id: "delegate-call".into(),
-            name: tau_proto::ToolName::new("agent_start"),
-            tool_type: tau_proto::ToolType::Function,
-            arguments: CborValue::Map(Vec::new()),
-            raw_arguments_json: None,
-            responses_envelope: None,
-        })],
-        stop_reason: tau_proto::ProviderStopReason::ToolCalls,
-        error: None,
-        usage: None,
-        originator: tau_proto::PromptOriginator::User,
-        compaction_original_input_tokens: None,
-        compaction_compacted_input_tokens: None,
-        backend: None,
-        provider_response_id: None,
-        ws_pool_delta: None,
-    })
-    .expect("main response");
-
-    let sink = collect_event_sink(&mut h);
-    h.handle_start_agent_request(
-        "conn-delegate",
-        StartAgentRequest {
-            parent_agent: None,
-            query_id: "q-disconnect".to_owned(),
-            instruction: "side task".to_owned(),
-            role: None,
-            input_stats: tau_proto::ToolUseStats::default(),
-            tool_call_id: Some("delegate-call".into()),
-            task_name: Some("look it up".to_owned()),
-        },
-    )
-    .expect("query");
-    drain_delegate_progress(&sink, "delegate-call");
-
-    let side_cid = ext_query_cid(&h, "q-disconnect").expect("side conversation");
-    let side_spid = h
-        .prompt_agents
-        .iter()
-        .find_map(|(spid, prompt_cid)| (prompt_cid == &side_cid).then_some(spid.clone()))
-        .expect("side prompt id");
-    h.handle_provider_response_finished(ProviderResponseFinished {
-        agent_prompt_id: side_spid,
-        agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
-        output_items: vec![ContextItem::ToolCall(ToolCallItem {
-            call_id: "websearch-call".into(),
-            name: tau_proto::ToolName::new("websearch"),
-            tool_type: tau_proto::ToolType::Function,
-            arguments: CborValue::Map(Vec::new()),
-            raw_arguments_json: None,
-            responses_envelope: None,
-        })],
-        stop_reason: tau_proto::ProviderStopReason::ToolCalls,
-        error: None,
-        usage: None,
-        originator: tau_proto::PromptOriginator::Extension {
-            name: "core-subagents".into(),
-            query_id: "q-disconnect".to_owned(),
-        },
-        compaction_original_input_tokens: None,
-        compaction_compacted_input_tokens: None,
-        backend: None,
-        provider_response_id: None,
-        ws_pool_delta: None,
-    })
-    .expect("side response");
-
-    let in_flight = drain_delegate_progress(&sink, "delegate-call")
-        .pop()
-        .expect("progress after sub-tool starts");
-    assert_eq!(in_flight.tools_in_flight, 1);
-    assert_eq!(in_flight.tools_total, 1);
-    assert_delegate_tools_counter(&in_flight, Some(0), Some(1));
-    assert_eq!(
-        h.pending_tool_providers
-            .get("websearch-call")
-            .map(|provider| provider.as_str()),
-        Some("conn-websearch")
-    );
-
-    let call_id: ToolCallId = "websearch-call".into();
-    h.suppress_background_completion_prompt(call_id.clone());
-    h.handle_disconnect("conn-websearch");
-
-    let after_disconnect = drain_delegate_progress(&sink, "delegate-call")
-        .pop()
-        .expect("progress after provider disconnect");
-    assert_eq!(after_disconnect.tools_in_flight, 0);
-    assert_eq!(after_disconnect.tools_total, 1);
-    assert_delegate_tools_counter(&after_disconnect, Some(1), Some(1));
-    assert_eq!(
-        h.agents
-            .get(&side_cid)
-            .expect("side conversation remains live")
-            .tools_in_flight,
-        0
-    );
-    assert_eq!(
-        h.background_completion_targets.get(&call_id),
-        Some(&side_cid)
-    );
-    assert!(!h.pending_tool_providers.contains_key(&call_id));
-    assert!(!h.tool_agents.contains_key(&call_id));
-    let expected = extension_disconnected_background_tool_call_error_message(&call_id);
-    assert!(event_log_contains_any_source(&h, |event| matches!(
-        event,
-        Event::ToolBackgroundError(error)
-            if error.call_id.as_str() == call_id.as_str()
-                && error.message == expected
-    )));
-    assert!(!event_log_contains_any_source(&h, |event| matches!(
-        event,
-        Event::ToolError(error) if error.call_id.as_str() == call_id.as_str()
-    )));
-    assert!(
-        h.agents
-            .get(&side_cid)
-            .expect("side conversation remains live")
-            .pending_prompts
-            .iter()
-            .all(|prompt| prompt.text != background_completion_prompt(&call_id))
-    );
-
-    h.unsuppress_background_completion_prompt(call_id.clone());
-    let side = h
-        .agents
-        .get(&side_cid)
-        .expect("side conversation remains live");
-    assert!(side.pending_prompts.iter().any(|prompt| {
-        prompt.text == background_completion_prompt(&call_id) && prompt.is_internal()
-    }));
-
-    h.shutdown().expect("shutdown");
-}
-
-/// An explicit `agent_start` role must be a real role switch for the sub-agent,
-/// not just UI metadata: the prompt uses that role's model, params, prompt, and
-/// tool profile.
-#[test]
-fn delegate_explicit_role_uses_role_model_params_prompt_and_tools() {
-    let td = TempDir::new().expect("tempdir");
-    let sp = td.path().join("state");
-    let mut h = echo_harness(&sp).expect("start");
-
-    let engineer_model: tau_proto::ModelId = "test/engineer".into();
-    let worker_model: tau_proto::ModelId = "test/worker".into();
-    set_available_provider_models(
-        &mut h,
-        [
-            provider_model_info(engineer_model.clone(), 64_000),
-            provider_model_info(worker_model.clone(), 256_000),
-        ],
-    );
-    h.selected_role = "engineer".to_owned();
-    h.selected_model = Some(engineer_model.clone());
-    h.available_roles = std::collections::HashMap::from([
-        (
-            "engineer".to_owned(),
-            tau_config::settings::AgentRole {
-                model: Some(engineer_model),
-                prompt_fragments: vec![tau_config::settings::RolePromptFragment {
-                    name: "engineer.instructions".to_owned(),
-                    priority: tau_proto::PromptPriority::new(100),
-                    text: tau_proto::PromptContent::new("SMART ROLE PROMPT"),
-                }],
-                ..Default::default()
-            },
-        ),
-        (
-            "worker".to_owned(),
-            tau_config::settings::AgentRole {
-                model: Some(worker_model.clone()),
-                effort: Some(tau_proto::Effort::High),
-                verbosity: Some(tau_proto::Verbosity::High),
-                thinking_summary: Some(tau_proto::ThinkingSummary::Auto),
-                service_tier: Some(tau_proto::ServiceTier::Flex),
-                prompt_fragments: vec![
-                    tau_config::settings::RolePromptFragment {
-                        name: "worker.instructions".to_owned(),
-                        priority: tau_proto::PromptPriority::new(100),
-                        text: tau_proto::PromptContent::new("WORKER ROLE PROMPT"),
-                    },
-                    tau_config::settings::RolePromptFragment {
-                        name: "worker.extra".to_owned(),
-                        priority: tau_proto::PromptPriority::new(200),
-                        text: tau_proto::PromptContent::new("WORKER EXTRA PROMPT"),
-                    },
-                ],
-                tools: Some(vec![ToolName::new("allowed_tool")]),
-                enable_tools: vec![ToolName::new("enabled_tool")],
-                disable_tools: vec![ToolName::new("denied_tool")],
-                ..Default::default()
-            },
-        ),
-    ]);
-    h.registry.register_with_prompt_fragment(
-        "conn-allowed-tool",
-        tau_proto::ToolRegister {
-            tool: ToolSpec {
-                name: ToolName::new("allowed_tool"),
-                model_visible_name: None,
-                description: Some("allowed".to_owned()),
-                parameters: None,
-                tool_type: tau_proto::ToolType::Function,
-                format: None,
-                tags: Vec::new(),
-                enabled_by_default: false,
-                background_support: None,
-                examples: Vec::new(),
-            },
-            tool_group: None,
-            prompt_fragment: Some(tau_proto::PromptFragment::new(
-                "allowed_tool.instructions",
-                tau_proto::PromptPriority::new(10),
-                "ALLOWED TOOL PROMPT",
-            )),
-        },
-    );
-    h.registry.register_with_prompt_fragment(
-        "conn-enabled-tool",
-        tau_proto::ToolRegister {
-            tool: ToolSpec {
-                name: ToolName::new("enabled_tool"),
-                model_visible_name: None,
-                description: Some("enabled".to_owned()),
-                parameters: None,
-                tool_type: tau_proto::ToolType::Function,
-                format: None,
-                tags: Vec::new(),
-                enabled_by_default: false,
-                background_support: None,
-                examples: Vec::new(),
-            },
-            tool_group: None,
-            prompt_fragment: Some(tau_proto::PromptFragment::new(
-                "enabled_tool.instructions",
-                tau_proto::PromptPriority::new(10),
-                "ENABLED TOOL PROMPT",
-            )),
-        },
-    );
-    h.registry.register_with_prompt_fragment(
-        "conn-default-tool",
-        tau_proto::ToolRegister {
-            tool: ToolSpec {
-                name: ToolName::new("default_tool"),
-                model_visible_name: None,
-                description: Some("default".to_owned()),
-                parameters: None,
-                tool_type: tau_proto::ToolType::Function,
-                format: None,
-                tags: Vec::new(),
-                enabled_by_default: true,
-                background_support: None,
-                examples: Vec::new(),
-            },
-            tool_group: None,
-            prompt_fragment: Some(tau_proto::PromptFragment::new(
-                "default_tool.instructions",
-                tau_proto::PromptPriority::new(10),
-                "DEFAULT TOOL PROMPT",
-            )),
-        },
-    );
-    h.registry.register_with_prompt_fragment(
-        "conn-denied-tool",
-        tau_proto::ToolRegister {
-            tool: ToolSpec {
-                name: ToolName::new("denied_tool"),
-                model_visible_name: None,
-                description: Some("denied".to_owned()),
-                parameters: None,
-                tool_type: tau_proto::ToolType::Function,
-                format: None,
-                tags: Vec::new(),
-                enabled_by_default: true,
-                background_support: None,
-                examples: Vec::new(),
-            },
-            tool_group: None,
-            prompt_fragment: Some(tau_proto::PromptFragment::new(
-                "denied_tool.instructions",
-                tau_proto::PromptPriority::new(10),
-                "DENIED TOOL PROMPT",
-            )),
-        },
-    );
-
-    let _delegate = connect_test_tool(&mut h, "conn-delegate");
-    let sink = collect_event_sink(&mut h);
-    h.handle_start_agent_request(
-        "conn-delegate",
-        StartAgentRequest {
-            parent_agent: None,
-            query_id: "q-worker".to_owned(),
-            instruction: "side task".to_owned(),
-            role: Some("worker".to_owned()),
-            input_stats: tau_proto::ToolUseStats::default(),
-            tool_call_id: Some("delegate-call".into()),
-            task_name: Some("use worker".to_owned()),
-        },
-    )
-    .expect("query");
-
-    let progress = pop_delegate_progress(&sink, "delegate-call").expect("initial progress");
-    assert_eq!(progress.role.as_deref(), Some("worker"));
-
-    let side_cid = ext_query_cid(&h, "q-worker").expect("side conversation");
-    let side_spid = h
-        .prompt_agents
-        .iter()
-        .find_map(|(spid, prompt_cid)| (prompt_cid == &side_cid).then_some(spid.clone()))
-        .expect("side prompt id");
-    let prompt = read_prompt_created(&h, &side_spid);
-
-    assert_eq!(prompt.model, worker_model);
-    assert_eq!(prompt.model_params.effort, tau_proto::Effort::High);
-    assert_eq!(prompt.model_params.verbosity, tau_proto::Verbosity::High);
-    assert_eq!(
-        prompt.model_params.thinking_summary,
-        tau_proto::ThinkingSummary::Auto
-    );
-    assert_eq!(
-        prompt.model_params.service_tier,
-        Some(tau_proto::ServiceTier::Flex)
-    );
-    assert!(prompt.system_prompt.contains("WORKER ROLE PROMPT"));
-    assert!(prompt.system_prompt.contains("WORKER EXTRA PROMPT"));
-    assert!(!prompt.system_prompt.contains("SMART ROLE PROMPT"));
-    assert!(prompt.system_prompt.contains("ALLOWED TOOL PROMPT"));
-    assert!(prompt.system_prompt.contains("ENABLED TOOL PROMPT"));
-    assert!(!prompt.system_prompt.contains("DEFAULT TOOL PROMPT"));
-    assert!(!prompt.system_prompt.contains("DENIED TOOL PROMPT"));
-    assert!(
-        prompt
-            .tools
-            .iter()
-            .any(|tool| tool.name.as_str() == "allowed_tool")
-    );
-    assert!(
-        prompt
-            .tools
-            .iter()
-            .any(|tool| tool.name.as_str() == "enabled_tool")
-    );
-    assert!(
-        !prompt
-            .tools
-            .iter()
-            .any(|tool| tool.name.as_str() == "default_tool")
-    );
-    assert!(
-        !prompt
-            .tools
-            .iter()
-            .any(|tool| tool.name.as_str() == "denied_tool")
-    );
-
-    h.shutdown().expect("shutdown");
-}
-
 fn start_agent_request_error(
     frames: &Arc<Mutex<Vec<RoutedFrame>>>,
     query_id: &str,
@@ -11712,6 +10987,34 @@ fn start_agent_request_error(
             }
             _ => None,
         })
+}
+
+fn drain_watches_updated(
+    frames: &Arc<Mutex<Vec<RoutedFrame>>>,
+) -> Vec<tau_proto::AgentWatchesUpdated> {
+    let mut frames = frames.lock().expect("frames");
+    let mut out = Vec::new();
+    frames.retain(|routed| match peel_inner_event(&routed.frame) {
+        Some(Event::AgentWatchesUpdated(snapshot)) => {
+            out.push(snapshot.clone());
+            false
+        }
+        _ => true,
+    });
+    out
+}
+
+fn drain_stats_updated(frames: &Arc<Mutex<Vec<RoutedFrame>>>) -> Vec<tau_proto::AgentStatsUpdated> {
+    let mut frames = frames.lock().expect("frames");
+    let mut out = Vec::new();
+    frames.retain(|routed| match peel_inner_event(&routed.frame) {
+        Some(Event::AgentStatsUpdated(stats)) => {
+            out.push(stats.clone());
+            false
+        }
+        _ => true,
+    });
+    out
 }
 
 fn configure_delegate_error_roles(h: &mut Harness) {
@@ -11742,9 +11045,6 @@ fn configure_delegate_error_roles(h: &mut Harness) {
     ]);
 }
 
-/// Bad delegate roles fail before spawning a side conversation and report the
-/// usable role names in sorted order, excluding roles whose model is
-/// unavailable.
 #[test]
 fn delegate_invalid_or_unavailable_role_errors_with_sorted_available_roles() {
     let td = TempDir::new().expect("tempdir");
@@ -11828,6 +11128,320 @@ fn delegate_missing_default_senior_engineer_errors_when_unavailable() {
     );
     assert!(ext_query_cid(&h, "q-default").is_none());
 
+    h.shutdown().expect("shutdown");
+}
+
+#[test]
+fn generic_agent_watch_snapshots_replay_and_clear_on_session_switch() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    let live = connect_test_tool(&mut h, "watch-live");
+    h.complete_subscription(
+        "watch-live",
+        vec![EventSelector::Exact(
+            tau_proto::EventName::AGENT_WATCHES_UPDATED,
+        )],
+    )
+    .expect("subscribe");
+    drain_watches_updated(&live);
+
+    h.set_agent_watch(
+        "watcher",
+        "child-b",
+        true,
+        tau_proto::AgentWatchUpdateCause::AgentWatchEnable,
+    );
+    h.set_agent_watch(
+        "watcher",
+        "child-a",
+        true,
+        tau_proto::AgentWatchUpdateCause::AgentWatchEnable,
+    );
+    h.set_agent_watch(
+        "watcher",
+        "child-b",
+        false,
+        tau_proto::AgentWatchUpdateCause::AgentWatchDisable,
+    );
+    h.set_agent_watch(
+        "watcher",
+        "child-a",
+        false,
+        tau_proto::AgentWatchUpdateCause::AgentWatchDisable,
+    );
+
+    let snapshots = drain_watches_updated(&live);
+    assert_eq!(snapshots.len(), 4);
+    assert_eq!(
+        snapshots[0].watched_agent_ids,
+        vec![crate::parse_agent_id("child-b")]
+    );
+    assert_eq!(
+        snapshots[1].watched_agent_ids,
+        vec![
+            crate::parse_agent_id("child-a"),
+            crate::parse_agent_id("child-b")
+        ]
+    );
+    assert_eq!(
+        snapshots[2].watched_agent_ids,
+        vec![crate::parse_agent_id("child-a")]
+    );
+    assert!(snapshots[3].watched_agent_ids.is_empty());
+
+    h.set_agent_watch(
+        "watcher",
+        "child-a",
+        true,
+        tau_proto::AgentWatchUpdateCause::AgentWatchEnable,
+    );
+    let replay = connect_test_tool(&mut h, "watch-replay");
+    h.complete_subscription(
+        "watch-replay",
+        vec![EventSelector::Exact(
+            tau_proto::EventName::AGENT_WATCHES_UPDATED,
+        )],
+    )
+    .expect("subscribe replay");
+    let replayed = drain_watches_updated(&replay);
+    assert_eq!(replayed.len(), 1);
+    assert_eq!(
+        replayed[0].cause,
+        tau_proto::AgentWatchUpdateCause::SessionSnapshot
+    );
+    assert_eq!(replayed[0].watcher_id, crate::parse_agent_id("watcher"));
+    assert_eq!(
+        replayed[0].watched_agent_ids,
+        vec![crate::parse_agent_id("child-a")]
+    );
+
+    h.switch_session("s2".into(), tau_proto::SessionStartReason::New)
+        .expect("switch session");
+    assert!(h.agent_watches.is_empty());
+    assert!(h.agent_watchers.is_empty());
+    h.shutdown().expect("shutdown");
+}
+
+#[test]
+fn disabling_agent_watch_removes_response_fanout_route() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    let sender_cid = ensure_test_user_agent(&mut h);
+    h.agents.get_mut(&sender_cid).expect("sender").agent_id = Some("child-agent".to_owned());
+    h.agent_routes
+        .insert("child-agent".to_owned(), sender_cid.clone());
+    h.set_agent_watch(
+        "watcher-agent",
+        "child-agent",
+        true,
+        tau_proto::AgentWatchUpdateCause::AgentWatchEnable,
+    );
+    h.set_agent_watch(
+        "watcher-agent",
+        "child-agent",
+        false,
+        tau_proto::AgentWatchUpdateCause::AgentWatchDisable,
+    );
+    assert!(
+        h.watchers_for_agent("child-agent").is_empty(),
+        "disabled watch must remove the child from watch-response fan-out"
+    );
+    h.shutdown().expect("shutdown");
+}
+
+#[test]
+fn agent_stats_snapshots_cover_tool_and_context_transitions_and_replay() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    set_available_provider_models(&mut h, [provider_model_info("test/model".into(), 1_000)]);
+    h.selected_model = Some("test/model".into());
+    let stats = connect_test_tool(&mut h, "stats-live");
+    h.complete_subscription(
+        "stats-live",
+        vec![EventSelector::Exact(
+            tau_proto::EventName::AGENT_STATS_UPDATED,
+        )],
+    )
+    .expect("subscribe");
+    drain_stats_updated(&stats);
+
+    let cid = ensure_test_user_agent(&mut h);
+    let public_id = durable_agent_id_for_conversation(&h, &cid);
+    h.set_agent_turn_state(
+        &cid,
+        AgentTurnState::AgentThinking {
+            agent_prompt_id: "sp-stats".into(),
+        },
+    );
+    h.bump_tools_started_for(&cid);
+    h.update_agent_context_usage(&cid, Some(&"test/model".into()), Some(250), Some(50));
+    h.tool_agents.insert("counted-call".into(), cid.clone());
+    h.finish_tool_call_runtime_state("counted-call");
+
+    let snapshots = drain_stats_updated(&stats);
+    assert!(snapshots.iter().any(|snapshot| {
+        snapshot.agent_id == public_id
+            && snapshot.runtime_state == tau_proto::AgentRuntimeState::Running
+    }));
+    assert!(snapshots.iter().any(|snapshot| {
+        snapshot.agent_id == public_id
+            && snapshot.tools.started_total == 1
+            && snapshot.tools.in_flight == 1
+    }));
+    assert!(snapshots.iter().any(|snapshot| {
+        snapshot.agent_id == public_id
+            && snapshot.context.input_tokens == Some(250)
+            && snapshot.context.cached_tokens == Some(50)
+            && snapshot.context.context_window == Some(1_000)
+            && snapshot.context.percent_used == Some(25)
+    }));
+
+    let replay = connect_test_tool(&mut h, "stats-replay");
+    h.complete_subscription(
+        "stats-replay",
+        vec![EventSelector::Exact(
+            tau_proto::EventName::AGENT_STATS_UPDATED,
+        )],
+    )
+    .expect("stats replay");
+    let replayed = drain_stats_updated(&replay);
+    assert!(replayed.iter().any(|snapshot| {
+        snapshot.agent_id == public_id
+            && snapshot.tools.started_total == 1
+            && snapshot.context.input_tokens == Some(250)
+    }));
+    h.shutdown().expect("shutdown");
+}
+
+#[test]
+fn rejected_pre_dispatch_tool_attempt_counts_once_in_agent_stats() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    let stats = connect_test_tool(&mut h, "stats-reject");
+    h.complete_subscription(
+        "stats-reject",
+        vec![EventSelector::Exact(
+            tau_proto::EventName::AGENT_STATS_UPDATED,
+        )],
+    )
+    .expect("subscribe");
+    drain_stats_updated(&stats);
+    let cid = ensure_test_user_agent(&mut h);
+    let public_id = durable_agent_id_for_conversation(&h, &cid);
+    let call = AgentToolCall {
+        id: "bad-call".into(),
+        name: ToolName::new("missing_tool"),
+        tool_type: tau_proto::ToolType::Function,
+        arguments: CborValue::Map(Vec::new()),
+    };
+
+    h.reject_agent_tool_call_before_dispatch(
+        &cid,
+        &call,
+        ToolName::new("missing_tool"),
+        "missing tool".to_owned(),
+    );
+
+    let snapshots = drain_stats_updated(&stats);
+    assert!(snapshots.iter().any(|snapshot| {
+        snapshot.agent_id == public_id
+            && snapshot.tools.started_total == 1
+            && snapshot.tools.in_flight == 1
+    }));
+    assert!(snapshots.iter().any(|snapshot| {
+        snapshot.agent_id == public_id
+            && snapshot.tools.started_total == 1
+            && snapshot.tools.in_flight == 0
+    }));
+    h.shutdown().expect("shutdown");
+}
+
+#[test]
+fn explicit_agent_start_role_controls_side_agent_prompt_model_and_tools() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    set_available_provider_models(
+        &mut h,
+        [provider_model_info("test/role-model".into(), 8_000)],
+    );
+    h.system_prompt_templates.insert(
+        "explicit-template".to_owned(),
+        "role={{role.name}} agent={{agent_id}}".to_owned(),
+    );
+    h.available_roles.insert(
+        "explicit-role".to_owned(),
+        tau_config::settings::AgentRole {
+            model: Some("test/role-model".into()),
+            prompt_override: Some("explicit-template".to_owned()),
+            tools: Some(vec![ToolName::new("agent_watch")]),
+            effort: Some(tau_proto::Effort::High),
+            ..Default::default()
+        },
+    );
+    let _delegate = connect_test_tool(&mut h, "conn-delegate");
+    h.registry.register(
+        "conn-delegate",
+        ToolSpec {
+            name: tau_proto::ToolName::new("agent_watch"),
+            model_visible_name: None,
+            description: Some("watch agent".to_owned()),
+            parameters: None,
+            tool_type: tau_proto::ToolType::Function,
+            format: None,
+            tags: Vec::new(),
+            enabled_by_default: true,
+            background_support: None,
+            examples: Vec::new(),
+        },
+    );
+
+    h.handle_start_agent_request(
+        "conn-delegate",
+        StartAgentRequest {
+            parent_agent: None,
+            query_id: "q-explicit".to_owned(),
+            instruction: "side task".to_owned(),
+            role: Some("explicit-role".to_owned()),
+            input_stats: tau_proto::ToolUseStats::default(),
+            tool_call_id: Some("explicit-call".into()),
+            task_name: Some("explicit task".to_owned()),
+        },
+    )
+    .expect("start explicit role");
+
+    let cid = ext_query_cid(&h, "q-explicit").expect("side conversation");
+    assert_eq!(
+        h.agents
+            .get(&cid)
+            .and_then(|conversation| conversation.role.as_deref()),
+        Some("explicit-role")
+    );
+    let spid = h
+        .prompt_agents
+        .iter()
+        .find_map(|(spid, prompt_cid)| (prompt_cid == &cid).then_some(spid.clone()))
+        .expect("side prompt");
+    let prompt = read_prompt_created(&h, &spid);
+    assert_eq!(prompt.model.to_string(), "test/role-model");
+    assert_eq!(prompt.model_params.effort, tau_proto::Effort::High);
+    assert!(
+        prompt
+            .system_prompt
+            .starts_with("role=explicit-role agent=")
+    );
+    assert_eq!(
+        prompt
+            .tools
+            .iter()
+            .map(|tool| tool.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["agent_watch"]
+    );
     h.shutdown().expect("shutdown");
 }
 

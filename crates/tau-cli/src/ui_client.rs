@@ -102,6 +102,8 @@ pub(crate) fn chat_subscription_selectors() -> Vec<EventSelector> {
         EventSelector::Exact(E::AGENT_PROMPT_STARTED),
         EventSelector::Exact(E::AGENT_PROMPT_TERMINATED),
         EventSelector::Exact(E::AGENT_TURN_STATS_UPDATED),
+        EventSelector::Exact(E::AGENT_WATCHES_UPDATED),
+        EventSelector::Exact(E::AGENT_STATS_UPDATED),
         EventSelector::Exact(E::AGENT_STARTED),
         EventSelector::Exact(E::AGENT_DISPLAY_NAME_SET),
         // Session and provider state rendered by the UI. Provider prompt
@@ -124,7 +126,6 @@ pub(crate) fn chat_subscription_selectors() -> Vec<EventSelector> {
         EventSelector::Exact(E::TOOL_BACKGROUND_ERROR),
         EventSelector::Exact(E::TOOL_PROGRESS),
         EventSelector::Exact(E::TOOL_CANCELLED),
-        EventSelector::Exact(E::TOOL_DELEGATE_PROGRESS),
         EventSelector::Exact(E::SHELL_COMMAND_PROGRESS),
         EventSelector::Exact(E::SHELL_COMMAND_FINISHED),
         // Extension/context/status events rendered in the transcript or used to

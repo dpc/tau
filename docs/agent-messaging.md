@@ -33,14 +33,14 @@ Message sent
 
 ## Send to another agent
 
-Start the other agent with `agent_start`. The child starts with fresh transcript context, but inheritable per-agent metadata such as shell cwd is copied from the parent. Its initial display name is the task title plus the parent id/name snapshot, like `<title>; child of <parent-agent-id> <parent-agent-name>`. The child prompt's `agent_id` template variable matches the returned `sub_agent_id`. The instant background placeholder includes `self_agent_id` and `sub_agent_id` headers. The final `agent_start` result carries the same ids, while the sub-agent's response text arrives through the `agent_watch` async response-notification path:
+Start the other agent with `agent_start`. The child starts with fresh transcript context, but inheritable per-agent metadata such as shell cwd is copied from the parent. Its initial display name is the task title plus the parent id/name snapshot, like `<title>; child of <parent-agent-id> <parent-agent-name>`. The child prompt's `agent_id` template variable matches the returned `sub_agent_id`. The `agent_start` tool completes immediately with `self_agent_id` and `sub_agent_id` metadata, while the sub-agent's response text arrives through the `agent_watch` async response-notification path:
 
 ```text
 tau_internal: true
 self_agent_id: senior-engineer_a
 sub_agent_id: engineer_b
 
-Tool call `call_123` is running in the background.
+Agent started; responses will arrive through agent_watch notifications.
 ```
 
 Use `sub_agent_id` as `recipient_id`:
