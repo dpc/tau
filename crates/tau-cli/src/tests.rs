@@ -2756,6 +2756,17 @@ fn watched_agent_stats_route_to_hidden_watcher_owner() {
             cause: tau_proto::AgentWatchUpdateCause::AgentStart,
         },
     ));
+    renderer.handle(&Event::AgentPromptStarted(tau_proto::AgentPromptStarted {
+        session_id: "s1".into(),
+        agent_id: agent_id("engineer_1"),
+        agent_prompt_id: "ap-engineer_1-0".into(),
+        model: "test/model".parse().expect("model id"),
+        originator: tau_proto::PromptOriginator::Extension {
+            name: "__harness__".into(),
+            query_id: "delegate-1".to_owned(),
+        },
+        ctx_id: None,
+    }));
     renderer.handle(&Event::AgentStatsUpdated(tau_proto::AgentStatsUpdated {
         session_id: "s1".into(),
         agent_id: agent_id("engineer_1"),
@@ -4295,7 +4306,7 @@ fn model_status_shows_main_tool_usage_before_context() {
         .find(|row| row.contains("@main"))
         .expect("status row after main response");
     assert!(
-        status_row.ends_with("%0/2 @2 #12k/200k"),
+        status_row.ends_with("%0/2 #12k/200k"),
         "unexpected status row: {status_row:?}"
     );
 
@@ -4328,7 +4339,7 @@ fn model_status_shows_main_tool_usage_before_context() {
         .into_iter()
         .find(|row| row.contains("@main"))
         .expect("status row after tool result");
-    assert!(status_row.ends_with("%1/2 @2 #12k/200k"));
+    assert!(status_row.ends_with("%1/2 #12k/200k"));
 
     // Regression coverage for turn visibility: once an extension/sub-agent
     // prompt becomes active, it must not steal the main transcript's tool chip;
@@ -4349,7 +4360,7 @@ fn model_status_shows_main_tool_usage_before_context() {
         .find(|row| row.contains("@main"))
         .expect("status row after side prompt starts");
     assert!(
-        status_row.ends_with("%1/2 @3 #12k/200k"),
+        status_row.ends_with("%1/2 @1 #12k/200k"),
         "unexpected status row: {status_row:?}"
     );
     assert!(status_row.contains('%'));
@@ -4370,7 +4381,7 @@ fn model_status_shows_main_tool_usage_before_context() {
         .into_iter()
         .find(|row| row.contains("@main"))
         .expect("status row after second main tool result during side turn");
-    assert!(status_row.ends_with("%2/2 @3 #12k/200k"));
+    assert!(status_row.ends_with("%2/2 @1 #12k/200k"));
     assert!(status_row.contains('%'));
 
     // Main tool completions that arrive while a side conversation is active
@@ -4386,7 +4397,7 @@ fn model_status_shows_main_tool_usage_before_context() {
         .into_iter()
         .find(|row| row.contains("@main"))
         .expect("status row after main prompt resumes");
-    assert!(status_row.ends_with("%2/2 @3 #12k/200k"));
+    assert!(status_row.ends_with("%2/2 @1 #12k/200k"));
 
     // The main agent's final no-tool response ends the tool-using turn and
     // hides the chip while preserving context stats.
@@ -4400,7 +4411,7 @@ fn model_status_shows_main_tool_usage_before_context() {
         .into_iter()
         .find(|row| row.contains("@main"))
         .expect("status row after final main response");
-    assert!(status_row.ends_with("@3 #12k/200k"));
+    assert!(status_row.ends_with("@1 #12k/200k"));
     assert!(!status_row.contains('%'));
 
     // Starting a new user task in the same session also keeps the chip hidden
@@ -4419,7 +4430,7 @@ fn model_status_shows_main_tool_usage_before_context() {
         .into_iter()
         .find(|row| row.contains("@main"))
         .expect("status row after next prompt");
-    assert!(status_row.ends_with("@3 #12k/200k"));
+    assert!(status_row.ends_with("@1 #12k/200k"));
     assert!(!status_row.contains('%'));
 }
 
@@ -4736,14 +4747,16 @@ fn delegate_side_conversation_keeps_parent_tool_status_visible() {
     // otherwise users lose the only bottom-bar indication that delegation is
     // still in progress.
     renderer.handle(&Event::AgentPromptCreated(AgentPromptCreated {
+        agent_id: agent_id("engineer_1"),
         originator: tau_proto::PromptOriginator::Extension {
             name: "core-subagents".into(),
             query_id: "q1".to_owned(),
         },
         ..agent_prompt_created("side-sp", "s1")
     }));
-    renderer.handle(&Event::ProviderResponseUpdated(
-        provider_response_delta_update(
+    renderer.handle(&Event::ProviderResponseUpdated(ProviderResponseUpdated {
+        agent_id: agent_id("engineer_1"),
+        ..provider_response_delta_update(
             "side-sp",
             "working",
             None,
@@ -4751,8 +4764,8 @@ fn delegate_side_conversation_keeps_parent_tool_status_visible() {
                 name: "core-subagents".into(),
                 query_id: "q1".to_owned(),
             },
-        ),
-    ));
+        )
+    }));
     sync(&handle);
 
     let status_row = vt
@@ -4760,7 +4773,7 @@ fn delegate_side_conversation_keeps_parent_tool_status_visible() {
         .into_iter()
         .find(|row| row.contains("@main"))
         .expect("status row during delegate side conversation");
-    assert!(status_row.ends_with("%0/1 @2 #12k/200k"));
+    assert!(status_row.ends_with("%0/1 @1 #12k/200k"));
 
     // Generic watched-agent stats no longer mutate the parent tool status chip.
     renderer.handle(&Event::AgentStatsUpdated(tau_proto::AgentStatsUpdated {
@@ -4780,7 +4793,7 @@ fn delegate_side_conversation_keeps_parent_tool_status_visible() {
         .find(|row| row.contains("#12k/200k"))
         .expect("status row after watched-agent stats");
     assert!(status_row.contains("@main"));
-    assert!(status_row.ends_with("%0/1 @2 #12k/200k"));
+    assert!(status_row.ends_with("%0/1 @1 #12k/200k"));
 
     renderer.handle(&Event::ToolCancelled(ToolCancelled {
         call_id: "delegate-call".into(),
@@ -5815,6 +5828,17 @@ fn watched_agent_stats_redraw_active_indicator() {
     sync(&handle);
     assert!(!vt.screen_contains(100, "watching [engineer_1]"));
 
+    renderer.handle(&Event::AgentPromptStarted(tau_proto::AgentPromptStarted {
+        session_id: "s1".into(),
+        agent_id: agent_id("engineer_1"),
+        agent_prompt_id: "ap-engineer_1-0".into(),
+        model: "test/model".parse().expect("model id"),
+        originator: tau_proto::PromptOriginator::Extension {
+            name: "__harness__".into(),
+            query_id: "delegate-1".to_owned(),
+        },
+        ctx_id: None,
+    }));
     renderer.handle(&Event::AgentStatsUpdated(tau_proto::AgentStatsUpdated {
         session_id: "s1".into(),
         agent_id: agent_id("engineer_1"),
@@ -5843,9 +5867,296 @@ fn watched_agent_stats_redraw_active_indicator() {
     );
 }
 
+/// Ensures watched-agent status blocks follow provider prompt lifetime rather
+/// than staying visible until a later `agent.stats_updated` idle snapshot.
+///
+/// The live session regression showed a watched agent with `%15/15` counters
+/// remaining on screen after it had produced a provider response. Removing the
+/// block on `provider.response_finished` prevents a missed or delayed idle stat
+/// from leaving a stale watched-agent line behind.
+#[test]
+fn watched_agent_response_finished_removes_active_indicator() {
+    let (_term, handle, vt) = setup(100, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        cli_test_theme(),
+    );
+
+    renderer.switch_agent("parent_1".to_owned());
+    renderer.handle(&Event::AgentWatchesUpdated(
+        tau_proto::AgentWatchesUpdated {
+            session_id: "s1".into(),
+            watcher_id: agent_id("parent_1"),
+            watched_agent_ids: vec![agent_id("engineer_1")],
+            changed_agent_id: Some(agent_id("engineer_1")),
+            cause: tau_proto::AgentWatchUpdateCause::AgentStart,
+        },
+    ));
+    renderer.handle(&Event::AgentPromptStarted(tau_proto::AgentPromptStarted {
+        session_id: "s1".into(),
+        agent_id: agent_id("engineer_1"),
+        agent_prompt_id: "ap-engineer_1-0".into(),
+        model: "test/model".parse().expect("model id"),
+        originator: tau_proto::PromptOriginator::Extension {
+            name: "__harness__".into(),
+            query_id: "delegate-1".to_owned(),
+        },
+        ctx_id: None,
+    }));
+    renderer.handle(&Event::AgentStatsUpdated(tau_proto::AgentStatsUpdated {
+        session_id: "s1".into(),
+        agent_id: agent_id("engineer_1"),
+        runtime_state: tau_proto::AgentRuntimeState::Running,
+        tools: tau_proto::AgentToolStats {
+            in_flight: 0,
+            started_total: 15,
+        },
+        context: tau_proto::AgentContextStats::default(),
+    }));
+
+    assert!(eventually_screen_contains(
+        &vt,
+        100,
+        "watching [engineer_1] @engineer_1 %15/15",
+    ));
+
+    renderer.handle(&Event::ProviderResponseFinished(ProviderResponseFinished {
+        agent_prompt_id: "ap-engineer_1-0".into(),
+        agent_id: agent_id("engineer_1"),
+        output_items: Vec::new(),
+        stop_reason: ProviderStopReason::EndTurn,
+        error: None,
+        originator: tau_proto::PromptOriginator::Extension {
+            name: "__harness__".into(),
+            query_id: "delegate-1".to_owned(),
+        },
+        usage: None,
+        compaction_original_input_tokens: None,
+        compaction_compacted_input_tokens: None,
+        backend: None,
+        provider_response_id: None,
+        ws_pool_delta: None,
+    }));
+    sync(&handle);
+
+    assert!(
+        !vt.screen_contains(100, "watching [engineer_1]"),
+        "watched-agent block should be removed when provider response finishes: {:?}",
+        vt.screen_text(100)
+    );
+}
+
+/// Ensures provider-level prompt submission also starts watched-agent running
+/// UI for backends or replay paths that do not emit an explicit
+/// `agent.prompt_started` event before provider work begins.
+#[test]
+fn watched_agent_provider_prompt_submitted_starts_active_indicator() {
+    let (_term, handle, vt) = setup(100, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        cli_test_theme(),
+    );
+
+    renderer.switch_agent("parent_1".to_owned());
+    renderer.handle(&Event::StartAgentAccepted(tau_proto::StartAgentAccepted {
+        query_id: "delegate-1".to_owned(),
+        agent_id: agent_id("engineer_1"),
+    }));
+    renderer.handle(&Event::AgentWatchesUpdated(
+        tau_proto::AgentWatchesUpdated {
+            session_id: "s1".into(),
+            watcher_id: agent_id("parent_1"),
+            watched_agent_ids: vec![agent_id("engineer_1")],
+            changed_agent_id: Some(agent_id("engineer_1")),
+            cause: tau_proto::AgentWatchUpdateCause::AgentStart,
+        },
+    ));
+    renderer.handle(&Event::ProviderPromptSubmitted(
+        tau_proto::ProviderPromptSubmitted {
+            agent_prompt_id: "ap-engineer_1-0".into(),
+            originator: tau_proto::PromptOriginator::Extension {
+                name: "__harness__".into(),
+                query_id: "delegate-1".to_owned(),
+            },
+        },
+    ));
+    sync(&handle);
+
+    assert!(eventually_screen_contains(
+        &vt,
+        100,
+        "watching [engineer_1] @engineer_1",
+    ));
+
+    renderer.handle(&Event::ProviderResponseFinished(ProviderResponseFinished {
+        agent_prompt_id: "ap-engineer_1-0".into(),
+        agent_id: agent_id("engineer_1"),
+        output_items: Vec::new(),
+        stop_reason: ProviderStopReason::EndTurn,
+        error: None,
+        originator: tau_proto::PromptOriginator::Extension {
+            name: "__harness__".into(),
+            query_id: "delegate-1".to_owned(),
+        },
+        usage: None,
+        compaction_original_input_tokens: None,
+        compaction_compacted_input_tokens: None,
+        backend: None,
+        provider_response_id: None,
+        ws_pool_delta: None,
+    }));
+    sync(&handle);
+
+    assert!(
+        !vt.screen_contains(100, "watching [engineer_1]"),
+        "provider-fallback watched-agent block should be removed on finish: {:?}",
+        vt.screen_text(100)
+    );
+}
+
+/// Ensures provider response updates use their explicit agent id as the active
+/// prompt owner, then terminal cleanup removes that prompt from all owners.
+///
+/// This prevents a provider-update-only path from accidentally marking the
+/// current/originator agent active and leaving the watched response owner stale
+/// after `provider.response_finished`.
+#[test]
+fn watched_agent_provider_response_update_uses_authoritative_agent_id() {
+    let (_term, handle, vt) = setup(100, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        cli_test_theme(),
+    );
+
+    renderer.switch_agent("parent_1".to_owned());
+    renderer.handle(&Event::AgentWatchesUpdated(
+        tau_proto::AgentWatchesUpdated {
+            session_id: "s1".into(),
+            watcher_id: agent_id("parent_1"),
+            watched_agent_ids: vec![agent_id("engineer_1")],
+            changed_agent_id: Some(agent_id("engineer_1")),
+            cause: tau_proto::AgentWatchUpdateCause::AgentStart,
+        },
+    ));
+    renderer.handle(&Event::ProviderResponseUpdated(ProviderResponseUpdated {
+        agent_id: agent_id("engineer_1"),
+        ..provider_response_delta_update(
+            "ap-engineer_1-0",
+            "working",
+            None,
+            tau_proto::PromptOriginator::Extension {
+                name: "__harness__".into(),
+                query_id: "parent-query".to_owned(),
+            },
+        )
+    }));
+    sync(&handle);
+
+    assert!(eventually_screen_contains(
+        &vt,
+        100,
+        "watching [engineer_1] @engineer_1",
+    ));
+
+    renderer.handle(&Event::ProviderResponseFinished(ProviderResponseFinished {
+        agent_prompt_id: "ap-engineer_1-0".into(),
+        agent_id: agent_id("engineer_1"),
+        output_items: Vec::new(),
+        stop_reason: ProviderStopReason::EndTurn,
+        error: None,
+        originator: tau_proto::PromptOriginator::Extension {
+            name: "__harness__".into(),
+            query_id: "parent-query".to_owned(),
+        },
+        usage: None,
+        compaction_original_input_tokens: None,
+        compaction_compacted_input_tokens: None,
+        backend: None,
+        provider_response_id: None,
+        ws_pool_delta: None,
+    }));
+    sync(&handle);
+
+    assert!(
+        !vt.screen_contains(100, "watching [engineer_1]"),
+        "watched-agent block should clear by terminal prompt id: {:?}",
+        vt.screen_text(100)
+    );
+}
+
+/// Ensures terminal prompt events tombstone their prompt id so delayed start or
+/// create events cannot resurrect stale watched-agent blocks.
+#[test]
+fn watched_agent_terminal_event_wins_over_delayed_prompt_start() {
+    let (_term, handle, vt) = setup(100, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        cli_test_theme(),
+    );
+
+    renderer.switch_agent("parent_1".to_owned());
+    renderer.handle(&Event::AgentWatchesUpdated(
+        tau_proto::AgentWatchesUpdated {
+            session_id: "s1".into(),
+            watcher_id: agent_id("parent_1"),
+            watched_agent_ids: vec![agent_id("engineer_1")],
+            changed_agent_id: Some(agent_id("engineer_1")),
+            cause: tau_proto::AgentWatchUpdateCause::AgentStart,
+        },
+    ));
+    renderer.handle(&Event::ProviderResponseFinished(ProviderResponseFinished {
+        agent_prompt_id: "ap-engineer_1-0".into(),
+        agent_id: agent_id("engineer_1"),
+        output_items: Vec::new(),
+        stop_reason: ProviderStopReason::EndTurn,
+        error: None,
+        originator: tau_proto::PromptOriginator::Extension {
+            name: "__harness__".into(),
+            query_id: "delegate-1".to_owned(),
+        },
+        usage: None,
+        compaction_original_input_tokens: None,
+        compaction_compacted_input_tokens: None,
+        backend: None,
+        provider_response_id: None,
+        ws_pool_delta: None,
+    }));
+    renderer.handle(&Event::AgentPromptStarted(tau_proto::AgentPromptStarted {
+        session_id: "s1".into(),
+        agent_id: agent_id("engineer_1"),
+        agent_prompt_id: "ap-engineer_1-0".into(),
+        model: "test/model".parse().expect("model id"),
+        originator: tau_proto::PromptOriginator::Extension {
+            name: "__harness__".into(),
+            query_id: "delegate-1".to_owned(),
+        },
+        ctx_id: None,
+    }));
+    renderer.handle(&Event::AgentPromptCreated(AgentPromptCreated {
+        agent_id: agent_id("engineer_1"),
+        originator: tau_proto::PromptOriginator::Extension {
+            name: "__harness__".into(),
+            query_id: "delegate-1".to_owned(),
+        },
+        ..agent_prompt_created("ap-engineer_1-0", "s1")
+    }));
+    sync(&handle);
+
+    assert!(
+        !vt.screen_contains(100, "watching [engineer_1]"),
+        "delayed start/create must not resurrect terminal prompt: {:?}",
+        vt.screen_text(100)
+    );
+}
+
 /// Ensures the now-immediate `agent_start` completion remains informative even
 /// though the child agent's final answer is delivered later through
 /// `agent_watch` notifications.
+
 #[test]
 fn immediate_agent_start_completion_shows_started_agent_and_prompt_stats() {
     let (_term, handle, vt) = setup(100, 24);

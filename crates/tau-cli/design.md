@@ -68,6 +68,24 @@ those complete watcher snapshots so it can render current-agent status such as
 cleared on session reset and rebuilt from live or replayed watch snapshots; they
 must not mutate display names or durable transcript state.
 
+Two agent-state concepts are intentionally distinct:
+
+- `active` / `suspended` is UI navigation state. It controls whether an agent is
+  selectable as a view, appears in switching/autocomplete sets, and can receive
+  user prompts from the terminal.
+- `running` / `waiting` is execution state. It controls whether an agent is
+  currently processing a turn after receiving a prompt and before the provider
+  response or prompt termination makes that turn terminal.
+
+Watched-agent `watching` blocks and the bottom status `@N` side-agent count use
+the running/waiting concept, not the navigation concept. Watches identify the
+observed agents, prompt/provider lifecycle events maintain the active prompt ids
+that define running turns, and stats/turn-stats events only add counters/details
+to those already-running indicators. A watched or non-suspended agent that is
+waiting for a future prompt/message must not be rendered as running. The `@N`
+status chip counts running side agents and excludes the currently visible agent,
+which is already named on the left side of the status line.
+
 ## New-agent staging
 
 Status: unconfirmed

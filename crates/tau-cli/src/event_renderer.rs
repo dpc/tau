@@ -105,6 +105,16 @@ pub(crate) struct EventRenderer {
     agent_watchers: HashMap<String, Vec<String>>,
     /// Latest generic operational stats keyed by agent id.
     agent_stats: HashMap<String, tau_proto::AgentStatsUpdated>,
+    /// In-flight `agent_prompt_id`s keyed by the agent currently producing a
+    /// response.
+    active_agent_prompts: HashMap<String, HashSet<String>>,
+    /// Prompt ids whose terminal event has already arrived.
+    ///
+    /// Provider and harness events can be delayed or replayed out of the ideal
+    /// order from the renderer's perspective. Once a prompt is terminal, later
+    /// start/create/update events for the same id must not resurrect watched
+    /// status blocks or the active side-agent count.
+    terminal_agent_prompts: HashSet<String>,
     /// Active watched-agent indicator blocks keyed by watched agent id.
     watched_agent_blocks: HashMap<String, tau_cli_term::BlockId>,
     /// Shared current visible agent mirror for prompt submission.
@@ -1216,6 +1226,8 @@ impl EventRenderer {
             watched_agents: HashMap::new(),
             agent_watchers: HashMap::new(),
             agent_stats: HashMap::new(),
+            active_agent_prompts: HashMap::new(),
+            terminal_agent_prompts: HashSet::new(),
             watched_agent_blocks: HashMap::new(),
             current_agent_state: std::sync::Arc::new(std::sync::Mutex::new(None)),
             draft_retargeter: None,
@@ -1515,11 +1527,7 @@ impl EventRenderer {
             .unwrap_or_default();
         let active: Vec<String> = watched
             .into_iter()
-            .filter(|agent_id| {
-                self.agent_stats.get(agent_id).is_some_and(|stats| {
-                    stats.runtime_state == tau_proto::AgentRuntimeState::Running
-                })
-            })
+            .filter(|agent_id| self.agent_has_active_prompt(agent_id))
             .collect();
         let active_set: HashSet<_> = active.iter().cloned().collect();
         let stale: Vec<_> = self
@@ -1546,6 +1554,55 @@ impl EventRenderer {
             }
         }
         self.handle.redraw();
+    }
+
+    fn agent_has_active_prompt(&self, agent_id: &str) -> bool {
+        self.active_agent_prompts
+            .get(agent_id)
+            .is_some_and(|prompts| !prompts.is_empty())
+    }
+
+    fn mark_agent_prompt_active(&mut self, agent_id: &str, agent_prompt_id: &str) {
+        if self.terminal_agent_prompts.contains(agent_prompt_id) {
+            return;
+        }
+        self.remove_active_agent_prompt(agent_prompt_id);
+        self.active_agent_prompts
+            .entry(agent_id.to_owned())
+            .or_default()
+            .insert(agent_prompt_id.to_owned());
+        self.render_model_status_if_present();
+        self.refresh_watched_agent_blocks();
+    }
+
+    fn mark_known_agent_prompt_active(
+        &mut self,
+        agent_prompt_id: &str,
+        originator: &tau_proto::PromptOriginator,
+    ) {
+        if let Some(agent_id) = self
+            .prompt_agents
+            .get(agent_prompt_id)
+            .cloned()
+            .or_else(|| self.agent_id_for_originator(originator))
+        {
+            self.mark_agent_prompt_active(&agent_id, agent_prompt_id);
+        }
+    }
+
+    fn mark_agent_prompt_inactive(&mut self, _agent_id: &str, agent_prompt_id: &str) {
+        self.terminal_agent_prompts
+            .insert(agent_prompt_id.to_owned());
+        self.remove_active_agent_prompt(agent_prompt_id);
+        self.render_model_status_if_present();
+        self.refresh_watched_agent_blocks();
+    }
+
+    fn remove_active_agent_prompt(&mut self, agent_prompt_id: &str) {
+        self.active_agent_prompts.retain(|_, prompts| {
+            prompts.remove(agent_prompt_id);
+            !prompts.is_empty()
+        });
     }
 
     fn clear_watched_agent_blocks(&mut self) {
@@ -2401,6 +2458,8 @@ impl EventRenderer {
         self.watched_agents.clear();
         self.agent_watchers.clear();
         self.agent_stats.clear();
+        self.active_agent_prompts.clear();
+        self.terminal_agent_prompts.clear();
         self.clear_watched_agent_blocks();
         if let Ok(mut agents) = self.known_agents.lock() {
             agents.clear();
@@ -2700,18 +2759,11 @@ impl EventRenderer {
     }
 
     fn active_side_agent_count(&self) -> usize {
-        let live = self
-            .live_agents
-            .lock()
-            .map(|agents| agents.clone())
-            .unwrap_or_default();
-        let suspended = self
-            .suspended_agents
-            .lock()
-            .map(|agents| agents.clone())
-            .unwrap_or_default();
-        live.iter()
-            .filter(|agent| !suspended.contains(*agent))
+        self.active_agent_prompts
+            .iter()
+            .filter(|(agent_id, prompts)| {
+                !prompts.is_empty() && self.current_agent_id.as_deref() != Some(agent_id.as_str())
+            })
             .count()
     }
 
@@ -3410,6 +3462,10 @@ impl EventRenderer {
                 self.mark_agent_live(agent_id.clone());
                 self.prompt_agents
                     .insert(prompt.agent_prompt_id.to_string(), agent_id);
+                self.mark_agent_prompt_active(
+                    prompt.agent_id.as_str(),
+                    prompt.agent_prompt_id.as_str(),
+                );
                 true
             }
             Event::AgentPromptStarted(prompt) => {
@@ -3417,6 +3473,10 @@ impl EventRenderer {
                 self.mark_agent_live(agent_id.clone());
                 self.prompt_agents
                     .insert(prompt.agent_prompt_id.to_string(), agent_id);
+                self.mark_agent_prompt_active(
+                    prompt.agent_id.as_str(),
+                    prompt.agent_prompt_id.as_str(),
+                );
                 true
             }
             Event::AgentPromptTerminated(terminated) => {
@@ -3426,6 +3486,10 @@ impl EventRenderer {
                 } else {
                     self.mark_agent_suspended(&agent_id);
                 }
+                self.mark_agent_prompt_inactive(
+                    terminated.agent_id.as_str(),
+                    terminated.agent_prompt_id.as_str(),
+                );
                 true
             }
             Event::AgentTurnStatsUpdated(stats) => {
@@ -3437,6 +3501,21 @@ impl EventRenderer {
                 }
                 true
             }
+            Event::ProviderPromptSubmitted(submitted) => {
+                self.mark_known_agent_prompt_active(
+                    submitted.agent_prompt_id.as_str(),
+                    &submitted.originator,
+                );
+                true
+            }
+            Event::ProviderResponseUpdated(update) => {
+                let agent_id = update.agent_id.to_string();
+                let agent_prompt_id = update.agent_prompt_id.as_str();
+                self.prompt_agents
+                    .insert(agent_prompt_id.to_owned(), agent_id.clone());
+                self.mark_agent_prompt_active(&agent_id, agent_prompt_id);
+                true
+            }
             _ => false,
         }
     }
@@ -3445,6 +3524,10 @@ impl EventRenderer {
         match event {
             Event::ProviderResponseFinished(finished) => {
                 let agent_id = finished.agent_id.to_string();
+                self.mark_agent_prompt_inactive(
+                    finished.agent_id.as_str(),
+                    finished.agent_prompt_id.as_str(),
+                );
                 let requested_tools = tool_calls_from_output_items(&finished.output_items);
                 if finished.originator.is_user()
                     || (finished.error.is_none()
