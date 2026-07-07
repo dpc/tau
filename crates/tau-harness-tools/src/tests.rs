@@ -459,6 +459,113 @@ fn delegate_result_includes_only_caller_and_sub_agent_ids() {
     assert_eq!(cbor_map_text(&value, "output"), None);
 }
 
+/// Ensures the built-in `agent_start` tool's immediate success descriptor
+/// contains the started agent id and prompt-size metadata that replaced the old
+/// long-running delegate progress line.
+#[test]
+fn agent_start_success_display_names_started_agent_and_prompt_stats() {
+    // Immediate `agent_start` completion no longer carries the child's final
+    // answer, so its display descriptor must still give the user useful spawn
+    // metadata in the normal tool-call block.
+    let display = agent_start_success_display(
+        "review",
+        "engineer_child",
+        ToolUseStats {
+            matches: None,
+            lines: Some(2),
+            bytes: Some(12),
+        },
+    );
+
+    assert_eq!(display.args, "[review]");
+    assert_eq!(display.stats.lines, Some(2));
+    assert_eq!(display.stats.bytes, Some(12));
+    assert_eq!(display.info_chips, vec!["@engineer_child"]);
+    assert_eq!(display.status, ToolUseStatus::Success);
+    assert_eq!(display.status_text, "started");
+}
+
+#[derive(Default)]
+struct RecordingAgentStartFinisher {
+    call: Option<RecordedAgentStartFinish>,
+}
+
+struct RecordedAgentStartFinish {
+    conversation_id: AgentId,
+    call_id: ToolCallId,
+    tool_name: ToolName,
+    tool_type: ToolType,
+    result: CborValue,
+    display: Option<ToolUseState>,
+}
+
+impl AgentStartSuccessFinisher for RecordingAgentStartFinisher {
+    fn finish_agent_start_success(
+        &mut self,
+        conversation_id: &AgentId,
+        call_id: ToolCallId,
+        tool_name: ToolName,
+        tool_type: ToolType,
+        result: CborValue,
+        display: Option<ToolUseState>,
+    ) {
+        self.call = Some(RecordedAgentStartFinish {
+            conversation_id: conversation_id.clone(),
+            call_id,
+            tool_name,
+            tool_type,
+            result,
+            display,
+        });
+    }
+}
+
+/// Ensures the production completion helper wires the informative display into
+/// the actual finish call, preventing regressions where `agent_start` silently
+/// returns to an unadorned `None` display.
+#[test]
+fn finish_agent_start_success_passes_informative_display() {
+    let mut finisher = RecordingAgentStartFinisher::default();
+    finish_agent_start_success(
+        &mut finisher,
+        &AgentId::parse("parent-cid").expect("valid agent id"),
+        ToolCallId::from("call-1"),
+        ToolName::new(AGENT_START_TOOL_NAME),
+        ToolType::Function,
+        AgentStartSuccess {
+            self_agent_id: "engineer_parent",
+            agent_id: "engineer_child",
+            task_name: "review",
+            prompt_stats: ToolUseStats {
+                matches: None,
+                lines: Some(2),
+                bytes: Some(12),
+            },
+        },
+    );
+    let call = finisher.call.expect("finish call recorded");
+    let display = call.display.expect("informative display is attached");
+
+    assert_eq!(call.conversation_id.as_str(), "parent-cid");
+    assert_eq!(call.call_id.as_str(), "call-1");
+    assert_eq!(call.tool_name.as_str(), AGENT_START_TOOL_NAME);
+    assert_eq!(call.tool_type, ToolType::Function);
+    assert_eq!(
+        cbor_map_text(&call.result, "self_agent_id"),
+        Some("engineer_parent")
+    );
+    assert_eq!(
+        cbor_map_text(&call.result, "sub_agent_id"),
+        Some("engineer_child")
+    );
+    assert_eq!(display.args, "[review]");
+    assert_eq!(display.stats.lines, Some(2));
+    assert_eq!(display.stats.bytes, Some(12));
+    assert_eq!(display.info_chips, vec!["@engineer_child"]);
+    assert_eq!(display.status, ToolUseStatus::Success);
+    assert_eq!(display.status_text, "started");
+}
+
 #[test]
 fn skill_search_guidance_omits_content_hint_when_content_was_already_searched() {
     let (result, _) = skill_search_result(

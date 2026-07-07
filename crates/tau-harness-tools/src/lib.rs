@@ -324,14 +324,16 @@ impl BuiltinTools {
             state.next_delegate_query_id += 1;
             query_id
         };
+        let prompt_stats = ToolUseStats::for_text(&parsed.prompt);
+        let task_name = parsed.task_name;
         let start_request = StartAgentRequest {
             parent_agent: None,
             query_id: query_id.clone(),
             instruction: delegate_instruction(&self_agent_id, &parsed.prompt),
             role: parsed.role,
-            input_stats: ToolUseStats::for_text(&parsed.prompt),
+            input_stats: prompt_stats,
             tool_call_id: Some(call_id.clone()),
-            task_name: Some(parsed.task_name),
+            task_name: Some(task_name.clone()),
         };
         let agent_id = match host.enqueue_start_agent_request_without_draining(start_request) {
             Ok(agent_id) => agent_id,
@@ -362,13 +364,18 @@ impl BuiltinTools {
             true,
             tau_proto::AgentWatchUpdateCause::AgentStart,
         );
-        host.finish_tool_with_cbor_result(
+        finish_agent_start_success(
+            host,
             cid,
             call_id,
             visible_tool_name,
             call.tool_type,
-            delegate_result_value(&self_agent_id, &agent_id),
-            None,
+            AgentStartSuccess {
+                self_agent_id: &self_agent_id,
+                agent_id: &agent_id,
+                task_name: &task_name,
+                prompt_stats,
+            },
         );
         host.drain_start_agent_requests()
     }
@@ -491,6 +498,86 @@ impl BuiltinTools {
                 host.prune_agent_watch(&watcher_id, sender_id);
             }
         }
+    }
+}
+
+trait AgentStartSuccessFinisher {
+    fn finish_agent_start_success(
+        &mut self,
+        conversation_id: &AgentId,
+        call_id: ToolCallId,
+        tool_name: ToolName,
+        tool_type: ToolType,
+        result: CborValue,
+        display: Option<ToolUseState>,
+    );
+}
+
+impl AgentStartSuccessFinisher for InternalToolHost<'_> {
+    fn finish_agent_start_success(
+        &mut self,
+        conversation_id: &AgentId,
+        call_id: ToolCallId,
+        tool_name: ToolName,
+        tool_type: ToolType,
+        result: CborValue,
+        display: Option<ToolUseState>,
+    ) {
+        self.finish_tool_with_cbor_result(
+            conversation_id,
+            call_id,
+            tool_name,
+            tool_type,
+            result,
+            display,
+        );
+    }
+}
+
+struct AgentStartSuccess<'a> {
+    self_agent_id: &'a str,
+    agent_id: &'a str,
+    task_name: &'a str,
+    prompt_stats: ToolUseStats,
+}
+
+fn finish_agent_start_success(
+    finisher: &mut impl AgentStartSuccessFinisher,
+    conversation_id: &AgentId,
+    call_id: ToolCallId,
+    tool_name: ToolName,
+    tool_type: ToolType,
+    success: AgentStartSuccess<'_>,
+) {
+    finisher.finish_agent_start_success(
+        conversation_id,
+        call_id,
+        tool_name,
+        tool_type,
+        delegate_result_value(success.self_agent_id, success.agent_id),
+        Some(agent_start_success_display(
+            success.task_name,
+            success.agent_id,
+            success.prompt_stats,
+        )),
+    );
+}
+
+fn agent_start_success_display(
+    task_name: &str,
+    agent_id: &str,
+    prompt_stats: ToolUseStats,
+) -> ToolUseState {
+    ToolUseState {
+        // Pending `agent_start` args may include `+role` while the model is
+        // still choosing/starting work. The immediate success line instead
+        // identifies the concrete spawned agent with the `@…` chip below.
+        args: format!("[{task_name}]"),
+        stats: prompt_stats,
+        info_chips: vec![format!("@{agent_id}")],
+        status: ToolUseStatus::Success,
+        status_text: "started".to_owned(),
+        ..Default::default()
     }
 }
 

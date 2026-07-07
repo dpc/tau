@@ -5714,6 +5714,60 @@ fn watched_agent_stats_redraw_active_indicator() {
     );
 }
 
+/// Ensures the now-immediate `agent_start` completion remains informative even
+/// though the child agent's final answer is delivered later through
+/// `agent_watch` notifications.
+#[test]
+fn immediate_agent_start_completion_shows_started_agent_and_prompt_stats() {
+    let (_term, handle, vt) = setup(100, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        cli_test_theme(),
+    );
+
+    renderer.handle(&tool_started(
+        "delegate-call",
+        "agent_start",
+        CborValue::Map(Vec::new()),
+    ));
+    renderer.handle(&Event::ToolResult(ToolResult {
+        call_id: "delegate-call".into(),
+        tool_name: tau_proto::ToolName::new("agent_start"),
+        tool_type: tau_proto::ToolType::Function,
+        result: CborValue::Map(Vec::new()),
+        kind: tau_proto::ToolResultKind::Final,
+        display: Some(tau_proto::ToolUseState {
+            args: "[audit]".into(),
+            stats: tau_proto::ToolUseStats {
+                matches: None,
+                lines: Some(2),
+                bytes: Some(12),
+            },
+            info_chips: vec!["@engineer_child".into()],
+            status: tau_proto::ToolUseStatus::Success,
+            status_text: "started".into(),
+            ..Default::default()
+        }),
+        originator: tau_proto::PromptOriginator::User,
+    }));
+    sync(&handle);
+
+    let rows = vt.screen_text(100);
+    let line = rows
+        .iter()
+        .find(|row| row.contains("agent_start"))
+        .expect("agent_start completion line");
+    assert!(
+        line.contains("agent_start [audit] 2L, 12B @engineer_child"),
+        "immediate agent_start completion should include spawned id and prompt size: {rows:?}",
+    );
+    assert!(
+        line.contains("started"),
+        "immediate agent_start completion should use an informative success status: {rows:?}",
+    );
+}
+
 #[test]
 fn provider_tool_error_before_tool_started_is_ignored() {
     let (_term, handle, vt) = setup(80, 24);
