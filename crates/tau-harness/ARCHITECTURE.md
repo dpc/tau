@@ -50,6 +50,12 @@ through tool results and follow-up model calls. While the turn is waiting on
 tools, the harness emits only prompt-less stats (`agent_prompt_id: null`) so UI
 consumers do not attach tool-wait samples to a completed provider prompt.
 
+While a stats turn is active, the runtime loop schedules a sampled
+`agent.turn_stats_updated` emit once per second even if no provider update
+arrives. These idle samples are valid before the first output byte and while the
+cumulative byte count is unchanged; they exist so UIs can advance elapsed time
+and show a zero interval rate during quiet provider periods.
+
 Terminal prompt-associated samples must be emitted before
 `provider.response_finished` or `agent.prompt_terminated`; after the terminal
 event, runtime stats are cleared without another prompt-associated emit. Paths
@@ -334,10 +340,10 @@ transient deltas in durable replay. If an update has no public deltas, status,
 or compaction after stripping `semantic_output`, the harness suppresses the
 provider update and publishes only the derived stats event when sampling says it
 is useful.
-The harness also owns `agent.turn_stats_updated`: after accepted provider deltas
-and turn phase transitions it publishes content-free current/previous turn stats
-samples as transient operational events. Providers and UI clients must not forge
-those stats through fallback emit paths.
+The harness also owns `agent.turn_stats_updated`: after accepted provider
+deltas, turn phase transitions, and runtime-loop stats deadlines it publishes
+content-free current/previous turn stats samples as transient operational events.
+Providers and UI clients must not forge those stats through fallback emit paths.
 
 ## Prompt dispatch lifecycle split
 

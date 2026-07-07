@@ -154,10 +154,13 @@ but keep it in memory only; `agent.started.ephemeral` marks that boundary.
 - **`agent.turn_stats_updated`** — Transient, content-free live stats for an
   active agent turn. The harness publishes `current` and `previous` cumulative
   samples containing semantic output bytes sent and elapsed turn microseconds so
-  consumers can calculate deltas/rates directly. Treat `turn_id` as an opaque
-  turn identifier; `agent_prompt_id` is absent while waiting on tools.
-  It is operational UI state, not transcript content, and is not replayed from
-  durable history.
+  consumers can calculate deltas/rates directly. Periodic idle samples are
+  valid, including pre-output zero-byte samples and unchanged-byte samples with a
+  zero interval rate; consumers should compute interval rates from
+  `current - previous` and whole-turn averages from `current`. Treat `turn_id`
+  as an opaque turn identifier; `agent_prompt_id` is absent while waiting on
+  tools. It is operational UI state, not transcript content, and is not replayed
+  from durable history.
 
 ## Provider execution
 

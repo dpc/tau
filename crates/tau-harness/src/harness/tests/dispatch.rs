@@ -5053,6 +5053,68 @@ fn agent_turn_stats_chain_and_clear_after_final_response() {
     h.shutdown().expect("shutdown");
 }
 
+/// Ensures the runtime loop has a stats deadline for an active turn even before
+/// any output bytes arrive, so quiet provider periods wake the loop instead of
+/// leaving the live progress indicator stale indefinitely.
+#[test]
+fn agent_turn_stats_deadline_wakes_idle_runtime_loop() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    h.selected_model = Some("test/model".into());
+
+    let cid = ensure_test_user_agent(&mut h);
+    let spid: AgentPromptId = "sp-turn-stats-idle-deadline".into();
+    seed_agent_thinking(&mut h, &cid, spid.as_str());
+    h.prompt_agents.insert(spid.clone(), cid.clone());
+    h.start_or_update_agent_turn_stats(&cid, spid.clone());
+    {
+        let stats = h
+            .agents
+            .get_mut(&cid)
+            .expect("agent should remain loaded")
+            .turn_stats
+            .as_mut()
+            .expect("turn stats should be active");
+        stats.started_at = stats
+            .started_at
+            .checked_sub(crate::harness::AGENT_TURN_STATS_SAMPLE_INTERVAL)
+            .expect("backdate stats start");
+        stats.last_emitted_at = stats
+            .last_emitted_at
+            .checked_sub(crate::harness::AGENT_TURN_STATS_SAMPLE_INTERVAL)
+            .expect("backdate stats deadline");
+    }
+
+    assert!(
+        h.next_runtime_deadline()
+            .is_some_and(|deadline| deadline <= std::time::Instant::now()),
+        "active stats turn should give the runtime loop an immediate deadline"
+    );
+    h.tx.send(crate::event::HarnessEvent::Disconnected {
+        connection_id: "queued-unrelated-event".into(),
+    })
+    .expect("queue unrelated event");
+    assert!(
+        matches!(
+            h.next_runtime_event(),
+            crate::harness::RuntimeEventWait::Event(_)
+        ),
+        "queued unrelated event should not block due stats processing"
+    );
+    let stats = agent_turn_stats_events(&h);
+    let idle = stats.last().expect("idle stats sample");
+    assert_eq!(idle.agent_prompt_id.as_ref(), Some(&spid));
+    assert_eq!(idle.current.output_bytes_sent, 0);
+    assert_eq!(idle.previous.output_bytes_sent, 0);
+    assert!(
+        idle.current.elapsed_micros > idle.previous.elapsed_micros,
+        "idle sample should advance elapsed time: {idle:#?}"
+    );
+
+    h.shutdown().expect("shutdown");
+}
+
 /// Ensures provider-private semantic-output snapshots for streamed tool input
 /// produce harness-owned public turn stats before the provider final response,
 /// without leaking an empty provider progress event to subscribers or durable

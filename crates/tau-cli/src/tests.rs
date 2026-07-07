@@ -4380,13 +4380,23 @@ fn agent_turn_stats_update_suffixes_live_indicator_until_finish() {
         "sp-progress",
         "s1",
     )));
+    let mut pre_output_stats = agent_turn_stats("sp-progress", 0, 0);
+    pre_output_stats.current.elapsed_micros = 1_000_000;
+    pre_output_stats.previous.elapsed_micros = 0;
+    renderer.handle(&Event::AgentTurnStatsUpdated(pre_output_stats));
+    sync(&handle);
+    assert!(
+        vt.screen_contains(80, "… (1s, 0B, Δ0B/s, 0B/s)"),
+        "pre-output stats samples must still refresh elapsed time: {:?}",
+        vt.screen_text(80)
+    );
     renderer.handle(&Event::AgentTurnStatsUpdated(agent_turn_stats(
         "sp-progress",
         12 * 1024,
         4 * 1024,
     )));
     sync(&handle);
-    assert!(vt.screen_contains(80, "… (12KB, 8KB/s)"));
+    assert!(vt.screen_contains(80, "… (2s, 12KB, Δ8KB/s, 6KB/s)"));
     assert!(!vt.screen_contains(80, "shell_command"));
     assert!(!vt.screen_contains(80, "tool args"));
     assert!(!vt.screen_contains(80, "tools,"));
@@ -4406,8 +4416,19 @@ fn agent_turn_stats_update_suffixes_live_indicator_until_finish() {
     }));
     sync(&handle);
     assert!(
-        vt.screen_contains(80, "… (12KB, 8KB/s)"),
+        vt.screen_contains(80, "… (2s, 12KB, Δ8KB/s, 6KB/s)"),
         "updates without a fresh stats sample must not clear cached stats: {:?}",
+        vt.screen_text(80)
+    );
+
+    let mut idle_stats = agent_turn_stats("sp-progress", 12 * 1024, 12 * 1024);
+    idle_stats.current.elapsed_micros = 3_000_000;
+    idle_stats.previous.elapsed_micros = 2_000_000;
+    renderer.handle(&Event::AgentTurnStatsUpdated(idle_stats));
+    sync(&handle);
+    assert!(
+        vt.screen_contains(80, "… (3s, 12KB, Δ0B/s, 4KB/s)"),
+        "idle stats samples must show elapsed time, zero interval rate, and total rate: {:?}",
         vt.screen_text(80)
     );
 
@@ -4416,7 +4437,7 @@ fn agent_turn_stats_update_suffixes_live_indicator_until_finish() {
         Vec::new(),
     )));
     sync(&handle);
-    assert!(!vt.screen_contains(80, "… (12KB, 8KB/s)"));
+    assert!(!vt.screen_contains(80, "… (2s, 12KB, Δ8KB/s, 6KB/s)"));
 }
 
 /// Ensures a stale prompt-associated stats sample received after the final
@@ -4446,7 +4467,7 @@ fn late_agent_turn_stats_after_finish_does_not_recreate_live_indicator() {
     sync(&handle);
 
     assert!(vt.screen_contains(80, "done"));
-    assert!(!vt.screen_contains(80, "… (12KB, 8KB/s)"));
+    assert!(!vt.screen_contains(80, "… (2s, 12KB, Δ8KB/s, 6KB/s)"));
 }
 
 /// Ensures visible assistant streaming remains content-focused: generic turn
@@ -4484,7 +4505,7 @@ fn provider_visible_update_omits_turn_stats_suffix() {
     }));
     sync(&handle);
     assert!(vt.screen_contains(80, "Hello …"));
-    assert!(!vt.screen_contains(80, "Hello … (5B, 5B/s)"));
+    assert!(!vt.screen_contains(80, "Hello … (2s, 5B, Δ5B/s, 2B/s)"));
 
     renderer.handle(&Event::ProviderResponseFinished(finished_response(
         "sp-visible-progress",
@@ -4492,7 +4513,7 @@ fn provider_visible_update_omits_turn_stats_suffix() {
     )));
     sync(&handle);
     assert!(vt.screen_contains(80, "Hello"));
-    assert!(!vt.screen_contains(80, "(5B, 5B/s)"));
+    assert!(!vt.screen_contains(80, "(2s, 5B, Δ5B/s, 2B/s)"));
 }
 
 #[test]

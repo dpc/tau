@@ -44,9 +44,10 @@ Agent turn stats are a standalone live-indicator status line. The CLI may
 remember the latest `agent.turn_stats_updated` sample for an in-flight prompt
 only to repaint the transient ellipsis block, and derives bytes/rate from the
 event's `current` and `previous` samples. The CLI renders a generic
-`(bytes, bytes/s)` suffix only on that transient indicator, not on visible
-assistant text, and must not copy stats text into editor current-response state,
-prompt-stdin capture, durable transcripts, or final response rendering.
+`(elapsed, total bytes, Δinterval rate, average rate)` suffix only on that
+transient indicator, not on visible assistant text, and must not copy stats text
+into editor current-response state, prompt-stdin capture, durable transcripts,
+or final response rendering.
 
 ## New-agent staging
 

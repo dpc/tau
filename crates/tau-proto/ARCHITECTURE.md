@@ -93,6 +93,11 @@ is an opaque [`AgentTurnId`], while `agent_prompt_id` identifies only the
 provider prompt currently active; it is absent during tool-wait samples and
 after a prompt is no longer active.
 
+Periodic idle samples with zero output bytes, unchanged output bytes, or a zero
+byte delta are valid. Consumers should compute interval rates from
+`current - previous` and whole-turn average rates from `current`, rather than
+assuming every sample corresponds to newly streamed provider content.
+
 `provider.response_updated.semantic_output` is a provider-to-harness
 content-free byte snapshot for non-visible generated output such as streamed
 tool/custom-tool input. It is not public UI progress state: harnesses consume and

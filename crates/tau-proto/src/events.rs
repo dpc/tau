@@ -3102,6 +3102,9 @@ pub struct AgentPromptPrewarmRequested {
 /// The harness owns publication of this event. It is an operational snapshot,
 /// not transcript content: consumers may use it to render live progress, but
 /// must not store it as assistant/user text or feed it back into prompts.
+/// Periodic idle samples may report zero or unchanged output bytes; consumers
+/// should derive interval rates from `current - previous` and whole-turn
+/// average rates from `current`.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct AgentTurnStatsUpdated {
     /// Stable id for this agent turn.

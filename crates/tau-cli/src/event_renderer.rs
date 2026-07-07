@@ -980,9 +980,7 @@ fn turn_stats_indicator_suffix(stats: Option<&tau_proto::AgentTurnStatsUpdated>)
         return String::new();
     };
     let total_bytes = stats.current.output_bytes_sent;
-    if total_bytes == 0 {
-        return String::new();
-    }
+    let elapsed_seconds = stats.current.elapsed_micros / 1_000_000;
     let bytes = format_progress_bytes(total_bytes);
     let delta_micros = stats
         .current
@@ -992,9 +990,12 @@ fn turn_stats_indicator_suffix(stats: Option<&tau_proto::AgentTurnStatsUpdated>)
         .current
         .output_bytes_sent
         .saturating_sub(stats.previous.output_bytes_sent);
-    let bytes_per_sec = delta_bytes.saturating_mul(1_000_000) / delta_micros.max(1);
-    let rate = format!("{}/s", format_progress_bytes(bytes_per_sec));
-    format!(" ({bytes}, {rate})")
+    let delta_bytes_per_sec = delta_bytes.saturating_mul(1_000_000) / delta_micros.max(1);
+    let total_bytes_per_sec =
+        total_bytes.saturating_mul(1_000_000) / stats.current.elapsed_micros.max(1);
+    let delta_rate = format!("{}/s", format_progress_bytes(delta_bytes_per_sec));
+    let total_rate = format!("{}/s", format_progress_bytes(total_bytes_per_sec));
+    format!(" ({elapsed_seconds}s, {bytes}, Δ{delta_rate}, {total_rate})")
 }
 
 fn format_progress_bytes(bytes: u64) -> String {

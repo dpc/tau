@@ -149,9 +149,9 @@ pub(crate) fn background_completion_prompt(call_id: &ToolCallId) -> String {
 enum RuntimeEventWait {
     /// A harness event is ready to be logged and dispatched.
     Event(HarnessEvent),
-    /// A background-tool deadline elapsed and was processed; the loop should
-    /// poll again.
-    BackgroundDeadlineElapsed,
+    /// A runtime deadline elapsed and was processed; the loop should poll
+    /// again.
+    DeadlineElapsed,
     /// All senders for the harness event channel have disconnected.
     Disconnected,
 }
@@ -4135,7 +4135,7 @@ impl Harness {
             }
             let harness_evt = match self.next_runtime_event() {
                 RuntimeEventWait::Event(event) => event,
-                RuntimeEventWait::BackgroundDeadlineElapsed => continue,
+                RuntimeEventWait::DeadlineElapsed => continue,
                 RuntimeEventWait::Disconnected => break,
             };
             self.log_event(&harness_evt);
@@ -4167,14 +4167,14 @@ impl Harness {
     }
 
     fn next_runtime_event(&mut self) -> RuntimeEventWait {
-        self.process_background_deadlines();
-        if let Some(deadline) = self.tool_turn.next_background_deadline() {
+        self.process_runtime_deadlines();
+        if let Some(deadline) = self.next_runtime_deadline() {
             let timeout = deadline.saturating_duration_since(Instant::now());
             match self.rx.recv_timeout(timeout) {
                 Ok(event) => RuntimeEventWait::Event(event),
                 Err(mpsc::RecvTimeoutError::Timeout) => {
-                    self.process_background_deadlines();
-                    RuntimeEventWait::BackgroundDeadlineElapsed
+                    self.process_runtime_deadlines();
+                    RuntimeEventWait::DeadlineElapsed
                 }
                 Err(mpsc::RecvTimeoutError::Disconnected) => RuntimeEventWait::Disconnected,
             }
@@ -4184,6 +4184,21 @@ impl Harness {
                 .map(RuntimeEventWait::Event)
                 .unwrap_or(RuntimeEventWait::Disconnected)
         }
+    }
+
+    fn process_runtime_deadlines(&mut self) {
+        self.process_background_deadlines();
+        self.process_agent_turn_stats_deadlines();
+    }
+
+    fn next_runtime_deadline(&self) -> Option<Instant> {
+        [
+            self.tool_turn.next_background_deadline(),
+            self.next_agent_turn_stats_deadline(),
+        ]
+        .into_iter()
+        .flatten()
+        .min()
     }
 
     fn handle_runtime_event(
@@ -10481,12 +10496,11 @@ impl Harness {
                     .as_micros()
                     .min(u128::from(u64::MAX)) as u64,
             };
-            let bytes_changed = current.output_bytes_sent != stats.last_emitted.output_bytes_sent;
             let first_byte_sample =
                 stats.last_emitted.output_bytes_sent == 0 && current.output_bytes_sent > 0;
             let interval_elapsed = now.saturating_duration_since(stats.last_emitted_at)
                 >= AGENT_TURN_STATS_SAMPLE_INTERVAL;
-            if !mode.is_forced() && !(bytes_changed && (first_byte_sample || interval_elapsed)) {
+            if !(mode.is_forced() || first_byte_sample || interval_elapsed) {
                 return None;
             }
             let agent_id = agent.agent_id.as_ref().map(crate::parse_agent_id)?;
@@ -10518,6 +10532,37 @@ impl Harness {
             Some(HARNESS_CONNECTION_ID),
             Event::AgentTurnStatsUpdated(event),
         );
+    }
+
+    /// Returns the next monotonic runtime instant when an active turn should
+    /// publish a sampled stats update even if no further provider bytes arrive.
+    fn next_agent_turn_stats_deadline(&self) -> Option<Instant> {
+        self.agents
+            .values()
+            .filter_map(|agent| {
+                let stats = agent.turn_stats.as_ref()?;
+                Some(stats.last_emitted_at + AGENT_TURN_STATS_SAMPLE_INTERVAL)
+            })
+            .min()
+    }
+
+    /// Emits due sampled stats updates for active turns so idle provider
+    /// periods still refresh elapsed time and interval rates.
+    fn process_agent_turn_stats_deadlines(&mut self) {
+        let now = Instant::now();
+        let due_agents: Vec<AgentId> = self
+            .agents
+            .iter()
+            .filter_map(|(cid, agent)| {
+                let stats = agent.turn_stats.as_ref()?;
+                let due = now.saturating_duration_since(stats.last_emitted_at)
+                    >= AGENT_TURN_STATS_SAMPLE_INTERVAL;
+                due.then(|| cid.clone())
+            })
+            .collect();
+        for cid in due_agents {
+            self.emit_agent_turn_stats(&cid, AgentTurnStatsEmitMode::Sampled);
+        }
     }
 
     /// Emits the final stats snapshot and clears runtime stats for the turn.
