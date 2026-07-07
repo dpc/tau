@@ -83,7 +83,7 @@ Tau mints durable agent IDs from the harness setting `agents.id_template`. Tau c
 
 ```yaml
 agents:
-  id_template: "{{{{role_group}}}}-{{{{random_alphanumeric 4}}}}"
+  id_template: "{{{{role}}}}-{{{{random_alphanumeric 4}}}}"
   display_name_template: "{{{{role_group}}}}: {{{{task_name}}}}"
 ```
 

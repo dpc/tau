@@ -925,7 +925,7 @@ fn render_self_knowledge_config_content_inserts_config_defaults() {
     assert!(rendered.contains("${XDG_RUNTIME_DIR}/tau/harnesses/"));
     assert!(rendered.contains("session_retention_days: 60"));
     assert!(rendered.contains("show_thinking: true"));
-    assert!(rendered.contains("{{role_group}}-{{random_alphanumeric 4}}"));
+    assert!(rendered.contains("{{role}}-{{random_alphanumeric 4}}"));
     assert!(rendered.contains("{{role_group}}: {{task_name}}"));
     assert!(
         rendered
