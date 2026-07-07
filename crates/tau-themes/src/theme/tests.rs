@@ -207,6 +207,10 @@ fn builtin_default_theme_parses_and_uses_safe_colors() {
     assert_eq!(tool_name.fg, Some(Color::Yellow));
     assert!(tool_name.bg.is_none());
 
+    let watching_name = theme.resolve_style(&StyleName::new(crate::names::WATCHING_NAME));
+    assert_eq!(watching_name.fg, Some(Color::DarkYellow));
+    assert!(watching_name.bg.is_none());
+
     let progress = theme.resolve_style(&StyleName::new(crate::names::PROGRESS_INDICATOR));
     assert_eq!(progress.fg, Some(Color::Cyan));
     assert!(progress.bold);
@@ -237,6 +241,25 @@ fn builtin_theme_names_match_lookup_registry() {
     }
 }
 
+/// Ensures every built-in theme can distinguish passive watched-agent labels
+/// from active tool-call labels.
+#[test]
+fn builtin_watching_name_differs_from_tool_name() {
+    for name in BUILTIN_THEME_NAMES {
+        let theme = Theme::builtin_named(name).expect("built-in theme");
+        let tool_name = theme.resolve_style(&StyleName::new(crate::names::TOOL_NAME));
+        let watching_name = theme.resolve_style(&StyleName::new(crate::names::WATCHING_NAME));
+        assert_ne!(
+            watching_name.fg, tool_name.fg,
+            "{name} should use a different foreground color for watching.name than tool.name"
+        );
+        assert_ne!(
+            watching_name, tool_name,
+            "{name} should render watching.name differently from tool.name"
+        );
+    }
+}
+
 /// Ensures every explicitly configured style in the conservative default theme
 /// stays within the allowed foreground color set and does not set backgrounds.
 #[test]
@@ -248,6 +271,7 @@ fn builtin_default_theme_styles_stay_palette_safe() {
             matches!(
                 style.fg,
                 None | Some(Color::Yellow)
+                    | Some(Color::DarkYellow)
                     | Some(Color::Cyan)
                     | Some(Color::Green)
                     | Some(Color::Red)

@@ -29,6 +29,7 @@ pub const MARKDOWN_ESCAPE: &str = "markdown.escape";
 // Each span has its own style so a theme can paint them differently.
 pub const TOOL_OUTPUT: &str = "tool.output";
 pub const TOOL_NAME: &str = "tool.name";
+pub const WATCHING_NAME: &str = "watching.name";
 pub const TOOL_MODE: &str = "tool.mode";
 pub const TOOL_ARGS: &str = "tool.args";
 pub const TOOL_STATUS_SUCCESS: &str = "tool.status.success";

@@ -26,6 +26,7 @@
     // -- Tool execution --
     "tool.output":          { },
     "tool.name":            { fg: "dark_yellow" },
+    "watching.name":        { fg: "#af5f00" },
     "tool.mode":            { fg: "dark_yellow" },
     "tool.args":            { },
     "tool.status.success":  { fg: "dark_green" },

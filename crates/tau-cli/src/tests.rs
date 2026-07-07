@@ -30,6 +30,7 @@ fn cli_test_theme() -> tau_themes::Theme {
         {
             styles: {
                 "tool.mode": { fg: "yellow" },
+                "watching.name": { fg: "dark_yellow" },
                 "tool.status.success": { fg: "green" },
                 "tool.status.error": { fg: "red" },
                 "status.agents": { fg: "cyan" },
@@ -2770,7 +2771,7 @@ fn watched_agent_stats_route_to_hidden_watcher_owner() {
 
     renderer.switch_agent("worker-1".to_owned());
     sync(&handle);
-    assert!(vt.screen_contains(90, "watching [engineer_1]"));
+    assert!(vt.screen_contains(90, "watching [engineer_1] @engineer_1"));
     assert!(vt.screen_contains(90, "%1/2"));
 }
 
@@ -5826,18 +5827,18 @@ fn watched_agent_stats_redraw_active_indicator() {
     }));
 
     assert!(
-        eventually_screen_contains(&vt, 100, "watching [engineer_1]"),
+        eventually_screen_contains(&vt, 100, "watching [engineer_1] @engineer_1"),
         "watched-agent stats should repaint without an explicit test redraw: {:?}",
         vt.screen_text(100)
     );
     assert!(
-        eventually_screen_contains(&vt, 100, "watching [engineer_1] %3/3"),
+        eventually_screen_contains(&vt, 100, "watching [engineer_1] @engineer_1 %3/3"),
         "watched-agent stats should repaint with tool-call-style counters without an explicit test redraw: {:?}",
         vt.screen_text(100)
     );
     assert!(
         !vt.screen_contains(100, "running tools"),
-        "watched-agent block should use the old agent_start in-progress layout, not prose: {:?}",
+        "watched-agent block should keep compact passive tool-block layout, not prose: {:?}",
         vt.screen_text(100)
     );
 }
@@ -7259,9 +7260,9 @@ fn render_tool_use_state_token_progress_formats_context_like_status_bar() {
     );
 }
 
-/// Ensures the generic watched-agent indicator keeps the old `agent_start`
-/// in-progress block shape while replacing only the leading tool name with the
-/// user-facing `watching` label.
+/// Ensures the generic watched-agent indicator keeps the compact tool-block
+/// shape while using passive styling, an explicit agent-id chip, and no
+/// in-progress ellipsis.
 #[test]
 fn watched_agent_display_uses_tool_block_styles_and_counters() {
     let theme = cli_test_theme();
@@ -7281,14 +7282,11 @@ fn watched_agent_display_uses_tool_block_styles_and_counters() {
         },
     };
 
-    let display = watched_agent_tool_display("review", Some(&stats));
+    let display = watched_agent_tool_display("review", "engineer_1", Some(&stats));
     assert_eq!(display.tool_name, "watching");
     assert_eq!(display.args, "[review]");
     let texts: Vec<&str> = display.suffixes.iter().map(|s| s.text.as_str()).collect();
-    assert_eq!(
-        texts,
-        vec!["%2/3", "#133.4k/200k", tau_proto::PROGRESS_INDICATOR_TEXT]
-    );
+    assert_eq!(texts, vec!["@engineer_1", "%2/3", "#133.4k/200k"]);
 
     let block = render_tool_block(&theme, &display);
     let watching = block
@@ -7299,8 +7297,9 @@ fn watched_agent_display_uses_tool_block_styles_and_counters() {
         .expect("watching tool-name span");
     assert_eq!(
         watching.style,
-        tau_cli_term::resolve::resolve(&theme, tau_themes::names::TOOL_NAME)
+        tau_cli_term::resolve::resolve(&theme, tau_themes::names::WATCHING_NAME)
     );
+    assert_eq!(watching.style.fg, Some(Color::DarkYellow));
 
     let percent_only_stats = tau_proto::AgentStatsUpdated {
         context: tau_proto::AgentContextStats {
@@ -7311,12 +7310,9 @@ fn watched_agent_display_uses_tool_block_styles_and_counters() {
         },
         ..stats
     };
-    let display = watched_agent_tool_display("review", Some(&percent_only_stats));
+    let display = watched_agent_tool_display("review", "engineer_1", Some(&percent_only_stats));
     let texts: Vec<&str> = display.suffixes.iter().map(|s| s.text.as_str()).collect();
-    assert_eq!(
-        texts,
-        vec!["%2/3", "#67%", tau_proto::PROGRESS_INDICATOR_TEXT]
-    );
+    assert_eq!(texts, vec!["@engineer_1", "%2/3", "#67%"]);
 }
 
 #[test]

@@ -910,7 +910,9 @@ avoid full repaints on each token.
 
 The UI ships with a conservative built-in `tau-plain-dark` theme that keeps text
 attributes and limits hard-coded foreground colors to default color plus yellow,
-cyan, green, and red so it remains readable on unusual terminal palettes.
+dark yellow, cyan, green, and red so it remains readable on unusual terminal
+palettes. Dark yellow is reserved for passive watched-agent `watching` labels so
+they are distinct from active yellow tool calls.
 More opinionated built-ins include `tau-dpc` (the previous Tau theme) and
 `tau-plain-light`. `cli.yaml` can set `theme: tau-plain-dark`,
 `theme: tau-plain-light`, `theme: tau-dpc`, or a custom theme name; `TAU_THEME`

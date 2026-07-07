@@ -21,11 +21,12 @@ use crate::markdown_render::{
 };
 use crate::skill_commands::SkillCommandState;
 use crate::tool_render::{
-    CompactionStatus, ToolCallDisplay, ToolSummaryDisplay, build_delegate_completion_display,
-    build_tool_summary_display, diff_payload_counts, extension_status_block, extract_diff,
-    format_token_count, pending_tool_call_display, render_compaction_block, render_diff_tool_block,
-    render_harness_notice, render_multi_diff_tool_block, render_shell_block, render_tool_block,
-    render_tool_use_state, render_turn_stats_block, session_status_block, streaming_block,
+    CompactionStatus, ToolCallDisplay, ToolStatus, ToolSuffixSegment, ToolSummaryDisplay,
+    build_delegate_completion_display, build_tool_summary_display, diff_payload_counts,
+    extension_status_block, extract_diff, format_token_count, pending_tool_call_display,
+    render_compaction_block, render_diff_tool_block, render_harness_notice,
+    render_multi_diff_tool_block, render_shell_block, render_tool_block, render_tool_use_state,
+    render_turn_stats_block, session_status_block, streaming_block,
     streaming_block_with_indicator_suffix, synthesize_fallback_display, system_loaded_block,
     tool_duration_suffix, ui_dir_block,
 };
@@ -1093,13 +1094,14 @@ fn tool_calls_from_output_items(output_items: &[ContextItem]) -> Vec<ToolCallIte
         .collect()
 }
 
-/// Builds the generic tool-call display for a live watched-agent indicator.
+/// Builds the generic tool-block-shaped display for a watched-agent indicator.
 ///
-/// This intentionally synthesizes a [`tau_proto::ToolUseState`] so `watching`
-/// keeps the same layout, counters, and theming as ordinary in-progress tool
-/// blocks instead of reintroducing watched-agent-specific tool UI.
+/// This intentionally reuses [`tau_proto::ToolUseState`] counter formatting so
+/// `watching` keeps the compact generic layout while using passive styling, an
+/// explicit `@agent_id` chip, and no in-progress status suffix.
 pub(crate) fn watched_agent_tool_display(
     label: &str,
+    agent_id: &str,
     stats: Option<&tau_proto::AgentStatsUpdated>,
 ) -> ToolCallDisplay {
     use tau_proto::{ProgressCounter, ProgressUnit, ToolUseState, ToolUseStatus};
@@ -1138,11 +1140,22 @@ pub(crate) fn watched_agent_tool_display(
     let display = ToolUseState {
         args: format!("[{label}]"),
         progress_counters,
-        status: ToolUseStatus::InProgress,
-        status_text: tau_proto::PROGRESS_INDICATOR_TEXT.to_owned(),
+        status: ToolUseStatus::Success,
+        status_text: String::new(),
         ..Default::default()
     };
-    render_tool_use_state("watching", &display)
+    let mut rendered = render_tool_use_state("watching", &display);
+    rendered.tool_name_style = Some(tau_themes::names::WATCHING_NAME);
+    rendered.suffixes.retain(|suffix| !suffix.text.is_empty());
+    rendered.suffixes.insert(
+        0,
+        ToolSuffixSegment {
+            text: format!("@{agent_id}"),
+            status: ToolStatus::Info,
+            no_leading_space: false,
+        },
+    );
+    rendered
 }
 
 impl EventRenderer {
@@ -1550,7 +1563,7 @@ impl EventRenderer {
             .and_then(|names| names.get(agent_id).cloned())
             .unwrap_or_else(|| agent_id.to_owned());
         let stats = self.agent_stats.get(agent_id);
-        let display = watched_agent_tool_display(&label, stats);
+        let display = watched_agent_tool_display(&label, agent_id, stats);
         render_tool_block(&self.theme, &display)
     }
 

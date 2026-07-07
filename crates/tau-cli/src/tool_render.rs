@@ -248,11 +248,12 @@ pub(crate) struct ToolSuffixSegment {
     pub(crate) no_leading_space: bool,
 }
 
-/// Decomposed tool-call label, painted as themed spans:
+/// Decomposed compact tool-block label, painted as themed spans:
 /// `<tool_name> <mode> <args> <range> <suffix...>`.
 #[derive(Clone)]
 pub(crate) struct ToolCallDisplay {
     pub(crate) tool_name: String,
+    pub(crate) tool_name_style: Option<&'static str>,
     pub(crate) mode: String,
     pub(crate) args: String,
     pub(crate) range: Option<String>,
@@ -335,6 +336,7 @@ fn tool_suffix(text: String, status: ToolStatus) -> ToolSuffixSegment {
 pub(crate) fn pending_tool_call_display(tool_name: &str) -> ToolCallDisplay {
     ToolCallDisplay {
         tool_name: tool_name.to_owned(),
+        tool_name_style: None,
         mode: String::new(),
         args: String::new(),
         range: None,
@@ -495,6 +497,7 @@ pub(crate) fn render_tool_use_state(tool_name: &str, display: &ToolUseState) -> 
     suffixes.push(tool_suffix(status_text, status_kind));
     ToolCallDisplay {
         tool_name: tool_name.to_owned(),
+        tool_name_style: None,
         mode: display.mode.clone(),
         args: display.args.clone(),
         range: display.range.as_ref().and_then(format_tool_use_range),
@@ -654,6 +657,7 @@ pub(crate) fn build_tool_summary_display(summary: &ToolSummaryDisplay) -> ToolCa
     }
     ToolCallDisplay {
         tool_name: "tools".to_owned(),
+        tool_name_style: None,
         mode: String::new(),
         args: format!("{}/{}", summary.completed, summary.total),
         range: None,
@@ -714,7 +718,7 @@ pub(crate) fn render_tool_block(
 
     let mut themed = ThemedText::new();
     let output = themed.add_style(names::TOOL_OUTPUT);
-    let name = themed.add_style(names::TOOL_NAME);
+    let name = themed.add_style(display.tool_name_style.unwrap_or(names::TOOL_NAME));
     let mode = themed.add_style(names::TOOL_MODE);
     let args = themed.add_style(names::TOOL_ARGS);
 

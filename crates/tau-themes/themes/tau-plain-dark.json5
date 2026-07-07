@@ -3,7 +3,8 @@
 // This is a conservative subset of the richer `tau-dpc` theme. It keeps semantic
 // emphasis attributes and only uses default terminal color plus yellow, cyan,
 // green, and red foregrounds, which are considered generally safe terminal
-// colors. Other `tau-dpc` colors are dropped or mapped to one of those colors.
+// colors, plus dark yellow for passive watched-agent indicators. Other `tau-dpc`
+// colors are dropped or mapped to one of those colors.
 {
   description: "Conservative dark built-in theme using broadly safe terminal colors.",
   styles: {
@@ -24,6 +25,7 @@
 
     // -- Tool execution --
     "tool.name":            { fg: "yellow" },
+    "watching.name":        { fg: "dark_yellow" },
     "tool.mode":            { fg: "yellow" },
     "tool.status.success":  { fg: "green" },
     "tool.status.error":    { fg: "red" },
