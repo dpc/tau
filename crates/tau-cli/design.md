@@ -255,6 +255,18 @@ shared terminal handle; local output must wait until the actually visible
 snapshot is restored so it cannot be appended to a hidden agent transcript by a
 cross-thread race.
 
+The initial no-agent/start-new-agent screen is not a durable transcript boundary.
+Startup or post-`/session new` status, action, and extension output that is
+visible there is the beginning of the first selected/created agent conversation.
+Selecting that first agent therefore adopts the visible no-agent output in place,
+without replacing the terminal snapshot or clearing scrollback. Pending no-agent
+action completions and extension lifecycle owners are retargeted to the adopted
+agent only in this initial no-swap case so later completions update the same
+visible conversation. Explicit `/agent none` and `/agent new` after leaving an
+agent are different: they intentionally create a protected no-agent snapshot, and
+fresh agents must not inherit output or pending owners from that explicit global
+view.
+
 ## Dynamic action completion snapshot ownership
 
 Status: unconfirmed

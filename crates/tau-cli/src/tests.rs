@@ -1528,6 +1528,81 @@ fn new_agent_after_new_session_does_not_force_full_redraw() {
 }
 
 #[test]
+fn new_session_initial_history_appends_to_first_agent() {
+    // `/session new` can be reached after an explicit no-agent state, but the new
+    // session's start screen is a fresh initial screen. Visible startup history
+    // there should be adopted by the first agent instead of preserved as an
+    // explicit no-agent snapshot.
+    let (_term, handle, vt) = setup(80, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        cli_test_theme(),
+    );
+    renderer.switch_agent("previous-agent".to_owned());
+    renderer.clear_selected_agent();
+    renderer.handle(&Event::SessionStarted(SessionStarted {
+        session_id: "s2".into(),
+        reason: SessionStartReason::New,
+    }));
+    renderer.handle(&Event::ExtensionStarting(tau_proto::ExtensionStarting {
+        instance_id: 88.into(),
+        extension_name: "std-session".into(),
+        pid: Some(456),
+    }));
+    sync(&handle);
+    assert!(vt.screen_contains(80, "extension std-session starting"));
+
+    let full_render_count = handle.full_render_count();
+    renderer.switch_agent("fresh-agent".to_owned());
+    sync(&handle);
+    assert!(vt.screen_contains(80, "extension std-session starting"));
+    assert_eq!(handle.full_render_count(), full_render_count);
+
+    renderer.handle(&Event::ExtensionReady(ExtensionReady {
+        instance_id: 88.into(),
+        extension_name: "std-session".into(),
+        pid: Some(456),
+    }));
+    sync(&handle);
+    assert!(!vt.screen_contains(80, "extension std-session starting"));
+    assert!(vt.screen_contains(80, "extension std-session ready"));
+}
+
+#[test]
+fn delayed_clear_after_new_session_keeps_initial_history_adoptable() {
+    // The input thread also queues a local ClearSelectedAgent when starting a
+    // new session. If the remote SessionStarted(New) wins the race, that delayed
+    // clear must not convert the fresh initial screen into an explicit protected
+    // no-agent snapshot.
+    let (_term, handle, vt) = setup(80, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        cli_test_theme(),
+    );
+    renderer.switch_agent("previous-agent".to_owned());
+    renderer.handle(&Event::SessionStarted(SessionStarted {
+        session_id: "s2".into(),
+        reason: SessionStartReason::New,
+    }));
+    renderer.clear_selected_agent();
+    renderer.handle(&Event::ExtensionStarting(tau_proto::ExtensionStarting {
+        instance_id: 89.into(),
+        extension_name: "std-race".into(),
+        pid: Some(456),
+    }));
+    sync(&handle);
+    assert!(vt.screen_contains(80, "extension std-race starting"));
+
+    let full_render_count = handle.full_render_count();
+    renderer.switch_agent("fresh-agent".to_owned());
+    sync(&handle);
+    assert!(vt.screen_contains(80, "extension std-race starting"));
+    assert_eq!(handle.full_render_count(), full_render_count);
+}
+
+#[test]
 fn selecting_same_agent_does_not_force_full_redraw() {
     // Regression: selecting the already-displayed target agent is a pure no-op
     // for transcript rendering.
@@ -1854,12 +1929,12 @@ fn extension_lifecycle_completion_routes_to_starting_snapshot() {
     assert!(!vt.screen_contains(80, "extension std-test starting"));
 }
 
-/// Extension lifecycle blocks that start on the no-agent screen must stay owned
-/// by that global snapshot when the user switches to a new agent with no prior
-/// hidden state. This prevents the new agent transcript from adopting the
-/// no-agent starting line and leaving it stale when the extension exits.
+/// Extension lifecycle blocks that start on the initial no-agent screen are
+/// part of the first agent conversation and must not be cleared by selecting
+/// that first agent. This protects the startup/agent-selection flow from
+/// redrawing away visible history before the conversation has really begun.
 #[test]
-fn no_agent_extension_lifecycle_completion_routes_to_no_agent_snapshot() {
+fn initial_no_agent_extension_lifecycle_appends_to_first_agent() {
     let (_term, handle, vt) = setup(80, 24);
     let mut renderer = EventRenderer::new(
         handle.clone(),
@@ -1867,6 +1942,47 @@ fn no_agent_extension_lifecycle_completion_routes_to_no_agent_snapshot() {
         cli_test_theme(),
     );
 
+    renderer.handle(&Event::ExtensionStarting(tau_proto::ExtensionStarting {
+        instance_id: 8.into(),
+        extension_name: "std-global".into(),
+        pid: Some(456),
+    }));
+    sync(&handle);
+    assert!(vt.screen_contains(80, "extension std-global starting"));
+
+    let full_render_count = handle.full_render_count();
+    renderer.switch_agent("fresh-agent".to_owned());
+    sync(&handle);
+    assert!(vt.screen_contains(80, "extension std-global starting"));
+    assert_eq!(handle.full_render_count(), full_render_count);
+
+    renderer.handle(&Event::ExtensionExited(tau_proto::ExtensionExited {
+        instance_id: 8.into(),
+        extension_name: "std-global".into(),
+        pid: Some(456),
+        exit_code: Some(1),
+        signal: None,
+    }));
+    sync(&handle);
+    assert!(!vt.screen_contains(80, "extension std-global starting"));
+    assert!(vt.screen_contains(80, "extension std-global exited"));
+}
+
+/// Extension lifecycle blocks on an explicitly cleared no-agent screen must
+/// stay owned by that global snapshot. That state is different from process
+/// startup: the user intentionally left an existing agent transcript, so fresh
+/// agents should not inherit global no-agent output.
+#[test]
+fn explicit_no_agent_extension_lifecycle_routes_to_no_agent_snapshot() {
+    let (_term, handle, vt) = setup(80, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        cli_test_theme(),
+    );
+
+    renderer.switch_agent("previous-agent".to_owned());
+    renderer.clear_selected_agent();
     renderer.handle(&Event::ExtensionStarting(tau_proto::ExtensionStarting {
         instance_id: 8.into(),
         extension_name: "std-global".into(),
@@ -1927,11 +2043,11 @@ fn action_result_routes_to_invocation_snapshot() {
     assert!(vt.screen_contains(80, "agent a action output"));
 }
 
-/// Dynamic action errors invoked from the no-agent screen must not appear in a
-/// later-selected agent transcript. This preserves the global/no-agent snapshot
-/// boundary for extension action failures just like successful output.
+/// Dynamic action errors invoked from the initial no-agent screen are adopted
+/// by the first selected agent, matching successful action output and startup
+/// extension status.
 #[test]
-fn no_agent_action_error_routes_to_no_agent_snapshot() {
+fn initial_no_agent_action_error_appends_to_first_agent() {
     let (_term, handle, vt) = setup(80, 24);
     let mut renderer = EventRenderer::new(
         handle.clone(),
@@ -1948,18 +2064,14 @@ fn no_agent_action_error_routes_to_no_agent_snapshot() {
         details: None,
     }));
     sync(&handle);
-    assert!(!vt.screen_contains(80, "no-agent action failed"));
-
-    renderer.clear_selected_agent();
-    sync(&handle);
     assert!(vt.screen_contains(80, "no-agent action failed"));
 }
 
-/// No-agent action output that arrives while the no-agent screen is still
-/// visible must be snapshotted before switching to a fresh agent. Otherwise the
-/// fresh agent would inherit global action output that was never scoped to it.
+/// Dynamic action errors invoked after explicit deselection must not appear in
+/// a later-selected agent transcript. This preserves the global/no-agent
+/// snapshot boundary for extension action failures just like successful output.
 #[test]
-fn visible_no_agent_action_result_is_preserved_when_switching_to_fresh_agent() {
+fn explicit_no_agent_action_error_routes_to_no_agent_snapshot() {
     let (_term, handle, vt) = setup(80, 24);
     let mut renderer = EventRenderer::new(
         handle.clone(),
@@ -1967,6 +2079,66 @@ fn visible_no_agent_action_result_is_preserved_when_switching_to_fresh_agent() {
         cli_test_theme(),
     );
 
+    renderer.switch_agent("previous-agent".to_owned());
+    renderer.clear_selected_agent();
+    renderer.record_action_invocation("action-2".into(), None);
+    renderer.switch_agent("fresh-agent".to_owned());
+    renderer.handle(&Event::ActionError(tau_proto::ActionError {
+        invocation_id: "action-2".into(),
+        action_id: "demo.action".to_owned(),
+        message: "no-agent action failed".to_owned(),
+        details: None,
+    }));
+    sync(&handle);
+    assert!(!vt.screen_contains(80, "no-agent action failed"));
+
+    renderer.clear_selected_agent();
+    sync(&handle);
+    assert!(vt.screen_contains(80, "no-agent action failed"));
+}
+
+/// No-agent action output that arrives on the initial start-new-agent screen is
+/// part of the first agent conversation and should remain visible when that
+/// agent is selected.
+#[test]
+fn initial_no_agent_action_result_appends_to_first_agent() {
+    let (_term, handle, vt) = setup(80, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        cli_test_theme(),
+    );
+
+    renderer.record_action_invocation("action-3".into(), None);
+    renderer.handle(&Event::ActionResult(tau_proto::ActionResult {
+        invocation_id: "action-3".into(),
+        action_id: "demo.action".to_owned(),
+        output: tau_proto::ActionOutput::Text {
+            text: "visible no-agent action output".to_owned(),
+        },
+    }));
+    sync(&handle);
+    assert!(vt.screen_contains(80, "visible no-agent action output"));
+
+    renderer.switch_agent("fresh-agent".to_owned());
+    sync(&handle);
+    assert!(vt.screen_contains(80, "visible no-agent action output"));
+}
+
+/// No-agent action output that arrives after explicit deselection must be
+/// snapshotted before switching to a fresh agent. Otherwise the fresh agent
+/// would inherit global action output that was never scoped to it.
+#[test]
+fn explicit_no_agent_action_result_is_preserved_when_switching_to_fresh_agent() {
+    let (_term, handle, vt) = setup(80, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        cli_test_theme(),
+    );
+
+    renderer.switch_agent("previous-agent".to_owned());
+    renderer.clear_selected_agent();
     renderer.record_action_invocation("action-3".into(), None);
     renderer.handle(&Event::ActionResult(tau_proto::ActionResult {
         invocation_id: "action-3".into(),

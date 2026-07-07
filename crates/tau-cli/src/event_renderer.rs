@@ -70,8 +70,14 @@ pub(crate) struct EventRenderer {
     /// visible. The currently visible agent lives in the fields on this struct
     /// so existing rendering code can stay direct and efficient.
     agents_ui_state: HashMap<String, AgentUiState>,
-    /// Whether the visible no-agent transcript must be snapshotted before
-    /// switching to a fresh agent transcript.
+    /// Whether the visible no-agent transcript has output that may need a
+    /// snapshot before switching to a fresh agent transcript.
+    ///
+    /// Preservation is additionally gated by
+    /// [`Self::awaiting_new_agent_selection`]: startup and post-`/session
+    /// new` no-agent output is adopted by the first selected agent, while
+    /// explicit `/agent none`/`/agent new` output remains a protected
+    /// no-agent snapshot.
     preserve_on_fresh_agent_switch: bool,
     /// Agent ids known to the UI for `/agent` completion.
     known_agents: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
@@ -1262,14 +1268,16 @@ impl EventRenderer {
     }
 
     pub(crate) fn switch_agent(&mut self, agent_id: String) {
-        self.awaiting_new_agent_selection = false;
         self.remember_agent(agent_id.clone());
         let target_changed = self.current_agent_id.as_deref() != Some(agent_id.as_str());
         let display_changed = self.displayed_agent_id.as_deref() != Some(agent_id.as_str());
 
         if display_changed {
+            // Let transcript switching see the previous awaiting flag so it can
+            // distinguish initial no-agent adoption from explicit `/agent new`.
             self.show_agent_transcript(agent_id.clone());
         }
+        self.awaiting_new_agent_selection = false;
 
         if target_changed {
             self.set_current_agent_id(Some(agent_id), false);
@@ -1279,9 +1287,16 @@ impl EventRenderer {
     }
 
     pub(crate) fn clear_selected_agent(&mut self) {
-        self.awaiting_new_agent_selection = true;
         let target_changed = self.current_agent_id.is_some();
         let display_changed = self.displayed_agent_id.is_some();
+        if target_changed || display_changed {
+            // Only a clear that actually leaves an agent creates the explicit
+            // no-agent boundary. A delayed clear command that arrives after
+            // `/session new` while the UI is already on the fresh initial
+            // screen must stay a no-op, otherwise the first new-session agent
+            // would incorrectly clear startup history instead of adopting it.
+            self.awaiting_new_agent_selection = true;
+        }
 
         if display_changed {
             self.store_visible_agent_state();
@@ -1316,11 +1331,50 @@ impl EventRenderer {
             self.restore_visible_agent_state(state);
             self.rerender_visible_for_current_settings();
         }
+        if !needs_snapshot_swap && self.displayed_agent_id.is_none() {
+            self.adopt_visible_no_agent_owners(agent_id.as_str());
+        }
         self.displayed_agent_id = Some(agent_id);
     }
 
+    fn adopt_visible_no_agent_owners(&mut self, agent_id: &str) {
+        let owner = UiSnapshotOwner::Agent(agent_id.to_owned());
+        for state in self.extension_blocks.values_mut() {
+            if matches!(state.owner, UiSnapshotOwner::NoAgent) {
+                state.owner = owner.clone();
+            }
+        }
+        for invocation_owner in self.action_invocation_owners.values_mut() {
+            if matches!(invocation_owner, UiSnapshotOwner::NoAgent) {
+                *invocation_owner = owner.clone();
+            }
+        }
+    }
+
     fn visible_no_agent_snapshot_needs_preservation(&self) -> bool {
-        self.displayed_agent_id.is_none() && self.preserve_on_fresh_agent_switch
+        // Do not treat the initial start-new-agent screen as a separate
+        // transcript. Startup/status history rendered there is the beginning of
+        // the first user-created agent conversation, so selecting that first
+        // agent must append in-place instead of swapping to a fresh snapshot and
+        // clearing visible scrollback.
+        //
+        // The preservation path is only for the explicit no-agent screen reached
+        // after `/agent none`/`/agent new`, where the user has deliberately left
+        // a previous agent transcript and global no-agent output must remain
+        // available when they return to the no-agent view.
+        self.displayed_agent_id.is_none()
+            && self.awaiting_new_agent_selection
+            && (self.preserve_on_fresh_agent_switch || self.has_pending_no_agent_owner())
+    }
+
+    fn has_pending_no_agent_owner(&self) -> bool {
+        self.action_invocation_owners
+            .values()
+            .any(|owner| matches!(owner, UiSnapshotOwner::NoAgent))
+            || self
+                .extension_blocks
+                .values()
+                .any(|state| matches!(state.owner, UiSnapshotOwner::NoAgent))
     }
 
     fn set_current_agent_id(&mut self, agent_id: Option<String>, retarget_draft: bool) {
@@ -2164,6 +2218,10 @@ impl EventRenderer {
             agents.clear();
         }
         self.clear_selected_agent();
+        // A new session starts from the same append-in-place no-agent state as
+        // process startup. Unlike explicit `/agent none`, there is no previous
+        // in-session agent transcript to protect from the first new agent.
+        self.awaiting_new_agent_selection = false;
         self.agents_ui_state.clear();
         self.prompts.clear();
         self.last_user_block = None;
