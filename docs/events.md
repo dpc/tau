@@ -228,7 +228,10 @@ the agent requests calls, and the harness orchestrates dispatch.
   emitted as `tool.result`. Once a call has emitted a background placeholder,
   harness-forced cancellation or teardown also completes it through
   `tool.background_error` (and wait background-completion state), not through a
-  second transcript-terminal `tool.cancelled`.
+  second transcript-terminal `tool.cancelled`. Only one real background
+  completion is valid for a `call_id`: once either `tool.background_result` or
+  `tool.background_error` has been recorded, later background completion events
+  for that id are rejected during both live append and durable replay.
 - **`tool.progress`** *(extension)* — In-flight progress update with an
   optional message, current/total counters, and/or complete display state.
   Providers should usually emit an initial `tool.progress` immediately after

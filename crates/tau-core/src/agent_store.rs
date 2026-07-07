@@ -498,9 +498,7 @@ impl AgentStore {
             .agents
             .entry(sid.clone())
             .or_insert_with(|| AgentTree::from_events(sid.clone(), &[]));
-        tree.validate_event(&event)
-            .map_err(|source| AgentStoreError::InvalidEvent { source })?;
-        tree.validate_event_parent(parent)
+        tree.validate_event_at(parent, &event)
             .map_err(|source| AgentStoreError::InvalidEvent { source })?;
         // Cached: `from_events` populated this from the highest
         // persisted sequence at load time; we keep it advanced below.

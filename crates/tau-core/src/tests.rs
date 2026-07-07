@@ -1,8 +1,10 @@
 use std::path::PathBuf;
 
 use tau_proto::{
-    AgentDisplayNameSet, AgentHead, AgentHeadMoved, AgentId, AgentPromptSubmitted, Event,
-    PromptMessageClass, PromptOriginator, SessionAgentLoaded, SessionAgentUnloaded, SessionId,
+    AgentDisplayNameSet, AgentHead, AgentHeadMoved, AgentId, AgentPromptId, AgentPromptSubmitted,
+    CborValue, ContextItem, Event, PromptMessageClass, PromptOriginator, ProviderResponseFinished,
+    ProviderStopReason, SessionAgentLoaded, SessionAgentUnloaded, SessionId, ToolBackgroundError,
+    ToolBackgroundResult, ToolCallId, ToolCallItem, ToolName, ToolResult, ToolResultKind, ToolType,
 };
 
 use crate::{
@@ -67,6 +69,65 @@ fn session_loaded(session_id: &str, agent_id: &str, ephemeral: bool) -> Event {
         session_id: SessionId::from(session_id),
         agent_id: AgentId::parse(agent_id).expect("agent id"),
         ephemeral,
+    })
+}
+
+fn provider_tool_call(agent_id: &str, call_id: &str) -> Event {
+    Event::ProviderResponseFinished(ProviderResponseFinished {
+        agent_prompt_id: AgentPromptId::from("prompt-1"),
+        agent_id: AgentId::parse(agent_id).expect("agent id"),
+        output_items: vec![ContextItem::ToolCall(ToolCallItem {
+            call_id: ToolCallId::from(call_id),
+            name: ToolName::new("example_tool"),
+            tool_type: ToolType::Function,
+            arguments: CborValue::Null,
+            raw_arguments_json: None,
+            responses_envelope: None,
+        })],
+        stop_reason: ProviderStopReason::ToolCalls,
+        error: None,
+        originator: PromptOriginator::User,
+        usage: None,
+        compaction_original_input_tokens: None,
+        compaction_compacted_input_tokens: None,
+        backend: None,
+        provider_response_id: None,
+        ws_pool_delta: None,
+    })
+}
+
+fn background_placeholder(call_id: &str) -> Event {
+    Event::ProviderToolResult(ToolResult {
+        call_id: ToolCallId::from(call_id),
+        tool_name: ToolName::new("example_tool"),
+        tool_type: ToolType::Function,
+        result: CborValue::Null,
+        kind: ToolResultKind::BackgroundPlaceholder,
+        display: None,
+        originator: PromptOriginator::User,
+    })
+}
+
+fn background_result(call_id: &str) -> Event {
+    Event::ToolBackgroundResult(ToolBackgroundResult {
+        call_id: ToolCallId::from(call_id),
+        tool_name: ToolName::new("example_tool"),
+        tool_type: ToolType::Function,
+        result: CborValue::Null,
+        display: None,
+        originator: PromptOriginator::User,
+    })
+}
+
+fn background_error(call_id: &str) -> Event {
+    Event::ToolBackgroundError(ToolBackgroundError {
+        call_id: ToolCallId::from(call_id),
+        tool_name: ToolName::new("example_tool"),
+        tool_type: ToolType::Function,
+        message: "failed".to_owned(),
+        details: None,
+        display: None,
+        originator: PromptOriginator::User,
     })
 }
 
@@ -174,6 +235,224 @@ fn agent_store_persists_transcript_under_agent_directory() {
     let events = reopened.agent_events("agent-1").expect("agent events");
     assert_eq!(events.len(), 1);
     assert_eq!(events[0].event, agent_prompt("agent-1", "hello"));
+
+    let _ = std::fs::remove_dir_all(agents_dir);
+}
+
+#[test]
+fn agent_store_rejects_duplicate_background_completion_before_persisting() {
+    // A backgrounded tool call has a singular real completion after its
+    // provider-visible placeholder. Retrying or racing a second background
+    // result/error for the same call must fail before it is written to the
+    // durable event log.
+    let agents_dir = temp_dir("agents-duplicate-background-completion");
+    let mut store = AgentStore::open(&agents_dir).expect("open agent store");
+
+    store
+        .append_agent_event("agent-1", None, provider_tool_call("agent-1", "call-1"))
+        .expect("append assistant tool call");
+    store
+        .append_agent_event("agent-1", None, background_placeholder("call-1"))
+        .expect("append background placeholder");
+    store
+        .append_agent_event("agent-1", None, background_result("call-1"))
+        .expect("append first background completion");
+
+    let duplicate_result = store
+        .append_agent_event("agent-1", None, background_result("call-1"))
+        .expect_err("duplicate background result must be rejected");
+    assert!(matches!(
+        duplicate_result,
+        AgentStoreError::InvalidEvent { .. }
+    ));
+    let duplicate_error = store
+        .append_agent_event("agent-1", None, background_error("call-1"))
+        .expect_err("background error after result must be rejected");
+    assert!(matches!(
+        duplicate_error,
+        AgentStoreError::InvalidEvent { .. }
+    ));
+
+    let events = store.agent_events("agent-1").expect("agent events");
+    assert_eq!(events.len(), 3);
+
+    let _ = std::fs::remove_dir_all(agents_dir);
+}
+
+#[test]
+fn agent_store_rejects_duplicate_background_error_before_persisting() {
+    // A failed background completion is just as terminal as a successful one.
+    // Once ToolBackgroundError is recorded, later result/error completions for
+    // the same call id must be rejected before they can reach the event log.
+    let agents_dir = temp_dir("agents-duplicate-background-error");
+    let mut store = AgentStore::open(&agents_dir).expect("open agent store");
+
+    store
+        .append_agent_event("agent-1", None, provider_tool_call("agent-1", "call-1"))
+        .expect("append assistant tool call");
+    store
+        .append_agent_event("agent-1", None, background_placeholder("call-1"))
+        .expect("append background placeholder");
+    store
+        .append_agent_event("agent-1", None, background_error("call-1"))
+        .expect("append first background error");
+
+    let duplicate_result = store
+        .append_agent_event("agent-1", None, background_result("call-1"))
+        .expect_err("background result after error must be rejected");
+    assert!(matches!(
+        duplicate_result,
+        AgentStoreError::InvalidEvent { .. }
+    ));
+    let duplicate_error = store
+        .append_agent_event("agent-1", None, background_error("call-1"))
+        .expect_err("second background error must be rejected");
+    assert!(matches!(
+        duplicate_error,
+        AgentStoreError::InvalidEvent { .. }
+    ));
+
+    let events = store.agent_events("agent-1").expect("agent events");
+    assert_eq!(events.len(), 3);
+
+    let _ = std::fs::remove_dir_all(agents_dir);
+}
+
+#[test]
+fn agent_store_accepts_background_completion_for_explicit_parent_branch() {
+    // Background completions are durable side events for the branch containing
+    // the original tool call. Validation must use the explicit fold parent
+    // instead of the mutable global head so another branch cannot make a valid
+    // late completion look unknown.
+    let agents_dir = temp_dir("agents-background-completion-explicit-parent");
+    let mut store = AgentStore::open(&agents_dir).expect("open agent store");
+
+    store
+        .append_agent_event("agent-1", None, provider_tool_call("agent-1", "call-1"))
+        .expect("append assistant tool call");
+    let branch_a_head = store
+        .append_agent_event("agent-1", None, background_placeholder("call-1"))
+        .expect("append background placeholder")
+        .folded_node_id
+        .expect("placeholder closes the tool round");
+    let branch_b_head = store
+        .append_agent_event_at(
+            "agent-1",
+            None,
+            AgentEventParent::Root,
+            agent_prompt("agent-1", "branch b"),
+            tau_proto::UnixMicros::now(),
+        )
+        .expect("append unrelated branch")
+        .folded_node_id
+        .expect("prompt folds");
+
+    let wrong_parent = store
+        .append_agent_event_at(
+            "agent-1",
+            None,
+            AgentEventParent::Under(branch_b_head),
+            background_error("call-1"),
+            tau_proto::UnixMicros::now(),
+        )
+        .expect_err("unrelated explicit branch must not validate call id");
+    assert!(matches!(wrong_parent, AgentStoreError::InvalidEvent { .. }));
+
+    store
+        .append_agent_event_at(
+            "agent-1",
+            None,
+            AgentEventParent::Under(branch_a_head),
+            background_result("call-1"),
+            tau_proto::UnixMicros::now(),
+        )
+        .expect("completion belongs to explicit branch A parent");
+
+    let events = store.agent_events("agent-1").expect("agent events");
+    assert_eq!(events.len(), 4);
+
+    let _ = std::fs::remove_dir_all(agents_dir);
+}
+
+#[test]
+fn agent_store_rejects_duplicate_background_completion_on_replay() {
+    // Durable replay validates the same singular background-completion
+    // invariant as live appends. A tampered or old log containing two real
+    // completions for one backgrounded call must fail closed instead of letting
+    // the later completion overwrite the earlier one in folded state.
+    let agents_dir = temp_dir("agents-duplicate-background-completion-replay");
+    let events_path = agents_dir.join("agent-1").join("events.cbor");
+    for (seq, event) in [
+        provider_tool_call("agent-1", "call-1"),
+        background_placeholder("call-1"),
+        background_result("call-1"),
+        background_error("call-1"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        append_raw_cbor(
+            &events_path,
+            &PersistedAgentEvent {
+                seq: PersistedAgentEventSeq::new(seq as u64),
+                source: None,
+                event,
+                parent: AgentEventParent::InheritHead,
+                recorded_at: tau_proto::UnixMicros::now(),
+            },
+        );
+    }
+
+    let error = AgentStore::open(&agents_dir).expect_err("duplicate completion must fail load");
+    assert!(matches!(error, AgentStoreError::InvalidEvent { .. }));
+
+    let _ = std::fs::remove_dir_all(agents_dir);
+}
+
+#[test]
+fn agent_store_replays_background_completion_for_explicit_parent_branch() {
+    // Durable replay must accept a late background completion whose explicit
+    // parent points to the branch containing the original call, even if a later
+    // unrelated event moved the global head to another branch.
+    let agents_dir = temp_dir("agents-background-completion-explicit-parent-replay");
+    let events_path = agents_dir.join("agent-1").join("events.cbor");
+    for (seq, event, parent) in [
+        (
+            0,
+            provider_tool_call("agent-1", "call-1"),
+            AgentEventParent::InheritHead,
+        ),
+        (
+            1,
+            background_placeholder("call-1"),
+            AgentEventParent::InheritHead,
+        ),
+        (
+            2,
+            agent_prompt("agent-1", "branch b"),
+            AgentEventParent::Root,
+        ),
+        (
+            3,
+            background_result("call-1"),
+            AgentEventParent::Under(NodeId::new(1)),
+        ),
+    ] {
+        append_raw_cbor(
+            &events_path,
+            &PersistedAgentEvent {
+                seq: PersistedAgentEventSeq::new(seq),
+                source: None,
+                event,
+                parent,
+                recorded_at: tau_proto::UnixMicros::now(),
+            },
+        );
+    }
+
+    let store = AgentStore::open(&agents_dir).expect("explicit parent replay should succeed");
+    let events = store.agent_events("agent-1").expect("agent events");
+    assert_eq!(events.len(), 4);
 
     let _ = std::fs::remove_dir_all(agents_dir);
 }

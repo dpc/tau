@@ -63,6 +63,13 @@ event/parent invariants enforced for live appends before folding replayed state.
 Corrupt, truncated, spliced, or semantically invalid durable records must return a
 typed store error instead of being ignored or panicking during fold.
 
+Only one real background completion is valid for a globally unique tool call id:
+once either `ToolBackgroundResult` or `ToolBackgroundError` has been recorded,
+later background completion events for that id are rejected during both live
+append and durable replay. Duplicate detection is global by `ToolCallId`; the
+known-call check remains branch-relative and must resolve the event's explicit
+fold parent instead of using the mutable global tree head.
+
 Durable sequence numbers count only records actually written to the corresponding
 `events.cbor` stream. Memory-only session membership facts update live folded
 state but do not advance the durable sequence cursor, so later durable records

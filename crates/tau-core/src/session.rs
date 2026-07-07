@@ -262,6 +262,9 @@ pub struct AgentTree {
     materialized_prompt_count: u64,
     pending_tool_rounds: HashMap<NodeId, PendingToolRound>,
     tool_call_rounds: HashMap<ToolCallId, NodeId>,
+    /// Globally unique tool calls that already have one real background
+    /// completion event.
+    background_completed_tool_calls: HashSet<ToolCallId>,
 }
 
 /// Latest durable value for one per-agent metadata key.
@@ -601,10 +604,10 @@ impl AgentTree {
             materialized_prompt_count: 0,
             pending_tool_rounds: HashMap::new(),
             tool_call_rounds: HashMap::new(),
+            background_completed_tool_calls: HashSet::new(),
         };
         for entry in events {
-            tree.validate_event(&entry.event)?;
-            tree.validate_event_parent(entry.parent)?;
+            tree.validate_event_at(entry.parent, &entry.event)?;
             tree.apply_event_at(entry.parent, &entry.event);
             tree.next_event_seq = entry.seq.next();
         }
@@ -693,6 +696,14 @@ impl AgentTree {
             | Event::ToolRejected(_)
             | Event::ToolResult(_)
             | Event::ToolError(_) => {}
+            Event::ToolBackgroundResult(result) => {
+                self.background_completed_tool_calls
+                    .insert(result.call_id.clone());
+            }
+            Event::ToolBackgroundError(error) => {
+                self.background_completed_tool_calls
+                    .insert(error.call_id.clone());
+            }
             _ => return false,
         }
         true
@@ -924,6 +935,25 @@ impl AgentTree {
     /// Validate an event against the current transcript fold state before
     /// appending it to the durable log.
     pub fn validate_event(&self, event: &Event) -> Result<(), AgentEventValidationError> {
+        self.validate_event_for_head(self.head, event)
+    }
+
+    /// Validate an event and explicit fold parent against the current
+    /// transcript fold state before appending it to the durable log.
+    pub fn validate_event_at(
+        &self,
+        parent: AgentEventParent,
+        event: &Event,
+    ) -> Result<(), AgentEventValidationError> {
+        self.validate_event_parent(parent)?;
+        self.validate_event_for_head(parent.resolve(self.head), event)
+    }
+
+    fn validate_event_for_head(
+        &self,
+        head: Option<NodeId>,
+        event: &Event,
+    ) -> Result<(), AgentEventValidationError> {
         if let Some(result) = self.validate_agent_state_event(event) {
             return result;
         }
@@ -933,7 +963,7 @@ impl AgentTree {
         if let Some(result) = self.validate_agent_fold_event(event) {
             return result;
         }
-        if let Some(result) = self.validate_tool_completion_event(event) {
+        if let Some(result) = self.validate_tool_completion_event(head, event) {
             return result;
         }
         if Self::is_agent_id_mismatch_event(event) {
@@ -1007,6 +1037,7 @@ impl AgentTree {
 
     fn validate_tool_completion_event(
         &self,
+        head: Option<NodeId>,
         event: &Event,
     ) -> Option<Result<(), AgentEventValidationError>> {
         match event {
@@ -1020,10 +1051,10 @@ impl AgentTree {
                 Some(self.validate_terminal_tool_result(&cancelled.call_id))
             }
             Event::ToolBackgroundResult(result) => {
-                Some(self.validate_known_tool_call(&result.call_id))
+                Some(self.validate_background_tool_completion(head, &result.call_id))
             }
             Event::ToolBackgroundError(error) => {
-                Some(self.validate_known_tool_call(&error.call_id))
+                Some(self.validate_background_tool_completion(head, &error.call_id))
             }
             _ => None,
         }
@@ -1132,18 +1163,24 @@ impl AgentTree {
         ))
     }
 
-    fn validate_known_tool_call(
+    fn validate_background_tool_completion(
         &self,
+        head: Option<NodeId>,
         call_id: &ToolCallId,
     ) -> Result<(), AgentEventValidationError> {
-        if self.tool_call_ids_from_branch(self.head).contains(call_id)
-            || self.tool_call_rounds.contains_key(call_id)
-        {
-            return Ok(());
+        if self.background_completed_tool_calls.contains(call_id) {
+            return Err(AgentEventValidationError::new(format!(
+                "duplicate background tool completion for call_id: {call_id}"
+            )));
         }
-        Err(AgentEventValidationError::new(format!(
-            "background tool completion for unknown call_id: {call_id}"
-        )))
+        if !self.tool_call_ids_from_branch(head).contains(call_id)
+            && !self.tool_call_rounds.contains_key(call_id)
+        {
+            return Err(AgentEventValidationError::new(format!(
+                "background tool completion for unknown call_id: {call_id}"
+            )));
+        }
+        Ok(())
     }
 
     fn validate_terminal_tool_result(
