@@ -4045,6 +4045,99 @@ fn status_agent_chip_keeps_id_primary_and_display_name_secondary() {
 }
 
 #[test]
+fn status_agent_chip_shows_current_agent_watchers() {
+    let (_term, handle, vt) = setup(120, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        cli_test_theme(),
+    );
+
+    renderer.handle(&Event::SessionStarted(SessionStarted {
+        session_id: "s1".into(),
+        reason: SessionStartReason::New,
+    }));
+    renderer.handle(&Event::AgentStarted(tau_proto::AgentStarted {
+        parent_agent: None,
+        agent_id: agent_id("engineer_child"),
+        role: "engineer".to_owned(),
+        display_name: Some("fix streaming ellipsis".to_owned()),
+        metadata: Vec::new(),
+        ephemeral: false,
+    }));
+    renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
+        session_id: "s1".into(),
+        text: "hello".into(),
+        agent_id: tau_proto::AgentId::parse("engineer_child").expect("agent id"),
+        message_class: tau_proto::PromptMessageClass::User,
+        originator: tau_proto::PromptOriginator::User,
+        ctx_id: None,
+    }));
+    renderer.handle(&Event::AgentWatchesUpdated(
+        tau_proto::AgentWatchesUpdated {
+            session_id: "s1".into(),
+            watcher_id: agent_id("manager-AjhD"),
+            watched_agent_ids: vec![agent_id("engineer_child")],
+            changed_agent_id: Some(agent_id("engineer_child")),
+            cause: tau_proto::AgentWatchUpdateCause::AgentStart,
+        },
+    ));
+    sync(&handle);
+
+    let status_row = vt
+        .screen_text(120)
+        .into_iter()
+        .find(|row| row.contains("&s1"))
+        .expect("status row after watch update");
+    assert!(status_row.contains("@engineer_child (fix streaming ellipsis)"));
+    assert!(status_row.contains("watched by: manager-AjhD"));
+    assert!(!status_row.contains("child of"));
+}
+
+#[test]
+fn status_agent_chip_truncates_multiple_current_agent_watchers() {
+    let (_term, handle, vt) = setup(120, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        cli_test_theme(),
+    );
+
+    renderer.handle(&Event::SessionStarted(SessionStarted {
+        session_id: "s1".into(),
+        reason: SessionStartReason::New,
+    }));
+    renderer.switch_agent("engineer_child".to_owned());
+    renderer.handle(&Event::AgentWatchesUpdated(
+        tau_proto::AgentWatchesUpdated {
+            session_id: "s1".into(),
+            watcher_id: agent_id("manager-AjhD"),
+            watched_agent_ids: vec![agent_id("engineer_child")],
+            changed_agent_id: Some(agent_id("engineer_child")),
+            cause: tau_proto::AgentWatchUpdateCause::AgentStart,
+        },
+    ));
+    renderer.handle(&Event::AgentWatchesUpdated(
+        tau_proto::AgentWatchesUpdated {
+            session_id: "s1".into(),
+            watcher_id: agent_id("reviewer-Zz99"),
+            watched_agent_ids: vec![agent_id("engineer_child")],
+            changed_agent_id: Some(agent_id("engineer_child")),
+            cause: tau_proto::AgentWatchUpdateCause::AgentWatchEnable,
+        },
+    ));
+    sync(&handle);
+
+    let status_row = vt
+        .screen_text(120)
+        .into_iter()
+        .find(|row| row.contains("&s1"))
+        .expect("status row after watch updates");
+    assert!(status_row.contains("watched by: manager-AjhD, +1 more agents"));
+    assert!(!status_row.contains("reviewer-Zz99"));
+}
+
+#[test]
 fn model_status_shows_context_window_until_usage_is_known() {
     let (_term, handle, vt) = setup(100, 24);
     let mut renderer = EventRenderer::new(

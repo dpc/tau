@@ -10749,6 +10749,46 @@ fn nested_start_agent_request_starts_independently() {
     h.shutdown().expect("shutdown");
 }
 
+/// Regression: `agent_start` display names should remain the requested topic.
+/// Parent lineage is represented by generic watch state, not encoded into
+/// `agent.started.display_name`, because display names nest and are
+/// user-visible wherever the agent is referenced.
+#[test]
+fn tool_backed_start_agent_display_name_does_not_include_parent_lineage() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    h.selected_model = Some("test/model".into());
+    let _ = connect_test_tool(&mut h, "conn-delegate");
+
+    h.handle_start_agent_request("conn-delegate", ext_query("q-parent"))
+        .expect("parent query");
+    let parent_cid = ext_query_cid(&h, "q-parent").expect("parent started");
+
+    h.tool_agents.insert("child-call".into(), parent_cid);
+    let mut child = ext_query("q-child");
+    child.tool_call_id = Some("child-call".into());
+    child.task_name = Some("fix streaming ellipsis".to_owned());
+    h.handle_start_agent_request("conn-delegate", child)
+        .expect("child query");
+
+    let child_cid = ext_query_cid(&h, "q-child").expect("child started");
+    let display_name = event_log_events(&h)
+        .into_iter()
+        .find_map(|event| match event {
+            Event::AgentStarted(started) if started.agent_id.as_str() == child_cid.as_str() => {
+                started.display_name
+            }
+            _ => None,
+        })
+        .expect("child display name");
+
+    assert_eq!(display_name, "fix streaming ellipsis");
+    assert!(!display_name.contains("child of"));
+
+    h.shutdown().expect("shutdown");
+}
+
 /// A wait that is already blocked on a tool call must be released even when the
 /// terminal event is a harness-synthesized routing error instead of a provider
 /// response. Otherwise `wait` can hang forever after unavailable-tool paths.

@@ -100,6 +100,8 @@ pub(crate) struct EventRenderer {
     shell_agents: HashMap<String, String>,
     /// Current watch sets keyed by watcher agent id.
     watched_agents: HashMap<String, Vec<String>>,
+    /// Reverse watch sets keyed by watched agent id.
+    agent_watchers: HashMap<String, Vec<String>>,
     /// Latest generic operational stats keyed by agent id.
     agent_stats: HashMap<String, tau_proto::AgentStatsUpdated>,
     /// Active watched-agent indicator blocks keyed by watched agent id.
@@ -1199,6 +1201,7 @@ impl EventRenderer {
             tool_agents: HashMap::new(),
             shell_agents: HashMap::new(),
             watched_agents: HashMap::new(),
+            agent_watchers: HashMap::new(),
             agent_stats: HashMap::new(),
             watched_agent_blocks: HashMap::new(),
             current_agent_state: std::sync::Arc::new(std::sync::Mutex::new(None)),
@@ -1448,14 +1451,36 @@ impl EventRenderer {
     }
 
     fn handle_agent_watches_updated(&mut self, updated: &tau_proto::AgentWatchesUpdated) {
+        let watcher_id = updated.watcher_id.to_string();
+        if let Some(previous) = self.watched_agents.get(&watcher_id) {
+            for watched_agent_id in previous {
+                if let Some(watchers) = self.agent_watchers.get_mut(watched_agent_id) {
+                    watchers.retain(|candidate| candidate != &watcher_id);
+                    if watchers.is_empty() {
+                        self.agent_watchers.remove(watched_agent_id);
+                    }
+                }
+            }
+        }
+        for watched_agent_id in &updated.watched_agent_ids {
+            let watchers = self
+                .agent_watchers
+                .entry(watched_agent_id.to_string())
+                .or_default();
+            if !watchers.iter().any(|candidate| candidate == &watcher_id) {
+                watchers.push(watcher_id.clone());
+                watchers.sort();
+            }
+        }
         self.watched_agents.insert(
-            updated.watcher_id.to_string(),
+            watcher_id,
             updated
                 .watched_agent_ids
                 .iter()
                 .map(ToString::to_string)
                 .collect(),
         );
+        self.render_model_status_if_present();
         self.refresh_watched_agent_blocks();
     }
 
@@ -1679,6 +1704,19 @@ impl EventRenderer {
             .filter(|name| !name.is_empty() && name != agent_id)
             .map(|name| format!("{agent_id} ({name})"))
             .unwrap_or_else(|| agent_id.to_owned())
+    }
+
+    fn watched_by_status(&self, agent_id: &str) -> Option<String> {
+        let watchers = self.agent_watchers.get(agent_id)?;
+        let first = watchers.first()?;
+        match watchers.len() {
+            0 => None,
+            1 => Some(format!("watched by: {first}")),
+            count => Some(format!(
+                "watched by: {first}, +{} more agents",
+                count.saturating_sub(1)
+            )),
+        }
     }
 
     fn remember_agent(&mut self, agent_id: String) {
@@ -2348,6 +2386,7 @@ impl EventRenderer {
         self.tool_agents.clear();
         self.shell_agents.clear();
         self.watched_agents.clear();
+        self.agent_watchers.clear();
         self.agent_stats.clear();
         self.clear_watched_agent_blocks();
         if let Ok(mut agents) = self.known_agents.lock() {
@@ -2468,12 +2507,17 @@ impl EventRenderer {
             self.current_role.as_deref(),
             self.current_model.as_ref(),
         ) {
-            (Some(agent_id), _, _) => push_status_chip(
-                &mut themed,
-                role_style,
-                &mut needs_space,
-                format!("@{}", self.agent_display_label(agent_id)),
-            ),
+            (Some(agent_id), _, _) => {
+                push_status_chip(
+                    &mut themed,
+                    role_style,
+                    &mut needs_space,
+                    format!("@{}", self.agent_display_label(agent_id)),
+                );
+                if let Some(watched_by) = self.watched_by_status(agent_id) {
+                    push_status_chip(&mut themed, status_style, &mut needs_space, watched_by);
+                }
+            }
             (None, Some(role), _) => push_status_chip(
                 &mut themed,
                 role_style,
