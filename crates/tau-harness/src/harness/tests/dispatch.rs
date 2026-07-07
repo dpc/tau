@@ -4833,6 +4833,7 @@ fn provider_execution_events_must_come_from_prompt_owner() {
             compaction: None,
             status: None,
             semantic_output: None,
+            response_stats: None,
             originator: tau_proto::PromptOriginator::User,
         })),
     )
@@ -4846,6 +4847,7 @@ fn provider_execution_events_must_come_from_prompt_owner() {
             compaction: None,
             status: None,
             semantic_output: None,
+            response_stats: None,
             originator: tau_proto::PromptOriginator::User,
         })),
     )
@@ -4895,6 +4897,7 @@ fn provider_execution_events_must_come_from_prompt_owner() {
             compaction: None,
             status: None,
             semantic_output: None,
+            response_stats: None,
             originator: tau_proto::PromptOriginator::User,
         })),
     )
@@ -4951,9 +4954,9 @@ fn agent_turn_stats_chain_and_clear_after_final_response() {
     h.prompt_agents.insert(spid.clone(), cid.clone());
     h.start_or_update_agent_turn_stats(&cid, spid.clone());
     h.add_agent_turn_output_bytes(&cid, 4);
-    h.emit_agent_turn_stats(&cid, crate::harness::AgentTurnStatsEmitMode::Forced);
+    h.emit_provider_prompt_terminal_agent_turn_stats(&cid);
     h.add_agent_turn_output_bytes(&cid, 3);
-    h.emit_agent_turn_stats(&cid, crate::harness::AgentTurnStatsEmitMode::Forced);
+    h.emit_provider_prompt_terminal_agent_turn_stats(&cid);
 
     let stats = agent_turn_stats_events(&h);
     let first = stats
@@ -5054,12 +5057,11 @@ fn agent_turn_stats_deadline_wakes_idle_runtime_loop() {
     h.shutdown().expect("shutdown");
 }
 
-/// Ensures an idle zero-delta stats sample does not delay the next real byte
-/// sample. Without this, the runtime could publish `Δ0B/s` during a quiet
-/// period, then suppress provider byte progress that arrived just after the
-/// idle sample until the next one-second deadline.
+/// Ensures byte changes after an idle zero-delta stats sample wait for the next
+/// sampled deadline instead of bypassing the cadence. This prevents provider
+/// chunk timing from turning `ΔB/s` into random-looking jitter.
 #[test]
-fn agent_turn_stats_bytes_emit_immediately_after_idle_sample() {
+fn agent_turn_stats_bytes_after_idle_wait_for_next_sample() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
@@ -5071,7 +5073,7 @@ fn agent_turn_stats_bytes_emit_immediately_after_idle_sample() {
     h.prompt_agents.insert(spid.clone(), cid.clone());
     h.start_or_update_agent_turn_stats(&cid, spid.clone());
     h.add_agent_turn_output_bytes(&cid, 1024);
-    h.emit_agent_turn_stats(&cid, crate::harness::AgentTurnStatsEmitMode::Sampled);
+    h.emit_provider_prompt_terminal_agent_turn_stats(&cid);
 
     {
         let stats = h
@@ -5095,7 +5097,28 @@ fn agent_turn_stats_bytes_emit_immediately_after_idle_sample() {
     assert_eq!(idle.previous.output_bytes_sent, 1024);
 
     h.add_agent_turn_output_bytes(&cid, 2048);
-    h.emit_agent_turn_stats(&cid, crate::harness::AgentTurnStatsEmitMode::Sampled);
+    h.emit_agent_turn_stats_if_due(&cid);
+    assert_eq!(
+        agent_turn_stats_events(&h)
+            .last()
+            .map(|stats| stats.current),
+        Some(idle.current),
+        "byte changes must not bypass the sampled stats cadence"
+    );
+    {
+        let stats = h
+            .agents
+            .get_mut(&cid)
+            .expect("agent should remain loaded")
+            .turn_stats
+            .as_mut()
+            .expect("turn stats should be active");
+        stats.last_emitted_at = stats
+            .last_emitted_at
+            .checked_sub(crate::harness::AGENT_TURN_STATS_SAMPLE_INTERVAL)
+            .expect("backdate resumed byte deadline");
+    }
+    h.process_agent_turn_stats_deadlines();
     let resumed = agent_turn_stats_events(&h)
         .last()
         .cloned()
@@ -5122,6 +5145,19 @@ fn agent_turn_stats_publish_for_semantic_output_snapshot_before_finish() {
     h.pending_provider_prompts
         .insert(spid.clone(), "provider-owner".into());
     h.start_or_update_agent_turn_stats(&cid, spid.clone());
+    {
+        let stats = h
+            .agents
+            .get_mut(&cid)
+            .expect("agent should remain loaded")
+            .turn_stats
+            .as_mut()
+            .expect("turn stats should be active");
+        stats.last_emitted_at = stats
+            .last_emitted_at
+            .checked_sub(crate::harness::AGENT_TURN_STATS_SAMPLE_INTERVAL)
+            .expect("backdate stats deadline");
+    }
     let target_agent_id = h.agents[&cid].agent_id.clone().expect("agent id");
 
     h.handle_extension_provider_prompt_event(
@@ -5135,6 +5171,7 @@ fn agent_turn_stats_publish_for_semantic_output_snapshot_before_finish() {
             semantic_output: Some(tau_proto::ProviderResponseSemanticOutput {
                 non_visible_output_bytes: 4096,
             }),
+            response_stats: None,
             originator: tau_proto::PromptOriginator::User,
         }),
     )
@@ -5181,6 +5218,19 @@ fn agent_turn_stats_final_tool_arguments_do_not_double_count_semantic_snapshot()
     h.pending_provider_prompts
         .insert(spid.clone(), "provider-owner".into());
     h.start_or_update_agent_turn_stats(&cid, spid.clone());
+    {
+        let stats = h
+            .agents
+            .get_mut(&cid)
+            .expect("agent should remain loaded")
+            .turn_stats
+            .as_mut()
+            .expect("turn stats should be active");
+        stats.last_emitted_at = stats
+            .last_emitted_at
+            .checked_sub(crate::harness::AGENT_TURN_STATS_SAMPLE_INTERVAL)
+            .expect("backdate stats deadline");
+    }
     let target_agent_id = h.agents[&cid].agent_id.clone().expect("agent id");
     let raw_arguments = r#"{"x":1}"#;
 
@@ -5195,6 +5245,7 @@ fn agent_turn_stats_final_tool_arguments_do_not_double_count_semantic_snapshot()
             semantic_output: Some(tau_proto::ProviderResponseSemanticOutput {
                 non_visible_output_bytes: raw_arguments.len() as u64,
             }),
+            response_stats: None,
             originator: tau_proto::PromptOriginator::User,
         }),
     )
@@ -5250,6 +5301,19 @@ fn agent_turn_stats_clear_response_resets_semantic_snapshot_baseline() {
     h.pending_provider_prompts
         .insert(spid.clone(), "provider-owner".into());
     h.start_or_update_agent_turn_stats(&cid, spid.clone());
+    {
+        let stats = h
+            .agents
+            .get_mut(&cid)
+            .expect("agent should remain loaded")
+            .turn_stats
+            .as_mut()
+            .expect("turn stats should be active");
+        stats.last_emitted_at = stats
+            .last_emitted_at
+            .checked_sub(crate::harness::AGENT_TURN_STATS_SAMPLE_INTERVAL)
+            .expect("backdate stats deadline");
+    }
     let target_agent_id = h.agents[&cid].agent_id.clone().expect("agent id");
 
     for event in [
@@ -5262,6 +5326,7 @@ fn agent_turn_stats_clear_response_resets_semantic_snapshot_baseline() {
             semantic_output: Some(tau_proto::ProviderResponseSemanticOutput {
                 non_visible_output_bytes: 4096,
             }),
+            response_stats: None,
             originator: tau_proto::PromptOriginator::User,
         }),
         Event::ProviderResponseUpdated(ProviderResponseUpdated {
@@ -5274,6 +5339,7 @@ fn agent_turn_stats_clear_response_resets_semantic_snapshot_baseline() {
                 clear_response: true,
             }),
             semantic_output: None,
+            response_stats: None,
             originator: tau_proto::PromptOriginator::User,
         }),
         Event::ProviderResponseUpdated(ProviderResponseUpdated {
@@ -5285,13 +5351,14 @@ fn agent_turn_stats_clear_response_resets_semantic_snapshot_baseline() {
             semantic_output: Some(tau_proto::ProviderResponseSemanticOutput {
                 non_visible_output_bytes: 4096,
             }),
+            response_stats: None,
             originator: tau_proto::PromptOriginator::User,
         }),
     ] {
         h.handle_extension_provider_prompt_event("provider-owner", event)
             .expect("provider update");
     }
-    h.emit_agent_turn_stats(&cid, crate::harness::AgentTurnStatsEmitMode::Forced);
+    h.emit_provider_prompt_terminal_agent_turn_stats(&cid);
 
     let stats = agent_turn_stats_events(&h);
     assert!(stats.iter().any(|stats| {
@@ -5318,6 +5385,19 @@ fn provider_response_updated_strips_semantic_output_from_public_mixed_update() {
     h.pending_provider_prompts
         .insert(spid.clone(), "provider-owner".into());
     h.start_or_update_agent_turn_stats(&cid, spid.clone());
+    {
+        let stats = h
+            .agents
+            .get_mut(&cid)
+            .expect("agent should remain loaded")
+            .turn_stats
+            .as_mut()
+            .expect("turn stats should be active");
+        stats.last_emitted_at = stats
+            .last_emitted_at
+            .checked_sub(crate::harness::AGENT_TURN_STATS_SAMPLE_INTERVAL)
+            .expect("backdate stats deadline");
+    }
     let target_agent_id = h.agents[&cid].agent_id.clone().expect("agent id");
 
     h.handle_extension_provider_prompt_event(
@@ -5335,6 +5415,13 @@ fn provider_response_updated_strips_semantic_output_from_public_mixed_update() {
             semantic_output: Some(tau_proto::ProviderResponseSemanticOutput {
                 non_visible_output_bytes: 10,
             }),
+            response_stats: Some(tau_proto::ProviderResponseStats {
+                current: tau_proto::ProviderResponseStatsSample {
+                    output_bytes_sent: 99,
+                    elapsed_micros: 1_000_000,
+                },
+                previous: tau_proto::ProviderResponseStatsSample::default(),
+            }),
             originator: tau_proto::PromptOriginator::User,
         }),
     )
@@ -5345,12 +5432,15 @@ fn provider_response_updated_strips_semantic_output_from_public_mixed_update() {
         Event::ProviderResponseUpdated(update)
             if update.agent_prompt_id == spid
                 && update.semantic_output.is_none()
+                && update.response_stats.is_none()
                 && !update.deltas.is_empty()
     )));
     assert!(agent_turn_stats_events(&h).iter().any(|stats| {
         stats.agent_prompt_id.as_ref() == Some(&spid)
-            && stats.current.output_bytes_sent == 12
+            && stats.current.output_bytes_sent == 99
+            && stats.current.elapsed_micros == 1_000_000
             && stats.previous.output_bytes_sent == 0
+            && stats.previous.elapsed_micros == 0
     }));
     assert_eq!(
         agent_event_count(&h, |event| matches!(
@@ -5363,9 +5453,91 @@ fn provider_response_updated_strips_semantic_output_from_public_mixed_update() {
     h.shutdown().expect("shutdown");
 }
 
+/// Ensures provider-owned response stats are projected independently from
+/// harness idle/fallback timing, and that a provider-derived terminal flush is
+/// not followed by a duplicate harness-derived terminal sample at response
+/// close.
+#[test]
+fn provider_response_stats_projection_survives_idle_sample_and_skips_duplicate_finish() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    let cid = ensure_test_user_agent(&mut h);
+    let spid: AgentPromptId = "sp-provider-stats-after-idle".into();
+    seed_agent_thinking(&mut h, &cid, spid.as_str());
+    h.prompt_agents.insert(spid.clone(), cid.clone());
+    h.pending_provider_prompts
+        .insert(spid.clone(), "provider-owner".into());
+    h.start_or_update_agent_turn_stats(&cid, spid.clone());
+    {
+        let stats = h
+            .agents
+            .get_mut(&cid)
+            .expect("agent should remain loaded")
+            .turn_stats
+            .as_mut()
+            .expect("turn stats should be active");
+        stats.last_emitted_at = stats
+            .last_emitted_at
+            .checked_sub(crate::harness::AGENT_TURN_STATS_SAMPLE_INTERVAL)
+            .expect("backdate stats deadline");
+    }
+    h.process_agent_turn_stats_deadlines();
+    let after_idle = agent_turn_stats_events(&h).len();
+    let target_agent_id = h.agents[&cid].agent_id.clone().expect("agent id");
+
+    h.handle_extension_provider_prompt_event(
+        "provider-owner",
+        Event::ProviderResponseUpdated(ProviderResponseUpdated {
+            agent_prompt_id: spid.clone(),
+            agent_id: crate::parse_agent_id(&target_agent_id),
+            deltas: vec![tau_proto::ProviderResponseTextDelta::Message {
+                output_index: 0,
+                text: "hi".to_owned(),
+                phase: None,
+            }],
+            compaction: None,
+            status: None,
+            semantic_output: None,
+            response_stats: Some(tau_proto::ProviderResponseStats {
+                current: tau_proto::ProviderResponseStatsSample {
+                    output_bytes_sent: 2,
+                    elapsed_micros: 500_000,
+                },
+                previous: tau_proto::ProviderResponseStatsSample::default(),
+            }),
+            originator: tau_proto::PromptOriginator::User,
+        }),
+    )
+    .expect("provider terminal-flush update");
+    let projected = agent_turn_stats_events(&h);
+    assert_eq!(projected.len(), after_idle + 1);
+    let provider_sample = projected.last().expect("provider sample");
+    assert_eq!(provider_sample.current.elapsed_micros, 500_000);
+    assert_eq!(provider_sample.previous.elapsed_micros, 0);
+
+    h.handle_extension_provider_prompt_event(
+        "provider-owner",
+        Event::ProviderResponseFinished(provider_text_response(
+            &spid,
+            crate::parse_agent_id(&target_agent_id),
+            "hi",
+        )),
+    )
+    .expect("provider finish");
+    assert_eq!(
+        agent_turn_stats_events(&h).len(),
+        after_idle + 1,
+        "response_finished must not add a harness-timed duplicate after provider stats"
+    );
+
+    h.shutdown().expect("shutdown");
+}
+
 /// Ensures tool-call turns count provider-generated raw tool arguments, switch
-/// post-final stats to prompt-less tool-wait state, and keep the same turn id
-/// when the next provider prompt continues the turn.
+/// keep the same turn id when the next provider prompt continues the turn.
+/// Prompt-less tool-wait samples are rate-limited instead of forced at the
+/// transition, so the transition itself does not add event-log noise.
 #[test]
 fn agent_turn_stats_tool_wait_counts_arguments_and_keeps_turn_id() {
     let td = TempDir::new().expect("tempdir");
@@ -5420,6 +5592,16 @@ fn agent_turn_stats_tool_wait_counts_arguments_and_keeps_turn_id() {
         stats.agent_prompt_id.as_ref() == Some(&spid)
             && stats.current.output_bytes_sent == raw_arguments.len() as u64
     }));
+    assert!(!stats.iter().any(|stats| stats.agent_prompt_id.is_none()));
+    {
+        let runtime = h.agents.get_mut(&cid).unwrap().turn_stats.as_mut().unwrap();
+        runtime.last_emitted_at = runtime
+            .last_emitted_at
+            .checked_sub(crate::harness::AGENT_TURN_STATS_SAMPLE_INTERVAL)
+            .expect("backdate tool-wait stats deadline");
+    }
+    h.process_agent_turn_stats_deadlines();
+    let stats = agent_turn_stats_events(&h);
     assert!(stats.iter().any(|stats| {
         stats.turn_id.as_str() == spid.as_str()
             && stats.agent_prompt_id.is_none()

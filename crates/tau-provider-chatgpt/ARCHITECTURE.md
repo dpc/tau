@@ -66,9 +66,20 @@ emit displayable assistant/reasoning append deltas and final tool-call items, bu
 do not publish public byte-progress metadata. For streamed function-call
 arguments and custom-tool input, the provider sends the harness a private,
 content-free `semantic_output.non_visible_output_bytes` snapshot that is
-cumulative for the current provider prompt, not a per-update delta. The harness
-strips that snapshot before subscriber delivery and surfaces any public liveness
-display only through `agent.turn_stats_updated`.
+cumulative for the current provider prompt, not a per-update delta.
+
+Provider response throughput samples are also private provider-to-harness
+metadata. The sampler starts when the backend request is dispatched. Chunk reads
+only update in-memory cumulative state and pending visible/non-visible deltas.
+The provider writes non-terminal `provider.response_updated` samples only on
+one-second response deadlines; byte changes never bypass that cadence. Each
+private `response_stats` pair uses `previous` = the last provider sample actually
+emitted for the prompt and `current` = the new cumulative sample. A terminal
+flush is the only normal bypass and is allowed immediately before the provider
+prompt closes. The harness strips private response metadata before subscriber
+delivery and surfaces any public liveness display only through the compatibility
+`agent.turn_stats_updated` projection without replacing provider byte/elapsed
+semantics.
 
 ## Model metadata tags
 

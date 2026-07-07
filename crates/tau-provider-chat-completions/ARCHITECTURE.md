@@ -24,6 +24,16 @@ current provider prompt, not a per-update delta. The harness strips that snapsho
 before subscriber delivery and surfaces any public liveness display only through
 `agent.turn_stats_updated`.
 
+Streaming parsers may receive upstream chunks at arbitrary cadence, but Tau
+protocol updates are sampled. The provider response sampler starts when the
+backend request is dispatched. Chunk reads only update in-memory cumulative
+state and pending visible/non-visible deltas. The rate-limited emitter writes a
+non-terminal `provider.response_updated` sample only on one-second response
+deadlines; byte changes never bypass that cadence. Each private `response_stats`
+pair uses `previous` = the last provider sample actually emitted for the prompt
+and `current` = the new cumulative sample. A terminal flush is the only normal
+bypass and is allowed immediately before the provider prompt closes.
+
 ## Transcript replay boundary
 
 Chat Completions replay reconstructs provider-visible history from Tau's

@@ -501,7 +501,14 @@ fn read_sse_response_to_terminal_event(
                     }
                 }
             }
-            Err(error) if is_read_timeout(&error) => continue,
+            Err(error) if is_read_timeout(&error) => {
+                // Provider-owned response liveness is deadline-driven, not
+                // upstream-event-driven. The outer provider emitter rate-limits
+                // these timeout wakes to the public 1Hz cadence, but the
+                // transport loop must still wake it during silent backend waits.
+                on_update(&state);
+                continue;
+            }
             Err(error) => {
                 return Err(stream_read_failed_error(
                     tau_proto::ProviderBackendTransport::HttpSse,

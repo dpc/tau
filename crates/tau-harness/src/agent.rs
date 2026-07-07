@@ -56,6 +56,11 @@ pub(crate) struct AgentTurnStatsRuntime {
     pub(crate) started_at: Instant,
     /// Cumulative semantic provider output bytes observed in this turn.
     pub(crate) output_bytes_sent: u64,
+    /// Cumulative provider-owned response-output bytes observed for the current
+    /// provider prompt. Reset when the same agent turn advances to another
+    /// provider prompt after tool execution, or when provider retry clears the
+    /// current in-flight response state.
+    pub(crate) current_prompt_output_bytes: u64,
     /// Cumulative non-visible semantic output bytes observed for the current
     /// provider prompt. Reset when the same agent turn advances to another
     /// provider prompt after tool execution, or when the provider reports that
@@ -65,6 +70,10 @@ pub(crate) struct AgentTurnStatsRuntime {
     pub(crate) last_emitted: AgentTurnStatsSample,
     /// Last wall-clock time a sample was emitted.
     pub(crate) last_emitted_at: Instant,
+    /// Whether the current provider prompt already supplied provider-owned
+    /// response stats, so prompt close must not synthesize a second
+    /// harness-timed terminal sample for the same response.
+    pub(crate) provider_response_stats_seen: bool,
 }
 
 /// One loaded agent tracked by the harness.

@@ -86,23 +86,37 @@ must synthesize replay from the typed fields.
 First-party event categories (`tool`, `action`, `agent`, `extension`, `provider`, `harness`, `ui`, `shell`, `session`, and `term`) are reserved for typed protocol events. `CustomEvent` names must use extension-owned categories so extension payloads cannot spoof first-party routing or policy keys.
 Parsed event names and custom event payload names must have non-empty category and call segments; empty segments are malformed protocol data rather than extension-owned names.
 
-`agent.turn_stats_updated` is a transient agent runtime event owned by the
-harness. Its samples are cumulative and content-free; `previous` is always
-present and must describe the last emitted sample for the same turn. `turn_id`
-is an opaque [`AgentTurnId`], while `agent_prompt_id` identifies only the
-provider prompt currently active; it is absent during tool-wait samples and
-after a prompt is no longer active.
+`provider.response_updated.response_stats` is private provider-to-harness
+response-liveness metadata. It is content-free, prompt-local, and owned by the
+provider because the provider owns the backend request lifecycle and reads the
+response byte stream. Providers attach previous/current cumulative samples to
+rate-limited response updates: `previous` is the last sample that was actually
+emitted for that provider prompt, and `current` is the new cumulative sample.
+Non-terminal provider response/progress/stat updates must not be emitted more
+than once per second per prompt; byte changes never bypass that cadence. A final
+flush may bypass the cadence immediately before the provider prompt closes.
+
+`agent.turn_stats_updated` is a transient public compatibility projection owned
+by the harness as validator/adapter, not as the source of truth for provider
+response throughput. Its samples are cumulative and content-free; `previous` is
+always present and must describe the last emitted public sample for the same
+turn. When a valid provider response sample is present, the harness must preserve
+the provider previous/current byte and elapsed semantics while mapping prompt
+ownership/routing to the active agent turn; it must not reconstruct
+provider-response throughput from per-chunk updates. `turn_id` is an opaque
+[`AgentTurnId`], while `agent_prompt_id` identifies only the provider prompt
+currently active; it is absent during tool-wait samples and after a prompt is no
+longer active.
 
 Periodic idle samples with zero output bytes, unchanged output bytes, or a zero
 byte delta are valid. Consumers should compute interval rates from
 `current - previous` and whole-turn average rates from `current`, rather than
 assuming every sample corresponds to newly streamed provider content.
 
-`provider.response_updated.semantic_output` is a provider-to-harness
-content-free byte snapshot for non-visible generated output such as streamed
-tool/custom-tool input. It is not public UI progress state: harnesses consume and
-strip it before subscriber delivery, then publish any user-visible progress as
-`agent.turn_stats_updated`.
+`provider.response_updated.semantic_output` and `response_stats` are
+provider-to-harness private. Harnesses consume and strip them before subscriber
+delivery, then publish any user-visible progress as the compatibility
+`agent.turn_stats_updated` projection.
 
 ## Tree navigation targets
 

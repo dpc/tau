@@ -535,6 +535,7 @@ fn representative_events() -> Vec<Event> {
             compaction: None,
             status: None,
             semantic_output: None,
+            response_stats: None,
             originator: PromptOriginator::User,
         }),
         Event::ProviderResponseFinished(ProviderResponseFinished {
@@ -1700,6 +1701,7 @@ fn execution_events_use_provider_wire_family() {
                 compaction: None,
                 status: None,
                 semantic_output: None,
+                response_stats: None,
                 originator: PromptOriginator::User,
             }),
             "provider.response_updated",
@@ -1765,6 +1767,7 @@ fn provider_response_updated_semantic_output_round_trip() {
         semantic_output: Some(ProviderResponseSemanticOutput {
             non_visible_output_bytes: 8192,
         }),
+        response_stats: None,
         originator: PromptOriginator::User,
     };
 
@@ -2069,6 +2072,7 @@ fn event_defaults_to_transient_marks_progress_kinds() {
             compaction: None,
             status: None,
             semantic_output: None,
+            response_stats: None,
             originator: PromptOriginator::User,
         }),
         Event::ToolProgress(ToolProgress {

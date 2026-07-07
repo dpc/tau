@@ -5,17 +5,18 @@ pub mod openrouter;
 use std::collections::{BTreeMap, HashMap};
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::mpsc;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use tau_proto::{
     AgentPromptId, ContentPart, ContextItem, ContextRole, Event, HarnessInputMessage, ModelId,
     ModelName, ModelTag, OpaqueProviderItem, PeerOutputWriter, ProviderBackend,
     ProviderBackendKind, ProviderBackendTransport, ProviderModelInfo, ProviderName,
-    ProviderResponseFinished, ProviderResponseSemanticOutput, ProviderResponseStatusUpdate,
-    ProviderResponseTextDelta, ProviderResponseUpdated, ProviderStopReason, ProviderTokenUsage,
-    ReasoningTextItem, ReasoningTextKind, ThinkingSummary, ToolCallItem, ToolChoice,
-    ToolDefinition, ToolResponseHeader, ToolResultStatus, ToolType,
+    ProviderResponseFinished, ProviderResponseSemanticOutput, ProviderResponseStats,
+    ProviderResponseStatusUpdate, ProviderResponseTextDelta, ProviderResponseUpdated,
+    ProviderStopReason, ProviderTokenUsage, ReasoningTextItem, ReasoningTextKind, ThinkingSummary,
+    ToolCallItem, ToolChoice, ToolDefinition, ToolResponseHeader, ToolResultStatus, ToolType,
 };
 use tau_provider::{StreamRepetitionGuard, StreamRepetitionKey};
 
@@ -25,6 +26,8 @@ const LOG_TARGET: &str = "provider-chat-completions";
 /// provider-specific override is set.
 pub const DEFAULT_MAX_OUTPUT_TOKENS: u32 = 8192;
 const EMPTY_RESPONSE_MAX_RETRIES: usize = 10;
+const PROVIDER_RESPONSE_UPDATE_MIN_INTERVAL: Duration = Duration::from_secs(1);
+const PROVIDER_RESPONSE_READ_POLL_INTERVAL: Duration = Duration::from_secs(1);
 
 /// One Chat Completions-compatible provider entry.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -164,10 +167,10 @@ fn run_prompt<W: Write>(
     }
     let mut empty_response_retries = 0_usize;
     loop {
+        let mut response_update_emitter = RateLimitedResponseUpdateEmitter::new();
         let result = {
-            let mut delta_emitter = StreamDeltaEmitter::default();
             let mut on_update = |state: &StreamState| {
-                emit_stream_update(agent_prompt_id, prompt, state, &mut delta_emitter, writer);
+                response_update_emitter.emit_if_due(agent_prompt_id, prompt, state, writer);
             };
             chat_completions_stream(
                 &provider,
@@ -178,7 +181,15 @@ fn run_prompt<W: Write>(
             )
         };
         match result {
-            Ok(state) => return finish_success(agent_prompt_id, prompt, &provider, state),
+            Ok(state) => {
+                response_update_emitter.emit_terminal_flush(
+                    agent_prompt_id,
+                    prompt,
+                    &state,
+                    writer,
+                );
+                return finish_success(agent_prompt_id, prompt, &provider, state);
+            }
             Err(LlmError::EmptyResponse) if empty_response_retries < EMPTY_RESPONSE_MAX_RETRIES => {
                 empty_response_retries += 1;
                 emit_empty_response_retry_update(
@@ -200,19 +211,122 @@ fn run_prompt<W: Write>(
     }
 }
 
+struct RateLimitedResponseUpdateEmitter {
+    delta_emitter: StreamDeltaEmitter,
+    started_at: Instant,
+    last_update_emitted_at: Option<Instant>,
+    last_stats_sample: tau_proto::ProviderResponseStatsSample,
+}
+
+impl RateLimitedResponseUpdateEmitter {
+    fn new() -> Self {
+        Self::new_at(Instant::now())
+    }
+
+    fn new_at(started_at: Instant) -> Self {
+        Self {
+            delta_emitter: StreamDeltaEmitter::default(),
+            started_at,
+            last_update_emitted_at: Some(started_at),
+            last_stats_sample: tau_proto::ProviderResponseStatsSample::default(),
+        }
+    }
+
+    fn emit_if_due<W: Write>(
+        &mut self,
+        agent_prompt_id: &AgentPromptId,
+        prompt: &tau_proto::AgentPromptCreated,
+        state: &StreamState,
+        writer: &mut PeerOutputWriter<W>,
+    ) {
+        self.emit_at(
+            agent_prompt_id,
+            prompt,
+            state,
+            writer,
+            Instant::now(),
+            false,
+        );
+    }
+
+    fn emit_terminal_flush<W: Write>(
+        &mut self,
+        agent_prompt_id: &AgentPromptId,
+        prompt: &tau_proto::AgentPromptCreated,
+        state: &StreamState,
+        writer: &mut PeerOutputWriter<W>,
+    ) {
+        self.emit_at(agent_prompt_id, prompt, state, writer, Instant::now(), true);
+    }
+
+    fn emit_at<W: Write>(
+        &mut self,
+        agent_prompt_id: &AgentPromptId,
+        prompt: &tau_proto::AgentPromptCreated,
+        state: &StreamState,
+        writer: &mut PeerOutputWriter<W>,
+        now: Instant,
+        terminal_flush: bool,
+    ) {
+        if !terminal_flush
+            && self.last_update_emitted_at.is_some_and(|last| {
+                now.saturating_duration_since(last) < PROVIDER_RESPONSE_UPDATE_MIN_INTERVAL
+            })
+        {
+            return;
+        }
+        let response_stats = self.response_stats_at(state, now);
+        if emit_stream_update(
+            agent_prompt_id,
+            prompt,
+            state,
+            &mut self.delta_emitter,
+            response_stats,
+            writer,
+        ) {
+            self.last_stats_sample = response_stats.current;
+            self.last_update_emitted_at = Some(now);
+        }
+    }
+
+    fn response_stats_at(&self, state: &StreamState, now: Instant) -> ProviderResponseStats {
+        let current = tau_proto::ProviderResponseStatsSample {
+            output_bytes_sent: state.response_output_bytes(),
+            elapsed_micros: now
+                .saturating_duration_since(self.started_at)
+                .as_micros()
+                .min(u128::from(u64::MAX)) as u64,
+        };
+        ProviderResponseStats {
+            current,
+            previous: self.last_stats_sample,
+        }
+    }
+}
+
 fn emit_stream_update<W: Write>(
     agent_prompt_id: &AgentPromptId,
     prompt: &tau_proto::AgentPromptCreated,
     state: &StreamState,
     delta_emitter: &mut StreamDeltaEmitter,
+    response_stats: ProviderResponseStats,
     writer: &mut PeerOutputWriter<W>,
-) {
+) -> bool {
+    // RATE-LIMIT GUARDRAIL — DO NOT CALL THIS DIRECTLY FROM UPSTREAM CHUNKS.
+    // provider.response_updated is a bus/event-log event, not a per-chunk
+    // callback. Progress/byte updates MUST be batched and emitted no faster than
+    // PROVIDER_RESPONSE_UPDATE_MIN_INTERVAL (1s) per prompt. A byte change is NOT
+    // a reason to emit early. Only `RateLimitedResponseUpdateEmitter` may bypass
+    // this for a terminal flush immediately before the turn is closed.
     let deltas = delta_emitter.deltas(state);
     let semantic_output = state.semantic_output_for_update();
-    if deltas.is_empty() && semantic_output.is_none() {
-        return;
+    if deltas.is_empty()
+        && semantic_output.is_none()
+        && response_stats.current == response_stats.previous
+    {
+        return false;
     }
-    let _ = writer.write_message(&HarnessInputMessage::emit(Event::ProviderResponseUpdated(
+    let Ok(()) = writer.write_message(&HarnessInputMessage::emit(Event::ProviderResponseUpdated(
         ProviderResponseUpdated {
             agent_prompt_id: agent_prompt_id.clone(),
             agent_id: prompt.agent_id.clone(),
@@ -220,10 +334,13 @@ fn emit_stream_update<W: Write>(
             compaction: None,
             status: None,
             semantic_output,
+            response_stats: Some(response_stats),
             originator: prompt.originator.clone(),
         },
-    )));
-    let _ = writer.flush();
+    ))) else {
+        return false;
+    };
+    writer.flush().is_ok()
 }
 
 fn emit_empty_response_retry_update<W: Write>(
@@ -246,6 +363,7 @@ fn emit_empty_response_retry_update<W: Write>(
                 clear_response: true,
             }),
             semantic_output: None,
+            response_stats: None,
             originator: prompt.originator.clone(),
         },
     )));
@@ -272,6 +390,7 @@ fn emit_repetition_detected_update<W: Write>(
                 clear_response: true,
             }),
             semantic_output: None,
+            response_stats: None,
             originator: prompt.originator.clone(),
         },
     )));
@@ -499,6 +618,20 @@ impl StreamState {
         })
     }
 
+    fn response_output_bytes(&self) -> u64 {
+        let visible_bytes = self
+            .text
+            .len()
+            .saturating_add(self.thinking.len())
+            .try_into()
+            .unwrap_or(u64::MAX);
+        let non_visible_bytes = self
+            .semantic_output_for_update()
+            .map(|semantic_output| semantic_output.non_visible_output_bytes)
+            .unwrap_or(0);
+        visible_bytes.saturating_add(non_visible_bytes)
+    }
+
     fn append_assistant_text_delta(&mut self, delta: &str) -> Result<(), LlmError> {
         if delta.is_empty() {
             return Ok(());
@@ -689,22 +822,43 @@ fn chat_completions_stream(
 
     let mut state = StreamState::new();
     let mut raw_events = Vec::new();
-    let reader = BufReader::new(response.body_mut().as_reader());
-    for line in reader.lines() {
-        let line = line.map_err(LlmError::Io)?;
-        let Some(data) = line.strip_prefix("data: ") else {
-            continue;
-        };
-        if data == "[DONE]" {
-            break;
+    std::thread::scope(|scope| -> Result<(), LlmError> {
+        let (line_tx, line_rx) = mpsc::channel();
+        let reader = BufReader::new(response.body_mut().as_reader());
+        scope.spawn(move || {
+            for line in reader.lines() {
+                if line_tx.send(line).is_err() {
+                    break;
+                }
+            }
+        });
+        loop {
+            let line = match line_rx.recv_timeout(PROVIDER_RESPONSE_READ_POLL_INTERVAL) {
+                Ok(line) => line.map_err(LlmError::Io)?,
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    // Provider-owned response liveness is deadline-driven, not
+                    // upstream-chunk-driven. Wake the sampled emitter while the
+                    // backend is silent; it enforces the 1Hz event cadence.
+                    on_update(&state);
+                    continue;
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            };
+            let Some(data) = line.strip_prefix("data: ") else {
+                continue;
+            };
+            if data == "[DONE]" {
+                break;
+            }
+            let event: serde_json::Value = match serde_json::from_str(data) {
+                Ok(event) => event,
+                Err(_) => continue,
+            };
+            raw_events.push(event.clone());
+            apply_event(&mut state, &event, on_update)?;
         }
-        let event: serde_json::Value = match serde_json::from_str(data) {
-            Ok(event) => event,
-            Err(_) => continue,
-        };
-        raw_events.push(event.clone());
-        apply_event(&mut state, &event, on_update)?;
-    }
+        Ok(())
+    })?;
     flush_pending_content(&mut state, on_update)?;
     maybe_debug_write_provider_response(
         prompt,

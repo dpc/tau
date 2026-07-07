@@ -313,11 +313,16 @@ impl WsConn {
                 return Err(LlmError::HttpStatus(499, "cancelled by harness".to_owned()));
             }
             let remaining = idle_timeout.saturating_sub(last_event_at.elapsed());
-            let event = match self.inbound_rx.recv_timeout(remaining) {
+            let wait = remaining.min(Duration::from_secs(1));
+            let event = match self.inbound_rx.recv_timeout(wait) {
                 Ok(event) => event,
                 Err(std_mpsc::RecvTimeoutError::Timeout)
                     if last_event_at.elapsed() < idle_timeout =>
                 {
+                    // Provider-owned response liveness is deadline-driven, not
+                    // upstream-event-driven. Wake the outer sampled emitter
+                    // during quiet WebSocket waits; it enforces the 1Hz cadence.
+                    on_update(&state);
                     continue;
                 }
                 Err(std_mpsc::RecvTimeoutError::Timeout) => {

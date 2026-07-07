@@ -979,6 +979,9 @@ fn turn_stats_indicator_suffix(stats: Option<&tau_proto::AgentTurnStatsUpdated>)
     let Some(stats) = stats else {
         return String::new();
     };
+    // This widget is intentionally stateless with respect to rates. Do not use
+    // `Instant::now()` here. The harness owns sampling cadence; the CLI only
+    // renders the latest current/previous sample it received.
     let total_bytes = stats.current.output_bytes_sent;
     let elapsed_seconds = stats.current.elapsed_micros / 1_000_000;
     let bytes = format_progress_bytes(total_bytes);

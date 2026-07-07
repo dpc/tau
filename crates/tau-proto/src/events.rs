@@ -3197,13 +3197,14 @@ pub struct AgentTurnStatsUpdated {
     pub previous: AgentTurnStatsSample,
 }
 
-/// One cumulative content-free statistics sample for an agent turn.
+/// One cumulative content-free statistics sample for a public agent turn event.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct AgentTurnStatsSample {
     /// Monotonic UTF-8 byte count of provider-generated semantic output sent
     /// during this agent turn.
     pub output_bytes_sent: u64,
-    /// Monotonic elapsed time since this agent turn started, in microseconds.
+    /// Monotonic elapsed time since this public stats turn started, in
+    /// microseconds.
     pub elapsed_micros: u64,
 }
 
@@ -3255,6 +3256,15 @@ pub struct ProviderResponseUpdated {
     /// UI consumers must use `agent.turn_stats_updated` for progress display.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub semantic_output: Option<ProviderResponseSemanticOutput>,
+    /// Provider-to-harness content-free response throughput sample.
+    ///
+    /// Providers own the response byte counter because they observe upstream
+    /// stream bytes before the harness does. The harness validates prompt
+    /// ownership, consumes and strips this field, maps the prompt-local sample
+    /// to a harness-owned [`AgentTurnStatsUpdated`] turn sample, and
+    /// defensively rate-limits that public event.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_stats: Option<ProviderResponseStats>,
     /// Echo of [`AgentPromptCreated::originator`]. UIs filter on
     /// `originator.is_user()` so the streaming text from a side
     /// conversation doesn't paint into the user's chat window.
@@ -3273,6 +3283,26 @@ pub struct ProviderResponseSemanticOutput {
     /// Cumulative UTF-8 bytes of non-visible provider-generated semantic output
     /// observed for the current provider prompt.
     pub non_visible_output_bytes: u64,
+}
+
+/// One provider-owned, prompt-local response throughput update.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ProviderResponseStats {
+    /// Latest cumulative provider-response statistics sample for this prompt.
+    pub current: ProviderResponseStatsSample,
+    /// Previously emitted provider-response sample for this prompt.
+    pub previous: ProviderResponseStatsSample,
+}
+
+/// One provider-owned, prompt-local response throughput sample.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ProviderResponseStatsSample {
+    /// Monotonic UTF-8 byte count of provider-generated semantic output
+    /// observed for the current provider prompt/response.
+    pub output_bytes_sent: u64,
+    /// Monotonic elapsed time since backend request dispatch for this provider
+    /// prompt, in microseconds.
+    pub elapsed_micros: u64,
 }
 
 /// Newly appended displayable text in a provider response update.

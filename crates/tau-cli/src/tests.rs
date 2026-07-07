@@ -1298,6 +1298,7 @@ fn provider_response_delta_update(
         compaction: None,
         status: None,
         semantic_output: None,
+        response_stats: None,
         originator,
     }
 }
@@ -1454,6 +1455,7 @@ fn status_clear_response_removes_live_thinking_block() {
             clear_response: true,
         }),
         semantic_output: None,
+        response_stats: None,
         originator: tau_proto::PromptOriginator::User,
     }));
     sync(&handle);
@@ -4411,6 +4413,7 @@ fn agent_turn_stats_update_suffixes_live_indicator_until_finish() {
         compaction: None,
         status: None,
         semantic_output: None,
+        response_stats: None,
         originator: tau_proto::PromptOriginator::User,
     }));
     sync(&handle);
@@ -4500,6 +4503,7 @@ fn provider_visible_update_omits_turn_stats_suffix() {
         compaction: None,
         status: None,
         semantic_output: None,
+        response_stats: None,
         originator: tau_proto::PromptOriginator::User,
     }));
     sync(&handle);
@@ -5628,6 +5632,7 @@ fn render_provider_compaction_update_as_compact_progress() {
         }),
         status: None,
         semantic_output: None,
+        response_stats: None,
         originator: tau_proto::PromptOriginator::User,
     }));
     sync(&handle);

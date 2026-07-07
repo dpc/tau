@@ -51,6 +51,13 @@ cooperative rather than a hard socket interruption; ChatGPT/Codex WebSocket turn
 use the abort-waker path to wake an idle provider-event receive and return the
 normal harness cancellation result promptly.
 
+Built-in providers batch `provider.response_updated` output and emit
+non-terminal progress at most once per second per prompt. Worker/backend stream
+loops must not write Tau protocol progress events directly from every upstream
+chunk; visible deltas, compaction status, and private semantic-output byte
+snapshots are accumulated until the rate-limited emitter samples them, except for
+a terminal flush immediately before the provider prompt closes.
+
 ## Provider retry sleeps are capped per attempt
 
 Status: unconfirmed

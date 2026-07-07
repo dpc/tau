@@ -49,9 +49,11 @@ unchecked raw blob.
 ## Streaming status boundary
 
 Providers must not copy raw streamed assistant text, reasoning text,
-tool-call arguments, or custom-tool input into status text or diagnostics. Live
-byte stats are harness-owned `agent.turn_stats_updated` events, not public
-provider metadata. The private `semantic_output.non_visible_output_bytes`
-snapshot sent to the harness is content-free, cumulative for the current
-provider prompt, excluded from durable/public outputs, and stripped before
-subscriber delivery.
+tool-call arguments, or custom-tool input into status text or diagnostics.
+Provider response stats are private, content-free provider-to-harness metadata:
+providers own the prompt-local byte counter, emit previous/current samples at no
+more than 1Hz except the final flush, and the harness validates ownership and
+strips the field before public provider delivery. The private
+`semantic_output.non_visible_output_bytes` snapshot sent to the harness is also
+content-free, cumulative for the current provider prompt, excluded from
+durable/public outputs, and stripped before subscriber delivery.

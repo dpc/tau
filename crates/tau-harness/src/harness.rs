@@ -115,18 +115,6 @@ const SELF_KNOWLEDGE_UI_CONFIG: &str = include_str!("../../tau-config/config/bui
 const SELF_KNOWLEDGE_PIM_CONFIG: &str =
     include_str!("../../tau-ext-pim/config/self-knowledge.harness.yaml");
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum AgentTurnStatsEmitMode {
-    Sampled,
-    Forced,
-}
-
-impl AgentTurnStatsEmitMode {
-    fn is_forced(self) -> bool {
-        matches!(self, Self::Forced)
-    }
-}
-
 fn session_dir_status_from_reason(
     reason: tau_proto::SessionStartReason,
 ) -> tau_proto::SessionDirStatus {
@@ -5690,6 +5678,7 @@ impl Harness {
                         .semantic_output
                         .take()
                         .map(|semantic_output| semantic_output.non_visible_output_bytes);
+                    let response_stats = updated.response_stats.take();
                     let has_public_content = provider_response_update_has_public_content(&updated);
                     if has_public_content {
                         self.publish_event(
@@ -5701,11 +5690,29 @@ impl Harness {
                         if resets_response {
                             self.reset_agent_turn_current_prompt_non_visible_output_bytes(cid);
                         }
-                        self.add_agent_turn_output_bytes(cid, output_bytes);
-                        if let Some(bytes) = non_visible_output_bytes {
-                            self.add_agent_turn_non_visible_output_snapshot(cid, bytes);
+                        if let Some(response_stats) = response_stats {
+                            let mapped_stats =
+                                self.map_provider_response_stats_to_turn(cid, response_stats);
+                            self.set_agent_turn_current_prompt_output_snapshot(
+                                cid,
+                                response_stats.current.output_bytes_sent,
+                            );
+                            if let Some(bytes) = non_visible_output_bytes {
+                                self.set_agent_turn_current_prompt_non_visible_baseline(cid, bytes);
+                            }
+                            if let Some(mapped_stats) = mapped_stats {
+                                self.emit_agent_turn_stats_from_provider_response_stats(
+                                    cid,
+                                    mapped_stats,
+                                );
+                            }
+                        } else {
+                            self.add_agent_turn_output_bytes(cid, output_bytes);
+                            if let Some(bytes) = non_visible_output_bytes {
+                                self.add_agent_turn_non_visible_output_snapshot(cid, bytes);
+                            }
+                            self.emit_agent_turn_stats_if_due(cid);
                         }
-                        self.emit_agent_turn_stats(cid, AgentTurnStatsEmitMode::Sampled);
                     }
                 }
                 Ok(None)
@@ -10414,16 +10421,20 @@ impl Harness {
         if let Some(agent) = self.agents.get_mut(cid) {
             if let Some(stats) = agent.turn_stats.as_mut() {
                 stats.current_prompt_id = Some(agent_prompt_id);
+                stats.current_prompt_output_bytes = 0;
                 stats.current_prompt_non_visible_output_bytes = 0;
+                stats.provider_response_stats_seen = false;
             } else {
                 agent.turn_stats = Some(AgentTurnStatsRuntime {
                     turn_id: AgentTurnId::from(agent_prompt_id.as_str()),
                     current_prompt_id: Some(agent_prompt_id),
                     started_at: now,
                     output_bytes_sent: 0,
+                    current_prompt_output_bytes: 0,
                     current_prompt_non_visible_output_bytes: 0,
                     last_emitted: AgentTurnStatsSample::default(),
                     last_emitted_at: now,
+                    provider_response_stats_seen: false,
                 });
             }
         }
@@ -10471,6 +10482,101 @@ impl Harness {
         }
     }
 
+    fn set_agent_turn_current_prompt_non_visible_baseline(&mut self, cid: &AgentId, bytes: u64) {
+        if let Some(stats) = self
+            .agents
+            .get_mut(cid)
+            .and_then(|agent| agent.turn_stats.as_mut())
+        {
+            stats.current_prompt_non_visible_output_bytes = bytes;
+        }
+    }
+
+    /// Updates turn output bytes from a provider-owned cumulative response
+    /// throughput sample for the current prompt.
+    fn set_agent_turn_current_prompt_output_snapshot(&mut self, cid: &AgentId, bytes: u64) {
+        if let Some(stats) = self
+            .agents
+            .get_mut(cid)
+            .and_then(|agent| agent.turn_stats.as_mut())
+        {
+            let new_bytes = bytes.saturating_sub(stats.current_prompt_output_bytes);
+            if new_bytes == 0 {
+                return;
+            }
+            stats.current_prompt_output_bytes = bytes;
+            stats.output_bytes_sent = stats.output_bytes_sent.saturating_add(new_bytes);
+        }
+    }
+
+    fn map_provider_response_stats_to_turn(
+        &self,
+        cid: &AgentId,
+        response_stats: tau_proto::ProviderResponseStats,
+    ) -> Option<tau_proto::ProviderResponseStats> {
+        let stats = self.agents.get(cid)?.turn_stats.as_ref()?;
+        let turn_offset = stats
+            .output_bytes_sent
+            .saturating_sub(stats.current_prompt_output_bytes);
+        Some(tau_proto::ProviderResponseStats {
+            current: tau_proto::ProviderResponseStatsSample {
+                output_bytes_sent: turn_offset
+                    .saturating_add(response_stats.current.output_bytes_sent),
+                elapsed_micros: response_stats.current.elapsed_micros,
+            },
+            previous: tau_proto::ProviderResponseStatsSample {
+                output_bytes_sent: turn_offset
+                    .saturating_add(response_stats.previous.output_bytes_sent),
+                elapsed_micros: response_stats.previous.elapsed_micros,
+            },
+        })
+    }
+
+    fn emit_agent_turn_stats_from_provider_response_stats(
+        &mut self,
+        cid: &AgentId,
+        response_stats: tau_proto::ProviderResponseStats,
+    ) {
+        let now = Instant::now();
+        let Some(event) = self.agents.get(cid).and_then(|agent| {
+            let stats = agent.turn_stats.as_ref()?;
+            let agent_id = agent.agent_id.as_ref().map(crate::parse_agent_id)?;
+            Some(AgentTurnStatsUpdated {
+                turn_id: stats.turn_id.clone(),
+                agent_id,
+                session_id: agent.session_id.clone(),
+                agent_prompt_id: stats.current_prompt_id.clone(),
+                originator: agent.originator.clone(),
+                current: AgentTurnStatsSample {
+                    output_bytes_sent: response_stats.current.output_bytes_sent,
+                    elapsed_micros: response_stats.current.elapsed_micros,
+                },
+                previous: AgentTurnStatsSample {
+                    output_bytes_sent: response_stats.previous.output_bytes_sent,
+                    elapsed_micros: response_stats.previous.elapsed_micros,
+                },
+            })
+        }) else {
+            return;
+        };
+        if let Some(stats) = self
+            .agents
+            .get_mut(cid)
+            .and_then(|agent| agent.turn_stats.as_mut())
+        {
+            stats.last_emitted = AgentTurnStatsSample {
+                output_bytes_sent: response_stats.current.output_bytes_sent,
+                elapsed_micros: response_stats.current.elapsed_micros,
+            };
+            stats.last_emitted_at = now;
+            stats.provider_response_stats_seen = true;
+        }
+        self.publish_event(
+            Some(HARNESS_CONNECTION_ID),
+            Event::AgentTurnStatsUpdated(event),
+        );
+    }
+
     /// Resets the current-prompt non-visible snapshot baseline after the
     /// provider reports that in-flight response state was cleared, usually
     /// before retrying the same prompt.
@@ -10480,7 +10586,9 @@ impl Harness {
             .get_mut(cid)
             .and_then(|agent| agent.turn_stats.as_mut())
         {
+            stats.current_prompt_output_bytes = 0;
             stats.current_prompt_non_visible_output_bytes = 0;
+            stats.provider_response_stats_seen = false;
         }
     }
 
@@ -10495,8 +10603,35 @@ impl Harness {
         }
     }
 
-    /// Emits the current stats snapshot for an active turn when useful.
-    fn emit_agent_turn_stats(&mut self, cid: &AgentId, mode: AgentTurnStatsEmitMode) {
+    /// Emits the current stats snapshot for an active turn if the sampled
+    /// one-second cadence is due.
+    fn emit_agent_turn_stats_if_due(&mut self, cid: &AgentId) {
+        self.emit_agent_turn_stats(cid, false);
+    }
+
+    /// Emits the terminal stats snapshot before immediately clearing turn
+    /// stats.
+    fn emit_terminal_agent_turn_stats_and_clear(&mut self, cid: &AgentId) {
+        self.emit_agent_turn_stats(cid, true);
+        self.clear_agent_turn_stats(cid);
+    }
+
+    /// Emits a prompt-terminal snapshot immediately before closing the active
+    /// provider response.
+    fn emit_provider_prompt_terminal_agent_turn_stats(&mut self, cid: &AgentId) {
+        if self
+            .agents
+            .get(cid)
+            .and_then(|agent| agent.turn_stats.as_ref())
+            .is_some_and(|stats| stats.provider_response_stats_seen)
+        {
+            return;
+        }
+        self.emit_agent_turn_stats(cid, true);
+    }
+
+    /// Emits the current stats snapshot for an active turn.
+    fn emit_agent_turn_stats(&mut self, cid: &AgentId, terminal_shutdown: bool) {
         let now = Instant::now();
         let Some((event, current)) = self.agents.get(cid).and_then(|agent| {
             let stats = agent.turn_stats.as_ref()?;
@@ -10507,10 +10642,17 @@ impl Harness {
                     .as_micros()
                     .min(u128::from(u64::MAX)) as u64,
             };
-            let bytes_changed = current.output_bytes_sent != stats.last_emitted.output_bytes_sent;
             let interval_elapsed = now.saturating_duration_since(stats.last_emitted_at)
                 >= AGENT_TURN_STATS_SAMPLE_INTERVAL;
-            if !(mode.is_forced() || bytes_changed || interval_elapsed) {
+            // RATE-LIMIT GUARDRAIL — DO NOT ADD `bytes_changed` HERE.
+            // Agent turn stats are sampled UI/event-log state. New provider
+            // bytes update cumulative counters only; they MUST wait for the
+            // next 1s sample deadline. Emitting on every byte change turns
+            // ΔB/s into provider-chunk jitter and floods the event log. Only
+            // terminal provider-response shutdown may bypass, and that path
+            // immediately closes the active prompt so no more bytes can follow
+            // from that provider prompt.
+            if !(terminal_shutdown || interval_elapsed) {
                 return None;
             }
             let agent_id = agent.agent_id.as_ref().map(crate::parse_agent_id)?;
@@ -10571,14 +10713,13 @@ impl Harness {
             })
             .collect();
         for cid in due_agents {
-            self.emit_agent_turn_stats(&cid, AgentTurnStatsEmitMode::Sampled);
+            self.emit_agent_turn_stats_if_due(&cid);
         }
     }
 
     /// Emits the final stats snapshot and clears runtime stats for the turn.
     fn finish_agent_turn_stats(&mut self, cid: &AgentId) {
-        self.emit_agent_turn_stats(cid, AgentTurnStatsEmitMode::Forced);
-        self.clear_agent_turn_stats(cid);
+        self.emit_terminal_agent_turn_stats_and_clear(cid);
     }
 
     /// Clears runtime stats for a turn that already emitted its terminal sample
@@ -11073,7 +11214,7 @@ impl Harness {
         let agent_prompt_id = prompt.agent_prompt_id.clone();
         self.publish_event(None, Event::AgentPromptStarted((&prompt).into()));
         self.publish_event(None, Event::AgentPromptCreated(prompt));
-        self.emit_agent_turn_stats(cid, AgentTurnStatsEmitMode::Forced);
+        self.emit_agent_turn_stats_if_due(cid);
         Some(agent_prompt_id)
     }
 
@@ -11823,7 +11964,7 @@ impl Harness {
             &cid,
             final_tool_argument_bytes(&response.output_items),
         );
-        self.emit_agent_turn_stats(&cid, AgentTurnStatsEmitMode::Forced);
+        self.emit_provider_prompt_terminal_agent_turn_stats(&cid);
         self.publish_finished_response_for_agent(&cid, source, &response);
         if self.handle_finished_response_side_conversation(
             &cid,
@@ -12340,7 +12481,7 @@ impl Harness {
         self.register_finished_response_pending_tools(&normalized_tool_calls.calls);
         self.set_agent_turn_state(cid, AgentTurnState::ToolsRunning { remaining_calls });
         self.mark_agent_turn_stats_waiting_on_tools(cid);
-        self.emit_agent_turn_stats(cid, AgentTurnStatsEmitMode::Forced);
+        self.emit_agent_turn_stats_if_due(cid);
         if self
             .agents
             .get(cid)

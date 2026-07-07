@@ -25,8 +25,8 @@ use tau_proto::{
     ClientKind, ContextItem, Event, EventName, HarnessInputMessage, HarnessInputReader, ModelId,
     ModelName, PeerOutputWriter, ProviderBackend, ProviderBackendKind, ProviderBackendTransport,
     ProviderCacheMissDiagnostic, ProviderModelInfo, ProviderModelsUpdated, ProviderName,
-    ProviderPromptSubmitted, ProviderResponseFinished, ProviderResponseStatusUpdate,
-    ProviderResponseUpdated, ProviderStopReason,
+    ProviderPromptSubmitted, ProviderResponseFinished, ProviderResponseStats,
+    ProviderResponseStatusUpdate, ProviderResponseUpdated, ProviderStopReason,
 };
 use tau_provider::storage::{AuthFile, ProviderStore};
 use tau_provider_chat_completions::openrouter::{OpenRouterProfile, fetch_openrouter_models};
@@ -110,6 +110,7 @@ const LLM_MAX_RETRIES_EXTENSION: usize = 2;
 /// view. Keep retries useful for transient overload while guaranteeing a prompt
 /// slot returns in human-scale time.
 const LLM_MAX_RETRY_DELAY: Duration = Duration::from_secs(60);
+const PROVIDER_RESPONSE_UPDATE_MIN_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Default number of provider prompts allowed to execute concurrently.
 const DEFAULT_PROMPT_CONCURRENCY: usize = 4;
@@ -1654,6 +1655,7 @@ fn emit_retry_banner<W: Write>(
                 clear_response: true,
             }),
             semantic_output: None,
+            response_stats: None,
             originator: originator.clone(),
         },
     )));
@@ -1804,25 +1806,34 @@ where
         writer,
         retry_ctx,
         |writer, retry_ctx| {
-            let mut delta_emitter = common::StreamDeltaEmitter::default();
+            let mut response_update_emitter = RateLimitedResponseUpdateEmitter::new();
             let mut on_update = |state: &common::StreamState| {
-                emit_chatgpt_stream_update(
+                response_update_emitter.emit_if_due(
                     agent_prompt_id,
                     &prompt.agent_id,
                     &originator,
                     state,
-                    &mut delta_emitter,
                     writer,
                 );
             };
-            chatgpt_runtime.stream(
+            let result = chatgpt_runtime.stream(
                 agent_prompt_id,
                 config,
                 &request,
                 &mut chatgpt_turn_state,
                 retry_ctx,
                 &mut on_update,
-            )
+            );
+            if let Ok(dispatch) = &result {
+                response_update_emitter.emit_terminal_flush(
+                    agent_prompt_id,
+                    &prompt.agent_id,
+                    &originator,
+                    &dispatch.state,
+                    writer,
+                );
+            }
+            result
         },
     );
     match result {
@@ -1884,21 +1895,140 @@ where
     Ok(())
 }
 
+struct RateLimitedResponseUpdateEmitter {
+    delta_emitter: common::StreamDeltaEmitter,
+    started_at: Instant,
+    last_update_emitted_at: Option<Instant>,
+    last_stats_sample: tau_proto::ProviderResponseStatsSample,
+}
+
+struct ResponseUpdateTarget<'a> {
+    agent_prompt_id: &'a str,
+    agent_id: &'a tau_proto::AgentId,
+    originator: &'a tau_proto::PromptOriginator,
+}
+
+impl RateLimitedResponseUpdateEmitter {
+    fn new() -> Self {
+        Self::new_at(Instant::now())
+    }
+
+    fn new_at(started_at: Instant) -> Self {
+        Self {
+            delta_emitter: common::StreamDeltaEmitter::default(),
+            started_at,
+            last_update_emitted_at: Some(started_at),
+            last_stats_sample: tau_proto::ProviderResponseStatsSample::default(),
+        }
+    }
+
+    fn emit_if_due<W: Write>(
+        &mut self,
+        agent_prompt_id: &str,
+        agent_id: &tau_proto::AgentId,
+        originator: &tau_proto::PromptOriginator,
+        state: &common::StreamState,
+        writer: &mut PeerOutputWriter<W>,
+    ) {
+        let target = ResponseUpdateTarget {
+            agent_prompt_id,
+            agent_id,
+            originator,
+        };
+        self.emit_at(&target, state, writer, Instant::now(), false);
+    }
+
+    fn emit_terminal_flush<W: Write>(
+        &mut self,
+        agent_prompt_id: &str,
+        agent_id: &tau_proto::AgentId,
+        originator: &tau_proto::PromptOriginator,
+        state: &common::StreamState,
+        writer: &mut PeerOutputWriter<W>,
+    ) {
+        let target = ResponseUpdateTarget {
+            agent_prompt_id,
+            agent_id,
+            originator,
+        };
+        self.emit_at(&target, state, writer, Instant::now(), true);
+    }
+
+    fn emit_at<W: Write>(
+        &mut self,
+        target: &ResponseUpdateTarget<'_>,
+        state: &common::StreamState,
+        writer: &mut PeerOutputWriter<W>,
+        now: Instant,
+        terminal_flush: bool,
+    ) {
+        if !terminal_flush
+            && self.last_update_emitted_at.is_some_and(|last| {
+                now.saturating_duration_since(last) < PROVIDER_RESPONSE_UPDATE_MIN_INTERVAL
+            })
+        {
+            return;
+        }
+        let response_stats = self.response_stats_at(state, now);
+        if emit_chatgpt_stream_update(
+            target.agent_prompt_id,
+            target.agent_id,
+            target.originator,
+            state,
+            &mut self.delta_emitter,
+            response_stats,
+            writer,
+        ) {
+            self.last_stats_sample = response_stats.current;
+            self.last_update_emitted_at = Some(now);
+        }
+    }
+
+    fn response_stats_at(
+        &self,
+        state: &common::StreamState,
+        now: Instant,
+    ) -> ProviderResponseStats {
+        let current = tau_proto::ProviderResponseStatsSample {
+            output_bytes_sent: state.response_output_bytes(),
+            elapsed_micros: now
+                .saturating_duration_since(self.started_at)
+                .as_micros()
+                .min(u128::from(u64::MAX)) as u64,
+        };
+        ProviderResponseStats {
+            current,
+            previous: self.last_stats_sample,
+        }
+    }
+}
+
 fn emit_chatgpt_stream_update<W: Write>(
     agent_prompt_id: &str,
     agent_id: &tau_proto::AgentId,
     originator: &tau_proto::PromptOriginator,
     state: &common::StreamState,
     delta_emitter: &mut common::StreamDeltaEmitter,
+    response_stats: ProviderResponseStats,
     writer: &mut PeerOutputWriter<W>,
-) {
+) -> bool {
+    // RATE-LIMIT GUARDRAIL — DO NOT CALL THIS DIRECTLY FROM UPSTREAM CHUNKS.
+    // provider.response_updated is a bus/event-log event, not a per-chunk
+    // callback. Progress/byte updates MUST be batched and emitted no faster than
+    // PROVIDER_RESPONSE_UPDATE_MIN_INTERVAL (1s) per prompt. A byte change is NOT
+    // a reason to emit early. Only `RateLimitedResponseUpdateEmitter` may bypass
+    // this for a terminal flush immediately before the turn is closed.
     let deltas = delta_emitter.deltas(state);
     let compaction = state.compaction_update();
     let semantic_output = state.semantic_output_for_update();
-    if deltas.is_empty() && compaction.is_none() && semantic_output.is_none() {
-        return;
+    if deltas.is_empty()
+        && compaction.is_none()
+        && semantic_output.is_none()
+        && response_stats.current == response_stats.previous
+    {
+        return false;
     }
-    let _ = writer.write_message(&HarnessInputMessage::emit(Event::ProviderResponseUpdated(
+    let Ok(()) = writer.write_message(&HarnessInputMessage::emit(Event::ProviderResponseUpdated(
         ProviderResponseUpdated {
             agent_prompt_id: agent_prompt_id.into(),
             agent_id: agent_id.clone(),
@@ -1906,10 +2036,13 @@ fn emit_chatgpt_stream_update<W: Write>(
             compaction,
             status: None,
             semantic_output,
+            response_stats: Some(response_stats),
             originator: originator.clone(),
         },
-    )));
-    let _ = writer.flush();
+    ))) else {
+        return false;
+    };
+    writer.flush().is_ok()
 }
 
 fn backend_descriptor(
@@ -2146,6 +2279,7 @@ fn emit_repetition_detected_update<W: Write>(
                 clear_response: true,
             }),
             semantic_output: None,
+            response_stats: None,
             originator: originator.clone(),
         },
     )));

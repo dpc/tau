@@ -182,13 +182,18 @@ Emitted by the provider backend that owns the selected model.
   Carries newly appended displayable assistant/reasoning text in `deltas`, plus
   small compaction/status metadata when relevant. Provider retry/status text is
   not assistant-authored and is carried separately from message deltas. Providers
-  may also send a content-free `semantic_output` byte snapshot for non-visible
-  generated output; that snapshot is cumulative for the current provider prompt,
+  may also send private content-free `semantic_output` and `response_stats`
+  metadata. `semantic_output` is a cumulative non-visible byte snapshot for the
+  current provider prompt. `response_stats` is a provider-owned previous/current
+  response-liveness sample pair; `previous` is the last emitted provider sample,
+  `current` is the new cumulative prompt-local sample, and non-terminal samples
+  are emitted at most once per second except the final flush. Both fields are
   provider-to-harness private, excluded from durable/public outputs, and stripped
-  before subscriber delivery. The harness then publishes public progress only as
-  `agent.turn_stats_updated`. The event is not durable and is not replayed to
-  late subscribers; UIs that attach mid-stream may show an ellipsis prefix until
-  the final complete response arrives.
+  before subscriber delivery. The harness validates ownership, maps accepted
+  stats to the public compatibility `agent.turn_stats_updated` event, and must
+  not reconstruct provider throughput from per-chunk updates. The event is not
+  durable and is not replayed to late subscribers; UIs that attach mid-stream may
+  show an ellipsis prefix until the final complete response arrives.
 - **`provider.response_finished`** — Final assistant output in original
   item order via `output_items`, plus optional usage, provider
   response id, backend metadata, and echoed originator. Routed by the

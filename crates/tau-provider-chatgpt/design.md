@@ -53,6 +53,17 @@ Parser and streaming changes should keep using focused event/delta/snapshot
 regression tests, with broader provider response streaming guidance in
 `../../docs/testing.md`.
 
+## Streaming protocol updates are sampled
+
+Status: confirmed, 2026-07-07, user
+
+Streaming parsers may receive upstream chunks at arbitrary cadence, but Tau
+protocol updates are sampled. Stream state accumulates visible text, compaction
+status, and non-visible semantic-output bytes; the rate-limited emitter decides
+when `provider.response_updated` is written. Non-terminal progress must be
+emitted at most once per second per prompt, with only a terminal flush allowed
+immediately before the provider prompt closes.
+
 ## Responses replay sidecars are syntax, not semantics
 
 Status: unconfirmed

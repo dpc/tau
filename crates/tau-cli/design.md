@@ -49,7 +49,9 @@ event's `current` and `previous` samples. The CLI renders a generic
 `(elapsed, total bytes, Δinterval rate, average rate)` suffix only on that
 transient indicator, not on visible assistant text, and must not copy stats text
 into editor current-response state, prompt-stdin capture, durable transcripts,
-or final response rendering.
+or final response rendering. The live throughput suffix is a pure render of the
+latest harness stats sample; the CLI must not interpolate elapsed time or
+recompute `Δ` on redraw/timer ticks.
 
 ## New-agent staging
 

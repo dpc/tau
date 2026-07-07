@@ -701,6 +701,24 @@ impl StreamState {
         })
     }
 
+    /// Returns the cumulative provider-generated semantic-output bytes for this
+    /// response, including both visible assistant/reasoning text and
+    /// non-visible tool/custom-tool input.
+    pub fn response_output_bytes(&self) -> u64 {
+        let visible_bytes = self.text.len().saturating_add(
+            self.thinking
+                .as_ref()
+                .map(|thinking| thinking.len())
+                .unwrap_or(0),
+        );
+        let visible_bytes = visible_bytes.try_into().unwrap_or(u64::MAX);
+        let non_visible_bytes = self
+            .semantic_output_for_update()
+            .map(|semantic_output| semantic_output.non_visible_output_bytes)
+            .unwrap_or(0);
+        visible_bytes.saturating_add(non_visible_bytes)
+    }
+
     fn refresh_text(&mut self) {
         self.text.clear();
         for item in &self.output_items {

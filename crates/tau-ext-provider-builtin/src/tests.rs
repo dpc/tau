@@ -536,6 +536,7 @@ fn chatgpt_stream_update_emits_semantic_output_without_text_deltas() {
             &prompt.originator,
             &state,
             &mut delta_emitter,
+            ProviderResponseStats::default(),
             &mut writer,
         );
     }
@@ -553,6 +554,202 @@ fn chatgpt_stream_update_emits_semantic_output_without_text_deltas() {
         Some(tau_proto::ProviderResponseSemanticOutput {
             non_visible_output_bytes: "raw custom input".len() as u64,
         })
+    );
+}
+
+/// Ensures ChatGPT/Codex provider progress frames are sampled by
+/// provider-prompt cadence, not emitted once per upstream chunk or byte change.
+#[test]
+fn chatgpt_response_update_emitter_rate_limits_non_terminal_updates() {
+    let prompt = minimal_prompt();
+    let mut state = common::StreamState::new();
+    let mut bytes = Vec::new();
+    let start = std::time::Instant::now();
+    {
+        let mut writer = tau_proto::PeerOutputWriter::new(&mut bytes);
+        let mut emitter = RateLimitedResponseUpdateEmitter::new_at(start);
+        let target = ResponseUpdateTarget {
+            agent_prompt_id: prompt.agent_prompt_id.as_str(),
+            agent_id: &prompt.agent_id,
+            originator: &prompt.originator,
+        };
+        state.append_message_delta_at(0, "hel");
+        emitter.emit_at(&target, &state, &mut writer, start, false);
+        state.append_message_delta_at(0, "lo");
+        state
+            .tool_call_at_mut(1, tau_proto::ToolType::Custom)
+            .arguments_json
+            .push_str("raw custom input");
+        emitter.emit_at(
+            &target,
+            &state,
+            &mut writer,
+            start + PROVIDER_RESPONSE_UPDATE_MIN_INTERVAL / 2,
+            false,
+        );
+        emitter.emit_at(
+            &target,
+            &state,
+            &mut writer,
+            start + PROVIDER_RESPONSE_UPDATE_MIN_INTERVAL,
+            false,
+        );
+    }
+
+    let updates: Vec<_> = decode_frames(&bytes)
+        .into_iter()
+        .filter_map(|frame| match frame {
+            tau_proto::HarnessInputMessage::Emit(emit) => match *emit.event {
+                tau_proto::Event::ProviderResponseUpdated(update) => Some(update),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect();
+    assert_eq!(updates.len(), 1, "updates: {updates:#?}");
+    assert_eq!(
+        updates[0].deltas,
+        vec![tau_proto::ProviderResponseTextDelta::Message {
+            output_index: 0,
+            text: "hello".to_owned(),
+            phase: None,
+        }]
+    );
+    assert_eq!(
+        updates[0].semantic_output,
+        Some(tau_proto::ProviderResponseSemanticOutput {
+            non_visible_output_bytes: "raw custom input".len() as u64,
+        })
+    );
+    assert_eq!(
+        updates[0].response_stats,
+        Some(ProviderResponseStats {
+            current: tau_proto::ProviderResponseStatsSample {
+                output_bytes_sent: ("hello".len() + "raw custom input".len()) as u64,
+                elapsed_micros: 1_000_000,
+            },
+            previous: tau_proto::ProviderResponseStatsSample {
+                output_bytes_sent: 0,
+                elapsed_micros: 0,
+            },
+        })
+    );
+}
+
+/// Ensures due ChatGPT/Codex response samples are emitted even when no bytes
+/// changed, so provider `previous` always names the last emitted stats point.
+#[test]
+fn chatgpt_response_update_emitter_emits_due_stats_only_sample() {
+    let prompt = minimal_prompt();
+    let state = common::StreamState::new();
+    let mut bytes = Vec::new();
+    let start = std::time::Instant::now();
+    {
+        let mut writer = tau_proto::PeerOutputWriter::new(&mut bytes);
+        let mut emitter = RateLimitedResponseUpdateEmitter::new_at(start);
+        let target = ResponseUpdateTarget {
+            agent_prompt_id: prompt.agent_prompt_id.as_str(),
+            agent_id: &prompt.agent_id,
+            originator: &prompt.originator,
+        };
+        emitter.emit_at(
+            &target,
+            &state,
+            &mut writer,
+            start + PROVIDER_RESPONSE_UPDATE_MIN_INTERVAL,
+            false,
+        );
+        emitter.emit_at(
+            &target,
+            &state,
+            &mut writer,
+            start + PROVIDER_RESPONSE_UPDATE_MIN_INTERVAL * 2,
+            false,
+        );
+    }
+
+    let updates: Vec<_> = decode_frames(&bytes)
+        .into_iter()
+        .filter_map(|frame| match frame {
+            tau_proto::HarnessInputMessage::Emit(emit) => match *emit.event {
+                tau_proto::Event::ProviderResponseUpdated(update) => Some(update),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect();
+    assert_eq!(updates.len(), 2, "updates: {updates:#?}");
+    assert!(updates.iter().all(|update| update.deltas.is_empty()));
+    assert_eq!(
+        updates[1].response_stats,
+        Some(ProviderResponseStats {
+            current: tau_proto::ProviderResponseStatsSample {
+                output_bytes_sent: 0,
+                elapsed_micros: 2_000_000,
+            },
+            previous: tau_proto::ProviderResponseStatsSample {
+                output_bytes_sent: 0,
+                elapsed_micros: 1_000_000,
+            },
+        })
+    );
+}
+
+/// Ensures a terminal flush can publish the final batched suffix immediately
+/// before `provider.response_finished`, without losing text suppressed by the
+/// non-terminal one-second cadence.
+#[test]
+fn chatgpt_response_update_emitter_terminal_flush_emits_batched_suffix() {
+    let prompt = minimal_prompt();
+    let mut state = common::StreamState::new();
+    let mut bytes = Vec::new();
+    let start = std::time::Instant::now();
+    {
+        let mut writer = tau_proto::PeerOutputWriter::new(&mut bytes);
+        let mut emitter = RateLimitedResponseUpdateEmitter::new_at(start);
+        let target = ResponseUpdateTarget {
+            agent_prompt_id: prompt.agent_prompt_id.as_str(),
+            agent_id: &prompt.agent_id,
+            originator: &prompt.originator,
+        };
+        state.append_message_delta_at(0, "hel");
+        emitter.emit_at(&target, &state, &mut writer, start, false);
+        state.append_message_delta_at(0, "lo");
+        emitter.emit_at(
+            &target,
+            &state,
+            &mut writer,
+            start + PROVIDER_RESPONSE_UPDATE_MIN_INTERVAL / 2,
+            true,
+        );
+    }
+
+    let updates: Vec<_> = decode_frames(&bytes)
+        .into_iter()
+        .filter_map(|frame| match frame {
+            tau_proto::HarnessInputMessage::Emit(emit) => match *emit.event {
+                tau_proto::Event::ProviderResponseUpdated(update) => Some(update),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect();
+    assert_eq!(updates.len(), 1, "updates: {updates:#?}");
+    assert_eq!(
+        updates[0].deltas,
+        vec![tau_proto::ProviderResponseTextDelta::Message {
+            output_index: 0,
+            text: "hello".to_owned(),
+            phase: None,
+        }]
+    );
+    assert_eq!(
+        updates[0]
+            .response_stats
+            .expect("terminal flush should carry provider stats")
+            .current
+            .output_bytes_sent,
+        "hello".len() as u64
     );
 }
 

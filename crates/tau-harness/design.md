@@ -4,6 +4,28 @@ This file records major design decisions currently embodied by this directory's
 code, and how authoritative each decision is. It is not an architecture overview,
 ADR log, todo list, roadmap, implementation guide, or changelog.
 
+## Agent turn stats are hard rate-limited
+
+Status: confirmed, 2026-07-07, user
+
+Providers own prompt-local response byte counting and send rate-limited private
+`provider.response_updated.response_stats` samples because providers read the
+upstream response stream. The harness validates prompt ownership/cancelation,
+strips private provider stats from public provider updates, maps accepted
+prompt-local samples onto its active turn, and publishes the current
+`agent.turn_stats_updated` compatibility event.
+
+`agent.turn_stats_updated` sampled events must not be emitted faster than once
+per second per active turn. New provider bytes update in-memory cumulative
+counters only; byte changes must wait for the next one-second sample deadline
+and must not bypass the cadence.
+
+The only bypasses are terminal lifecycle flushes: provider-prompt closure before
+`provider.response_finished` / prompt termination, and final turn shutdown that
+immediately clears runtime stats. Non-terminal prompt starts, provider chunks,
+tool-wait transitions, and promptless tool-wait samples must use the sampled
+gate.
+
 ## Daemon listener shutdown is reactive and path-independent
 
 Status: unconfirmed
