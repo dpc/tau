@@ -53,6 +53,21 @@ or final response rendering. The live throughput suffix is a pure render of the
 latest harness stats sample; the CLI must not interpolate elapsed time or
 recompute `Δ` on redraw/timer ticks.
 
+## Agent names and watcher display
+
+Status: confirmed, 2026-07-07, dpc
+
+Terminal UI agent names render the human display label for an agent; they are
+not a place to encode parent lineage, delegation topology, or who is observing
+the agent. When the UI needs observation context, `agent.watches_updated` is the
+source of truth.
+
+The CLI may keep session-scoped forward and reverse watcher caches derived from
+those complete watcher snapshots so it can render current-agent status such as
+`watched by: <agent_id>` or a truncated multi-watcher form. These caches must be
+cleared on session reset and rebuilt from live or replayed watch snapshots; they
+must not mutate display names or durable transcript state.
+
 ## New-agent staging
 
 Status: unconfirmed

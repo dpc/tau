@@ -40,6 +40,20 @@ and `always_show` warnings such as extension config errors) are replayable,
 published with a call-site `must_pass` override, and protected from interceptor
 rewrite/drop.
 
+## Agent display names and watch topology
+
+Agent display names are human-facing labels, not topology metadata. They may
+come from a user-supplied topic, role/template rendering, or an explicit rename,
+but they must not encode parent/child lineage or watcher relationships.
+Topology and observation state belong in protocol facts instead, so the same
+agent label remains stable wherever the agent is referenced.
+
+Session-local watch state is represented by authoritative
+`agent.watches_updated` snapshots keyed by watcher. The harness maintains the
+forward watch set and reverse watcher index only as runtime/session state,
+publishes complete replacement snapshots for each watcher, and does not persist
+watch relationships into agent display names.
+
 ## Agent turn stats lifecycle
 
 Providers own response-throughput sampling. A provider starts prompt-local
