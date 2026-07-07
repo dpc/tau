@@ -29,3 +29,10 @@ turn. The harness publishes it with current and previous cumulative samples so
 consumers can calculate byte/rate deltas without depending on provider-owned
 progress metadata. It must not count raw wire framing, prompts, tool execution
 output/results, or UI rendering text, and it must not be folded into transcripts.
+
+`provider.response_updated.semantic_output.non_visible_output_bytes` is the
+private provider-to-harness input for non-visible generated output such as
+streamed tool/custom-tool input. It is content-free, cumulative for the current
+provider prompt rather than a per-update delta, stripped by the harness before
+subscriber delivery, excluded from durable/public outputs, and surfaced publicly
+only through harness-owned `agent.turn_stats_updated`.

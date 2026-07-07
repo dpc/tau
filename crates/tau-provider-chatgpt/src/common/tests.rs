@@ -30,6 +30,29 @@ fn into_output_items_drops_nameless_accumulator_artifacts() {
     assert_eq!(call.name.as_str(), "shell");
 }
 
+/// Ensures Responses function/custom-tool input streams expose only a
+/// content-free cumulative byte snapshot for the harness-owned turn stats path.
+#[test]
+fn semantic_output_for_update_counts_streamed_tool_input_bytes() {
+    let mut state = StreamState::new();
+    state
+        .tool_call_at_mut(0, tau_proto::ToolType::Function)
+        .arguments_json
+        .push_str("{\"path\":\"Cargo.toml\"}");
+    state
+        .tool_call_at_mut(1, tau_proto::ToolType::Custom)
+        .arguments_json
+        .push_str("raw custom input");
+
+    assert_eq!(
+        state.semantic_output_for_update(),
+        Some(tau_proto::ProviderResponseSemanticOutput {
+            non_visible_output_bytes: "{\"path\":\"Cargo.toml\"}".len() as u64
+                + "raw custom input".len() as u64,
+        })
+    );
+}
+
 #[test]
 fn usage_limit_429_retries_after_reset_seconds() {
     let error = LlmError::HttpStatus(

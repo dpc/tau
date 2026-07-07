@@ -93,6 +93,12 @@ is an opaque [`AgentTurnId`], while `agent_prompt_id` identifies only the
 provider prompt currently active; it is absent during tool-wait samples and
 after a prompt is no longer active.
 
+`provider.response_updated.semantic_output` is a provider-to-harness
+content-free byte snapshot for non-visible generated output such as streamed
+tool/custom-tool input. It is not public UI progress state: harnesses consume and
+strip it before subscriber delivery, then publish any user-visible progress as
+`agent.turn_stats_updated`.
+
 ## Tree navigation targets
 
 UI tree navigation is protocol-modeled in user-facing terms. The default

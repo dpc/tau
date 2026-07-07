@@ -28,3 +28,9 @@ editor state, prompt stdin output, or final assistant rendering. The harness
 derives byte counts only after provider prompt ownership validation and clears
 runtime stats on every terminal or abandoned turn path so a later prompt cannot
 inherit stale timing or byte counters.
+
+Providers may send `provider.response_updated.semantic_output` as a
+provider-to-harness content-free byte snapshot for non-visible generated output.
+The harness must consume and strip that field before subscriber delivery, and
+must suppress stripped-empty provider updates so `agent.turn_stats_updated`
+remains the only public UI-facing progress event.

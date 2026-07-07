@@ -517,6 +517,7 @@ fn representative_events() -> Vec<Event> {
             }],
             compaction: None,
             status: None,
+            semantic_output: None,
             originator: PromptOriginator::User,
         }),
         Event::ProviderResponseFinished(ProviderResponseFinished {
@@ -1677,6 +1678,7 @@ fn execution_events_use_provider_wire_family() {
                 deltas: Vec::new(),
                 compaction: None,
                 status: None,
+                semantic_output: None,
                 originator: PromptOriginator::User,
             }),
             "provider.response_updated",
@@ -1726,6 +1728,30 @@ fn provider_response_updated_requires_delta_routing_fields() {
         error.to_string().contains("text"),
         "unexpected error: {error}"
     );
+}
+
+/// Ensures provider-private semantic-output snapshots round-trip as
+/// content-free byte counts while remaining optional for ordinary displayable
+/// response updates.
+#[test]
+fn provider_response_updated_semantic_output_round_trip() {
+    let update = ProviderResponseUpdated {
+        agent_prompt_id: "sp-1".into(),
+        agent_id: agent_id("engineer_abcd1234"),
+        deltas: Vec::new(),
+        compaction: None,
+        status: None,
+        semantic_output: Some(ProviderResponseSemanticOutput {
+            non_visible_output_bytes: 8192,
+        }),
+        originator: PromptOriginator::User,
+    };
+
+    let value = serde_json::to_value(&update).expect("serialize semantic output update");
+    assert_eq!(value["semantic_output"]["non_visible_output_bytes"], 8192);
+    let decoded: ProviderResponseUpdated =
+        serde_json::from_value(value).expect("decode semantic output update");
+    assert_eq!(decoded, update);
 }
 
 /// Ensures agent turn stats keep current and previous samples together so
@@ -1975,6 +2001,7 @@ fn event_defaults_to_transient_marks_progress_kinds() {
             deltas: Vec::new(),
             compaction: None,
             status: None,
+            semantic_output: None,
             originator: PromptOriginator::User,
         }),
         Event::ToolProgress(ToolProgress {

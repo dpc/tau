@@ -17,9 +17,12 @@ spelling. Serializing parsed CBOR is only a fallback for old persisted records o
 records that never had provider-wire JSON.
 
 Streamed assistant text and reasoning text are emitted as append deltas only.
-Providers no longer publish public byte-progress metadata; the harness derives
-content-free agent-turn stats after accepting provider events so UI liveness
-display remains outside provider-owned response payloads.
+Providers no longer publish public byte-progress metadata. For streamed
+tool-call arguments, Chat Completions sends the harness a private, content-free
+`semantic_output.non_visible_output_bytes` snapshot that is cumulative for the
+current provider prompt, not a per-update delta. The harness strips that snapshot
+before subscriber delivery and surfaces any public liveness display only through
+`agent.turn_stats_updated`.
 
 ## Transcript replay boundary
 

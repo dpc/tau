@@ -50,5 +50,8 @@ unchecked raw blob.
 
 Providers must not copy raw streamed assistant text, reasoning text,
 tool-call arguments, or custom-tool input into status text or diagnostics. Live
-byte stats are harness-owned `agent.turn_stats_updated` events, not provider
-metadata.
+byte stats are harness-owned `agent.turn_stats_updated` events, not public
+provider metadata. The private `semantic_output.non_visible_output_bytes`
+snapshot sent to the harness is content-free, cumulative for the current
+provider prompt, excluded from durable/public outputs, and stripped before
+subscriber delivery.

@@ -6,9 +6,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tau_proto::{
     CborValue, ContentPart, ContextItem, ContextRole, MessageItem, OpaqueProviderItem,
     PromptContext, PromptOriginator, ProviderResponseCompactionStatus,
-    ProviderResponseCompactionUpdate, ProviderResponseTextDelta, ProviderTokenUsage,
-    ReasoningTextItem, ReasoningTextKind, ResponsesToolCallEnvelope, SessionId, ToolCallItem,
-    ToolDefinition,
+    ProviderResponseCompactionUpdate, ProviderResponseSemanticOutput, ProviderResponseTextDelta,
+    ProviderTokenUsage, ReasoningTextItem, ReasoningTextKind, ResponsesToolCallEnvelope, SessionId,
+    ToolCallItem, ToolDefinition,
 };
 use tau_provider::{StreamRepetitionGuard, StreamRepetitionKey};
 use uuid::Uuid;
@@ -683,6 +683,22 @@ impl StreamState {
         {
             thinking.push_str("\n\n");
         }
+    }
+
+    /// Returns a content-free snapshot of non-visible semantic output generated
+    /// for this provider prompt.
+    pub fn semantic_output_for_update(&self) -> Option<ProviderResponseSemanticOutput> {
+        let non_visible_output_bytes: u64 = self
+            .output_items
+            .iter()
+            .filter_map(|item| match item {
+                OutputItemAccumulator::ToolCall(call) => Some(call.arguments_json.len() as u64),
+                _ => None,
+            })
+            .sum();
+        (non_visible_output_bytes != 0).then_some(ProviderResponseSemanticOutput {
+            non_visible_output_bytes,
+        })
     }
 
     fn refresh_text(&mut self) {

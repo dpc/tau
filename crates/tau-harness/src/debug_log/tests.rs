@@ -81,6 +81,7 @@ fn published_line_compacts_long_strings() {
         ],
         compaction: None,
         status: None,
+        semantic_output: None,
         originator: PromptOriginator::User,
     });
 
@@ -157,6 +158,7 @@ fn transient_from_connection_events_are_not_logged_twice() {
         }],
         compaction: None,
         status: None,
+        semantic_output: None,
         originator: PromptOriginator::User,
     });
 

@@ -325,7 +325,15 @@ call-site policy says otherwise.
 
 ## Provider response update routing
 
-The harness treats `provider.response_updated` as non-durable live progress. It validates that the publishing connection owns the in-flight provider prompt, overwrites the update `agent_id` from harness prompt ownership, enriches best-effort compaction metadata, and does not include these transient deltas in durable replay.
+The harness treats `provider.response_updated` as non-durable live progress. It
+validates that the publishing connection owns the in-flight provider prompt,
+overwrites the update `agent_id` from harness prompt ownership, enriches
+best-effort compaction metadata, consumes and strips provider-private
+content-free `semantic_output` byte snapshots, and does not include these
+transient deltas in durable replay. If an update has no public deltas, status,
+or compaction after stripping `semantic_output`, the harness suppresses the
+provider update and publishes only the derived stats event when sampling says it
+is useful.
 The harness also owns `agent.turn_stats_updated`: after accepted provider deltas
 and turn phase transitions it publishes content-free current/previous turn stats
 samples as transient operational events. Providers and UI clients must not forge

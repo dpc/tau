@@ -516,6 +516,46 @@ fn decode_frames(bytes: &[u8]) -> Vec<tau_proto::HarnessInputMessage> {
     frames
 }
 
+/// Ensures the built-in ChatGPT/Codex emission boundary does not suppress
+/// custom-tool-input-only streams that have no displayable text or compaction.
+#[test]
+fn chatgpt_stream_update_emits_semantic_output_without_text_deltas() {
+    let prompt = minimal_prompt();
+    let mut state = common::StreamState::new();
+    state
+        .tool_call_at_mut(0, tau_proto::ToolType::Custom)
+        .arguments_json
+        .push_str("raw custom input");
+    let mut bytes = Vec::new();
+    {
+        let mut writer = tau_proto::PeerOutputWriter::new(&mut bytes);
+        let mut delta_emitter = common::StreamDeltaEmitter::default();
+        emit_chatgpt_stream_update(
+            prompt.agent_prompt_id.as_str(),
+            &prompt.agent_id,
+            &prompt.originator,
+            &state,
+            &mut delta_emitter,
+            &mut writer,
+        );
+    }
+
+    let frames = decode_frames(&bytes);
+    let Some(tau_proto::HarnessInputMessage::Emit(emit)) = frames.first() else {
+        panic!("expected semantic output frame: {frames:?}");
+    };
+    let tau_proto::Event::ProviderResponseUpdated(update) = emit.event.as_ref() else {
+        panic!("expected provider response update: {:?}", emit.event);
+    };
+    assert!(update.deltas.is_empty());
+    assert_eq!(
+        update.semantic_output,
+        Some(tau_proto::ProviderResponseSemanticOutput {
+            non_visible_output_bytes: "raw custom input".len() as u64,
+        })
+    );
+}
+
 #[test]
 fn chatgpt_repetition_error_uses_clear_response_and_empty_final_output() {
     // Built-in ChatGPT/Codex errors from the stream guard clear transient output

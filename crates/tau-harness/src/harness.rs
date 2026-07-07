@@ -27,10 +27,11 @@ use tau_proto::{
     HarnessAgentContextUsageChanged, HarnessContextUsageChanged, HarnessInputMessage,
     HarnessOutputMessage, HarnessRoleSelected, Hello, MessageItem, ModelId, PROTOCOL_VERSION,
     PromptFragment, PromptOriginator, ProviderModelInfo, ProviderResponseFinished,
-    ProviderResponseTextDelta, ProviderStopReason, ProviderTokenUsage, SecretValue, SessionId,
-    ToolBackgroundError, ToolBackgroundResult, ToolCallId, ToolCallItem, ToolCancelled,
-    ToolDefinition, ToolError, ToolName, ToolRegister, ToolRejected, ToolRequest, ToolResult,
-    ToolResultKind, ToolType, UiCancelPrompt, UiTreeNavigationTarget, nearest_name_suggestion,
+    ProviderResponseTextDelta, ProviderResponseUpdated, ProviderStopReason, ProviderTokenUsage,
+    SecretValue, SessionId, ToolBackgroundError, ToolBackgroundResult, ToolCallId, ToolCallItem,
+    ToolCancelled, ToolDefinition, ToolError, ToolName, ToolRegister, ToolRejected, ToolRequest,
+    ToolResult, ToolResultKind, ToolType, UiCancelPrompt, UiTreeNavigationTarget,
+    nearest_name_suggestion,
 };
 
 use crate::agent::{
@@ -191,11 +192,21 @@ fn final_tool_argument_bytes(output_items: &[ContextItem]) -> u64 {
     output_items
         .iter()
         .filter_map(|item| match item {
-            ContextItem::ToolCall(call) => call.raw_arguments_json.as_ref(),
+            ContextItem::ToolCall(call) => match call.tool_type {
+                tau_proto::ToolType::Function => call.raw_arguments_json.as_deref(),
+                tau_proto::ToolType::Custom => match &call.arguments {
+                    CborValue::Text(input) => Some(input.as_str()),
+                    _ => None,
+                },
+            },
             _ => None,
         })
         .map(|arguments| arguments.len() as u64)
         .sum()
+}
+
+fn provider_response_update_has_public_content(updated: &ProviderResponseUpdated) -> bool {
+    !updated.deltas.is_empty() || updated.compaction.is_some() || updated.status.is_some()
 }
 
 /// Text for the one-shot model-visible notice folded into the first user turn
@@ -5633,9 +5644,29 @@ impl Harness {
                     self.enrich_provider_response_updated_compaction(&mut updated);
                     let stats_cid = self.agent_id_for_prompt(&updated.agent_prompt_id);
                     let output_bytes = provider_response_delta_bytes(&updated.deltas);
-                    self.publish_event(Some(source_id), Event::ProviderResponseUpdated(updated));
+                    let resets_response = updated
+                        .status
+                        .as_ref()
+                        .is_some_and(|status| status.clear_response);
+                    let non_visible_output_bytes = updated
+                        .semantic_output
+                        .take()
+                        .map(|semantic_output| semantic_output.non_visible_output_bytes);
+                    let has_public_content = provider_response_update_has_public_content(&updated);
+                    if has_public_content {
+                        self.publish_event(
+                            Some(source_id),
+                            Event::ProviderResponseUpdated(updated),
+                        );
+                    }
                     if let Some(cid) = stats_cid.as_ref() {
+                        if resets_response {
+                            self.reset_agent_turn_current_prompt_non_visible_output_bytes(cid);
+                        }
                         self.add_agent_turn_output_bytes(cid, output_bytes);
+                        if let Some(bytes) = non_visible_output_bytes {
+                            self.add_agent_turn_non_visible_output_snapshot(cid, bytes);
+                        }
                         self.emit_agent_turn_stats(cid, AgentTurnStatsEmitMode::Sampled);
                     }
                 }
@@ -10357,12 +10388,14 @@ impl Harness {
         if let Some(agent) = self.agents.get_mut(cid) {
             if let Some(stats) = agent.turn_stats.as_mut() {
                 stats.current_prompt_id = Some(agent_prompt_id);
+                stats.current_prompt_non_visible_output_bytes = 0;
             } else {
                 agent.turn_stats = Some(AgentTurnStatsRuntime {
                     turn_id: AgentTurnId::from(agent_prompt_id.as_str()),
                     current_prompt_id: Some(agent_prompt_id),
                     started_at: now,
                     output_bytes_sent: 0,
+                    current_prompt_non_visible_output_bytes: 0,
                     last_emitted: AgentTurnStatsSample::default(),
                     last_emitted_at: now,
                 });
@@ -10381,6 +10414,47 @@ impl Harness {
             .and_then(|agent| agent.turn_stats.as_mut())
         {
             stats.output_bytes_sent = stats.output_bytes_sent.saturating_add(bytes);
+        }
+    }
+
+    /// Adds newly observed non-visible semantic-output bytes for the current
+    /// provider prompt, using a cumulative provider snapshot to avoid double
+    /// counting repeated samples.
+    fn add_agent_turn_non_visible_output_snapshot(&mut self, cid: &AgentId, bytes: u64) {
+        self.add_agent_turn_cumulative_non_visible_output_bytes(cid, bytes);
+    }
+
+    /// Counts final non-visible tool/custom-tool input bytes that were not
+    /// already reported through streaming semantic-output snapshots.
+    fn add_agent_turn_final_non_visible_output_bytes(&mut self, cid: &AgentId, final_bytes: u64) {
+        self.add_agent_turn_cumulative_non_visible_output_bytes(cid, final_bytes);
+    }
+
+    fn add_agent_turn_cumulative_non_visible_output_bytes(&mut self, cid: &AgentId, bytes: u64) {
+        if let Some(stats) = self
+            .agents
+            .get_mut(cid)
+            .and_then(|agent| agent.turn_stats.as_mut())
+        {
+            let new_bytes = bytes.saturating_sub(stats.current_prompt_non_visible_output_bytes);
+            if new_bytes == 0 {
+                return;
+            }
+            stats.current_prompt_non_visible_output_bytes = bytes;
+            stats.output_bytes_sent = stats.output_bytes_sent.saturating_add(new_bytes);
+        }
+    }
+
+    /// Resets the current-prompt non-visible snapshot baseline after the
+    /// provider reports that in-flight response state was cleared, usually
+    /// before retrying the same prompt.
+    fn reset_agent_turn_current_prompt_non_visible_output_bytes(&mut self, cid: &AgentId) {
+        if let Some(stats) = self
+            .agents
+            .get_mut(cid)
+            .and_then(|agent| agent.turn_stats.as_mut())
+        {
+            stats.current_prompt_non_visible_output_bytes = 0;
         }
     }
 
@@ -11688,7 +11762,10 @@ impl Harness {
             );
         }
 
-        self.add_agent_turn_output_bytes(&cid, final_tool_argument_bytes(&response.output_items));
+        self.add_agent_turn_final_non_visible_output_bytes(
+            &cid,
+            final_tool_argument_bytes(&response.output_items),
+        );
         self.emit_agent_turn_stats(&cid, AgentTurnStatsEmitMode::Forced);
         self.publish_finished_response_for_agent(&cid, source, &response);
         if self.handle_finished_response_side_conversation(

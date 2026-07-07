@@ -12,10 +12,10 @@ use tau_proto::{
     AgentPromptId, ContentPart, ContextItem, ContextRole, Event, HarnessInputMessage, ModelId,
     ModelName, ModelTag, OpaqueProviderItem, PeerOutputWriter, ProviderBackend,
     ProviderBackendKind, ProviderBackendTransport, ProviderModelInfo, ProviderName,
-    ProviderResponseFinished, ProviderResponseStatusUpdate, ProviderResponseTextDelta,
-    ProviderResponseUpdated, ProviderStopReason, ProviderTokenUsage, ReasoningTextItem,
-    ReasoningTextKind, ThinkingSummary, ToolCallItem, ToolChoice, ToolDefinition,
-    ToolResponseHeader, ToolResultStatus, ToolType,
+    ProviderResponseFinished, ProviderResponseSemanticOutput, ProviderResponseStatusUpdate,
+    ProviderResponseTextDelta, ProviderResponseUpdated, ProviderStopReason, ProviderTokenUsage,
+    ReasoningTextItem, ReasoningTextKind, ThinkingSummary, ToolCallItem, ToolChoice,
+    ToolDefinition, ToolResponseHeader, ToolResultStatus, ToolType,
 };
 use tau_provider::{StreamRepetitionGuard, StreamRepetitionKey};
 
@@ -167,21 +167,7 @@ fn run_prompt<W: Write>(
         let result = {
             let mut delta_emitter = StreamDeltaEmitter::default();
             let mut on_update = |state: &StreamState| {
-                let deltas = delta_emitter.deltas(state);
-                if deltas.is_empty() {
-                    return;
-                }
-                let _ = writer.write_message(&HarnessInputMessage::emit(
-                    Event::ProviderResponseUpdated(ProviderResponseUpdated {
-                        agent_prompt_id: agent_prompt_id.clone(),
-                        agent_id: prompt.agent_id.clone(),
-                        deltas,
-                        compaction: None,
-                        status: None,
-                        originator: prompt.originator.clone(),
-                    }),
-                ));
-                let _ = writer.flush();
+                emit_stream_update(agent_prompt_id, prompt, state, &mut delta_emitter, writer);
             };
             chat_completions_stream(
                 &provider,
@@ -214,6 +200,32 @@ fn run_prompt<W: Write>(
     }
 }
 
+fn emit_stream_update<W: Write>(
+    agent_prompt_id: &AgentPromptId,
+    prompt: &tau_proto::AgentPromptCreated,
+    state: &StreamState,
+    delta_emitter: &mut StreamDeltaEmitter,
+    writer: &mut PeerOutputWriter<W>,
+) {
+    let deltas = delta_emitter.deltas(state);
+    let semantic_output = state.semantic_output_for_update();
+    if deltas.is_empty() && semantic_output.is_none() {
+        return;
+    }
+    let _ = writer.write_message(&HarnessInputMessage::emit(Event::ProviderResponseUpdated(
+        ProviderResponseUpdated {
+            agent_prompt_id: agent_prompt_id.clone(),
+            agent_id: prompt.agent_id.clone(),
+            deltas,
+            compaction: None,
+            status: None,
+            semantic_output,
+            originator: prompt.originator.clone(),
+        },
+    )));
+    let _ = writer.flush();
+}
+
 fn emit_empty_response_retry_update<W: Write>(
     agent_prompt_id: &AgentPromptId,
     prompt: &tau_proto::AgentPromptCreated,
@@ -233,6 +245,7 @@ fn emit_empty_response_retry_update<W: Write>(
                 text,
                 clear_response: true,
             }),
+            semantic_output: None,
             originator: prompt.originator.clone(),
         },
     )));
@@ -258,6 +271,7 @@ fn emit_repetition_detected_update<W: Write>(
                 text,
                 clear_response: true,
             }),
+            semantic_output: None,
             originator: prompt.originator.clone(),
         },
     )));
@@ -469,6 +483,20 @@ impl StreamState {
             .iter()
             .filter_map(OutputItemAccumulator::context_item)
             .collect()
+    }
+
+    fn semantic_output_for_update(&self) -> Option<ProviderResponseSemanticOutput> {
+        let non_visible_output_bytes: u64 = self
+            .output_items
+            .iter()
+            .filter_map(|item| match item {
+                OutputItemAccumulator::ToolCall(call) => Some(call.arguments.len() as u64),
+                _ => None,
+            })
+            .sum();
+        (non_visible_output_bytes != 0).then_some(ProviderResponseSemanticOutput {
+            non_visible_output_bytes,
+        })
     }
 
     fn append_assistant_text_delta(&mut self, delta: &str) -> Result<(), LlmError> {

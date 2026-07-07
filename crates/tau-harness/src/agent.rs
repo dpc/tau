@@ -56,6 +56,11 @@ pub(crate) struct AgentTurnStatsRuntime {
     pub(crate) started_at: Instant,
     /// Cumulative semantic provider output bytes observed in this turn.
     pub(crate) output_bytes_sent: u64,
+    /// Cumulative non-visible semantic output bytes observed for the current
+    /// provider prompt. Reset when the same agent turn advances to another
+    /// provider prompt after tool execution, or when the provider reports that
+    /// the current in-flight response state was cleared for retry.
+    pub(crate) current_prompt_non_visible_output_bytes: u64,
     /// Last sample emitted to protocol consumers.
     pub(crate) last_emitted: AgentTurnStatsSample,
     /// Last wall-clock time a sample was emitted.

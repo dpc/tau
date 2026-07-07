@@ -731,6 +731,7 @@ fn late_joining_ui_client_replays_final_but_not_stale_queued_session_events() {
             deltas: Vec::new(),
             compaction: None,
             status: None,
+            semantic_output: None,
             originator: Default::default(),
         }),
     );

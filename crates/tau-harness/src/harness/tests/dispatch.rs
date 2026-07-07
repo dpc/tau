@@ -4893,6 +4893,7 @@ fn provider_execution_events_must_come_from_prompt_owner() {
             deltas: Vec::new(),
             compaction: None,
             status: None,
+            semantic_output: None,
             originator: tau_proto::PromptOriginator::User,
         })),
     )
@@ -4905,6 +4906,7 @@ fn provider_execution_events_must_come_from_prompt_owner() {
             deltas: Vec::new(),
             compaction: None,
             status: None,
+            semantic_output: None,
             originator: tau_proto::PromptOriginator::User,
         })),
     )
@@ -4953,6 +4955,7 @@ fn provider_execution_events_must_come_from_prompt_owner() {
             }],
             compaction: None,
             status: None,
+            semantic_output: None,
             originator: tau_proto::PromptOriginator::User,
         })),
     )
@@ -5046,6 +5049,263 @@ fn agent_turn_stats_chain_and_clear_after_final_response() {
         .is_none()
     );
     assert!(h.agents[&cid].turn_stats.is_none());
+
+    h.shutdown().expect("shutdown");
+}
+
+/// Ensures provider-private semantic-output snapshots for streamed tool input
+/// produce harness-owned public turn stats before the provider final response,
+/// without leaking an empty provider progress event to subscribers or durable
+/// agent history.
+#[test]
+fn agent_turn_stats_publish_for_semantic_output_snapshot_before_finish() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    let cid = ensure_test_user_agent(&mut h);
+    let spid: AgentPromptId = "sp-turn-stats-semantic-output".into();
+    seed_agent_thinking(&mut h, &cid, spid.as_str());
+    h.prompt_agents.insert(spid.clone(), cid.clone());
+    h.pending_provider_prompts
+        .insert(spid.clone(), "provider-owner".into());
+    h.start_or_update_agent_turn_stats(&cid, spid.clone());
+    let target_agent_id = h.agents[&cid].agent_id.clone().expect("agent id");
+
+    h.handle_extension_provider_prompt_event(
+        "provider-owner",
+        Event::ProviderResponseUpdated(ProviderResponseUpdated {
+            agent_prompt_id: spid.clone(),
+            agent_id: crate::parse_agent_id(&target_agent_id),
+            deltas: Vec::new(),
+            compaction: None,
+            status: None,
+            semantic_output: Some(tau_proto::ProviderResponseSemanticOutput {
+                non_visible_output_bytes: 4096,
+            }),
+            originator: tau_proto::PromptOriginator::User,
+        }),
+    )
+    .expect("semantic output update");
+
+    let stats = agent_turn_stats_events(&h);
+    assert!(
+        stats.iter().any(|stats| {
+            stats.agent_prompt_id.as_ref() == Some(&spid)
+                && stats.current.output_bytes_sent == 4096
+                && stats.previous.output_bytes_sent == 0
+        }),
+        "stats events: {stats:#?}"
+    );
+    assert!(!event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::ProviderResponseUpdated(update)
+            if update.agent_prompt_id == spid && update.deltas.is_empty()
+    )));
+    assert_eq!(
+        agent_event_count(&h, |event| matches!(
+            event,
+            Event::ProviderResponseUpdated(_) | Event::AgentTurnStatsUpdated(_)
+        )),
+        0
+    );
+
+    h.shutdown().expect("shutdown");
+}
+
+/// Ensures final tool-call arguments do not double-count bytes that were
+/// already reported through provider-private semantic-output snapshots.
+#[test]
+fn agent_turn_stats_final_tool_arguments_do_not_double_count_semantic_snapshot() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    h.registry
+        .register("tool-owner", shared_test_tool_spec("stats_tool"));
+    let cid = ensure_test_user_agent(&mut h);
+    let spid: AgentPromptId = "sp-turn-stats-no-double-count".into();
+    seed_agent_thinking(&mut h, &cid, spid.as_str());
+    h.prompt_agents.insert(spid.clone(), cid.clone());
+    h.pending_provider_prompts
+        .insert(spid.clone(), "provider-owner".into());
+    h.start_or_update_agent_turn_stats(&cid, spid.clone());
+    let target_agent_id = h.agents[&cid].agent_id.clone().expect("agent id");
+    let raw_arguments = r#"{"x":1}"#;
+
+    h.handle_extension_provider_prompt_event(
+        "provider-owner",
+        Event::ProviderResponseUpdated(ProviderResponseUpdated {
+            agent_prompt_id: spid.clone(),
+            agent_id: crate::parse_agent_id(&target_agent_id),
+            deltas: Vec::new(),
+            compaction: None,
+            status: None,
+            semantic_output: Some(tau_proto::ProviderResponseSemanticOutput {
+                non_visible_output_bytes: raw_arguments.len() as u64,
+            }),
+            originator: tau_proto::PromptOriginator::User,
+        }),
+    )
+    .expect("semantic output update");
+
+    h.handle_provider_response_finished(ProviderResponseFinished {
+        agent_prompt_id: spid.clone(),
+        agent_id: crate::parse_agent_id(&target_agent_id),
+        output_items: vec![ContextItem::ToolCall(ToolCallItem {
+            call_id: "stats-tool-call".into(),
+            name: ToolName::new("stats_tool"),
+            tool_type: tau_proto::ToolType::Function,
+            arguments: CborValue::Map(Vec::new()),
+            raw_arguments_json: Some(raw_arguments.to_owned()),
+            responses_envelope: None,
+        })],
+        stop_reason: tau_proto::ProviderStopReason::ToolCalls,
+        error: None,
+        usage: None,
+        originator: tau_proto::PromptOriginator::User,
+        compaction_original_input_tokens: None,
+        compaction_compacted_input_tokens: None,
+        backend: None,
+        provider_response_id: None,
+        ws_pool_delta: None,
+    })
+    .expect("finished response");
+
+    let stats = agent_turn_stats_events(&h);
+    assert_eq!(
+        stats
+            .iter()
+            .map(|stats| stats.current.output_bytes_sent)
+            .max(),
+        Some(raw_arguments.len() as u64)
+    );
+
+    h.shutdown().expect("shutdown");
+}
+
+/// Ensures a provider retry that clears transient response state also resets
+/// the current-prompt non-visible snapshot baseline, so regenerated tool input
+/// is counted as newly observed turn output.
+#[test]
+fn agent_turn_stats_clear_response_resets_semantic_snapshot_baseline() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    let cid = ensure_test_user_agent(&mut h);
+    let spid: AgentPromptId = "sp-turn-stats-clear-response".into();
+    seed_agent_thinking(&mut h, &cid, spid.as_str());
+    h.prompt_agents.insert(spid.clone(), cid.clone());
+    h.pending_provider_prompts
+        .insert(spid.clone(), "provider-owner".into());
+    h.start_or_update_agent_turn_stats(&cid, spid.clone());
+    let target_agent_id = h.agents[&cid].agent_id.clone().expect("agent id");
+
+    for event in [
+        Event::ProviderResponseUpdated(ProviderResponseUpdated {
+            agent_prompt_id: spid.clone(),
+            agent_id: crate::parse_agent_id(&target_agent_id),
+            deltas: Vec::new(),
+            compaction: None,
+            status: None,
+            semantic_output: Some(tau_proto::ProviderResponseSemanticOutput {
+                non_visible_output_bytes: 4096,
+            }),
+            originator: tau_proto::PromptOriginator::User,
+        }),
+        Event::ProviderResponseUpdated(ProviderResponseUpdated {
+            agent_prompt_id: spid.clone(),
+            agent_id: crate::parse_agent_id(&target_agent_id),
+            deltas: Vec::new(),
+            compaction: None,
+            status: Some(tau_proto::ProviderResponseStatusUpdate {
+                text: "retrying".to_owned(),
+                clear_response: true,
+            }),
+            semantic_output: None,
+            originator: tau_proto::PromptOriginator::User,
+        }),
+        Event::ProviderResponseUpdated(ProviderResponseUpdated {
+            agent_prompt_id: spid.clone(),
+            agent_id: crate::parse_agent_id(&target_agent_id),
+            deltas: Vec::new(),
+            compaction: None,
+            status: None,
+            semantic_output: Some(tau_proto::ProviderResponseSemanticOutput {
+                non_visible_output_bytes: 4096,
+            }),
+            originator: tau_proto::PromptOriginator::User,
+        }),
+    ] {
+        h.handle_extension_provider_prompt_event("provider-owner", event)
+            .expect("provider update");
+    }
+    h.emit_agent_turn_stats(&cid, crate::harness::AgentTurnStatsEmitMode::Forced);
+
+    let stats = agent_turn_stats_events(&h);
+    assert!(stats.iter().any(|stats| {
+        stats.agent_prompt_id.as_ref() == Some(&spid)
+            && stats.current.output_bytes_sent == 8192
+            && stats.previous.output_bytes_sent == 4096
+    }));
+
+    h.shutdown().expect("shutdown");
+}
+
+/// Ensures mixed public deltas plus provider-private semantic-output snapshots
+/// are split at the harness boundary: subscribers get only the public delta
+/// update while stats include both visible and non-visible byte counts.
+#[test]
+fn provider_response_updated_strips_semantic_output_from_public_mixed_update() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    let cid = ensure_test_user_agent(&mut h);
+    let spid: AgentPromptId = "sp-turn-stats-mixed-update".into();
+    seed_agent_thinking(&mut h, &cid, spid.as_str());
+    h.prompt_agents.insert(spid.clone(), cid.clone());
+    h.pending_provider_prompts
+        .insert(spid.clone(), "provider-owner".into());
+    h.start_or_update_agent_turn_stats(&cid, spid.clone());
+    let target_agent_id = h.agents[&cid].agent_id.clone().expect("agent id");
+
+    h.handle_extension_provider_prompt_event(
+        "provider-owner",
+        Event::ProviderResponseUpdated(ProviderResponseUpdated {
+            agent_prompt_id: spid.clone(),
+            agent_id: crate::parse_agent_id(&target_agent_id),
+            deltas: vec![tau_proto::ProviderResponseTextDelta::Message {
+                output_index: 0,
+                text: "hi".to_owned(),
+                phase: None,
+            }],
+            compaction: None,
+            status: None,
+            semantic_output: Some(tau_proto::ProviderResponseSemanticOutput {
+                non_visible_output_bytes: 10,
+            }),
+            originator: tau_proto::PromptOriginator::User,
+        }),
+    )
+    .expect("mixed provider update");
+
+    assert!(event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::ProviderResponseUpdated(update)
+            if update.agent_prompt_id == spid
+                && update.semantic_output.is_none()
+                && !update.deltas.is_empty()
+    )));
+    assert!(agent_turn_stats_events(&h).iter().any(|stats| {
+        stats.agent_prompt_id.as_ref() == Some(&spid)
+            && stats.current.output_bytes_sent == 12
+            && stats.previous.output_bytes_sent == 0
+    }));
+    assert_eq!(
+        agent_event_count(&h, |event| matches!(
+            event,
+            Event::ProviderResponseUpdated(_) | Event::AgentTurnStatsUpdated(_)
+        )),
+        0
+    );
 
     h.shutdown().expect("shutdown");
 }

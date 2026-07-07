@@ -1295,6 +1295,7 @@ fn provider_response_delta_update(
         deltas,
         compaction: None,
         status: None,
+        semantic_output: None,
         originator,
     }
 }
@@ -1413,6 +1414,7 @@ fn status_clear_response_removes_live_thinking_block() {
             text: "retrying".to_owned(),
             clear_response: true,
         }),
+        semantic_output: None,
         originator: tau_proto::PromptOriginator::User,
     }));
     sync(&handle);
@@ -4227,6 +4229,7 @@ fn agent_turn_stats_update_suffixes_live_indicator_until_finish() {
         }],
         compaction: None,
         status: None,
+        semantic_output: None,
         originator: tau_proto::PromptOriginator::User,
     }));
     sync(&handle);
@@ -4304,6 +4307,7 @@ fn provider_visible_update_omits_turn_stats_suffix() {
         }],
         compaction: None,
         status: None,
+        semantic_output: None,
         originator: tau_proto::PromptOriginator::User,
     }));
     sync(&handle);
@@ -5450,6 +5454,7 @@ fn render_provider_compaction_update_as_compact_progress() {
             compacted_input_tokens: None,
         }),
         status: None,
+        semantic_output: None,
         originator: tau_proto::PromptOriginator::User,
     }));
     sync(&handle);

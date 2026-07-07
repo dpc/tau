@@ -1653,6 +1653,7 @@ fn emit_retry_banner<W: Write>(
                 text: banner,
                 clear_response: true,
             }),
+            semantic_output: None,
             originator: originator.clone(),
         },
     )));
@@ -1805,22 +1806,14 @@ where
         |writer, retry_ctx| {
             let mut delta_emitter = common::StreamDeltaEmitter::default();
             let mut on_update = |state: &common::StreamState| {
-                let deltas = delta_emitter.deltas(state);
-                let compaction = state.compaction_update();
-                if deltas.is_empty() && compaction.is_none() {
-                    return;
-                }
-                let _ = writer.write_message(&HarnessInputMessage::emit(
-                    Event::ProviderResponseUpdated(ProviderResponseUpdated {
-                        agent_prompt_id: agent_prompt_id.into(),
-                        agent_id: prompt.agent_id.clone(),
-                        deltas,
-                        compaction,
-                        status: None,
-                        originator: originator.clone(),
-                    }),
-                ));
-                let _ = writer.flush();
+                emit_chatgpt_stream_update(
+                    agent_prompt_id,
+                    &prompt.agent_id,
+                    &originator,
+                    state,
+                    &mut delta_emitter,
+                    writer,
+                );
             };
             chatgpt_runtime.stream(
                 agent_prompt_id,
@@ -1889,6 +1882,34 @@ where
         }
     }
     Ok(())
+}
+
+fn emit_chatgpt_stream_update<W: Write>(
+    agent_prompt_id: &str,
+    agent_id: &tau_proto::AgentId,
+    originator: &tau_proto::PromptOriginator,
+    state: &common::StreamState,
+    delta_emitter: &mut common::StreamDeltaEmitter,
+    writer: &mut PeerOutputWriter<W>,
+) {
+    let deltas = delta_emitter.deltas(state);
+    let compaction = state.compaction_update();
+    let semantic_output = state.semantic_output_for_update();
+    if deltas.is_empty() && compaction.is_none() && semantic_output.is_none() {
+        return;
+    }
+    let _ = writer.write_message(&HarnessInputMessage::emit(Event::ProviderResponseUpdated(
+        ProviderResponseUpdated {
+            agent_prompt_id: agent_prompt_id.into(),
+            agent_id: agent_id.clone(),
+            deltas,
+            compaction,
+            status: None,
+            semantic_output,
+            originator: originator.clone(),
+        },
+    )));
+    let _ = writer.flush();
 }
 
 fn backend_descriptor(
@@ -2124,6 +2145,7 @@ fn emit_repetition_detected_update<W: Write>(
                 text,
                 clear_response: true,
             }),
+            semantic_output: None,
             originator: originator.clone(),
         },
     )));

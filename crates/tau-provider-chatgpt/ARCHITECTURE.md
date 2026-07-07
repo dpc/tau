@@ -63,8 +63,12 @@ historical `fc_`/`ctc_` id synthesis when that sidecar is absent.
 Responses streams may deliver visible assistant text, reasoning summaries, large
 function-call arguments, or custom-tool input during an agent turn. Providers
 emit displayable assistant/reasoning append deltas and final tool-call items, but
-do not publish public byte-progress metadata. The harness derives content-free
-agent-turn stats from accepted events.
+do not publish public byte-progress metadata. For streamed function-call
+arguments and custom-tool input, the provider sends the harness a private,
+content-free `semantic_output.non_visible_output_bytes` snapshot that is
+cumulative for the current provider prompt, not a per-update delta. The harness
+strips that snapshot before subscriber delivery and surfaces any public liveness
+display only through `agent.turn_stats_updated`.
 
 ## Model metadata tags
 

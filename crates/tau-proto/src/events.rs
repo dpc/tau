@@ -3172,11 +3172,33 @@ pub struct ProviderResponseUpdated {
     /// Provider-authored transient status text, such as retry diagnostics.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status: Option<ProviderResponseStatusUpdate>,
+    /// Provider-to-harness content-free semantic-output byte snapshot.
+    ///
+    /// This field lets providers report non-visible generated output, such as
+    /// streamed tool/custom-tool input bytes, to the harness so the harness can
+    /// publish public [`AgentTurnStatsUpdated`] samples. The harness must clear
+    /// this field before delivering `provider.response_updated` to subscribers;
+    /// UI consumers must use `agent.turn_stats_updated` for progress display.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub semantic_output: Option<ProviderResponseSemanticOutput>,
     /// Echo of [`AgentPromptCreated::originator`]. UIs filter on
     /// `originator.is_user()` so the streaming text from a side
     /// conversation doesn't paint into the user's chat window.
     #[serde(default)]
     pub originator: PromptOriginator,
+}
+
+/// Content-free semantic-output byte snapshot for one in-flight response.
+///
+/// Providers send this only to the harness on `provider.response_updated`.
+/// Counts are cumulative for the current provider prompt and exclude visible
+/// assistant/reasoning text deltas, prompts, tool execution output, raw wire
+/// framing, and labels or other content-bearing metadata.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ProviderResponseSemanticOutput {
+    /// Cumulative UTF-8 bytes of non-visible provider-generated semantic output
+    /// observed for the current provider prompt.
+    pub non_visible_output_bytes: u64,
 }
 
 /// Newly appended displayable text in a provider response update.

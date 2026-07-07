@@ -154,6 +154,64 @@ fn stream_delta_emitter_emits_append_deltas() {
     );
 }
 
+/// Ensures streamed Chat Completions tool-call arguments expose only a
+/// content-free cumulative byte snapshot for the harness-owned turn stats path.
+#[test]
+fn stream_state_reports_tool_argument_semantic_output_bytes() {
+    let mut state = StreamState::new();
+
+    state
+        .append_tool_arguments_delta(0, "{\"cmd\":")
+        .expect("first argument delta");
+    state
+        .append_tool_arguments_delta(0, "\"ls\"}")
+        .expect("second argument delta");
+
+    assert_eq!(
+        state.semantic_output_for_update(),
+        Some(tau_proto::ProviderResponseSemanticOutput {
+            non_visible_output_bytes: r#"{"cmd":"ls"}"#.len() as u64,
+        })
+    );
+}
+
+/// Ensures the provider emission boundary does not regress to suppressing
+/// tool-argument-only streams that have no displayable text deltas.
+#[test]
+fn stream_update_emits_semantic_output_without_text_deltas() {
+    let mut state = StreamState::new();
+    state
+        .append_tool_arguments_delta(0, "{\"cmd\":\"ls\"}")
+        .expect("argument delta");
+    let mut bytes = Vec::new();
+    {
+        let mut writer = PeerOutputWriter::new(&mut bytes);
+        let mut delta_emitter = StreamDeltaEmitter::default();
+        emit_stream_update(
+            &AgentPromptId::from("sp-tool-args"),
+            &prompt(),
+            &state,
+            &mut delta_emitter,
+            &mut writer,
+        );
+    }
+
+    let frames = decode_frames(&bytes);
+    let Some(HarnessInputMessage::Emit(emit)) = frames.first() else {
+        panic!("expected semantic output update frame: {frames:?}");
+    };
+    let Event::ProviderResponseUpdated(update) = emit.event.as_ref() else {
+        panic!("expected provider response update: {:?}", emit.event);
+    };
+    assert!(update.deltas.is_empty());
+    assert_eq!(
+        update.semantic_output,
+        Some(tau_proto::ProviderResponseSemanticOutput {
+            non_visible_output_bytes: "{\"cmd\":\"ls\"}".len() as u64,
+        })
+    );
+}
+
 /// Ensures rare provider corrections do not produce corrupt suffix deltas; the
 /// final complete response is responsible for correcting the UI.
 #[test]

@@ -91,11 +91,17 @@ tool calls and opaque provider items, are committed. Provider-authored retry or
 diagnostic text must be sent as update `status`, not as assistant message
 deltas.
 
-Providers do not publish public byte-progress metadata. The harness derives
-content-free `agent.turn_stats_updated` events after validating provider prompt
-ownership; those events carry current and previous cumulative turn samples for
-UI rates and must not be stored as transcript content, editor current-response
-text, prompt-stdin capture, or final response output.
+Providers do not publish public byte-progress metadata. For non-visible
+provider-generated output such as streamed tool/custom-tool input, providers may
+send the harness a content-free `provider.response_updated.semantic_output`
+byte snapshot. `semantic_output.non_visible_output_bytes` is cumulative for the
+current provider prompt, not a per-update delta, and remains provider-to-harness
+private. After validating provider prompt ownership, the harness consumes and
+strips that field, excludes it from durable/public provider output, then
+publishes content-free `agent.turn_stats_updated` events. Those events carry
+current and previous cumulative turn samples for UI rates and must not be stored
+as transcript content, editor current-response text, prompt-stdin capture, or
+final response output.
 
 First-party providers abort high-confidence tight stream loops with
 `stop_reason: repetition_detected`: assistant/reasoning/tool-argument deltas are
