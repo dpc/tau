@@ -404,6 +404,7 @@ fn emit_gateway_deliveries(
         output.emit(Event::ExtPromptSubmitRequest(ExtPromptSubmitRequest {
             agent_id,
             text: delivery.text,
+            message_class: tau_proto::PromptMessageClass::User,
             ctx_id: Some(delivery.ctx_id),
         }));
     }
@@ -1494,6 +1495,7 @@ impl Extension {
             .emit(Event::ExtPromptSubmitRequest(ExtPromptSubmitRequest {
                 agent_id,
                 text: prompt,
+                message_class: tau_proto::PromptMessageClass::User,
                 ctx_id: None,
             }));
     }

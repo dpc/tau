@@ -60,6 +60,13 @@
         config: {},
     },
     {
+        name: "std-utils",
+        suffix: ["component", "ext-utils"],
+        role: "tool",
+        enable: true,
+        config: {},
+    },
+    {
         name: "std-websearch",
         suffix: ["component", "ext-websearch"],
         role: "tool",

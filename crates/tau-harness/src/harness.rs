@@ -6262,9 +6262,15 @@ impl Harness {
             return Ok(());
         };
         let text = request.text;
-        let prompt = PendingPrompt::watch_notified_user(text).with_ctx_id(request.ctx_id);
+        let is_internal = request.message_class.is_internal();
+        let prompt = if is_internal {
+            PendingPrompt::internal(text)
+        } else {
+            PendingPrompt::watch_notified_user(text)
+        }
+        .with_ctx_id(request.ctx_id);
         let submission = self.submit_prompt_to_agent(session_id, &agent_id, prompt)?;
-        if !matches!(submission, PromptSubmission::Rejected { .. }) {
+        if !matches!(submission, PromptSubmission::Rejected { .. }) && !is_internal {
             let _ = self.agent_store.record_agent_user_interaction(&agent_id);
         }
         if matches!(submission, PromptSubmission::Queued) {
@@ -12837,6 +12843,7 @@ impl Harness {
                     agent_id: crate::parse_agent_id(&agent_id),
                     text: prompt.text,
                     message_class: prompt.message_class,
+                    ctx_id: prompt.ctx_id,
                 }),
             );
             if let Some(text) = notification_text {

@@ -3128,6 +3128,7 @@ dependencies = [
  "tau-ext-std-notifications",
  "tau-ext-telegram",
  "tau-ext-test-dummy",
+ "tau-ext-utils",
  "tau-ext-websearch",
  "tau-ext-xmpp",
  "tau-harness",
@@ -3421,6 +3422,16 @@ dependencies = [
  "serde_json",
  "tau-client",
  "tau-proto",
+]
+
+[[package]]
+name = "tau-ext-utils"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "tau-client",
+ "tau-proto",
+ "tracing",
 ]
 
 [[package]]

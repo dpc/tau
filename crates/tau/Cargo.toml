@@ -25,6 +25,7 @@ tau-ext-slack.workspace = true
 tau-ext-std-notifications.workspace = true
 tau-ext-telegram.workspace = true
 tau-ext-test-dummy.workspace = true
+tau-ext-utils.workspace = true
 tau-ext-websearch.workspace = true
 tau-ext-xmpp.workspace = true
 

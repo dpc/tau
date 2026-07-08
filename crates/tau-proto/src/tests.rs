@@ -423,6 +423,7 @@ fn representative_events() -> Vec<Event> {
             agent_id: agent_id("engineer_abcd1234"),
             text: "steer".to_owned(),
             message_class: PromptMessageClass::User,
+            ctx_id: None,
         }),
         Event::AgentCompactionTriggered(AgentCompactionTriggered {
             agent_id: agent_id("engineer_abcd1234"),
@@ -629,6 +630,7 @@ fn representative_events() -> Vec<Event> {
         Event::ExtPromptSubmitRequest(ExtPromptSubmitRequest {
             agent_id: agent_id("agent-1"),
             text: "extension prompt".to_owned(),
+            message_class: PromptMessageClass::User,
             ctx_id: Some("ctx-1".to_owned()),
         }),
         Event::StartAgentRequest(StartAgentRequest {
@@ -1645,6 +1647,7 @@ fn extension_prompt_submit_request_wire_form() {
     let event = Event::ExtPromptSubmitRequest(ExtPromptSubmitRequest {
         agent_id: agent_id("agent-1"),
         text: "[telegram from alice] hello".to_owned(),
+        message_class: PromptMessageClass::User,
         ctx_id: Some("ctx-1".to_owned()),
     });
     let json = serde_json::to_value(&event).expect("serialize");
@@ -1652,6 +1655,19 @@ fn extension_prompt_submit_request_wire_form() {
     assert_eq!(json["payload"]["agent_id"], "agent-1");
     assert_eq!(json["payload"]["ctx_id"], "ctx-1");
     assert_eq!(event.name(), EventName::EXTENSION_PROMPT_SUBMIT_REQUEST);
+}
+
+/// Omitted extension prompt message classes remain user-style for backwards
+/// compatibility with existing bridge extensions.
+#[test]
+fn extension_prompt_submit_request_defaults_to_user_message_class() {
+    let payload: ExtPromptSubmitRequest = serde_json::from_value(serde_json::json!({
+        "agent_id": "agent-1",
+        "text": "hello"
+    }))
+    .expect("decode extension prompt request");
+
+    assert_eq!(payload.message_class, PromptMessageClass::User);
 }
 
 /// Ensures model ids split only on the first slash so provider model names may
@@ -2231,6 +2247,7 @@ fn prompt_message_class_defaults_to_user_when_omitted() {
         agent_id: agent_id("worker"),
         text: "[tau-internal] Tool call `bg` is complete.".into(),
         message_class: PromptMessageClass::Internal,
+        ctx_id: None,
     })
     .expect("serialize steered prompt");
     assert_eq!(internal["message_class"], serde_json::json!("internal"));

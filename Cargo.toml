@@ -19,6 +19,7 @@ members = [
   "crates/tau-ext-std-notifications",
   "crates/tau-ext-telegram",
   "crates/tau-ext-test-dummy",
+  "crates/tau-ext-utils",
   "crates/tau-ext-websearch",
   "crates/tau-ext-xmpp",
   "crates/tau-harness",
@@ -78,6 +79,7 @@ tau-ext-slack = { path = "crates/tau-ext-slack" }
 tau-ext-std-notifications = { path = "crates/tau-ext-std-notifications" }
 tau-ext-telegram = { path = "crates/tau-ext-telegram" }
 tau-ext-test-dummy = { path = "crates/tau-ext-test-dummy" }
+tau-ext-utils = { path = "crates/tau-ext-utils" }
 tau-ext-websearch = { path = "crates/tau-ext-websearch" }
 tau-ext-xmpp = { path = "crates/tau-ext-xmpp" }
 tau-harness = { path = "crates/tau-harness" }

@@ -1768,6 +1768,7 @@ impl WorkerState {
             .emit(Event::ExtPromptSubmitRequest(ExtPromptSubmitRequest {
                 agent_id,
                 text,
+                message_class: tau_proto::PromptMessageClass::User,
                 ctx_id: None,
             }));
     }

@@ -328,10 +328,12 @@ harness/agent.
 - **`extension.prompt_fragment_publish`** — The extension publishes a prompt
   fragment contribution that prompt assembly may include according to config.
 - **`extension.prompt_submit_request`** — An extension request to submit a
-  normal user-style prompt to an already loaded agent. The harness validates the
-  target agent and, when accepted, publishes the normal durable
-  `agent.prompt_submitted` fact; extensions must not forge transcript prompt
-  facts directly.
+  user-style or hidden internal prompt to an already loaded agent. The harness
+  validates the target agent and, when accepted, publishes the durable
+  `agent.prompt_submitted` fact with the requested `message_class`; queued prompts
+  that are folded into an in-flight turn preserve the request `ctx_id` on
+  `agent.prompt_steered`. Extensions must not forge transcript prompt facts
+  directly. `tau-ext-utils` uses internal prompt submissions for timer wakeups.
 - **`agent.start_request`** — An extension or harness-owned tool asks
   the harness to start a side/sub-agent conversation: instruction text,
   correlation `query_id`, optional requested `role`, optional tool-call

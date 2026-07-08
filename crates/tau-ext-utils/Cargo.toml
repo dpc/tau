@@ -1,0 +1,12 @@
+[package]
+name = "tau-ext-utils"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+serde_json.workspace = true
+tau-client.workspace = true
+tau-proto.workspace = true
+tracing.workspace = true

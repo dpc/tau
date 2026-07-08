@@ -107,6 +107,9 @@ harness snapshots. Peers that perform side effects must register live handlers
 and ignore `deliver` frames with `replay: true`; restore handlers may opt in to
 historical execution facts such as `tool.request` and `tool.started` and to
 catch-up snapshots such as `session.agent_loaded` or `harness.session_dir`.
+Timer-like extensions should rebuild active state from replayed execution facts
+and wait for `agent.replay_complete` before submitting restored overdue internal
+prompts.
 
 - **`deliver`** *(harness → peer)* — Harness-owned event delivery envelope.
   `recorded_at` is present for committed runtime deliveries and replay entries

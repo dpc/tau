@@ -65,6 +65,11 @@ impl_event_payload!(
     tau_proto::Event::AgentPromptSubmitted
 );
 impl_event_payload!(
+    tau_proto::AgentPromptSteered,
+    tau_proto::EventName::AGENT_PROMPT_STEERED,
+    tau_proto::Event::AgentPromptSteered
+);
+impl_event_payload!(
     tau_proto::HarnessNotice,
     tau_proto::EventName::HARNESS_NOTICE,
     tau_proto::Event::HarnessNotice

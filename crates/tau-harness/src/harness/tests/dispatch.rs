@@ -330,6 +330,7 @@ fn resume_ignores_later_side_queued_or_steered_default_agent_candidates() {
                     agent_id: tau_proto::AgentId::parse("worker_steered").expect("agent id"),
                     text: "side steered".to_owned(),
                     message_class: tau_proto::PromptMessageClass::User,
+                    ctx_id: None,
                 }),
             )
             .expect("seed side steered prompt");
@@ -13396,6 +13397,7 @@ fn extension_prompt_submit_request_routes_to_loaded_agent() {
             tau_proto::ExtPromptSubmitRequest {
                 agent_id: agent_id.clone(),
                 text: "[telegram from alice] hello".to_owned(),
+                message_class: tau_proto::PromptMessageClass::User,
                 ctx_id: Some("telegram-1".to_owned()),
             },
         )),
@@ -13419,6 +13421,42 @@ fn extension_prompt_submit_request_routes_to_loaded_agent() {
     h.shutdown().expect("shutdown");
 }
 
+/// Internal extension prompt submissions must stay hidden while still producing
+/// harness-owned prompt facts for timer and other wakeup extensions.
+#[test]
+fn internal_extension_prompt_submit_request_routes_as_internal_prompt() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("harness");
+    h.selected_model = Some("test/model".into());
+    let cid = ensure_test_user_agent(&mut h);
+    let agent_id = durable_agent_id_for_conversation(&h, &cid);
+
+    h.handle_extension_event(
+        "utils-ext",
+        TestProtocolItem::Event(Event::ExtPromptSubmitRequest(
+            tau_proto::ExtPromptSubmitRequest {
+                agent_id: agent_id.clone(),
+                text: "timer fired".to_owned(),
+                message_class: tau_proto::PromptMessageClass::Internal,
+                ctx_id: Some("timer:wake:1".to_owned()),
+            },
+        )),
+    )
+    .expect("submit internal prompt request");
+
+    assert!(event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::AgentPromptSubmitted(prompt)
+            if prompt.agent_id == agent_id
+                && prompt.text == "timer fired"
+                && prompt.message_class == tau_proto::PromptMessageClass::Internal
+                && prompt.ctx_id.as_deref() == Some("timer:wake:1")
+    )));
+
+    h.shutdown().expect("shutdown");
+}
+
 /// Bad extension prompt targets must be rejected with user-visible harness
 /// notice and must not create durable prompt facts for arbitrary agent ids.
 #[test]
@@ -13433,6 +13471,7 @@ fn extension_prompt_submit_request_rejects_unknown_agent() {
             tau_proto::ExtPromptSubmitRequest {
                 agent_id: tau_proto::AgentId::parse("missing-agent").expect("agent id"),
                 text: "hello".to_owned(),
+                message_class: tau_proto::PromptMessageClass::User,
                 ctx_id: None,
             },
         )),
@@ -13446,6 +13485,48 @@ fn extension_prompt_submit_request_rejects_unknown_agent() {
     assert!(!event_log_contains_any_source(&h, |event| matches!(
         event,
         Event::AgentPromptSubmitted(prompt) if prompt.text == "hello"
+    )));
+
+    h.shutdown().expect("shutdown");
+}
+
+/// Queued extension prompt-submit requests preserve their ctx_id when they are
+/// folded as steering messages, giving timer restore replayable fired evidence.
+#[test]
+fn queued_extension_prompt_submit_request_preserves_ctx_id_when_steered() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("harness");
+    h.selected_model = Some("test/model".into());
+    let cid = ensure_test_user_agent(&mut h);
+    let agent_id = durable_agent_id_for_conversation(&h, &cid);
+    h.set_agent_turn_state(
+        &cid,
+        AgentTurnState::AgentThinking {
+            agent_prompt_id: "busy-prompt".into(),
+        },
+    );
+    h.handle_extension_event(
+        "utils-ext",
+        TestProtocolItem::Event(Event::ExtPromptSubmitRequest(
+            tau_proto::ExtPromptSubmitRequest {
+                agent_id: agent_id.clone(),
+                text: "timer fired".to_owned(),
+                message_class: tau_proto::PromptMessageClass::Internal,
+                ctx_id: Some("timer:wake:1".to_owned()),
+            },
+        )),
+    )
+    .expect("queue internal prompt request");
+    h.fold_pending_prompts_as_steered(&cid);
+
+    assert!(event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::AgentPromptSteered(steered)
+            if steered.agent_id == agent_id
+                && steered.text == "timer fired"
+                && steered.message_class == tau_proto::PromptMessageClass::Internal
+                && steered.ctx_id.as_deref() == Some("timer:wake:1")
     )));
 
     h.shutdown().expect("shutdown");
@@ -13475,6 +13556,7 @@ fn queued_extension_prompt_submit_requests_preserve_individual_ctx_ids() {
                 tau_proto::ExtPromptSubmitRequest {
                     agent_id: agent_id.clone(),
                     text: text.to_owned(),
+                    message_class: tau_proto::PromptMessageClass::User,
                     ctx_id: Some(ctx_id.to_owned()),
                 },
             )),

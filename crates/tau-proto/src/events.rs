@@ -1796,16 +1796,22 @@ pub struct ExtPromptFragmentPublish {
     pub fragment: PromptFragment,
 }
 
-/// Request from an extension to submit a normal user prompt to a loaded agent.
+/// Request from an extension to submit a user or internal prompt to a loaded
+/// agent.
 ///
 /// The harness owns validation and transcript publication for this request;
-/// extensions must not publish `agent.prompt_submitted` directly.
+/// extensions must not publish `agent.prompt_submitted` directly. Internal
+/// prompts are hidden from ordinary user-facing UI and latest-user-prompt
+/// metadata.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ExtPromptSubmitRequest {
     /// Loaded agent that should receive the prompt.
     pub agent_id: AgentId,
-    /// User-style prompt text to submit.
+    /// Prompt text to submit.
     pub text: String,
+    /// Whether this prompt is user-authored or hidden internal control text.
+    #[serde(default)]
+    pub message_class: PromptMessageClass,
     /// Optional submitter correlation id copied to the created prompt.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ctx_id: Option<String>,
@@ -2923,11 +2929,15 @@ pub struct AgentCompactionTriggered {
 pub struct AgentPromptSteered {
     /// Agent whose in-flight turn received the prompt.
     pub agent_id: AgentId,
+    /// Prompt text appended to the in-flight turn.
     pub text: String,
     /// Whether this prompt text is user-authored or hidden internal control
     /// text.
     #[serde(default)]
     pub message_class: PromptMessageClass,
+    /// Echo of the original queued prompt correlation id, when present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ctx_id: Option<String>,
 }
 
 /// A synthetic user message injected into an agent transcript by the harness

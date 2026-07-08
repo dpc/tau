@@ -5622,6 +5622,7 @@ fn queued_prompt_steered_promotes_without_duplicate() {
         text: "folded queued prompt".into(),
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         message_class: tau_proto::PromptMessageClass::User,
+        ctx_id: None,
     }));
     sync(&handle);
     assert!(
@@ -5674,6 +5675,7 @@ fn internal_prompt_events_are_hidden() {
         text: "[tau-internal] Tool call `steered` is complete.".into(),
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         message_class: tau_proto::PromptMessageClass::Internal,
+        ctx_id: None,
     }));
     sync(&handle);
 
