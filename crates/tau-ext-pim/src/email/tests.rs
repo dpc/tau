@@ -643,7 +643,7 @@ fn email_run_startup_order_and_subscriptions_are_stable() {
     assert!(matches!(
         &frames[1],
         HarnessInputMessage::Subscribe(subscribe)
-            if subscribe.selectors == vec![
+            if subscribe.live_selectors == vec![
                 tau_proto::EventSelector::Exact(tau_proto::EventName::TOOL_STARTED),
                 tau_proto::EventSelector::Exact(tau_proto::EventName::ACTION_INVOKE),
             ]

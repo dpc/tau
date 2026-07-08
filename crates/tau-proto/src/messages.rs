@@ -35,13 +35,22 @@ pub struct Hello {
 
 /// Subscription request describing which events a participant wants.
 ///
-/// Selectors describe event interest, not replay intent. The harness may send
-/// selected durable catch-up to any peer, including extensions, with
-/// [`EventDelivery::replay`] set to `true`. Side-effecting subscribers must
-/// ignore replayed deliveries. This payload has no past-event opt-in field.
+/// Historical selectors opt in to catch-up delivered with
+/// [`EventDelivery::replay`] set to `true`, including durable facts and current
+/// state snapshots. Live selectors opt in to future
+/// committed deliveries after catch-up has completed. Keeping these sets
+/// separate prevents restore-only state from widening live side-effect
+/// exposure, and prevents live-only handlers from implicitly receiving
+/// historical tool execution facts.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct Subscribe {
-    pub selectors: Vec<EventSelector>,
+    /// Durable/restorable facts and current snapshots to replay before the live
+    /// stream is released.
+    #[serde(default)]
+    pub historical_selectors: Vec<EventSelector>,
+    /// Future committed events to deliver after catch-up.
+    #[serde(default)]
+    pub live_selectors: Vec<EventSelector>,
 }
 
 /// Interception request describing which event emissions a participant wants
@@ -196,15 +205,15 @@ impl std::fmt::Display for UnixMicros {
 /// this payload so delivery metadata is explicitly harness-owned and
 /// direction-specific.
 ///
-/// `replay` distinguishes historical record from live occurrence: subscribe
-/// time catch-up re-sends durable facts with `replay: true`. Consumers that
-/// render state (UI transcripts) fold replay frames like live events;
-/// consumers that perform side effects (sounds, tool execution, idle timers)
-/// must skip them.
+/// `replay` distinguishes catch-up input from live occurrence: subscribe-time
+/// catch-up sends durable facts and current snapshots with `replay: true`.
+/// Consumers that render state (UI transcripts) fold replay frames like live
+/// events; consumers that perform side effects (sounds, tool execution, idle
+/// timers) must skip them.
 ///
-/// `recorded_at` is present for committed runtime deliveries and for durable
-/// replay entries when a historical timestamp is meaningful. It is absent for
-/// synthetic direct snapshots.
+/// `recorded_at` is present for committed runtime deliveries and for replay
+/// entries when a timestamp is meaningful. Synthetic catch-up snapshots use a
+/// harness-generated catch-up timestamp.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct EventDelivery {
     /// Inner bus fact delivered to the peer.
@@ -240,8 +249,8 @@ impl EventDelivery {
         }
     }
 
-    /// Creates a replay delivery re-sending a durable historical fact with
-    /// its persisted timestamp.
+    /// Creates a replay delivery for a historical fact or catch-up snapshot
+    /// with its timestamp.
     #[must_use]
     pub fn replay(recorded_at: UnixMicros, event: Event) -> Self {
         Self {

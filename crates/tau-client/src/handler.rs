@@ -7,6 +7,29 @@ use crate::contexts::{
 use crate::event_payload::EventPayload;
 use crate::{ClientHandle, ClientResult, InterceptDecision};
 
+/// Replay filtering policy for typed and raw event handlers.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum DeliveryPolicy {
+    /// Run for both replay and live deliveries.
+    Any,
+    /// Run only for replay-marked historical deliveries.
+    RestoreOnly,
+    /// Run only for non-replay live or synthetic deliveries.
+    LiveOnly,
+}
+
+impl DeliveryPolicy {
+    /// Returns true when this policy excludes the delivery.
+    #[must_use]
+    fn skips(self, replay: bool) -> bool {
+        match self {
+            Self::Any => false,
+            Self::RestoreOnly => !replay,
+            Self::LiveOnly => replay,
+        }
+    }
+}
+
 /// Runtime handler for one configuration declaration.
 pub(crate) trait ConfigureHandler<State> {
     /// Parses and applies one configure message, emitting `ConfigError` on
@@ -237,8 +260,8 @@ where
 
 /// Typed event handler implementation.
 pub(crate) struct TypedEventHandler<Payload, F> {
-    /// Whether replay-marked deliveries should be skipped.
-    live_only: bool,
+    /// Replay filtering policy for this handler.
+    policy: DeliveryPolicy,
     /// User-provided event handler.
     handler: F,
     /// Marker for the typed event payload.
@@ -248,9 +271,9 @@ pub(crate) struct TypedEventHandler<Payload, F> {
 impl<Payload, F> TypedEventHandler<Payload, F> {
     /// Creates a typed event handler wrapper.
     #[must_use]
-    pub(crate) fn new(live_only: bool, handler: F) -> Self {
+    pub(crate) fn new(policy: DeliveryPolicy, handler: F) -> Self {
         Self {
-            live_only,
+            policy,
             handler,
             _payload: std::marker::PhantomData,
         }
@@ -268,7 +291,7 @@ where
         state: &mut State,
         handle: &ClientHandle,
     ) -> ClientResult<()> {
-        if self.live_only && delivery.is_replay() {
+        if self.policy.skips(delivery.is_replay()) {
             return Ok(());
         }
         let Some(event) = Payload::from_event(delivery.event()) else {
@@ -289,8 +312,8 @@ where
 pub(crate) struct TypedRawEventHandler<F> {
     /// Selector matched against delivered event names.
     selector: tau_proto::EventSelector,
-    /// Whether replay-marked deliveries should be skipped.
-    live_only: bool,
+    /// Replay filtering policy for this handler.
+    policy: DeliveryPolicy,
     /// User-provided event handler.
     handler: F,
 }
@@ -298,10 +321,14 @@ pub(crate) struct TypedRawEventHandler<F> {
 impl<F> TypedRawEventHandler<F> {
     /// Creates a raw event handler wrapper.
     #[must_use]
-    pub(crate) fn new(selector: tau_proto::EventSelector, live_only: bool, handler: F) -> Self {
+    pub(crate) fn new(
+        selector: tau_proto::EventSelector,
+        policy: DeliveryPolicy,
+        handler: F,
+    ) -> Self {
         Self {
             selector,
-            live_only,
+            policy,
             handler,
         }
     }
@@ -317,7 +344,7 @@ where
         state: &mut State,
         handle: &ClientHandle,
     ) -> ClientResult<()> {
-        if self.live_only && delivery.is_replay() {
+        if self.policy.skips(delivery.is_replay()) {
             return Ok(());
         }
         let event_name = delivery.event().name();

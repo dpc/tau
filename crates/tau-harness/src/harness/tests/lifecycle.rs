@@ -610,7 +610,8 @@ fn extension_config_error_is_mandatory_warning_and_replayed_to_late_ui() {
     h.handle_client_event(
         &ui_conn,
         TestProtocolItem::Message(TestMessage::Subscribe(Subscribe {
-            selectors: vec![EventSelector::Prefix("harness.".to_owned())],
+            historical_selectors: Vec::new(),
+            live_selectors: vec![EventSelector::Prefix("harness.".to_owned())],
         })),
     )
     .expect("subscribe");
@@ -713,7 +714,8 @@ fn optional_extension_config_error_is_replayed_and_disables_extension() {
     h.handle_client_event(
         &ui_conn,
         TestProtocolItem::Message(TestMessage::Subscribe(Subscribe {
-            selectors: vec![EventSelector::Prefix("harness.".to_owned())],
+            historical_selectors: Vec::new(),
+            live_selectors: vec![EventSelector::Prefix("harness.".to_owned())],
         })),
     )
     .expect("subscribe");
@@ -824,7 +826,8 @@ fn optional_pre_ready_disconnect_is_mandatory_warning_replayed_and_nonfatal() {
     h.handle_client_event(
         &ui_conn,
         TestProtocolItem::Message(TestMessage::Subscribe(Subscribe {
-            selectors: vec![EventSelector::Prefix("harness.".to_owned())],
+            historical_selectors: Vec::new(),
+            live_selectors: vec![EventSelector::Prefix("harness.".to_owned())],
         })),
     )
     .expect("subscribe");
@@ -876,7 +879,8 @@ fn optional_startup_timeout_is_mandatory_warning_replayed_and_nonfatal() {
     h.handle_client_event(
         &ui_conn,
         TestProtocolItem::Message(TestMessage::Subscribe(Subscribe {
-            selectors: vec![EventSelector::Prefix("harness.".to_owned())],
+            historical_selectors: Vec::new(),
+            live_selectors: vec![EventSelector::Prefix("harness.".to_owned())],
         })),
     )
     .expect("subscribe");
@@ -975,7 +979,8 @@ fn startup_diagnostics_are_mandatory_warning_and_replayed() {
     h.handle_client_event(
         &ui_conn,
         TestProtocolItem::Message(TestMessage::Subscribe(Subscribe {
-            selectors: vec![EventSelector::Prefix("harness.".to_owned())],
+            historical_selectors: Vec::new(),
+            live_selectors: vec![EventSelector::Prefix("harness.".to_owned())],
         })),
     )
     .expect("subscribe");
@@ -1646,7 +1651,8 @@ fn session_init_catchup_replays_current_session_dir_to_early_subscribers() {
     h.handle_extension_message(
         "early-session-dir",
         TestMessage::Subscribe(Subscribe {
-            selectors: vec![tau_proto::EventSelector::Exact(
+            historical_selectors: Vec::new(),
+            live_selectors: vec![tau_proto::EventSelector::Exact(
                 tau_proto::EventName::HARNESS_SESSION_DIR,
             )],
         }),
@@ -1692,7 +1698,8 @@ fn session_init_catchup_does_not_duplicate_ui_startup_status_snapshots() {
     h.handle_client_message(
         "startup-ui",
         TestMessage::Subscribe(Subscribe {
-            selectors: selectors.clone(),
+            historical_selectors: Vec::new(),
+            live_selectors: selectors.clone(),
         })
         .into_input_message(),
     )
@@ -1859,6 +1866,7 @@ fn session_context_ready_is_published_live() {
     h.bus
         .set_subscriptions(
             "session-context-ready-observer",
+            Vec::new(),
             vec![tau_proto::EventSelector::Exact(
                 tau_proto::EventName::EXTENSION_SESSION_CONTEXT_READY,
             )],
@@ -2026,7 +2034,8 @@ fn prompt_created_waits_for_registered_agent_context_provider() {
     h.handle_extension_message(
         conn_id,
         TestMessage::Subscribe(Subscribe {
-            selectors: vec![EventSelector::Exact(
+            historical_selectors: Vec::new(),
+            live_selectors: vec![EventSelector::Exact(
                 tau_proto::EventName::SESSION_AGENT_LOADED,
             )],
         }),

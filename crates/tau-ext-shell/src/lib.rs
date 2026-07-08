@@ -720,25 +720,49 @@ impl tau_client::TauExtension for ShellExtension {
                 tau_proto::EventSelector::Exact(tau_proto::EventName::ACTION_INVOKE),
                 |cx| cx.state.handle_event(cx.event().clone(), false),
             )
+            .on_restore::<tau_proto::SessionStarted>(|cx| {
+                cx.state
+                    .handle_event(Event::SessionStarted(cx.event.clone()), true)
+            })
             .on_live::<tau_proto::SessionStarted>(|cx| {
                 cx.state
                     .handle_event(Event::SessionStarted(cx.event.clone()), false)
+            })
+            .on_restore::<tau_proto::SessionAgentLoaded>(|cx| {
+                cx.state
+                    .handle_event(Event::SessionAgentLoaded(cx.event.clone()), true)
             })
             .on_live::<tau_proto::SessionAgentLoaded>(|cx| {
                 cx.state
                     .handle_event(Event::SessionAgentLoaded(cx.event.clone()), false)
             })
+            .on_restore::<tau_proto::SessionAgentUnloaded>(|cx| {
+                cx.state
+                    .handle_event(Event::SessionAgentUnloaded(cx.event.clone()), true)
+            })
             .on_live::<tau_proto::SessionAgentUnloaded>(|cx| {
                 cx.state
                     .handle_event(Event::SessionAgentUnloaded(cx.event.clone()), false)
             })
-            .on::<tau_proto::AgentMetadataSet>(|cx| {
+            .on_live::<tau_proto::AgentReplayComplete>(|cx| {
                 cx.state
-                    .handle_event(Event::AgentMetadataSet(cx.event.clone()), cx.is_replay())
+                    .handle_event(Event::AgentReplayComplete(cx.event.clone()), false)
             })
-            .on::<tau_proto::AgentMetadataUnset>(|cx| {
+            .on_restore::<tau_proto::AgentMetadataSet>(|cx| {
                 cx.state
-                    .handle_event(Event::AgentMetadataUnset(cx.event.clone()), cx.is_replay())
+                    .handle_event(Event::AgentMetadataSet(cx.event.clone()), true)
+            })
+            .on_live::<tau_proto::AgentMetadataSet>(|cx| {
+                cx.state
+                    .handle_event(Event::AgentMetadataSet(cx.event.clone()), false)
+            })
+            .on_restore::<tau_proto::AgentMetadataUnset>(|cx| {
+                cx.state
+                    .handle_event(Event::AgentMetadataUnset(cx.event.clone()), true)
+            })
+            .on_live::<tau_proto::AgentMetadataUnset>(|cx| {
+                cx.state
+                    .handle_event(Event::AgentMetadataUnset(cx.event.clone()), false)
             })
             .on_live::<tau_proto::SessionShutdown>(|cx| {
                 cx.state
@@ -1750,7 +1774,16 @@ fn apply_started_cwd_metadata(
     }
 }
 
-fn dispatch_session_agent_loaded(loaded: SessionAgentLoaded, tx: &Output, cwd_state: &CwdState) {
+fn dispatch_session_agent_loaded(
+    loaded: SessionAgentLoaded,
+    tx: &Output,
+    cwd_state: &CwdState,
+    defer_default_until_replay_complete: bool,
+) {
+    if defer_default_until_replay_complete {
+        cwd_state.set_pending_ready(loaded.agent_id, loaded.session_id);
+        return;
+    }
     if let Some(cwd) = cwd_state.get(&loaded.agent_id) {
         let _ = tx.send(HarnessInputMessage::emit(cwd_context_event(
             loaded.agent_id.clone(),
@@ -1765,8 +1798,8 @@ fn dispatch_session_agent_loaded(loaded: SessionAgentLoaded, tx: &Output, cwd_st
         return;
     }
 
-    let cwd = CwdState::process_default();
     cwd_state.set_pending_ready(loaded.agent_id.clone(), loaded.session_id);
+    let cwd = CwdState::process_default();
     let _ = tx.send(HarnessInputMessage::emit(Event::AgentMetadataSet(
         tau_proto::AgentMetadataSet {
             agent_id: loaded.agent_id,

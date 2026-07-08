@@ -2097,7 +2097,11 @@ impl TauExtension for XmppExtension {
                 None,
                 handle_tool_invocation,
             )
-            .on_raw(
+            .on_raw_restore(
+                tau_proto::EventSelector::Exact(tau_proto::EventName::SESSION_STARTED),
+                handle_session_started,
+            )
+            .on_raw_live(
                 tau_proto::EventSelector::Exact(tau_proto::EventName::SESSION_STARTED),
                 handle_session_started,
             )

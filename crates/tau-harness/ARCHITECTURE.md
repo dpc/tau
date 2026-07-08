@@ -40,6 +40,20 @@ and `always_show` warnings such as extension config errors) are replayable,
 published with a call-site `must_pass` override, and protected from interceptor
 rewrite/drop.
 
+`tool.request` and `tool.started` are session-scoped execution restore facts.
+They are persisted in each session's `restore-events.cbor` stream (or the
+equivalent in-memory stream for ephemeral sessions), replayed only to peers that
+request matching `historical_selectors`, and deliberately kept out of agent
+transcript logs. Live tool execution remains driven only by non-replay
+`tool.started` deliveries.
+
+Catch-up snapshots reconstructed from current harness state (for example
+`session.agent_loaded`, folded metadata, and `harness.session_dir`) are also
+selected by `historical_selectors` and delivered with `EventDelivery.replay =
+true`. Only `agent.replay_complete` and `session.replay_complete` boundaries
+remain non-replay during catch-up; live delivery is buffered until the session
+boundary has been sent.
+
 ## Agent display names and watch topology
 
 Agent display names are human-facing labels, not topology metadata. They may

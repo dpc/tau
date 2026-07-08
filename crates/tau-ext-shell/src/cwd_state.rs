@@ -103,6 +103,17 @@ impl CwdState {
             .remove(agent_id)
     }
 
+    pub(crate) fn pending_ready(
+        &self,
+        agent_id: &tau_proto::AgentId,
+    ) -> Option<tau_proto::SessionId> {
+        self.pending_ready_by_agent
+            .lock()
+            .expect("cwd ready map lock poisoned")
+            .get(agent_id)
+            .cloned()
+    }
+
     pub(crate) fn set_pending_notice(&self, agent_id: tau_proto::AgentId, cwd: PathBuf) {
         self.pending_notice_by_agent
             .lock()

@@ -58,7 +58,11 @@ fn action_result(invocation_id: &str, text: &str) -> tau_proto::ActionResult {
 
 fn subscribe_to_actions(h: &mut Harness, client_id: &str) {
     h.bus
-        .set_subscriptions(client_id, vec![EventSelector::Prefix("action.".to_owned())])
+        .set_subscriptions(
+            client_id,
+            Vec::new(),
+            vec![EventSelector::Prefix("action.".to_owned())],
+        )
         .expect("subscribe to action events");
 }
 

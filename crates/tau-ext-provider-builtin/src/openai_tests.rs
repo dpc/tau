@@ -654,13 +654,20 @@ fn provider_startup_declares_exact_subscriptions_and_models_before_ready() {
         "provider should emit one startup Subscribe frame: {frames:?}",
     );
     assert_eq!(
-        subscribe_frames[0].selectors,
+        subscribe_frames[0].live_selectors,
         [
             tau_proto::EventSelector::Exact(EventName::AGENT_PROMPT_PREWARM_REQUESTED),
             tau_proto::EventSelector::Exact(EventName::HARNESS_SESSION_DIR),
             tau_proto::EventSelector::Exact(EventName::UI_CANCEL_PROMPT),
         ],
         "provider startup subscriptions must stay exact and must not include direct prompt routing",
+    );
+    assert_eq!(
+        subscribe_frames[0].historical_selectors,
+        [tau_proto::EventSelector::Exact(
+            EventName::HARNESS_SESSION_DIR
+        )],
+        "provider must request the current session-dir catch-up snapshot for restore-time debug policy",
     );
 
     let models_index = frames

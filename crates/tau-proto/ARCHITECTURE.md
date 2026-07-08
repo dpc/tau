@@ -134,6 +134,17 @@ Prefer additive optional fields with serde defaults for backward compatibility. 
 
 `agent.metadata_set` and `agent.metadata_unset` are durable, extension-visible agent facts. Metadata keys are strings; values are arbitrary CBOR values capped by `MAX_AGENT_METADATA_VALUE_BYTES`; and `metadata_set.inheritable` controls child-agent copies. Do not classify these events as transient defaults: extensions may subscribe to them for live state, and replay uses the latest folded snapshot before `session.agent_loaded`.
 
+## Subscription replay protocol
+
+`Subscribe` carries separate `historical_selectors` and `live_selectors`.
+Historical catch-up is represented only by `EventDelivery.replay` on the
+delivery envelope; event payloads are identical for catch-up and live
+occurrences. Catch-up includes durable facts and harness-reconstructed current
+snapshots selected by `historical_selectors`; both are delivered with
+`replay: true`. Replay catch-up terminates with transient non-replay
+`agent.replay_complete`/`session.replay_complete` boundary events before live
+delivery is released.
+
 ## Provider response streaming updates
 
 `provider.response_updated` is transient append-delta protocol surface for

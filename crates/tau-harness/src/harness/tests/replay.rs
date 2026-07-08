@@ -367,7 +367,8 @@ fn late_joining_ui_client_receives_replayed_agent_message_exact_selector() {
     h.handle_client_event(
         &ui_conn,
         TestProtocolItem::Message(TestMessage::Subscribe(Subscribe {
-            selectors: vec![EventSelector::Exact(
+            historical_selectors: Vec::new(),
+            live_selectors: vec![EventSelector::Exact(
                 tau_proto::EventName::AGENT_MESSAGE_SENT,
             )],
         })),
@@ -440,7 +441,8 @@ fn late_joining_ui_client_receives_replayed_session_events() {
     h.handle_client_event(
         &ui_conn,
         TestProtocolItem::Message(TestMessage::Subscribe(Subscribe {
-            selectors: vec![
+            historical_selectors: Vec::new(),
+            live_selectors: vec![
                 EventSelector::Prefix("session.".to_owned()),
                 EventSelector::Prefix("agent.".to_owned()),
                 EventSelector::Prefix("provider.".to_owned()),
@@ -543,7 +545,10 @@ fn extension_subscribe_replays_durable_facts_as_replay_frames() {
     h.handle_extension_message(
         "late-extension",
         TestMessage::Subscribe(Subscribe {
-            selectors: vec![EventSelector::Exact(
+            historical_selectors: vec![EventSelector::Exact(
+                tau_proto::EventName::PROVIDER_RESPONSE_FINISHED,
+            )],
+            live_selectors: vec![EventSelector::Exact(
                 tau_proto::EventName::PROVIDER_RESPONSE_FINISHED,
             )],
         }),
@@ -552,6 +557,41 @@ fn extension_subscribe_replays_durable_facts_as_replay_frames() {
 
     {
         let events = extension_events.lock().expect("sink");
+        let replay_index = events
+            .iter()
+            .position(|routed| {
+                peel_delivery(&routed.frame).is_some_and(|delivery| {
+                    delivery.is_replay()
+                        && matches!(
+                            delivery.event(),
+                            Event::ProviderResponseFinished(finished)
+                                if provider_response_contains_text(finished, past_text)
+                        )
+                })
+            })
+            .expect("replay response");
+        let agent_boundary_index = events
+            .iter()
+            .position(|routed| {
+                peel_delivery(&routed.frame).is_some_and(|delivery| {
+                    !delivery.is_replay()
+                        && matches!(delivery.event(), Event::AgentReplayComplete(_))
+                })
+            })
+            .expect("agent replay boundary");
+        let session_boundary_index = events
+            .iter()
+            .position(|routed| {
+                peel_delivery(&routed.frame).is_some_and(|delivery| {
+                    !delivery.is_replay()
+                        && matches!(delivery.event(), Event::SessionReplayComplete(_))
+                })
+            })
+            .expect("session replay boundary");
+        assert!(
+            replay_index < agent_boundary_index && agent_boundary_index < session_boundary_index,
+            "historical replay must precede non-replay replay-complete boundaries"
+        );
         assert!(
             events.iter().any(|routed| {
                 peel_delivery(&routed.frame).is_some_and(|delivery| {
@@ -573,6 +613,32 @@ fn extension_subscribe_replays_durable_facts_as_replay_frames() {
 
     {
         let events = extension_events.lock().expect("sink");
+        let live_index = events
+            .iter()
+            .position(|routed| {
+                peel_delivery(&routed.frame).is_some_and(|delivery| {
+                    !delivery.is_replay()
+                        && matches!(
+                            delivery.event(),
+                            Event::ProviderResponseFinished(finished)
+                                if provider_response_contains_text(finished, live_text)
+                        )
+                })
+            })
+            .expect("live response");
+        let session_boundary_index = events
+            .iter()
+            .position(|routed| {
+                peel_delivery(&routed.frame).is_some_and(|delivery| {
+                    !delivery.is_replay()
+                        && matches!(delivery.event(), Event::SessionReplayComplete(_))
+                })
+            })
+            .expect("session replay boundary");
+        assert!(
+            session_boundary_index < live_index,
+            "buffered/future live deliveries must follow session replay_complete"
+        );
         assert!(
             events.iter().any(|routed| {
                 peel_delivery(&routed.frame).is_some_and(|delivery| {
@@ -588,6 +654,279 @@ fn extension_subscribe_replays_durable_facts_as_replay_frames() {
         );
     }
 
+    h.shutdown().expect("shutdown");
+}
+
+/// Loading an existing agent into an already-live session replays that agent's
+/// durable history to restore-aware subscribers before the agent boundary.
+#[test]
+fn live_agent_load_replays_existing_agent_history_to_subscribers() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let agent_id = tau_proto::AgentId::parse("loaded-later").expect("agent id");
+    let mut agent_store = tau_core::AgentStore::open(sp.join("agents")).expect("agent store");
+    agent_store
+        .append_agent_event(
+            agent_id.as_str(),
+            None,
+            Event::AgentStarted(tau_proto::AgentStarted {
+                parent_agent: None,
+                agent_id: agent_id.clone(),
+                role: "engineer".to_owned(),
+                display_name: None,
+                metadata: Vec::new(),
+                ephemeral: false,
+            }),
+        )
+        .expect("seed agent start");
+    agent_store
+        .append_agent_event(
+            agent_id.as_str(),
+            None,
+            Event::AgentMetadataSet(tau_proto::AgentMetadataSet {
+                agent_id: agent_id.clone(),
+                key: tau_proto::AgentMetadataKey::new("ext_core-shell_cwd"),
+                value: CborValue::Text("/tmp/live-load-cwd".to_owned()),
+                inheritable: true,
+            }),
+        )
+        .expect("seed metadata");
+    agent_store
+        .append_agent_event(
+            agent_id.as_str(),
+            None,
+            Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+                agent_id: agent_id.clone(),
+                text: "history before load".to_owned(),
+                message_class: tau_proto::PromptMessageClass::User,
+                originator: tau_proto::PromptOriginator::User,
+                display_name: None,
+                ctx_id: None,
+            }),
+        )
+        .expect("seed prompt");
+
+    let mut h = quiet_provider_harness(&sp).expect("start");
+    let sink = connect_test_tool(&mut h, "restore-ext");
+    h.handle_extension_message(
+        "restore-ext",
+        TestMessage::Subscribe(Subscribe {
+            historical_selectors: vec![
+                EventSelector::Exact(tau_proto::EventName::AGENT_PROMPT_SUBMITTED),
+                EventSelector::Exact(tau_proto::EventName::AGENT_METADATA_SET),
+            ],
+            live_selectors: vec![EventSelector::Exact(
+                tau_proto::EventName::SESSION_AGENT_LOADED,
+            )],
+        }),
+    )
+    .expect("subscribe");
+    sink.lock().expect("sink").clear();
+
+    h.publish_event(
+        None,
+        Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
+            session_id: "s1".into(),
+            agent_id: agent_id.clone(),
+            ephemeral: false,
+        }),
+    );
+
+    let events = sink.lock().expect("sink");
+    let load_index = events
+        .iter()
+        .position(|routed| {
+            peel_delivery(&routed.frame).is_some_and(|delivery| {
+                !delivery.is_replay()
+                    && matches!(
+                        delivery.event(),
+                        Event::SessionAgentLoaded(loaded) if loaded.agent_id == agent_id
+                    )
+            })
+        })
+        .expect("live load");
+    let replay_index = events
+        .iter()
+        .position(|routed| {
+            peel_delivery(&routed.frame).is_some_and(|delivery| {
+                delivery.is_replay()
+                    && matches!(
+                        delivery.event(),
+                        Event::AgentPromptSubmitted(prompt)
+                            if prompt.agent_id == agent_id && prompt.text == "history before load"
+                    )
+            })
+        })
+        .expect("loaded-agent replay");
+    let metadata_index = events
+        .iter()
+        .position(|routed| {
+            peel_delivery(&routed.frame).is_some_and(|delivery| {
+                delivery.is_replay()
+                    && matches!(
+                        delivery.event(),
+                        Event::AgentMetadataSet(metadata)
+                            if metadata.agent_id == agent_id
+                                && metadata.key.as_str() == "ext_core-shell_cwd"
+                    )
+            })
+        })
+        .expect("loaded-agent metadata replay");
+    let boundary_index = events
+        .iter()
+        .position(|routed| {
+            peel_delivery(&routed.frame).is_some_and(|delivery| {
+                !delivery.is_replay()
+                    && matches!(
+                        delivery.event(),
+                        Event::AgentReplayComplete(done) if done.agent_id == agent_id
+                    )
+            })
+        })
+        .expect("agent boundary");
+    assert!(metadata_index < replay_index && replay_index < boundary_index);
+    assert!(
+        load_index < boundary_index,
+        "live load and its per-agent restore boundary must both be delivered"
+    );
+    h.shutdown().expect("shutdown");
+}
+
+/// A corrupt session restore log must produce both an operator-visible replay
+/// error notice and an errored `session.replay_complete` boundary, preventing
+/// restore consumers from treating partial state as successful catch-up.
+#[test]
+fn session_replay_complete_reports_restore_log_errors() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let path = tau_config::settings::sessions_dir_of(&sp)
+        .join("s1")
+        .join("restore-events.cbor");
+    std::fs::create_dir_all(path.parent().expect("restore parent")).expect("create parent");
+    std::fs::write(&path, 8_u64.to_le_bytes()).expect("write truncated restore record");
+
+    let mut h = quiet_provider_harness(&sp).expect("start");
+    let sink = connect_test_tool(&mut h, "restore-ext");
+    h.handle_extension_message(
+        "restore-ext",
+        TestMessage::Subscribe(Subscribe {
+            historical_selectors: vec![EventSelector::Exact(tau_proto::EventName::HARNESS_NOTICE)],
+            live_selectors: Vec::new(),
+        }),
+    )
+    .expect("subscribe");
+
+    let events = sink.lock().expect("sink");
+    assert!(
+        events.iter().any(|routed| {
+            peel_delivery(&routed.frame).is_some_and(|delivery| {
+                delivery.is_replay()
+                    && matches!(
+                        delivery.event(),
+                        Event::HarnessNotice(notice)
+                            if notice.kind == tau_proto::notice_kind::HARNESS_REPLAY_ERROR
+                                && notice.message.contains("session restore events")
+                    )
+            })
+        }),
+        "restore log corruption should emit a replay error notice"
+    );
+    assert!(
+        events.iter().any(|routed| {
+            peel_delivery(&routed.frame).is_some_and(|delivery| {
+                !delivery.is_replay()
+                    && matches!(
+                    delivery.event(),
+                    Event::SessionReplayComplete(done)
+                        if done.error.as_deref().is_some_and(|error| error.contains("session restore events"))
+                )
+            })
+        }),
+        "session replay boundary should carry the restore error"
+    );
+    h.shutdown().expect("shutdown");
+}
+
+/// A corrupt loaded-agent transcript must produce an agent-specific failed
+/// boundary and propagate that failure to the session replay boundary.
+#[test]
+fn replay_complete_boundaries_report_agent_log_errors() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let agent_id = tau_proto::AgentId::parse("corrupt-agent").expect("agent id");
+    let sessions_dir = tau_config::settings::sessions_dir_of(&sp);
+    let mut store = tau_core::SessionStore::open(&sessions_dir).expect("session store");
+    store
+        .append_session_event(
+            "s1",
+            None,
+            Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
+                session_id: "s1".into(),
+                agent_id: agent_id.clone(),
+                ephemeral: false,
+            }),
+        )
+        .expect("seed session membership");
+    drop(store);
+    let path = sp
+        .join("agents")
+        .join(agent_id.as_str())
+        .join("events.cbor");
+    std::fs::create_dir_all(path.parent().expect("agent parent")).expect("create parent");
+    std::fs::write(&path, 8_u64.to_le_bytes()).expect("write truncated agent record");
+
+    let mut h = quiet_provider_harness(&sp).expect("start");
+    let sink = connect_test_tool(&mut h, "restore-ext");
+    h.handle_extension_message(
+        "restore-ext",
+        TestMessage::Subscribe(Subscribe {
+            historical_selectors: vec![EventSelector::Exact(tau_proto::EventName::HARNESS_NOTICE)],
+            live_selectors: Vec::new(),
+        }),
+    )
+    .expect("subscribe");
+
+    let events = sink.lock().expect("sink");
+    assert!(
+        events.iter().any(|routed| {
+            peel_delivery(&routed.frame).is_some_and(|delivery| {
+                delivery.is_replay()
+                    && matches!(
+                        delivery.event(),
+                        Event::HarnessNotice(notice)
+                            if notice.kind == tau_proto::notice_kind::HARNESS_REPLAY_ERROR
+                                && notice.message.contains("corrupt-agent")
+                    )
+            })
+        }),
+        "agent log corruption should emit a replay error notice"
+    );
+    assert!(
+        events.iter().any(|routed| {
+            peel_delivery(&routed.frame).is_some_and(|delivery| {
+                !delivery.is_replay()
+                    && matches!(
+                        delivery.event(),
+                        Event::AgentReplayComplete(done)
+                            if done.agent_id == agent_id && done.error.is_some()
+                    )
+            })
+        }),
+        "agent replay boundary should carry the agent log error"
+    );
+    assert!(
+        events.iter().any(|routed| {
+            peel_delivery(&routed.frame).is_some_and(|delivery| {
+                !delivery.is_replay()
+                    && matches!(
+                    delivery.event(),
+                    Event::SessionReplayComplete(done)
+                        if done.error.as_deref().is_some_and(|error| error.contains("corrupt-agent"))
+                )
+            })
+        }),
+        "session replay boundary should include the agent log error"
+    );
     h.shutdown().expect("shutdown");
 }
 
@@ -609,7 +948,8 @@ fn extension_subscribe_announces_current_session_snapshot() {
     h.handle_extension_message(
         "respawned-extension",
         TestMessage::Subscribe(Subscribe {
-            selectors: vec![
+            historical_selectors: Vec::new(),
+            live_selectors: vec![
                 EventSelector::Exact(tau_proto::EventName::SESSION_STARTED),
                 EventSelector::Exact(tau_proto::EventName::SESSION_AGENT_LOADED),
             ],
@@ -777,7 +1117,8 @@ fn late_joining_ui_client_replays_final_but_not_stale_queued_session_events() {
     h.handle_client_event(
         &ui_conn,
         TestProtocolItem::Message(TestMessage::Subscribe(Subscribe {
-            selectors: vec![
+            historical_selectors: Vec::new(),
+            live_selectors: vec![
                 EventSelector::Prefix("agent.".to_owned()),
                 EventSelector::Prefix("provider.".to_owned()),
             ],
@@ -839,7 +1180,8 @@ fn late_joining_ui_client_replays_only_current_active_queue() {
     h.handle_client_event(
         &ui_conn,
         TestProtocolItem::Message(TestMessage::Subscribe(Subscribe {
-            selectors: vec![EventSelector::Prefix("agent.".to_owned())],
+            historical_selectors: Vec::new(),
+            live_selectors: vec![EventSelector::Prefix("agent.".to_owned())],
         })),
     )
     .expect("subscribe");
@@ -1018,7 +1360,8 @@ fn late_joining_ui_client_replays_terminal_tool_events() {
     h.handle_client_event(
         &ui_conn,
         TestProtocolItem::Message(TestMessage::Subscribe(Subscribe {
-            selectors: vec![EventSelector::Prefix("tool.".to_owned())],
+            historical_selectors: Vec::new(),
+            live_selectors: vec![EventSelector::Prefix("tool.".to_owned())],
         })),
     )
     .expect("subscribe");
@@ -1122,7 +1465,8 @@ fn late_joining_ui_client_does_not_replay_runtime_extension_setup() {
     h.handle_client_event(
         &ui_conn,
         TestProtocolItem::Message(TestMessage::Subscribe(Subscribe {
-            selectors: vec![EventSelector::Prefix("extension.".to_owned())],
+            historical_selectors: Vec::new(),
+            live_selectors: vec![EventSelector::Prefix("extension.".to_owned())],
         })),
     )
     .expect("subscribe");
@@ -1329,7 +1673,8 @@ fn resumed_session_init_catches_up_subscribers_that_joined_before_init() {
     h.handle_extension_message(
         "early-extension",
         TestMessage::Subscribe(Subscribe {
-            selectors: vec![
+            historical_selectors: Vec::new(),
+            live_selectors: vec![
                 EventSelector::Exact(tau_proto::EventName::SESSION_STARTED),
                 EventSelector::Exact(tau_proto::EventName::SESSION_AGENT_LOADED),
                 EventSelector::Exact(tau_proto::EventName::PROVIDER_RESPONSE_FINISHED),
@@ -1398,7 +1743,8 @@ fn resumed_session_repair_errors_are_not_duplicated_for_pre_init_subscribers() {
     h.handle_extension_message(
         "early-extension",
         TestMessage::Subscribe(Subscribe {
-            selectors: vec![EventSelector::Exact(tau_proto::EventName::TOOL_ERROR)],
+            historical_selectors: Vec::new(),
+            live_selectors: vec![EventSelector::Exact(tau_proto::EventName::TOOL_ERROR)],
         }),
     )
     .expect("extension subscribe");
@@ -1480,7 +1826,8 @@ fn replay_emits_latest_agent_metadata_before_session_agent_loaded() {
     h.handle_client_event(
         "metadata-ui",
         TestProtocolItem::Message(TestMessage::Subscribe(Subscribe {
-            selectors: vec![
+            historical_selectors: Vec::new(),
+            live_selectors: vec![
                 EventSelector::Exact(tau_proto::EventName::AGENT_METADATA_SET),
                 EventSelector::Exact(tau_proto::EventName::SESSION_AGENT_LOADED),
             ],

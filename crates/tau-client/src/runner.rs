@@ -201,10 +201,14 @@ pub(crate) fn write_startup<State>(
     handle: &ClientHandle,
 ) -> ClientResult<()> {
     write_hello(builder, handle)?;
-    if builder.force_subscribe || !builder.selectors.is_empty() {
+    if builder.force_subscribe
+        || !builder.historical_selectors.is_empty()
+        || !builder.live_selectors.is_empty()
+    {
         handle.send(tau_proto::HarnessInputMessage::Subscribe(
             tau_proto::Subscribe {
-                selectors: builder.selectors.clone(),
+                historical_selectors: builder.historical_selectors.clone(),
+                live_selectors: builder.live_selectors.clone(),
             },
         ))?;
     }

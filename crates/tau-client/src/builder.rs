@@ -6,9 +6,10 @@ use crate::contexts::{
 };
 use crate::event_payload::EventPayload;
 use crate::handler::{
-    ActionHandler, ConfigureHandler, EventHandler, InterceptHandler, NamedActionHandler,
-    NamedToolHandler, RawConfigureHandler, RawEventHandler, ToolHandler, TypedConfigureHandler,
-    TypedConfigureWithErrorHandler, TypedEventHandler, TypedInterceptHandler, TypedRawEventHandler,
+    ActionHandler, ConfigureHandler, DeliveryPolicy, EventHandler, InterceptHandler,
+    NamedActionHandler, NamedToolHandler, RawConfigureHandler, RawEventHandler, ToolHandler,
+    TypedConfigureHandler, TypedConfigureWithErrorHandler, TypedEventHandler,
+    TypedInterceptHandler, TypedRawEventHandler,
 };
 use crate::{ClientError, ClientResult, ExtensionPlugin, InterceptDecision};
 
@@ -19,9 +20,11 @@ pub struct ExtensionBuilder<State> {
     pub(crate) name: tau_proto::ExtensionName,
     /// Peer kind used in the startup `Hello` frame.
     pub(crate) kind: tau_proto::ClientKind,
-    /// Event selectors sent in the optional startup `Subscribe` frame.
-    pub(crate) selectors: Vec<tau_proto::EventSelector>,
-    /// Whether to send `Subscribe` even when `selectors` is empty.
+    /// Historical event selectors sent in the optional startup `Subscribe`.
+    pub(crate) historical_selectors: Vec<tau_proto::EventSelector>,
+    /// Live event selectors sent in the optional startup `Subscribe` frame.
+    pub(crate) live_selectors: Vec<tau_proto::EventSelector>,
+    /// Whether to send `Subscribe` even when both selector sets are empty.
     pub(crate) force_subscribe: bool,
     /// Intercept declaration sent during startup.
     pub(crate) intercept: Option<tau_proto::Intercept>,
@@ -52,7 +55,8 @@ impl<State> ExtensionBuilder<State> {
         Self {
             name: name.into(),
             kind,
-            selectors: Vec::new(),
+            historical_selectors: Vec::new(),
+            live_selectors: Vec::new(),
             force_subscribe: false,
             intercept: None,
             startup_events: Vec::new(),
@@ -73,14 +77,14 @@ impl<State> ExtensionBuilder<State> {
         names: impl IntoIterator<Item = tau_proto::EventName>,
     ) -> &mut Self {
         for name in names {
-            self.add_selector(tau_proto::EventSelector::Exact(name));
+            self.add_live_selector(tau_proto::EventSelector::Exact(name));
         }
         self
     }
 
     /// Adds one custom event selector to the startup `Subscribe` frame.
     pub fn subscribe_selector(&mut self, selector: tau_proto::EventSelector) -> &mut Self {
-        self.add_selector(selector);
+        self.add_live_selector(selector);
         self
     }
 
@@ -218,8 +222,10 @@ impl<State> ExtensionBuilder<State> {
         self
     }
 
-    /// Registers a replay-aware typed event handler and subscribes to its
-    /// event.
+    /// Registers a live typed event handler and subscribes to its event.
+    ///
+    /// The payload is added to `live_selectors`. Use [`Self::on_restore`] to
+    /// receive historical replay for the same payload.
     pub fn on<Payload>(
         &mut self,
         handler: impl for<'a> FnMut(EventContext<'a, State, Payload>) -> ClientResult<()> + 'static,
@@ -230,7 +236,29 @@ impl<State> ExtensionBuilder<State> {
         self.subscribe([Payload::NAME]);
         self.event_handlers
             .push(Box::new(TypedEventHandler::<Payload, _>::new(
-                false, handler,
+                DeliveryPolicy::LiveOnly,
+                handler,
+            )));
+        self
+    }
+
+    /// Registers a typed restore handler and subscribes to historical catch-up.
+    ///
+    /// The handler runs only for replay-marked deliveries selected by
+    /// `historical_selectors`, including durable restore facts and
+    /// current-state catch-up snapshots. It does not run for live deliveries.
+    pub fn on_restore<Payload>(
+        &mut self,
+        handler: impl for<'a> FnMut(EventContext<'a, State, Payload>) -> ClientResult<()> + 'static,
+    ) -> &mut Self
+    where
+        Payload: EventPayload + 'static,
+    {
+        self.add_historical_selector(tau_proto::EventSelector::Exact(Payload::NAME));
+        self.event_handlers
+            .push(Box::new(TypedEventHandler::<Payload, _>::new(
+                DeliveryPolicy::RestoreOnly,
+                handler,
             )));
         self
     }
@@ -246,13 +274,13 @@ impl<State> ExtensionBuilder<State> {
         self.subscribe([Payload::NAME]);
         self.event_handlers
             .push(Box::new(TypedEventHandler::<Payload, _>::new(
-                true, handler,
+                DeliveryPolicy::LiveOnly,
+                handler,
             )));
         self
     }
 
-    /// Registers a replay-aware raw event handler and subscribes with
-    /// `selector`.
+    /// Registers a live raw event handler and subscribes with `selector`.
     ///
     /// Use this for event variants that do not yet have a built-in
     /// [`EventPayload`] implementation or when the handler needs the complete
@@ -265,7 +293,29 @@ impl<State> ExtensionBuilder<State> {
         self.subscribe_selector(selector.clone());
         self.raw_event_handlers
             .push(Box::new(TypedRawEventHandler::new(
-                selector, false, handler,
+                selector,
+                DeliveryPolicy::LiveOnly,
+                handler,
+            )));
+        self
+    }
+
+    /// Registers a raw restore handler and subscribes historically.
+    ///
+    /// The handler runs only for replay-marked deliveries selected by
+    /// `historical_selectors`, including durable restore facts and
+    /// current-state catch-up snapshots. It does not run for live deliveries.
+    pub fn on_raw_restore(
+        &mut self,
+        selector: tau_proto::EventSelector,
+        handler: impl for<'a> FnMut(RawEventContext<'a, State>) -> ClientResult<()> + 'static,
+    ) -> &mut Self {
+        self.add_historical_selector(selector.clone());
+        self.raw_event_handlers
+            .push(Box::new(TypedRawEventHandler::new(
+                selector,
+                DeliveryPolicy::RestoreOnly,
+                handler,
             )));
         self
     }
@@ -296,7 +346,9 @@ impl<State> ExtensionBuilder<State> {
     ) -> &mut Self {
         self.raw_event_handlers
             .push(Box::new(TypedRawEventHandler::new(
-                selector, false, handler,
+                selector,
+                DeliveryPolicy::Any,
+                handler,
             )));
         self
     }
@@ -313,7 +365,11 @@ impl<State> ExtensionBuilder<State> {
         handler: impl for<'a> FnMut(RawEventContext<'a, State>) -> ClientResult<()> + 'static,
     ) -> &mut Self {
         self.raw_event_handlers
-            .push(Box::new(TypedRawEventHandler::new(selector, true, handler)));
+            .push(Box::new(TypedRawEventHandler::new(
+                selector,
+                DeliveryPolicy::LiveOnly,
+                handler,
+            )));
         self
     }
 
@@ -420,7 +476,8 @@ impl<State> ExtensionBuilder<State> {
     /// Validates that this builder can be used with deferred manual startup.
     pub(crate) fn validate_deferred_startup(&self) -> ClientResult<()> {
         if self.force_subscribe
-            || !self.selectors.is_empty()
+            || !self.historical_selectors.is_empty()
+            || !self.live_selectors.is_empty()
             || self.intercept.is_some()
             || !self.startup_events.is_empty()
             || self.ready_message.is_some()
@@ -433,9 +490,16 @@ impl<State> ExtensionBuilder<State> {
     }
 
     /// Adds one startup subscription selector unless it is already present.
-    fn add_selector(&mut self, selector: tau_proto::EventSelector) {
-        if !self.selectors.contains(&selector) {
-            self.selectors.push(selector);
+    fn add_live_selector(&mut self, selector: tau_proto::EventSelector) {
+        if !self.live_selectors.contains(&selector) {
+            self.live_selectors.push(selector);
+        }
+    }
+
+    /// Adds one startup historical selector unless it is already present.
+    fn add_historical_selector(&mut self, selector: tau_proto::EventSelector) {
+        if !self.historical_selectors.contains(&selector) {
+            self.historical_selectors.push(selector);
         }
     }
 }

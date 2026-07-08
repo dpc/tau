@@ -1665,7 +1665,8 @@ where
     // Live-only test provider: prompt and cancel events are work requests.
     // Replaying past ones would rerun or cancel completed turns.
     writer.write_message(&HarnessInputMessage::Subscribe(Subscribe {
-        selectors: vec![
+        historical_selectors: Vec::new(),
+        live_selectors: vec![
             EventSelector::Exact(EventName::AGENT_PROMPT_CREATED),
             EventSelector::Exact(EventName::UI_CANCEL_PROMPT),
         ],
@@ -3471,15 +3472,15 @@ impl Harness {
                 _ => {}
             }
         }
-        // Wrap in a harness-owned delivery so subscribers get the runtime
-        // event-log sequence and can ack after processing.
+        // Wrap in a harness-owned delivery so subscribers get the shared
+        // runtime timestamp and replay/live envelope metadata.
         let log_frame = HarnessOutputMessage::deliver_live(recorded_at, event.clone());
         if let Some(provider_connection_id) = self.provider_route_for_prompt_request(&event) {
             // Provider-owned prompt execution is point-to-point: observers still
             // see the durable prompt fact, but execution clients do not all race
             // to consume it. The owning provider gets the exact same delivery
-            // payload via a directed route so ACK and replay semantics match
-            // the subscribed-provider path.
+            // payload via a directed route so replay/live delivery metadata
+            // matches the subscribed-provider path.
             let execution_kinds = [ClientKind::Provider];
             let _ =
                 self.bus
@@ -3538,6 +3539,9 @@ impl Harness {
     fn react_to_committed_event(&mut self, event: &Event) {
         if let Event::AgentMessageReceived(message) = event {
             self.deliver_agent_message(message);
+        }
+        if let Event::SessionAgentLoaded(loaded) = event {
+            self.replay_loaded_agent_history_to_subscribers(&loaded.agent_id);
         }
         let folds_user_message = matches!(
             event,
@@ -3686,6 +3690,22 @@ impl Harness {
             return Ok(None);
         }
         let source = source.map(tau_proto::ConnectionId::from);
+        if matches!(event, Event::ToolRequest(_) | Event::ToolStarted(_)) {
+            if !self.session_restore_event_targets_loaded_agent(event) {
+                return Err(HarnessError::Participant(format!(
+                    "session restore event {} targets an agent that is not loaded in session {}",
+                    event.name(),
+                    self.current_session_id
+                )));
+            }
+            self.store.append_session_restore_event_at(
+                self.current_session_id.as_str(),
+                source,
+                event.clone(),
+                recorded_at,
+            )?;
+            return Ok(None);
+        }
         if let Some(session_id) = semantic_event_router::session_membership_id_for_event(event) {
             let event_persistence = self.session_membership_event_persistence(event);
             self.store.append_session_event_at_with_persistence(
@@ -3713,6 +3733,21 @@ impl Harness {
                 recorded_at,
             )?
             .folded_node_id)
+    }
+
+    fn session_restore_event_targets_loaded_agent(&self, event: &Event) -> bool {
+        let agent_id = match event {
+            Event::ToolRequest(request) => &request.agent_id,
+            Event::ToolStarted(started) => &started.agent_id,
+            _ => return true,
+        };
+        self.store
+            .session(self.current_session_id.as_str())
+            .is_some_and(|session| session.contains_agent(agent_id))
+            || self
+                .agent_routes
+                .keys()
+                .any(|loaded_agent_id| loaded_agent_id == agent_id.as_str())
     }
 
     fn session_membership_event_persistence(
@@ -4730,13 +4765,17 @@ impl Harness {
         let selector = EventSelector::Exact(tau_proto::EventName::TOOL_STARTED);
         let mut selectors = self
             .bus
-            .subscriptions(source_id)
+            .live_subscriptions(source_id)
             .map_or_else(Vec::new, |s| s.to_vec());
         if selectors.iter().any(|existing| existing == &selector) {
             return;
         }
         selectors.push(selector);
-        if let Err(error) = self.bus.set_subscriptions(source_id, selectors) {
+        let historical = self
+            .bus
+            .historical_subscriptions(source_id)
+            .map_or_else(Vec::new, |s| s.to_vec());
+        if let Err(error) = self.bus.set_subscriptions(source_id, historical, selectors) {
             tracing::warn!(
                 target: "tau_harness",
                 connection_id = %source_id,
@@ -5047,8 +5086,12 @@ impl Harness {
                 // durable facts as replay-marked frames. Side-effecting
                 // extensions must skip replay frames instead of being
                 // protected by withheld delivery.
-                self.complete_subscription(source_id, subscribe.selectors)
-                    .map_err(HarnessError::Route)?;
+                self.complete_subscription(
+                    source_id,
+                    subscribe.historical_selectors,
+                    subscribe.live_selectors,
+                )
+                .map_err(HarnessError::Route)?;
             }
             HarnessInputMessage::Intercept(intercept) => {
                 if self.should_stage_extension_capabilities(source_id) {
@@ -5719,7 +5762,11 @@ impl Harness {
                 Ok(true)
             }
             HarnessInputMessage::Subscribe(subscribe) => {
-                match self.complete_subscription(client_id, subscribe.selectors) {
+                match self.complete_subscription(
+                    client_id,
+                    subscribe.historical_selectors,
+                    subscribe.live_selectors,
+                ) {
                     Ok(()) => Ok(true),
                     Err(RouteError::SubscriptionDenied { reason, .. }) => {
                         let _ = self.bus.send_to(
@@ -8178,7 +8225,7 @@ impl Harness {
                     && connection.origin != ConnectionOrigin::Socket
                     && self
                         .bus
-                        .subscriptions(connection.id.as_str())
+                        .live_subscriptions(connection.id.as_str())
                         .is_some_and(|selectors| selector_matches_event(selectors, event))
             })
             .map(|connection| connection.id)

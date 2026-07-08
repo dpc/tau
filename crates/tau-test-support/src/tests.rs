@@ -143,6 +143,7 @@ fn deterministic_provider_and_tool_complete_one_vertical_slice() {
     bus.set_subscriptions(
         &ui_id,
         vec![EventSelector::Exact(EventName::PROVIDER_RESPONSE_FINISHED)],
+        vec![EventSelector::Exact(EventName::PROVIDER_RESPONSE_FINISHED)],
     )
     .expect("ui subscription should be stored");
 
@@ -161,7 +162,7 @@ fn deterministic_provider_and_tool_complete_one_vertical_slice() {
             .expect("provider startup message should arrive");
         match message {
             HarnessInputMessage::Subscribe(sub) => {
-                bus.set_subscriptions(&provider_id, sub.selectors)
+                bus.set_subscriptions(&provider_id, sub.historical_selectors, sub.live_selectors)
                     .expect("provider subscriptions should be stored");
             }
             HarnessInputMessage::Emit(emit) => match *emit.event {
@@ -183,7 +184,7 @@ fn deterministic_provider_and_tool_complete_one_vertical_slice() {
         .expect("read")
         .expect("tool subscribe should arrive");
     if let HarnessInputMessage::Subscribe(sub) = tool_subscribe {
-        bus.set_subscriptions(&tool_id, sub.selectors)
+        bus.set_subscriptions(&tool_id, sub.historical_selectors, sub.live_selectors)
             .expect("tool subscriptions should be stored");
     } else {
         panic!("expected tool subscribe message");

@@ -154,7 +154,10 @@ pub(crate) fn chat_subscription_selectors() -> Vec<EventSelector> {
 }
 
 pub(crate) fn subscribe_message(selectors: Vec<EventSelector>) -> HarnessInputMessage {
-    HarnessInputMessage::Subscribe(Subscribe { selectors })
+    HarnessInputMessage::Subscribe(Subscribe {
+        historical_selectors: selectors.clone(),
+        live_selectors: selectors,
+    })
 }
 
 pub(crate) fn send_hello(

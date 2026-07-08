@@ -113,7 +113,7 @@ fn startup_uses_exact_notification_subscriptions() {
         tau_proto::EventSelector::Exact(tau_proto::EventName::TOOL_BACKGROUND_ERROR),
         tau_proto::EventSelector::Exact(tau_proto::EventName::AGENT_START_RESULT),
     ];
-    assert_eq!(subscribe.selectors, expected);
+    assert_eq!(subscribe.live_selectors, expected);
     assert!(
         frames
             .iter()

@@ -72,7 +72,8 @@ fn forbidden_socket_subscription_disconnects_client_without_killing_daemon() {
             // `unknown.` is not an allowed event family — sockets may
             // only subscribe to the closed-list of well-known categories
             // declared in `DefaultSubscriptionPolicy::evaluate`.
-            selectors: vec![EventSelector::Prefix("unknown.".to_owned())],
+            historical_selectors: Vec::new(),
+            live_selectors: vec![EventSelector::Prefix("unknown.".to_owned())],
         }))
         .expect("forbidden subscribe should send");
 

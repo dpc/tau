@@ -287,7 +287,7 @@ fn startup_registers_email_and_calendar_tools() {
         match frame {
             HarnessInputMessage::Subscribe(subscribe) => {
                 assert!(!saw_ready, "Subscribe should be emitted before Ready");
-                saw_subscription = subscribe.selectors
+                saw_subscription = subscribe.live_selectors
                     == vec![
                         EventSelector::Exact(EventName::TOOL_STARTED),
                         EventSelector::Exact(EventName::ACTION_INVOKE),

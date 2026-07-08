@@ -55,6 +55,11 @@ impl_event_payload!(
     tau_proto::Event::AgentMetadataUnset
 );
 impl_event_payload!(
+    tau_proto::AgentReplayComplete,
+    tau_proto::EventName::AGENT_REPLAY_COMPLETE,
+    tau_proto::Event::AgentReplayComplete
+);
+impl_event_payload!(
     tau_proto::AgentPromptSubmitted,
     tau_proto::EventName::AGENT_PROMPT_SUBMITTED,
     tau_proto::Event::AgentPromptSubmitted
@@ -83,6 +88,11 @@ impl_event_payload!(
     tau_proto::SessionShutdown,
     tau_proto::EventName::SESSION_SHUTDOWN,
     tau_proto::Event::SessionShutdown
+);
+impl_event_payload!(
+    tau_proto::SessionReplayComplete,
+    tau_proto::EventName::SESSION_REPLAY_COMPLETE,
+    tau_proto::Event::SessionReplayComplete
 );
 impl_event_payload!(
     tau_proto::StartAgentAccepted,

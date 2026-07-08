@@ -38,6 +38,42 @@ use crate::model::{
     thinking_summaries_for_model, verbosities_for_model,
 };
 
+/// Errors accumulated while replaying catch-up state for one subscriber.
+#[derive(Default)]
+struct ReplayOutcome {
+    /// Session-scoped replay errors, such as membership or restore-log
+    /// failures.
+    session_errors: Vec<String>,
+    /// Per-agent replay errors keyed by the agent whose transcript failed.
+    agent_errors: std::collections::BTreeMap<tau_proto::AgentId, Vec<String>>,
+}
+
+impl ReplayOutcome {
+    fn add_session_error(&mut self, message: String) {
+        self.session_errors.push(message);
+    }
+
+    fn add_agent_error(&mut self, agent_id: tau_proto::AgentId, message: String) {
+        self.agent_errors.entry(agent_id).or_default().push(message);
+    }
+
+    fn agent_error(&self, agent_id: &tau_proto::AgentId) -> Option<String> {
+        self.agent_errors
+            .get(agent_id)
+            .map(|errors| errors.join("; "))
+    }
+
+    fn session_error(&self) -> Option<String> {
+        let mut errors = self.session_errors.clone();
+        for (agent_id, agent_errors) in &self.agent_errors {
+            for error in agent_errors {
+                errors.push(format!("agent `{agent_id}` replay failed: {error}"));
+            }
+        }
+        (!errors.is_empty()).then(|| errors.join("; "))
+    }
+}
+
 impl Harness {
     /// Completes a `Subscribe` from any peer: installs live routing, then
     /// catches the subscriber up to current state.
@@ -53,30 +89,36 @@ impl Harness {
     pub(crate) fn complete_subscription(
         &mut self,
         connection_id: &str,
-        selectors: Vec<EventSelector>,
+        historical_selectors: Vec<EventSelector>,
+        live_selectors: Vec<EventSelector>,
     ) -> Result<(), RouteError> {
         self.bus
-            .set_subscriptions(connection_id, selectors.clone())?;
+            .set_subscriptions(connection_id, historical_selectors.clone(), live_selectors)?;
         if self.session_initialized(&self.current_session_id) {
-            self.replay_session_events(connection_id, &selectors);
-            self.replay_harness_notice(connection_id, &selectors);
+            if !historical_selectors.is_empty() {
+                self.bus.begin_catch_up(connection_id)?;
+            }
+            let replay = self.replay_session_events(connection_id, &historical_selectors);
+            self.replay_harness_notice(connection_id, &historical_selectors);
+            self.emit_session_replay_complete(connection_id, replay.session_error());
+            let _ = self.bus.finish_catch_up(connection_id);
         }
         Ok(())
     }
 
-    pub(crate) fn replay_session_events(&mut self, client_id: &str, selectors: &[EventSelector]) {
+    fn replay_session_events(
+        &mut self,
+        client_id: &str,
+        selectors: &[EventSelector],
+    ) -> ReplayOutcome {
         let session_started = Event::SessionStarted(tau_proto::SessionStarted {
             session_id: self.current_session_id.clone(),
             reason: self.current_session_start_reason,
         });
         if selector_matches_event(selectors, &session_started) {
-            let _ = self.bus.send_to(
-                client_id,
-                None,
-                HarnessOutputMessage::deliver(session_started),
-            );
+            self.send_catch_up_event(client_id, None, session_started);
         }
-        self.replay_session_history(client_id, selectors);
+        self.replay_session_history(client_id, selectors)
     }
 
     /// Catches one subscriber up on the bound session's content: the
@@ -87,35 +129,71 @@ impl Harness {
     /// `SessionStarted` snapshot above) and session-init completion, where
     /// peers that subscribed before init already saw `SessionStarted` live
     /// and only need the history.
-    fn replay_session_history(&mut self, client_id: &str, selectors: &[EventSelector]) {
+    fn replay_session_history(
+        &mut self,
+        client_id: &str,
+        selectors: &[EventSelector],
+    ) -> ReplayOutcome {
+        let mut outcome = ReplayOutcome::default();
         let loaded_agents: Vec<tau_proto::AgentId> = {
             match self.store.load_session(self.current_session_id.as_str()) {
                 Ok(Some(membership)) => membership.loaded_agents().into_iter().cloned().collect(),
                 Ok(None) => Vec::new(),
                 Err(error) => {
-                    self.send_replay_error(
-                        client_id,
-                        &format!("failed to load session events for replay: {error}"),
-                    );
+                    let message = format!("failed to load session events for replay: {error}");
+                    self.send_replay_error(client_id, &message);
+                    outcome.add_session_error(message);
                     Vec::new()
                 }
             }
         };
 
-        for agent_id in &loaded_agents {
-            if let Ok(Some(tree)) = self.agent_store.load_agent(agent_id.as_str()) {
-                for (key, entry) in tree.metadata() {
-                    let event = Event::AgentMetadataSet(tau_proto::AgentMetadataSet {
-                        agent_id: agent_id.clone(),
-                        key: key.clone(),
-                        value: entry.value.clone(),
-                        inheritable: entry.inheritable,
-                    });
-                    if selector_matches_event(selectors, &event) {
-                        let _ =
-                            self.bus
-                                .send_to(client_id, None, HarnessOutputMessage::deliver(event));
+        match self
+            .store
+            .session_restore_events(self.current_session_id.as_str())
+        {
+            Ok(events) => {
+                for entry in events {
+                    if selector_matches_event(selectors, &entry.event) {
+                        let frame =
+                            HarnessOutputMessage::deliver_replay(entry.recorded_at, entry.event);
+                        let _ = self.bus.send_to(client_id, entry.source.as_deref(), frame);
                     }
+                }
+            }
+            Err(error) => {
+                let message = format!("failed to load session restore events for replay: {error}");
+                self.send_replay_error(client_id, &message);
+                outcome.add_session_error(message);
+            }
+        }
+
+        for agent_id in &loaded_agents {
+            match self.agent_store.load_agent(agent_id.as_str()) {
+                Ok(Some(tree)) => {
+                    let metadata_events = tree
+                        .metadata()
+                        .iter()
+                        .map(|(key, entry)| {
+                            Event::AgentMetadataSet(tau_proto::AgentMetadataSet {
+                                agent_id: agent_id.clone(),
+                                key: key.clone(),
+                                value: entry.value.clone(),
+                                inheritable: entry.inheritable,
+                            })
+                        })
+                        .collect::<Vec<_>>();
+                    for event in metadata_events {
+                        if selector_matches_event(selectors, &event) {
+                            self.send_catch_up_event(client_id, None, event);
+                        }
+                    }
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    let message = format!("failed to load agent `{agent_id}` for replay: {error}");
+                    self.send_replay_error(client_id, &message);
+                    outcome.add_agent_error(agent_id.clone(), message);
                 }
             }
             let event = Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
@@ -124,20 +202,18 @@ impl Harness {
                 ephemeral: self.agent_is_ephemeral(agent_id),
             });
             if selector_matches_event(selectors, &event) {
-                let _ = self
-                    .bus
-                    .send_to(client_id, None, HarnessOutputMessage::deliver(event));
+                self.send_catch_up_event(client_id, None, event);
             }
         }
 
-        for agent_id in loaded_agents {
+        for agent_id in &loaded_agents {
             let events = match self.agent_store.agent_events(agent_id.as_str()) {
                 Ok(events) => events,
                 Err(error) => {
-                    self.send_replay_error(
-                        client_id,
-                        &format!("failed to load agent `{agent_id}` events for replay: {error}"),
-                    );
+                    let message =
+                        format!("failed to load agent `{agent_id}` events for replay: {error}");
+                    self.send_replay_error(client_id, &message);
+                    outcome.add_agent_error(agent_id.clone(), message);
                     continue;
                 }
             };
@@ -152,6 +228,11 @@ impl Harness {
             }
         }
         self.replay_active_queued_prompts(client_id, selectors);
+        for agent_id in loaded_agents {
+            let error = outcome.agent_error(&agent_id);
+            self.emit_agent_replay_complete(client_id, agent_id, error);
+        }
+        outcome
     }
 
     /// Catches up every already-subscribed peer when session init completes.
@@ -177,7 +258,7 @@ impl Harness {
             .connections()
             .into_iter()
             .filter_map(|meta| {
-                let selectors = self.bus.subscriptions(meta.id.as_str())?;
+                let selectors = self.bus.historical_subscriptions(meta.id.as_str())?;
                 if selectors.is_empty() {
                     return None;
                 }
@@ -185,23 +266,141 @@ impl Harness {
             })
             .collect();
         for (client_id, kind, selectors) in subscribers {
-            self.replay_session_history(&client_id, &selectors);
+            let _ = self.bus.begin_catch_up(&client_id);
+            let replay = self.replay_session_history(&client_id, &selectors);
             if kind != tau_proto::ClientKind::Ui {
                 self.replay_harness_notice(&client_id, &selectors);
             }
+            self.emit_session_replay_complete(&client_id, replay.session_error());
+            let _ = self.bus.finish_catch_up(&client_id);
+        }
+    }
+
+    fn emit_agent_replay_complete(
+        &mut self,
+        client_id: &str,
+        agent_id: tau_proto::AgentId,
+        error: Option<String>,
+    ) {
+        let _ = self.bus.send_to(
+            client_id,
+            None,
+            HarnessOutputMessage::deliver(Event::AgentReplayComplete(
+                tau_proto::AgentReplayComplete {
+                    agent_id,
+                    session_id: Some(self.current_session_id.clone()),
+                    error,
+                },
+            )),
+        );
+    }
+
+    fn emit_session_replay_complete(&mut self, client_id: &str, error: Option<String>) {
+        let _ = self.bus.send_to(
+            client_id,
+            None,
+            HarnessOutputMessage::deliver(Event::SessionReplayComplete(
+                tau_proto::SessionReplayComplete {
+                    session_id: self.current_session_id.clone(),
+                    error,
+                },
+            )),
+        );
+    }
+
+    /// Replays one newly loaded existing agent to already-live subscribers.
+    pub(crate) fn replay_loaded_agent_history_to_subscribers(
+        &mut self,
+        agent_id: &tau_proto::AgentId,
+    ) {
+        let subscribers: Vec<(String, Vec<EventSelector>)> = self
+            .bus
+            .connections()
+            .into_iter()
+            .filter_map(|meta| {
+                let selectors = self.bus.historical_subscriptions(meta.id.as_str())?;
+                if selectors.is_empty() {
+                    return None;
+                }
+                Some((meta.id.to_string(), selectors.to_vec()))
+            })
+            .collect();
+        for (client_id, selectors) in subscribers {
+            let mut errors = Vec::new();
+            match self.agent_store.load_agent(agent_id.as_str()) {
+                Ok(Some(tree)) => {
+                    let metadata_events = tree
+                        .metadata()
+                        .iter()
+                        .map(|(key, entry)| {
+                            Event::AgentMetadataSet(tau_proto::AgentMetadataSet {
+                                agent_id: agent_id.clone(),
+                                key: key.clone(),
+                                value: entry.value.clone(),
+                                inheritable: entry.inheritable,
+                            })
+                        })
+                        .collect::<Vec<_>>();
+                    for event in metadata_events {
+                        if selector_matches_event(&selectors, &event) {
+                            self.send_catch_up_event(&client_id, None, event);
+                        }
+                    }
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    let message = format!("failed to load agent `{agent_id}` for replay: {error}");
+                    self.send_replay_error(&client_id, &message);
+                    errors.push(message);
+                }
+            }
+            match self.agent_store.agent_events(agent_id.as_str()) {
+                Ok(events) => {
+                    for entry in events {
+                        if selector_matches_event(&selectors, &entry.event)
+                            && should_replay_agent_event_to_late_subscriber(&entry.event)
+                        {
+                            let frame = HarnessOutputMessage::deliver_replay(
+                                entry.recorded_at,
+                                entry.event,
+                            );
+                            let _ = self.bus.send_to(&client_id, entry.source.as_deref(), frame);
+                        }
+                    }
+                }
+                Err(error) => {
+                    let message =
+                        format!("failed to load agent `{agent_id}` events for replay: {error}");
+                    self.send_replay_error(&client_id, &message);
+                    errors.push(message);
+                }
+            }
+            self.emit_agent_replay_complete(
+                &client_id,
+                agent_id.clone(),
+                (!errors.is_empty()).then(|| errors.join("; ")),
+            );
         }
     }
 
     fn send_replay_error(&mut self, client_id: &str, message: &str) {
-        let _ = self.bus.send_to(
+        self.send_catch_up_event(
             client_id,
             None,
-            HarnessOutputMessage::deliver(Event::HarnessNotice(tau_proto::HarnessNotice {
+            Event::HarnessNotice(tau_proto::HarnessNotice {
                 kind: tau_proto::notice_kind::HARNESS_REPLAY_ERROR.to_owned(),
                 message: message.to_owned(),
                 level: tau_proto::NoticeLevel::Warning,
                 always_show: true,
-            })),
+            }),
+        );
+    }
+
+    fn send_catch_up_event(&mut self, client_id: &str, source: Option<&str>, event: Event) {
+        let _ = self.bus.send_to(
+            client_id,
+            source,
+            HarnessOutputMessage::deliver_replay(tau_proto::UnixMicros::now(), event),
         );
     }
 
@@ -211,25 +410,33 @@ impl Harness {
             agent_by_conversation.insert(conversation_id.clone(), agent_id.clone());
         }
 
-        for (conversation_id, conversation) in &self.agents {
-            if conversation.session_id != self.current_session_id {
-                continue;
-            }
-            let target_agent_id = agent_by_conversation.get(conversation_id).cloned();
-            for prompt in &conversation.pending_prompts {
-                let Some(agent_id) = target_agent_id.clone() else {
-                    continue;
-                };
-                let event = Event::AgentPromptQueued(AgentPromptQueued {
-                    agent_id: crate::parse_agent_id(&agent_id),
-                    text: prompt.text.clone(),
-                    message_class: prompt.message_class,
-                });
-                if selector_matches_event(selectors, &event) {
-                    let _ = self
-                        .bus
-                        .send_to(client_id, None, HarnessOutputMessage::deliver(event));
+        let queued_prompt_events = self
+            .agents
+            .iter()
+            .flat_map(|(conversation_id, conversation)| {
+                if conversation.session_id != self.current_session_id {
+                    return Vec::new();
                 }
+                let Some(agent_id) = agent_by_conversation.get(conversation_id).cloned() else {
+                    return Vec::new();
+                };
+                conversation
+                    .pending_prompts
+                    .iter()
+                    .map(|prompt| {
+                        Event::AgentPromptQueued(AgentPromptQueued {
+                            agent_id: crate::parse_agent_id(&agent_id),
+                            text: prompt.text.clone(),
+                            message_class: prompt.message_class,
+                        })
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+
+        for event in queued_prompt_events {
+            if selector_matches_event(selectors, &event) {
+                self.send_catch_up_event(client_id, None, event);
             }
         }
     }
@@ -248,11 +455,7 @@ impl Harness {
     pub(crate) fn replay_harness_notice(&mut self, client_id: &str, selectors: &[EventSelector]) {
         let session_dir_event = self.current_session_dir_event();
         if selector_matches_event(selectors, &session_dir_event) {
-            let _ = self.bus.send_to(
-                client_id,
-                None,
-                HarnessOutputMessage::deliver(session_dir_event),
-            );
+            self.send_catch_up_event(client_id, None, session_dir_event);
         }
 
         let mut agent_state_events = self
@@ -275,22 +478,15 @@ impl Harness {
         });
         for event in agent_state_events {
             if selector_matches_event(selectors, &event) {
-                let _ = self.bus.send_to(
-                    client_id,
-                    Some("harness"),
-                    HarnessOutputMessage::deliver(event),
-                );
+                self.send_catch_up_event(client_id, Some("harness"), event);
             }
         }
 
-        for info in &self.replayable_harness_notices {
-            let event = Event::HarnessNotice(info.clone());
+        let replayable_harness_notices = self.replayable_harness_notices.clone();
+        for info in replayable_harness_notices {
+            let event = Event::HarnessNotice(info);
             if selector_matches_event(selectors, &event) {
-                let _ = self.bus.send_to(
-                    client_id,
-                    Some("harness"),
-                    HarnessOutputMessage::deliver(event),
-                );
+                self.send_catch_up_event(client_id, Some("harness"), event);
             }
         }
 
@@ -325,11 +521,7 @@ impl Harness {
             .collect();
         for event in extension_events {
             if selector_matches_event(selectors, &event) {
-                let _ = self.bus.send_to(
-                    client_id,
-                    Some("harness"),
-                    HarnessOutputMessage::deliver(event),
-                );
+                self.send_catch_up_event(client_id, Some("harness"), event);
             }
         }
 
@@ -343,11 +535,7 @@ impl Harness {
             let provider_event =
                 Event::ProviderModelsUpdated(tau_proto::ProviderModelsUpdated { models });
             if selector_matches_event(selectors, &provider_event) {
-                let _ = self.bus.send_to(
-                    client_id,
-                    Some(source_id.as_str()),
-                    HarnessOutputMessage::deliver(provider_event),
-                );
+                self.send_catch_up_event(client_id, Some(source_id.as_str()), provider_event);
             }
         }
 
@@ -358,10 +546,10 @@ impl Harness {
                 schema: published.schema,
             });
             if selector_matches_event(selectors, &action_event) {
-                let _ = self.bus.send_to(
+                self.send_catch_up_event(
                     client_id,
                     Some(published.connection_id.as_str()),
-                    HarnessOutputMessage::deliver(action_event),
+                    action_event,
                 );
             }
         }
@@ -371,9 +559,7 @@ impl Harness {
             models: self.available_models.clone(),
         });
         if selector_matches_event(selectors, &models_event) {
-            let _ = self
-                .bus
-                .send_to(client_id, None, HarnessOutputMessage::deliver(models_event));
+            self.send_catch_up_event(client_id, None, models_event);
         }
         let roles_event = Event::HarnessRolesAvailable(HarnessRolesAvailable {
             roles: role_infos(
@@ -385,9 +571,7 @@ impl Harness {
             custom_prompts: self.custom_prompts.clone(),
         });
         if selector_matches_event(selectors, &roles_event) {
-            let _ = self
-                .bus
-                .send_to(client_id, None, HarnessOutputMessage::deliver(roles_event));
+            self.send_catch_up_event(client_id, None, roles_event);
         }
         let (harness_settings, _) = crate::settings::load_harness_settings_or_warn(&self.dirs);
         let selected_event = Event::HarnessRoleSelected(HarnessRoleSelected {
@@ -408,11 +592,7 @@ impl Harness {
             role: self.selected_role.clone(),
         });
         if selector_matches_event(selectors, &selected_event) {
-            let _ = self.bus.send_to(
-                client_id,
-                None,
-                HarnessOutputMessage::deliver(selected_event),
-            );
+            self.send_catch_up_event(client_id, None, selected_event);
         }
         let context_event = Event::HarnessContextUsageChanged(HarnessContextUsageChanged {
             input_tokens: self.current_session_state.context_input_tokens,
@@ -420,11 +600,7 @@ impl Harness {
             percent_used: self.current_session_state.context_percent_used,
         });
         if selector_matches_event(selectors, &context_event) {
-            let _ = self.bus.send_to(
-                client_id,
-                None,
-                HarnessOutputMessage::deliver(context_event),
-            );
+            self.send_catch_up_event(client_id, None, context_event);
         }
         let stats_events: Vec<_> = self
             .agents
@@ -434,9 +610,7 @@ impl Harness {
             .collect();
         for event in stats_events {
             if selector_matches_event(selectors, &event) {
-                let _ = self
-                    .bus
-                    .send_to(client_id, None, HarnessOutputMessage::deliver(event));
+                self.send_catch_up_event(client_id, None, event);
             }
         }
         let mut watch_entries = self.agent_watches.iter().collect::<Vec<_>>();
@@ -456,9 +630,7 @@ impl Harness {
             .collect();
         for event in watch_events {
             if selector_matches_event(selectors, &event) {
-                let _ = self
-                    .bus
-                    .send_to(client_id, None, HarnessOutputMessage::deliver(event));
+                self.send_catch_up_event(client_id, None, event);
             }
         }
         let effort_levels = self
@@ -471,11 +643,7 @@ impl Harness {
                 levels: effort_levels,
             });
         if selector_matches_event(selectors, &effort_levels_event) {
-            let _ = self.bus.send_to(
-                client_id,
-                None,
-                HarnessOutputMessage::deliver(effort_levels_event),
-            );
+            self.send_catch_up_event(client_id, None, effort_levels_event);
         }
         let verbosity_levels = self
             .selected_model
@@ -487,11 +655,7 @@ impl Harness {
                 levels: verbosity_levels,
             });
         if selector_matches_event(selectors, &verbosity_levels_event) {
-            let _ = self.bus.send_to(
-                client_id,
-                None,
-                HarnessOutputMessage::deliver(verbosity_levels_event),
-            );
+            self.send_catch_up_event(client_id, None, verbosity_levels_event);
         }
         let thinking_levels = self
             .selected_model
@@ -504,11 +668,7 @@ impl Harness {
             },
         );
         if selector_matches_event(selectors, &thinking_levels_event) {
-            let _ = self.bus.send_to(
-                client_id,
-                None,
-                HarnessOutputMessage::deliver(thinking_levels_event),
-            );
+            self.send_catch_up_event(client_id, None, thinking_levels_event);
         }
     }
 }

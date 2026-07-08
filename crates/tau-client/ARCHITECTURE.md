@@ -77,8 +77,12 @@ Event handlers are either typed payload handlers or raw delivery handlers. Typed
 handlers cover the built-in `EventPayload` variants, including common runtime
 events needed by extensions that fold session, agent metadata, cancellation, and
 side-agent result state; raw handlers are available for unsupported first-party
-or custom extension events. Replay-aware handlers receive both historical and
-live deliveries, while live-only handlers skip replay-marked deliveries.
+or custom extension events. `on`/`on_raw` and `on_live`/`on_raw_live` populate
+`live_selectors` and skip replay-marked deliveries. `on_restore` and
+`on_raw_restore` populate `historical_selectors` and run only for replay-marked
+deliveries, which include both durable restore facts and catch-up snapshots such
+as `session.agent_loaded` or `harness.session_dir`. Tool and action helpers are
+live-only side-effect handlers.
 
 Raw handlers normally add their selector to the startup subscription set. For
 deliveries that the harness routes through another protocol contract, such as

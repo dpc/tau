@@ -314,13 +314,15 @@ impl SessionMembership {
 ///
 /// Durable stores append membership facts to `<sessions_dir>/<session_id>` and
 /// maintain the corresponding metadata/lock sidecars. Ephemeral stores keep the
-/// folded membership view in memory only: they never create the sessions root,
-/// session directories, event logs, metadata, or locks, and `session_events`
-/// reports no durable records.
+/// folded membership view and session-scoped execution/restore facts in memory
+/// only: they never create the sessions root, session directories, event logs,
+/// metadata, or locks, `session_events` reports no durable records, and
+/// `session_restore_events` returns same-daemon in-memory restore facts.
 #[derive(Debug)]
 pub struct SessionStore {
     sessions_dir: PathBuf,
     sessions: HashMap<SessionId, SessionMembership>,
+    restore_events: HashMap<SessionId, Vec<PersistedSessionEvent>>,
     locks: HashMap<SessionId, File>,
     mode: SessionPersistenceMode,
 }
@@ -363,6 +365,7 @@ impl SessionStore {
         Ok(Self {
             sessions_dir,
             sessions: HashMap::new(),
+            restore_events: HashMap::new(),
             locks: HashMap::new(),
             mode: SessionPersistenceMode::Durable,
         })
@@ -377,6 +380,7 @@ impl SessionStore {
         Ok(Self {
             sessions_dir: sessions_dir.into(),
             sessions: HashMap::new(),
+            restore_events: HashMap::new(),
             locks: HashMap::new(),
             mode: SessionPersistenceMode::Ephemeral,
         })
@@ -554,6 +558,74 @@ impl SessionStore {
         load_session_events(&self.session_dir(&session_id).join("events.cbor"))
     }
 
+    /// Appends one session-scoped execution/restore fact.
+    pub fn append_session_restore_event_at(
+        &mut self,
+        session_id: &str,
+        source: Option<ConnectionId>,
+        event: Event,
+        recorded_at: UnixMicros,
+    ) -> Result<(), SessionStoreError> {
+        validate_restore_event(&event)?;
+        let sid = validate_session_id(session_id)?;
+        if self.mode.is_ephemeral() {
+            let events = self.restore_events.entry(sid).or_default();
+            let seq = PersistedSessionEventSeq::new(events.len() as u64);
+            events.push(PersistedSessionEvent {
+                seq,
+                source,
+                event,
+                recorded_at,
+            });
+            return Ok(());
+        }
+        self.ensure_locked(session_id)?;
+        let path = self.session_dir(&sid).join("restore-events.cbor");
+        let events = load_session_events(&path)?;
+        for record in &events {
+            validate_restore_event(&record.event)?;
+        }
+        let seq = PersistedSessionEventSeq::new(events.len() as u64);
+        append_cbor_record(
+            &path,
+            &PersistedSessionEvent {
+                seq,
+                source,
+                event,
+                recorded_at,
+            },
+        )?;
+        Ok(())
+    }
+
+    /// Loads session-scoped execution/restore facts.
+    ///
+    /// Durable stores read `<session>/restore-events.cbor`; ephemeral stores
+    /// return same-daemon in-memory restore facts.
+    pub fn session_restore_events(
+        &self,
+        session_id: &str,
+    ) -> Result<Vec<PersistedSessionEvent>, SessionStoreError> {
+        if self.mode.is_ephemeral() {
+            let session_id = validate_session_id(session_id)?;
+            return Ok(self
+                .restore_events
+                .get(&session_id)
+                .cloned()
+                .unwrap_or_default());
+        }
+        let session_id = validate_session_id(session_id)?;
+        let path = self.session_dir(&session_id).join("restore-events.cbor");
+        if !path.exists() {
+            return Ok(Vec::new());
+        }
+        let events = load_session_events(&path)?;
+        for record in &events {
+            validate_restore_event(&record.event)?;
+        }
+        Ok(events)
+    }
+
     /// Returns the storage root for session membership containers.
     #[must_use]
     pub fn sessions_dir(&self) -> &Path {
@@ -653,6 +725,15 @@ fn validate_membership_event(session_id: &str, event: &Event) -> Result<(), Sess
         _ => Err(SessionStoreError::InvalidEvent {
             message: "session store only persists session.agent_loaded/session.agent_unloaded"
                 .to_owned(),
+        }),
+    }
+}
+
+fn validate_restore_event(event: &Event) -> Result<(), SessionStoreError> {
+    match event {
+        Event::ToolRequest(_) | Event::ToolStarted(_) => Ok(()),
+        _ => Err(SessionStoreError::InvalidEvent {
+            message: "session restore log only persists tool.request/tool.started".to_owned(),
         }),
     }
 }

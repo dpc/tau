@@ -12,24 +12,57 @@ use crate::connection::{
 };
 use crate::policy::{DefaultSubscriptionPolicy, SubscriptionPolicy};
 
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct SubscriptionSet {
-    selectors: Vec<EventSelector>,
+    historical_selectors: Vec<EventSelector>,
+    live_selectors: Vec<EventSelector>,
+    catch_up_blocked: bool,
+    pending_live: Vec<RoutedFrame>,
 }
 
 impl SubscriptionSet {
-    pub(crate) fn replace(&mut self, selectors: Vec<EventSelector>) {
-        self.selectors = selectors;
+    pub(crate) fn replace(
+        &mut self,
+        historical_selectors: Vec<EventSelector>,
+        live_selectors: Vec<EventSelector>,
+    ) {
+        let was_catch_up_blocked = self.catch_up_blocked;
+        self.historical_selectors = historical_selectors;
+        self.live_selectors = live_selectors;
+        // Pending live frames already matched the live selectors at publish
+        // time. Preserve them across blocked subscription replacement so a
+        // catch-up resubscribe cannot retroactively drop committed delivery.
+        self.catch_up_blocked = was_catch_up_blocked;
+        if !self.catch_up_blocked {
+            self.pending_live.clear();
+        }
     }
 
     pub(crate) fn matches(&self, message: &HarnessOutputMessage) -> bool {
-        self.selectors
+        self.live_selectors
             .iter()
             .any(|selector| selector_matches(selector, message))
     }
 
-    pub(crate) fn selectors(&self) -> &[EventSelector] {
-        &self.selectors
+    pub(crate) fn historical_selectors(&self) -> &[EventSelector] {
+        &self.historical_selectors
+    }
+
+    pub(crate) fn live_selectors(&self) -> &[EventSelector] {
+        &self.live_selectors
+    }
+
+    fn is_catch_up_blocked(&self) -> bool {
+        self.catch_up_blocked
+    }
+
+    fn push_pending_live(&mut self, routed: RoutedFrame) {
+        self.pending_live.push(routed);
+    }
+
+    fn finish_catch_up(&mut self) -> Vec<RoutedFrame> {
+        self.catch_up_blocked = false;
+        std::mem::take(&mut self.pending_live)
     }
 }
 
@@ -137,11 +170,22 @@ impl EventBus {
             .collect()
     }
 
-    /// Replaces the subscription selectors for one connection.
+    /// Replaces the historical and live subscription selectors for one
+    /// connection.
+    ///
+    /// The bus evaluates the union of both selector sets against the
+    /// subscription policy before committing either set. Historical selectors
+    /// are used by the harness catch-up/replay path; live selectors are
+    /// used for publish-time live routing. If a connection is currently
+    /// catch-up blocked and the replacement clears all historical
+    /// selectors, the bus treats that as canceling the replay phase and
+    /// immediately releases the catch-up block, flushing any already-routed
+    /// pending live frames.
     pub fn set_subscriptions(
         &mut self,
         connection_id: &str,
-        selectors: Vec<EventSelector>,
+        historical_selectors: Vec<EventSelector>,
+        live_selectors: Vec<EventSelector>,
     ) -> Result<(), RouteError> {
         let metadata = self
             .connections
@@ -150,8 +194,14 @@ impl EventBus {
             .ok_or_else(|| RouteError::UnknownConnection {
                 connection_id: connection_id.into(),
             })?;
+        let mut policy_selectors = historical_selectors.clone();
+        for selector in &live_selectors {
+            if !policy_selectors.contains(selector) {
+                policy_selectors.push(selector.clone());
+            }
+        }
         self.subscription_policy
-            .evaluate(&metadata, &selectors)
+            .evaluate(&metadata, &policy_selectors)
             .map_err(|error| RouteError::SubscriptionDenied {
                 connection_id: connection_id.into(),
                 reason: error.reason().to_owned(),
@@ -161,16 +211,67 @@ impl EventBus {
                 connection_id: connection_id.into(),
             }
         })?;
-        entry.subscriptions.replace(selectors);
+        let should_release_catch_up =
+            entry.subscriptions.is_catch_up_blocked() && historical_selectors.is_empty();
+        entry
+            .subscriptions
+            .replace(historical_selectors, live_selectors);
+        if should_release_catch_up {
+            let _ = self.finish_catch_up(connection_id)?;
+        }
         Ok(())
     }
 
-    /// Returns the active subscription selectors for one connection.
+    /// Pauses live delivery for one connection while catch-up replay runs.
+    pub fn begin_catch_up(&mut self, connection_id: &str) -> Result<(), RouteError> {
+        let entry = self.connections.get_mut(connection_id).ok_or_else(|| {
+            RouteError::UnknownConnection {
+                connection_id: connection_id.into(),
+            }
+        })?;
+        entry.subscriptions.catch_up_blocked = true;
+        Ok(())
+    }
+
+    /// Returns the active historical selectors for one connection.
     #[must_use]
-    pub fn subscriptions(&self, connection_id: &str) -> Option<&[EventSelector]> {
+    pub fn historical_subscriptions(&self, connection_id: &str) -> Option<&[EventSelector]> {
         self.connections
             .get(connection_id)
-            .map(|entry| entry.subscriptions.selectors())
+            .map(|entry| entry.subscriptions.historical_selectors())
+    }
+
+    /// Returns the active live selectors for one connection.
+    #[must_use]
+    pub fn live_subscriptions(&self, connection_id: &str) -> Option<&[EventSelector]> {
+        self.connections
+            .get(connection_id)
+            .map(|entry| entry.subscriptions.live_selectors())
+    }
+
+    /// Releases live delivery for one connection and flushes queued frames.
+    pub fn finish_catch_up(&mut self, connection_id: &str) -> Result<RouteReport, RouteError> {
+        let entry = self.connections.get_mut(connection_id).ok_or_else(|| {
+            RouteError::UnknownConnection {
+                connection_id: connection_id.into(),
+            }
+        })?;
+        let pending = entry.subscriptions.finish_catch_up();
+        let mut report = RouteReport::default();
+        for routed in pending {
+            if !entry.visibility_filter.allows(&routed) {
+                report.blocked_by_filter.push(connection_id.into());
+                continue;
+            }
+            match entry.sink.send(routed) {
+                Ok(()) => report.delivered_to.push(connection_id.into()),
+                Err(error) => report.failed_deliveries.push(DeliveryFailure {
+                    connection_id: connection_id.into(),
+                    error,
+                }),
+            }
+        }
+        Ok(report)
     }
 
     /// Broadcasts one harness output message to subscribed and visible clients.
@@ -206,6 +307,11 @@ impl EventBus {
             }
             if !entry.subscriptions.matches(&routed.frame) {
                 report.skipped_by_subscription.push(connection_id.clone());
+                continue;
+            }
+            if entry.subscriptions.is_catch_up_blocked() {
+                entry.subscriptions.push_pending_live(routed.clone());
+                report.delivered_to.push(connection_id.clone());
                 continue;
             }
             if !entry.visibility_filter.allows(&routed) {

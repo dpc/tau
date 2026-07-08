@@ -220,7 +220,8 @@ fn queued_first_user_prompt_publishes_replayable_agent_target() {
     h.handle_client_event(
         &ui_conn,
         TestProtocolItem::Message(TestMessage::Subscribe(Subscribe {
-            selectors: vec![EventSelector::Prefix("agent.".to_owned())],
+            historical_selectors: Vec::new(),
+            live_selectors: vec![EventSelector::Prefix("agent.".to_owned())],
         })),
     )
     .expect("subscribe");
@@ -4651,10 +4652,10 @@ fn provider_model_prompt_routes_directly_to_provider_owner() {
         tau_proto::EventName::AGENT_PROMPT_CREATED,
     )];
     h.bus
-        .set_subscriptions("provider-observer", prompt_selector.clone())
+        .set_subscriptions("provider-observer", Vec::new(), prompt_selector.clone())
         .expect("provider observer subscription");
     h.bus
-        .set_subscriptions("ui-observer", prompt_selector)
+        .set_subscriptions("ui-observer", Vec::new(), prompt_selector)
         .expect("ui observer subscription");
 
     h.handle_extension_message(
@@ -4941,6 +4942,7 @@ fn provider_response_stats_are_public_provider_updates() {
     h.bus
         .set_subscriptions(
             "ui-stats-observer",
+            Vec::new(),
             vec![
                 EventSelector::Exact(tau_proto::EventName::PROVIDER_RESPONSE_UPDATED),
                 EventSelector::Exact(tau_proto::EventName::AGENT_STATS_UPDATED),
@@ -10727,6 +10729,7 @@ fn generic_agent_watch_snapshots_replay_and_clear_on_session_switch() {
     let live = connect_test_tool(&mut h, "watch-live");
     h.complete_subscription(
         "watch-live",
+        Vec::new(),
         vec![EventSelector::Exact(
             tau_proto::EventName::AGENT_WATCHES_UPDATED,
         )],
@@ -10790,6 +10793,7 @@ fn generic_agent_watch_snapshots_replay_and_clear_on_session_switch() {
         vec![EventSelector::Exact(
             tau_proto::EventName::AGENT_WATCHES_UPDATED,
         )],
+        Vec::new(),
     )
     .expect("subscribe replay");
     let replayed = drain_watches_updated(&replay);
@@ -10849,6 +10853,7 @@ fn agent_stats_snapshots_cover_tool_and_context_transitions_and_replay() {
     let stats = connect_test_tool(&mut h, "stats-live");
     h.complete_subscription(
         "stats-live",
+        Vec::new(),
         vec![EventSelector::Exact(
             tau_proto::EventName::AGENT_STATS_UPDATED,
         )],
@@ -10893,6 +10898,7 @@ fn agent_stats_snapshots_cover_tool_and_context_transitions_and_replay() {
         vec![EventSelector::Exact(
             tau_proto::EventName::AGENT_STATS_UPDATED,
         )],
+        Vec::new(),
     )
     .expect("stats replay");
     let replayed = drain_stats_updated(&replay);
@@ -10912,6 +10918,7 @@ fn rejected_pre_dispatch_tool_attempt_counts_once_in_agent_stats() {
     let stats = connect_test_tool(&mut h, "stats-reject");
     h.complete_subscription(
         "stats-reject",
+        Vec::new(),
         vec![EventSelector::Exact(
             tau_proto::EventName::AGENT_STATS_UPDATED,
         )],
@@ -13746,6 +13753,7 @@ fn ui_emitted_custom_event_routes_to_subscribed_extension() {
     h.bus
         .set_subscriptions(
             "factory-ext",
+            Vec::new(),
             vec![EventSelector::Prefix("factory.".to_owned())],
         )
         .expect("extension subscription");

@@ -62,7 +62,7 @@ Runtime-only state handles:
 - progress updates
 - queued prompts
 - per-conversation scheduling
-- subscriber replay and acks
+- subscriber replay, live buffering, and replay-complete boundaries
 
 The harness keeps its live event-log delivery shape. That delivery plumbing is
 not conversation state.

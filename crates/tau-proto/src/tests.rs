@@ -398,6 +398,10 @@ fn representative_events() -> Vec<Event> {
             session_id: "s1".into(),
             agent_id: agent_id("engineer_abcd1234"),
         }),
+        Event::SessionReplayComplete(SessionReplayComplete {
+            session_id: "s1".into(),
+            error: None,
+        }),
         Event::AgentPromptSubmitted(AgentPromptSubmitted {
             agent_id: agent_id("engineer_abcd1234"),
             text: "hello".to_owned(),
@@ -507,6 +511,11 @@ fn representative_events() -> Vec<Event> {
         Event::AgentMetadataUnset(AgentMetadataUnset {
             agent_id: agent_id("engineer_abcd1234"),
             key: "cwd".into(),
+        }),
+        Event::AgentReplayComplete(AgentReplayComplete {
+            agent_id: agent_id("engineer_abcd1234"),
+            session_id: Some("s1".into()),
+            error: None,
         }),
         Event::ProviderPromptSubmitted(ProviderPromptSubmitted {
             agent_prompt_id: "sp-1".into(),
@@ -871,7 +880,8 @@ fn representative_input_messages() -> Vec<HarnessInputMessage> {
             client_kind: ClientKind::Provider,
         }),
         HarnessInputMessage::Subscribe(Subscribe {
-            selectors: vec![
+            historical_selectors: Vec::new(),
+            live_selectors: vec![
                 EventSelector::Exact(EventName::UI_PROMPT_SUBMITTED),
                 EventSelector::Prefix("tool.".to_owned()),
             ],
@@ -1087,6 +1097,8 @@ fn expected_default_transient(event: &Event) -> bool {
             | Event::ProviderPromptSubmitted(_)
             | Event::AgentWatchesUpdated(_)
             | Event::AgentStatsUpdated(_)
+            | Event::AgentReplayComplete(_)
+            | Event::SessionReplayComplete(_)
             | Event::ToolProgress(_)
             | Event::ToolDelegateProgress(_)
             | Event::ToolError(_)
@@ -1134,6 +1146,7 @@ fn expected_first_party_event_names() -> std::collections::BTreeSet<String> {
         "agent.prompt_steered",
         "agent.prompt_submitted",
         "agent.prompt_terminated",
+        "agent.replay_complete",
         "agent.start_accepted",
         "agent.start_request",
         "agent.start_result",
@@ -1175,6 +1188,7 @@ fn expected_first_party_event_names() -> std::collections::BTreeSet<String> {
         "provider.tool_result",
         "session.agent_loaded",
         "session.agent_unloaded",
+        "session.replay_complete",
         "session.shutdown",
         "session.started",
         "shell.command_finished",

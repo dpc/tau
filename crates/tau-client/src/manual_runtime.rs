@@ -311,9 +311,27 @@ impl<State> ManualExtensionRuntime<State> {
         selectors: impl IntoIterator<Item = tau_proto::EventSelector>,
     ) -> ClientResult<()> {
         self.ensure_deferred_startup()?;
+        let selectors: Vec<_> = selectors.into_iter().collect();
         self.handle.send(tau_proto::HarnessInputMessage::Subscribe(
             tau_proto::Subscribe {
-                selectors: selectors.into_iter().collect(),
+                historical_selectors: Vec::new(),
+                live_selectors: selectors,
+            },
+        ))
+    }
+
+    /// Sends a dynamic startup `Subscribe` frame with explicit restore/live
+    /// sets.
+    pub fn startup_subscribe_split(
+        &mut self,
+        historical_selectors: impl IntoIterator<Item = tau_proto::EventSelector>,
+        live_selectors: impl IntoIterator<Item = tau_proto::EventSelector>,
+    ) -> ClientResult<()> {
+        self.ensure_deferred_startup()?;
+        self.handle.send(tau_proto::HarnessInputMessage::Subscribe(
+            tau_proto::Subscribe {
+                historical_selectors: historical_selectors.into_iter().collect(),
+                live_selectors: live_selectors.into_iter().collect(),
             },
         ))
     }

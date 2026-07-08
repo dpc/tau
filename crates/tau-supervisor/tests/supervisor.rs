@@ -51,7 +51,8 @@ fn expect_child_startup(child: &mut SupervisedChild) -> ToolRegister {
     assert_eq!(
         subscribe,
         HarnessInputMessage::Subscribe(Subscribe {
-            selectors: vec![tau_proto::EventSelector::Exact(
+            historical_selectors: Vec::new(),
+            live_selectors: vec![tau_proto::EventSelector::Exact(
                 tau_proto::EventName::TOOL_STARTED,
             )],
         })

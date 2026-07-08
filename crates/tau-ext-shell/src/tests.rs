@@ -405,7 +405,7 @@ fn startup_declares_exact_shell_subscriptions_and_ready_after_publications() {
         panic!("expected Subscribe after Hello");
     };
     assert_eq!(
-        subscribe.selectors,
+        subscribe.live_selectors,
         [
             EventSelector::Exact(EventName::TOOL_STARTED),
             EventSelector::Exact(EventName::TOOL_CANCEL_REQUEST),
@@ -413,12 +413,23 @@ fn startup_declares_exact_shell_subscriptions_and_ready_after_publications() {
             EventSelector::Exact(EventName::SESSION_STARTED),
             EventSelector::Exact(EventName::SESSION_AGENT_LOADED),
             EventSelector::Exact(EventName::SESSION_AGENT_UNLOADED),
+            EventSelector::Exact(EventName::AGENT_REPLAY_COMPLETE),
             EventSelector::Exact(EventName::AGENT_METADATA_SET),
             EventSelector::Exact(EventName::AGENT_METADATA_UNSET),
             EventSelector::Exact(EventName::SESSION_SHUTDOWN),
             EventSelector::Exact(EventName::AGENT_START_ACCEPTED),
             EventSelector::Exact(EventName::AGENT_START_RESULT),
             EventSelector::Exact(EventName::UI_SHELL_COMMAND),
+        ]
+    );
+    assert_eq!(
+        subscribe.historical_selectors,
+        [
+            EventSelector::Exact(EventName::SESSION_STARTED),
+            EventSelector::Exact(EventName::SESSION_AGENT_LOADED),
+            EventSelector::Exact(EventName::SESSION_AGENT_UNLOADED),
+            EventSelector::Exact(EventName::AGENT_METADATA_SET),
+            EventSelector::Exact(EventName::AGENT_METADATA_UNSET),
         ]
     );
 
@@ -2248,6 +2259,7 @@ fn session_agent_loaded_publishes_current_directory_context_for_agent() {
         },
         &output,
         &cwd_state,
+        false,
     );
 
     let HarnessInputMessage::Emit(emit) = rx.recv().expect("cwd metadata publish") else {
@@ -2725,6 +2737,15 @@ fn session_agent_loaded_emits_ready_after_agent_context_publish() {
             ephemeral: false,
         }))
         .expect("request");
+    writer
+        .write_frame(&HarnessOutputMessage::deliver(Event::AgentReplayComplete(
+            tau_proto::AgentReplayComplete {
+                agent_id: tau_proto::AgentId::parse("agent-1").expect("agent id"),
+                session_id: Some("s1".into()),
+                error: None,
+            },
+        )))
+        .expect("agent replay boundary");
     writer.flush().expect("flush");
     let metadata = loop {
         let event = reader.read_event().expect("read").expect("metadata event");
@@ -7577,6 +7598,245 @@ fn overlapping_same_agent_cd_is_rejected_until_first_commit() {
     writer.flush().expect("flush");
 }
 
+/// Replayed `session.agent_loaded` catch-up snapshots must rebuild cwd context
+/// and emit readiness for already-loaded agents without running live tools.
+#[test]
+fn replayed_session_agent_loaded_restores_cwd_context_and_ready() {
+    let (mut reader, mut writer) = spawn_extension();
+    drain_startup(&mut reader);
+    let agent_id = tau_proto::AgentId::parse("agent-replay-cwd").expect("agent id");
+    let cwd = PathBuf::from("/tmp/replayed-cwd");
+
+    writer
+        .write_frame(&HarnessOutputMessage::deliver_replay(
+            tau_proto::UnixMicros::new(1),
+            Event::AgentMetadataSet(tau_proto::AgentMetadataSet {
+                agent_id: agent_id.clone(),
+                key: tau_proto::AgentMetadataKey::new("ext_core-shell_cwd"),
+                value: CborValue::Text(cwd.display().to_string()),
+                inheritable: true,
+            }),
+        ))
+        .expect("replay cwd metadata");
+    writer
+        .write_frame(&HarnessOutputMessage::deliver_replay(
+            tau_proto::UnixMicros::new(2),
+            Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
+                session_id: "s1".into(),
+                agent_id: agent_id.clone(),
+                ephemeral: false,
+            }),
+        ))
+        .expect("replay loaded snapshot");
+    writer
+        .write_frame(&HarnessOutputMessage::deliver(Event::AgentReplayComplete(
+            tau_proto::AgentReplayComplete {
+                agent_id: agent_id.clone(),
+                session_id: Some("s1".into()),
+                error: None,
+            },
+        )))
+        .expect("replay boundary");
+    writer.flush().expect("flush replay");
+
+    let mut saw_context = false;
+    loop {
+        let event = reader.read_event().expect("read").expect("event");
+        match event {
+            Event::ExtAgentContextPublish(publish)
+                if publish.agent_id == agent_id && publish.key.as_ref() == "cwd" =>
+            {
+                assert_eq!(
+                    publish.value.0,
+                    serde_json::json!(cwd.display().to_string())
+                );
+                saw_context = true;
+            }
+            Event::ExtensionContextReady(ready) if ready.agent_id == agent_id => {
+                assert!(saw_context, "cwd context should precede ready");
+                break;
+            }
+            _ => {}
+        }
+    }
+
+    writer
+        .write_frame(&disconnect_frame(None))
+        .expect("disconnect");
+    writer.flush().expect("flush");
+}
+
+/// A live existing-agent load must wait for replayed cwd metadata before
+/// publishing cwd context or falling back to process-default cwd metadata.
+#[test]
+fn live_loaded_existing_agent_uses_replayed_cwd_before_ready() {
+    let (mut reader, mut writer) = spawn_extension();
+    drain_startup(&mut reader);
+    let agent_id = tau_proto::AgentId::parse("agent-live-replay-cwd").expect("agent id");
+    let stored_cwd = PathBuf::from("/tmp/stored-live-cwd");
+
+    writer
+        .write_event(&Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
+            session_id: "s1".into(),
+            agent_id: agent_id.clone(),
+            ephemeral: false,
+        }))
+        .expect("live load");
+    writer
+        .write_frame(&HarnessOutputMessage::deliver_replay(
+            tau_proto::UnixMicros::new(1),
+            Event::AgentMetadataSet(tau_proto::AgentMetadataSet {
+                agent_id: agent_id.clone(),
+                key: tau_proto::AgentMetadataKey::new("ext_core-shell_cwd"),
+                value: CborValue::Text(stored_cwd.display().to_string()),
+                inheritable: true,
+            }),
+        ))
+        .expect("replay cwd");
+    writer
+        .write_frame(&HarnessOutputMessage::deliver(Event::AgentReplayComplete(
+            tau_proto::AgentReplayComplete {
+                agent_id: agent_id.clone(),
+                session_id: Some("s1".into()),
+                error: None,
+            },
+        )))
+        .expect("replay boundary");
+    writer.flush().expect("flush");
+
+    let mut saw_context = false;
+    loop {
+        let event = reader.read_event().expect("read").expect("event");
+        match event {
+            Event::AgentMetadataSet(metadata) if metadata.agent_id == agent_id => {
+                panic!("default cwd metadata emitted before stored cwd replay: {metadata:?}");
+            }
+            Event::ExtAgentContextPublish(publish)
+                if publish.agent_id == agent_id && publish.key.as_ref() == "cwd" =>
+            {
+                assert_eq!(
+                    publish.value.0,
+                    serde_json::json!(stored_cwd.display().to_string())
+                );
+                saw_context = true;
+            }
+            Event::ExtensionContextReady(ready) if ready.agent_id == agent_id => {
+                assert!(saw_context, "stored cwd context should precede ready");
+                break;
+            }
+            _ => {}
+        }
+    }
+
+    writer
+        .write_frame(&disconnect_frame(None))
+        .expect("disconnect");
+    writer.flush().expect("flush");
+}
+
+/// A live load with no replayed cwd still falls back to process-default
+/// metadata after the per-agent replay boundary, preserving new-agent
+/// initialization.
+#[test]
+fn live_loaded_agent_defaults_cwd_after_replay_boundary_without_metadata() {
+    let (mut reader, mut writer) = spawn_extension();
+    drain_startup(&mut reader);
+    let agent_id = tau_proto::AgentId::parse("agent-live-default-cwd").expect("agent id");
+
+    writer
+        .write_event(&Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
+            session_id: "s1".into(),
+            agent_id: agent_id.clone(),
+            ephemeral: false,
+        }))
+        .expect("live load");
+    writer
+        .write_frame(&HarnessOutputMessage::deliver(Event::AgentReplayComplete(
+            tau_proto::AgentReplayComplete {
+                agent_id: agent_id.clone(),
+                session_id: Some("s1".into()),
+                error: None,
+            },
+        )))
+        .expect("replay boundary");
+    writer.flush().expect("flush");
+
+    loop {
+        let event = reader.read_event().expect("read").expect("event");
+        if let Event::AgentMetadataSet(metadata) = event
+            && metadata.agent_id == agent_id
+        {
+            assert_eq!(metadata.key.as_str(), "ext_core-shell_cwd");
+            break;
+        }
+    }
+
+    writer
+        .write_frame(&disconnect_frame(None))
+        .expect("disconnect");
+    writer.flush().expect("flush");
+}
+
+/// An errored per-agent replay boundary must fail closed: shell must not invent
+/// default cwd metadata or publish readiness when restore failed.
+#[test]
+fn live_loaded_agent_does_not_default_cwd_after_replay_error() {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let mut runtime = ShellRuntime::new(Output::channel(tx), ExtConfig::default());
+    let agent_id = tau_proto::AgentId::parse("agent-live-error-cwd").expect("agent id");
+
+    runtime
+        .handle_event(
+            Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
+                session_id: "s1".into(),
+                agent_id: agent_id.clone(),
+                ephemeral: false,
+            }),
+            false,
+        )
+        .expect("live load");
+    runtime
+        .handle_event(
+            Event::AgentMetadataSet(tau_proto::AgentMetadataSet {
+                agent_id: agent_id.clone(),
+                key: tau_proto::AgentMetadataKey::new("ext_core-shell_cwd"),
+                value: CborValue::Text("/tmp/restored-before-error".to_owned()),
+                inheritable: true,
+            }),
+            true,
+        )
+        .expect("replay cwd metadata");
+    runtime
+        .handle_event(
+            Event::AgentReplayComplete(tau_proto::AgentReplayComplete {
+                agent_id: agent_id.clone(),
+                session_id: Some("s1".into()),
+                error: Some("corrupt agent log".to_owned()),
+            }),
+            false,
+        )
+        .expect("errored replay boundary");
+
+    while let Ok(message) = rx.try_recv() {
+        let HarnessInputMessage::Emit(emit) = message else {
+            continue;
+        };
+        match *emit.event {
+            Event::AgentMetadataSet(metadata) if metadata.agent_id == agent_id => {
+                panic!("errored replay must not synthesize cwd metadata: {metadata:?}");
+            }
+            Event::ExtAgentContextPublish(publish) if publish.agent_id == agent_id => {
+                panic!("errored replay must not publish cwd context: {publish:?}");
+            }
+            Event::ExtensionContextReady(ready) if ready.agent_id == agent_id => {
+                panic!("errored replay must not mark cwd context ready: {ready:?}");
+            }
+            _ => {}
+        }
+    }
+    runtime.final_shutdown();
+}
+
 #[test]
 fn malformed_cwd_metadata_does_not_wedge_context_ready() {
     let (mut reader, mut writer) = spawn_extension();
@@ -7590,6 +7850,15 @@ fn malformed_cwd_metadata_does_not_wedge_context_ready() {
             ephemeral: false,
         }))
         .expect("load");
+    writer
+        .write_frame(&HarnessOutputMessage::deliver(Event::AgentReplayComplete(
+            tau_proto::AgentReplayComplete {
+                agent_id: agent_id.clone(),
+                session_id: Some("s1".into()),
+                error: None,
+            },
+        )))
+        .expect("agent replay boundary");
     writer.flush().expect("flush load");
     let _ = reader
         .read_event()

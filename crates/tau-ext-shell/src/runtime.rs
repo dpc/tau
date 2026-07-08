@@ -151,14 +151,10 @@ impl ShellRuntime {
                 self.handle_tool_started(invoke, is_replay)?;
             }
             Event::SessionStarted(started) => {
-                if !is_replay {
-                    dispatch_session_started(started, &self.tx);
-                }
+                dispatch_session_started(started, &self.tx);
             }
             Event::SessionAgentLoaded(loaded) => {
-                if !is_replay {
-                    dispatch_session_agent_loaded(loaded, &self.tx, &self.cwd_state);
-                }
+                dispatch_session_agent_loaded(loaded, &self.tx, &self.cwd_state, true);
             }
             Event::SessionAgentUnloaded(unloaded) => {
                 if !is_replay {
@@ -167,6 +163,7 @@ impl ShellRuntime {
             }
             Event::AgentMetadataSet(set) => self.handle_agent_metadata_set(set, is_replay),
             Event::AgentMetadataUnset(unset) => self.handle_agent_metadata_unset(unset, is_replay),
+            Event::AgentReplayComplete(done) => self.handle_agent_replay_complete(done),
             Event::SessionShutdown(_) => self.shutdown_session(),
             Event::StartAgentAccepted(accepted) => {
                 self.start_agent_owners
@@ -375,6 +372,36 @@ impl ShellRuntime {
         }
     }
 
+    fn handle_agent_replay_complete(&self, done: tau_proto::AgentReplayComplete) {
+        let Some(session_id) = self.cwd_state.pending_ready(&done.agent_id) else {
+            return;
+        };
+        if done.error.is_some() {
+            self.cwd_state.take_pending_ready(&done.agent_id);
+            return;
+        }
+        if let Some(cwd) = self.cwd_state.get(&done.agent_id) {
+            let _ = self.tx.send(HarnessInputMessage::emit(cwd_context_event(
+                done.agent_id.clone(),
+                &cwd,
+            )));
+            self.publish_ready_if_pending(done.agent_id);
+            return;
+        }
+        let cwd = CwdState::process_default();
+        let _ = self
+            .tx
+            .send(HarnessInputMessage::emit(Event::AgentMetadataSet(
+                tau_proto::AgentMetadataSet {
+                    agent_id: done.agent_id.clone(),
+                    key: self.cwd_state.key(),
+                    value: CborValue::Text(cwd.display().to_string()),
+                    inheritable: true,
+                },
+            )));
+        self.cwd_state.set_pending_ready(done.agent_id, session_id);
+    }
+
     fn shutdown_session(&mut self) {
         self.shutdown();
         self.start_agent_owners.clear();
@@ -488,8 +515,8 @@ mod tests {
             .expect("shutdown cancel signal");
     }
 
-    /// Ensures replayed cwd metadata is folded for later live context readiness
-    /// without emitting replay-time side effects.
+    /// Ensures replayed cwd metadata is folded for later boundary-approved
+    /// context readiness without emitting replay-time side effects.
     #[test]
     fn replayed_cwd_metadata_folds_without_emitting_until_live_agent_load() {
         let (tx, rx) = mpsc::channel();
@@ -520,6 +547,20 @@ mod tests {
                 false,
             )
             .expect("live load");
+        assert!(
+            rx.try_recv().is_err(),
+            "live load waits for replay boundary before emitting"
+        );
+        runtime
+            .handle_event(
+                Event::AgentReplayComplete(tau_proto::AgentReplayComplete {
+                    agent_id: agent_id.clone(),
+                    session_id: Some("session-1".into()),
+                    error: None,
+                }),
+                false,
+            )
+            .expect("replay boundary");
 
         let HarnessInputMessage::Emit(context) = rx.recv().expect("context publish") else {
             panic!("expected context publish");

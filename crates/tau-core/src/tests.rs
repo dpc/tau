@@ -2,15 +2,17 @@ use std::path::PathBuf;
 
 use tau_proto::{
     AgentDisplayNameSet, AgentHead, AgentHeadMoved, AgentId, AgentPromptId, AgentPromptSubmitted,
-    CborValue, ContextItem, Event, PromptMessageClass, PromptOriginator, ProviderResponseFinished,
-    ProviderStopReason, SessionAgentLoaded, SessionAgentUnloaded, SessionId, ToolBackgroundError,
-    ToolBackgroundResult, ToolCallId, ToolCallItem, ToolName, ToolResult, ToolResultKind, ToolType,
+    CborValue, ContextItem, Event, EventSelector, HarnessNotice, HarnessOutputMessage, NoticeLevel,
+    PromptMessageClass, PromptOriginator, ProviderResponseFinished, ProviderStopReason,
+    SessionAgentLoaded, SessionAgentUnloaded, SessionId, ToolBackgroundError, ToolBackgroundResult,
+    ToolCallId, ToolCallItem, ToolName, ToolRequest, ToolResult, ToolResultKind, ToolStarted,
+    ToolType,
 };
 
 use crate::{
-    AgentEntry, AgentEventParent, AgentStore, AgentStoreError, NodeId, PersistedAgentEvent,
-    PersistedAgentEventSeq, PersistedSessionEvent, PersistedSessionEventSeq, SessionStore,
-    SessionStoreError, list_session_metas,
+    AgentEntry, AgentEventParent, AgentStore, AgentStoreError, EventBus, NodeId,
+    PersistedAgentEvent, PersistedAgentEventSeq, PersistedSessionEvent, PersistedSessionEventSeq,
+    SessionStore, SessionStoreError, list_session_metas, memory_connection,
 };
 
 fn temp_dir(name: &str) -> PathBuf {
@@ -39,6 +41,79 @@ fn append_raw_cbor<T: serde::Serialize>(path: &std::path::Path, record: &T) {
     file.write_all(&(encoded.len() as u64).to_le_bytes())
         .expect("write record length");
     file.write_all(&encoded).expect("write record body");
+}
+
+/// Buffered live delivery records the publish-time live selector match so a
+/// later subscription update cannot drop or add already-committed events.
+#[test]
+fn event_bus_buffers_only_publish_time_live_matches() {
+    let mut bus = EventBus::new();
+    let (connection, inbox) = memory_connection("ext", tau_proto::ClientKind::Tool);
+    let id = bus.connect(connection);
+    bus.set_subscriptions(
+        id.as_str(),
+        vec![EventSelector::Exact(tau_proto::EventName::AGENT_STARTED)],
+        vec![EventSelector::Exact(tau_proto::EventName::HARNESS_NOTICE)],
+    )
+    .expect("subscribe");
+    bus.begin_catch_up(id.as_str()).expect("begin catch-up");
+
+    let notice = Event::HarnessNotice(HarnessNotice {
+        kind: "test".to_owned(),
+        message: "buffer me".to_owned(),
+        level: NoticeLevel::Info,
+        always_show: false,
+    });
+    bus.publish(HarnessOutputMessage::deliver_live(
+        tau_proto::UnixMicros::new(1),
+        notice.clone(),
+    ));
+    bus.set_subscriptions(
+        id.as_str(),
+        vec![EventSelector::Exact(tau_proto::EventName::AGENT_STARTED)],
+        vec![EventSelector::Exact(tau_proto::EventName::TOOL_STARTED)],
+    )
+    .expect("resubscribe while blocked");
+    bus.finish_catch_up(id.as_str()).expect("finish catch-up");
+
+    let frames = inbox.drain();
+    assert_eq!(frames.len(), 1);
+    assert_eq!(frames[0].frame.delivered_event(), Some(&notice));
+}
+
+/// Removing historical selectors during catch-up releases the live stream so
+/// peers cannot remain blocked forever after canceling their replay phase.
+#[test]
+fn event_bus_releases_catch_up_when_historical_selectors_are_cleared() {
+    let mut bus = EventBus::new();
+    let (connection, inbox) = memory_connection("ext", tau_proto::ClientKind::Tool);
+    let id = bus.connect(connection);
+    let live_selector = EventSelector::Exact(tau_proto::EventName::HARNESS_NOTICE);
+    bus.set_subscriptions(
+        id.as_str(),
+        vec![EventSelector::Exact(tau_proto::EventName::AGENT_STARTED)],
+        vec![live_selector.clone()],
+    )
+    .expect("subscribe with catch-up");
+    bus.begin_catch_up(id.as_str()).expect("begin catch-up");
+
+    let notice = Event::HarnessNotice(HarnessNotice {
+        kind: "test".to_owned(),
+        message: "release me".to_owned(),
+        level: NoticeLevel::Info,
+        always_show: false,
+    });
+    bus.publish(HarnessOutputMessage::deliver_live(
+        tau_proto::UnixMicros::new(2),
+        notice.clone(),
+    ));
+    assert!(inbox.snapshot().is_empty());
+
+    bus.set_subscriptions(id.as_str(), Vec::new(), vec![live_selector])
+        .expect("clear historical selectors");
+    let frames = inbox.drain();
+    assert_eq!(frames.len(), 1);
+    assert_eq!(frames[0].frame.delivered_event(), Some(&notice));
 }
 
 fn append_partial_record_header(path: &std::path::Path) {
@@ -762,6 +837,183 @@ fn session_store_persists_only_membership_facts() {
     let events = reopened.session_events("session-1").expect("events");
     assert_eq!(events.len(), 2);
     assert_eq!(events[0].event, loaded);
+
+    let _ = std::fs::remove_dir_all(sessions_dir);
+}
+
+/// Session restore facts keep execution correlation out of agent transcript
+/// storage while remaining replayable from a session-scoped log.
+#[test]
+fn session_restore_log_persists_tool_execution_facts_separately() {
+    let sessions_dir = temp_dir("session-restore");
+    let mut store = SessionStore::open(&sessions_dir).expect("open session store");
+    let request = Event::ToolRequest(ToolRequest {
+        call_id: ToolCallId::from("call-1"),
+        tool_name: ToolName::new("demo"),
+        tool_type: ToolType::Function,
+        arguments: CborValue::Null,
+        agent_id: AgentId::parse("agent-1").expect("agent id"),
+        originator: PromptOriginator::User,
+    });
+    let started = Event::ToolStarted(ToolStarted {
+        call_id: ToolCallId::from("call-1"),
+        tool_name: ToolName::new("demo"),
+        arguments: CborValue::Null,
+        agent_id: AgentId::parse("agent-1").expect("agent id"),
+        originator: PromptOriginator::User,
+    });
+
+    store
+        .append_session_restore_event_at(
+            "session-1",
+            None,
+            request.clone(),
+            tau_proto::UnixMicros::new(10),
+        )
+        .expect("append restore request");
+    store
+        .append_session_restore_event_at(
+            "session-1",
+            None,
+            started.clone(),
+            tau_proto::UnixMicros::new(11),
+        )
+        .expect("append restore started");
+
+    assert!(!sessions_dir.join("session-1").join("events.cbor").exists());
+    let reopened = SessionStore::open(&sessions_dir).expect("reopen session store");
+    let events = reopened
+        .session_restore_events("session-1")
+        .expect("restore events");
+    assert_eq!(events.len(), 2);
+    assert_eq!(events[0].event, request);
+    assert_eq!(events[1].event, started);
+
+    let _ = std::fs::remove_dir_all(sessions_dir);
+}
+
+/// Ephemeral sessions keep restore facts in memory for same-daemon replay while
+/// avoiding durable restore-event files.
+#[test]
+fn ephemeral_session_restore_log_replays_from_memory_only() {
+    let sessions_dir = temp_dir("ephemeral-session-restore");
+    let mut store = SessionStore::open_ephemeral(&sessions_dir).expect("open ephemeral store");
+    let started = Event::ToolStarted(ToolStarted {
+        call_id: ToolCallId::from("call-ephemeral"),
+        tool_name: ToolName::new("demo"),
+        arguments: CborValue::Null,
+        agent_id: AgentId::parse("agent-1").expect("agent id"),
+        originator: PromptOriginator::User,
+    });
+
+    store
+        .append_session_restore_event_at(
+            "session-1",
+            None,
+            started.clone(),
+            tau_proto::UnixMicros::new(12),
+        )
+        .expect("append memory restore fact");
+
+    assert!(!sessions_dir.exists());
+    let events = store
+        .session_restore_events("session-1")
+        .expect("memory restore events");
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].event, started);
+}
+
+/// Restore logs fail closed on corrupt sequence state rather than silently
+/// restarting at sequence zero and appending over suspect history.
+#[test]
+fn session_restore_append_rejects_invalid_existing_sequence() {
+    let sessions_dir = temp_dir("bad-session-restore-seq");
+    let session_dir = sessions_dir.join("session-1");
+    let path = session_dir.join("restore-events.cbor");
+    let bad = PersistedSessionEvent {
+        seq: PersistedSessionEventSeq::new(7),
+        source: None,
+        event: Event::ToolStarted(ToolStarted {
+            call_id: ToolCallId::from("call-bad"),
+            tool_name: ToolName::new("demo"),
+            arguments: CborValue::Null,
+            agent_id: AgentId::parse("agent-1").expect("agent id"),
+            originator: PromptOriginator::User,
+        }),
+        recorded_at: tau_proto::UnixMicros::new(1),
+    };
+    append_raw_cbor(&path, &bad);
+    let mut store = SessionStore::open(&sessions_dir).expect("open session store");
+
+    let error = store
+        .append_session_restore_event_at(
+            "session-1",
+            None,
+            bad.event.clone(),
+            tau_proto::UnixMicros::new(2),
+        )
+        .expect_err("invalid restore sequence must fail");
+    assert!(matches!(error, SessionStoreError::InvalidSequence { .. }));
+
+    let _ = std::fs::remove_dir_all(sessions_dir);
+}
+
+/// Restore-log appends read existing records first, so a torn restore log is
+/// reported instead of being extended with a misleading fresh sequence.
+#[test]
+fn session_restore_append_rejects_truncated_existing_log() {
+    let sessions_dir = temp_dir("bad-session-restore-truncated");
+    let path = sessions_dir.join("session-1").join("restore-events.cbor");
+    std::fs::create_dir_all(path.parent().expect("restore parent")).expect("create parent");
+    std::fs::write(&path, 8_u64.to_le_bytes()).expect("write torn header");
+    let mut store = SessionStore::open(&sessions_dir).expect("open session store");
+    let event = Event::ToolStarted(ToolStarted {
+        call_id: ToolCallId::from("call-torn"),
+        tool_name: ToolName::new("demo"),
+        arguments: CborValue::Null,
+        agent_id: AgentId::parse("agent-1").expect("agent id"),
+        originator: PromptOriginator::User,
+    });
+
+    let error = store
+        .append_session_restore_event_at("session-1", None, event, tau_proto::UnixMicros::new(2))
+        .expect_err("truncated restore log must fail");
+    assert!(matches!(error, SessionStoreError::Read { .. }));
+
+    let _ = std::fs::remove_dir_all(sessions_dir);
+}
+
+/// Restore-log appends validate the semantic contents of existing records, not
+/// only their CBOR framing and sequence numbers, so a membership log cannot be
+/// accidentally extended as if it were a restore stream.
+#[test]
+fn session_restore_append_rejects_wrong_existing_event_kind() {
+    let sessions_dir = temp_dir("bad-session-restore-kind");
+    let path = sessions_dir.join("session-1").join("restore-events.cbor");
+    let wrong = PersistedSessionEvent {
+        seq: PersistedSessionEventSeq::new(0),
+        source: None,
+        event: Event::SessionAgentLoaded(SessionAgentLoaded {
+            session_id: SessionId::from("session-1"),
+            agent_id: AgentId::parse("agent-1").expect("agent id"),
+            ephemeral: false,
+        }),
+        recorded_at: tau_proto::UnixMicros::new(1),
+    };
+    append_raw_cbor(&path, &wrong);
+    let mut store = SessionStore::open(&sessions_dir).expect("open session store");
+    let event = Event::ToolStarted(ToolStarted {
+        call_id: ToolCallId::from("call-good"),
+        tool_name: ToolName::new("demo"),
+        arguments: CborValue::Null,
+        agent_id: AgentId::parse("agent-1").expect("agent id"),
+        originator: PromptOriginator::User,
+    });
+
+    let error = store
+        .append_session_restore_event_at("session-1", None, event, tau_proto::UnixMicros::new(2))
+        .expect_err("wrong restore event kind must fail");
+    assert!(matches!(error, SessionStoreError::InvalidEvent { .. }));
 
     let _ = std::fs::remove_dir_all(sessions_dir);
 }

@@ -565,7 +565,11 @@ where
                 tau_proto::EventSelector::Exact(EventName::AGENT_PROMPT_PREWARM_REQUESTED),
                 handle_provider_delivery::<F>,
             )
-            .on_raw(
+            .on_raw_restore(
+                tau_proto::EventSelector::Exact(EventName::HARNESS_SESSION_DIR),
+                handle_provider_delivery::<F>,
+            )
+            .on_raw_live(
                 tau_proto::EventSelector::Exact(EventName::HARNESS_SESSION_DIR),
                 handle_provider_delivery::<F>,
             )

@@ -664,8 +664,10 @@ fn connect_daemon_message_peer(
     socket_path: impl Into<PathBuf>,
 ) -> Result<SocketPeer, HarnessError> {
     let mut peer = connect_daemon_helper(socket_path, "tau-cli")?;
+    let selectors = daemon_message_event_selectors();
     peer.send(&HarnessInputMessage::Subscribe(Subscribe {
-        selectors: daemon_message_event_selectors(),
+        historical_selectors: selectors.clone(),
+        live_selectors: selectors,
     }))?;
     Ok(peer)
 }

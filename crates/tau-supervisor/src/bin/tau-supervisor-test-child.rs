@@ -98,7 +98,8 @@ fn write_startup_messages(writer: &mut PeerOutputWriter<impl Write>) -> Result<(
         client_kind: ClientKind::Tool,
     }))?;
     writer.write_message(&HarnessInputMessage::Subscribe(Subscribe {
-        selectors: vec![tau_proto::EventSelector::Exact(
+        historical_selectors: Vec::new(),
+        live_selectors: vec![tau_proto::EventSelector::Exact(
             tau_proto::EventName::TOOL_STARTED,
         )],
     }))?;

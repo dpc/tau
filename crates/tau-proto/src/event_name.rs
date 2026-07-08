@@ -347,12 +347,16 @@ impl EventName {
     pub const AGENT_METADATA_SET: Self = Self::from_static(EventCategory::Agent, "metadata_set");
     pub const AGENT_METADATA_UNSET: Self =
         Self::from_static(EventCategory::Agent, "metadata_unset");
+    pub const AGENT_REPLAY_COMPLETE: Self =
+        Self::from_static(EventCategory::Agent, "replay_complete");
     pub const SESSION_STARTED: Self = Self::from_static(EventCategory::Session, "started");
     pub const SESSION_SHUTDOWN: Self = Self::from_static(EventCategory::Session, "shutdown");
     pub const SESSION_AGENT_LOADED: Self =
         Self::from_static(EventCategory::Session, "agent_loaded");
     pub const SESSION_AGENT_UNLOADED: Self =
         Self::from_static(EventCategory::Session, "agent_unloaded");
+    pub const SESSION_REPLAY_COMPLETE: Self =
+        Self::from_static(EventCategory::Session, "replay_complete");
     pub const AGENT_PROMPT_CREATED: Self =
         Self::from_static(EventCategory::Agent, "prompt_created");
     pub const AGENT_PROMPT_STARTED: Self =

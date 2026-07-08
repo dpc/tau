@@ -2425,6 +2425,37 @@ pub struct UiPromptDraft {
     pub text: String,
 }
 
+/// Synthetic boundary emitted after one loaded agent's historical replay.
+///
+/// The harness creates this transient event as a non-replay delivery. It is not
+/// accepted from peers and is not persisted; ordered delivery lets restore
+/// handlers treat it as "all earlier replay frames for this agent have run".
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AgentReplayComplete {
+    /// Agent whose replay batch has reached its boundary.
+    pub agent_id: AgentId,
+    /// Session for which the agent was replayed, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<SessionId>,
+    /// Replay error for this agent, if catch-up could not complete normally.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// Synthetic boundary emitted after session-scoped historical replay.
+///
+/// The harness creates this transient event as a non-replay delivery. It is not
+/// accepted from peers and is not persisted; live deliveries for the connection
+/// are released only after this boundary is sent.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct SessionReplayComplete {
+    /// Session whose catch-up phase has reached its boundary.
+    pub session_id: SessionId,
+    /// Replay error for this session, if catch-up could not complete normally.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
 /// The UI terminal focus state changed. Emitted when the terminal supports
 /// focus-in/focus-out reporting and the user moves focus into or away from the
 /// Tau terminal window.
@@ -3697,6 +3728,8 @@ pub enum Event {
     AgentMetadataSet(AgentMetadataSet),
     #[serde(rename = "agent.metadata_unset")]
     AgentMetadataUnset(AgentMetadataUnset),
+    #[serde(rename = "agent.replay_complete")]
+    AgentReplayComplete(AgentReplayComplete),
 
     // Session lifecycle/membership
     #[serde(rename = "session.started")]
@@ -3707,6 +3740,8 @@ pub enum Event {
     SessionAgentLoaded(SessionAgentLoaded),
     #[serde(rename = "session.agent_unloaded")]
     SessionAgentUnloaded(SessionAgentUnloaded),
+    #[serde(rename = "session.replay_complete")]
+    SessionReplayComplete(SessionReplayComplete),
 
     // Provider execution
     #[serde(rename = "provider.prompt_submitted")]
@@ -3906,6 +3941,7 @@ impl Event {
             Self::AgentDisplayNameSet(_) => EventName::AGENT_DISPLAY_NAME_SET,
             Self::AgentMetadataSet(_) => EventName::AGENT_METADATA_SET,
             Self::AgentMetadataUnset(_) => EventName::AGENT_METADATA_UNSET,
+            Self::AgentReplayComplete(_) => EventName::AGENT_REPLAY_COMPLETE,
             _ => return None,
         }
         .into()
@@ -3917,6 +3953,7 @@ impl Event {
             Self::SessionShutdown(_) => EventName::SESSION_SHUTDOWN,
             Self::SessionAgentLoaded(_) => EventName::SESSION_AGENT_LOADED,
             Self::SessionAgentUnloaded(_) => EventName::SESSION_AGENT_UNLOADED,
+            Self::SessionReplayComplete(_) => EventName::SESSION_REPLAY_COMPLETE,
             _ => return None,
         }
         .into()
@@ -3961,6 +3998,8 @@ impl Event {
                 | Self::AgentState(_)
                 | Self::AgentWatchesUpdated(_)
                 | Self::AgentStatsUpdated(_)
+                | Self::AgentReplayComplete(_)
+                | Self::SessionReplayComplete(_)
                 | Self::UiCompactRequest(_)
                 | Self::UiCreateAgent(_)
                 | Self::UiDebugEventStatsRequest(_)

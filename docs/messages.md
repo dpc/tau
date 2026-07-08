@@ -33,8 +33,9 @@ is done.
   connecting: protocol version, client name, and client kind (`provider` /
   `tool` / `action` / `ui` / `core` / `external`). First message on every
   connection.
-- **`subscribe`** *(peer → harness)* — A peer declares which delivered events it
-  wants to receive, as a list of selectors (exact name or prefix). Without a
+- **`subscribe`** *(peer → harness)* — A peer declares which historical events
+  it wants replayed via `historical_selectors` and which future committed
+  events it wants via `live_selectors` (exact name or prefix). Without a
   subscription, only directed traffic reaches the peer. Prefer exact selectors
   listing the concrete events the peer handles; prefix selectors should be used
   only for intentionally generic observers that really need the whole category.
@@ -88,20 +89,30 @@ metadata, not the fact subscribers ultimately observe.
 
 The harness wraps every event it sends to a peer in `deliver`. Deliveries carry
 `EventDelivery { event, replay, recorded_at }`. `replay: false` announces a live
-occurrence or direct snapshot; `replay: true` re-sends a durable historical fact
-to a late subscriber.
+occurrence or a synthetic replay boundary; `replay: true` marks catch-up input
+selected by `historical_selectors`, including durable historical facts,
+session-scoped restore facts, and current-state snapshots reconstructed for a
+late subscriber.
+
+`subscribe` separates `historical_selectors` from `live_selectors`. The harness
+replays matching historical facts and current-state snapshots first, sends non-replay
+`agent.replay_complete` / `session.replay_complete` boundaries, then releases
+live delivery for that connection. Live events selected while catch-up is in
+progress are queued for that connection and flushed after the session boundary.
 
 The protocol no longer has an `ack` input message. The harness does not retain
 the runtime event stream in memory; late catch-up for any subscribed peer is
-rebuilt from durable session/agent stores and current harness snapshots. Peers
-that perform side effects must ignore `deliver` frames with `replay: true`. Some
-runtime events, such as `tool.started`, are not durable and are therefore not
-replayed.
+rebuilt from durable session/agent stores, session restore facts, and current
+harness snapshots. Peers that perform side effects must register live handlers
+and ignore `deliver` frames with `replay: true`; restore handlers may opt in to
+historical execution facts such as `tool.request` and `tool.started` and to
+catch-up snapshots such as `session.agent_loaded` or `harness.session_dir`.
 
 - **`deliver`** *(harness → peer)* — Harness-owned event delivery envelope.
-  `recorded_at` is present for committed runtime deliveries and durable replay
-  entries when a timestamp is meaningful. It is absent for synthetic direct
-  snapshots.
+  `recorded_at` is present for committed runtime deliveries and replay entries
+  when a timestamp is meaningful. Synthetic catch-up snapshots receive a
+  harness-generated catch-up timestamp; replay boundaries are non-replay
+  deliveries.
 
 ## Extension data RPC
 

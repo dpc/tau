@@ -22,6 +22,15 @@ sensitive/contentful payloads. Prefix/category subscriptions should be reserved
 for intentionally generic observers that truly need the entire category; changes
 to subscribers must consider replay behavior, payload size/frequency, and whether
 the selected events carry prompt, tool, provider, or extension-provided content.
+Historical selectors are a separate exposure decision from live selectors:
+replayed `tool.request` and `tool.started` facts can include tool arguments and
+must only be requested by restore code that needs them. Live execution handlers
+must remain live-only and must not run from replayed delivery envelopes.
+Historical catch-up also includes replay-marked current-state snapshots (for
+example loaded-agent, metadata, and session-dir facts), with live events buffered
+until the non-replay replay-complete boundary. Ephemeral session stores keep
+restore facts only in same-daemon memory, while durable restore logs fail closed
+on corrupt or semantically invalid existing records instead of being extended.
 
 `ui.prompt_draft` is transient and not transcript truth, but it is still
 contentful user input. Consumers that store, restore, synchronize, autocomplete,

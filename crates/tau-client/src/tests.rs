@@ -228,7 +228,13 @@ impl TauExtension for ReplayExtension {
 
     fn register(self, builder: &mut ExtensionBuilder<Self::State>) {
         builder
-            .on::<HarnessNotice>(|cx| {
+            .on_restore::<HarnessNotice>(|cx| {
+                cx.state.replay_aware += 1;
+                cx.state.last_replay = Some(cx.is_replay());
+                cx.state.last_recorded_at = cx.recorded_at;
+                Ok(())
+            })
+            .on_live::<HarnessNotice>(|cx| {
                 cx.state.replay_aware += 1;
                 cx.state.last_replay = Some(cx.is_replay());
                 cx.state.last_recorded_at = cx.recorded_at;
@@ -363,7 +369,12 @@ impl TauExtension for ShellRuntimeEventsExtension {
                 cx.state.seen.push("agent_started");
                 Ok(())
             })
-            .on::<tau_proto::AgentMetadataSet>(|cx| {
+            .on_restore::<tau_proto::AgentMetadataSet>(|cx| {
+                cx.state.seen.push("metadata_set");
+                cx.state.metadata_replay_flags.push(cx.is_replay());
+                Ok(())
+            })
+            .on_live::<tau_proto::AgentMetadataSet>(|cx| {
                 cx.state.seen.push("metadata_set");
                 cx.state.metadata_replay_flags.push(cx.is_replay());
                 Ok(())
@@ -372,8 +383,16 @@ impl TauExtension for ShellRuntimeEventsExtension {
                 cx.state.seen.push("metadata_unset");
                 Ok(())
             })
+            .on_restore::<tau_proto::SessionAgentLoaded>(|cx| {
+                cx.state.seen.push("agent_loaded");
+                Ok(())
+            })
             .on_live::<tau_proto::SessionAgentLoaded>(|cx| {
                 cx.state.seen.push("agent_loaded");
+                Ok(())
+            })
+            .on_restore::<tau_proto::SessionAgentUnloaded>(|cx| {
+                cx.state.seen.push("agent_unloaded");
                 Ok(())
             })
             .on_live::<tau_proto::SessionAgentUnloaded>(|cx| {
@@ -1152,7 +1171,7 @@ fn raw_configure_error_emits_config_error_and_continues() {
 fn replay_and_live_handlers_preserve_replay_metadata() {
     let replay_at = UnixMicros::new(10);
     let live_at = UnixMicros::new(11);
-    let (state, _) = run_messages(
+    let (state, frames) = run_messages(
         ReplayExtension,
         Counts::default(),
         &[
@@ -1165,6 +1184,12 @@ fn replay_and_live_handlers_preserve_replay_metadata() {
     assert_eq!(state.live_only, 1);
     assert_eq!(state.last_replay, Some(false));
     assert_eq!(state.last_recorded_at, Some(live_at));
+    assert!(matches!(
+        &frames[1],
+        HarnessInputMessage::Subscribe(sub)
+            if sub.historical_selectors == [EventSelector::Exact(tau_proto::EventName::HARNESS_NOTICE)]
+                && sub.live_selectors == [EventSelector::Exact(tau_proto::EventName::HARNESS_NOTICE)]
+    ));
 }
 
 /// Ensures live tool handlers are dispatched only for their registered tool
@@ -1194,7 +1219,7 @@ fn multi_tool_registration_subscribes_to_tool_started_once() {
         })
         .expect("subscribe frame");
     assert_eq!(
-        subscribe.selectors,
+        subscribe.live_selectors,
         [EventSelector::Exact(tau_proto::EventName::TOOL_STARTED)]
     );
 }
@@ -1228,7 +1253,7 @@ fn action_schema_and_live_dispatch_match_action_after_harness_routing() {
     assert!(matches!(
         &frames[1],
         HarnessInputMessage::Subscribe(sub)
-            if sub.selectors == [EventSelector::Exact(tau_proto::EventName::ACTION_INVOKE)]
+            if sub.live_selectors == [EventSelector::Exact(tau_proto::EventName::ACTION_INVOKE)]
     ));
     let (schema_index, published_schema) = frames
         .iter()
@@ -1313,12 +1338,14 @@ fn shell_runtime_event_payloads_subscribe_and_dispatch_with_replay_policy() {
             HarnessOutputMessage::deliver_live(UnixMicros::new(3), metadata_set()),
             HarnessOutputMessage::deliver_replay(UnixMicros::new(4), metadata_unset()),
             HarnessOutputMessage::deliver_live(UnixMicros::new(5), metadata_unset()),
-            HarnessOutputMessage::deliver_live(UnixMicros::new(6), session_agent_loaded()),
-            HarnessOutputMessage::deliver_live(UnixMicros::new(7), session_agent_unloaded()),
-            HarnessOutputMessage::deliver_live(UnixMicros::new(8), tool_cancel_request()),
-            HarnessOutputMessage::deliver_live(UnixMicros::new(9), start_agent_accepted()),
-            HarnessOutputMessage::deliver_live(UnixMicros::new(10), start_agent_result()),
-            HarnessOutputMessage::deliver_live(UnixMicros::new(11), ui_shell_command()),
+            HarnessOutputMessage::deliver_replay(UnixMicros::new(6), session_agent_loaded()),
+            HarnessOutputMessage::deliver_live(UnixMicros::new(7), session_agent_loaded()),
+            HarnessOutputMessage::deliver_replay(UnixMicros::new(8), session_agent_unloaded()),
+            HarnessOutputMessage::deliver_live(UnixMicros::new(9), session_agent_unloaded()),
+            HarnessOutputMessage::deliver_live(UnixMicros::new(10), tool_cancel_request()),
+            HarnessOutputMessage::deliver_live(UnixMicros::new(11), start_agent_accepted()),
+            HarnessOutputMessage::deliver_live(UnixMicros::new(12), start_agent_result()),
+            HarnessOutputMessage::deliver_live(UnixMicros::new(13), ui_shell_command()),
         ],
     );
 
@@ -1330,7 +1357,7 @@ fn shell_runtime_event_payloads_subscribe_and_dispatch_with_replay_policy() {
         })
         .expect("subscribe frame");
     assert_eq!(
-        subscribe.selectors,
+        subscribe.live_selectors,
         [
             EventSelector::Exact(tau_proto::EventName::AGENT_STARTED),
             EventSelector::Exact(tau_proto::EventName::AGENT_METADATA_SET),
@@ -1343,15 +1370,24 @@ fn shell_runtime_event_payloads_subscribe_and_dispatch_with_replay_policy() {
             EventSelector::Exact(tau_proto::EventName::UI_SHELL_COMMAND),
         ]
     );
+    assert_eq!(
+        subscribe.historical_selectors,
+        [
+            EventSelector::Exact(tau_proto::EventName::AGENT_METADATA_SET),
+            EventSelector::Exact(tau_proto::EventName::SESSION_AGENT_LOADED),
+            EventSelector::Exact(tau_proto::EventName::SESSION_AGENT_UNLOADED),
+        ]
+    );
     assert_eq!(state.metadata_replay_flags, [true, false]);
     assert_eq!(
         state.seen,
         [
-            "agent_started",
             "metadata_set",
             "metadata_set",
             "metadata_unset",
             "agent_loaded",
+            "agent_loaded",
+            "agent_unloaded",
             "agent_unloaded",
             "tool_cancel_request",
             "start_agent_accepted",
@@ -2490,7 +2526,7 @@ fn raw_event_handler_matches_prefix_and_skips_replay() {
     assert!(matches!(
         &frames[1],
         HarnessInputMessage::Subscribe(sub)
-            if sub.selectors == [EventSelector::Prefix("harness.".to_owned())]
+            if sub.live_selectors == [EventSelector::Prefix("harness.".to_owned())]
     ));
 }
 
@@ -2585,7 +2621,9 @@ fn empty_subscribe_frame_remains_available() {
 
     let (_, frames) = run_messages(EmptySubscribe, (), &[]);
     assert!(matches!(frames[0], HarnessInputMessage::Hello(_)));
-    assert!(matches!(&frames[1], HarnessInputMessage::Subscribe(sub) if sub.selectors.is_empty()));
+    assert!(
+        matches!(&frames[1], HarnessInputMessage::Subscribe(sub) if sub.live_selectors.is_empty())
+    );
     assert!(matches!(frames[2], HarnessInputMessage::Ready(_)));
     assert_eq!(frames.len(), 3);
 }

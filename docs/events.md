@@ -87,10 +87,25 @@ membership journal, not a transcript.
   loaded into this session. Like load facts, this is durable for durable agents
   and memory-only for ephemeral agents. Interceptors cannot drop or rewrite this
   immutable membership fact.
+- **`agent.replay_complete`** / **`session.replay_complete`** — Transient,
+  harness-owned catch-up boundaries. They are delivered as non-replay frames
+  after matching historical facts and before buffered live frames for that
+  connection.
 
 Historical load/unload facts are not transcript history. On reconnect/resume the
 harness announces the current loaded-agent snapshot, then replays each loaded
 agent log once.
+
+When an existing stored agent is loaded into an already-live session,
+subscribers may see the live `session.agent_loaded` membership fact before the
+per-agent catch-up stream. Restore-aware consumers must treat the matching
+replay-marked metadata/history and following non-replay `agent.replay_complete`
+boundary as the point at which restored agent state is complete; they must not
+publish default/stale agent context merely because the live membership fact
+arrived first.
+If an `agent.replay_complete` boundary carries `error`, restore-aware consumers
+must fail closed for that agent: do not synthesize default restored state or mark
+agent context ready from an incomplete replay.
 
 ## Agent transcript and prompt lifecycle
 
@@ -210,12 +225,16 @@ the agent requests calls, and the harness orchestrates dispatch.
   with any known live, completed, or durable transcript tool call are refused
   with `harness.notice` only, not a call-id-keyed terminal event. Transcript
   tool-call truth comes from the provider response's `ContextItem::ToolCall`,
-  not this routing event.
+  not this routing event. The event is persisted in the session restore log,
+  not the agent transcript log, so restore handlers can correlate execution
+  state without re-running live tool execution.
 - **`tool.started`** *(harness)* — The harness accepted and routed a
   tool request. This runtime broadcast is the signal that the selected tool
   provider should start the call, and that UIs can show a generic pending tool
   line. It intentionally carries no provider-owned display formatting; the tool
-  provider owns argument parsing and presentation.
+  provider owns argument parsing and presentation. The event is persisted in the
+  session restore log, not the agent transcript log; live tool execution
+  handlers must not run for replayed deliveries.
 - **`tool.rejected`** *(harness)* — The harness rejected a tool request
   before any tool provider was asked to run it. UIs can display this as a tool
   call rejection.

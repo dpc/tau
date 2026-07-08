@@ -149,7 +149,12 @@ impl TestMessage {
     fn into_input_message(self) -> HarnessInputMessage {
         match self {
             Self::Hello(message) => HarnessInputMessage::Hello(message),
-            Self::Subscribe(message) => HarnessInputMessage::Subscribe(message),
+            Self::Subscribe(mut message) => {
+                if message.historical_selectors.is_empty() {
+                    message.historical_selectors = message.live_selectors.clone();
+                }
+                HarnessInputMessage::Subscribe(message)
+            }
             Self::Intercept(message) => HarnessInputMessage::Intercept(message),
             Self::Ready(message) => HarnessInputMessage::Ready(message),
             Self::Disconnect(message) => HarnessInputMessage::Disconnect(message),

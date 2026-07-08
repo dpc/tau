@@ -1381,7 +1381,8 @@ fn delayed_skill_runner(
     writer
         .write_message(&tau_proto::HarnessInputMessage::Subscribe(
             tau_proto::Subscribe {
-                selectors: vec![tau_proto::EventSelector::Exact(
+                historical_selectors: Vec::new(),
+                live_selectors: vec![tau_proto::EventSelector::Exact(
                     tau_proto::EventName::SESSION_STARTED,
                 )],
             },
