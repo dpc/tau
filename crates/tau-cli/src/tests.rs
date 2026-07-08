@@ -1201,6 +1201,63 @@ fn replayed_durable_first_user_prompt_selects_live_agent() {
     assert!(vt.screen_contains(80, "hello"));
 }
 
+/// Timer-created internal prompt submissions render a visible wakeup marker so
+/// the following response is attributable to the timer, not an invisible
+/// prompt.
+#[test]
+fn timer_wakeup_prompt_submitted_renders_visible_marker() {
+    let (_term, handle, vt) = setup(100, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        cli_test_theme(),
+    );
+
+    renderer.handle(&Event::SessionStarted(SessionStarted {
+        session_id: "s1".into(),
+        reason: SessionStartReason::Initial,
+    }));
+    renderer.handle(&Event::AgentPromptSubmitted(AgentPromptSubmitted {
+        agent_id: agent_id("engineer_abc12345"),
+        text: "Timer `wake` fired: stand up".to_owned(),
+        message_class: tau_proto::PromptMessageClass::Internal,
+        originator: tau_proto::PromptOriginator::User,
+        display_name: None,
+        ctx_id: Some("timer:wake:1".to_owned()),
+    }));
+    sync(&handle);
+
+    assert!(vt.screen_contains(100, "Timer `wake` woke this agent: stand up"));
+    assert!(!vt.screen_contains(100, "woke this agent: Timer `wake` fired"));
+}
+
+/// Timer wakeups that were queued during a busy turn render the same marker
+/// when folded as steered prompts.
+#[test]
+fn timer_wakeup_prompt_steered_renders_visible_marker() {
+    let (_term, handle, vt) = setup(100, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        cli_test_theme(),
+    );
+
+    renderer.handle(&Event::SessionStarted(SessionStarted {
+        session_id: "s1".into(),
+        reason: SessionStartReason::Initial,
+    }));
+    renderer.handle(&Event::AgentPromptSteered(AgentPromptSteered {
+        agent_id: agent_id("engineer_abc12345"),
+        text: "Timer `wake` fired: stand up".to_owned(),
+        message_class: tau_proto::PromptMessageClass::Internal,
+        ctx_id: Some("timer:wake:2".to_owned()),
+    }));
+    sync(&handle);
+
+    assert!(vt.screen_contains(100, "Timer `wake` woke this agent: stand up"));
+    assert!(!vt.screen_contains(100, "woke this agent: Timer `wake` fired"));
+}
+
 #[test]
 fn role_cycling_only_enabled_without_selected_agent() {
     // Regression: role cycling changes the role used for the next new agent,

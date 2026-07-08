@@ -35,6 +35,29 @@ pub(crate) const UI_IO_MEDIUM_BYTES_PER_SEC: u64 = 10 * 1024;
 const UI_IO_HIGH_BYTES_PER_SEC: u64 = 100 * 1024;
 
 const AGENT_START_TOOL_NAME: &str = "agent_start";
+const TIMER_WAKEUP_CTX_PREFIX: &str = "timer:";
+
+fn timer_wakeup_ctx(ctx_id: Option<&str>) -> Option<(&str, &str)> {
+    let rest = ctx_id?.strip_prefix(TIMER_WAKEUP_CTX_PREFIX)?;
+    rest.rsplit_once(':')
+}
+
+fn timer_wakeup_summary(timer_id: &str, text: Option<&str>) -> String {
+    let Some(text) = text else {
+        return format!("Timer `{timer_id}` woke this agent");
+    };
+    let trimmed = text.trim();
+    let timer_prefix = format!("Timer `{timer_id}` fired:");
+    let message = trimmed
+        .strip_prefix(&timer_prefix)
+        .map(str::trim)
+        .unwrap_or(trimmed);
+    if message.is_empty() {
+        format!("Timer `{timer_id}` woke this agent")
+    } else {
+        format!("Timer `{timer_id}` woke this agent: {message}")
+    }
+}
 
 /// Rolling UI↔harness socket throughput maxima for one terminal UI.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -4126,7 +4149,32 @@ impl EventRenderer {
     }
 
     fn handle_agent_prompt_submitted(&mut self, prompt: &tau_proto::AgentPromptSubmitted) {
+        if self.handle_timer_wakeup_prompt(
+            prompt.message_class,
+            prompt.ctx_id.as_deref(),
+            Some(&prompt.text),
+        ) {
+            return;
+        }
         self.handle_submitted_user_prompt(&prompt.text, prompt.message_class);
+    }
+
+    fn handle_timer_wakeup_prompt(
+        &mut self,
+        message_class: tau_proto::PromptMessageClass,
+        ctx_id: Option<&str>,
+        text: Option<&str>,
+    ) -> bool {
+        if !message_class.is_internal() {
+            return false;
+        }
+        let Some((timer_id, _fire_count)) = timer_wakeup_ctx(ctx_id) else {
+            return false;
+        };
+        let summary = timer_wakeup_summary(timer_id, text);
+        let block = self.submitted_plain_block(tau_themes::names::SYSTEM_INFO, summary);
+        self.handle.print_output("timer-wakeup", block);
+        true
     }
 
     fn handle_submitted_user_prompt(
@@ -4201,6 +4249,13 @@ impl EventRenderer {
     }
 
     fn handle_agent_prompt_steered(&mut self, steered: &tau_proto::AgentPromptSteered) {
+        if self.handle_timer_wakeup_prompt(
+            steered.message_class,
+            steered.ctx_id.as_deref(),
+            Some(&steered.text),
+        ) {
+            return;
+        }
         if steered.message_class.is_internal() {
             return;
         }
