@@ -57,6 +57,8 @@ agents:
           effort: high
 
     manager:
+      enable_tool_groups:
+        - timer
       roles:
         micro-manager:
           enable: true

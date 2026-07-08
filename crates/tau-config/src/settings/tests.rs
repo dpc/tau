@@ -2530,6 +2530,10 @@ fn harness_built_in_roles_load_from_json_with_manager_prompt() {
             .any(|fragment| fragment.text.contains("Trust the `<instructions>`"))
     );
     let manager = &s.roles["micro-manager"];
+    assert_eq!(
+        manager.enable_tool_groups,
+        vec![tau_proto::ToolGroupName::new("timer")]
+    );
     let prompt = manager
         .prompt_fragments
         .first()
