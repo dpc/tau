@@ -2,15 +2,27 @@
 name: tau-tool-verification
 description: >
   Use this skill when asked to verify Tau harness tools or tool output behavior,
-  especially read, edit, shell, line-oriented output, truncation, metadata
+  especially read, edit, shell/shell_command, line-oriented output, truncation, metadata
   headers, UTF-8 handling, diffs, timeouts, or skill/tool conformance.
 ---
 
 # Tau Tool Verification
 
-Use when asked to verify Tau skills.
+Use when asked to verify Tau tool behavior or Tau tool-verification skills.
 
-If not explicitly stated, assume the user means `read`, `edit` and `shell` tools.
+Tau exposes different tool sets depending on configuration, provider/model
+capabilities, and extension setup. Common sets include:
+
+* ext-shell's `read`, `edit`, and `shell` tools, plus related tools such as
+  `dir_lock`;
+* provider/native tools such as `apply_patch` and `shell_command`.
+
+If not explicitly stated, start from the tools that are actually exposed in the
+current session. For older/full ext-shell sessions, the default core set is
+`read`, `edit`, and `shell`. For provider/native sessions, map the same checks to
+`shell_command` and `apply_patch` where possible, and explicitly report any
+tool-specific checks that cannot be run because the corresponding tool is not
+available.
 
 ## Goal
 
@@ -47,7 +59,7 @@ format: uid date from flags access attachments subject...
 6212 2016-04-23T17:32:52Z builds@travis-ci.org seen,redacted preview 0 Hi there, from us
 ```
 
-The `...` suffic on last field in the format is used to indicate it's a multi-word field that will extend till the end of the line.
+The `...` suffix on the last field in the format is used to indicate it is a multi-word field that extends to the end of the line.
 
 Tool implementation must take care ensuring newlines and special characters are stripped from field values, and empty values use some placeholders (e.g. `-`) to avoid breaking the meaning of each line.
 
@@ -136,21 +148,22 @@ timeout operations that take longer than timeout argument, but currently 100%
 reliable child process termination is not implemented and will require advanced
 techniques to implement in the future (e.g. cgroups).
 
-#### Shell read-only mode
+#### Shell mutation and directory-lock mode
 
-When verifying `shell`, also verify `mode: ro`. Use a fresh scratch directory
-under `/tmp`; create an input file in it; then run a `shell` command with
-`cwd` set to that directory and `mode: ro` that reads the input file and then
-tries to create or overwrite another file in the same directory, e.g.
-`cat input.txt; touch should-not-exist.txt`.
+Older Tau versions exposed explicit `shell` `mode: ro` / `mode: rw` arguments.
+Current ext-shell derives shell read/write behavior from manual `dir_lock`
+coverage, not from command-content mutation detection. A shell command is treated
+as read-only unless the caller already holds a matching manual directory update
+lock; under that same-owner manual lock it is covered as a read/write command.
+Do not expect a `mode` argument unless it is present in the live tool schema.
 
-Expected on Linux platforms that support the native mount namespace setup:
-the read succeeds, the write fails with a non-zero shell result, and the target
-file is still absent after the command. The failure should be reported as a
-normal shell command result, not a tool invocation error. If the platform or
-container policy does not support read-only bind mounts, `mode: ro` may degrade
-to a normal shell command; report that the ro-bind enforcement was unavailable
-instead of treating the shell invocation itself as broken.
+When verifying ext-shell `shell`, check both sides of that rule: shell commands
+without same-owner manual-lock coverage bypass conflicting update locks (and use
+read-only bind enforcement when available), while shell commands run by the
+owner under a matching manual `dir_lock` are covered by that lock and keep it
+active. When only provider/native `shell_command` is available, report that
+ext-shell directory-lock and historical `mode: ro` checks are not applicable to
+that tool schema.
 
 `edit` is line-oriented. Each edit entry must include `start_line`, `end_line_exclusive`, `newText`, and `context_line`; it replaces the original half-open line range `start_line..end_line_exclusive` with `newText` as whole replacement lines. Empty insertion ranges use `start_line == end_line_exclusive`; non-empty replacements cover `start_line` through `end_line_exclusive - 1`. To replace read output lines A through B, use `start_line: A` and `end_line_exclusive: B + 1`. All edit ranges use the original file numbering as if applied simultaneously, so the tool must reject overlapping ranges before changing the file. Unlike `read`, `edit` must not clip ranges: both line slots must be at most `total_lines + 1`, and `end_line_exclusive` must be at least `start_line`. When non-empty `newText` lacks a trailing line ending, `edit` normalizes it into a full line using surrounding/replaced content as needed; explicit line endings in `newText` are preserved, so mixed line endings are allowed.
 `edit` supports file creation: missing files are treated as empty, and missing parent directories are created only after the request validates. To create a file, insert with `start_line: 1`, `end_line_exclusive: 1`, and an empty `context_line`. The model-visible result should stay minimal: `edits`, `changed`, `new_max_valid_start_line`, and `total_bytes`; `new_max_valid_start_line` is after-edit state and must not be confused with original range validation.
@@ -185,9 +198,18 @@ This prompt is model-visible only if it reaches the agent before the completion 
 
 The agent can call `wait({"tool_call_id": "..."})` to collect that specific real result, or `wait({})` to wait for the first background completion in the current conversation. The no-arg form is conversation-scoped: it must not consume completions from parent, child, or sibling conversations. The tool description shown to agents often says not to call `wait` until they know the tool call has completed. This is an optimization to avoid wasting tokens: for foreground calls, the normal tool call result will arrive without an extra `wait`, and for background calls Tau will wake the agent when the completion prompt is delivered. It is not a technical requirement. The `wait` tool must work well when called for tool calls that are still running, and it must have reasonable semantics in all cases. If `wait` is used for a backgrounded call before completion, Tau suppresses that internal completion prompt while still emitting the real background result/error event. If `wait` consumes an already-completed result before its queued completion prompt is delivered to the model, Tau also suppresses/removes that prompt. If `wait({})` consumes a completion, it suppresses the normal `[tau-internal] Tool call ... is complete.` prompt for that completion and returns an `original_tool_call_id: <tool_call_id>` provider-visible header so the agent knows which background call was collected.
 
-Current background timing: most tools background after about 5 seconds, `agent_start` backgrounds instantly, and `wait` itself never backgrounds. This may change; when verifying, report if observed behavior differs.
+Current background timing: most backgroundable tools background after about 5
+seconds, and `wait` itself never backgrounds. `agent_start` currently finishes
+instantly after creating the sub-agent and returns `self_agent_id` and
+`sub_agent_id`; the sub-agent's later turns and final answers are delivered to
+the starter by `agent_watch`, which `agent_start` enables automatically. Older
+Tau versions treated `agent_start` itself as a backgrounded tool call; if you see
+that older behavior, report it as version/config-specific rather than assuming
+the current watch-based semantics are broken.
 
-Slow `agent_start` calls should include the same `duration_seconds` header semantics as `shell`: omit fast calls, include approximate whole seconds for calls that took longer than about 5 seconds, and allow internal overheads and jitter. Delegate duration measures parent-observed delegate wall-clock time, not only inner tool runtime. It includes sub-agent model latency, tool scheduling, inner background/wait turns, final response latency, and is rounded up to whole seconds. Verify this both for direct background agent_start results and for agent_start results collected through `wait`.
+Because `agent_start` now finishes instantly, slow delegate work is normally
+observed through watch notifications and the delegate's own background tool
+results, not through a slow `agent_start` result with `duration_seconds`.
 
 When asked to verify the `agent_start` tool, also verify delayed `message` delivery to a live delegated sub-agent whose own tool turn is parked behind a backgrounded tool. This is a delegate-specific regression path, not only a `message` tool test. Use a delegate prompt that first runs `sleep 30`, then after the background placeholder requests a second shell command `sleep 5`, and asks it to report to `user` if it receives a parent message. After the first shell backgrounds and the second shell request is queued, send `message` to the delegate `sub_agent_id` with a nonce. Expected: `Message sent`, the queued `sleep 5` is terminalized internally, and the delegate promptly reports receiving the nonce instead of staying stuck until `sleep 30` finishes. If event logs are available, confirm `AgentMessage`, `ToolCancelled` for the not-yet-started queued call, and a new `AgentPromptCreated` for the delegate message prompt. Treat omission of this scenario as incomplete `agent_start` verification.
 
@@ -196,16 +218,19 @@ Also verify the active-`wait` variant of the same scenario. Use a delegate promp
 Because `agent_start` enables a persistent watch, these message-delivery probes can produce later watch notifications if the child leaves an earlier background tool running. For example, after an active-`wait` interruption, the original sleep may complete later, queue a normal background-completion prompt in the child, and the child may answer something like `Received.`. That is not a duplicate watch notification by itself; it is a later child turn caused by the delayed inner completion. If the verifier no longer wants notifications from that child after the success nonce, explicitly call `agent_watch({"agent_id":"<sub_agent_id>","enable":false})`.
 
 A completed background result is consumed by the first successful `wait`. Later waits for the same id should fail with an already-consumed error. Parallel duplicate waits on the same id race; at most one should receive the result, and the rest should fail. Parallel duplicate no-arg waits in the same conversation should also fail clearly because only one waiter can consume the next completion. The exact error depends on timing: an in-progress duplicate-wait error, an already-consumed error, or another clear race-related error can be acceptable if only one wait receives the result.
-A completed background result is consumed by the first successful `wait`. Later waits for the same id should fail with an already-consumed error. Parallel duplicate waits on the same id race; at most one should receive the result, and the rest should fail. Parallel duplicate no-arg waits in the same conversation should also fail clearly because only one waiter can consume the next completion. The exact error depends on timing: an in-progress duplicate-wait error, an already-consumed error, or another clear race-related error can be acceptable if only one wait receives the result.
 
 
 ### Directory locking verification plan
 
-Use this plan when asked to verify ext-shell directory locking, `dir_lock`, or the interaction between locking, mutating shell tools, backgrounding, `cancel`, and `wait`. Directory locking is optional and advisory. It is owned by `tau-ext-shell`, not the harness or `agent_start`.
+Use this plan when asked to verify ext-shell directory locking, `dir_lock`, or the interaction between locking, filesystem mutation tools, same-owner shell coverage, backgrounding, `cancel`, and `wait`. Directory locking is optional and advisory. It is owned by `tau-ext-shell`, not the harness or `agent_start`.
 
 Create a fresh scratch tree in `/tmp`, such as `/tmp/tau-dir-lock-verification.*`, with at least these directories: `root/a`, `root/a/child`, `root/b`, and `other`. Put small files in `root/a/file.txt` and `root/b/file.txt`. Use unique nonces in file contents and messages. Never run destructive shell commands outside the scratch tree.
 
-Run the first check with default ext-shell config and confirm `dir_lock` is enabled by default. Also start a fresh Tau session with ext-shell config `dir_lock: { enable: false }` and confirm the tool is disabled and mutating tools no longer wait on directory locks. Use explicit `dir_lock: { enable: true }` only when you need to override a previously disabled test config.
+Run the first check with default ext-shell config and confirm `dir_lock` is
+disabled by default unless configuration opted in. Also start a fresh Tau session
+or configuration with `dir_lock: { enable: true }` before running the locking
+behavior checks below. When `dir_lock.enable` is false, confirm the tool is
+disabled or unavailable and mutation tools do not wait on directory locks.
 
 When locking is enabled, verify all of these behaviors:
 
@@ -216,7 +241,8 @@ When locking is enabled, verify all of these behaviors:
 * Repeated `update` by the same agent on the same canonical directory, an ancestor, or a child is an error. It should return `error: dir_lock_duplicate` with details headers including `blocking_directory`, `requested_directory`, and `lock_owner_id`, plus a short text payload in `output`. Same-agent automatic writer reentry under a manual lock should still complete, including while another same-agent mutating tool under that lock is still running.
 * Ancestor and child directories conflict both ways. Sibling directories do not conflict, even when a blocked waiter for another subtree is already queued.
 * Reads stay free: `read`, `grep`, `find`, and `ls` complete while an update lock is held.
-* Mutating tools participate when enabled: `edit`, `apply_patch`, `shell`, and `gpt_shell` wait on conflicting locks.
+* Mutating filesystem tools participate when enabled: `edit` and `apply_patch` wait on conflicting locks.
+* `shell`/`gpt_shell` do not infer read/write mode from the command text. Without same-owner manual-lock coverage they are inferred read-only and bypass conflicting update locks; with matching same-owner manual `dir_lock` coverage they run as covered read/write shell commands and keep that owner's lock active.
 * Lock waiters do not consume the ext-shell worker semaphore before their lock is available. A large number of blocked lock waiters should not prevent unrelated reads from running.
 * A mutating tool that waits more than 5s and then acquires its automatic lock reports `lock_wait_duration_seconds` in its final result or error details. Fast, unblocked, canceled, and abandoned lock paths omit it.
 * Waiting on an idle manual lock eventually returns an abandoned-lock error. It should return `error: dir_lock_abandoned` with details headers including `blocking_directory`, `lock_owner_id`, `idle_seconds`, and `held_seconds`, plus a clear text payload in `output`. Active same-owner mutating tools under the lock should prevent this abandoned-lock error.
@@ -227,7 +253,7 @@ When locking is enabled, verify all of these behaviors:
 
 #### Phase 1: basic manual lock behavior
 
-With default config or `dir_lock.enable` true, call `dir_lock update` on a relative path like `root/a/../a`. Expect success and a canonical absolute directory in the result/display. Call `dir_lock unlock` for the same path. Expect success.
+With `dir_lock.enable` true, call `dir_lock update` on a relative path like `root/a/../a`. Expect success and a canonical absolute directory in the result/display. Call `dir_lock unlock` for the same path. Expect success.
 
 Call `dir_lock update` on a missing directory and on `root/a/file.txt`. Expect tool errors. Then call `dir_lock update` twice on `root/a` from the same agent. The second update should error and mention the already-held lock. Also call `dir_lock update root/a/child` and `dir_lock update root` from that same agent while `root/a` is held; both should error. Start a delegate that tries to create `root/a/child/blocked.txt` with `edit` and reports to `user` after it succeeds. The delegate should wait. Call `dir_lock unlock` once from the original agent; the delegate should complete. A second `unlock` should error. Also verify that a different agent cannot unlock Agent A's lock without `owner_agent_id`, but can force-unlock it when `owner_agent_id` is Agent A.
 
@@ -235,19 +261,29 @@ Also verify same-owner reentry: while the original agent holds `root/a`, run a s
 
 #### Phase 2: reads remain unblocked
 
-Hold a manual lock on `root/a`. While it is held, run `read root/a/file.txt`, `grep` against `root/a`, `find` under `root/a`, and `ls root/a`. These should complete promptly and should not wait for unlock. Then start a conflicting `shell` with `cwd: root/a` and command `python3 -c 'open("shell-waited.txt", "w").write("locked")'`. It should wait. Leave it blocked for more than 5s, then unlock `root/a`; the shell should run, create the file, and include `lock_wait_duration_seconds` in the final result.
-
-If the `shell` waits long enough to background, call `wait` after unlocking and confirm the real shell result is returned normally with the same `lock_wait_duration_seconds` header.
+Hold a manual lock on `root/a`. While it is held, run `read root/a/file.txt`,
+`grep` against `root/a`, `find` under `root/a`, and `ls root/a`. These should
+complete promptly and should not wait for unlock. From a different agent, also
+run a `shell`/`gpt_shell` command with `cwd: root/a` that would write a sentinel
+file. Current shell semantics infer this as read-only because the caller does
+not hold a matching manual lock, so it should not wait on Agent A's lock. If
+`enforce_ro_bind` is enabled and native read-only isolation is available, the
+write should fail as a normal shell result and the sentinel should remain
+absent. If `enforce_ro_bind` is enabled but native isolation is unsupported or
+cannot be installed, the shell call should fail or start-error rather than
+silently degrading to read/write. Only when `enforce_ro_bind` is disabled may
+the command write despite the advisory lock. Report that no-coverage behavior as
+the expected shell bypass caveat, not as an update-lock wait failure.
 
 #### Phase 3: automatic lock scopes
 
-For each mutating tool, hold the relevant manual lock from one agent and run the tool from a different delegate. Confirm it waits until the lock is released:
+For each automatically locked filesystem mutation tool, hold the relevant manual lock from one agent and run the tool from a different delegate. Confirm it waits until the lock is released. Verify shell separately because it uses same-owner manual-lock coverage rather than command-text mutation inference:
 
 * `edit`: lock the target file parent. Existing final symlinks should be followed to the real edited file. Missing-parent creates like `root/a/new/dir/file.txt` should wait on the deepest existing ancestor and then create parents after unlock.
 * `apply_patch`: use a patch that touches one file under `root/a` and one under `root/b`. If `root/a` is locked, neither change should be applied before the lock is granted. After unlock, both changes should appear together from the patch invocation. Separately, verify the patch safety cases from the tool-specific section: existing-file `Add File` and move-to-existing-destination failures preserve all affected files, while successful multi-file patches produce structured UI diffs for every changed UTF-8 file.
-* `shell` and `gpt_shell`: lock the canonical `cwd`. A command with `cwd: root/a` should wait on a `root/a` lock.
+* `shell` and `gpt_shell`: verify the current manual-lock coverage rule. Without a matching same-owner manual lock, commands are inferred read-only and should bypass another agent's update lock. With a matching same-owner manual lock on the canonical `cwd` or an ancestor, shell commands are covered by that owner's lock and should keep the lock active for abandonment/liveness purposes.
 
-For `shell`, also verify the advisory limitation: a command with `cwd: other` that writes to an absolute path under `root/a` is not expected to wait on the `root/a` lock. Report this as expected advisory behavior, not a lock failure.
+For `shell`, also verify the advisory limitation: a command with `cwd: other` that writes to an absolute path under `root/a` is not protected by a `root/a` manual lock unless the caller holds matching manual-lock coverage for the relevant command scope. Report this as expected advisory behavior, not a lock failure.
 
 #### Phase 4: ancestor, child, and sibling conflict matrix
 
@@ -269,7 +305,13 @@ Also test the reverse overlap: Agent A holds `root/a/child`, Agent B waits on `r
 
 #### Phase 6: cancellation and background behavior
 
-Hold `root/a` from one agent. Start a delegate or shell call whose mutating `shell` invocation uses `cwd: root/a` and would create a sentinel file. Let it wait long enough to show the waiting directory in the UI; if it backgrounds, record the placeholder ID. Call `cancel` on the waiting shell tool call ID. Expected: cancel is accepted, the waiting lock request is removed, `wait` returns a canceled result if the call backgrounded, and the sentinel file is still absent after the lock is later released.
+Hold `root/a` from one agent. Start a delegate or tool call using `edit` or
+`apply_patch` that would create a sentinel file under `root/a`. Let it wait long
+enough to show the waiting directory in the UI; if it backgrounds, record the
+placeholder ID. Call `cancel` on the waiting tool call ID when the harness
+exposes it as cancellable. Expected: cancel is accepted, the waiting lock request
+is removed, `wait` returns a canceled result if the call backgrounded, and the
+sentinel file is still absent after the lock is later released.
 
 Do not count cancellation of `edit` as required unless the harness exposes those call IDs as cancellable in that run. The important lock-specific behavior is that a waiting lock request can be canceled and does not run later after unlock.
 
@@ -287,11 +329,11 @@ Run this phase only when specifically testing stale-lock behavior; it intentiona
 
 Report concise but complete findings:
 
-* Whether `dir_lock` was enabled by default and could be disabled by config.
+* Whether `dir_lock` was disabled by default unless opted in, and whether enabling/disabling it by config behaved as expected.
 * Exact outputs or errors for canonicalization, missing directory, non-directory, same-agent double update, double unlock, wrong-owner unlock, and `owner_agent_id` force-unlock.
 * Whether same-agent automatic writer reentry still worked while manual double updates errored, including reentry while a same-agent shell under the manual lock was still running.
 * Whether reads stayed unblocked.
-* For each mutating tool, whether it waited on the expected directory and completed only after unlock.
+* For each automatically locked filesystem mutation tool, whether it waited on the expected directory and completed only after unlock; for `shell`/`gpt_shell`, whether no-coverage commands bypassed update locks and same-owner manual-lock-covered commands kept the lock active.
 * Whether waiting UI/status showed the blocked directory, whether `dir_lock` failures showed the target directory, and whether auto-background plus `wait` behaved normally.
 * Whether slow acquired lock waits reported `lock_wait_duration_seconds`, and whether quick/no-wait, canceled, and abandoned paths omitted it.
 * Whether `/shell-dir-force-unlock DIRECTORY` was available, released overlapping manual locks, reported owner details, and left automatic locks alone.
@@ -304,7 +346,17 @@ Report concise but complete findings:
 
 ### Background tool `cancel`
 
-`cancel` requires `tool_call_id` and never backgrounds. It supports running `agent_start` calls and should support running `shell` calls. A successful cancel request returns `Tool cancellation requested`, emits a harness notice event containing `tool call cancellation request`, and targets only the requested tool call. Cancellation is async and best effort: the success result only means Tau accepted the request, not that the child process or agent has already stopped. A canceled delegate should complete as a background error so `wait` can observe the cancellation instead of hanging. A canceled shell call should also complete through `wait`, include timing headers if it ran longer than about 5 seconds, and must not keep running to normal `status: 0` completion.
+`cancel` requires `tool_call_id` and never backgrounds. It supports running
+backgrounded tool calls such as slow shell commands. Older Tau versions also
+supported canceling a backgrounded `agent_start` call; current `agent_start`
+finishes instantly and therefore usually does not expose a cancellable
+`agent_start` tool-call id. A successful cancel request returns `Tool
+cancellation requested`, emits a harness notice event containing `tool call
+cancellation request`, and targets only the requested tool call. Cancellation is
+async and best effort: the success result only means Tau accepted the request,
+not that the child process or agent has already stopped. A canceled shell call
+should complete through `wait`, include timing headers if it ran longer than
+about 5 seconds, and must not keep running to normal `status: 0` completion.
 
 Calling `cancel` for an unknown, completed, or unsupported tool call should return a tool error. Unknown ids should be distinguished from already-completed ids. Calling it twice for the same target should return a tool error like `Tool call already canceled`.
 
@@ -313,7 +365,11 @@ When verifying this behavior, check that the synthetic foreground result is visi
 
 ### Cancel tool verification plan
 
-Use this plan when asked to verify the `cancel` tool, especially around background `agent_start` calls, `wait`, duplicate requests, and leaked work from a canceled sub-agent. The goal is to prove that cancel targets exactly one running agent_start call, reports success or errors clearly, and leaves no orphaned tool completions behind.
+Use this plan when asked to verify the `cancel` tool, especially around
+background shell calls, `wait`, duplicate requests, and any still-supported
+background `agent_start` behavior. Current `agent_start` normally finishes
+instantly, so delegate-cancel phases are conditional: run them only if the live
+`agent_start` result exposes a background tool-call id.
 
 Do not rely on memory. Give every sub-agent a self-contained prompt. A delegated agent starts with a clean context and does not know this skill, the parent conversation, or the IDs of other agents unless you include them in its prompt or later messages.
 
@@ -323,23 +379,26 @@ Create a scratch directory in `/tmp`, such as `/tmp/tau-cancel-verification.*`, 
 
 Record all of these observations:
 
-* The agent_start placeholder includes `tau_internal: true`, `self_agent_id`, `sub_agent_id`, and the background agent_start tool call ID.
-* `cancel` must be called with the agent_start `tool_call_id`, not the `sub_agent_id`.
+* If `agent_start` backgrounds in the live session, its placeholder includes `tau_internal: true`, `self_agent_id`, `sub_agent_id`, and the background agent_start tool call ID.
+* If canceling `agent_start` is supported, `cancel` must be called with the agent_start `tool_call_id`, not the `sub_agent_id`.
 * A successful cancel returns exactly `Tool cancellation requested` and does not background.
 * The harness emits a `harness.notice` event containing `tool call cancellation request` if event logs are available.
-* The canceled delegate produces a background error that `wait` can collect.
+* If delegate cancellation is supported, the canceled delegate produces a background error that `wait` can collect.
 * `wait({"tool_call_id": id})` returns the canceled result once and only once.
 * `wait({})` can collect a canceled completion and includes `original_tool_call_id`.
 * Waiting before the delegate has completed suppresses the later model-visible completion prompt. Waiting after a completion prompt was already delivered is still valid, but does not retroactively suppress that prompt.
 * Duplicate cancel requests race cleanly: one succeeds, later or parallel ones fail with `Tool call already canceled` or another clear duplicate error.
-* Canceling an unknown id, completed agent_start id, unsupported running tool id, empty id, or `sub_agent_id` returns a tool error.
-* Canceling one delegate does not cancel a sibling delegate.
+* Canceling an unknown id, unsupported running tool id, empty id, or `sub_agent_id` returns a tool error. If legacy/background `agent_start` is present, a completed agent_start id also returns a clear already-done error.
+* If delegate cancellation is supported, canceling one delegate does not cancel a sibling delegate.
 * Canceling a long-running shell call works and does not let the command complete normally.
-* Slow canceled delegates and shell calls include `duration_seconds` after about 5 seconds. A few seconds of timing overhead is normal and not worth reporting by itself.
-* A canceled delegate does not leak completions from its own in-flight or backgrounded inner tool calls into the parent conversation.
+* Slow canceled shell calls, and slow canceled delegates when supported, include `duration_seconds` after about 5 seconds. A few seconds of timing overhead is normal and not worth reporting by itself.
+* If delegate cancellation is supported, a canceled delegate does not leak completions from its own in-flight or backgrounded inner tool calls into the parent conversation.
 * The user-visible UI does not show hidden internal completion prompts unless the current UI settings intentionally expose them.
 
-#### Phase 1: running delegate happy path
+#### Phase 1: running delegate happy path (legacy/conditional)
+
+Run this phase only when `agent_start` returns a background placeholder with a
+tool-call id. In current watch-based `agent_start` sessions it is not applicable.
 
 Start a shared sub-agent with `agent_start` with this prompt:
 
@@ -354,7 +413,9 @@ Procedure:
 Do not do anything else.
 ```
 
-After the placeholder result returns, record `self_agent_id`, `sub_agent_id`, and the agent_start tool call ID. Call `cancel` with that agent_start tool call ID. Expect the foreground result to be exactly:
+After the legacy placeholder result returns, record `self_agent_id`,
+`sub_agent_id`, and the agent_start tool call ID. Call `cancel` with that
+agent_start tool call ID. Expect the foreground result to be exactly:
 
 ```text
 Tool cancellation requested
@@ -370,7 +431,9 @@ sub_agent_id: ...
 
 Call `wait` for the same ID again. Expect an already-consumed error. Call `cancel` for the same ID again. Expect `Tool call already canceled`.
 
-#### Phase 2: no-arg wait and wait suppression
+#### Phase 2: no-arg wait and wait suppression (legacy/conditional)
+
+Run this phase only when `agent_start` returns a background tool-call id.
 
 Start another long-sleeping sub-agent with `agent_start`. Cancel it, then call `wait({})`. Expect the canceled error and an `original_tool_call_id` header matching the agent_start call ID.
 
@@ -382,17 +445,21 @@ Verify each error case independently:
 
 * `cancel({"tool_call_id": ""})` returns `` `tool_call_id` must not be empty ``.
 * A clearly unknown call ID returns `Unknown tool call id` and echoes `tool_call_id`.
-* A completed agent_start ID returns `Tool call is already done`.
+* If legacy/background `agent_start` is present, a completed agent_start ID returns `Tool call is already done`.
 * A `sub_agent_id` returns `Unknown tool call id`; this proves the tool wants the agent_start call ID.
-* Two parallel `cancel` calls for the same live delegate produce one success and one duplicate-cancel error.
+* If legacy/background `agent_start` is present, two parallel `cancel` calls for the same live delegate produce one success and one duplicate-cancel error.
 
-For the completed-agent_start case, spawn a sub-agent with `agent_start` that immediately returns:
+For the completed-agent_start case, run this only when legacy/background
+`agent_start` ids are exposed. Spawn a sub-agent with `agent_start` that
+immediately returns:
 
 ```text
 You are a Tau cancel-tool verification sub-agent. Return immediately with exactly: `FINAL cancel-completed-probe normal completion`.
 ```
 
-Wait until the completion prompt arrives, then try to cancel it. After that, call `wait` and verify the normal final answer is still available once.
+Wait until the completion prompt arrives, then try to cancel the legacy
+background `agent_start` id. After that, call `wait` and verify the normal final
+answer is still available once.
 
 #### Phase 4: running shell cancellation
 
@@ -400,7 +467,9 @@ Start a shell command long enough to background, such as `sleep 20`. When the sh
 
 Then call `wait` for the shell call. Expect a canceled or terminated result, not a normal `status: 0` completion. If the command ran longer than about 5 seconds, verify the result includes a `duration_seconds` header. If `cancel` rejects the shell call as not cancellable, or if `wait` later returns normal `status: 0`, record this as a discrepancy because shell cancellation is expected to work.
 
-#### Phase 5: target isolation
+#### Phase 5: target isolation (legacy/conditional)
+
+Run this phase only when `agent_start` returns background tool-call ids.
 
 Start two sub-agents with `agent_start` in parallel. The target should sleep for a long time. The survivor should sleep briefly and return `FINAL cancel-survivor unaffected`.
 
@@ -411,13 +480,18 @@ Cancel only the target delegate. Then wait for both IDs. Expect:
 
 Any sibling cancellation, missing survivor result, or cross-talk between IDs is a bug.
 
-#### Phase 6: slow cancellation and duration
+#### Phase 6: slow delegate cancellation and duration (legacy/conditional)
+
+Run this phase only when `agent_start` returns a background tool-call id.
 
 Start a long-sleeping sub-agent with `agent_start`. Let it run long enough to cross the delegate duration threshold, usually about 6 seconds. Cancel it and wait for the result. Expect the canceled agent_start result to include `duration_seconds` with an approximate whole-second value.
 
 Do not require an exact duration. Internal overhead and scheduling can add a few seconds of jitter; do not report small delays by themselves.
 
-#### Phase 7: nested and inner-tool leak check
+#### Phase 7: nested and inner-tool leak check (legacy/conditional)
+
+Run this phase only when delegate cancellation is supported by a background
+`agent_start` tool-call id.
 
 This phase is important. A canceled delegate can have its own foreground or background tool call in flight. Canceling the delegate must not leave an orphaned inner tool completion that later wakes the parent conversation.
 
@@ -452,13 +526,13 @@ If you have direct access to harness event logs, verify:
 
 Report concise but complete findings:
 
-* List each tested route and whether it passed: running delegate, no-arg wait, wait suppression, duplicate cancel, unknown id, empty id, completed delegate, shell cancellation, unsupported non-shell tool, `sub_agent_id`, sibling isolation, slow duration, and inner-tool leak.
+* List each tested route and whether it passed: shell cancellation, unknown id, empty id, unsupported non-shell tool, and `sub_agent_id`; when legacy/background `agent_start` ids are available, also report running delegate, no-arg wait, wait suppression, duplicate cancel, completed delegate, sibling isolation, slow delegate duration, and inner-tool leak.
 * Include exact unexpected errors or output.
 * Mention any timing surprises, missed completion prompts, duplicate prompts, leaked inner completions, or ordering uncertainty.
 * Confirm the `cancel` success output is only `Tool cancellation requested`; it is an async, best-effort request, not a delivery receipt for child cleanup.
-* Include whether errors distinguish completed delegates from unknown ids.
-* Include whether the `agent_start` placeholder made the target ID clear enough, and whether `self_agent_id` and `sub_agent_id` were present without redundant aliases.
-* Include whether slow canceled delegates reported `duration_seconds`.
+* When legacy/background `agent_start` ids are available, include whether errors distinguish completed delegates from unknown ids.
+* Include whether current `agent_start` results make `self_agent_id` and `sub_agent_id` clear enough without redundant aliases; when legacy/background `agent_start` ids are available, also include whether the placeholder made the cancellable target ID clear enough.
+* When legacy/background `agent_start` ids are available, include whether slow canceled delegates reported `duration_seconds`.
 * Include whether the UI hid completion prompts that should be hidden, or whether that could not be directly verified.
 
 
@@ -485,7 +559,7 @@ Record all of these observations:
 * Error for an unknown recipient ID.
 * Error for a completed sub-agent recipient ID.
 * Error for an empty message.
-* `agent_start` and `wait` behavior around long-running sub-agents, including `duration_seconds` headers for slow delegates.
+* `agent_start`, `agent_watch`, and `wait` behavior around long-running sub-agents; in current Tau, sub-agent responses arrive by watch notifications rather than slow `agent_start` results.
 
 #### Phase 1: spawn two peer agents and use `user` for live reports
 
@@ -516,7 +590,10 @@ Procedure:
 You are expected to receive messages from the parent and possibly from Agent B. Be precise and do not invent messages.
 ```
 
-After the `agent_start` placeholder results return, note the caller `self_agent_id`, each `sub_agent_id`, and both agent_start tool call IDs. Use `sub_agent_id` as the message recipient. Send the first batch of messages in parallel:
+After the `agent_start` results return, note the caller `self_agent_id` and each
+`sub_agent_id`. In legacy/background `agent_start` sessions, also note any
+returned agent_start tool-call ids. Use `sub_agent_id` as the message recipient.
+Send the first batch of messages in parallel:
 
 ```text
 To Agent A:
@@ -550,7 +627,7 @@ Also send one message to a clearly invalid recipient such as `engineer_does_not_
 
 Wait for both delegates. In their final logs, verify that:
 
-* The agent_start placeholder and final result expose `self_agent_id` and `sub_agent_id` without redundant aliases.
+* The agent_start result exposes `self_agent_id` and `sub_agent_id` without redundant aliases.
 * Each agent saw the direct main-agent messages addressed to it.
 * Each agent saw the peer message from the other agent.
 * Each `COMMAND: SEND_PEER` caused exactly one peer `message` call with result `Message sent`.
@@ -578,7 +655,7 @@ Procedure:
 Do not invent messages. Do not finish before checking for the parent message.
 ```
 
-After the agent_start placeholder returns, wait until the delegate has had enough time for the first `sleep 30` to background and for the second `sleep 5` request to be queued. In normal UI output this often looks like delegate progress with a running/backgrounded shell call and no response from the second shell yet.
+After the `agent_start` result returns, wait until the delegate has had enough time for the first `sleep 30` to background and for the second `sleep 5` request to be queued. In normal UI output this often looks like delegate progress with a running/backgrounded shell call and no response from the second shell yet.
 
 Send a message to the delegate `sub_agent_id`:
 
@@ -724,7 +801,7 @@ Record all of these observations:
 * Unknown, empty, or self `agent_id` values fail clearly. Stopped but known agents can still be watched or unwatched.
 * Mid-turn tool-call responses do not notify early; notifications should correspond to final response semantics.
 * Prompts delivered through the `message` tool do not produce watch-prompt notifications; they remain ordinary explicit-message deliveries to the watched agent.
-* If a watched sub-agent errors or is canceled and the starter receives the watch message, the `agent_start` tool error may be the generic watch-delivered error. If the starter disabled watch or delivery failed, the original error, such as `Tool call canceled`, must remain visible in the tool error.
+* If a watched sub-agent errors, the starter should still receive a useful watch/error notification. In legacy/background `agent_start` sessions where the agent_start call itself is cancellable, cancellation should still report a useful error.
 
 #### Suggested procedure
 
@@ -736,7 +813,7 @@ Record all of these observations:
 6. Exercise validation: watch self, watch an empty id, watch an unknown id, and watch a stopped completed sub-agent. Unknown, empty, and self ids should error; the stopped but known sub-agent should be accepted. Record exact tool results or errors.
 7. Deliver a real user prompt to a watched agent, or inspect event logs from a test that does so, and confirm the watcher receives exactly the “Watched agent <id> received a user prompt” wrapper with a `<prompt>` block.
 8. Deliver an internal prompt to a watched agent if you can do so safely, or inspect event logs around a watched agent's background tool completion. Confirm no watch prompt notification is delivered for `[tau-internal] Tool call ... is complete.` or similar internal/steering text. If the watched agent later responds after processing that internal prompt, record that later response as a separate final-response notification.
-9. Cancel a watched long-running `agent_start`. Confirm cancellation still reports a useful error. If watch delivery reached the starter, generic watch-delivered wording is acceptable; otherwise the original `Tool call canceled` must be preserved.
+9. In current watch-based sessions, verify an erroring watched sub-agent reports a useful watch/error notification. If legacy/background `agent_start` cancellation is available, cancel a watched long-running `agent_start` and confirm cancellation still reports a useful error; if watch delivery reached the starter, generic watch-delivered wording is acceptable, otherwise the original `Tool call canceled` must be preserved.
 
 #### Reporting format for `agent_watch` verification
 
@@ -744,7 +821,7 @@ Report concise but complete findings:
 
 * List each tested route and whether it passed: auto-watch, final response wrapper, user-prompt wrapper, internal/tool-completion non-forwarding, disable, re-enable, validation errors, cancellation/error fallback, and no duplicated `agent_start` output.
 * Include exact notification text, tool results, and unexpected errors. Call out any watch notification that is formatted like an explicit `message` tool delivery.
-* Mention duplicate notifications, missed notifications, premature mid-turn notifications, or unclear sender/recipient IDs. If a sub-agent was instructed to both `message` the user and final-answer with the same text, record those as two expected delivery paths rather than an `agent_watch` duplicate. If the watching agent repeats a received `[tau-internal]` notification in its own commentary/final response, record that as model echo unless event logs show multiple received deliveries. If a watched child produces a later response after an unfinished background tool completes, record it as a later child turn unless the same response event was delivered more than once.
+* Mention duplicate notifications, missed notifications, premature mid-turn notifications, duplicate UI/status rows for the same watched agent, or unclear sender/recipient IDs. If a sub-agent was instructed to both `message` the user and final-answer with the same text, record those as two expected delivery paths rather than an `agent_watch` duplicate. If the watching agent repeats a received `[tau-internal]` notification in its own commentary/final response, record that as model echo unless event logs show multiple received deliveries. If a watched child produces a later response after an unfinished background tool completes, record it as a later child turn unless the same response event was delivered more than once.
 * Include whether `wait` was interrupted by a watch notification while waiting; this is expected if it reports that new input is queued.
 * Include whether `self_agent_id` and `sub_agent_id` made the watcher and watched IDs clear enough.
 
