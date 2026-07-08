@@ -561,14 +561,16 @@ fn recv_next(runtime: &mut ManualExtensionRuntime<TimerRuntime>) -> ClientResult
 
 fn handle_timer_tool(cx: ToolContext<'_, TimerRuntime>) -> ClientResult<()> {
     let now = UnixMicros::now();
-    match cx.state.handle_live_tool(cx.invoke, now) {
+    let result = cx.state.handle_live_tool(cx.invoke, now);
+    let display_args = timer_display_args(&cx.invoke.arguments, cx.invoke.call_id.as_str());
+    match result {
         Ok(result) => cx.emit(Event::ToolResult(ToolResult {
             call_id: cx.invoke.call_id.clone(),
             tool_name: cx.invoke.tool_name.clone(),
             tool_type: ToolType::Function,
             result,
             kind: ToolResultKind::Final,
-            display: Some(ok_display()),
+            display: Some(ok_display(display_args)),
             originator: cx.invoke.originator.clone(),
         })),
         Err(message) => cx.emit(Event::ToolError(ToolError {
@@ -577,7 +579,7 @@ fn handle_timer_tool(cx: ToolContext<'_, TimerRuntime>) -> ClientResult<()> {
             tool_type: ToolType::Function,
             message,
             details: None,
-            display: Some(error_display()),
+            display: Some(error_display(display_args)),
             originator: cx.invoke.originator.clone(),
         })),
     }
@@ -660,18 +662,94 @@ fn handle_session_agent_unloaded(
     Ok(())
 }
 
-fn ok_display() -> ToolUseState {
+fn timer_display_args(arguments: &CborValue, call_id: &str) -> String {
+    match parse_action(arguments, call_id) {
+        Ok(action) => timer_action_display_args(&action),
+        Err(_) => fallback_timer_display_args(arguments),
+    }
+}
+
+fn timer_action_display_args(action: &TimerAction) -> String {
+    match action {
+        TimerAction::Schedule(args) => schedule_display_args(
+            Some(args.timer_id.as_str()),
+            Some(args.delay_seconds),
+            args.interval_seconds,
+        ),
+        TimerAction::Cancel { timer_id } => format!("cancel {timer_id}"),
+        TimerAction::List => "list".to_owned(),
+    }
+}
+
+fn fallback_timer_display_args(arguments: &CborValue) -> String {
+    let Some(action) = tau_proto::cbor_text_field(arguments, "action") else {
+        return String::new();
+    };
+    match action.as_str() {
+        "schedule" => schedule_display_args(
+            sanitized_display_timer_id(arguments).as_deref(),
+            display_seconds_field(arguments, "delay_seconds"),
+            display_seconds_field(arguments, "interval_seconds"),
+        ),
+        "cancel" => sanitized_display_timer_id(arguments)
+            .map(|timer_id| format!("cancel {timer_id}"))
+            .unwrap_or_else(|| "cancel".to_owned()),
+        "list" => "list".to_owned(),
+        _ => String::new(),
+    }
+}
+
+fn schedule_display_args(
+    timer_id: Option<&str>,
+    delay_seconds: Option<u64>,
+    interval_seconds: Option<u64>,
+) -> String {
+    let mut parts = vec!["schedule".to_owned()];
+    if let Some(timer_id) = timer_id {
+        parts.push(timer_id.to_owned());
+    }
+    if let Some(delay) = delay_seconds {
+        parts.push(format!("in {}", format_seconds(delay)));
+    }
+    if let Some(interval) = interval_seconds {
+        parts.push(format!("every {}", format_seconds(interval)));
+    }
+    parts.join(" ")
+}
+
+fn sanitized_display_timer_id(arguments: &CborValue) -> Option<String> {
+    let timer_id = tau_proto::cbor_text_field(arguments, "timer_id")?;
+    validate_timer_id(&timer_id).ok()
+}
+
+fn display_seconds_field(arguments: &CborValue, key: &str) -> Option<u64> {
+    let raw = tau_proto::cbor_int_field(arguments, key)?;
+    let seconds = u64::try_from(raw).ok()?;
+    (seconds <= MAX_DELAY_SECONDS).then_some(seconds)
+}
+
+fn format_seconds(seconds: u64) -> String {
+    if seconds != 0 && seconds.is_multiple_of(3600) {
+        format!("{}h", seconds / 3600)
+    } else if seconds != 0 && seconds.is_multiple_of(60) {
+        format!("{}m", seconds / 60)
+    } else {
+        format!("{seconds}s")
+    }
+}
+
+fn ok_display(args: String) -> ToolUseState {
     ToolUseState {
-        args: String::new(),
+        args,
         status: ToolUseStatus::Success,
         status_text: "ok".to_owned(),
         ..Default::default()
     }
 }
 
-fn error_display() -> ToolUseState {
+fn error_display(args: String) -> ToolUseState {
     ToolUseState {
-        args: String::new(),
+        args,
         status: ToolUseStatus::Error,
         status_text: "error".to_owned(),
         ..Default::default()
@@ -688,7 +766,7 @@ fn timer_tool_spec() -> ToolSpec {
             "type": "object",
             "properties": {
                 "action": {"type": "string", "enum": ["schedule", "cancel", "list"]},
-                "timer_id": {"type": "string", "description": "Path-safe id. Required for cancel; optional for schedule."},
+                "timer_id": {"type": "string", "maxLength": MAX_TIMER_ID_BYTES, "pattern": "^[A-Za-z0-9_-]{1,64}$", "description": "Path-safe id. Required for cancel; optional for schedule."},
                 "delay_seconds": {"type": "integer", "minimum": MIN_DELAY_SECONDS, "maximum": MAX_DELAY_SECONDS},
                 "interval_seconds": {"type": "integer", "minimum": MIN_INTERVAL_SECONDS, "maximum": MAX_DELAY_SECONDS},
                 "message": {"type": "string", "maxLength": MAX_MESSAGE_BYTES}
@@ -1119,6 +1197,58 @@ mod tests {
             .expect("first schedule");
 
         assert!(rt.schedule_timer(&agent, args, UnixMicros::new(0)).is_err());
+    }
+
+    /// Timer result display args summarize schedule timing and recurrence
+    /// compactly.
+    #[test]
+    fn timer_display_args_summarize_schedule() {
+        let args = cbor_map(vec![
+            ("action", CborValue::Text("schedule".to_owned())),
+            ("timer_id", CborValue::Text("standup".to_owned())),
+            ("delay_seconds", CborValue::Integer(600.into())),
+            ("interval_seconds", CborValue::Integer(3600.into())),
+            ("message", CborValue::Text("wake".to_owned())),
+        ]);
+
+        assert_eq!(
+            timer_display_args(&args, "call-1"),
+            "schedule standup in 10m every 1h"
+        );
+    }
+
+    /// Timer result display args identify cancel and list actions.
+    #[test]
+    fn timer_display_args_summarize_cancel_and_list() {
+        let cancel = cbor_map(vec![
+            ("action", CborValue::Text("cancel".to_owned())),
+            ("timer_id", CborValue::Text("standup".to_owned())),
+        ]);
+        let list = cbor_map(vec![("action", CborValue::Text("list".to_owned()))]);
+
+        assert_eq!(timer_display_args(&cancel, "call-1"), "cancel standup");
+        assert_eq!(timer_display_args(&list, "call-1"), "list");
+    }
+
+    /// Timer display args do not echo unknown actions or unsafe timer ids.
+    #[test]
+    fn timer_display_args_do_not_echo_untrusted_fields() {
+        let unknown = cbor_map(vec![(
+            "action",
+            CborValue::Text("bad action with lots of text".to_owned()),
+        )]);
+        let unsafe_schedule = cbor_map(vec![
+            ("action", CborValue::Text("schedule".to_owned())),
+            ("timer_id", CborValue::Text("../unsafe".to_owned())),
+            ("delay_seconds", CborValue::Integer(600.into())),
+            ("interval_seconds", CborValue::Integer(3600.into())),
+        ]);
+
+        assert_eq!(timer_display_args(&unknown, "call-1"), "");
+        assert_eq!(
+            timer_display_args(&unsafe_schedule, "call-1"),
+            "schedule in 10m every 1h"
+        );
     }
 
     /// Timer validation enforces bounded path-safe ids and message length.

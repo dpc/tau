@@ -24,3 +24,12 @@ Periodic timers coalesce downtime into one internal prompt and advance the next
 fire time beyond the current wall clock.
 
 Session lifecycle is explicit: live `session.started` and `session.shutdown` clear all active timer state, and `session.agent_unloaded` makes that agent's timers dormant until a later successful replay boundary. Schedule requests reject duplicate active ids instead of acting as implicit updates. The default safety floor is 10 seconds for one-shot delays and 60 seconds for recurring intervals.
+
+## Timer tool display
+
+Timer tool result/error display metadata is derived from validated `TimerAction`
+values for valid calls, so compact UI lines can show action and timing details
+without re-parsing untrusted strings. If argument parsing fails, display falls
+back only to whitelisted action labels (`schedule`, `cancel`, `list`) plus
+sanitized timer ids and bounded numeric fields. Unknown actions and invalid timer
+ids are not echoed into `ToolUseState.args`.
