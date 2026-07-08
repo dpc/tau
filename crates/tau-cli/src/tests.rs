@@ -5867,6 +5867,88 @@ fn watched_agent_stats_redraw_active_indicator() {
     );
 }
 
+/// Ensures watched-agent rows remain owned by the transcript snapshot across
+/// agent switches.
+///
+/// This prevents restoring a parent transcript that already contains a
+/// `watching [...]` row while the renderer has forgotten that row's block id,
+/// which would otherwise create a duplicate simultaneous row for the same
+/// watched agent on the next refresh.
+#[test]
+fn watched_agent_indicator_does_not_duplicate_after_agent_switch() {
+    let (_term, handle, vt) = setup(100, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        cli_test_theme(),
+    );
+
+    renderer.switch_agent("parent_1".to_owned());
+    renderer.handle(&Event::AgentWatchesUpdated(
+        tau_proto::AgentWatchesUpdated {
+            session_id: "s1".into(),
+            watcher_id: agent_id("parent_1"),
+            watched_agent_ids: vec![agent_id("engineer_1")],
+            changed_agent_id: Some(agent_id("engineer_1")),
+            cause: tau_proto::AgentWatchUpdateCause::AgentStart,
+        },
+    ));
+    renderer.handle(&Event::AgentPromptStarted(tau_proto::AgentPromptStarted {
+        session_id: "s1".into(),
+        agent_id: agent_id("engineer_1"),
+        agent_prompt_id: "ap-engineer_1-0".into(),
+        model: "test/model".parse().expect("model id"),
+        originator: tau_proto::PromptOriginator::Extension {
+            name: "__harness__".into(),
+            query_id: "delegate-1".to_owned(),
+        },
+        ctx_id: None,
+    }));
+    renderer.handle(&Event::AgentStatsUpdated(tau_proto::AgentStatsUpdated {
+        session_id: "s1".into(),
+        agent_id: agent_id("engineer_1"),
+        runtime_state: tau_proto::AgentRuntimeState::Running,
+        tools: tau_proto::AgentToolStats {
+            in_flight: 0,
+            started_total: 13,
+        },
+        context: tau_proto::AgentContextStats::default(),
+    }));
+    sync(&handle);
+    assert!(eventually_screen_contains(
+        &vt,
+        100,
+        "watching [engineer_1] @engineer_1 %13/13",
+    ));
+
+    renderer.switch_agent("other_1".to_owned());
+    renderer.switch_agent("parent_1".to_owned());
+    renderer.handle(&Event::AgentStatsUpdated(tau_proto::AgentStatsUpdated {
+        session_id: "s1".into(),
+        agent_id: agent_id("engineer_1"),
+        runtime_state: tau_proto::AgentRuntimeState::Running,
+        tools: tau_proto::AgentToolStats {
+            in_flight: 0,
+            started_total: 42,
+        },
+        context: tau_proto::AgentContextStats::default(),
+    }));
+    sync(&handle);
+
+    let watching_rows: Vec<_> = vt
+        .screen_text(100)
+        .into_iter()
+        .filter(|row| row.contains("watching [engineer_1] @engineer_1"))
+        .map(|row| row.trim_end().to_owned())
+        .collect();
+    assert_eq!(
+        watching_rows,
+        vec!["watching [engineer_1] @engineer_1 %42/42"],
+        "watched-agent row should update in place after transcript restore: {:?}",
+        vt.screen_text(100)
+    );
+}
+
 /// Ensures watched-agent status blocks follow provider prompt lifetime rather
 /// than staying visible until a later `agent.stats_updated` idle snapshot.
 ///

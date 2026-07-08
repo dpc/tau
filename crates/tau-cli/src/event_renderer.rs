@@ -338,6 +338,15 @@ struct DraftRetargeter {
 #[derive(Default)]
 struct AgentUiState {
     output: tau_cli_term::OutputSnapshot,
+    /// Active watched-agent indicator blocks that belong to this output
+    /// snapshot.
+    ///
+    /// These rows are transient global UI for the currently selected watcher,
+    /// but their block ids live inside the terminal output snapshot. Keeping
+    /// the ids with the snapshot prevents a restored transcript from retaining
+    /// an old `watching [...]` row while the global renderer state has
+    /// forgotten it and creates a second row for the same watched agent.
+    watched_agent_blocks: HashMap<String, tau_cli_term::BlockId>,
     editor_conversation_context: EditorConversationContext,
     prompts: HashMap<String, PromptState>,
     last_user_block: Option<(tau_cli_term::BlockId, String)>,
@@ -1684,6 +1693,7 @@ impl EventRenderer {
     fn take_visible_agent_state(&mut self) -> AgentUiState {
         AgentUiState {
             output: self.handle.output_snapshot(),
+            watched_agent_blocks: std::mem::take(&mut self.watched_agent_blocks),
             editor_conversation_context: std::mem::take(&mut self.editor_conversation_context),
             prompts: std::mem::take(&mut self.prompts),
             last_user_block: self.last_user_block.take(),
@@ -1735,6 +1745,7 @@ impl EventRenderer {
             self.handle.replace_output_snapshot_quiet(state.output);
         }
         self.editor_conversation_context = state.editor_conversation_context;
+        self.watched_agent_blocks = state.watched_agent_blocks;
         if publish_editor_context {
             self.publish_editor_conversation_context();
         }
