@@ -428,10 +428,12 @@ reports.
 Provider response updates are transient and untrusted until the harness validates
 the provider prompt owner and derives the published `agent_id` from harness
 state, so a provider cannot route streaming deltas to another agent by forging
-ids. The harness, not providers, publishes content-free
-`agent.turn_stats_updated`, `agent.stats_updated`, and `agent.watches_updated`
-operational stats/watch snapshots; the ephemeral-agent debug-log classifier
-must cover those id-bearing events. Provider-authored retry/status
+ids. Providers publish public content-free
+`provider.response_updated.response_stats` samples from their transport receive
+boundary, and the harness only validates prompt ownership/routing before
+broadcasting them. The harness owns `agent.stats_updated` and
+`agent.watches_updated` operational stats/watch snapshots; the ephemeral-agent
+debug-log classifier must cover those id-bearing events. Provider-authored retry/status
 diagnostics must stay separate from assistant text deltas to avoid confusing
 diagnostics with model-authored transcript content; durable truth remains the
 final response event.

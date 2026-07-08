@@ -29,7 +29,6 @@ fn user_update(spid: &str, text: &str, thinking: Option<&str>) -> ProviderRespon
         deltas,
         compaction: None,
         status: None,
-        semantic_output: None,
         response_stats: None,
         originator: PromptOriginator::User,
     }
@@ -45,7 +44,6 @@ fn user_status_clear_update(spid: &str) -> ProviderResponseUpdated {
             text: "retrying".to_owned(),
             clear_response: true,
         }),
-        semantic_output: None,
         response_stats: None,
         originator: PromptOriginator::User,
     }

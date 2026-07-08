@@ -15,27 +15,8 @@ shutdown correctness must not depend on reconnecting to that path. Internal wake
 traffic is control-plane state only and must never be forwarded as a harness
 client.
 
-## Agent turn stats
+## Provider response stats
 
-`agent.turn_stats_updated` is a harness-owned operational event, not transcript
-content. It must remain content-free: only cumulative semantic-output byte
-counts, elapsed turn duration, routing ids, and originator are allowed. Do not
-include provider text snippets, tool names, raw arguments, tool results, prompt
-text, or backend wire payloads in stats events.
+Provider response stats are public, content-free metadata on transient `provider.response_updated` events. They may carry routing ids, originator, cumulative backend response byte counts, and elapsed provider request time, but must not include provider text snippets, raw wire payloads, tool names, raw arguments, tool results, prompt text, or backend diagnostics.
 
-`agent.stats_updated` and `agent.watches_updated` are likewise transient,
-content-free operational events. They may expose local agent ids, watch
-relationships, runtime state, tool counters, and token counts, but must not carry
-prompts, responses, tool arguments, or tool outputs.
-
-Stats samples are transient and must not be folded into agent transcripts,
-editor state, prompt stdin output, or final assistant rendering. The harness
-derives byte counts only after provider prompt ownership validation and clears
-runtime stats on every terminal or abandoned turn path so a later prompt cannot
-inherit stale timing or byte counters.
-
-Providers may send `provider.response_updated.semantic_output` as a
-provider-to-harness content-free byte snapshot for non-visible generated output.
-The harness must consume and strip that field before subscriber delivery, and
-must suppress stripped-empty provider updates so `agent.turn_stats_updated`
-remains the only public UI-facing progress event.
+The harness validates provider prompt ownership and rewrites the public `agent_id` from prompt ownership before broadcasting provider updates. It must not strip `response_stats`, derive its own response-throughput counters, or emit a harness-owned response-throughput projection. Stats samples are transient and must not be folded into agent transcripts, editor state, prompt stdin output, or final assistant rendering.

@@ -58,11 +58,13 @@ regression tests, with broader provider response streaming guidance in
 Status: confirmed, 2026-07-07, user
 
 Streaming parsers may receive upstream chunks at arbitrary cadence, but Tau
-protocol updates are sampled. Stream state accumulates visible text, compaction
-status, and non-visible semantic-output bytes; the rate-limited emitter decides
-when `provider.response_updated` is written. Non-terminal progress must be
-emitted at most once per second per prompt, with only a terminal flush allowed
-immediately before the provider prompt closes.
+protocol updates are sampled. Stream state accumulates lower-layer transport
+bytes, visible text, compaction status, and non-visible semantic-output bytes;
+the rate-limited emitter decides when `provider.response_updated` is written. The
+first non-empty streamed output sample may be emitted promptly so live UIs learn
+that output has started. Later non-terminal progress must be emitted at most once
+per second per prompt, with a terminal flush also allowed immediately before the
+provider prompt closes.
 
 ## Responses replay sidecars are syntax, not semantics
 

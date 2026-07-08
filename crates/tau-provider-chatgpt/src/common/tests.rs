@@ -30,10 +30,10 @@ fn into_output_items_drops_nameless_accumulator_artifacts() {
     assert_eq!(call.name.as_str(), "shell");
 }
 
-/// Ensures Responses function/custom-tool input streams expose only a
-/// content-free cumulative byte snapshot for the harness-owned turn stats path.
+/// Ensures Responses function/custom-tool input streams contribute only
+/// content-free bytes to provider-owned response stats.
 #[test]
-fn semantic_output_for_update_counts_streamed_tool_input_bytes() {
+fn non_visible_output_bytes_counts_streamed_tool_input_bytes() {
     let mut state = StreamState::new();
     state
         .tool_call_at_mut(0, tau_proto::ToolType::Function)
@@ -45,12 +45,22 @@ fn semantic_output_for_update_counts_streamed_tool_input_bytes() {
         .push_str("raw custom input");
 
     assert_eq!(
-        state.semantic_output_for_update(),
-        Some(tau_proto::ProviderResponseSemanticOutput {
-            non_visible_output_bytes: "{\"path\":\"Cargo.toml\"}".len() as u64
-                + "raw custom input".len() as u64,
-        })
+        state.non_visible_output_bytes(),
+        "{\"path\":\"Cargo.toml\"}".len() as u64 + "raw custom input".len() as u64,
     );
+}
+
+/// Ensures live response progress is based on lower-layer received bytes before
+/// semantic parsing, so a provider that delays complete items still advances
+/// the byte counter as soon as the transport yields data.
+#[test]
+fn response_bytes_received_counts_transport_bytes_before_semantic_parsing() {
+    let mut state = StreamState::new();
+
+    state.record_transport_response_bytes(4096);
+
+    assert_eq!(state.response_bytes_received(), 4096);
+    assert_eq!(state.non_visible_output_bytes(), 0);
 }
 
 #[test]

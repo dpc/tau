@@ -3,9 +3,8 @@
 pub mod openrouter;
 
 use std::collections::{BTreeMap, HashMap};
-use std::io::{BufRead, BufReader, Write};
+use std::io::{Read, Write};
 use std::path::PathBuf;
-use std::sync::mpsc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -13,10 +12,10 @@ use tau_proto::{
     AgentPromptId, ContentPart, ContextItem, ContextRole, Event, HarnessInputMessage, ModelId,
     ModelName, ModelTag, OpaqueProviderItem, PeerOutputWriter, ProviderBackend,
     ProviderBackendKind, ProviderBackendTransport, ProviderModelInfo, ProviderName,
-    ProviderResponseFinished, ProviderResponseSemanticOutput, ProviderResponseStats,
-    ProviderResponseStatusUpdate, ProviderResponseTextDelta, ProviderResponseUpdated,
-    ProviderStopReason, ProviderTokenUsage, ReasoningTextItem, ReasoningTextKind, ThinkingSummary,
-    ToolCallItem, ToolChoice, ToolDefinition, ToolResponseHeader, ToolResultStatus, ToolType,
+    ProviderResponseFinished, ProviderResponseStats, ProviderResponseStatusUpdate,
+    ProviderResponseTextDelta, ProviderResponseUpdated, ProviderStopReason, ProviderTokenUsage,
+    ReasoningTextItem, ReasoningTextKind, ThinkingSummary, ToolCallItem, ToolChoice,
+    ToolDefinition, ToolResponseHeader, ToolResultStatus, ToolType,
 };
 use tau_provider::{StreamRepetitionGuard, StreamRepetitionKey};
 
@@ -27,7 +26,6 @@ const LOG_TARGET: &str = "provider-chat-completions";
 pub const DEFAULT_MAX_OUTPUT_TOKENS: u32 = 8192;
 const EMPTY_RESPONSE_MAX_RETRIES: usize = 10;
 const PROVIDER_RESPONSE_UPDATE_MIN_INTERVAL: Duration = Duration::from_secs(1);
-const PROVIDER_RESPONSE_READ_POLL_INTERVAL: Duration = Duration::from_secs(1);
 
 /// One Chat Completions-compatible provider entry.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -216,6 +214,7 @@ struct RateLimitedResponseUpdateEmitter {
     started_at: Instant,
     last_update_emitted_at: Option<Instant>,
     last_stats_sample: tau_proto::ProviderResponseStatsSample,
+    emitted_non_empty_sample: bool,
 }
 
 impl RateLimitedResponseUpdateEmitter {
@@ -227,8 +226,9 @@ impl RateLimitedResponseUpdateEmitter {
         Self {
             delta_emitter: StreamDeltaEmitter::default(),
             started_at,
-            last_update_emitted_at: Some(started_at),
+            last_update_emitted_at: None,
             last_stats_sample: tau_proto::ProviderResponseStatsSample::default(),
+            emitted_non_empty_sample: false,
         }
     }
 
@@ -268,14 +268,22 @@ impl RateLimitedResponseUpdateEmitter {
         now: Instant,
         terminal_flush: bool,
     ) {
+        let response_stats = self.response_stats_at(state, now);
+        let first_non_empty_sample =
+            !self.emitted_non_empty_sample && response_stats.current.response_bytes_received > 0;
         if !terminal_flush
-            && self.last_update_emitted_at.is_some_and(|last| {
-                now.saturating_duration_since(last) < PROVIDER_RESPONSE_UPDATE_MIN_INTERVAL
-            })
+            && !first_non_empty_sample
+            && self.last_update_emitted_at.map_or_else(
+                || {
+                    response_stats.current.response_bytes_received == 0
+                        && now.saturating_duration_since(self.started_at)
+                            < PROVIDER_RESPONSE_UPDATE_MIN_INTERVAL
+                },
+                |last| now.saturating_duration_since(last) < PROVIDER_RESPONSE_UPDATE_MIN_INTERVAL,
+            )
         {
             return;
         }
-        let response_stats = self.response_stats_at(state, now);
         if emit_stream_update(
             agent_prompt_id,
             prompt,
@@ -286,12 +294,13 @@ impl RateLimitedResponseUpdateEmitter {
         ) {
             self.last_stats_sample = response_stats.current;
             self.last_update_emitted_at = Some(now);
+            self.emitted_non_empty_sample |= response_stats.current.response_bytes_received > 0;
         }
     }
 
     fn response_stats_at(&self, state: &StreamState, now: Instant) -> ProviderResponseStats {
         let current = tau_proto::ProviderResponseStatsSample {
-            output_bytes_sent: state.response_output_bytes(),
+            response_bytes_received: state.response_bytes_received(),
             elapsed_micros: now
                 .saturating_duration_since(self.started_at)
                 .as_micros()
@@ -314,16 +323,14 @@ fn emit_stream_update<W: Write>(
 ) -> bool {
     // RATE-LIMIT GUARDRAIL — DO NOT CALL THIS DIRECTLY FROM UPSTREAM CHUNKS.
     // provider.response_updated is a bus/event-log event, not a per-chunk
-    // callback. Progress/byte updates MUST be batched and emitted no faster than
-    // PROVIDER_RESPONSE_UPDATE_MIN_INTERVAL (1s) per prompt. A byte change is NOT
-    // a reason to emit early. Only `RateLimitedResponseUpdateEmitter` may bypass
-    // this for a terminal flush immediately before the turn is closed.
+    // callback. After the first prompt update, progress/byte updates MUST be
+    // batched and emitted no faster than PROVIDER_RESPONSE_UPDATE_MIN_INTERVAL
+    // (1s) per prompt. A byte change is NOT a reason to emit early. Only
+    // `RateLimitedResponseUpdateEmitter` may bypass this for the first non-empty
+    // progress sample and for a terminal flush immediately before the turn is
+    // closed.
     let deltas = delta_emitter.deltas(state);
-    let semantic_output = state.semantic_output_for_update();
-    if deltas.is_empty()
-        && semantic_output.is_none()
-        && response_stats.current == response_stats.previous
-    {
+    if deltas.is_empty() && response_stats.current == response_stats.previous {
         return false;
     }
     let Ok(()) = writer.write_message(&HarnessInputMessage::emit(Event::ProviderResponseUpdated(
@@ -333,7 +340,6 @@ fn emit_stream_update<W: Write>(
             deltas,
             compaction: None,
             status: None,
-            semantic_output,
             response_stats: Some(response_stats),
             originator: prompt.originator.clone(),
         },
@@ -362,7 +368,6 @@ fn emit_empty_response_retry_update<W: Write>(
                 text,
                 clear_response: true,
             }),
-            semantic_output: None,
             response_stats: None,
             originator: prompt.originator.clone(),
         },
@@ -389,7 +394,6 @@ fn emit_repetition_detected_update<W: Write>(
                 text,
                 clear_response: true,
             }),
-            semantic_output: None,
             response_stats: None,
             originator: prompt.originator.clone(),
         },
@@ -515,6 +519,7 @@ struct StreamState {
     output_tokens: Option<u64>,
     stop_reason: ProviderStopReason,
     repetition_guard: StreamRepetitionGuard,
+    transport_response_bytes: u64,
 }
 
 /// Tracks displayable text already emitted on transient response updates.
@@ -594,6 +599,7 @@ impl StreamState {
             output_tokens: None,
             stop_reason: ProviderStopReason::EndTurn,
             repetition_guard: StreamRepetitionGuard::new(),
+            transport_response_bytes: 0,
         }
     }
 
@@ -604,32 +610,33 @@ impl StreamState {
             .collect()
     }
 
-    fn semantic_output_for_update(&self) -> Option<ProviderResponseSemanticOutput> {
-        let non_visible_output_bytes: u64 = self
-            .output_items
+    fn non_visible_output_bytes(&self) -> u64 {
+        self.output_items
             .iter()
             .filter_map(|item| match item {
                 OutputItemAccumulator::ToolCall(call) => Some(call.arguments.len() as u64),
                 _ => None,
             })
-            .sum();
-        (non_visible_output_bytes != 0).then_some(ProviderResponseSemanticOutput {
-            non_visible_output_bytes,
-        })
+            .sum()
     }
 
-    fn response_output_bytes(&self) -> u64 {
+    fn response_bytes_received(&self) -> u64 {
         let visible_bytes = self
             .text
             .len()
             .saturating_add(self.thinking.len())
             .try_into()
             .unwrap_or(u64::MAX);
-        let non_visible_bytes = self
-            .semantic_output_for_update()
-            .map(|semantic_output| semantic_output.non_visible_output_bytes)
-            .unwrap_or(0);
-        visible_bytes.saturating_add(non_visible_bytes)
+        let non_visible_bytes = self.non_visible_output_bytes();
+        visible_bytes
+            .saturating_add(non_visible_bytes)
+            .max(self.transport_response_bytes)
+    }
+
+    fn record_transport_response_bytes(&mut self, bytes: usize) {
+        self.transport_response_bytes = self
+            .transport_response_bytes
+            .saturating_add(bytes.try_into().unwrap_or(u64::MAX));
     }
 
     fn append_assistant_text_delta(&mut self, delta: &str) -> Result<(), LlmError> {
@@ -789,6 +796,80 @@ impl ToolCallAccumulator {
     }
 }
 
+fn read_chat_stream_body(
+    mut reader: impl Read,
+    state: &mut StreamState,
+    raw_events: &mut Vec<serde_json::Value>,
+    on_update: &mut impl FnMut(&StreamState),
+) -> Result<(), LlmError> {
+    let mut buffer = [0; 8192];
+    let mut pending = Vec::new();
+    loop {
+        match reader.read(&mut buffer) {
+            Ok(0) => {
+                if !pending.is_empty() {
+                    let line = decode_sse_line(std::mem::take(&mut pending));
+                    let _done = apply_chat_stream_lines(vec![line], state, raw_events, on_update)?;
+                }
+                return Ok(());
+            }
+            Ok(bytes) => {
+                state.record_transport_response_bytes(bytes);
+                pending.extend_from_slice(&buffer[..bytes]);
+                let lines = drain_complete_lines(&mut pending);
+                let done = apply_chat_stream_lines(lines, state, raw_events, on_update)?;
+                on_update(state);
+                if done {
+                    return Ok(());
+                }
+            }
+            Err(error) => return Err(LlmError::Io(error)),
+        }
+    }
+}
+
+fn drain_complete_lines(pending: &mut Vec<u8>) -> Vec<String> {
+    let mut lines = Vec::new();
+    while let Some(newline_index) = pending.iter().position(|byte| *byte == b'\n') {
+        let line_bytes = pending.drain(..=newline_index).collect();
+        lines.push(decode_sse_line(line_bytes));
+    }
+    lines
+}
+
+fn decode_sse_line(mut line_bytes: Vec<u8>) -> String {
+    if line_bytes.last() == Some(&b'\n') {
+        line_bytes.pop();
+    }
+    if line_bytes.last() == Some(&b'\r') {
+        line_bytes.pop();
+    }
+    String::from_utf8_lossy(&line_bytes).into_owned()
+}
+
+fn apply_chat_stream_lines(
+    lines: Vec<String>,
+    state: &mut StreamState,
+    raw_events: &mut Vec<serde_json::Value>,
+    on_update: &mut impl FnMut(&StreamState),
+) -> Result<bool, LlmError> {
+    for line in lines {
+        let Some(data) = line.strip_prefix("data: ") else {
+            continue;
+        };
+        if data == "[DONE]" {
+            return Ok(true);
+        }
+        let event: serde_json::Value = match serde_json::from_str(data) {
+            Ok(event) => event,
+            Err(_) => continue,
+        };
+        raw_events.push(event.clone());
+        apply_event(state, &event, on_update)?;
+    }
+    Ok(false)
+}
+
 fn chat_completions_stream(
     provider: &ResolvedProvider,
     model: &ChatCompletionsModel,
@@ -822,43 +903,12 @@ fn chat_completions_stream(
 
     let mut state = StreamState::new();
     let mut raw_events = Vec::new();
-    std::thread::scope(|scope| -> Result<(), LlmError> {
-        let (line_tx, line_rx) = mpsc::channel();
-        let reader = BufReader::new(response.body_mut().as_reader());
-        scope.spawn(move || {
-            for line in reader.lines() {
-                if line_tx.send(line).is_err() {
-                    break;
-                }
-            }
-        });
-        loop {
-            let line = match line_rx.recv_timeout(PROVIDER_RESPONSE_READ_POLL_INTERVAL) {
-                Ok(line) => line.map_err(LlmError::Io)?,
-                Err(mpsc::RecvTimeoutError::Timeout) => {
-                    // Provider-owned response liveness is deadline-driven, not
-                    // upstream-chunk-driven. Wake the sampled emitter while the
-                    // backend is silent; it enforces the 1Hz event cadence.
-                    on_update(&state);
-                    continue;
-                }
-                Err(mpsc::RecvTimeoutError::Disconnected) => break,
-            };
-            let Some(data) = line.strip_prefix("data: ") else {
-                continue;
-            };
-            if data == "[DONE]" {
-                break;
-            }
-            let event: serde_json::Value = match serde_json::from_str(data) {
-                Ok(event) => event,
-                Err(_) => continue,
-            };
-            raw_events.push(event.clone());
-            apply_event(&mut state, &event, on_update)?;
-        }
-        Ok(())
-    })?;
+    read_chat_stream_body(
+        response.body_mut().as_reader(),
+        &mut state,
+        &mut raw_events,
+        on_update,
+    )?;
     flush_pending_content(&mut state, on_update)?;
     maybe_debug_write_provider_response(
         prompt,

@@ -517,9 +517,9 @@ fn decode_frames(bytes: &[u8]) -> Vec<tau_proto::HarnessInputMessage> {
 }
 
 /// Ensures the built-in ChatGPT/Codex emission boundary does not suppress
-/// custom-tool-input-only streams that have no displayable text or compaction.
+/// public stats-only streams that have no displayable text or compaction.
 #[test]
-fn chatgpt_stream_update_emits_semantic_output_without_text_deltas() {
+fn chatgpt_stream_update_emits_response_stats_without_text_deltas() {
     let prompt = minimal_prompt();
     let mut state = common::StreamState::new();
     state
@@ -536,29 +536,37 @@ fn chatgpt_stream_update_emits_semantic_output_without_text_deltas() {
             &prompt.originator,
             &state,
             &mut delta_emitter,
-            ProviderResponseStats::default(),
+            ProviderResponseStats {
+                current: tau_proto::ProviderResponseStatsSample {
+                    response_bytes_received: state.response_bytes_received(),
+                    elapsed_micros: 1_000_000,
+                },
+                previous: tau_proto::ProviderResponseStatsSample::default(),
+            },
             &mut writer,
         );
     }
 
     let frames = decode_frames(&bytes);
     let Some(tau_proto::HarnessInputMessage::Emit(emit)) = frames.first() else {
-        panic!("expected semantic output frame: {frames:?}");
+        panic!("expected provider response update frame: {frames:?}");
     };
     let tau_proto::Event::ProviderResponseUpdated(update) = emit.event.as_ref() else {
         panic!("expected provider response update: {:?}", emit.event);
     };
     assert!(update.deltas.is_empty());
     assert_eq!(
-        update.semantic_output,
-        Some(tau_proto::ProviderResponseSemanticOutput {
-            non_visible_output_bytes: "raw custom input".len() as u64,
-        })
+        update
+            .response_stats
+            .as_ref()
+            .map(|stats| stats.current.response_bytes_received),
+        Some("raw custom input".len() as u64),
     );
 }
 
-/// Ensures ChatGPT/Codex provider progress frames are sampled by
-/// provider-prompt cadence, not emitted once per upstream chunk or byte change.
+/// Ensures ChatGPT/Codex provider progress frames publish the first streamed
+/// chunk promptly, then follow provider-prompt cadence instead of emitting once
+/// per upstream chunk or byte change.
 #[test]
 fn chatgpt_response_update_emitter_rate_limits_non_terminal_updates() {
     let prompt = minimal_prompt();
@@ -606,30 +614,45 @@ fn chatgpt_response_update_emitter_rate_limits_non_terminal_updates() {
             _ => None,
         })
         .collect();
-    assert_eq!(updates.len(), 1, "updates: {updates:#?}");
+    assert_eq!(updates.len(), 2, "updates: {updates:#?}");
     assert_eq!(
         updates[0].deltas,
         vec![tau_proto::ProviderResponseTextDelta::Message {
             output_index: 0,
-            text: "hello".to_owned(),
+            text: "hel".to_owned(),
             phase: None,
         }]
-    );
-    assert_eq!(
-        updates[0].semantic_output,
-        Some(tau_proto::ProviderResponseSemanticOutput {
-            non_visible_output_bytes: "raw custom input".len() as u64,
-        })
     );
     assert_eq!(
         updates[0].response_stats,
         Some(ProviderResponseStats {
             current: tau_proto::ProviderResponseStatsSample {
-                output_bytes_sent: ("hello".len() + "raw custom input".len()) as u64,
+                response_bytes_received: "hel".len() as u64,
+                elapsed_micros: 0,
+            },
+            previous: tau_proto::ProviderResponseStatsSample {
+                response_bytes_received: 0,
+                elapsed_micros: 0,
+            },
+        })
+    );
+    assert_eq!(
+        updates[1].deltas,
+        vec![tau_proto::ProviderResponseTextDelta::Message {
+            output_index: 0,
+            text: "lo".to_owned(),
+            phase: None,
+        }]
+    );
+    assert_eq!(
+        updates[1].response_stats,
+        Some(ProviderResponseStats {
+            current: tau_proto::ProviderResponseStatsSample {
+                response_bytes_received: ("hello".len() + "raw custom input".len()) as u64,
                 elapsed_micros: 1_000_000,
             },
             previous: tau_proto::ProviderResponseStatsSample {
-                output_bytes_sent: 0,
+                response_bytes_received: "hel".len() as u64,
                 elapsed_micros: 0,
             },
         })
@@ -652,6 +675,13 @@ fn chatgpt_response_update_emitter_emits_due_stats_only_sample() {
             agent_id: &prompt.agent_id,
             originator: &prompt.originator,
         };
+        emitter.emit_at(
+            &target,
+            &state,
+            &mut writer,
+            start + PROVIDER_RESPONSE_UPDATE_MIN_INTERVAL / 2,
+            false,
+        );
         emitter.emit_at(
             &target,
             &state,
@@ -681,23 +711,182 @@ fn chatgpt_response_update_emitter_emits_due_stats_only_sample() {
     assert_eq!(updates.len(), 2, "updates: {updates:#?}");
     assert!(updates.iter().all(|update| update.deltas.is_empty()));
     assert_eq!(
+        updates[0].response_stats,
+        Some(ProviderResponseStats {
+            current: tau_proto::ProviderResponseStatsSample {
+                response_bytes_received: 0,
+                elapsed_micros: 1_000_000,
+            },
+            previous: tau_proto::ProviderResponseStatsSample {
+                response_bytes_received: 0,
+                elapsed_micros: 0,
+            },
+        })
+    );
+    assert_eq!(
         updates[1].response_stats,
         Some(ProviderResponseStats {
             current: tau_proto::ProviderResponseStatsSample {
-                output_bytes_sent: 0,
+                response_bytes_received: 0,
                 elapsed_micros: 2_000_000,
             },
             previous: tau_proto::ProviderResponseStatsSample {
-                output_bytes_sent: 0,
+                response_bytes_received: 0,
                 elapsed_micros: 1_000_000,
             },
         })
     );
 }
 
-/// Ensures a terminal flush can publish the final batched suffix immediately
-/// before `provider.response_finished`, without losing text suppressed by the
-/// non-terminal one-second cadence.
+/// Ensures a due zero-byte idle sample does not consume the first non-empty
+/// bypass for streamed output, while later non-terminal bytes still obey the
+/// one-second cadence.
+#[test]
+fn chatgpt_response_update_emitter_emits_first_bytes_after_idle_sample_promptly() {
+    let prompt = minimal_prompt();
+    let mut state = common::StreamState::new();
+    let mut bytes = Vec::new();
+    let start = std::time::Instant::now();
+    {
+        let mut writer = tau_proto::PeerOutputWriter::new(&mut bytes);
+        let mut emitter = RateLimitedResponseUpdateEmitter::new_at(start);
+        let target = ResponseUpdateTarget {
+            agent_prompt_id: prompt.agent_prompt_id.as_str(),
+            agent_id: &prompt.agent_id,
+            originator: &prompt.originator,
+        };
+        emitter.emit_at(
+            &target,
+            &state,
+            &mut writer,
+            start + PROVIDER_RESPONSE_UPDATE_MIN_INTERVAL,
+            false,
+        );
+        state.append_message_delta_at(0, "hi");
+        emitter.emit_at(
+            &target,
+            &state,
+            &mut writer,
+            start
+                + PROVIDER_RESPONSE_UPDATE_MIN_INTERVAL
+                + PROVIDER_RESPONSE_UPDATE_MIN_INTERVAL / 2,
+            false,
+        );
+        state.append_message_delta_at(0, "!");
+        emitter.emit_at(
+            &target,
+            &state,
+            &mut writer,
+            start
+                + PROVIDER_RESPONSE_UPDATE_MIN_INTERVAL
+                + PROVIDER_RESPONSE_UPDATE_MIN_INTERVAL / 2
+                + PROVIDER_RESPONSE_UPDATE_MIN_INTERVAL / 4,
+            false,
+        );
+        emitter.emit_at(
+            &target,
+            &state,
+            &mut writer,
+            start
+                + PROVIDER_RESPONSE_UPDATE_MIN_INTERVAL
+                + PROVIDER_RESPONSE_UPDATE_MIN_INTERVAL / 2
+                + PROVIDER_RESPONSE_UPDATE_MIN_INTERVAL,
+            false,
+        );
+    }
+
+    let updates: Vec<_> = decode_frames(&bytes)
+        .into_iter()
+        .filter_map(|frame| match frame {
+            tau_proto::HarnessInputMessage::Emit(emit) => match *emit.event {
+                tau_proto::Event::ProviderResponseUpdated(update) => Some(update),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect();
+    assert_eq!(updates.len(), 3, "updates: {updates:#?}");
+    assert!(updates[0].deltas.is_empty());
+    assert_eq!(
+        updates[1].deltas,
+        vec![tau_proto::ProviderResponseTextDelta::Message {
+            output_index: 0,
+            text: "hi".to_owned(),
+            phase: None,
+        }]
+    );
+    assert_eq!(
+        updates[1].response_stats,
+        Some(ProviderResponseStats {
+            current: tau_proto::ProviderResponseStatsSample {
+                response_bytes_received: "hi".len() as u64,
+                elapsed_micros: 1_500_000,
+            },
+            previous: tau_proto::ProviderResponseStatsSample {
+                response_bytes_received: 0,
+                elapsed_micros: 1_000_000,
+            },
+        })
+    );
+    assert_eq!(
+        updates[2].deltas,
+        vec![tau_proto::ProviderResponseTextDelta::Message {
+            output_index: 0,
+            text: "!".to_owned(),
+            phase: None,
+        }]
+    );
+}
+
+/// Ensures the first non-empty progress bypass applies to stats-only tool input
+/// bytes, not just visible assistant text.
+#[test]
+fn chatgpt_response_update_emitter_emits_first_stats_only_sample_promptly() {
+    let prompt = minimal_prompt();
+    let mut state = common::StreamState::new();
+    let mut bytes = Vec::new();
+    let start = std::time::Instant::now();
+    {
+        let mut writer = tau_proto::PeerOutputWriter::new(&mut bytes);
+        let mut emitter = RateLimitedResponseUpdateEmitter::new_at(start);
+        let target = ResponseUpdateTarget {
+            agent_prompt_id: prompt.agent_prompt_id.as_str(),
+            agent_id: &prompt.agent_id,
+            originator: &prompt.originator,
+        };
+        state
+            .tool_call_at_mut(1, tau_proto::ToolType::Custom)
+            .arguments_json
+            .push_str("raw custom input");
+        emitter.emit_at(&target, &state, &mut writer, start, false);
+    }
+
+    let updates: Vec<_> = decode_frames(&bytes)
+        .into_iter()
+        .filter_map(|frame| match frame {
+            tau_proto::HarnessInputMessage::Emit(emit) => match *emit.event {
+                tau_proto::Event::ProviderResponseUpdated(update) => Some(update),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect();
+    assert_eq!(updates.len(), 1, "updates: {updates:#?}");
+    assert!(updates[0].deltas.is_empty());
+    assert_eq!(
+        updates[0]
+            .response_stats
+            .as_ref()
+            .expect("stats-only update should carry provider stats")
+            .current
+            .response_bytes_received,
+        "raw custom input".len() as u64
+    );
+}
+
+/// Ensures a terminal flush can publish the final suffix immediately before
+/// `provider.response_finished`, without losing text suppressed by the
+/// non-terminal one-second cadence after the first streamed chunk.
 #[test]
 fn chatgpt_response_update_emitter_terminal_flush_emits_batched_suffix() {
     let prompt = minimal_prompt();
@@ -734,21 +923,38 @@ fn chatgpt_response_update_emitter_terminal_flush_emits_batched_suffix() {
             _ => None,
         })
         .collect();
-    assert_eq!(updates.len(), 1, "updates: {updates:#?}");
+    assert_eq!(updates.len(), 2, "updates: {updates:#?}");
     assert_eq!(
         updates[0].deltas,
         vec![tau_proto::ProviderResponseTextDelta::Message {
             output_index: 0,
-            text: "hello".to_owned(),
+            text: "hel".to_owned(),
             phase: None,
         }]
     );
     assert_eq!(
         updates[0]
             .response_stats
+            .as_ref()
+            .expect("initial update should carry provider stats")
+            .current
+            .response_bytes_received,
+        "hel".len() as u64
+    );
+    assert_eq!(
+        updates[1].deltas,
+        vec![tau_proto::ProviderResponseTextDelta::Message {
+            output_index: 0,
+            text: "lo".to_owned(),
+            phase: None,
+        }]
+    );
+    assert_eq!(
+        updates[1]
+            .response_stats
             .expect("terminal flush should carry provider stats")
             .current
-            .output_bytes_sent,
+            .response_bytes_received,
         "hello".len() as u64
     );
 }

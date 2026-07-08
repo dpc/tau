@@ -16,7 +16,7 @@ The long-term direction is a single UI model/reducer that owns protocol state, w
 
 UI code must render tool calls through generic `ToolUseState`, `ToolUsePayload`, progress counters, and fallback tool displays. Do not add tool-name-specific rendering for ordinary extension tools.
 
-Harness sub-agent activity is rendered from generic events, not delegation-specific UI paths. `agent.watches_updated` identifies which agents are observed; prompt/provider lifecycle events decide whether an observed agent is currently running a turn; `agent.stats_updated` and `agent.turn_stats_updated` provide counters/details for that running turn. Merely live, selectable, non-suspended, or watched agents must not appear as active watched-agent work or be counted in the bottom active-side-agent `@N` status chip.
+Harness sub-agent activity is rendered from generic events, not delegation-specific UI paths. `agent.watches_updated` identifies which agents are observed; prompt/provider lifecycle events decide whether an observed agent is currently running a turn; `agent.stats_updated` provides generic counters and provider response stats provide live response throughput details for that running turn. Merely live, selectable, non-suspended, or watched agents must not appear as active watched-agent work or be counted in the bottom active-side-agent `@N` status chip.
 
 There is also a narrow temporary action-input redaction exception: `/email auth
 google finish ...` command echo and prompt-history entries are redacted because

@@ -54,44 +54,11 @@ forward watch set and reverse watcher index only as runtime/session state,
 publishes complete replacement snapshots for each watcher, and does not persist
 watch relationships into agent display names.
 
-## Agent turn stats lifecycle
+## Provider response stats boundary
 
-Providers own response-throughput sampling. A provider starts prompt-local
-response stats when it dispatches the backend request, batches streamed byte
-counters in memory, emits previous/current private `response_stats` samples on
-the provider `provider.response_updated` cadence (at most once per second), and
-may flush once immediately before the prompt closes. `previous` is the last
-sample that provider actually emitted, not an internal calculation.
+Providers own response-throughput sampling. A provider starts prompt-local response stats when it dispatches the backend request, counts backend response bytes at the transport receive boundary before semantic parsing, batches counters in memory, emits the first non-empty previous/current `response_stats` sample promptly, emits later samples at most once per second on `provider.response_updated`, and may flush once immediately before the prompt closes. `previous` is the last sample that provider actually emitted, not an internal calculation.
 
-The harness is the authoritative validator/adapter for transient public
-`agent.turn_stats_updated` events. It validates provider prompt ownership,
-rewrites routing identities, strips private provider-only `semantic_output` and
-`response_stats` fields before public provider delivery, and maps accepted
-provider samples to the active agent turn for current UI compatibility. When
-provider `response_stats` are present, the harness must preserve the provider
-previous/current byte and elapsed semantics; it must not reconstruct
-provider-response throughput from per-chunk provider updates.
-
-A stats turn starts with the first provider prompt for an agent turn, mints a
-stable `AgentTurnId`, and moves `agent_prompt_id` to each active provider prompt
-while the same turn continues through tool results and follow-up model calls.
-While the turn is waiting on tools, the harness emits only prompt-less stats
-(`agent_prompt_id: null`) so UI consumers do not attach tool-wait samples to a
-completed provider prompt.
-
-While a stats turn is active, the runtime loop schedules a sampled
-`agent.turn_stats_updated` emit once per second even if no provider update
-arrives. These idle samples are valid before the first output byte and while the
-cumulative byte count is unchanged; they exist so UIs can advance elapsed time
-and show a zero interval rate during quiet provider periods.
-
-Terminal prompt-associated samples must be emitted before
-`provider.response_finished` or `agent.prompt_terminated`; after the terminal
-event, runtime stats are cleared without another prompt-associated emit. Paths
-that abandon a turn without another provider prompt, such as tool-phase
-cancellation or queued-tool preemption, must clear the in-memory stats so the
-next prompt starts with a fresh `AgentTurnId`, zero output bytes, and a default
-previous sample.
+The harness is not part of response-throughput accounting. For `provider.response_updated`, it validates provider prompt ownership/cancellation, rewrites `agent_id` from harness prompt ownership, enriches provider compaction metadata when applicable, and broadcasts public provider updates, including stats-only updates. It must not strip provider `response_stats`, map them to agent-turn stats, maintain response byte counters, or schedule idle response-stats samples. UI clients subscribe to provider updates and render provider-owned stats directly.
 
 ## Session and agent stores
 
@@ -360,19 +327,7 @@ call-site policy says otherwise.
 
 ## Provider response update routing
 
-The harness treats `provider.response_updated` as non-durable live progress. It
-validates that the publishing connection owns the in-flight provider prompt,
-overwrites the update `agent_id` from harness prompt ownership, enriches
-best-effort compaction metadata, consumes and strips provider-private
-content-free `semantic_output` byte snapshots, and does not include these
-transient deltas in durable replay. If an update has no public deltas, status,
-or compaction after stripping `semantic_output`, the harness suppresses the
-provider update and publishes only the derived stats event when sampling says it
-is useful.
-The harness also owns `agent.turn_stats_updated`: after accepted provider
-deltas, turn phase transitions, and runtime-loop stats deadlines it publishes
-content-free current/previous turn stats samples as transient operational events.
-Providers and UI clients must not forge those stats through fallback emit paths.
+The harness treats `provider.response_updated` as non-durable live progress. It validates that the publishing connection owns the in-flight provider prompt, overwrites the update `agent_id` from harness prompt ownership, enriches best-effort compaction metadata, and broadcasts public updates. Displayable deltas, status, compaction, and content-free `response_stats` are all public provider-owned transient fields. Stats-only provider updates are valid and must be delivered to subscribers so UIs can render response liveness directly.
 
 ## Prompt dispatch lifecycle split
 

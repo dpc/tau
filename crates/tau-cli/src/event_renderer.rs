@@ -115,6 +115,13 @@ pub(crate) struct EventRenderer {
     /// start/create/update events for the same id must not resurrect watched
     /// status blocks or the active side-agent count.
     terminal_agent_prompts: HashSet<String>,
+    /// Provider prompt ids whose final response was already rendered.
+    ///
+    /// Late stats-only provider updates for these prompts are stale and must
+    /// not recreate live response indicators, while stats-only updates for
+    /// unknown prompts are still allowed for the no-agent adoptable
+    /// transcript path.
+    finished_provider_prompts: HashSet<String>,
     /// Active watched-agent indicator blocks keyed by watched agent id.
     watched_agent_blocks: HashMap<String, tau_cli_term::BlockId>,
     /// Shared current visible agent mirror for prompt submission.
@@ -867,8 +874,9 @@ struct PromptState {
     response_markdown_cache: MarkdownStreamCache,
     /// Append-aware Markdown-lite cache for the live thinking block.
     thinking_markdown_cache: MarkdownStreamCache,
-    /// Latest transient agent-turn stats for repainting the live indicator.
-    turn_stats: Option<tau_proto::AgentTurnStatsUpdated>,
+    /// Latest provider-owned response stats received directly on
+    /// `provider.response_updated` for repainting the live indicator.
+    provider_response_stats: Option<tau_proto::ProviderResponseStats>,
     /// Live provider-side compaction block. Created only while a provider emits
     /// an in-progress compaction item, then removed on completion/cancel.
     compaction_block_id: Option<tau_cli_term::BlockId>,
@@ -997,30 +1005,39 @@ fn format_ui_io_scaled_rate(bytes_per_sec: u64, divisor: u64, suffix: &str) -> S
     }
 }
 
-fn turn_stats_indicator_suffix(stats: Option<&tau_proto::AgentTurnStatsUpdated>) -> String {
-    let Some(stats) = stats else {
-        return String::new();
-    };
+fn response_stats_indicator_suffix(stats: &tau_proto::ProviderResponseStats) -> String {
+    let current = stats.current;
+    let previous = stats.previous;
     // This widget is intentionally stateless with respect to rates. Do not use
-    // `Instant::now()` here. The harness owns sampling cadence; the CLI only
+    // `Instant::now()` here. The provider owns sampling cadence; the CLI only
     // renders the latest current/previous sample it received.
-    let total_bytes = stats.current.output_bytes_sent;
-    let elapsed_seconds = stats.current.elapsed_micros / 1_000_000;
+    let total_bytes = current.response_bytes_received;
+    let elapsed_seconds = current.elapsed_micros / 1_000_000;
     let bytes = format_progress_bytes(total_bytes);
-    let delta_micros = stats
-        .current
+    let delta_micros = current
         .elapsed_micros
-        .saturating_sub(stats.previous.elapsed_micros);
-    let delta_bytes = stats
-        .current
-        .output_bytes_sent
-        .saturating_sub(stats.previous.output_bytes_sent);
+        .saturating_sub(previous.elapsed_micros);
+    let delta_bytes = current
+        .response_bytes_received
+        .saturating_sub(previous.response_bytes_received);
     let delta_bytes_per_sec = delta_bytes.saturating_mul(1_000_000) / delta_micros.max(1);
-    let total_bytes_per_sec =
-        total_bytes.saturating_mul(1_000_000) / stats.current.elapsed_micros.max(1);
+    let total_bytes_per_sec = total_bytes.saturating_mul(1_000_000) / current.elapsed_micros.max(1);
     let delta_rate = format!("{}/s", format_progress_bytes(delta_bytes_per_sec));
     let total_rate = format!("{}/s", format_progress_bytes(total_bytes_per_sec));
     format!(" ({elapsed_seconds}s, {bytes}, Δ{delta_rate}, {total_rate})")
+}
+
+fn response_stats_indicator_for_prompt(state: &PromptState) -> String {
+    state
+        .provider_response_stats
+        .as_ref()
+        .map_or_else(String::new, response_stats_indicator_suffix)
+}
+
+fn provider_response_update_has_visible_content(
+    update: &tau_proto::ProviderResponseUpdated,
+) -> bool {
+    !update.deltas.is_empty() || update.compaction.is_some() || update.status.is_some()
 }
 
 fn format_progress_bytes(bytes: u64) -> String {
@@ -1237,6 +1254,7 @@ impl EventRenderer {
             agent_stats: HashMap::new(),
             active_agent_prompts: HashMap::new(),
             terminal_agent_prompts: HashSet::new(),
+            finished_provider_prompts: HashSet::new(),
             watched_agent_blocks: HashMap::new(),
             current_agent_state: std::sync::Arc::new(std::sync::Mutex::new(None)),
             draft_retargeter: None,
@@ -1766,8 +1784,9 @@ impl EventRenderer {
         self.main_tools_completed = state.main_tools_completed;
         self.main_tools_total = state.main_tools_total;
         self.main_backgrounded_tools = state.main_backgrounded_tools;
-        self.main_agent_turn_active = state.main_agent_turn_active;
-        self.main_tools_visible = state.main_tools_visible;
+        self.main_agent_turn_active =
+            state.main_agent_turn_active && state.agent_activity.is_in_progress();
+        self.main_tools_visible = state.main_tools_visible && self.main_agent_turn_active;
         self.tool_summaries = state.tool_summaries;
         self.prompt_tool_summary = state.prompt_tool_summary;
         self.prompt_tool_summary_active = state.prompt_tool_summary_active;
@@ -1943,6 +1962,11 @@ impl EventRenderer {
     /// terminating an active session accidentally.
     pub(crate) fn agent_in_progress_state(&self) -> Arc<AtomicBool> {
         self.agent_in_progress.clone()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn main_agent_turn_active_for_test(&self) -> bool {
+        self.main_agent_turn_active
     }
 
     /// Returns a clone of the shared Fast-mode mirror, used by configurable
@@ -2805,6 +2829,14 @@ impl EventRenderer {
         self.set_main_tools_visible(active && self.main_tools_total != 0);
     }
 
+    fn clear_main_agent_turn_active_everywhere(&mut self) {
+        self.set_main_agent_turn_active(false);
+        for state in self.agents_ui_state.values_mut() {
+            state.main_agent_turn_active = false;
+            state.main_tools_visible = false;
+        }
+    }
+
     fn has_live_main_delegate_tool_call(&self) -> bool {
         self.tool_calls
             .values()
@@ -2832,11 +2864,13 @@ impl EventRenderer {
                 self.agent_activity.start_prompt(&submitted.agent_prompt_id);
             }
             Event::ProviderResponseUpdated(update) => {
-                self.agent_activity.start_prompt(&update.agent_prompt_id);
+                if !self.is_stale_terminal_stats_only_update(update) {
+                    self.agent_activity.start_prompt(&update.agent_prompt_id);
+                }
             }
             Event::ProviderResponseFinished(finished) => {
                 self.agent_activity
-                    .finish_prompt(&finished.agent_prompt_id, &finished.output_items);
+                    .finish_prompt_if_active(&finished.agent_prompt_id, &finished.output_items);
             }
             Event::AgentPromptTerminated(terminated) => {
                 self.agent_activity
@@ -2891,8 +2925,15 @@ impl EventRenderer {
                 }
             }
             Event::ProviderResponseUpdated(update) => {
-                if update.originator.is_user() || !self.has_live_main_delegate_tool_call() {
+                if !self.is_stale_terminal_stats_only_update(update)
+                    && (update.originator.is_user() || !self.has_live_main_delegate_tool_call())
+                {
                     self.set_main_agent_turn_active(update.originator.is_user());
+                }
+            }
+            Event::ProviderResponseFinished(finished) if finished.originator.is_user() => {
+                if tool_calls_from_output_items(&finished.output_items).is_empty() {
+                    self.clear_main_agent_turn_active_everywhere();
                 }
             }
             Event::ProviderResponseFinished(finished)
@@ -3324,7 +3365,6 @@ impl EventRenderer {
             Event::AgentPromptStarted(prompt) => !prompt.originator.is_user(),
             Event::AgentPromptTerminated(terminated) => !terminated.originator.is_user(),
             Event::ProviderPromptSubmitted(submitted) => !submitted.originator.is_user(),
-            Event::AgentTurnStatsUpdated(stats) => !stats.originator.is_user(),
             Event::ProviderResponseUpdated(update) => !update.originator.is_user(),
             Event::ProviderResponseFinished(finished) => !finished.originator.is_user(),
             Event::ToolResult(result) | Event::ProviderToolResult(result) => {
@@ -3503,16 +3543,6 @@ impl EventRenderer {
                 );
                 true
             }
-            Event::AgentTurnStatsUpdated(stats) => {
-                let agent_id = stats.agent_id.to_string();
-                self.mark_agent_live(agent_id.clone());
-                if let Some(agent_prompt_id) = stats.agent_prompt_id.as_ref() {
-                    self.prompt_agents
-                        .entry(agent_prompt_id.to_string())
-                        .or_insert(agent_id);
-                }
-                true
-            }
             Event::ProviderPromptSubmitted(submitted) => {
                 self.mark_known_agent_prompt_active(
                     submitted.agent_prompt_id.as_str(),
@@ -3523,9 +3553,17 @@ impl EventRenderer {
             Event::ProviderResponseUpdated(update) => {
                 let agent_id = update.agent_id.to_string();
                 let agent_prompt_id = update.agent_prompt_id.as_str();
-                self.prompt_agents
-                    .insert(agent_prompt_id.to_owned(), agent_id.clone());
-                self.mark_agent_prompt_active(&agent_id, agent_prompt_id);
+                if self.is_stale_terminal_stats_only_update(update) {
+                    self.clear_main_agent_turn_active_everywhere();
+                    return true;
+                }
+                if provider_response_update_has_visible_content(update)
+                    || !self.prompt_agents.contains_key(agent_prompt_id)
+                {
+                    self.prompt_agents
+                        .insert(agent_prompt_id.to_owned(), agent_id.clone());
+                    self.mark_agent_prompt_active(&agent_id, agent_prompt_id);
+                }
                 true
             }
             _ => false,
@@ -3536,6 +3574,13 @@ impl EventRenderer {
         match event {
             Event::ProviderResponseFinished(finished) => {
                 let agent_id = finished.agent_id.to_string();
+                self.agent_activity
+                    .finish_prompt(&finished.agent_prompt_id, &finished.output_items);
+                if finished.originator.is_user()
+                    && tool_calls_from_output_items(&finished.output_items).is_empty()
+                {
+                    self.clear_main_agent_turn_active_everywhere();
+                }
                 self.mark_agent_prompt_inactive(
                     finished.agent_id.as_str(),
                     finished.agent_prompt_id.as_str(),
@@ -3711,9 +3756,6 @@ impl EventRenderer {
             }
             Event::HarnessAgentContextUsageChanged(changed) => {
                 EventAgentIdResolution::Agent(changed.agent_id.to_string())
-            }
-            Event::AgentTurnStatsUpdated(stats) => {
-                EventAgentIdResolution::Agent(stats.agent_id.to_string())
             }
             Event::ExtensionContextReady(ready) => {
                 EventAgentIdResolution::Agent(ready.agent_id.to_string())
@@ -4166,6 +4208,8 @@ impl EventRenderer {
     }
 
     fn handle_agent_prompt_started(&mut self, prompt: &tau_proto::AgentPromptStarted) {
+        self.finished_provider_prompts
+            .remove(prompt.agent_prompt_id.as_str());
         let state = self
             .prompts
             .entry(prompt.agent_prompt_id.to_string())
@@ -4187,6 +4231,8 @@ impl EventRenderer {
 
     fn handle_agent_prompt_terminated(&mut self, terminated: &tau_proto::AgentPromptTerminated) {
         self.clear_editor_current_response_for_user_prompt(terminated.originator.is_user());
+        self.finished_provider_prompts
+            .insert(terminated.agent_prompt_id.to_string());
         let Some(prompt_state) = self.prompts.remove(terminated.agent_prompt_id.as_str()) else {
             return;
         };
@@ -4226,15 +4272,13 @@ impl EventRenderer {
                 self.handle_provider_response_finished(finished);
                 true
             }
-            Event::AgentTurnStatsUpdated(stats) => {
-                self.handle_agent_turn_stats_updated(stats);
-                true
-            }
             _ => false,
         }
     }
 
     fn handle_provider_prompt_submitted(&mut self, submitted: &tau_proto::ProviderPromptSubmitted) {
+        self.finished_provider_prompts
+            .remove(submitted.agent_prompt_id.as_str());
         self.prompts
             .entry(submitted.agent_prompt_id.to_string())
             .or_default()
@@ -4246,7 +4290,24 @@ impl EventRenderer {
         self.prompt_agents
             .entry(spid.to_owned())
             .or_insert_with(|| update.agent_id.to_string());
+        if self.is_stale_terminal_stats_only_update(update) {
+            return;
+        }
+        if !provider_response_update_has_visible_content(update)
+            && self
+                .prompt_agents
+                .get(spid)
+                .is_some_and(|agent_id| agent_id != update.agent_id.as_str())
+        {
+            return;
+        }
         self.ensure_live_response_block_for_update(update);
+        if let Some(stats) = update.response_stats {
+            self.prompts
+                .entry(spid.to_owned())
+                .or_default()
+                .provider_response_stats = Some(stats);
+        }
         if let Some(status) = &update.status {
             if status.clear_response {
                 self.clear_live_response_accumulators(spid);
@@ -4265,52 +4326,14 @@ impl EventRenderer {
         self.update_live_response_block(spid, &text);
     }
 
-    fn handle_agent_turn_stats_updated(&mut self, stats: &tau_proto::AgentTurnStatsUpdated) {
-        if !self.stats_update_matches_current_snapshot(stats) {
-            return;
-        }
-        let Some(agent_prompt_id) = stats.agent_prompt_id.as_ref() else {
-            return;
-        };
-        let spid = agent_prompt_id.as_str();
-        self.prompt_agents
-            .entry(spid.to_owned())
-            .or_insert_with(|| stats.agent_id.to_string());
-        if !self.prompts.contains_key(spid) {
-            return;
-        }
-        self.ensure_live_response_block_for_prompt(spid);
-        if let Some(state) = self.prompts.get_mut(spid) {
-            state.turn_stats = Some(stats.clone());
-        }
-        self.update_live_response_block(spid, "");
-    }
-
-    fn stats_update_matches_current_snapshot(
+    fn is_stale_terminal_stats_only_update(
         &self,
-        stats: &tau_proto::AgentTurnStatsUpdated,
+        update: &tau_proto::ProviderResponseUpdated,
     ) -> bool {
-        if let Some(visible_agent_id) = self
-            .displayed_agent_id
-            .as_deref()
-            .or(self.current_agent_id.as_deref())
-        {
-            return visible_agent_id == stats.agent_id.as_str();
-        }
-
-        // No selected/displayed agent can still have an adoptable visible
-        // no-agent transcript, for example when a late provider update creates
-        // live prompt state before the UI has selected the agent. In that
-        // fallback, accept stats only for a prompt already present in the
-        // currently restored snapshot and already attributed to the stats agent.
-        let Some(agent_prompt_id) = stats.agent_prompt_id.as_ref() else {
-            return false;
-        };
-        self.prompts.contains_key(agent_prompt_id.as_str())
+        !provider_response_update_has_visible_content(update)
             && self
-                .prompt_agents
-                .get(agent_prompt_id.as_str())
-                .is_some_and(|agent_id| agent_id == stats.agent_id.as_str())
+                .finished_provider_prompts
+                .contains(update.agent_prompt_id.as_str())
     }
 
     fn clear_live_response_accumulators(&mut self, spid: &str) {
@@ -4322,7 +4345,7 @@ impl EventRenderer {
             state.missing_thinking_prefix = false;
             state.response_markdown_cache = MarkdownStreamCache::default();
             state.thinking_markdown_cache = MarkdownStreamCache::default();
-            state.turn_stats = None;
+            state.provider_response_stats = None;
             if let Some(block_id) = state.thinking_block_id.take() {
                 self.handle.remove_block(block_id);
             }
@@ -4573,7 +4596,7 @@ impl EventRenderer {
                     &self.theme,
                     names::AGENT_PENDING,
                     "",
-                    turn_stats_indicator_suffix(state.turn_stats.as_ref()),
+                    response_stats_indicator_for_prompt(state),
                 )
             } else {
                 markdown_streaming_block(
@@ -4592,6 +4615,13 @@ impl EventRenderer {
         &mut self,
         finished: &tau_proto::ProviderResponseFinished,
     ) {
+        if finished.originator.is_user()
+            && tool_calls_from_output_items(&finished.output_items).is_empty()
+        {
+            self.clear_main_agent_turn_active_everywhere();
+        }
+        self.finished_provider_prompts
+            .insert(finished.agent_prompt_id.to_string());
         let (prompt_state, turn_latency) = self.take_finished_prompt_state(finished);
         let thinking =
             reasoning_text_from_output_items(&finished.output_items).or(prompt_state.thinking_text);

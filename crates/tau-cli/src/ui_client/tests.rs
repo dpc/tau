@@ -39,7 +39,6 @@ fn chat_subscription_uses_no_prefix_selectors() {
         EventName::AGENT_COMPACTION_TRIGGERED,
         EventName::AGENT_PROMPT_STARTED,
         EventName::AGENT_PROMPT_TERMINATED,
-        EventName::AGENT_TURN_STATS_UPDATED,
         EventName::AGENT_WATCHES_UPDATED,
         EventName::AGENT_STATS_UPDATED,
         EventName::AGENT_STARTED,

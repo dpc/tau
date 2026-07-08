@@ -157,16 +157,7 @@ but keep it in memory only; `agent.started.ephemeral` marks that boundary.
 - **`agent.head_moved`** — Durable fact that changes an agent's selected tree
   head after navigation, so future prompts branch from the requested root or
   node target.
-- **`agent.turn_stats_updated`** — Transient, content-free live stats for an
-  active agent turn. The harness publishes `current` and `previous` cumulative
-  samples containing semantic output bytes sent and elapsed turn microseconds so
-  consumers can calculate deltas/rates directly. Periodic idle samples are
-  valid, including pre-output zero-byte samples and unchanged-byte samples with a
-  zero interval rate; consumers should compute interval rates from
-  `current - previous` and whole-turn averages from `current`. Treat `turn_id`
-  as an opaque turn identifier; `agent_prompt_id` is absent while waiting on
-  tools. It is operational UI state, not transcript content, and is not replayed
-  from durable history.
+
 
 ## Provider execution
 
@@ -178,22 +169,17 @@ Emitted by the provider backend that owns the selected model.
   events.
 - **`provider.prompt_submitted`** — The provider accepted an `agent.prompt_created`
   and started processing it. Echoes the originator. Transient.
-- **`provider.response_updated`** — Transient append-delta streaming update.
-  Carries newly appended displayable assistant/reasoning text in `deltas`, plus
-  small compaction/status metadata when relevant. Provider retry/status text is
-  not assistant-authored and is carried separately from message deltas. Providers
-  may also send private content-free `semantic_output` and `response_stats`
-  metadata. `semantic_output` is a cumulative non-visible byte snapshot for the
-  current provider prompt. `response_stats` is a provider-owned previous/current
-  response-liveness sample pair; `previous` is the last emitted provider sample,
-  `current` is the new cumulative prompt-local sample, and non-terminal samples
-  are emitted at most once per second except the final flush. Both fields are
-  provider-to-harness private, excluded from durable/public outputs, and stripped
-  before subscriber delivery. The harness validates ownership, maps accepted
-  stats to the public compatibility `agent.turn_stats_updated` event, and must
-  not reconstruct provider throughput from per-chunk updates. The event is not
-  durable and is not replayed to late subscribers; UIs that attach mid-stream may
-  show an ellipsis prefix until the final complete response arrives.
+- **`provider.response_updated`** — Transient provider-owned live response update.
+  `deltas` carry newly appended displayable assistant/reasoning text. `status`
+  carries provider-authored retry/diagnostic status. `compaction` carries
+  provider-side compaction lifecycle. `response_stats` carries public
+  content-free previous/current response-throughput samples for the current
+  provider prompt. Providers count backend response bytes at the transport
+  receive boundary before semantic parsing and emit stats at the provider's
+  rate-limited cadence. The harness validates prompt ownership and routing, then
+  broadcasts these updates unchanged; UI clients render stats directly from this
+  event. Stats-only updates are valid and transient.
+
 - **`provider.response_finished`** — Final assistant output in original
   item order via `output_items`, plus optional usage, provider
   response id, backend metadata, and echoed originator. Routed by the

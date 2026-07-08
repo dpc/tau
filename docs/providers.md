@@ -91,31 +91,11 @@ tool calls and opaque provider items, are committed. Provider-authored retry or
 diagnostic text must be sent as update `status`, not as assistant message
 deltas.
 
-Providers must not write `provider.response_updated` directly from every
-upstream stream chunk. Non-terminal response/progress updates are batched and
-emitted at most once per second per prompt; byte changes are accumulated, not a
-reason to emit early. A terminal flush is allowed immediately before
-`provider.response_finished` closes the prompt.
+Providers must not write `provider.response_updated` directly from every upstream stream chunk. Providers may emit the first non-empty streamed response/progress sample promptly so UIs learn that output has started. Later non-terminal response/progress updates are batched and emitted at most once per second per prompt; later byte changes are accumulated, not a reason to emit early. A terminal flush is allowed immediately before `provider.response_finished` closes the prompt.
 
-Providers do not publish public byte-progress metadata. For non-visible
-provider-generated output such as streamed tool/custom-tool input, providers may
-send the harness a content-free `provider.response_updated.semantic_output`
-byte snapshot. `semantic_output.non_visible_output_bytes` is cumulative for the
-current provider prompt, not a per-update delta, and remains provider-to-harness
-private. After validating provider prompt ownership, the harness consumes and
-strips that field and excludes it from durable/public provider output.
+Providers attach public content-free `response_stats` previous/current samples to these rate-limited updates. Providers own prompt-local response byte counting because they read the upstream stream, and first-party providers advance that counter from lower-layer received backend response bytes before semantic parsing so progress does not wait for a complete response item. `previous` is the last provider response sample that was actually emitted for that prompt, while `current` is the new cumulative sample measured since backend request dispatch.
 
-Providers also attach private `response_stats` previous/current samples to these
-rate-limited updates. Providers own prompt-local response byte counting because
-they read the upstream stream. `previous` is the last provider response sample
-that was actually emitted for that prompt, while `current` is the new cumulative
-sample measured since backend request dispatch. After validating provider prompt
-ownership, the harness consumes and strips private response stats, maps accepted
-samples to the active harness turn for current UI compatibility without
-replacing provider byte/elapsed semantics, then publishes content-free
-`agent.turn_stats_updated` events. Those events carry current and previous
-cumulative samples for UI rates and must not be stored as transcript content,
-editor current-response text, prompt-stdin capture, or final response output.
+The harness validates provider prompt ownership and fixes routing identity, then broadcasts `provider.response_updated` unchanged. It must not strip `response_stats`, derive its own response byte counters, or publish a harness-owned response-throughput projection. UI clients render live response throughput directly from provider updates. Stats-only provider updates are valid when no displayable text, status, or compaction changed.
 
 First-party providers abort high-confidence tight stream loops with
 `stop_reason: repetition_detected`: assistant/reasoning/tool-argument deltas are

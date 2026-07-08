@@ -154,10 +154,10 @@ fn stream_delta_emitter_emits_append_deltas() {
     );
 }
 
-/// Ensures streamed Chat Completions tool-call arguments expose only a
-/// content-free cumulative byte snapshot for the harness-owned turn stats path.
+/// Ensures streamed Chat Completions tool-call arguments contribute only
+/// content-free bytes to provider-owned response stats.
 #[test]
-fn stream_state_reports_tool_argument_semantic_output_bytes() {
+fn stream_state_reports_tool_argument_response_bytes() {
     let mut state = StreamState::new();
 
     state
@@ -168,17 +168,77 @@ fn stream_state_reports_tool_argument_semantic_output_bytes() {
         .expect("second argument delta");
 
     assert_eq!(
-        state.semantic_output_for_update(),
-        Some(tau_proto::ProviderResponseSemanticOutput {
-            non_visible_output_bytes: r#"{"cmd":"ls"}"#.len() as u64,
-        })
+        state.response_bytes_received(),
+        r#"{"cmd":"ls"}"#.len() as u64,
     );
 }
 
-/// Ensures the provider emission boundary does not regress to suppressing
-/// tool-argument-only streams that have no displayable text deltas.
+/// Ensures transport progress moves as soon as response bytes arrive, even when
+/// the provider has not yet sent a complete SSE line that can be parsed
+/// semantically.
 #[test]
-fn stream_update_emits_semantic_output_without_text_deltas() {
+fn chat_stream_body_counts_transport_bytes_before_complete_sse_line() {
+    let bytes = b"data: {\"choices\"";
+    let mut state = StreamState::new();
+    let mut raw_events = Vec::new();
+    let mut observed = Vec::new();
+
+    read_chat_stream_body(
+        std::io::Cursor::new(bytes),
+        &mut state,
+        &mut raw_events,
+        &mut |state| observed.push(state.response_bytes_received()),
+    )
+    .expect("partial stream read");
+
+    assert_eq!(observed, vec![bytes.len() as u64]);
+    assert!(raw_events.is_empty());
+}
+
+struct DoneThenPanicReader {
+    sent_done: bool,
+}
+
+impl std::io::Read for DoneThenPanicReader {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if self.sent_done {
+            panic!("reader must not be polled again after data: [DONE]");
+        }
+        self.sent_done = true;
+        let bytes = b"data: [DONE]\n\n";
+        buf[..bytes.len()].copy_from_slice(bytes);
+        Ok(bytes.len())
+    }
+}
+
+/// Ensures `[DONE]` terminates the parser without waiting for EOF from a
+/// provider that leaves the HTTP body open.
+#[test]
+fn chat_stream_body_stops_after_done_without_waiting_for_eof() {
+    let mut state = StreamState::new();
+    let mut raw_events = Vec::new();
+    let mut updates = 0;
+
+    read_chat_stream_body(
+        DoneThenPanicReader { sent_done: false },
+        &mut state,
+        &mut raw_events,
+        &mut |_| updates += 1,
+    )
+    .expect("done stream read");
+
+    assert_eq!(updates, 1);
+    assert_eq!(
+        state.response_bytes_received(),
+        b"data: [DONE]\n\n".len() as u64
+    );
+    assert!(raw_events.is_empty());
+}
+
+/// Ensures the provider emission boundary does not suppress public stats-only
+/// updates that have no displayable text deltas.
+#[test]
+fn stream_update_emits_response_stats_without_text_deltas() {
     let mut state = StreamState::new();
     state
         .append_tool_arguments_delta(0, "{\"cmd\":\"ls\"}")
@@ -192,29 +252,37 @@ fn stream_update_emits_semantic_output_without_text_deltas() {
             &prompt(),
             &state,
             &mut delta_emitter,
-            ProviderResponseStats::default(),
+            ProviderResponseStats {
+                current: tau_proto::ProviderResponseStatsSample {
+                    response_bytes_received: state.response_bytes_received(),
+                    elapsed_micros: 1_000_000,
+                },
+                previous: tau_proto::ProviderResponseStatsSample::default(),
+            },
             &mut writer,
         );
     }
 
     let frames = decode_frames(&bytes);
     let Some(HarnessInputMessage::Emit(emit)) = frames.first() else {
-        panic!("expected semantic output update frame: {frames:?}");
+        panic!("expected provider response update frame: {frames:?}");
     };
     let Event::ProviderResponseUpdated(update) = emit.event.as_ref() else {
         panic!("expected provider response update: {:?}", emit.event);
     };
     assert!(update.deltas.is_empty());
     assert_eq!(
-        update.semantic_output,
-        Some(tau_proto::ProviderResponseSemanticOutput {
-            non_visible_output_bytes: "{\"cmd\":\"ls\"}".len() as u64,
-        })
+        update
+            .response_stats
+            .as_ref()
+            .map(|stats| stats.current.response_bytes_received),
+        Some("{\"cmd\":\"ls\"}".len() as u64),
     );
 }
 
-/// Ensures Chat Completions progress frames are sampled by provider-prompt
-/// cadence, not emitted once per upstream chunk or byte change.
+/// Ensures Chat Completions progress frames publish the first streamed chunk
+/// promptly, then follow provider-prompt cadence instead of emitting once per
+/// upstream chunk or byte change.
 #[test]
 fn response_update_emitter_rate_limits_non_terminal_updates() {
     let prompt = prompt();
@@ -264,30 +332,45 @@ fn response_update_emitter_rate_limits_non_terminal_updates() {
             _ => None,
         })
         .collect();
-    assert_eq!(updates.len(), 1, "updates: {updates:#?}");
+    assert_eq!(updates.len(), 2, "updates: {updates:#?}");
     assert_eq!(
         updates[0].deltas,
         vec![ProviderResponseTextDelta::Message {
             output_index: 0,
-            text: "hello".to_owned(),
+            text: "hel".to_owned(),
             phase: None,
         },]
-    );
-    assert_eq!(
-        updates[0].semantic_output,
-        Some(tau_proto::ProviderResponseSemanticOutput {
-            non_visible_output_bytes: "{\"cmd\":\"ls\"}".len() as u64,
-        })
     );
     assert_eq!(
         updates[0].response_stats,
         Some(ProviderResponseStats {
             current: tau_proto::ProviderResponseStatsSample {
-                output_bytes_sent: ("hello".len() + "{\"cmd\":\"ls\"}".len()) as u64,
+                response_bytes_received: "hel".len() as u64,
+                elapsed_micros: 0,
+            },
+            previous: tau_proto::ProviderResponseStatsSample {
+                response_bytes_received: 0,
+                elapsed_micros: 0,
+            },
+        })
+    );
+    assert_eq!(
+        updates[1].deltas,
+        vec![ProviderResponseTextDelta::Message {
+            output_index: 0,
+            text: "lo".to_owned(),
+            phase: None,
+        },]
+    );
+    assert_eq!(
+        updates[1].response_stats,
+        Some(ProviderResponseStats {
+            current: tau_proto::ProviderResponseStatsSample {
+                response_bytes_received: ("hello".len() + "{\"cmd\":\"ls\"}".len()) as u64,
                 elapsed_micros: 1_000_000,
             },
             previous: tau_proto::ProviderResponseStatsSample {
-                output_bytes_sent: 0,
+                response_bytes_received: "hel".len() as u64,
                 elapsed_micros: 0,
             },
         })
@@ -307,6 +390,14 @@ fn response_update_emitter_emits_due_stats_only_sample() {
     {
         let mut writer = PeerOutputWriter::new(&mut bytes);
         let mut emitter = RateLimitedResponseUpdateEmitter::new_at(start);
+        emitter.emit_at(
+            &agent_prompt_id,
+            &prompt,
+            &state,
+            &mut writer,
+            start + PROVIDER_RESPONSE_UPDATE_MIN_INTERVAL / 2,
+            false,
+        );
         emitter.emit_at(
             &agent_prompt_id,
             &prompt,
@@ -338,23 +429,181 @@ fn response_update_emitter_emits_due_stats_only_sample() {
     assert_eq!(updates.len(), 2, "updates: {updates:#?}");
     assert!(updates.iter().all(|update| update.deltas.is_empty()));
     assert_eq!(
+        updates[0].response_stats,
+        Some(ProviderResponseStats {
+            current: tau_proto::ProviderResponseStatsSample {
+                response_bytes_received: 0,
+                elapsed_micros: 1_000_000,
+            },
+            previous: tau_proto::ProviderResponseStatsSample {
+                response_bytes_received: 0,
+                elapsed_micros: 0,
+            },
+        })
+    );
+    assert_eq!(
         updates[1].response_stats,
         Some(ProviderResponseStats {
             current: tau_proto::ProviderResponseStatsSample {
-                output_bytes_sent: 0,
+                response_bytes_received: 0,
                 elapsed_micros: 2_000_000,
             },
             previous: tau_proto::ProviderResponseStatsSample {
-                output_bytes_sent: 0,
+                response_bytes_received: 0,
                 elapsed_micros: 1_000_000,
             },
         })
     );
 }
 
-/// Ensures a terminal flush can publish the final batched suffix immediately
-/// before `provider.response_finished`, without losing text suppressed by the
-/// non-terminal one-second cadence.
+/// Ensures a due zero-byte idle sample does not consume the first non-empty
+/// bypass for streamed output, while later non-terminal bytes still obey the
+/// one-second cadence.
+#[test]
+fn response_update_emitter_emits_first_bytes_after_idle_sample_promptly() {
+    let prompt = prompt();
+    let agent_prompt_id = AgentPromptId::from("sp-first-bytes-after-idle");
+    let mut state = StreamState::new();
+    let mut bytes = Vec::new();
+    let start = std::time::Instant::now();
+    {
+        let mut writer = PeerOutputWriter::new(&mut bytes);
+        let mut emitter = RateLimitedResponseUpdateEmitter::new_at(start);
+        emitter.emit_at(
+            &agent_prompt_id,
+            &prompt,
+            &state,
+            &mut writer,
+            start + PROVIDER_RESPONSE_UPDATE_MIN_INTERVAL,
+            false,
+        );
+        state
+            .append_assistant_text_delta("hi")
+            .expect("first text delta");
+        emitter.emit_at(
+            &agent_prompt_id,
+            &prompt,
+            &state,
+            &mut writer,
+            start
+                + PROVIDER_RESPONSE_UPDATE_MIN_INTERVAL
+                + PROVIDER_RESPONSE_UPDATE_MIN_INTERVAL / 2,
+            false,
+        );
+        state
+            .append_assistant_text_delta("!")
+            .expect("second text delta");
+        emitter.emit_at(
+            &agent_prompt_id,
+            &prompt,
+            &state,
+            &mut writer,
+            start
+                + PROVIDER_RESPONSE_UPDATE_MIN_INTERVAL
+                + PROVIDER_RESPONSE_UPDATE_MIN_INTERVAL / 2
+                + PROVIDER_RESPONSE_UPDATE_MIN_INTERVAL / 4,
+            false,
+        );
+        emitter.emit_at(
+            &agent_prompt_id,
+            &prompt,
+            &state,
+            &mut writer,
+            start
+                + PROVIDER_RESPONSE_UPDATE_MIN_INTERVAL
+                + PROVIDER_RESPONSE_UPDATE_MIN_INTERVAL / 2
+                + PROVIDER_RESPONSE_UPDATE_MIN_INTERVAL,
+            false,
+        );
+    }
+
+    let updates: Vec<_> = decode_frames(&bytes)
+        .into_iter()
+        .filter_map(|frame| match frame {
+            HarnessInputMessage::Emit(emit) => match *emit.event {
+                Event::ProviderResponseUpdated(update) => Some(update),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect();
+    assert_eq!(updates.len(), 3, "updates: {updates:#?}");
+    assert!(updates[0].deltas.is_empty());
+    assert_eq!(
+        updates[1].deltas,
+        vec![ProviderResponseTextDelta::Message {
+            output_index: 0,
+            text: "hi".to_owned(),
+            phase: None,
+        }]
+    );
+    assert_eq!(
+        updates[1].response_stats,
+        Some(ProviderResponseStats {
+            current: tau_proto::ProviderResponseStatsSample {
+                response_bytes_received: "hi".len() as u64,
+                elapsed_micros: 1_500_000,
+            },
+            previous: tau_proto::ProviderResponseStatsSample {
+                response_bytes_received: 0,
+                elapsed_micros: 1_000_000,
+            },
+        })
+    );
+    assert_eq!(
+        updates[2].deltas,
+        vec![ProviderResponseTextDelta::Message {
+            output_index: 0,
+            text: "!".to_owned(),
+            phase: None,
+        }]
+    );
+}
+
+/// Ensures the first non-empty progress bypass applies to stats-only tool
+/// argument bytes, not just visible assistant text.
+#[test]
+fn response_update_emitter_emits_first_stats_only_sample_promptly() {
+    let prompt = prompt();
+    let agent_prompt_id = AgentPromptId::from("sp-first-semantic-output");
+    let mut state = StreamState::new();
+    let mut bytes = Vec::new();
+    let start = std::time::Instant::now();
+    {
+        let mut writer = PeerOutputWriter::new(&mut bytes);
+        let mut emitter = RateLimitedResponseUpdateEmitter::new_at(start);
+        state
+            .append_tool_arguments_delta(0, "{\"cmd\":\"ls\"}")
+            .expect("tool argument delta");
+        emitter.emit_at(&agent_prompt_id, &prompt, &state, &mut writer, start, false);
+    }
+
+    let updates: Vec<_> = decode_frames(&bytes)
+        .into_iter()
+        .filter_map(|frame| match frame {
+            HarnessInputMessage::Emit(emit) => match *emit.event {
+                Event::ProviderResponseUpdated(update) => Some(update),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect();
+    assert_eq!(updates.len(), 1, "updates: {updates:#?}");
+    assert!(updates[0].deltas.is_empty());
+    assert_eq!(
+        updates[0]
+            .response_stats
+            .as_ref()
+            .expect("stats-only update should carry provider stats")
+            .current
+            .response_bytes_received,
+        "{\"cmd\":\"ls\"}".len() as u64
+    );
+}
+
+/// Ensures a terminal flush can publish the final suffix immediately before
+/// `provider.response_finished`, without losing text suppressed by the
+/// non-terminal one-second cadence after the first streamed chunk.
 #[test]
 fn response_update_emitter_terminal_flush_emits_batched_suffix() {
     let prompt = prompt();
@@ -392,21 +641,38 @@ fn response_update_emitter_terminal_flush_emits_batched_suffix() {
             _ => None,
         })
         .collect();
-    assert_eq!(updates.len(), 1, "updates: {updates:#?}");
+    assert_eq!(updates.len(), 2, "updates: {updates:#?}");
     assert_eq!(
         updates[0].deltas,
         vec![ProviderResponseTextDelta::Message {
             output_index: 0,
-            text: "hello".to_owned(),
+            text: "hel".to_owned(),
             phase: None,
         }]
     );
     assert_eq!(
         updates[0]
             .response_stats
+            .as_ref()
+            .expect("initial update should carry provider stats")
+            .current
+            .response_bytes_received,
+        "hel".len() as u64
+    );
+    assert_eq!(
+        updates[1].deltas,
+        vec![ProviderResponseTextDelta::Message {
+            output_index: 0,
+            text: "lo".to_owned(),
+            phase: None,
+        }]
+    );
+    assert_eq!(
+        updates[1]
+            .response_stats
             .expect("terminal flush should carry provider stats")
             .current
-            .output_bytes_sent,
+            .response_bytes_received,
         "hello".len() as u64
     );
 }

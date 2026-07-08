@@ -86,37 +86,9 @@ must synthesize replay from the typed fields.
 First-party event categories (`tool`, `action`, `agent`, `extension`, `provider`, `harness`, `ui`, `shell`, `session`, and `term`) are reserved for typed protocol events. `CustomEvent` names must use extension-owned categories so extension payloads cannot spoof first-party routing or policy keys.
 Parsed event names and custom event payload names must have non-empty category and call segments; empty segments are malformed protocol data rather than extension-owned names.
 
-`provider.response_updated.response_stats` is private provider-to-harness
-response-liveness metadata. It is content-free, prompt-local, and owned by the
-provider because the provider owns the backend request lifecycle and reads the
-response byte stream. Providers attach previous/current cumulative samples to
-rate-limited response updates: `previous` is the last sample that was actually
-emitted for that provider prompt, and `current` is the new cumulative sample.
-Non-terminal provider response/progress/stat updates must not be emitted more
-than once per second per prompt; byte changes never bypass that cadence. A final
-flush may bypass the cadence immediately before the provider prompt closes.
+`provider.response_updated.response_stats` is public provider-owned response-liveness metadata. It is content-free, prompt-local, and owned by the provider because the provider owns the backend request lifecycle and reads the response byte stream. Providers attach previous/current cumulative samples to rate-limited response updates: `previous` is the last sample that was actually emitted for that provider prompt, and `current` is the new cumulative sample. Providers may emit the first non-empty response/progress/stat update immediately so UIs learn that output has started. Later non-terminal provider response/progress/stat updates must not be emitted more than once per second per prompt; later byte changes never bypass that cadence. A final flush may bypass the cadence immediately before the provider prompt closes.
 
-`agent.turn_stats_updated` is a transient public compatibility projection owned
-by the harness as validator/adapter, not as the source of truth for provider
-response throughput. Its samples are cumulative and content-free; `previous` is
-always present and must describe the last emitted public sample for the same
-turn. When a valid provider response sample is present, the harness must preserve
-the provider previous/current byte and elapsed semantics while mapping prompt
-ownership/routing to the active agent turn; it must not reconstruct
-provider-response throughput from per-chunk updates. `turn_id` is an opaque
-[`AgentTurnId`], while `agent_prompt_id` identifies only the provider prompt
-currently active; it is absent during tool-wait samples and after a prompt is no
-longer active.
-
-Periodic idle samples with zero output bytes, unchanged output bytes, or a zero
-byte delta are valid. Consumers should compute interval rates from
-`current - previous` and whole-turn average rates from `current`, rather than
-assuming every sample corresponds to newly streamed provider content.
-
-`provider.response_updated.semantic_output` and `response_stats` are
-provider-to-harness private. Harnesses consume and strip them before subscriber
-delivery, then publish any user-visible progress as the compatibility
-`agent.turn_stats_updated` projection.
+The harness validates provider prompt ownership and routing for `provider.response_updated`, but it must not consume, strip, remap, account, or project provider response stats. UI clients render response throughput directly from the provider update. Stats-only provider updates are valid public transient events.
 
 ## Tree navigation targets
 
@@ -168,9 +140,8 @@ Prefer additive optional fields with serde defaults for backward compatibility. 
 visible assistant/reasoning progress. Providers must send newly appended text in
 `deltas`, not full accumulated message snapshots; retry/status diagnostics belong
 in the separate `status` field because they are provider-authored, not
-assistant-authored. Live byte/duration stats are not provider-response metadata;
-the harness publishes content-free `agent.turn_stats_updated` events for active
-agent turns after validating provider ownership and observing accepted deltas.
+assistant-authored. Live byte/duration stats are provider-owned content-free metadata carried in
+`response_stats`; UIs render them directly from `provider.response_updated`.
 `provider.response_finished.output_items` remains the complete durable response
 and replay source.
 

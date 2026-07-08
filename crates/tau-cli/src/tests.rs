@@ -878,26 +878,47 @@ fn agent_prompt_started(agent_prompt_id: &str, session_id: &str) -> tau_proto::A
     }
 }
 
-fn agent_turn_stats(
+fn provider_response_stats_update(
+    agent_prompt_id: &str,
+    agent_id: tau_proto::AgentId,
+    current_bytes: u64,
+    previous_bytes: u64,
+    current_elapsed_micros: u64,
+    previous_elapsed_micros: u64,
+) -> ProviderResponseUpdated {
+    ProviderResponseUpdated {
+        agent_prompt_id: agent_prompt_id.into(),
+        agent_id,
+        deltas: Vec::new(),
+        compaction: None,
+        status: None,
+        response_stats: Some(tau_proto::ProviderResponseStats {
+            current: tau_proto::ProviderResponseStatsSample {
+                response_bytes_received: current_bytes,
+                elapsed_micros: current_elapsed_micros,
+            },
+            previous: tau_proto::ProviderResponseStatsSample {
+                response_bytes_received: previous_bytes,
+                elapsed_micros: previous_elapsed_micros,
+            },
+        }),
+        originator: tau_proto::PromptOriginator::User,
+    }
+}
+
+fn main_provider_response_stats_update(
     agent_prompt_id: &str,
     current_bytes: u64,
     previous_bytes: u64,
-) -> tau_proto::AgentTurnStatsUpdated {
-    tau_proto::AgentTurnStatsUpdated {
-        turn_id: agent_prompt_id.into(),
-        agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
-        session_id: "s1".into(),
-        agent_prompt_id: Some(agent_prompt_id.into()),
-        originator: tau_proto::PromptOriginator::User,
-        current: tau_proto::AgentTurnStatsSample {
-            output_bytes_sent: current_bytes,
-            elapsed_micros: 2_000_000,
-        },
-        previous: tau_proto::AgentTurnStatsSample {
-            output_bytes_sent: previous_bytes,
-            elapsed_micros: 1_000_000,
-        },
-    }
+) -> ProviderResponseUpdated {
+    provider_response_stats_update(
+        agent_prompt_id,
+        tau_proto::AgentId::parse("main").expect("agent id"),
+        current_bytes,
+        previous_bytes,
+        2_000_000,
+        1_000_000,
+    )
 }
 
 #[test]
@@ -1298,7 +1319,6 @@ fn provider_response_delta_update(
         deltas,
         compaction: None,
         status: None,
-        semantic_output: None,
         response_stats: None,
         originator,
     }
@@ -1485,7 +1505,6 @@ fn status_clear_response_removes_live_thinking_block() {
             text: "retrying".to_owned(),
             clear_response: true,
         }),
-        semantic_output: None,
         response_stats: None,
         originator: tau_proto::PromptOriginator::User,
     }));
@@ -4501,10 +4520,10 @@ fn prompt_termination_clears_live_response_and_activity() {
     assert!(!vt.screen_contains(80, "…"));
 }
 
-/// Ensures agent-turn stats make the standalone live indicator
+/// Ensures provider response stats make the standalone live indicator
 /// look active without entering the final transcript.
 #[test]
-fn agent_turn_stats_update_suffixes_live_indicator_until_finish() {
+fn provider_response_stats_update_suffixes_live_indicator_until_finish() {
     let (_term, handle, vt) = setup(80, 24);
     let mut renderer = EventRenderer::new(
         handle.clone(),
@@ -4516,21 +4535,25 @@ fn agent_turn_stats_update_suffixes_live_indicator_until_finish() {
         "sp-progress",
         "s1",
     )));
-    let mut pre_output_stats = agent_turn_stats("sp-progress", 0, 0);
-    pre_output_stats.current.elapsed_micros = 1_000_000;
-    pre_output_stats.previous.elapsed_micros = 0;
-    renderer.handle(&Event::AgentTurnStatsUpdated(pre_output_stats));
+    renderer.handle(&Event::ProviderResponseUpdated(
+        provider_response_stats_update(
+            "sp-progress",
+            tau_proto::AgentId::parse("main").expect("agent id"),
+            0,
+            0,
+            1_000_000,
+            0,
+        ),
+    ));
     sync(&handle);
     assert!(
         vt.screen_contains(80, "… (1s, 0B, Δ0B/s, 0B/s)"),
         "pre-output stats samples must still refresh elapsed time: {:?}",
         vt.screen_text(80)
     );
-    renderer.handle(&Event::AgentTurnStatsUpdated(agent_turn_stats(
-        "sp-progress",
-        12 * 1024,
-        4 * 1024,
-    )));
+    renderer.handle(&Event::ProviderResponseUpdated(
+        main_provider_response_stats_update("sp-progress", 12 * 1024, 4 * 1024),
+    ));
     sync(&handle);
     assert!(vt.screen_contains(80, "… (2s, 12KB, Δ8KB/s, 6KB/s)"));
     assert!(!vt.screen_contains(80, "shell_command"));
@@ -4547,7 +4570,6 @@ fn agent_turn_stats_update_suffixes_live_indicator_until_finish() {
         }],
         compaction: None,
         status: None,
-        semantic_output: None,
         response_stats: None,
         originator: tau_proto::PromptOriginator::User,
     }));
@@ -4558,10 +4580,16 @@ fn agent_turn_stats_update_suffixes_live_indicator_until_finish() {
         vt.screen_text(80)
     );
 
-    let mut idle_stats = agent_turn_stats("sp-progress", 12 * 1024, 12 * 1024);
-    idle_stats.current.elapsed_micros = 3_000_000;
-    idle_stats.previous.elapsed_micros = 2_000_000;
-    renderer.handle(&Event::AgentTurnStatsUpdated(idle_stats));
+    renderer.handle(&Event::ProviderResponseUpdated(
+        provider_response_stats_update(
+            "sp-progress",
+            tau_proto::AgentId::parse("main").expect("agent id"),
+            12 * 1024,
+            12 * 1024,
+            3_000_000,
+            2_000_000,
+        ),
+    ));
     sync(&handle);
     assert!(
         vt.screen_contains(80, "… (3s, 12KB, Δ0B/s, 4KB/s)"),
@@ -4584,7 +4612,7 @@ fn agent_turn_stats_update_suffixes_live_indicator_until_finish() {
 /// user viewing another agent should not see the live response stats line
 /// appear, disappear, or change because of background activity elsewhere.
 #[test]
-fn hidden_agent_turn_stats_do_not_update_visible_response_indicator() {
+fn hidden_provider_response_stats_do_not_update_visible_response_indicator() {
     let (_term, handle, vt) = setup(80, 24);
     let mut renderer = EventRenderer::new(
         handle.clone(),
@@ -4596,11 +4624,15 @@ fn hidden_agent_turn_stats_do_not_update_visible_response_indicator() {
     let mut prompt_a = agent_prompt_created("ap-agent_a-0", "s1");
     prompt_a.agent_id = agent_id("agent_a");
     renderer.handle(&Event::AgentPromptCreated(prompt_a));
-    renderer.handle(&Event::AgentTurnStatsUpdated(
-        tau_proto::AgentTurnStatsUpdated {
-            agent_id: agent_id("agent_a"),
-            ..agent_turn_stats("ap-agent_a-0", 4 * 1024, 0)
-        },
+    renderer.handle(&Event::ProviderResponseUpdated(
+        provider_response_stats_update(
+            "ap-agent_a-0",
+            agent_id("agent_a"),
+            4 * 1024,
+            0,
+            2_000_000,
+            1_000_000,
+        ),
     ));
     sync(&handle);
     assert!(vt.screen_contains(80, "… (2s, 4KB, Δ4KB/s, 2KB/s)"));
@@ -4610,12 +4642,15 @@ fn hidden_agent_turn_stats_do_not_update_visible_response_indicator() {
     prompt_b.agent_id = agent_id("agent_b");
     renderer.handle(&Event::AgentPromptCreated(prompt_b));
     renderer.switch_agent("agent_a".to_owned());
-    renderer.handle(&Event::AgentTurnStatsUpdated(
-        tau_proto::AgentTurnStatsUpdated {
-            agent_id: agent_id("agent_b"),
-            agent_prompt_id: Some("ap-agent_b-0".into()),
-            ..agent_turn_stats("ap-agent_b-0", 12 * 1024, 4 * 1024)
-        },
+    renderer.handle(&Event::ProviderResponseUpdated(
+        provider_response_stats_update(
+            "ap-agent_b-0",
+            agent_id("agent_b"),
+            12 * 1024,
+            4 * 1024,
+            2_000_000,
+            1_000_000,
+        ),
     ));
     sync(&handle);
 
@@ -4640,13 +4675,13 @@ fn hidden_agent_turn_stats_do_not_update_visible_response_indicator() {
 }
 
 /// Ensures the no-agent fallback still accepts stats for a visible prompt it
-/// already owns, while rejecting unrelated agent stats.
+/// already owns, while rejecting unrelated provider response stats.
 ///
 /// A late provider update can create live response state before the UI has
 /// selected or displayed an agent. The stats guard must preserve that supported
 /// adoptable transcript path without letting other agents' stats leak into it.
 #[test]
-fn no_agent_visible_prompt_accepts_only_matching_turn_stats() {
+fn no_agent_visible_prompt_accepts_only_matching_response_stats() {
     let (_term, handle, vt) = setup(80, 24);
     let mut renderer = EventRenderer::new(
         handle.clone(),
@@ -4660,18 +4695,21 @@ fn no_agent_visible_prompt_accepts_only_matching_turn_stats() {
         deltas: Vec::new(),
         compaction: None,
         status: None,
-        semantic_output: None,
         response_stats: None,
         originator: tau_proto::PromptOriginator::User,
     }));
     sync(&handle);
     assert!(vt.screen_contains(80, "…"));
 
-    renderer.handle(&Event::AgentTurnStatsUpdated(
-        tau_proto::AgentTurnStatsUpdated {
-            agent_id: agent_id("agent_a"),
-            ..agent_turn_stats("ap-agent_a-0", 4 * 1024, 0)
-        },
+    renderer.handle(&Event::ProviderResponseUpdated(
+        provider_response_stats_update(
+            "ap-agent_a-0",
+            agent_id("agent_a"),
+            4 * 1024,
+            0,
+            2_000_000,
+            1_000_000,
+        ),
     ));
     sync(&handle);
     assert!(
@@ -4680,12 +4718,15 @@ fn no_agent_visible_prompt_accepts_only_matching_turn_stats() {
         vt.screen_text(80)
     );
 
-    renderer.handle(&Event::AgentTurnStatsUpdated(
-        tau_proto::AgentTurnStatsUpdated {
-            agent_id: agent_id("agent_b"),
-            agent_prompt_id: Some("ap-agent_a-0".into()),
-            ..agent_turn_stats("ap-agent_a-0", 12 * 1024, 4 * 1024)
-        },
+    renderer.handle(&Event::ProviderResponseUpdated(
+        provider_response_stats_update(
+            "ap-agent_a-0",
+            agent_id("agent_b"),
+            12 * 1024,
+            4 * 1024,
+            2_000_000,
+            1_000_000,
+        ),
     ));
     sync(&handle);
     assert!(
@@ -4695,7 +4736,7 @@ fn no_agent_visible_prompt_accepts_only_matching_turn_stats() {
     );
     assert!(
         !vt.screen_contains(80, "… (2s, 12KB, Δ8KB/s, 6KB/s)"),
-        "unrelated agent stats must not render in the visible no-agent transcript: {:?}",
+        "unrelated provider response stats must not render in the visible no-agent transcript: {:?}",
         vt.screen_text(80)
     );
 }
@@ -4703,13 +4744,14 @@ fn no_agent_visible_prompt_accepts_only_matching_turn_stats() {
 /// Ensures a stale prompt-associated stats sample received after the final
 /// provider response does not recreate an already-finished live response block.
 #[test]
-fn late_agent_turn_stats_after_finish_does_not_recreate_live_indicator() {
+fn late_provider_response_stats_after_finish_does_not_recreate_live_indicator() {
     let (_term, handle, vt) = setup(80, 24);
     let mut renderer = EventRenderer::new(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
     );
+    let in_progress = renderer.agent_in_progress_state();
 
     renderer.handle(&Event::AgentPromptCreated(agent_prompt_created(
         "sp-progress",
@@ -4719,21 +4761,22 @@ fn late_agent_turn_stats_after_finish_does_not_recreate_live_indicator() {
         "sp-progress",
         vec![assistant_message_item("done")],
     )));
-    renderer.handle(&Event::AgentTurnStatsUpdated(agent_turn_stats(
-        "sp-progress",
-        12 * 1024,
-        4 * 1024,
-    )));
+    renderer.handle(&Event::ProviderResponseUpdated(
+        main_provider_response_stats_update("sp-progress", 12 * 1024, 4 * 1024),
+    ));
     sync(&handle);
 
     assert!(vt.screen_contains(80, "done"));
     assert!(!vt.screen_contains(80, "… (2s, 12KB, Δ8KB/s, 6KB/s)"));
+    assert!(!in_progress.load(std::sync::atomic::Ordering::Relaxed));
+    assert!(!renderer.main_agent_turn_active_for_test());
 }
 
-/// Ensures visible assistant streaming remains content-focused: generic turn
-/// stats are not appended to the response text while text is visibly active.
+/// Ensures visible assistant streaming remains content-focused: provider
+/// response stats are not appended to the response text while text is visibly
+/// active.
 #[test]
-fn provider_visible_update_omits_turn_stats_suffix() {
+fn provider_visible_update_omits_response_stats_suffix() {
     let (_term, handle, vt) = setup(80, 24);
     let mut renderer = EventRenderer::new(
         handle.clone(),
@@ -4745,11 +4788,9 @@ fn provider_visible_update_omits_turn_stats_suffix() {
         "sp-visible-progress",
         "s1",
     )));
-    renderer.handle(&Event::AgentTurnStatsUpdated(agent_turn_stats(
-        "sp-visible-progress",
-        5,
-        0,
-    )));
+    renderer.handle(&Event::ProviderResponseUpdated(
+        main_provider_response_stats_update("sp-visible-progress", 5, 0),
+    ));
     renderer.handle(&Event::ProviderResponseUpdated(ProviderResponseUpdated {
         agent_prompt_id: "sp-visible-progress".into(),
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
@@ -4760,7 +4801,6 @@ fn provider_visible_update_omits_turn_stats_suffix() {
         }],
         compaction: None,
         status: None,
-        semantic_output: None,
         response_stats: None,
         originator: tau_proto::PromptOriginator::User,
     }));
@@ -5891,7 +5931,6 @@ fn render_provider_compaction_update_as_compact_progress() {
             compacted_input_tokens: None,
         }),
         status: None,
-        semantic_output: None,
         response_stats: None,
         originator: tau_proto::PromptOriginator::User,
     }));

@@ -24,11 +24,11 @@ captures.
 Streamed assistant text, reasoning text, and tool-call/custom-tool input cross
 the same external-provider boundary. Never copy raw streamed
 text/reasoning/argument/input bytes into status text, notices, traces, or final
-transcript rendering. Provider response stats are private, content-free
-provider-to-harness metadata: providers own the prompt-local byte counter, emit
-previous/current samples at no more than 1Hz except the final flush, and the
-harness validates ownership and strips the field before public provider
-delivery.
+transcript rendering. Provider response stats are public, content-free metadata on transient
+`provider.response_updated` events: providers own the prompt-local byte counter,
+may emit the first non-empty previous/current sample promptly, emit later
+non-terminal samples at no more than 1Hz, and may emit a final flush. The harness
+validates ownership and broadcasts the stats unchanged.
 
 ## Prompt worker wakeups
 

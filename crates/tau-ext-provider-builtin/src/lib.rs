@@ -1654,7 +1654,6 @@ fn emit_retry_banner<W: Write>(
                 text: banner,
                 clear_response: true,
             }),
-            semantic_output: None,
             response_stats: None,
             originator: originator.clone(),
         },
@@ -1900,6 +1899,7 @@ struct RateLimitedResponseUpdateEmitter {
     started_at: Instant,
     last_update_emitted_at: Option<Instant>,
     last_stats_sample: tau_proto::ProviderResponseStatsSample,
+    emitted_non_empty_sample: bool,
 }
 
 struct ResponseUpdateTarget<'a> {
@@ -1917,8 +1917,9 @@ impl RateLimitedResponseUpdateEmitter {
         Self {
             delta_emitter: common::StreamDeltaEmitter::default(),
             started_at,
-            last_update_emitted_at: Some(started_at),
+            last_update_emitted_at: None,
             last_stats_sample: tau_proto::ProviderResponseStatsSample::default(),
+            emitted_non_empty_sample: false,
         }
     }
 
@@ -1962,14 +1963,22 @@ impl RateLimitedResponseUpdateEmitter {
         now: Instant,
         terminal_flush: bool,
     ) {
+        let response_stats = self.response_stats_at(state, now);
+        let first_non_empty_sample =
+            !self.emitted_non_empty_sample && response_stats.current.response_bytes_received > 0;
         if !terminal_flush
-            && self.last_update_emitted_at.is_some_and(|last| {
-                now.saturating_duration_since(last) < PROVIDER_RESPONSE_UPDATE_MIN_INTERVAL
-            })
+            && !first_non_empty_sample
+            && self.last_update_emitted_at.map_or_else(
+                || {
+                    response_stats.current.response_bytes_received == 0
+                        && now.saturating_duration_since(self.started_at)
+                            < PROVIDER_RESPONSE_UPDATE_MIN_INTERVAL
+                },
+                |last| now.saturating_duration_since(last) < PROVIDER_RESPONSE_UPDATE_MIN_INTERVAL,
+            )
         {
             return;
         }
-        let response_stats = self.response_stats_at(state, now);
         if emit_chatgpt_stream_update(
             target.agent_prompt_id,
             target.agent_id,
@@ -1981,6 +1990,7 @@ impl RateLimitedResponseUpdateEmitter {
         ) {
             self.last_stats_sample = response_stats.current;
             self.last_update_emitted_at = Some(now);
+            self.emitted_non_empty_sample |= response_stats.current.response_bytes_received > 0;
         }
     }
 
@@ -1990,7 +2000,7 @@ impl RateLimitedResponseUpdateEmitter {
         now: Instant,
     ) -> ProviderResponseStats {
         let current = tau_proto::ProviderResponseStatsSample {
-            output_bytes_sent: state.response_output_bytes(),
+            response_bytes_received: state.response_bytes_received(),
             elapsed_micros: now
                 .saturating_duration_since(self.started_at)
                 .as_micros()
@@ -2014,16 +2024,16 @@ fn emit_chatgpt_stream_update<W: Write>(
 ) -> bool {
     // RATE-LIMIT GUARDRAIL — DO NOT CALL THIS DIRECTLY FROM UPSTREAM CHUNKS.
     // provider.response_updated is a bus/event-log event, not a per-chunk
-    // callback. Progress/byte updates MUST be batched and emitted no faster than
-    // PROVIDER_RESPONSE_UPDATE_MIN_INTERVAL (1s) per prompt. A byte change is NOT
-    // a reason to emit early. Only `RateLimitedResponseUpdateEmitter` may bypass
-    // this for a terminal flush immediately before the turn is closed.
+    // callback. After the first prompt update, progress/byte updates MUST be
+    // batched and emitted no faster than PROVIDER_RESPONSE_UPDATE_MIN_INTERVAL
+    // (1s) per prompt. A byte change is NOT a reason to emit early. Only
+    // `RateLimitedResponseUpdateEmitter` may bypass this for the first non-empty
+    // progress sample and for a terminal flush immediately before the turn is
+    // closed.
     let deltas = delta_emitter.deltas(state);
     let compaction = state.compaction_update();
-    let semantic_output = state.semantic_output_for_update();
     if deltas.is_empty()
         && compaction.is_none()
-        && semantic_output.is_none()
         && response_stats.current == response_stats.previous
     {
         return false;
@@ -2035,7 +2045,6 @@ fn emit_chatgpt_stream_update<W: Write>(
             deltas,
             compaction,
             status: None,
-            semantic_output,
             response_stats: Some(response_stats),
             originator: originator.clone(),
         },
@@ -2278,7 +2287,6 @@ fn emit_repetition_detected_update<W: Write>(
                 text,
                 clear_response: true,
             }),
-            semantic_output: None,
             response_stats: None,
             originator: originator.clone(),
         },

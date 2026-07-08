@@ -348,6 +348,8 @@ impl WsConn {
                     let now = Instant::now();
                     let delta = now.saturating_duration_since(last_event_at);
                     last_event_at = now;
+                    state.record_transport_response_bytes(text.len());
+                    on_update(&state);
                     if let Some(stream) = recording_stream.as_deref_mut() {
                         record_provider_raw_event_after(stream, delta, text.to_string());
                     }

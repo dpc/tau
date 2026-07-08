@@ -365,18 +365,6 @@ fn representative_events() -> Vec<Event> {
             kind: AgentMessageKind::Message,
             message: "hello back".to_owned(),
         }),
-        Event::AgentTurnStatsUpdated(AgentTurnStatsUpdated {
-            turn_id: "sp-1".into(),
-            agent_id: agent_id("engineer_abcd1234"),
-            session_id: "session_123".into(),
-            agent_prompt_id: Some("sp-1".into()),
-            originator: PromptOriginator::User,
-            current: AgentTurnStatsSample {
-                output_bytes_sent: 42,
-                elapsed_micros: 1_000_000,
-            },
-            previous: AgentTurnStatsSample::default(),
-        }),
         Event::AgentWatchesUpdated(AgentWatchesUpdated {
             session_id: "session_123".into(),
             watcher_id: agent_id("engineer_parent"),
@@ -534,7 +522,6 @@ fn representative_events() -> Vec<Event> {
             }],
             compaction: None,
             status: None,
-            semantic_output: None,
             response_stats: None,
             originator: PromptOriginator::User,
         }),
@@ -1115,7 +1102,6 @@ fn expected_default_transient(event: &Event) -> bool {
             | Event::AgentPromptCreated(_)
             | Event::AgentPromptStarted(_)
             | Event::AgentPromptTerminated(_)
-            | Event::AgentTurnStatsUpdated(_)
             | Event::AgentPromptPrewarmRequested(_)
             | Event::AgentState(_)
             | Event::UiCompactRequest(_)
@@ -1154,7 +1140,6 @@ fn expected_first_party_event_names() -> std::collections::BTreeSet<String> {
         "agent.started",
         "agent.state",
         "agent.stats_updated",
-        "agent.turn_stats_updated",
         "agent.user_message_injected",
         "agent.watches_updated",
         "extension.agent_context_publish",
@@ -1700,7 +1685,6 @@ fn execution_events_use_provider_wire_family() {
                 deltas: Vec::new(),
                 compaction: None,
                 status: None,
-                semantic_output: None,
                 response_stats: None,
                 originator: PromptOriginator::User,
             }),
@@ -1753,53 +1737,38 @@ fn provider_response_updated_requires_delta_routing_fields() {
     );
 }
 
-/// Ensures provider-private semantic-output snapshots round-trip as
-/// content-free byte counts while remaining optional for ordinary displayable
-/// response updates.
+/// Ensures public provider response stats round-trip on provider updates so UI
+/// clients can render provider-owned throughput directly from the broadcast
+/// event.
 #[test]
-fn provider_response_updated_semantic_output_round_trip() {
+fn provider_response_updated_response_stats_round_trip() {
     let update = ProviderResponseUpdated {
         agent_prompt_id: "sp-1".into(),
         agent_id: agent_id("engineer_abcd1234"),
         deltas: Vec::new(),
         compaction: None,
         status: None,
-        semantic_output: Some(ProviderResponseSemanticOutput {
-            non_visible_output_bytes: 8192,
+        response_stats: Some(ProviderResponseStats {
+            current: ProviderResponseStatsSample {
+                response_bytes_received: 12_345,
+                elapsed_micros: 2_000_000,
+            },
+            previous: ProviderResponseStatsSample {
+                response_bytes_received: 4096,
+                elapsed_micros: 1_000_000,
+            },
         }),
-        response_stats: None,
         originator: PromptOriginator::User,
     };
 
-    let value = serde_json::to_value(&update).expect("serialize semantic output update");
-    assert_eq!(value["semantic_output"]["non_visible_output_bytes"], 8192);
+    let value = serde_json::to_value(&update).expect("serialize response stats update");
+    assert_eq!(
+        value["response_stats"]["current"]["response_bytes_received"],
+        12_345
+    );
     let decoded: ProviderResponseUpdated =
-        serde_json::from_value(value).expect("decode semantic output update");
+        serde_json::from_value(value).expect("decode response stats update");
     assert_eq!(decoded, update);
-}
-
-/// Ensures agent turn stats keep current and previous samples together so
-/// consumers can calculate deltas without remembering prior protocol events.
-#[test]
-fn agent_turn_stats_updated_serde_round_trip() {
-    let update = AgentTurnStatsUpdated {
-        turn_id: "sp-1".into(),
-        agent_id: agent_id("engineer_abcd1234"),
-        session_id: "session_123".into(),
-        agent_prompt_id: Some("sp-1".into()),
-        originator: PromptOriginator::User,
-        current: AgentTurnStatsSample {
-            output_bytes_sent: 12_345,
-            elapsed_micros: 2_000_000,
-        },
-        previous: AgentTurnStatsSample {
-            output_bytes_sent: 4096,
-            elapsed_micros: 1_000_000,
-        },
-    };
-    let value = serde_json::to_value(&update).expect("serialize stats");
-    let round_trip = serde_json::from_value::<AgentTurnStatsUpdated>(value).expect("decode stats");
-    assert_eq!(round_trip, update);
 }
 
 /// Ensures generic watched-agent watch snapshots keep optional change metadata
@@ -2071,7 +2040,6 @@ fn event_defaults_to_transient_marks_progress_kinds() {
             deltas: Vec::new(),
             compaction: None,
             status: None,
-            semantic_output: None,
             response_stats: None,
             originator: PromptOriginator::User,
         }),

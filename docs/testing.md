@@ -57,23 +57,9 @@ regression coverage. Reusable steps live in
 
 Tests for `provider.response_updated` should use append-delta semantics: multi-update assistant/reasoning cases send only the newly appended suffix in each update. Do not feed full accumulated snapshots through delta helpers unless the test is explicitly checking legacy/invalid payload handling. Final-response tests should continue to assert complete `provider.response_finished.output_items`.
 
-Provider streaming tests must also assert response/progress rate-limit
-boundaries: non-terminal `provider.response_updated` frames for one prompt are
-batched to at most one per second, no first non-terminal update is emitted before
-the first one-second deadline, stats-only/no-byte samples are valid liveness
-updates, suppressed visible deltas are not lost, and a terminal flush can publish
-the final batched suffix immediately before `provider.response_finished`.
-Previous/current response-stat assertions should prove that `previous` equals
-the last emitted provider sample, not an internal suppressed calculation.
+Provider streaming tests must also assert response/progress rate-limit boundaries: non-terminal `provider.response_updated` frames for one prompt publish the first non-empty streamed output sample promptly, suppress empty zero-byte idle samples until the first one-second deadline, batch later non-terminal samples to at most one per second, allow stats-only/no-byte samples as valid liveness updates once due, preserve suppressed visible deltas, and allow a terminal flush to publish the final batched suffix immediately before `provider.response_finished`. Previous/current response-stat assertions should prove that `previous` equals the last emitted provider sample, not an internal suppressed calculation. Tests should also prove response bytes are recorded at the backend transport receive boundary before semantic parsing.
 
-Agent-turn stats tests should assert byte-counter and elapsed-sample boundaries
-explicitly at the harness/protocol layer, including that byte changes do not
-bypass the one-second sampled cadence and that provider-supplied
-previous/current elapsed semantics are preserved when projected to the public UI
-compatibility event. UI tests should prove stats remain transient and absent
-from editor/final rendering, and that the live throughput suffix is not
-recomputed on redraw/timer ticks without a fresh stats event.
-
+Harness tests for provider response stats should assert only validation and pass-through: wrong-owner provider updates are rejected, accepted stats-only `provider.response_updated` events are broadcast to subscribers, `agent_id` is rewritten from prompt ownership, and no harness-owned response-throughput projection is emitted.
 
 ## Provider stream repetition guard
 

@@ -42,16 +42,16 @@ reasoning/thinking text. Tool calls, tool payloads/results, shell output,
 status/progress lines, and agent-to-agent message debug displays must stay on
 their existing renderers unless there is a separate product decision.
 
-Agent turn stats are a standalone live-indicator status line. The CLI may
-remember the latest `agent.turn_stats_updated` sample for an in-flight prompt
-only to repaint the transient ellipsis block, and derives bytes/rate from the
-event's `current` and `previous` samples. The CLI renders a generic
-`(elapsed, total bytes, Δinterval rate, average rate)` suffix only on that
-transient indicator, not on visible assistant text, and must not copy stats text
-into editor current-response state, prompt-stdin capture, durable transcripts,
-or final response rendering. The live throughput suffix is a pure render of the
-latest harness stats sample; the CLI must not interpolate elapsed time or
-recompute `Δ` on redraw/timer ticks.
+Provider response stats are a standalone live-indicator status line. The CLI may
+remember the latest `provider.response_updated.response_stats` sample for an
+in-flight prompt only to repaint the transient ellipsis block, and derives
+bytes/rate from the event's `current` and `previous` samples. The CLI renders a
+generic `(elapsed, total bytes, Δinterval rate, average rate)` suffix only on
+that transient indicator, not on visible assistant text, and must not copy stats
+text into editor current-response state, prompt-stdin capture, durable
+transcripts, or final response rendering. The live throughput suffix is a pure
+render of the latest provider stats sample; the CLI must not interpolate elapsed
+time or recompute `Δ` on redraw/timer ticks.
 
 ## Agent names and watcher display
 
@@ -80,7 +80,7 @@ Two agent-state concepts are intentionally distinct:
 Watched-agent `watching` blocks and the bottom status `@N` side-agent count use
 the running/waiting concept, not the navigation concept. Watches identify the
 observed agents, prompt/provider lifecycle events maintain the active prompt ids
-that define running turns, and stats/turn-stats events only add counters/details
+that define running turns, and agent stats and provider response stats only add counters/details
 to those already-running indicators. A watched or non-suspended agent that is
 waiting for a future prompt/message must not be rendered as running. The `@N`
 status chip counts running side agents and excludes the currently visible agent,

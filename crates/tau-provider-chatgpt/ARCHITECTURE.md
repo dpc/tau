@@ -62,24 +62,22 @@ historical `fc_`/`ctc_` id synthesis when that sidecar is absent.
 
 Responses streams may deliver visible assistant text, reasoning summaries, large
 function-call arguments, or custom-tool input during an agent turn. Providers
-emit displayable assistant/reasoning append deltas and final tool-call items, but
-do not publish public byte-progress metadata. For streamed function-call
-arguments and custom-tool input, the provider sends the harness a private,
-content-free `semantic_output.non_visible_output_bytes` snapshot that is
-cumulative for the current provider prompt, not a per-update delta.
+emit displayable assistant/reasoning append deltas and final tool-call items, and
+publish public content-free response throughput samples on
+`provider.response_updated.response_stats`.
 
-Provider response throughput samples are also private provider-to-harness
-metadata. The sampler starts when the backend request is dispatched. Chunk reads
-only update in-memory cumulative state and pending visible/non-visible deltas.
-The provider writes non-terminal `provider.response_updated` samples only on
-one-second response deadlines; byte changes never bypass that cadence. Each
-private `response_stats` pair uses `previous` = the last provider sample actually
-emitted for the prompt and `current` = the new cumulative sample. A terminal
-flush is the only normal bypass and is allowed immediately before the provider
-prompt closes. The harness strips private response metadata before subscriber
-delivery and surfaces any public liveness display only through the compatibility
-`agent.turn_stats_updated` projection without replacing provider byte/elapsed
-semantics.
+The sampler starts when the backend request is dispatched. Lower-layer HTTP/SSE
+reads and WebSocket frame receives immediately advance the prompt-local received
+byte counter before semantic parsing, while parsed chunks update pending
+visible/non-visible deltas. The provider writes the first non-empty
+`provider.response_updated` sample as soon as streamed output is observed, then
+writes later non-terminal samples only on one-second response deadlines; later
+byte changes never bypass that cadence. Each public `response_stats` pair uses
+`previous` = the last provider sample actually emitted for the prompt and
+`current` = the new cumulative sample. A terminal flush is the other normal
+bypass and is allowed immediately before the provider prompt closes. The harness
+validates provider ownership and broadcasts these stats unchanged; UI clients
+render them directly from provider updates.
 
 ## Model metadata tags
 

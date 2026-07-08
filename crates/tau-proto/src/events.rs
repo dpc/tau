@@ -11,10 +11,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     ActionInvocationId, AgentContextKey, AgentId, AgentMessageId, AgentMetadataKey, AgentPromptId,
-    AgentTurnId, CborValue, ContextItem, DiffSummary, EventCategory, EventName,
-    ExtensionInstanceId, ExtensionName, MessagePhase, ModelId, ModelTag, PromptContext,
-    PromptFragment, ProviderTokenUsage, ReasoningTextKind, SessionId, SkillName, ToolCallId,
-    ToolDefinition, ToolGroupName, ToolName, ToolTag,
+    CborValue, ContextItem, DiffSummary, EventCategory, EventName, ExtensionInstanceId,
+    ExtensionName, MessagePhase, ModelId, ModelTag, PromptContext, PromptFragment,
+    ProviderTokenUsage, ReasoningTextKind, SessionId, SkillName, ToolCallId, ToolDefinition,
+    ToolGroupName, ToolName, ToolTag,
 };
 
 fn default_true() -> bool {
@@ -3168,46 +3168,6 @@ pub struct AgentPromptPrewarmRequested {
     pub share_user_cache_key: bool,
 }
 
-/// Live, content-free statistics for one active agent turn.
-///
-/// The harness owns publication of this event. It is an operational snapshot,
-/// not transcript content: consumers may use it to render live progress, but
-/// must not store it as assistant/user text or feed it back into prompts.
-/// Periodic idle samples may report zero or unchanged output bytes; consumers
-/// should derive interval rates from `current - previous` and whole-turn
-/// average rates from `current`.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct AgentTurnStatsUpdated {
-    /// Stable id for this agent turn.
-    pub turn_id: AgentTurnId,
-    /// Agent transcript this turn belongs to.
-    pub agent_id: AgentId,
-    /// Session where the turn is running.
-    pub session_id: SessionId,
-    /// Provider prompt currently active for this turn, when the turn is in a
-    /// provider phase. Absent while the turn is waiting on tools.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub agent_prompt_id: Option<AgentPromptId>,
-    /// Prompt provenance for user-facing filtering.
-    #[serde(default)]
-    pub originator: PromptOriginator,
-    /// Latest cumulative turn statistics sample.
-    pub current: AgentTurnStatsSample,
-    /// Previously emitted cumulative sample for this turn.
-    pub previous: AgentTurnStatsSample,
-}
-
-/// One cumulative content-free statistics sample for a public agent turn event.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
-pub struct AgentTurnStatsSample {
-    /// Monotonic UTF-8 byte count of provider-generated semantic output sent
-    /// during this agent turn.
-    pub output_bytes_sent: u64,
-    /// Monotonic elapsed time since this public stats turn started, in
-    /// microseconds.
-    pub elapsed_micros: u64,
-}
-
 // ---------------------------------------------------------------------------
 // Provider execution events — facts from the provider backend
 // ---------------------------------------------------------------------------
@@ -3247,22 +3207,12 @@ pub struct ProviderResponseUpdated {
     /// Provider-authored transient status text, such as retry diagnostics.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status: Option<ProviderResponseStatusUpdate>,
-    /// Provider-to-harness content-free semantic-output byte snapshot.
-    ///
-    /// This field lets providers report non-visible generated output, such as
-    /// streamed tool/custom-tool input bytes, to the harness so the harness can
-    /// publish public [`AgentTurnStatsUpdated`] samples. The harness must clear
-    /// this field before delivering `provider.response_updated` to subscribers;
-    /// UI consumers must use `agent.turn_stats_updated` for progress display.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub semantic_output: Option<ProviderResponseSemanticOutput>,
-    /// Provider-to-harness content-free response throughput sample.
+    /// Public content-free response throughput sample for this prompt.
     ///
     /// Providers own the response byte counter because they observe upstream
-    /// stream bytes before the harness does. The harness validates prompt
-    /// ownership, consumes and strips this field, maps the prompt-local sample
-    /// to a harness-owned [`AgentTurnStatsUpdated`] turn sample, and
-    /// defensively rate-limits that public event.
+    /// response bytes at the backend transport boundary. The harness validates
+    /// prompt ownership and broadcasts this sample unchanged; UI clients render
+    /// it directly from `provider.response_updated`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub response_stats: Option<ProviderResponseStats>,
     /// Echo of [`AgentPromptCreated::originator`]. UIs filter on
@@ -3270,19 +3220,6 @@ pub struct ProviderResponseUpdated {
     /// conversation doesn't paint into the user's chat window.
     #[serde(default)]
     pub originator: PromptOriginator,
-}
-
-/// Content-free semantic-output byte snapshot for one in-flight response.
-///
-/// Providers send this only to the harness on `provider.response_updated`.
-/// Counts are cumulative for the current provider prompt and exclude visible
-/// assistant/reasoning text deltas, prompts, tool execution output, raw wire
-/// framing, and labels or other content-bearing metadata.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
-pub struct ProviderResponseSemanticOutput {
-    /// Cumulative UTF-8 bytes of non-visible provider-generated semantic output
-    /// observed for the current provider prompt.
-    pub non_visible_output_bytes: u64,
 }
 
 /// One provider-owned, prompt-local response throughput update.
@@ -3297,9 +3234,9 @@ pub struct ProviderResponseStats {
 /// One provider-owned, prompt-local response throughput sample.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ProviderResponseStatsSample {
-    /// Monotonic UTF-8 byte count of provider-generated semantic output
-    /// observed for the current provider prompt/response.
-    pub output_bytes_sent: u64,
+    /// Monotonic content-free byte count of backend response bytes received for
+    /// the current provider prompt before semantic parsing.
+    pub response_bytes_received: u64,
     /// Monotonic elapsed time since backend request dispatch for this provider
     /// prompt, in microseconds.
     pub elapsed_micros: u64,
@@ -3746,8 +3683,6 @@ pub enum Event {
     AgentPromptTerminated(AgentPromptTerminated),
     #[serde(rename = "agent.prompt_prewarm_requested")]
     AgentPromptPrewarmRequested(AgentPromptPrewarmRequested),
-    #[serde(rename = "agent.turn_stats_updated")]
-    AgentTurnStatsUpdated(AgentTurnStatsUpdated),
     #[serde(rename = "agent.user_message_injected")]
     AgentUserMessageInjected(AgentUserMessageInjected),
     #[serde(rename = "agent.head_moved")]
@@ -3963,7 +3898,6 @@ impl Event {
             Self::AgentPromptStarted(_) => EventName::AGENT_PROMPT_STARTED,
             Self::AgentPromptTerminated(_) => EventName::AGENT_PROMPT_TERMINATED,
             Self::AgentPromptPrewarmRequested(_) => EventName::AGENT_PROMPT_PREWARM_REQUESTED,
-            Self::AgentTurnStatsUpdated(_) => EventName::AGENT_TURN_STATS_UPDATED,
             Self::AgentUserMessageInjected(_) => EventName::AGENT_USER_MESSAGE_INJECTED,
             Self::AgentHeadMoved(_) => EventName::AGENT_HEAD_MOVED,
             Self::AgentStarted(_) => EventName::AGENT_STARTED,
@@ -4005,7 +3939,6 @@ impl Event {
             self,
             Self::ToolCancelled(_)
                 | Self::ProviderResponseUpdated(_)
-                | Self::AgentTurnStatsUpdated(_)
                 | Self::ProviderPromptSubmitted(_)
                 | Self::ToolProgress(_)
                 | Self::ToolDelegateProgress(_)

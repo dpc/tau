@@ -5,5 +5,5 @@
   parsing, replay behavior, tool-call handling, or provider cache/prompt identity
   semantics.
 - Read `SECURITY.md` before changing streamed provider response handling,
-  diagnostics, harness-derived turn stats inputs, or any path that might expose
+  diagnostics, provider response stats, or any path that might expose
   provider/tool content outside the transcript/tool-call boundary.

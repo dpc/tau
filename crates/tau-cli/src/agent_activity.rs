@@ -50,12 +50,33 @@ impl AgentActivity {
         agent_prompt_id: &AgentPromptId,
         output_items: &[ContextItem],
     ) {
+        if self.finish_active_prompt(agent_prompt_id, output_items) {
+            return;
+        }
+        self.optimistic_submissions = self.optimistic_submissions.saturating_sub(1);
+    }
+
+    /// Finishes a provider prompt only if this snapshot already tracks it.
+    pub(crate) fn finish_prompt_if_active(
+        &mut self,
+        agent_prompt_id: &AgentPromptId,
+        output_items: &[ContextItem],
+    ) {
+        let _ = self.finish_active_prompt(agent_prompt_id, output_items);
+    }
+
+    fn finish_active_prompt(
+        &mut self,
+        agent_prompt_id: &AgentPromptId,
+        output_items: &[ContextItem],
+    ) -> bool {
         if self.active_prompts.remove(agent_prompt_id.as_str()) {
             for call_id in tool_call_ids_from_output_items(output_items) {
                 self.active_tools.insert(call_id);
             }
+            true
         } else {
-            self.optimistic_submissions = self.optimistic_submissions.saturating_sub(1);
+            false
         }
     }
 

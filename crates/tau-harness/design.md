@@ -4,27 +4,13 @@ This file records major design decisions currently embodied by this directory's
 code, and how authoritative each decision is. It is not an architecture overview,
 ADR log, todo list, roadmap, implementation guide, or changelog.
 
-## Agent turn stats are hard rate-limited
+## Provider response stats are provider-owned public events
 
-Status: confirmed, 2026-07-07, user
+Status: confirmed, 2026-07-08, user
 
-Providers own prompt-local response byte counting and send rate-limited private
-`provider.response_updated.response_stats` samples because providers read the
-upstream response stream. The harness validates prompt ownership/cancelation,
-strips private provider stats from public provider updates, maps accepted
-prompt-local samples onto its active turn, and publishes the current
-`agent.turn_stats_updated` compatibility event.
+Providers own prompt-local response byte counting and rate limiting because they dispatch backend requests and read upstream response bytes at the transport boundary. They may attach `response_stats` previous/current samples to `provider.response_updated`, including stats-only updates with no text deltas. The first non-empty sample may be emitted promptly; later non-terminal samples are emitted at most once per second per prompt, with an optional terminal flush before the provider prompt closes.
 
-`agent.turn_stats_updated` sampled events must not be emitted faster than once
-per second per active turn. New provider bytes update in-memory cumulative
-counters only; byte changes must wait for the next one-second sample deadline
-and must not bypass the cadence.
-
-The only bypasses are terminal lifecycle flushes: provider-prompt closure before
-`provider.response_finished` / prompt termination, and final turn shutdown that
-immediately clears runtime stats. Non-terminal prompt starts, provider chunks,
-tool-wait transitions, and promptless tool-wait samples must use the sampled
-gate.
+The harness must not account, sample, remap, strip, or project provider response throughput. Its role for `provider.response_updated.response_stats` is only the normal provider-event boundary: validate provider prompt ownership/cancellation, rewrite routing identity from prompt ownership, enrich unrelated compaction metadata when applicable, and broadcast the provider-owned sample unchanged to subscribers. UI clients render live response throughput directly from provider events.
 
 ## Daemon listener shutdown is reactive and path-independent
 

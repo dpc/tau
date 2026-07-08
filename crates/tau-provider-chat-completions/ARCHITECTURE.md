@@ -17,22 +17,24 @@ spelling. Serializing parsed CBOR is only a fallback for old persisted records o
 records that never had provider-wire JSON.
 
 Streamed assistant text and reasoning text are emitted as append deltas only.
-Providers no longer publish public byte-progress metadata. For streamed
-tool-call arguments, Chat Completions sends the harness a private, content-free
-`semantic_output.non_visible_output_bytes` snapshot that is cumulative for the
-current provider prompt, not a per-update delta. The harness strips that snapshot
-before subscriber delivery and surfaces any public liveness display only through
-`agent.turn_stats_updated`.
+Providers publish public content-free byte/duration response stats on
+`provider.response_updated.response_stats`. The stats count backend response
+bytes received by the provider transport before semantic parsing; they do not
+carry provider content and are not transcript data.
 
 Streaming parsers may receive upstream chunks at arbitrary cadence, but Tau
 protocol updates are sampled. The provider response sampler starts when the
-backend request is dispatched. Chunk reads only update in-memory cumulative
-state and pending visible/non-visible deltas. The rate-limited emitter writes a
-non-terminal `provider.response_updated` sample only on one-second response
-deadlines; byte changes never bypass that cadence. Each private `response_stats`
-pair uses `previous` = the last provider sample actually emitted for the prompt
-and `current` = the new cumulative sample. A terminal flush is the only normal
-bypass and is allowed immediately before the provider prompt closes.
+backend request is dispatched. Received stream data advances in-memory
+prompt-local response byte counters before semantic event handling, while parsed
+chunks update pending visible/non-visible deltas. The rate-limited emitter writes
+the first non-empty `provider.response_updated` sample as soon as streamed output
+is observed, then writes later non-terminal samples only on one-second response
+deadlines; later byte changes never bypass that cadence. Each public
+`response_stats` pair uses `previous` = the last provider sample actually
+emitted for the prompt and `current` = the new cumulative sample. A terminal
+flush is the other normal bypass and is allowed immediately before the provider
+prompt closes. The harness validates provider ownership and broadcasts these
+stats unchanged; UI clients render them directly.
 
 ## Transcript replay boundary
 

@@ -452,6 +452,8 @@ fn read_sse_response_to_terminal_event(
                 ));
             }
             Ok(read) => {
+                state.record_transport_response_bytes(read);
+                on_update(&state);
                 for byte in &buffer[..read] {
                     if *byte == b'\n' {
                         let now = Instant::now();

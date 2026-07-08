@@ -6,9 +6,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tau_proto::{
     CborValue, ContentPart, ContextItem, ContextRole, MessageItem, OpaqueProviderItem,
     PromptContext, PromptOriginator, ProviderResponseCompactionStatus,
-    ProviderResponseCompactionUpdate, ProviderResponseSemanticOutput, ProviderResponseTextDelta,
-    ProviderTokenUsage, ReasoningTextItem, ReasoningTextKind, ResponsesToolCallEnvelope, SessionId,
-    ToolCallItem, ToolDefinition,
+    ProviderResponseCompactionUpdate, ProviderResponseTextDelta, ProviderTokenUsage,
+    ReasoningTextItem, ReasoningTextKind, ResponsesToolCallEnvelope, SessionId, ToolCallItem,
+    ToolDefinition,
 };
 use tau_provider::{StreamRepetitionGuard, StreamRepetitionKey};
 use uuid::Uuid;
@@ -246,6 +246,10 @@ pub struct StreamState {
     /// / `response.done`), retained for per-session debug captures. Other
     /// backends leave this empty.
     pub provider_terminal_event: Option<serde_json::Value>,
+    /// Cumulative raw provider response bytes received by the transport for
+    /// this prompt before semantic parsing. Used for live progress when the
+    /// provider has delivered bytes that have not yet formed parseable output.
+    transport_response_bytes: u64,
     /// A stale `previous_response_id` was rejected and this successful stream
     /// came from the full-replay retry.
     pub stale_chain_fallback: bool,
@@ -417,6 +421,7 @@ impl StreamState {
             thinking_output_index: None,
             response_id: None,
             provider_terminal_event: None,
+            transport_response_bytes: 0,
             stale_chain_fallback: false,
             chat_message_item_index: None,
             repetition_guard: StreamRepetitionGuard::new(),
@@ -685,38 +690,38 @@ impl StreamState {
         }
     }
 
-    /// Returns a content-free snapshot of non-visible semantic output generated
-    /// for this provider prompt.
-    pub fn semantic_output_for_update(&self) -> Option<ProviderResponseSemanticOutput> {
-        let non_visible_output_bytes: u64 = self
-            .output_items
+    /// Returns the cumulative non-visible provider output bytes generated for
+    /// this prompt, such as streamed tool-call arguments and custom-tool input.
+    pub fn non_visible_output_bytes(&self) -> u64 {
+        self.output_items
             .iter()
             .filter_map(|item| match item {
                 OutputItemAccumulator::ToolCall(call) => Some(call.arguments_json.len() as u64),
                 _ => None,
             })
-            .sum();
-        (non_visible_output_bytes != 0).then_some(ProviderResponseSemanticOutput {
-            non_visible_output_bytes,
-        })
+            .sum()
     }
 
-    /// Returns the cumulative provider-generated semantic-output bytes for this
-    /// response, including both visible assistant/reasoning text and
-    /// non-visible tool/custom-tool input.
-    pub fn response_output_bytes(&self) -> u64 {
-        let visible_bytes = self.text.len().saturating_add(
-            self.thinking
-                .as_ref()
-                .map(|thinking| thinking.len())
-                .unwrap_or(0),
-        );
-        let visible_bytes = visible_bytes.try_into().unwrap_or(u64::MAX);
-        let non_visible_bytes = self
-            .semantic_output_for_update()
-            .map(|semantic_output| semantic_output.non_visible_output_bytes)
-            .unwrap_or(0);
-        visible_bytes.saturating_add(non_visible_bytes)
+    /// Returns the cumulative provider response-progress bytes for this
+    /// response, preferring transport-received bytes so progress moves before
+    /// provider payloads have been semantically parsed.
+    pub fn response_bytes_received(&self) -> u64 {
+        let visible_bytes = self
+            .text
+            .len()
+            .saturating_add(self.thinking.as_ref().map_or(0, |thinking| thinking.len()))
+            as u64;
+        visible_bytes
+            .saturating_add(self.non_visible_output_bytes())
+            .max(self.transport_response_bytes)
+    }
+
+    /// Adds raw bytes received from the provider transport before semantic
+    /// parsing.
+    pub(crate) fn record_transport_response_bytes(&mut self, bytes: usize) {
+        self.transport_response_bytes = self
+            .transport_response_bytes
+            .saturating_add(bytes.try_into().unwrap_or(u64::MAX));
     }
 
     fn refresh_text(&mut self) {
