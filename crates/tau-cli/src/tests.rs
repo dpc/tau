@@ -6029,6 +6029,59 @@ fn watched_agent_stats_redraw_active_indicator() {
     );
 }
 
+/// Multiple active watched-agent blocks should keep a deterministic order
+/// across refreshes even when prompt-start events arrive in a different order.
+/// This prevents visually similar `watching` rows from flickering by swapping
+/// positions between redraws.
+#[test]
+fn watched_agent_blocks_are_sorted_by_agent_id() {
+    let (_term, handle, vt) = setup(100, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        cli_test_theme(),
+    );
+
+    renderer.switch_agent("parent_1".to_owned());
+    renderer.handle(&Event::AgentWatchesUpdated(
+        tau_proto::AgentWatchesUpdated {
+            session_id: "s1".into(),
+            watcher_id: agent_id("parent_1"),
+            watched_agent_ids: vec![agent_id("engineer_b"), agent_id("engineer_a")],
+            changed_agent_id: None,
+            cause: tau_proto::AgentWatchUpdateCause::AgentWatchEnable,
+        },
+    ));
+    for watched in ["engineer_b", "engineer_a"] {
+        renderer.handle(&Event::AgentPromptStarted(tau_proto::AgentPromptStarted {
+            session_id: "s1".into(),
+            agent_id: agent_id(watched),
+            agent_prompt_id: format!("ap-{watched}-0").into(),
+            model: "test/model".parse().expect("model id"),
+            originator: tau_proto::PromptOriginator::Extension {
+                name: "__harness__".into(),
+                query_id: format!("delegate-{watched}"),
+            },
+            ctx_id: None,
+        }));
+    }
+    sync(&handle);
+
+    let screen = vt.screen_text(100);
+    let first = screen
+        .iter()
+        .position(|line| line.contains("watching [engineer_a] @engineer_a"))
+        .expect("engineer_a watching row");
+    let second = screen
+        .iter()
+        .position(|line| line.contains("watching [engineer_b] @engineer_b"))
+        .expect("engineer_b watching row");
+    assert!(
+        first < second,
+        "watched-agent rows should be sorted by agent id: {screen:?}"
+    );
+}
+
 /// Ensures watched-agent rows remain owned by the transcript snapshot across
 /// agent switches.
 ///

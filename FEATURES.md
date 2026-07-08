@@ -554,6 +554,9 @@ real result or error later so the main turn can keep making progress. Unless the
 `senior-engineer` role. The `agent_start` placeholder and final result include
 `self_agent_id` and `sub_agent_id`; sub-agent responses arrive through distinct
 `agent_watch` async response notifications until the caller disables the watch.
+When a watched agent receives a direct user prompt, watchers also receive a
+hidden prompt notification when that prompt becomes the watched agent's active
+turn, so the matching watched response has clear context.
 
 When `role` is supplied, or when the default `senior-engineer` role is used, the
 sub-agent runs with that role's resolved model, model parameters, system prompt,

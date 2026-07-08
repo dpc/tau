@@ -3595,6 +3595,10 @@ impl Harness {
                 "[tau-internal]: Agent {} finished its turn\n\n<response>\n{}\n</response>",
                 sender_label, escaped_message
             ),
+            tau_proto::AgentMessageKind::WatchPrompt => format!(
+                "[tau-internal]: Agent {} received a user prompt\n\n<prompt>\n{}\n</prompt>",
+                sender_label, escaped_message
+            ),
         };
         if let Some(cid) = self
             .agent_routes
@@ -6210,7 +6214,8 @@ impl Harness {
             ));
             return Ok(());
         };
-        let prompt = PendingPrompt::user(request.text).with_ctx_id(request.ctx_id);
+        let text = request.text;
+        let prompt = PendingPrompt::watch_notified_user(text).with_ctx_id(request.ctx_id);
         let submission = self.submit_prompt_to_agent(session_id, &agent_id, prompt)?;
         if !matches!(submission, PromptSubmission::Rejected { .. }) {
             let _ = self.agent_store.record_agent_user_interaction(&agent_id);
@@ -6219,6 +6224,25 @@ impl Harness {
             self.interrupt_active_waits();
         }
         Ok(())
+    }
+
+    fn notify_agent_watchers_about_user_prompt(&mut self, agent_id: &str, text: &str) {
+        for watcher_id in self.watchers_for_agent(agent_id) {
+            let Some(sender_cid) = self.agent_routes.get(agent_id).cloned() else {
+                return;
+            };
+            if self
+                .publish_agent_delivery_from_agent(
+                    &sender_cid,
+                    watcher_id.clone(),
+                    text.to_owned(),
+                    tau_proto::AgentMessageKind::WatchPrompt,
+                )
+                .is_err()
+            {
+                self.prune_agent_watch(&watcher_id, agent_id);
+            }
+        }
     }
 
     fn handle_ui_prompt_submitted(
@@ -6237,9 +6261,11 @@ impl Harness {
             prompt.text.clone()
         };
         let pending = if prompt.message_class.is_internal() {
-            PendingPrompt::internal(text)
+            PendingPrompt::internal(text.clone())
+        } else if is_user_interaction {
+            PendingPrompt::watch_notified_user(text.clone())
         } else {
-            PendingPrompt::user(text)
+            PendingPrompt::user(text.clone())
         }
         .with_ctx_id(prompt.ctx_id.clone());
         let submission = self.submit_prompt_to_agent(prompt.session_id, &agent_id, pending)?;
@@ -12756,6 +12782,8 @@ impl Harness {
                 .get(cid)
                 .and_then(|conv| conv.agent_id.clone())
                 .expect("agent has durable id");
+            let notify_watchers = prompt.should_notify_watchers();
+            let notification_text = notify_watchers.then(|| prompt.text.clone());
             self.publish_for_agent(
                 cid,
                 Event::AgentPromptSteered(tau_proto::AgentPromptSteered {
@@ -12764,6 +12792,9 @@ impl Harness {
                     message_class: prompt.message_class,
                 }),
             );
+            if let Some(text) = notification_text {
+                self.notify_agent_watchers_about_user_prompt(&agent_id, &text);
+            }
         }
     }
 

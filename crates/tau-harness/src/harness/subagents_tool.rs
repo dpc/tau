@@ -328,7 +328,7 @@ impl Harness {
         );
     }
 
-    fn publish_agent_delivery_from_agent(
+    pub(crate) fn publish_agent_delivery_from_agent(
         &mut self,
         agent_id: &AgentId,
         recipient_id: String,

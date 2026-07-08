@@ -86,6 +86,10 @@ waiting for a future prompt/message must not be rendered as running. The `@N`
 status chip counts running side agents and excludes the currently visible agent,
 which is already named on the left side of the status line.
 
+When multiple watched agents are running at once, their `watching` blocks are
+ordered by stable agent id. This keeps redraws and independent prompt/stat
+events from making visually similar live blocks swap places.
+
 ## New-agent staging
 
 Status: unconfirmed

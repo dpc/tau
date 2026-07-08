@@ -1257,7 +1257,7 @@ fn agent_message_events_have_names_and_persistence_defaults() {
 }
 
 /// Ensures legacy agent-message payloads omit the default message kind but
-/// preserve non-default watch responses.
+/// preserve non-default watch notifications.
 #[test]
 fn agent_message_kind_defaults_and_serializes_only_when_non_default() {
     let legacy: AgentMessageReceived = serde_json::from_value(serde_json::json!({
@@ -1286,6 +1286,13 @@ fn agent_message_kind_defaults_and_serializes_only_when_non_default() {
     };
     let watch_json = serde_json::to_value(&watch_response).expect("serialize watch response");
     assert_eq!(watch_json["kind"], serde_json::json!("watch_response"));
+
+    let watch_prompt = AgentMessageReceived {
+        kind: AgentMessageKind::WatchPrompt,
+        ..watch_response
+    };
+    let prompt_json = serde_json::to_value(&watch_prompt).expect("serialize watch prompt");
+    assert_eq!(prompt_json["kind"], serde_json::json!("watch_prompt"));
 }
 
 /// Ensures representative harness input/output messages round-trip through the

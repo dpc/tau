@@ -720,6 +720,29 @@ pub(crate) fn assemble_prompt_context_from(
                         ));
                     }
                 }
+                tau_proto::AgentMessageKind::WatchPrompt => {
+                    if *direction == tau_core::AgentMessageDirection::Inbound {
+                        let sender_label = sender_session_id
+                            .as_ref()
+                            .map(|session_id| format!("{session_id}/{sender_id}"))
+                            .unwrap_or_else(|| sender_id.to_string());
+                        blocks.push(tau_proto::ContextBlock::UserInput(
+                            tau_proto::UserInputBlock {
+                                items: vec![ContextItem::Message(tau_proto::MessageItem {
+                                    role: tau_proto::ContextRole::User,
+                                    content: vec![tau_proto::ContentPart::Text {
+                                        text: format!(
+                                            "[tau-internal]: Agent {sender_label} received a user prompt\n\n<prompt>\n{}\n</prompt>",
+                                            xml_escape(message)
+                                        ),
+                                    }],
+                                    phase: None,
+                                    responses_raw_json: None,
+                                })],
+                            },
+                        ));
+                    }
+                }
             },
         }
     }

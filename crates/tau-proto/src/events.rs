@@ -1837,6 +1837,8 @@ pub enum AgentMessageKind {
     Message,
     /// An automatic `agent_watch` response notification.
     WatchResponse,
+    /// An automatic `agent_watch` user-prompt notification.
+    WatchPrompt,
 }
 
 impl AgentMessageKind {

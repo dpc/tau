@@ -12926,6 +12926,151 @@ fn agent_watch_response_queues_distinct_internal_prompt_markup() {
     h.shutdown().expect("shutdown");
 }
 
+/// A watcher must be told when the watched agent accepts a direct user prompt,
+/// otherwise the watched agent's next response can look like an unsolicited
+/// reply to the watcher instead of a response to fresh user input.
+#[test]
+fn user_prompt_to_watched_agent_notifies_watchers_with_prompt_markup() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    h.selected_model = Some("test/model".into());
+
+    let watched_cid = ensure_test_user_agent(&mut h);
+    let watcher_cid =
+        h.create_durable_user_agent(h.current_session_id.clone(), &h.selected_role.clone());
+    let watched_id = h.agents[&watched_cid]
+        .agent_id
+        .clone()
+        .expect("watched agent id");
+    let watcher_id = h.agents[&watcher_cid]
+        .agent_id
+        .clone()
+        .expect("watcher agent id");
+    h.pending_agent_context_ready
+        .remove(&tau_proto::AgentId::parse(&watcher_id).expect("watcher id"));
+    h.agents
+        .get_mut(&watcher_cid)
+        .expect("watcher conversation")
+        .turn_state = AgentTurnState::AgentThinking {
+        agent_prompt_id: "sp-watcher-busy".into(),
+    };
+    h.set_agent_watch(
+        &watcher_id,
+        &watched_id,
+        true,
+        tau_proto::AgentWatchUpdateCause::AgentWatchEnable,
+    );
+
+    h.handle_ui_prompt_submitted(UiPromptSubmitted {
+        session_id: h.current_session_id.clone(),
+        text: "please continue <now>&</now> >".to_owned(),
+        agent_id: tau_proto::AgentId::parse(&watched_id).expect("watched id"),
+        message_class: tau_proto::PromptMessageClass::User,
+        originator: tau_proto::PromptOriginator::User,
+        ctx_id: None,
+    })
+    .expect("prompt submitted");
+
+    assert!(session_agent_message_sent_events(&h).is_empty());
+    let received = session_agent_message_received_events(&h);
+    assert_eq!(received.len(), 1);
+    assert_eq!(received[0].kind, tau_proto::AgentMessageKind::WatchPrompt);
+    assert_eq!(received[0].sender_id, crate::parse_agent_id(&watched_id));
+    assert_eq!(received[0].recipient_id, crate::parse_agent_id(&watcher_id));
+
+    let watcher = h.agents.get(&watcher_cid).expect("watcher conversation");
+    let queued = watcher.pending_prompts.back().expect("queued notification");
+    assert_eq!(
+        queued.message_class,
+        tau_proto::PromptMessageClass::Internal
+    );
+    assert!(queued.text.contains(&format!(
+        "[tau-internal]: Agent {watched_id} received a user prompt"
+    )));
+    assert!(
+        queued
+            .text
+            .contains("<prompt>\nplease continue &lt;now&gt;&amp;&lt;/now&gt; &gt;\n</prompt>")
+    );
+    assert!(!queued.text.contains("finished its turn"));
+    assert!(!queued.text.contains("<response>"));
+
+    h.shutdown().expect("shutdown");
+}
+
+/// A queued prompt must not notify watchers until it becomes the watched
+/// agent's active turn. Otherwise the watcher can receive "prompt arrived" and
+/// then the previous turn's response, which is exactly the ordering ambiguity
+/// watch prompt notifications are meant to remove.
+#[test]
+fn queued_user_prompt_notifies_watchers_when_dispatched_not_when_queued() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    h.selected_model = Some("test/model".into());
+
+    let watched_cid = ensure_test_user_agent(&mut h);
+    let watcher_cid =
+        h.create_durable_user_agent(h.current_session_id.clone(), &h.selected_role.clone());
+    let watched_id = h.agents[&watched_cid]
+        .agent_id
+        .clone()
+        .expect("watched agent id");
+    let watcher_id = h.agents[&watcher_cid]
+        .agent_id
+        .clone()
+        .expect("watcher agent id");
+    h.pending_agent_context_ready
+        .remove(&tau_proto::AgentId::parse(&watcher_id).expect("watcher id"));
+    h.agents
+        .get_mut(&watched_cid)
+        .expect("watched conversation")
+        .turn_state = AgentTurnState::AgentThinking {
+        agent_prompt_id: "sp-watched-current".into(),
+    };
+    h.agents
+        .get_mut(&watcher_cid)
+        .expect("watcher conversation")
+        .turn_state = AgentTurnState::AgentThinking {
+        agent_prompt_id: "sp-watcher-busy".into(),
+    };
+    h.set_agent_watch(
+        &watcher_id,
+        &watched_id,
+        true,
+        tau_proto::AgentWatchUpdateCause::AgentWatchEnable,
+    );
+
+    h.handle_ui_prompt_submitted(UiPromptSubmitted {
+        session_id: h.current_session_id.clone(),
+        text: "queued follow-up".to_owned(),
+        agent_id: tau_proto::AgentId::parse(&watched_id).expect("watched id"),
+        message_class: tau_proto::PromptMessageClass::User,
+        originator: tau_proto::PromptOriginator::User,
+        ctx_id: None,
+    })
+    .expect("prompt queued");
+
+    assert!(
+        session_agent_message_received_events(&h).is_empty(),
+        "queued prompt must not notify watchers before it becomes active"
+    );
+
+    h.agents
+        .get_mut(&watched_cid)
+        .expect("watched conversation")
+        .turn_state = AgentTurnState::Idle;
+    h.try_advance_queue();
+
+    let received = session_agent_message_received_events(&h);
+    assert_eq!(received.len(), 1);
+    assert_eq!(received[0].kind, tau_proto::AgentMessageKind::WatchPrompt);
+    assert_eq!(received[0].message, "queued follow-up");
+
+    h.shutdown().expect("shutdown");
+}
+
 /// Agent ids are minted once per conversation as role-prefixed hex strings and
 /// are removed from the reverse lookup when the conversation is torn down.
 #[test]

@@ -82,6 +82,8 @@ impl Harness {
         {
             agent.next_ctx_id = prompt.ctx_id.clone();
         }
+        let notify_watchers = prompt.should_notify_watchers();
+        let notification_text = notify_watchers.then(|| prompt.text.clone());
         self.publish_for_agent(
             agent_id,
             Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
@@ -93,6 +95,11 @@ impl Harness {
                 ctx_id: prompt.ctx_id,
             }),
         );
+        if let Some(text) = notification_text
+            && let Some(public_agent_id) = self.ensure_agent_id_for_agent(agent_id)
+        {
+            self.notify_agent_watchers_about_user_prompt(&public_agent_id, &text);
+        }
         Ok(())
     }
 

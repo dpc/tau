@@ -1552,10 +1552,11 @@ impl EventRenderer {
             .get(&current)
             .cloned()
             .unwrap_or_default();
-        let active: Vec<String> = watched
+        let mut active: Vec<String> = watched
             .into_iter()
             .filter(|agent_id| self.agent_has_active_prompt(agent_id))
             .collect();
+        active.sort();
         let active_set: HashSet<_> = active.iter().cloned().collect();
         let stale: Vec<_> = self
             .watched_agent_blocks
@@ -1568,17 +1569,24 @@ impl EventRenderer {
                 self.handle.remove_block(block_id);
             }
         }
-        for agent_id in active {
-            let block = self.watched_agent_block(&agent_id);
-            if let Some(block_id) = self.watched_agent_blocks.get(&agent_id).copied() {
+        for (index, agent_id) in active.iter().enumerate() {
+            let block = self.watched_agent_block(agent_id);
+            let block_id = if let Some(block_id) = self.watched_agent_blocks.get(agent_id).copied()
+            {
                 self.handle.set_block(block_id, block);
+                block_id
             } else {
                 let block_id = self
                     .handle
                     .new_block(format!("watched-agent:{agent_id}"), block);
-                self.handle.push_above_active(block_id);
-                self.watched_agent_blocks.insert(agent_id, block_id);
-            }
+                self.watched_agent_blocks.insert(agent_id.clone(), block_id);
+                block_id
+            };
+            let later_blocks = active[index + 1..].iter().filter_map(|later_agent_id| {
+                self.watched_agent_blocks.get(later_agent_id).copied()
+            });
+            self.handle
+                .push_above_active_before_any(block_id, later_blocks);
         }
         self.handle.redraw();
     }
@@ -3930,6 +3938,15 @@ impl EventRenderer {
                     Self::agent_message_sent_recipient_display(message)
                 )
             }
+            Event::AgentMessageSent(message)
+                if message.kind == tau_proto::AgentMessageKind::WatchPrompt =>
+            {
+                format!(
+                    "Prompt to {} observed by {}",
+                    message.sender_id,
+                    Self::agent_message_sent_recipient_display(message)
+                )
+            }
             Event::AgentMessageSent(message) => format!(
                 "Message from {} to {}",
                 message.sender_id,
@@ -3940,6 +3957,15 @@ impl EventRenderer {
             {
                 format!(
                     "Response from {} to {}",
+                    Self::agent_message_received_sender_label(message),
+                    message.recipient_id
+                )
+            }
+            Event::AgentMessageReceived(message)
+                if message.kind == tau_proto::AgentMessageKind::WatchPrompt =>
+            {
+                format!(
+                    "Prompt to {} observed by {}",
                     Self::agent_message_received_sender_label(message),
                     message.recipient_id
                 )

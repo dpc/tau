@@ -168,6 +168,9 @@ pub(crate) struct Agent {
 pub(crate) enum PendingPromptSource {
     /// A normal user or harness steering prompt.
     General,
+    /// A user-style prompt whose watchers should be notified when it becomes
+    /// part of the watched agent's active turn.
+    WatchNotifiedUser,
     /// A prompt created from an `agent.message_received` delivery.
     AgentMessageReceived,
     /// Internal loop-guard pivot prompt.
@@ -217,6 +220,16 @@ impl PendingPrompt {
             text,
             message_class: PromptMessageClass::User,
             source: PendingPromptSource::General,
+            ctx_id: None,
+        }
+    }
+
+    /// Create a user-visible queued prompt that should notify active watchers.
+    pub(crate) fn watch_notified_user(text: String) -> Self {
+        Self {
+            text,
+            message_class: PromptMessageClass::User,
+            source: PendingPromptSource::WatchNotifiedUser,
             ctx_id: None,
         }
     }
@@ -278,6 +291,12 @@ impl PendingPrompt {
     #[must_use]
     pub(crate) fn is_agent_message_received(&self) -> bool {
         self.source == PendingPromptSource::AgentMessageReceived
+    }
+
+    /// Whether this user prompt should produce a watcher context notification.
+    #[must_use]
+    pub(crate) fn should_notify_watchers(&self) -> bool {
+        self.source == PendingPromptSource::WatchNotifiedUser
     }
 
     /// Whether this queued prompt is a loop-guard pivot.

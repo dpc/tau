@@ -92,6 +92,19 @@ Task result text.
 </response>
 ```
 
+If the watched agent receives a direct user prompt while the watch is active,
+watchers also receive a hidden context notification when that prompt becomes
+part of the watched agent's active turn, before the watched agent's later
+response notification for that turn:
+
+```text
+[tau-internal]: Agent engineer_b received a user prompt
+
+<prompt>
+User follow-up text.
+</prompt>
+```
+
 The `agent_start` tool result only confirms metadata such as `self_agent_id` and
 `sub_agent_id`; response text arrives through watch notifications. Watches are
 session-local runtime state: they are dropped on session shutdown, including a
