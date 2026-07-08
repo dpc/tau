@@ -4577,6 +4577,129 @@ fn agent_turn_stats_update_suffixes_live_indicator_until_finish() {
     assert!(!vt.screen_contains(80, "… (2s, 12KB, Δ8KB/s, 6KB/s)"));
 }
 
+/// Ensures response-progress stats are scoped to the agent transcript that owns
+/// the prompt rather than bleeding into the currently visible transcript.
+///
+/// A stats sample for a hidden agent must update only that hidden snapshot; the
+/// user viewing another agent should not see the live response stats line
+/// appear, disappear, or change because of background activity elsewhere.
+#[test]
+fn hidden_agent_turn_stats_do_not_update_visible_response_indicator() {
+    let (_term, handle, vt) = setup(80, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        cli_test_theme(),
+    );
+
+    renderer.switch_agent("agent_a".to_owned());
+    let mut prompt_a = agent_prompt_created("ap-agent_a-0", "s1");
+    prompt_a.agent_id = agent_id("agent_a");
+    renderer.handle(&Event::AgentPromptCreated(prompt_a));
+    renderer.handle(&Event::AgentTurnStatsUpdated(
+        tau_proto::AgentTurnStatsUpdated {
+            agent_id: agent_id("agent_a"),
+            ..agent_turn_stats("ap-agent_a-0", 4 * 1024, 0)
+        },
+    ));
+    sync(&handle);
+    assert!(vt.screen_contains(80, "… (2s, 4KB, Δ4KB/s, 2KB/s)"));
+
+    renderer.switch_agent("agent_b".to_owned());
+    let mut prompt_b = agent_prompt_created("ap-agent_b-0", "s1");
+    prompt_b.agent_id = agent_id("agent_b");
+    renderer.handle(&Event::AgentPromptCreated(prompt_b));
+    renderer.switch_agent("agent_a".to_owned());
+    renderer.handle(&Event::AgentTurnStatsUpdated(
+        tau_proto::AgentTurnStatsUpdated {
+            agent_id: agent_id("agent_b"),
+            agent_prompt_id: Some("ap-agent_b-0".into()),
+            ..agent_turn_stats("ap-agent_b-0", 12 * 1024, 4 * 1024)
+        },
+    ));
+    sync(&handle);
+
+    assert!(
+        vt.screen_contains(80, "… (2s, 4KB, Δ4KB/s, 2KB/s)"),
+        "visible agent A stats should remain unchanged: {:?}",
+        vt.screen_text(80)
+    );
+    assert!(
+        !vt.screen_contains(80, "… (2s, 12KB, Δ8KB/s, 6KB/s)"),
+        "hidden agent B stats must not render in agent A's view: {:?}",
+        vt.screen_text(80)
+    );
+
+    renderer.switch_agent("agent_b".to_owned());
+    sync(&handle);
+    assert!(
+        vt.screen_contains(80, "… (2s, 12KB, Δ8KB/s, 6KB/s)"),
+        "hidden stats should be visible when switching to their owning agent: {:?}",
+        vt.screen_text(80)
+    );
+}
+
+/// Ensures the no-agent fallback still accepts stats for a visible prompt it
+/// already owns, while rejecting unrelated agent stats.
+///
+/// A late provider update can create live response state before the UI has
+/// selected or displayed an agent. The stats guard must preserve that supported
+/// adoptable transcript path without letting other agents' stats leak into it.
+#[test]
+fn no_agent_visible_prompt_accepts_only_matching_turn_stats() {
+    let (_term, handle, vt) = setup(80, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        cli_test_theme(),
+    );
+
+    renderer.handle(&Event::ProviderResponseUpdated(ProviderResponseUpdated {
+        agent_prompt_id: "ap-agent_a-0".into(),
+        agent_id: agent_id("agent_a"),
+        deltas: Vec::new(),
+        compaction: None,
+        status: None,
+        semantic_output: None,
+        response_stats: None,
+        originator: tau_proto::PromptOriginator::User,
+    }));
+    sync(&handle);
+    assert!(vt.screen_contains(80, "…"));
+
+    renderer.handle(&Event::AgentTurnStatsUpdated(
+        tau_proto::AgentTurnStatsUpdated {
+            agent_id: agent_id("agent_a"),
+            ..agent_turn_stats("ap-agent_a-0", 4 * 1024, 0)
+        },
+    ));
+    sync(&handle);
+    assert!(
+        vt.screen_contains(80, "… (2s, 4KB, Δ4KB/s, 2KB/s)"),
+        "matching stats should update the visible no-agent prompt: {:?}",
+        vt.screen_text(80)
+    );
+
+    renderer.handle(&Event::AgentTurnStatsUpdated(
+        tau_proto::AgentTurnStatsUpdated {
+            agent_id: agent_id("agent_b"),
+            agent_prompt_id: Some("ap-agent_a-0".into()),
+            ..agent_turn_stats("ap-agent_a-0", 12 * 1024, 4 * 1024)
+        },
+    ));
+    sync(&handle);
+    assert!(
+        vt.screen_contains(80, "… (2s, 4KB, Δ4KB/s, 2KB/s)"),
+        "unrelated stats should leave the visible no-agent prompt unchanged: {:?}",
+        vt.screen_text(80)
+    );
+    assert!(
+        !vt.screen_contains(80, "… (2s, 12KB, Δ8KB/s, 6KB/s)"),
+        "unrelated agent stats must not render in the visible no-agent transcript: {:?}",
+        vt.screen_text(80)
+    );
+}
+
 /// Ensures a stale prompt-associated stats sample received after the final
 /// provider response does not recreate an already-finished live response block.
 #[test]

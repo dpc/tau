@@ -3508,7 +3508,8 @@ impl EventRenderer {
                 self.mark_agent_live(agent_id.clone());
                 if let Some(agent_prompt_id) = stats.agent_prompt_id.as_ref() {
                     self.prompt_agents
-                        .insert(agent_prompt_id.to_string(), agent_id);
+                        .entry(agent_prompt_id.to_string())
+                        .or_insert(agent_id);
                 }
                 true
             }
@@ -4265,6 +4266,9 @@ impl EventRenderer {
     }
 
     fn handle_agent_turn_stats_updated(&mut self, stats: &tau_proto::AgentTurnStatsUpdated) {
+        if !self.stats_update_matches_current_snapshot(stats) {
+            return;
+        }
         let Some(agent_prompt_id) = stats.agent_prompt_id.as_ref() else {
             return;
         };
@@ -4280,6 +4284,33 @@ impl EventRenderer {
             state.turn_stats = Some(stats.clone());
         }
         self.update_live_response_block(spid, "");
+    }
+
+    fn stats_update_matches_current_snapshot(
+        &self,
+        stats: &tau_proto::AgentTurnStatsUpdated,
+    ) -> bool {
+        if let Some(visible_agent_id) = self
+            .displayed_agent_id
+            .as_deref()
+            .or(self.current_agent_id.as_deref())
+        {
+            return visible_agent_id == stats.agent_id.as_str();
+        }
+
+        // No selected/displayed agent can still have an adoptable visible
+        // no-agent transcript, for example when a late provider update creates
+        // live prompt state before the UI has selected the agent. In that
+        // fallback, accept stats only for a prompt already present in the
+        // currently restored snapshot and already attributed to the stats agent.
+        let Some(agent_prompt_id) = stats.agent_prompt_id.as_ref() else {
+            return false;
+        };
+        self.prompts.contains_key(agent_prompt_id.as_str())
+            && self
+                .prompt_agents
+                .get(agent_prompt_id.as_str())
+                .is_some_and(|agent_id| agent_id == stats.agent_id.as_str())
     }
 
     fn clear_live_response_accumulators(&mut self, spid: &str) {
