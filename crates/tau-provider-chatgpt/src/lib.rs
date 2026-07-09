@@ -289,7 +289,7 @@ pub fn config_for_model(
         supports_phase: is_known_phase_capable_model_id(model_id),
         supports_encrypted_reasoning: true,
         supports_websocket: true,
-        supports_compaction: true,
+        supports_compaction: !uses_responses_lite(model_id),
         supports_prompt_cache_key: true,
     }
 }
@@ -312,7 +312,7 @@ fn model_info(provider: &ProviderName, model: &str) -> ProviderModelInfo {
             ThinkingSummary::Concise,
             ThinkingSummary::Detailed,
         ],
-        supports_compaction: true,
+        supports_compaction: !uses_responses_lite(model),
     }
 }
 

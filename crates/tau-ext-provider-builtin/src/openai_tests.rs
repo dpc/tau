@@ -251,6 +251,9 @@ fn chatgpt_profile_publishes_models_even_without_auth_tokens() {
     assert!(model_ids(&models).starts_with(&["chatgpt/gpt-5.6-sol".to_owned()]));
 }
 
+/// Ensures ChatGPT publication exposes the owned model set and mirrors the
+/// backend capability split: GPT-5.6 Responses Lite models omit server-side
+/// compaction while non-Lite ChatGPT models retain it.
 #[test]
 fn chatgpt_oauth_publishes_chatgpt_models() {
     // ChatGPT/Codex is a provider namespace named `chatgpt`; there is no
@@ -269,7 +272,18 @@ fn chatgpt_oauth_publishes_chatgpt_models() {
             "chatgpt/gpt-5.3-codex"
         ]
     );
-    assert!(models.iter().all(|model| model.supports_compaction));
+    assert!(
+        models
+            .iter()
+            .filter(|model| model.id.model.as_str().starts_with("gpt-5.6-"))
+            .all(|model| !model.supports_compaction)
+    );
+    assert!(
+        models
+            .iter()
+            .filter(|model| !model.id.model.as_str().starts_with("gpt-5.6-"))
+            .all(|model| model.supports_compaction)
+    );
 }
 
 #[test]

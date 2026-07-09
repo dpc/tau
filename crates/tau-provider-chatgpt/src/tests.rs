@@ -132,7 +132,18 @@ fn publishes_chatgpt_model_metadata() {
             "work-chatgpt/gpt-5.3-codex",
         ],
     );
-    assert!(models.iter().all(|model| model.supports_compaction));
+    assert!(
+        models
+            .iter()
+            .filter(|model| model.id.model.as_str().starts_with("gpt-5.6-"))
+            .all(|model| !model.supports_compaction)
+    );
+    assert!(
+        models
+            .iter()
+            .filter(|model| !model.id.model.as_str().starts_with("gpt-5.6-"))
+            .all(|model| model.supports_compaction)
+    );
     assert!(
         models
             .iter()
@@ -194,9 +205,9 @@ fn config_for_model_enables_codex_responses_capabilities() {
     assert!(config.supports_encrypted_reasoning);
 }
 
-/// Ensures request configuration uses each model's raw context window so
-/// server-side compaction can apply its threshold independently of the safe
-/// effective window published to the harness.
+/// Ensures request configuration retains each model's raw context window
+/// independently of the effective window published to the harness; non-Lite
+/// models use the raw value for default compaction thresholds.
 #[test]
 fn config_uses_model_specific_context_window() {
     let gpt_5_6 = config_for_model(&ModelName::new("gpt-5.6-terra"), "token".to_owned(), None);
@@ -204,6 +215,17 @@ fn config_uses_model_specific_context_window() {
 
     assert_eq!(gpt_5_6.raw_context_window, GPT_5_6_RAW_CONTEXT_WINDOW);
     assert_eq!(gpt_5_5.raw_context_window, DEFAULT_RAW_CONTEXT_WINDOW);
+}
+
+/// Ensures Responses Lite models do not advertise incompatible server-side
+/// compaction while normal Responses models retain that capability.
+#[test]
+fn config_scopes_compaction_capability_away_from_responses_lite() {
+    let gpt_5_6 = config_for_model(&ModelName::new("gpt-5.6-terra"), "token".to_owned(), None);
+    let gpt_5_5 = config_for_model(&ModelName::new("gpt-5.5"), "token".to_owned(), None);
+
+    assert!(!gpt_5_6.supports_compaction);
+    assert!(gpt_5_5.supports_compaction);
 }
 
 #[test]

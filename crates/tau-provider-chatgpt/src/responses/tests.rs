@@ -798,9 +798,9 @@ fn build_request_emits_tool_choice_none_while_keeping_tools_declared() {
     );
 }
 
-/// Ensures GPT-5.6 uses the Responses Lite body contract: tools and
-/// instructions become developer input items, parallel calls are disabled, and
-/// persistent reasoning context remains enabled.
+/// Ensures GPT-5.6 uses the Responses Lite body contract while suppressing
+/// incompatible server-side compaction: tools and instructions become developer
+/// input items, parallel calls are disabled, and persistent reasoning remains.
 #[test]
 fn build_request_uses_responses_lite_contract_for_gpt_5_6() {
     let config = ResponsesConfig {
@@ -821,7 +821,7 @@ fn build_request_uses_responses_lite_contract_for_gpt_5_6() {
     };
     let request = PromptPayload {
         system_prompt: "system instructions",
-        context: context(&[user_text("hello")]),
+        context: context(&[ContextItem::CompactionTrigger, user_text("hello")]),
         tools: std::slice::from_ref(&tool),
         params: tau_proto::ModelParams::default(),
         tool_choice: tau_proto::ToolChoice::Auto,
@@ -845,7 +845,7 @@ fn build_request_uses_responses_lite_contract_for_gpt_5_6() {
     assert_eq!(body["reasoning"]["context"], "all_turns");
     assert!(body["reasoning"].get("effort").is_none());
     assert!(body["reasoning"].get("summary").is_none());
-    assert_eq!(body["context_management"][0]["compact_threshold"], 334_800);
+    assert!(!object.contains_key("context_management"));
     assert_eq!(input[0]["type"], "additional_tools");
     assert_eq!(input[0]["role"], "developer");
     assert_eq!(input[0]["tools"][0]["name"], "shell");
@@ -853,6 +853,11 @@ fn build_request_uses_responses_lite_contract_for_gpt_5_6() {
     assert_eq!(input[1]["role"], "developer");
     assert_eq!(input[1]["content"][0]["text"], "system instructions");
     assert_eq!(input[2]["role"], "user");
+    assert!(
+        input
+            .iter()
+            .all(|item| item["type"] != "compaction_trigger")
+    );
 }
 
 /// Ensures the WebSocket request carries the Responses Lite routing marker as
@@ -874,6 +879,31 @@ fn ws_envelope_carries_responses_lite_request_metadata() {
     );
 }
 
+/// Ensures WebSocket GPT-5.6 requests retain the Lite routing marker while
+/// suppressing incompatible server-side compaction controls.
+#[test]
+fn ws_envelope_suppresses_compaction_without_disabling_responses_lite() {
+    let config = ResponsesConfig {
+        model_id: "gpt-5.6-luna".into(),
+        ..chain_test_config()
+    };
+    let mut request = basic_prompt_payload();
+    request.compaction = Some(tau_proto::PromptCompactionContext {
+        compact_threshold: Some(1200),
+    });
+
+    let body =
+        serde_json::to_value(build_ws_envelope(&config, &request, None, None)).expect("serialize");
+
+    assert_eq!(
+        body["client_metadata"]["ws_request_header_x_openai_internal_codex_responses_lite"],
+        "true"
+    );
+    assert!(body.get("context_management").is_none());
+}
+
+/// Ensures non-Lite models retain context management and explicit compaction
+/// trigger items while Responses Lite suppresses those incompatible controls.
 #[test]
 fn build_request_sends_compaction_context_management_and_trigger_item() {
     let config = ResponsesConfig {
@@ -1046,7 +1076,13 @@ fn spawn_eof_sse_server(body: &'static str) -> String {
     format!("http://{addr}")
 }
 
-fn capture_http_request_headers(model_id: &str) -> String {
+#[derive(Clone, Copy)]
+enum CapturedRequestCompaction {
+    Disabled,
+    ProviderDefault,
+}
+
+fn capture_http_request_headers(model_id: &str, compaction: CapturedRequestCompaction) -> String {
     let listener =
         std::net::TcpListener::bind(("127.0.0.1", 0)).expect("bind request capture server");
     let addr = listener.local_addr().expect("request capture address");
@@ -1090,7 +1126,12 @@ fn capture_http_request_headers(model_id: &str) -> String {
         model_id: model_id.to_owned(),
         ..chain_test_config()
     };
-    let request = basic_prompt_payload();
+    let mut request = basic_prompt_payload();
+    if matches!(compaction, CapturedRequestCompaction::ProviderDefault) {
+        request.compaction = Some(tau_proto::PromptCompactionContext {
+            compact_threshold: None,
+        });
+    }
     responses_stream(
         "ap-header-capture",
         &config,
@@ -1105,15 +1146,24 @@ fn capture_http_request_headers(model_id: &str) -> String {
         .expect("captured request headers")
 }
 
-/// Ensures the HTTP Responses transport opts GPT-5.6 into Responses Lite
-/// without leaking the internal routing header onto legacy model requests.
+/// Ensures the HTTP Responses transport keeps GPT-5.6 in Responses Lite even
+/// when callers supply compaction metadata, without leaking the routing header
+/// onto legacy model requests.
 #[test]
 fn http_transport_scopes_responses_lite_header_to_gpt_5_6() {
-    let lite_headers = capture_http_request_headers("gpt-5.6-sol").to_ascii_lowercase();
-    let legacy_headers = capture_http_request_headers("gpt-5.5").to_ascii_lowercase();
+    let lite_headers =
+        capture_http_request_headers("gpt-5.6-sol", CapturedRequestCompaction::Disabled)
+            .to_ascii_lowercase();
+    let compaction_headers =
+        capture_http_request_headers("gpt-5.6-sol", CapturedRequestCompaction::ProviderDefault)
+            .to_ascii_lowercase();
+    let legacy_headers =
+        capture_http_request_headers("gpt-5.5", CapturedRequestCompaction::Disabled)
+            .to_ascii_lowercase();
     let expected = "x-openai-internal-codex-responses-lite: true";
 
     assert!(lite_headers.contains(expected));
+    assert!(compaction_headers.contains(expected));
     assert!(!legacy_headers.contains("x-openai-internal-codex-responses-lite:"));
 }
 

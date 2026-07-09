@@ -36,8 +36,9 @@ The harness assembles prompts and routes provider-owned turns to this extension.
 ChatGPT/Codex turns use the Responses backend. Conversation chains reuse `previous_response_id` when possible so follow-up requests can send only newly added messages while upstream carries reasoning state. If an upstream stored response id expires, Tau retries once with a full replay before surfacing the error.
 
 ChatGPT GPT-5.6 Sol, Terra, and Luna publish a 353,400-token effective context
-window and compact automatically at 334,800 tokens based on their 372,000-token
-raw provider window. Their published reasoning choices include `max`.
+window and include `max` among their published reasoning choices. They do not
+advertise server-side compaction because the required Responses Lite routing is
+incompatible with upstream context management.
 
 The ChatGPT/Codex surface also uses a persistent WebSocket connection pool keyed by account and agent so upstream connection-local caches stay warm across turns, including interleaved sub-agent delegations. Prompt-cache keys are stable per target agent and do not split based on whether a turn came from the user, an extension, a manager relay, or an agent-to-agent message. Refreshed OAuth tokens invalidate stale sockets on next use. WebSocket-capable ChatGPT/Codex turns remain on WebSocket: retryable WS failures use bounded retry/backoff, and terminal WS errors surface instead of silently falling back to HTTP/SSE.
 

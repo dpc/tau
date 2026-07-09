@@ -22,6 +22,12 @@ contract. HTTP requests carry the internal Responses Lite routing header, while
 WebSocket `response.create` messages carry the equivalent per-request
 `client_metadata` marker so pooled sockets remain reusable.
 
+Responses Lite is incompatible with upstream server-side context management.
+Tau therefore does not advertise server-side compaction for GPT-5.6 and
+defensively suppresses compaction context and trigger items if a caller supplies
+them. The Lite request shape and routing marker remain enabled on both transports;
+non-Lite models retain their normal server-side compaction behavior.
+
 Responses Lite moves tool declarations and base instructions from the top-level
 request fields into leading developer input items, disables parallel tool
 calls, and keeps reasoning context across all turns. Hosted Responses tools are

@@ -1536,7 +1536,8 @@ fn build_request(
             _ => (context_items.as_slice(), None),
         };
 
-    let mut input = build_input_items(config, input_items);
+    let responses_lite = crate::uses_responses_lite(&config.model_id);
+    let mut input = build_input_items(config, input_items, responses_lite);
 
     let tools: Vec<serde_json::Value> = request.tools.iter().map(convert_tool_definition).collect();
 
@@ -1552,7 +1553,6 @@ fn build_request(
         (tau_proto::ToolChoice::Auto, false) => Some("auto".to_owned()),
         (tau_proto::ToolChoice::Auto, true) => None,
     };
-    let responses_lite = crate::uses_responses_lite(&config.model_id);
     let (instructions, tools, parallel_tool_calls) = if responses_lite {
         let mut prefix = vec![ResponsesInputItem::json(serde_json::json!({
             "type": "additional_tools",
@@ -1609,14 +1609,21 @@ fn build_request(
     } else {
         Vec::new()
     };
-    let context_management = request.compaction.map(|compaction| {
-        vec![ContextManagementRequest {
-            ty: "compaction",
-            compact_threshold: Some(compaction.compact_threshold.unwrap_or_else(|| {
-                provider_default_compaction_threshold(config.raw_context_window)
-            })),
-        }]
-    });
+    // Responses Lite does not support server-side compaction. Keep the Lite
+    // request shape intact and suppress context management even if a stale or
+    // direct caller supplies compaction metadata.
+    let context_management = if responses_lite {
+        None
+    } else {
+        request.compaction.map(|compaction| {
+            vec![ContextManagementRequest {
+                ty: "compaction",
+                compact_threshold: Some(compaction.compact_threshold.unwrap_or_else(|| {
+                    provider_default_compaction_threshold(config.raw_context_window)
+                })),
+            }]
+        })
+    };
 
     ResponsesRequest {
         model: config.model_id.clone(),
@@ -1652,6 +1659,7 @@ fn provider_default_compaction_threshold(raw_context_window: u64) -> u64 {
 fn build_input_items(
     config: &ResponsesConfig,
     input_items: &[ContextItem],
+    responses_lite: bool,
 ) -> Vec<ResponsesInputItem> {
     let input_items = if config.supports_compaction {
         trim_before_latest_compaction(input_items)
@@ -1660,6 +1668,9 @@ fn build_input_items(
     };
     let mut input = Vec::new();
     for item in input_items {
+        if responses_lite && matches!(item, ContextItem::CompactionTrigger) {
+            continue;
+        }
         convert_context_item(item, config.supports_phase, &mut input);
     }
     input
