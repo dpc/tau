@@ -152,14 +152,11 @@ impl BuiltinState {
                 ),
                 Err(_) => (String::new(), tau_proto::PROGRESS_INDICATOR_TEXT, None),
             },
-            AGENT_WATCH_TOOL_NAME => match parse_agent_watch_args(&call.arguments) {
-                Ok(parsed) => (
-                    agent_watch_display_args(&parsed),
-                    tau_proto::PROGRESS_INDICATOR_TEXT,
-                    None,
-                ),
-                Err(_) => (String::new(), tau_proto::PROGRESS_INDICATOR_TEXT, None),
-            },
+            AGENT_WATCH_TOOL_NAME => (
+                agent_watch_display_args(&call.arguments),
+                tau_proto::PROGRESS_INDICATOR_TEXT,
+                None,
+            ),
             CANCEL_TOOL_NAME => match parse_cancel_args(&call.arguments) {
                 Ok(target) => (target.to_string(), tau_proto::PROGRESS_INDICATOR_TEXT, None),
                 Err(_) => (String::new(), tau_proto::PROGRESS_INDICATOR_TEXT, None),
@@ -412,7 +409,7 @@ impl BuiltinTools {
             let self_agent_id = host
                 .ensure_agent_id_for_agent(conversation_id)
                 .ok_or_else(|| "sender conversation no longer exists".to_owned())?;
-            if parsed.agent_id == self_agent_id {
+            if parsed.agent_id.as_str() == self_agent_id {
                 return Err("`agent_id` must identify another agent".to_owned());
             }
             if !host.is_known_agent_id(&parsed.agent_id) {
@@ -437,22 +434,26 @@ impl BuiltinTools {
             }
         });
         match result {
-            Ok(message) => host.finish_tool_with_result(
+            Ok(message) => finish_agent_watch_success(
+                host,
                 conversation_id,
                 call_id,
                 visible_tool_name,
                 call.tool_type,
+                &call.arguments,
                 message,
-                None,
             ),
-            Err(message) => host.finish_tool_with_error(
-                conversation_id,
-                call_id,
-                visible_tool_name,
-                call.tool_type,
-                message,
-                Some(call.arguments.clone()),
-            ),
+            Err(message) => {
+                finish_agent_watch_error(
+                    host,
+                    conversation_id,
+                    call_id,
+                    visible_tool_name,
+                    call.tool_type,
+                    &call.arguments,
+                    message,
+                );
+            }
         }
         Ok(())
     }
@@ -499,6 +500,113 @@ impl BuiltinTools {
             }
         }
     }
+}
+
+trait AgentWatchFinisher {
+    fn finish_agent_watch_success(
+        &mut self,
+        conversation_id: &AgentId,
+        call_id: ToolCallId,
+        tool_name: ToolName,
+        tool_type: ToolType,
+        result: CborValue,
+        display: Option<ToolUseState>,
+    );
+
+    #[allow(clippy::too_many_arguments)]
+    fn finish_agent_watch_error(
+        &mut self,
+        conversation_id: &AgentId,
+        call_id: ToolCallId,
+        tool_name: ToolName,
+        tool_type: ToolType,
+        message: String,
+        details: Option<CborValue>,
+        display: Option<ToolUseState>,
+    );
+}
+
+impl AgentWatchFinisher for InternalToolHost<'_> {
+    fn finish_agent_watch_success(
+        &mut self,
+        conversation_id: &AgentId,
+        call_id: ToolCallId,
+        tool_name: ToolName,
+        tool_type: ToolType,
+        result: CborValue,
+        display: Option<ToolUseState>,
+    ) {
+        self.finish_tool_with_cbor_result(
+            conversation_id,
+            call_id,
+            tool_name,
+            tool_type,
+            result,
+            display,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn finish_agent_watch_error(
+        &mut self,
+        conversation_id: &AgentId,
+        call_id: ToolCallId,
+        tool_name: ToolName,
+        tool_type: ToolType,
+        message: String,
+        details: Option<CborValue>,
+        display: Option<ToolUseState>,
+    ) {
+        self.finish_tool_with_display_error(
+            conversation_id,
+            call_id,
+            tool_name,
+            tool_type,
+            message,
+            details,
+            display,
+        );
+    }
+}
+
+fn finish_agent_watch_success(
+    finisher: &mut impl AgentWatchFinisher,
+    conversation_id: &AgentId,
+    call_id: ToolCallId,
+    tool_name: ToolName,
+    tool_type: ToolType,
+    arguments: &CborValue,
+    message: String,
+) {
+    finisher.finish_agent_watch_success(
+        conversation_id,
+        call_id,
+        tool_name,
+        tool_type,
+        CborValue::Text(message),
+        Some(agent_watch_success_display(arguments)),
+    );
+}
+
+fn finish_agent_watch_error(
+    finisher: &mut impl AgentWatchFinisher,
+    conversation_id: &AgentId,
+    call_id: ToolCallId,
+    tool_name: ToolName,
+    tool_type: ToolType,
+    arguments: &CborValue,
+    message: String,
+) {
+    let display = agent_watch_error_display(arguments, &message);
+    finisher.finish_agent_watch_error(
+        conversation_id,
+        call_id,
+        tool_name,
+        tool_type,
+        message,
+        Some(arguments.clone()),
+        Some(display),
+    );
 }
 
 trait AgentStartSuccessFinisher {
@@ -1256,7 +1364,7 @@ fn parse_message_args(arguments: &CborValue) -> Result<MessageArgs, String> {
 }
 #[derive(Debug)]
 struct AgentWatchArgs {
-    agent_id: String,
+    agent_id: tau_proto::AgentId,
     enable: bool,
 }
 
@@ -1284,13 +1392,62 @@ fn parse_agent_watch_args(arguments: &CborValue) -> Result<AgentWatchArgs, Strin
     if agent_id.trim().is_empty() {
         return Err("`agent_id` must not be empty".to_owned());
     }
+    let agent_id =
+        tau_proto::AgentId::parse(&agent_id).map_err(|err| format!("invalid `agent_id`: {err}"))?;
     let enable = enable.ok_or_else(|| "`enable` is required".to_owned())?;
     Ok(AgentWatchArgs { agent_id, enable })
 }
 
-fn agent_watch_display_args(parsed: &AgentWatchArgs) -> String {
-    let action = if parsed.enable { "on" } else { "off" };
-    format!("{} {action}", parsed.agent_id)
+fn agent_watch_display_args(arguments: &CborValue) -> String {
+    match parse_agent_watch_args(arguments) {
+        Ok(parsed) => {
+            format_agent_watch_display_args(Some(parsed.enable), Some(parsed.agent_id.as_str()))
+        }
+        Err(_) => fallback_agent_watch_display_args(arguments),
+    }
+}
+
+fn agent_watch_success_display(arguments: &CborValue) -> ToolUseState {
+    ToolUseState {
+        args: agent_watch_display_args(arguments),
+        status: ToolUseStatus::Success,
+        status_text: "ok".to_owned(),
+        ..Default::default()
+    }
+}
+
+fn agent_watch_error_display(arguments: &CborValue, message: &str) -> ToolUseState {
+    ToolUseState {
+        args: agent_watch_display_args(arguments),
+        status: ToolUseStatus::Error,
+        status_text: error_chip_text(message),
+        ..Default::default()
+    }
+}
+
+fn fallback_agent_watch_display_args(arguments: &CborValue) -> String {
+    format_agent_watch_display_args(
+        tau_proto::cbor_bool_field(arguments, "enable"),
+        sanitized_display_agent_id(arguments).as_deref(),
+    )
+}
+
+fn format_agent_watch_display_args(enable: Option<bool>, agent_id: Option<&str>) -> String {
+    match (enable, agent_id) {
+        (Some(true), Some(agent_id)) => format!("watch {agent_id}"),
+        (Some(false), Some(agent_id)) => format!("unwatch {agent_id}"),
+        (Some(true), None) => "watch".to_owned(),
+        (Some(false), None) => "unwatch".to_owned(),
+        (None, Some(agent_id)) => agent_id.to_owned(),
+        (None, None) => String::new(),
+    }
+}
+
+fn sanitized_display_agent_id(arguments: &CborValue) -> Option<String> {
+    let agent_id = tau_proto::cbor_text_field(arguments, "agent_id")?;
+    tau_proto::AgentId::parse(&agent_id)
+        .ok()
+        .map(tau_proto::AgentId::into_string)
 }
 
 fn agent_watch_response_should_notify(response: &ProviderResponseFinished) -> Option<String> {
@@ -1457,7 +1614,7 @@ fn message_tool_spec() -> ToolSpec {
 }
 
 fn agent_watch_tool_spec() -> ToolSpec {
-    ToolSpec { name: ToolName::new(AGENT_WATCH_TOOL_NAME), model_visible_name: None, description: Some("Enable or disable session-local async notifications when another agent produces a response. `agent_start` automatically enables a watch for the started sub-agent; call `agent_watch` with `enable: false` to stop watching before the session ends. Requires `agent_id` and `enable`.".to_owned()), tool_type: ToolType::Function, parameters: Some(serde_json::json!({"type":"object","properties":{"agent_id":{"type":"string","description":"Agent id to watch or stop watching."},"enable":{"type":"boolean","description":"True to enable watching, false to disable it."}},"required":["agent_id","enable"],"additionalProperties":false})), format: None, tags: Vec::new(), enabled_by_default: true, background_support: Some(BackgroundSupport::Never), examples: Vec::new() }
+    ToolSpec { name: ToolName::new(AGENT_WATCH_TOOL_NAME), model_visible_name: None, description: Some("Enable or disable session-local async notifications when another agent produces a response. `agent_start` automatically enables a watch for the started sub-agent; call `agent_watch` with `enable: false` to stop watching before the session ends. Requires `agent_id` and `enable`.".to_owned()), tool_type: ToolType::Function, parameters: Some(serde_json::json!({"type":"object","properties":{"agent_id":{"type":"string","maxLength": tau_proto::AGENT_ID_MAX_LEN, "pattern": "^[A-Za-z0-9_-]{1,64}$", "description":"Agent id to watch or stop watching. Must contain only ASCII letters, digits, `_`, or `-`."},"enable":{"type":"boolean","description":"True to enable watching, false to disable it."}},"required":["agent_id","enable"],"additionalProperties":false})), format: None, tags: Vec::new(), enabled_by_default: true, background_support: Some(BackgroundSupport::Never), examples: Vec::new() }
 }
 
 fn cancel_tool_spec() -> ToolSpec {

@@ -127,6 +127,25 @@ fn agent_watch_spec_is_advertised_and_requires_agent_id_and_enable() {
     assert!(description.contains("session-local async notifications"));
     assert!(description.contains("automatically enables a watch"));
     assert!(description.contains("enable: false"));
+    assert_eq!(
+        params
+            .pointer("/properties/agent_id/maxLength")
+            .and_then(serde_json::Value::as_u64),
+        Some(tau_proto::AGENT_ID_MAX_LEN as u64)
+    );
+    assert_eq!(
+        params
+            .pointer("/properties/agent_id/pattern")
+            .and_then(serde_json::Value::as_str),
+        Some("^[A-Za-z0-9_-]{1,64}$")
+    );
+    assert!(
+        params
+            .pointer("/properties/agent_id/description")
+            .and_then(serde_json::Value::as_str)
+            .expect("agent_id description")
+            .contains("ASCII letters")
+    );
     assert_eq!(required, vec!["agent_id", "enable"]);
 }
 
@@ -140,9 +159,8 @@ fn agent_watch_args_require_non_empty_agent_id_and_bool_enable() {
         (CborValue::Text("enable".to_owned()), CborValue::Bool(true)),
     ]);
     let parsed = parse_agent_watch_args(&args).expect("valid watch args");
-    assert_eq!(parsed.agent_id, "agent-a");
+    assert_eq!(parsed.agent_id.as_str(), "agent-a");
     assert!(parsed.enable);
-    assert_eq!(agent_watch_display_args(&parsed), "agent-a on");
 
     let err = parse_agent_watch_args(&CborValue::Map(vec![
         (
@@ -166,6 +184,258 @@ fn agent_watch_args_require_non_empty_agent_id_and_bool_enable() {
     ]))
     .expect_err("non-bool enable should fail");
     assert_eq!(err, "`enable` must be a boolean");
+
+    let err = parse_agent_watch_args(&CborValue::Map(vec![
+        (
+            CborValue::Text("agent_id".to_owned()),
+            CborValue::Text("../agent-a".to_owned()),
+        ),
+        (CborValue::Text("enable".to_owned()), CborValue::Bool(false)),
+    ]))
+    .expect_err("invalid agent_id should fail");
+    assert!(err.starts_with("invalid `agent_id`:"));
+}
+
+/// Agent watch display args should make both the watch action and target agent
+/// visible in the compact tool line, preventing ambiguous bare `agent_watch`
+/// rows in the transcript.
+#[test]
+fn agent_watch_display_args_summarize_action_and_agent() {
+    let enable = CborValue::Map(vec![
+        (
+            CborValue::Text("agent_id".to_owned()),
+            CborValue::Text("agent-a".to_owned()),
+        ),
+        (CborValue::Text("enable".to_owned()), CborValue::Bool(true)),
+    ]);
+    let disable = CborValue::Map(vec![
+        (
+            CborValue::Text("agent_id".to_owned()),
+            CborValue::Text("agent-a".to_owned()),
+        ),
+        (CborValue::Text("enable".to_owned()), CborValue::Bool(false)),
+    ]);
+
+    assert_eq!(agent_watch_display_args(&enable), "watch agent-a");
+    assert_eq!(agent_watch_display_args(&disable), "unwatch agent-a");
+}
+
+/// Invalid agent watch display args should still expose whitelisted safe fields
+/// but must not echo arbitrary or unsafe strings from malformed tool calls.
+#[test]
+fn agent_watch_display_args_falls_back_to_safe_fields() {
+    let missing_agent = CborValue::Map(vec![(
+        CborValue::Text("enable".to_owned()),
+        CborValue::Bool(true),
+    )]);
+    let missing_enable = CborValue::Map(vec![(
+        CborValue::Text("agent_id".to_owned()),
+        CborValue::Text("agent-a".to_owned()),
+    )]);
+    let unsafe_agent = CborValue::Map(vec![
+        (
+            CborValue::Text("agent_id".to_owned()),
+            CborValue::Text("../agent-a".to_owned()),
+        ),
+        (CborValue::Text("enable".to_owned()), CborValue::Bool(false)),
+    ]);
+    let unsafe_enable = CborValue::Map(vec![
+        (
+            CborValue::Text("agent_id".to_owned()),
+            CborValue::Text("agent-a".to_owned()),
+        ),
+        (
+            CborValue::Text("enable".to_owned()),
+            CborValue::Text("false".to_owned()),
+        ),
+    ]);
+
+    assert_eq!(agent_watch_display_args(&missing_agent), "watch");
+    assert_eq!(agent_watch_display_args(&missing_enable), "agent-a");
+    assert_eq!(agent_watch_display_args(&unsafe_agent), "unwatch");
+    assert_eq!(agent_watch_display_args(&unsafe_enable), "agent-a");
+}
+
+/// Terminal agent watch results must carry the same bounded display args as the
+/// in-progress row so compact history does not regress to a bare
+/// `agent_watch ok` entry after completion.
+#[test]
+fn agent_watch_success_display_keeps_action_and_agent() {
+    let args = CborValue::Map(vec![
+        (
+            CborValue::Text("agent_id".to_owned()),
+            CborValue::Text("agent-a".to_owned()),
+        ),
+        (CborValue::Text("enable".to_owned()), CborValue::Bool(true)),
+    ]);
+
+    let display = agent_watch_success_display(&args);
+
+    assert_eq!(display.args, "watch agent-a");
+    assert_eq!(display.status, ToolUseStatus::Success);
+    assert_eq!(display.status_text, "ok");
+}
+
+/// Terminal agent watch errors must also preserve sanitized display args while
+/// keeping unsafe malformed identifiers out of the compact history row.
+#[test]
+fn agent_watch_error_display_keeps_safe_action() {
+    let args = CborValue::Map(vec![
+        (
+            CborValue::Text("agent_id".to_owned()),
+            CborValue::Text("agent-missing".to_owned()),
+        ),
+        (CborValue::Text("enable".to_owned()), CborValue::Bool(false)),
+    ]);
+
+    let display = agent_watch_error_display(&args, "unknown agent: `agent-missing`");
+
+    assert_eq!(display.args, "unwatch agent-missing");
+    assert_eq!(display.status, ToolUseStatus::Error);
+    assert_eq!(display.status_text, "unknown agent: `agent-missing`");
+}
+
+#[derive(Default)]
+struct RecordingAgentWatchFinisher {
+    success: Option<RecordedAgentWatchSuccess>,
+    error: Option<RecordedAgentWatchError>,
+}
+
+struct RecordedAgentWatchSuccess {
+    conversation_id: AgentId,
+    call_id: ToolCallId,
+    tool_name: ToolName,
+    tool_type: ToolType,
+    result: CborValue,
+    display: Option<ToolUseState>,
+}
+
+struct RecordedAgentWatchError {
+    conversation_id: AgentId,
+    call_id: ToolCallId,
+    tool_name: ToolName,
+    tool_type: ToolType,
+    message: String,
+    details: Option<CborValue>,
+    display: Option<ToolUseState>,
+}
+
+impl AgentWatchFinisher for RecordingAgentWatchFinisher {
+    fn finish_agent_watch_success(
+        &mut self,
+        conversation_id: &AgentId,
+        call_id: ToolCallId,
+        tool_name: ToolName,
+        tool_type: ToolType,
+        result: CborValue,
+        display: Option<ToolUseState>,
+    ) {
+        self.success = Some(RecordedAgentWatchSuccess {
+            conversation_id: conversation_id.clone(),
+            call_id,
+            tool_name,
+            tool_type,
+            result,
+            display,
+        });
+    }
+
+    fn finish_agent_watch_error(
+        &mut self,
+        conversation_id: &AgentId,
+        call_id: ToolCallId,
+        tool_name: ToolName,
+        tool_type: ToolType,
+        message: String,
+        details: Option<CborValue>,
+        display: Option<ToolUseState>,
+    ) {
+        self.error = Some(RecordedAgentWatchError {
+            conversation_id: conversation_id.clone(),
+            call_id,
+            tool_name,
+            tool_type,
+            message,
+            details,
+            display,
+        });
+    }
+}
+
+/// Ensures the production success finisher path attaches final display
+/// metadata, so the completed transcript row keeps the compact `watch <agent>`
+/// summary.
+#[test]
+fn finish_agent_watch_success_passes_informative_display() {
+    let args = CborValue::Map(vec![
+        (
+            CborValue::Text("agent_id".to_owned()),
+            CborValue::Text("agent-a".to_owned()),
+        ),
+        (CborValue::Text("enable".to_owned()), CborValue::Bool(true)),
+    ]);
+    let mut finisher = RecordingAgentWatchFinisher::default();
+
+    finish_agent_watch_success(
+        &mut finisher,
+        &AgentId::parse("parent-cid").expect("valid agent id"),
+        ToolCallId::from("call-1"),
+        ToolName::new(AGENT_WATCH_TOOL_NAME),
+        ToolType::Function,
+        &args,
+        "Watching agent `agent-a`".to_owned(),
+    );
+
+    let call = finisher.success.expect("finish call recorded");
+    let display = call.display.expect("informative display is attached");
+    assert_eq!(call.conversation_id.as_str(), "parent-cid");
+    assert_eq!(call.call_id.as_str(), "call-1");
+    assert_eq!(call.tool_name.as_str(), AGENT_WATCH_TOOL_NAME);
+    assert_eq!(call.tool_type, ToolType::Function);
+    assert_eq!(
+        call.result,
+        CborValue::Text("Watching agent `agent-a`".to_owned())
+    );
+    assert_eq!(display.args, "watch agent-a");
+    assert_eq!(display.status, ToolUseStatus::Success);
+    assert_eq!(display.status_text, "ok");
+}
+
+/// Ensures the production error finisher path attaches sanitized final display
+/// metadata, preventing completed error rows from degrading to bare
+/// `agent_watch` entries.
+#[test]
+fn finish_agent_watch_error_passes_informative_display() {
+    let args = CborValue::Map(vec![
+        (
+            CborValue::Text("agent_id".to_owned()),
+            CborValue::Text("agent-missing".to_owned()),
+        ),
+        (CborValue::Text("enable".to_owned()), CborValue::Bool(false)),
+    ]);
+    let mut finisher = RecordingAgentWatchFinisher::default();
+
+    finish_agent_watch_error(
+        &mut finisher,
+        &AgentId::parse("parent-cid").expect("valid agent id"),
+        ToolCallId::from("call-1"),
+        ToolName::new(AGENT_WATCH_TOOL_NAME),
+        ToolType::Function,
+        &args,
+        "unknown agent: `agent-missing`".to_owned(),
+    );
+
+    let call = finisher.error.expect("finish call recorded");
+    let display = call.display.expect("informative display is attached");
+    assert_eq!(call.conversation_id.as_str(), "parent-cid");
+    assert_eq!(call.call_id.as_str(), "call-1");
+    assert_eq!(call.tool_name.as_str(), AGENT_WATCH_TOOL_NAME);
+    assert_eq!(call.tool_type, ToolType::Function);
+    assert_eq!(call.message, "unknown agent: `agent-missing`");
+    assert_eq!(call.details, Some(args));
+    assert_eq!(display.args, "unwatch agent-missing");
+    assert_eq!(display.status, ToolUseStatus::Error);
+    assert_eq!(display.status_text, "unknown agent: `agent-missing`");
 }
 
 #[test]
