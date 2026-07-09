@@ -24,11 +24,11 @@
   does not currently relax privacy settings or grant member affiliations.
   Deployments must enforce privacy and any members-only policy at the server or
   room-default layer.
-- MUC room names include readable session/agent slugs plus a compact
-  domain-separated BLAKE3 disambiguator derived from the full Tau session id and
-  full validated agent id. Distinct ids must remain collision-resistant after
-  XMPP JID normalization, because a room collision would risk cross-agent prompt
-  delivery; the readable slugs are only hints and are not the routing authority.
+- MUC room names include a readable agent slug plus a compact 40-bit,
+  domain-separated BLAKE3 disambiguator derived from the full globally unique,
+  validated agent id. Distinct ids must remain collision-resistant after XMPP JID
+  normalization, because a room collision would risk cross-agent prompt delivery;
+  the readable slug is only a hint and is not the routing authority.
   If two generated room names ever collide in one process, registration fails
   closed instead of overwriting the existing room route.
 - Text is treated as untrusted external input and is prefixed with XMPP

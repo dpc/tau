@@ -63,7 +63,6 @@ const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 const WORKER_SHUTDOWN_CLEANUP_TIMEOUT: Duration = Duration::from_secs(4);
 const MUC_OWNER_NS: &str = "http://jabber.org/protocol/muc#owner";
 const MUC_ROOM_DISAMBIGUATOR_BYTES: usize = 5;
-const MUC_SESSION_SLUG_MAX_CHARS: usize = 16;
 const MUC_AGENT_SLUG_MAX_CHARS: usize = 18;
 
 /// Run the XMPP extension over stdio.
@@ -178,12 +177,7 @@ trait XmppBridge: Send + Sync + 'static {
     ) -> Result<(), String>;
 
     /// Register one agent conversation and return its XMPP address.
-    fn register_agent(
-        &self,
-        cfg: &RuntimeConfig,
-        session_id: &SessionId,
-        agent_id: &AgentId,
-    ) -> Result<String, String>;
+    fn register_agent(&self, cfg: &RuntimeConfig, agent_id: &AgentId) -> Result<String, String>;
 
     /// Remove one registered agent conversation from the bridge.
     fn unregister_agent(&self, agent_id: &AgentId) -> Result<(), String>;
@@ -489,7 +483,7 @@ struct State {
     registered_agents: HashSet<AgentId>,
     /// XMPP conversation address per agent.
     conversations: HashMap<AgentId, String>,
-    /// Current Tau session id used for stable per-session room names.
+    /// Current Tau session id used to scope registration lifecycle cleanup.
     current_session_id: Option<SessionId>,
     /// Whether the XMPP bridge has been started.
     bridge_started: bool,
@@ -596,20 +590,16 @@ impl Extension {
             if let Err(message) = self.bridge.wait_until_ready(ONLINE_WAIT_TIMEOUT) {
                 return tool_error(invoke, message);
             }
-            let session_id = {
+            {
                 let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-                let Some(session_id) = state.current_session_id.clone() else {
+                if state.current_session_id.is_none() {
                     return tool_error(
                         invoke,
                         "xmpp_register requires an active Tau session; no session_started event has been observed yet".to_owned(),
                     );
-                };
-                session_id
-            };
-            let address = match self
-                .bridge
-                .register_agent(&cfg, &session_id, &invoke.agent_id)
-            {
+                }
+            }
+            let address = match self.bridge.register_agent(&cfg, &invoke.agent_id) {
                 Ok(address) => address,
                 Err(message) => return tool_error(invoke, message),
             };
@@ -714,8 +704,6 @@ struct XmppWorkerThread {
 
 enum XmppCommand {
     Register {
-        /// Tau session containing the agent.
-        session_id: SessionId,
         /// Agent to register.
         agent_id: AgentId,
         /// Response channel carrying the conversation address.
@@ -772,16 +760,10 @@ impl XmppBridge for LiveXmppBridge {
         Ok(())
     }
 
-    fn register_agent(
-        &self,
-        _cfg: &RuntimeConfig,
-        session_id: &SessionId,
-        agent_id: &AgentId,
-    ) -> Result<String, String> {
+    fn register_agent(&self, _cfg: &RuntimeConfig, agent_id: &AgentId) -> Result<String, String> {
         let tx = self.command_sender()?;
         let (response_tx, response_rx) = mpsc::channel();
         tx.send(XmppCommand::Register {
-            session_id: session_id.clone(),
             agent_id: agent_id.clone(),
             response: response_tx,
         })
@@ -1049,14 +1031,10 @@ impl WorkerState {
     /// Process one command from tool handlers.
     async fn handle_command(&mut self, command: XmppCommand, client: &mut Client) {
         match command {
-            XmppCommand::Register {
-                session_id,
-                agent_id,
-                response,
-            } => {
+            XmppCommand::Register { agent_id, response } => {
                 let result = match tokio::time::timeout(
                     REGISTER_TIMEOUT,
-                    self.register_agent(session_id, agent_id.clone(), client),
+                    self.register_agent(agent_id.clone(), client),
                 )
                 .await
                 {
@@ -1113,7 +1091,6 @@ impl WorkerState {
     /// Register one agent conversation.
     async fn register_agent(
         &mut self,
-        session_id: SessionId,
         agent_id: AgentId,
         client: &mut Client,
     ) -> Result<String, String> {
@@ -1123,7 +1100,7 @@ impl WorkerState {
         let conversation = match self.cfg.routing_mode {
             RoutingMode::Muc => {
                 self.ensure_online(client).await?;
-                let room = self.muc_room_for(&session_id, &agent_id)?;
+                let room = self.muc_room_for(&agent_id)?;
                 self.ensure_muc_room_available(&room, &agent_id)?;
                 let nick = format!("{}-{}", self.cfg.resource_prefix, short_random_hex());
                 let occupant = MucOccupant::new(room.clone(), nick);
@@ -1241,8 +1218,8 @@ impl WorkerState {
         }
     }
 
-    /// Build the stable MUC room JID for a Tau session and agent pair.
-    fn muc_room_for(&self, session_id: &SessionId, agent_id: &AgentId) -> Result<BareJid, String> {
+    /// Build the stable MUC room JID for a Tau agent.
+    fn muc_room_for(&self, agent_id: &AgentId) -> Result<BareJid, String> {
         let service = self
             .cfg
             .muc
@@ -1252,7 +1229,7 @@ impl WorkerState {
         Jid::new(&format!(
             "{}-{}@{}",
             self.cfg.muc.room_prefix,
-            muc_room_label(session_id, agent_id),
+            muc_room_label(agent_id),
             service.domain()
         ))
         .map_err(|e| format!("failed to build muc room jid: {e}"))
@@ -2380,18 +2357,15 @@ fn generated_resource(cfg: &RuntimeConfig) -> String {
 }
 
 /// Return a short, readable, normalization-safe MUC room identity label.
-fn muc_room_label(session_id: &SessionId, agent_id: &AgentId) -> String {
-    let session_slug = localpart_slug(session_id.as_ref(), MUC_SESSION_SLUG_MAX_CHARS);
+fn muc_room_label(agent_id: &AgentId) -> String {
     let agent_slug = agent_room_slug(agent_id);
-    let disambiguator = muc_room_disambiguator(session_id, agent_id);
-    format!("{session_slug}-{agent_slug}-{disambiguator}")
+    let disambiguator = muc_room_disambiguator(agent_id);
+    format!("{agent_slug}-{disambiguator}")
 }
 
-fn muc_room_disambiguator(session_id: &SessionId, agent_id: &AgentId) -> String {
+fn muc_room_disambiguator(agent_id: &AgentId) -> String {
     let mut hasher = blake3::Hasher::new();
-    hasher.update(b"tau-ext-xmpp muc room v1\0session\0");
-    hasher.update(session_id.as_ref().as_bytes());
-    hasher.update(b"\0agent\0");
+    hasher.update(b"tau-ext-xmpp muc room v2\0agent\0");
     hasher.update(agent_id.as_ref().as_bytes());
     let hash = hasher.finalize();
     base32_token(&hash.as_bytes()[..MUC_ROOM_DISAMBIGUATOR_BYTES])
@@ -2420,10 +2394,6 @@ fn likely_generated_agent_suffix(input: &str) -> Option<String> {
                 && suffix.chars().any(|ch| ch.is_ascii_digit())
         })
         .map(|suffix| suffix.to_ascii_lowercase())
-}
-
-fn localpart_slug(input: &str, max_chars: usize) -> String {
-    join_slug_segments(&localpart_segments(input), max_chars)
 }
 
 fn localpart_segments(input: &str) -> Vec<String> {
