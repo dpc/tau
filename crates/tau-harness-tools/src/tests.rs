@@ -104,6 +104,9 @@ fn agent_start_spec_advertises_only_current_tool_name() {
         .expect("agent_start description");
     assert!(description.contains("delivered asynchronously via session-local `agent_watch`"));
     assert!(description.contains("until the caller disables the watch or the session ends"));
+    assert!(
+        description.contains("internal steering and tool-completion notices are not forwarded")
+    );
     assert!(description.contains("metadata"));
     assert!(!description.contains("return its final response"));
 }
@@ -126,6 +129,8 @@ fn agent_watch_spec_is_advertised_and_requires_agent_id_and_enable() {
         .expect("agent_watch description");
     assert!(description.contains("session-local async notifications"));
     assert!(description.contains("automatically enables a watch"));
+    assert!(description.contains("Watched agent <agent-id> emitted a response"));
+    assert!(description.contains("internal steering and tool-completion notices"));
     assert!(description.contains("enable: false"));
     assert_eq!(
         params
@@ -495,6 +500,56 @@ fn agent_watch_ignores_mid_turn_tool_call_responses() {
     };
 
     assert!(agent_watch_response_should_notify(&response).is_none());
+}
+
+/// Internal or steering-originated provider turns, such as background tool
+/// completion wakeups, must not be forwarded to watchers. Watchers should only
+/// see final watched-agent responses that belong to an interactive user turn.
+#[test]
+fn agent_watch_ignores_internal_originated_responses() {
+    let response = ProviderResponseFinished {
+        agent_prompt_id: "sp-watch".into(),
+        agent_id: tau_proto::AgentId::parse("agent-a").expect("agent id"),
+        output_items: vec![ContextItem::Message(tau_proto::MessageItem {
+            role: ContextRole::Assistant,
+            content: vec![ContentPart::Text {
+                text: "background completion handled".to_owned(),
+            }],
+            phase: None,
+            responses_raw_json: None,
+        })],
+        stop_reason: tau_proto::ProviderStopReason::EndTurn,
+        error: None,
+        usage: None,
+        originator: tau_proto::PromptOriginator::Extension {
+            name: tau_proto::ExtensionName::new("__harness__"),
+            query_id: "background-completion".to_owned(),
+        },
+        compaction_original_input_tokens: None,
+        compaction_compacted_input_tokens: None,
+        backend: None,
+        provider_response_id: None,
+        ws_pool_delta: None,
+    };
+
+    assert!(agent_watch_response_should_notify(&response).is_none());
+}
+
+/// A completed `agent_start` result is the child agent's terminal answer to the
+/// watcher that delegated it. That final result remains watchable even though
+/// non-user per-turn provider responses are filtered elsewhere.
+#[test]
+fn agent_watch_forwards_terminal_agent_start_result() {
+    let result = tau_proto::StartAgentResult {
+        query_id: "delegate-1".to_owned(),
+        text: "delegated final".to_owned(),
+        error: None,
+    };
+
+    assert_eq!(
+        start_agent_watch_notification_message("agent-a", &result),
+        Some("delegated final".to_owned())
+    );
 }
 
 /// Ensures the message tool treats `user`, bare agent ids, and

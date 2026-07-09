@@ -1451,6 +1451,9 @@ fn sanitized_display_agent_id(arguments: &CborValue) -> Option<String> {
 }
 
 fn agent_watch_response_should_notify(response: &ProviderResponseFinished) -> Option<String> {
+    // Only interactive user turns produce per-turn watch responses. Side-agent
+    // provider turns are summarized through `StartAgentResult`, and internal
+    // steering/tool-completion turns must stay local to the watched agent.
     if !response.originator.is_user() || response.stop_reason.requests_tool_calls() {
         return None;
     }
@@ -1461,6 +1464,11 @@ fn start_agent_watch_notification_message(
     _agent_id: &str,
     result: &tau_proto::StartAgentResult,
 ) -> Option<String> {
+    // A completed `agent_start` is the watched agent's final response to its
+    // delegating watcher. That terminal delegation result is watchable even when
+    // the delegating watcher itself was running as a side agent; filtering of
+    // internal/tool-completion continuations applies to per-turn provider
+    // responses, not to this explicit delegation result.
     if let Some(error) = result.error.as_deref()
         && !error.trim().is_empty()
     {
@@ -1606,7 +1614,7 @@ fn skill_tool_spec() -> ToolSpec {
 }
 
 fn agent_start_tool_spec() -> ToolSpec {
-    ToolSpec { name: ToolName::new(AGENT_START_TOOL_NAME), model_visible_name: None, description: Some("Start a self-contained sub-task in a new sub-agent. The `prompt` must contain all information the sub-agent needs to complete the task. The sub-agent's responses are delivered asynchronously via session-local `agent_watch` notifications until the caller disables the watch or the session ends. The immediate result includes `self_agent_id` and `sub_agent_id` metadata.".to_owned()), tool_type: ToolType::Function, parameters: Some(serde_json::json!({"type":"object","properties":{"task_name":{"type":"string","description":"Short user-visible label for the sub-task (a few words)."},"prompt":{"type":"string","description":"Self-contained task for the sub-agent."},"role":{"type":"string","description":"Optional sub-agent role to use."}},"required":["task_name","prompt"],"additionalProperties":false})), format: None, tags: Vec::new(), enabled_by_default: true, background_support: Some(BackgroundSupport::Never), examples: Vec::new() }
+    ToolSpec { name: ToolName::new(AGENT_START_TOOL_NAME), model_visible_name: None, description: Some("Start a self-contained sub-task in a new sub-agent. The `prompt` must contain all information the sub-agent needs to complete the task. The sub-agent's final responses and user prompts are delivered asynchronously via session-local `agent_watch` notifications until the caller disables the watch or the session ends; internal steering and tool-completion notices are not forwarded. The immediate result includes `self_agent_id` and `sub_agent_id` metadata.".to_owned()), tool_type: ToolType::Function, parameters: Some(serde_json::json!({"type":"object","properties":{"task_name":{"type":"string","description":"Short user-visible label for the sub-task (a few words)."},"prompt":{"type":"string","description":"Self-contained task for the sub-agent."},"role":{"type":"string","description":"Optional sub-agent role to use."}},"required":["task_name","prompt"],"additionalProperties":false})), format: None, tags: Vec::new(), enabled_by_default: true, background_support: Some(BackgroundSupport::Never), examples: Vec::new() }
 }
 
 fn message_tool_spec() -> ToolSpec {
@@ -1614,7 +1622,7 @@ fn message_tool_spec() -> ToolSpec {
 }
 
 fn agent_watch_tool_spec() -> ToolSpec {
-    ToolSpec { name: ToolName::new(AGENT_WATCH_TOOL_NAME), model_visible_name: None, description: Some("Enable or disable session-local async notifications when another agent produces a response. `agent_start` automatically enables a watch for the started sub-agent; call `agent_watch` with `enable: false` to stop watching before the session ends. Requires `agent_id` and `enable`.".to_owned()), tool_type: ToolType::Function, parameters: Some(serde_json::json!({"type":"object","properties":{"agent_id":{"type":"string","maxLength": tau_proto::AGENT_ID_MAX_LEN, "pattern": "^[A-Za-z0-9_-]{1,64}$", "description":"Agent id to watch or stop watching. Must contain only ASCII letters, digits, `_`, or `-`."},"enable":{"type":"boolean","description":"True to enable watching, false to disable it."}},"required":["agent_id","enable"],"additionalProperties":false})), format: None, tags: Vec::new(), enabled_by_default: true, background_support: Some(BackgroundSupport::Never), examples: Vec::new() }
+    ToolSpec { name: ToolName::new(AGENT_WATCH_TOOL_NAME), model_visible_name: None, description: Some("Enable or disable session-local async notifications for another agent's final responses and received user prompts. Watch notifications are clearly labeled as `Watched agent <agent-id> emitted a response` or `Watched agent <agent-id> received a user prompt`; internal steering and tool-completion notices delivered to the watched agent are not forwarded. `agent_start` automatically enables a watch for the started sub-agent; call `agent_watch` with `enable: false` to stop watching before the session ends. Requires `agent_id` and `enable`.".to_owned()), tool_type: ToolType::Function, parameters: Some(serde_json::json!({"type":"object","properties":{"agent_id":{"type":"string","maxLength": tau_proto::AGENT_ID_MAX_LEN, "pattern": "^[A-Za-z0-9_-]{1,64}$", "description":"Agent id to watch or stop watching. Must contain only ASCII letters, digits, `_`, or `-`."},"enable":{"type":"boolean","description":"True to enable watching, false to disable it."}},"required":["agent_id","enable"],"additionalProperties":false})), format: None, tags: Vec::new(), enabled_by_default: true, background_support: Some(BackgroundSupport::Never), examples: Vec::new() }
 }
 
 fn cancel_tool_spec() -> ToolSpec {

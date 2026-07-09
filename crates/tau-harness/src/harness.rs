@@ -3596,11 +3596,11 @@ impl Harness {
                 sender_label, escaped_message
             ),
             tau_proto::AgentMessageKind::WatchResponse => format!(
-                "[tau-internal]: Agent {} finished its turn\n\n<response>\n{}\n</response>",
+                "[tau-internal]: Watched agent {} emitted a response\n\n<response>\n{}\n</response>",
                 sender_label, escaped_message
             ),
             tau_proto::AgentMessageKind::WatchPrompt => format!(
-                "[tau-internal]: Agent {} received a user prompt\n\n<prompt>\n{}\n</prompt>",
+                "[tau-internal]: Watched agent {} received a user prompt\n\n<prompt>\n{}\n</prompt>",
                 sender_label, escaped_message
             ),
         };

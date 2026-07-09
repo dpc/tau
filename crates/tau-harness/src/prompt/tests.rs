@@ -870,7 +870,7 @@ fn assemble_conversation_replays_watch_response_as_notification_only() {
                 && matches!(
                     &content[0],
                     ContentPart::Text { text }
-                        if text == "[tau-internal]: Agent watched finished its turn\n\n<response>\ndone &lt;response&gt;&amp;&lt;/response&gt;\n</response>"
+                        if text == "[tau-internal]: Watched agent watched emitted a response\n\n<response>\ndone &lt;response&gt;&amp;&lt;/response&gt;\n</response>"
                 )
     ));
 

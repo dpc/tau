@@ -75,17 +75,19 @@ record a successful sender-side projection.
 
 ## Watch another agent's responses
 
-Use `agent_watch` to enable or disable hidden async notifications when another
-agent produces a response:
+Use `agent_watch` to enable or disable hidden async notifications for another
+agent's final responses and received user prompts:
 
 ```text
 agent_watch({"agent_id":"engineer_b","enable":true})
 ```
 
-`agent_start` automatically enables watching for the sub-agent it creates. A watch notification is delivered to the watching agent as a hidden internal prompt that is distinct from an explicit `message` tool delivery:
+`agent_start` automatically enables watching for the sub-agent it creates. A
+watch response notification is delivered to the watching agent as a hidden
+internal prompt that is distinct from an explicit `message` tool delivery:
 
 ```text
-[tau-internal]: Agent engineer_b finished its turn
+[tau-internal]: Watched agent engineer_b emitted a response
 
 <response>
 Task result text.
@@ -98,12 +100,21 @@ part of the watched agent's active turn, before the watched agent's later
 response notification for that turn:
 
 ```text
-[tau-internal]: Agent engineer_b received a user prompt
+[tau-internal]: Watched agent engineer_b received a user prompt
 
 <prompt>
 User follow-up text.
 </prompt>
 ```
+
+Watch notifications are deliberately narrow. They do not forward internal
+steering prompts, background/tool-completion prompts, explicit `message` tool
+deliveries to the watched agent, or other hidden/non-user inputs delivered to the
+watched agent. If such an input later causes the watched agent to produce a final
+response, the response may be watch-notified, but the hidden input itself is not
+forwarded. A completed `agent_start` result is watchable as the started child
+agent's terminal final response to its direct delegating watcher, even when that
+watcher is itself a side agent.
 
 The `agent_start` tool result only confirms metadata such as `self_agent_id` and
 `sub_agent_id`; response text arrives through watch notifications. Watches are

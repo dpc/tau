@@ -68,6 +68,15 @@ forward watch set and reverse watcher index only as runtime/session state,
 publishes complete replacement snapshots for each watcher, and does not persist
 watch relationships into agent display names.
 
+Model-visible `agent_watch` notifications are deliberately narrow. A watcher may
+receive only a watched agent's final response notification (`Watched agent <id>
+emitted a response`) or a watched agent's received user-prompt notification
+(`Watched agent <id> received a user prompt`). Internal steering, background
+tool-completion prompts, explicit `message` deliveries to the watched agent, and
+other hidden inputs must not be forwarded as watch notifications. A terminal
+`agent_start` result remains the started agent's final response to its direct
+delegating watcher, even when that watcher is itself a side agent.
+
 ## Provider response stats boundary
 
 Providers own response-throughput sampling. A provider starts prompt-local response stats when it dispatches the backend request, counts backend response bytes at the transport receive boundary before semantic parsing, batches counters in memory, emits the first non-empty previous/current `response_stats` sample promptly, emits later samples at most once per second on `provider.response_updated`, and may flush once immediately before the prompt closes. `previous` is the last sample that provider actually emitted, not an internal calculation.

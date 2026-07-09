@@ -709,7 +709,7 @@ pub(crate) fn assemble_prompt_context_from(
                                     role: tau_proto::ContextRole::User,
                                     content: vec![tau_proto::ContentPart::Text {
                                         text: format!(
-                                            "[tau-internal]: Agent {sender_label} finished its turn\n\n<response>\n{}\n</response>",
+                                            "[tau-internal]: Watched agent {sender_label} emitted a response\n\n<response>\n{}\n</response>",
                                             xml_escape(message)
                                         ),
                                     }],
@@ -732,7 +732,7 @@ pub(crate) fn assemble_prompt_context_from(
                                     role: tau_proto::ContextRole::User,
                                     content: vec![tau_proto::ContentPart::Text {
                                         text: format!(
-                                            "[tau-internal]: Agent {sender_label} received a user prompt\n\n<prompt>\n{}\n</prompt>",
+                                            "[tau-internal]: Watched agent {sender_label} received a user prompt\n\n<prompt>\n{}\n</prompt>",
                                             xml_escape(message)
                                         ),
                                     }],

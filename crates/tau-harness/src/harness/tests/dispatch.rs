@@ -12923,7 +12923,7 @@ fn agent_watch_response_queues_distinct_internal_prompt_markup() {
         tau_proto::PromptMessageClass::Internal
     );
     assert!(queued.text.contains(&format!(
-        "[tau-internal]: Agent {recipient_id} finished its turn"
+        "[tau-internal]: Watched agent {recipient_id} emitted a response"
     )));
     assert!(queued.text.contains(
         "<response>\ndone &lt;response&gt;&amp;&lt;/response&gt; payload &gt;\n</response>"
@@ -12994,7 +12994,7 @@ fn user_prompt_to_watched_agent_notifies_watchers_with_prompt_markup() {
         tau_proto::PromptMessageClass::Internal
     );
     assert!(queued.text.contains(&format!(
-        "[tau-internal]: Agent {watched_id} received a user prompt"
+        "[tau-internal]: Watched agent {watched_id} received a user prompt"
     )));
     assert!(
         queued
@@ -13003,6 +13003,53 @@ fn user_prompt_to_watched_agent_notifies_watchers_with_prompt_markup() {
     );
     assert!(!queued.text.contains("finished its turn"));
     assert!(!queued.text.contains("<response>"));
+
+    h.shutdown().expect("shutdown");
+}
+
+/// Internal prompts delivered to a watched agent, including background tool
+/// completion notices and steering prompts, must not be reflected as
+/// `agent_watch` prompt notifications. Only user-visible prompts are watchable
+/// context for the watcher.
+#[test]
+fn internal_prompt_to_watched_agent_does_not_notify_watchers() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    h.selected_model = Some("test/model".into());
+
+    let watched_cid = ensure_test_user_agent(&mut h);
+    let watcher_cid =
+        h.create_durable_user_agent(h.current_session_id.clone(), &h.selected_role.clone());
+    let watched_id = h.agents[&watched_cid]
+        .agent_id
+        .clone()
+        .expect("watched agent id");
+    let watcher_id = h.agents[&watcher_cid]
+        .agent_id
+        .clone()
+        .expect("watcher agent id");
+    h.set_agent_watch(
+        &watcher_id,
+        &watched_id,
+        true,
+        tau_proto::AgentWatchUpdateCause::AgentWatchEnable,
+    );
+
+    h.handle_ui_prompt_submitted(UiPromptSubmitted {
+        session_id: h.current_session_id.clone(),
+        text: "[tau-internal] Tool call `call-1` is complete.".to_owned(),
+        agent_id: tau_proto::AgentId::parse(&watched_id).expect("watched id"),
+        message_class: tau_proto::PromptMessageClass::Internal,
+        originator: tau_proto::PromptOriginator::User,
+        ctx_id: None,
+    })
+    .expect("internal prompt submitted");
+
+    assert!(
+        session_agent_message_received_events(&h).is_empty(),
+        "internal prompts to watched agents must not be forwarded to watchers"
+    );
 
     h.shutdown().expect("shutdown");
 }
