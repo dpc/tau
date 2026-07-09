@@ -121,6 +121,9 @@ fn publishes_chatgpt_model_metadata() {
     assert_eq!(
         ids,
         vec![
+            "work-chatgpt/gpt-5.6-sol",
+            "work-chatgpt/gpt-5.6-terra",
+            "work-chatgpt/gpt-5.6-luna",
             "work-chatgpt/gpt-5.5",
             "work-chatgpt/gpt-5.4",
             "work-chatgpt/gpt-5.4-mini",

@@ -232,7 +232,7 @@ fn prompt() -> tau_proto::AgentPromptCreated {
         },
         tools: Vec::new(),
         tools_ref: None,
-        model: model_id(CHATGPT_PROVIDER_NAME, "gpt-5.5"),
+        model: model_id(CHATGPT_PROVIDER_NAME, "gpt-5.6-sol"),
         model_params: Default::default(),
         tool_choice: tau_proto::ToolChoice::Auto,
         originator: tau_proto::PromptOriginator::User,
@@ -248,7 +248,7 @@ fn chatgpt_profile_publishes_models_even_without_auth_tokens() {
     // prompt execution, not whether the registered account's models are visible.
     let models = models_for_auth(&OpenAiAuth::default());
 
-    assert!(model_ids(&models).starts_with(&["chatgpt/gpt-5.5".to_owned()]));
+    assert!(model_ids(&models).starts_with(&["chatgpt/gpt-5.6-sol".to_owned()]));
 }
 
 #[test]
@@ -260,6 +260,9 @@ fn chatgpt_oauth_publishes_chatgpt_models() {
     assert_eq!(
         model_ids(&models),
         vec![
+            "chatgpt/gpt-5.6-sol",
+            "chatgpt/gpt-5.6-terra",
+            "chatgpt/gpt-5.6-luna",
             "chatgpt/gpt-5.5",
             "chatgpt/gpt-5.4",
             "chatgpt/gpt-5.4-mini",
@@ -324,6 +327,9 @@ fn xhigh_metadata_is_model_specific() {
     assert_eq!(
         ids_with_xhigh,
         vec![
+            "chatgpt/gpt-5.6-sol",
+            "chatgpt/gpt-5.6-terra",
+            "chatgpt/gpt-5.6-luna",
             "chatgpt/gpt-5.5",
             "chatgpt/gpt-5.4",
             "chatgpt/gpt-5.3-codex"
@@ -338,8 +344,8 @@ fn verbosity_metadata_is_published_for_chatgpt_models() {
     let models = models_for_auth(&chatgpt_auth());
     let gpt = models
         .iter()
-        .find(|model| model.id.to_string() == "chatgpt/gpt-5.5")
-        .expect("gpt-5.5 model");
+        .find(|model| model.id.to_string() == "chatgpt/gpt-5.6-sol")
+        .expect("gpt-5.6-sol model");
 
     assert_eq!(
         gpt.verbosities,
@@ -676,7 +682,7 @@ fn provider_startup_declares_exact_subscriptions_and_models_before_ready() {
             matches!(
                 input_event(frame),
                 Some(Event::ProviderModelsUpdated(updated))
-                    if model_ids(&updated.models).starts_with(&["chatgpt/gpt-5.5".to_owned()])
+                    if model_ids(&updated.models).starts_with(&["chatgpt/gpt-5.6-sol".to_owned()])
             )
         })
         .unwrap_or_else(|| panic!("startup frames should announce provider models: {frames:?}"));
@@ -721,7 +727,7 @@ fn direct_prompt_request_with_missing_backend_is_closed_with_error() {
                     && finished.stop_reason == ProviderStopReason::Error
                     && finished.output_items.is_empty()
                     && finished.error.as_deref()
-                        == Some("cannot resolve provider backend for: chatgpt/gpt-5.5")
+                        == Some("cannot resolve provider backend for: chatgpt/gpt-5.6-sol")
         )
     });
     let submitted = submitted.expect("prompt submitted event");

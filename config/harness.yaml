@@ -55,7 +55,7 @@
 #         senior-engineer:
 #           order: 20
 #           description: Balanced coding engineer.
-#           model: chatgpt/gpt-5.5
+#           model: chatgpt/gpt-5.6-sol
 #           compaction: { threshold: 200000 }
 #           tools: [read, grep]
 #           disable_tools: [shell]

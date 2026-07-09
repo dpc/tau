@@ -42,7 +42,7 @@ extension -> models
 Example:
 
 ```rust
-ModelId::new("chatgpt", "gpt-5.5")
+ModelId::new("chatgpt", "gpt-5.6-sol")
 ModelId::new("chatgpt", "gpt-5.3-codex")
 ```
 

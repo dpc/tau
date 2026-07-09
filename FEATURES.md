@@ -219,7 +219,7 @@ agents:
         senior-engineer:
           order: 20
           description: Balanced coding engineer
-          model: chatgpt/gpt-5.5
+          model: chatgpt/gpt-5.6-sol
           effort: medium
           tools: [read, grep]
           enable_tool_groups: [calendar, email]

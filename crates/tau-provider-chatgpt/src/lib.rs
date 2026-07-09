@@ -15,7 +15,15 @@ pub const LOG_TARGET: &str = "provider-chatgpt";
 pub const DEFAULT_BASE_URL: &str = "https://chatgpt.com/backend-api";
 
 const CONTEXT_WINDOW: u64 = 258400;
-const CHATGPT_MODELS: &[&str] = &["gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex"];
+const CHATGPT_MODELS: &[&str] = &[
+    "gpt-5.6-sol",
+    "gpt-5.6-terra",
+    "gpt-5.6-luna",
+    "gpt-5.5",
+    "gpt-5.4",
+    "gpt-5.4-mini",
+    "gpt-5.3-codex",
+];
 
 pub mod common;
 pub mod responses;
@@ -308,6 +316,9 @@ fn model_info(provider: &ProviderName, model: &str) -> ProviderModelInfo {
 
 fn default_affinity_for_model(model: &str) -> i32 {
     match model {
+        "gpt-5.6-sol" => 700,
+        "gpt-5.6-terra" => 600,
+        "gpt-5.6-luna" => 500,
         "gpt-5.5" => 400,
         "gpt-5.4" => 300,
         "gpt-5.3-codex" => 200,
@@ -336,6 +347,7 @@ fn supports_xhigh(model: &str) -> bool {
     }
     [
         "gpt-5.5",
+        "gpt-5.6",
         "gpt-5.4",
         "gpt-5.3-codex",
         "gpt-5.2",
