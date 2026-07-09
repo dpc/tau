@@ -26,8 +26,6 @@ pub const EXTENSION_NAME: &str = "tau-ext-utils";
 /// Model-visible timer tool name.
 pub const TIMER_TOOL_NAME: &str = "timer";
 
-const TIMER_USAGE_POLICY: &str = "Do not use timers to wait for or poll tools or commands; their completion is delivered automatically. Use timers only for genuine real-world external elapsed-time waits or wakeups.";
-
 const MAX_TIMERS_PER_AGENT: usize = 32;
 const MAX_TIMERS_TOTAL: usize = 128;
 const MAX_MESSAGE_BYTES: usize = 4096;
@@ -88,7 +86,7 @@ impl TauExtension for UtilsExtension {
             Some(tau_proto::PromptFragment::new(
                 "timer",
                 tau_proto::PromptPriority::new(0),
-                timer_prompt_fragment(),
+                "Do not use timers to wait for or poll tools or commands; completion is delivered automatically. Use timers only for genuine external elapsed-time waits or wakeups.",
             )),
             handle_timer_tool,
         );
@@ -762,7 +760,7 @@ fn timer_tool_spec() -> ToolSpec {
     ToolSpec {
         name: tau_proto::ToolName::new(TIMER_TOOL_NAME),
         model_visible_name: None,
-        description: Some(timer_tool_description()),
+        description: Some("Schedule, cancel, and list session-scoped timer reminders. Timers wake the agent with internal prompts.".to_owned()),
         tool_type: ToolType::Function,
         parameters: Some(serde_json::json!({
             "type": "object",
@@ -782,18 +780,6 @@ fn timer_tool_spec() -> ToolSpec {
         background_support: None,
         examples: vec![],
     }
-}
-
-fn timer_prompt_fragment() -> String {
-    format!(
-        "Use the `timer` tool to schedule, cancel, or list session-scoped reminders. {TIMER_USAGE_POLICY} Timer wakeups arrive as internal prompts and should be cancelled when no longer needed."
-    )
-}
-
-fn timer_tool_description() -> String {
-    format!(
-        "Schedule, cancel, and list session-scoped timer reminders. {TIMER_USAGE_POLICY} Timers wake the agent with internal prompts."
-    )
 }
 
 fn parse_action(value: &CborValue, call_id: &str) -> Result<TimerAction, String> {
@@ -915,14 +901,6 @@ fn missed_intervals(next_fire_at: UnixMicros, now: UnixMicros, interval_seconds:
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Both model-visible timer guidance surfaces must retain the shared policy
-    /// that prevents agents from polling automatically completed work.
-    #[test]
-    fn timer_guidance_surfaces_share_usage_policy() {
-        assert!(timer_prompt_fragment().contains(TIMER_USAGE_POLICY));
-        assert!(timer_tool_description().contains(TIMER_USAGE_POLICY));
-    }
 
     fn cbor_map(entries: Vec<(&str, CborValue)>) -> CborValue {
         CborValue::Map(
