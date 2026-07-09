@@ -7,7 +7,7 @@ A role can set:
 - `description`: short free-form summary shown in `/role ...` completions
 - `order`: optional numeric order within the containing role group
 - `model`: qualified model id, in `provider/model` form
-- `effort`: `off`, `minimal`, `low`, `medium`, `high`, or `xhigh`
+- `effort`: `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`
 - `verbosity`: `low`, `medium`, or `high`
 - `thinking_summary`: `off`, `auto`, `concise`, or `detailed`
 - `service_tier`: `fast` or `flex`

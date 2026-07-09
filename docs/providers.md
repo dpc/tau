@@ -175,6 +175,10 @@ It publishes `chatgpt/*` only from auth named `chatgpt`; there is no `openai-cod
 WebSocket-capable ChatGPT/Codex Responses models remain on WebSocket: retryable
 WS failures follow the bounded retry/backoff policy, and terminal WS errors are
 surfaced instead of silently falling back to HTTP/SSE.
+The ChatGPT GPT-5.6 Sol, Terra, and Luna models publish a 353,400-token
+effective context window. Their provider-side automatic compaction threshold is
+334,800 tokens, derived from the 372,000-token raw window, and their available
+reasoning choices include `max`.
 ChatGPT/Codex live streams use a five-minute idle watchdog on both HTTP/SSE and
 WebSocket transports. The watchdog resets on each SSE `data:` event or
 WebSocket provider frame, not on SSE comments/heartbeats or partial-line byte

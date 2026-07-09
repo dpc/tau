@@ -1,6 +1,9 @@
 use tau_cli_term_raw::Term;
 
-use super::{AgentActivity, MessageRenderMode, RoleCompletionDetails, role_value_completion};
+use super::{
+    AgentActivity, MessageRenderMode, RoleCompletionDetails, role_setting_value_completions,
+    role_value_completion,
+};
 use crate::chat::{DraftSlot, queue_prompt_draft_snapshot};
 
 fn agent_id(value: &str) -> tau_proto::AgentId {
@@ -371,4 +374,15 @@ fn role_values_have_descriptions() {
 
     assert_eq!(item.value, "detailed");
     assert_eq!(item.description, "detailed thinking summaries");
+}
+
+/// Ensures `/role ... effort` completion exposes GPT-5.6 maximum effort with a
+/// description distinct from `xhigh`.
+#[test]
+fn role_effort_completions_include_max() {
+    let items = role_setting_value_completions("effort", "max");
+
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].value, "max");
+    assert_eq!(items[0].description, "maximum reasoning effort for GPT-5.6");
 }

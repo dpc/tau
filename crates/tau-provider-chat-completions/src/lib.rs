@@ -1630,6 +1630,7 @@ fn effort_wire(effort: tau_proto::Effort) -> &'static str {
         tau_proto::Effort::Medium => "medium",
         tau_proto::Effort::High => "high",
         tau_proto::Effort::XHigh => "high",
+        tau_proto::Effort::Max => "high",
     }
 }
 

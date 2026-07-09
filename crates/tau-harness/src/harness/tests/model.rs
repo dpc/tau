@@ -1582,16 +1582,19 @@ fn efforts_for_model_uses_provider_snapshot_levels() {
     );
 }
 
-/// `clamp_effort` must degrade `XHigh` to `High` (Pi-style) when the model
-/// doesn't expose it, rather than silently dropping all the way to `Off`.
+/// `clamp_effort` must degrade `Max` through `XHigh` then `High`, and degrade
+/// `XHigh` to `High`, rather than silently dropping supported requests to
+/// `Off`.
 /// `Off` remains the fallback for other unsupported levels so users with a
 /// no-reasoning provider don't get pinned to a level the model can't handle.
 #[test]
-fn clamp_effort_degrades_xhigh_to_high_when_unsupported() {
+fn clamp_effort_degrades_max_and_xhigh_when_unsupported() {
     use tau_proto::Effort as L;
     let without_xhigh = [L::Off, L::Minimal, L::Low, L::Medium, L::High];
 
     assert_eq!(clamp_effort(L::XHigh, &without_xhigh), L::High);
+    assert_eq!(clamp_effort(L::Max, &[L::Off, L::High, L::XHigh]), L::XHigh);
+    assert_eq!(clamp_effort(L::Max, &without_xhigh), L::High);
     // Sanity: when xhigh IS allowed, no demotion.
     let with_xhigh = [L::Off, L::Minimal, L::Low, L::Medium, L::High, L::XHigh];
     assert_eq!(clamp_effort(L::XHigh, &with_xhigh), L::XHigh);

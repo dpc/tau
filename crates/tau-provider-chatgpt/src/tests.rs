@@ -75,7 +75,7 @@ fn test_config(base_url: String) -> responses::ResponsesConfig {
         base_url,
         api_key: "token".to_owned(),
         model_id: "gpt-5.3-codex".to_owned(),
-        context_window: CONTEXT_WINDOW,
+        raw_context_window: DEFAULT_RAW_CONTEXT_WINDOW,
         account_id: Some("account".to_owned()),
         supports_reasoning_effort: false,
         supports_reasoning_summary: false,
@@ -108,6 +108,8 @@ fn test_prompt_payload<'a>(
     }
 }
 
+/// Ensures the provider publishes the complete hardcoded ChatGPT model list
+/// with model-specific capabilities and effective context limits.
 #[test]
 fn publishes_chatgpt_model_metadata() {
     // ChatGPT account profiles do not store models; this crate is the
@@ -142,6 +144,34 @@ fn publishes_chatgpt_model_metadata() {
             .iter()
             .any(|tag| tag.as_str() == "tools:custom-text")
     }));
+    assert_eq!(
+        models
+            .iter()
+            .find(|model| model.id.model.as_str() == "gpt-5.6-sol")
+            .expect("gpt-5.6-sol model")
+            .context_window,
+        GPT_5_6_RAW_CONTEXT_WINDOW * EFFECTIVE_CONTEXT_WINDOW_PERCENT / 100
+    );
+    assert_eq!(
+        models
+            .iter()
+            .find(|model| model.id.model.as_str() == "gpt-5.5")
+            .expect("gpt-5.5 model")
+            .context_window,
+        DEFAULT_RAW_CONTEXT_WINDOW * EFFECTIVE_CONTEXT_WINDOW_PERCENT / 100
+    );
+    assert!(
+        models
+            .iter()
+            .filter(|model| model.id.model.as_str().starts_with("gpt-5.6-"))
+            .all(|model| model.efforts.contains(&Effort::Max))
+    );
+    assert!(
+        models
+            .iter()
+            .filter(|model| !model.id.model.as_str().starts_with("gpt-5.6-"))
+            .all(|model| !model.efforts.contains(&Effort::Max))
+    );
 }
 
 #[test]
@@ -162,6 +192,18 @@ fn config_for_model_enables_codex_responses_capabilities() {
     assert!(config.supports_compaction);
     assert!(config.supports_phase);
     assert!(config.supports_encrypted_reasoning);
+}
+
+/// Ensures request configuration uses each model's raw context window so
+/// server-side compaction can apply its threshold independently of the safe
+/// effective window published to the harness.
+#[test]
+fn config_uses_model_specific_context_window() {
+    let gpt_5_6 = config_for_model(&ModelName::new("gpt-5.6-terra"), "token".to_owned(), None);
+    let gpt_5_5 = config_for_model(&ModelName::new("gpt-5.5"), "token".to_owned(), None);
+
+    assert_eq!(gpt_5_6.raw_context_window, GPT_5_6_RAW_CONTEXT_WINDOW);
+    assert_eq!(gpt_5_5.raw_context_window, DEFAULT_RAW_CONTEXT_WINDOW);
 }
 
 #[test]

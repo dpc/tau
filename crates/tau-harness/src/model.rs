@@ -441,6 +441,14 @@ pub(crate) fn clamp_effort(
     if requested == L::XHigh && allowed.contains(&L::High) {
         return L::High;
     }
+    if requested == L::Max {
+        if allowed.contains(&L::XHigh) {
+            return L::XHigh;
+        }
+        if allowed.contains(&L::High) {
+            return L::High;
+        }
+    }
     if allowed.contains(&L::Off) {
         return L::Off;
     }

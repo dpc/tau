@@ -180,8 +180,9 @@ Per-prompt knobs are bundled into a single `ModelParams` struct
 that the harness stamps onto every `AgentPromptCreated` and that
 backends thread through to the provider request:
 
-- **`effort`** — reasoning effort. Six levels (`off`, `minimal`, `low`,
-  `medium`, `high`, `xhigh`); maps to provider-specific reasoning controls.
+- **`effort`** — reasoning effort. Seven levels (`off`, `minimal`, `low`,
+  `medium`, `high`, `xhigh`, `max`); maps to provider-specific reasoning
+  controls.
   Provider extensions publish the exact effort levels each model accepts, and
   the harness clamps role/default selections to that published list.
 - **`verbosity`** — output verbosity (`low`, `medium`, `high`).

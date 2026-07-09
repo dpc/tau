@@ -400,10 +400,14 @@ pub enum Effort {
     /// `reasoningEfforts`) agree with the rest.
     #[serde(rename = "xhigh")]
     XHigh = 5,
+    /// Maximum model reasoning effort.
+    Max = 6,
 }
 
 impl Effort {
-    /// Cycles to the next level (wraps `XHigh → Off`).
+    const LEVEL_COUNT: usize = 7;
+
+    /// Cycles to the next level (wraps `Max → Off`).
     #[must_use]
     pub const fn next(self) -> Self {
         match self {
@@ -412,7 +416,8 @@ impl Effort {
             Self::Low => Self::Medium,
             Self::Medium => Self::High,
             Self::High => Self::XHigh,
-            Self::XHigh => Self::Off,
+            Self::XHigh => Self::Max,
+            Self::Max => Self::Off,
         }
     }
 
@@ -429,7 +434,7 @@ impl Effort {
         // Bounded by `Effort` variant count — at most one full
         // wrap-around before we either land on an allowed level or
         // confirm none exist.
-        for _ in 0..6 {
+        for _ in 0..Self::LEVEL_COUNT {
             if allowed.contains(&candidate) {
                 return candidate;
             }
@@ -448,6 +453,7 @@ impl Effort {
             Self::Medium => "medium",
             Self::High => "high",
             Self::XHigh => "xhigh",
+            Self::Max => "max",
         }
     }
 
@@ -470,6 +476,7 @@ impl Effort {
             3 => Some(Self::Medium),
             4 => Some(Self::High),
             5 => Some(Self::XHigh),
+            6 => Some(Self::Max),
             _ => None,
         }
     }
@@ -493,6 +500,7 @@ impl std::str::FromStr for Effort {
             "medium" => Ok(Self::Medium),
             "high" => Ok(Self::High),
             "xhigh" => Ok(Self::XHigh),
+            "max" => Ok(Self::Max),
             other => Err(ParseEffortError {
                 input: other.to_owned(),
             }),
@@ -501,7 +509,7 @@ impl std::str::FromStr for Effort {
 }
 
 /// Error returned when an effort string is not one of the well-known
-/// levels (`off`, `minimal`, `low`, `medium`, `high`, `xhigh`).
+/// levels (`off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ParseEffortError {
     input: String,
@@ -518,7 +526,7 @@ impl fmt::Display for ParseEffortError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "unknown effort level `{}`; expected off/minimal/low/medium/high/xhigh",
+            "unknown effort level `{}`; expected off/minimal/low/medium/high/xhigh/max",
             self.input
         )
     }

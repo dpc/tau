@@ -2524,12 +2524,16 @@ fn effort_next_in_skips_disallowed_levels_and_wraps() {
     use Effort::*;
     let canonical = [Off, Minimal, Low, Medium, High];
     let with_xhigh = [Off, Minimal, Low, Medium, High, XHigh];
+    let with_max = [Off, Minimal, Low, Medium, High, XHigh, Max];
 
-    // Without xhigh, High wraps back to Off — XHigh is skipped.
+    // Without xhigh or max, High wraps back to Off.
     assert_eq!(High.next_in(&canonical), Off);
-    // With xhigh, High advances to XHigh and XHigh wraps to Off.
+    // With xhigh but not max, XHigh wraps to Off.
     assert_eq!(High.next_in(&with_xhigh), XHigh);
     assert_eq!(XHigh.next_in(&with_xhigh), Off);
+    // GPT-5.6 can advance through Max before wrapping.
+    assert_eq!(XHigh.next_in(&with_max), Max);
+    assert_eq!(Max.next_in(&with_max), Off);
 
     // Sparse allowed set (provider with no reasoning effort) — Off
     // is the only legal level, so any input lands there.
@@ -2541,6 +2545,24 @@ fn effort_next_in_skips_disallowed_levels_and_wraps() {
     // that haven't received `HarnessEffortsAvailable` yet still make
     // progress.
     assert_eq!(Medium.next_in(&[]), Medium.next());
+}
+
+/// Ensures the GPT-5.6 maximum effort has stable config, display, and atomic
+/// representations across protocol boundaries.
+#[test]
+fn max_effort_round_trips_all_protocol_representations() {
+    assert_eq!(
+        serde_json::to_string(&Effort::Max).expect("serialize"),
+        r#""max""#
+    );
+    assert_eq!(
+        serde_json::from_str::<Effort>(r#""max""#).expect("deserialize"),
+        Effort::Max
+    );
+    assert_eq!("max".parse::<Effort>().expect("parse"), Effort::Max);
+    assert_eq!(Effort::Max.to_string(), "max");
+    assert_eq!(Effort::Max.as_u8(), 6);
+    assert_eq!(Effort::from_u8(6), Some(Effort::Max));
 }
 
 /// Provider-facing tool responses must use the uniform header/body shape so

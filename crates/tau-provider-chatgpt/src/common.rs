@@ -856,6 +856,7 @@ pub fn effort_wire(level: tau_proto::Effort) -> Option<&'static str> {
         Medium => Some("medium"),
         High => Some("high"),
         XHigh => Some("xhigh"),
+        Max => Some("max"),
     }
 }
 

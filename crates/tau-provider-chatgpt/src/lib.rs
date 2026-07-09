@@ -14,7 +14,9 @@ pub const LOG_TARGET: &str = "provider-chatgpt";
 /// ChatGPT/Codex backend base URL, without the final Responses path.
 pub const DEFAULT_BASE_URL: &str = "https://chatgpt.com/backend-api";
 
-const CONTEXT_WINDOW: u64 = 258400;
+const DEFAULT_RAW_CONTEXT_WINDOW: u64 = 272_000;
+const GPT_5_6_RAW_CONTEXT_WINDOW: u64 = 372_000;
+const EFFECTIVE_CONTEXT_WINDOW_PERCENT: u64 = 95;
 const CHATGPT_MODELS: &[&str] = &[
     "gpt-5.6-sol",
     "gpt-5.6-terra",
@@ -279,7 +281,7 @@ pub fn config_for_model(
         base_url: DEFAULT_BASE_URL.to_owned(),
         api_key: access_token,
         model_id: model_id.to_owned(),
-        context_window: CONTEXT_WINDOW,
+        raw_context_window: raw_context_window_for_model(model_id),
         account_id,
         supports_reasoning_effort: true,
         supports_reasoning_summary: true,
@@ -301,7 +303,7 @@ fn model_info(provider: &ProviderName, model: &str) -> ProviderModelInfo {
             ModelTag::new("tools:custom-text"),
         ],
         default_affinity: default_affinity_for_model(model),
-        context_window: CONTEXT_WINDOW,
+        context_window: effective_context_window_for_model(model),
         efforts: efforts_for_model(model),
         verbosities: verbosities_for_model(model),
         thinking_summaries: vec![
@@ -327,6 +329,26 @@ fn default_affinity_for_model(model: &str) -> i32 {
     }
 }
 
+fn raw_context_window_for_model(model: &str) -> u64 {
+    if is_gpt_5_6(model) {
+        GPT_5_6_RAW_CONTEXT_WINDOW
+    } else {
+        DEFAULT_RAW_CONTEXT_WINDOW
+    }
+}
+
+fn effective_context_window_for_model(model: &str) -> u64 {
+    raw_context_window_for_model(model) * EFFECTIVE_CONTEXT_WINDOW_PERCENT / 100
+}
+
+fn uses_responses_lite(model: &str) -> bool {
+    is_gpt_5_6(model)
+}
+
+fn is_gpt_5_6(model: &str) -> bool {
+    model.starts_with("gpt-5.6-")
+}
+
 fn efforts_for_model(model: &str) -> Vec<Effort> {
     let mut efforts = vec![
         Effort::Off,
@@ -337,6 +359,9 @@ fn efforts_for_model(model: &str) -> Vec<Effort> {
     ];
     if supports_xhigh(model) {
         efforts.push(Effort::XHigh);
+    }
+    if is_gpt_5_6(model) {
+        efforts.push(Effort::Max);
     }
     efforts
 }

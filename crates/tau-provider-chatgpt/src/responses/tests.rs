@@ -96,7 +96,7 @@ fn build_request_includes_prompt_cache_key_when_supported() {
         base_url: "https://chatgpt.com/backend-api".into(),
         api_key: "test".into(),
         model_id: "gpt-5-codex".into(),
-        context_window: 258400,
+        raw_context_window: 258400,
         account_id: None,
         supports_reasoning_effort: false,
         supports_verbosity: false,
@@ -134,7 +134,7 @@ fn build_request_includes_service_tier_when_configured() {
         base_url: "https://chatgpt.com/backend-api".into(),
         api_key: "test".into(),
         model_id: "gpt-5-codex".into(),
-        context_window: 258400,
+        raw_context_window: 258400,
         account_id: None,
         supports_reasoning_effort: false,
         supports_verbosity: false,
@@ -195,6 +195,28 @@ fn build_request_maps_off_effort_to_openai_none() {
     assert_eq!(body["reasoning"]["effort"], "none");
 }
 
+/// Ensures GPT-5.6 maximum effort reaches the Responses API using the
+/// provider's exact `max` wire value.
+#[test]
+fn build_request_maps_max_effort_to_openai_max() {
+    let config = ResponsesConfig {
+        model_id: "gpt-5.6-sol".into(),
+        supports_reasoning_effort: true,
+        ..chain_test_config()
+    };
+    let request = PromptPayload {
+        params: tau_proto::ModelParams {
+            effort: tau_proto::Effort::Max,
+            ..Default::default()
+        },
+        ..basic_prompt_payload()
+    };
+
+    let body = serde_json::to_value(build_request(&config, &request, None)).expect("serialize");
+
+    assert_eq!(body["reasoning"]["effort"], "max");
+}
+
 #[test]
 fn build_request_omits_prompt_cache_key_without_seed() {
     let config = ResponsesConfig {
@@ -202,7 +224,7 @@ fn build_request_omits_prompt_cache_key_without_seed() {
         base_url: "https://chatgpt.com/backend-api".into(),
         api_key: "test".into(),
         model_id: "gpt-5-codex".into(),
-        context_window: 258400,
+        raw_context_window: 258400,
         account_id: None,
         supports_reasoning_effort: false,
         supports_verbosity: false,
@@ -776,6 +798,82 @@ fn build_request_emits_tool_choice_none_while_keeping_tools_declared() {
     );
 }
 
+/// Ensures GPT-5.6 uses the Responses Lite body contract: tools and
+/// instructions become developer input items, parallel calls are disabled, and
+/// persistent reasoning context remains enabled.
+#[test]
+fn build_request_uses_responses_lite_contract_for_gpt_5_6() {
+    let config = ResponsesConfig {
+        model_id: "gpt-5.6-sol".into(),
+        raw_context_window: 372_000,
+        supports_reasoning_effort: false,
+        supports_reasoning_summary: false,
+        supports_compaction: true,
+        ..chain_test_config()
+    };
+    let tool = tau_proto::ToolDefinition {
+        name: tau_proto::ToolName::new("shell"),
+        model_visible_name: None,
+        description: Some("run a shell command".to_owned()),
+        tool_type: tau_proto::ToolType::Function,
+        parameters: None,
+        format: None,
+    };
+    let request = PromptPayload {
+        system_prompt: "system instructions",
+        context: context(&[user_text("hello")]),
+        tools: std::slice::from_ref(&tool),
+        params: tau_proto::ModelParams::default(),
+        tool_choice: tau_proto::ToolChoice::Auto,
+        compaction: Some(tau_proto::PromptCompactionContext {
+            compact_threshold: None,
+        }),
+        originator: &tau_proto::PromptOriginator::User,
+        session_id: &tau_proto::SessionId::new("test-session"),
+        agent_id: &tau_proto::AgentId::parse("test-agent").expect("agent id"),
+        share_user_cache_key: false,
+        debug_provider_requests: false,
+    };
+
+    let body = serde_json::to_value(build_request(&config, &request, None)).expect("serialize");
+    let object = body.as_object().expect("request object");
+    let input = body["input"].as_array().expect("input array");
+
+    assert!(!object.contains_key("instructions"));
+    assert!(!object.contains_key("tools"));
+    assert_eq!(body["parallel_tool_calls"], false);
+    assert_eq!(body["reasoning"]["context"], "all_turns");
+    assert!(body["reasoning"].get("effort").is_none());
+    assert!(body["reasoning"].get("summary").is_none());
+    assert_eq!(body["context_management"][0]["compact_threshold"], 334_800);
+    assert_eq!(input[0]["type"], "additional_tools");
+    assert_eq!(input[0]["role"], "developer");
+    assert_eq!(input[0]["tools"][0]["name"], "shell");
+    assert_eq!(input[1]["type"], "message");
+    assert_eq!(input[1]["role"], "developer");
+    assert_eq!(input[1]["content"][0]["text"], "system instructions");
+    assert_eq!(input[2]["role"], "user");
+}
+
+/// Ensures the WebSocket request carries the Responses Lite routing marker as
+/// per-request metadata, allowing pooled sockets to serve different modes.
+#[test]
+fn ws_envelope_carries_responses_lite_request_metadata() {
+    let config = ResponsesConfig {
+        model_id: "gpt-5.6-luna".into(),
+        ..chain_test_config()
+    };
+    let request = basic_prompt_payload();
+
+    let body =
+        serde_json::to_value(build_ws_envelope(&config, &request, None, None)).expect("serialize");
+
+    assert_eq!(
+        body["client_metadata"]["ws_request_header_x_openai_internal_codex_responses_lite"],
+        "true"
+    );
+}
+
 #[test]
 fn build_request_sends_compaction_context_management_and_trigger_item() {
     let config = ResponsesConfig {
@@ -854,7 +952,7 @@ fn chain_test_config() -> ResponsesConfig {
         base_url: "https://chatgpt.com/backend-api".into(),
         api_key: "test".into(),
         model_id: "gpt-5-codex".into(),
-        context_window: 258400,
+        raw_context_window: 258400,
         account_id: None,
         supports_reasoning_effort: false,
         supports_verbosity: false,
@@ -946,6 +1044,77 @@ fn spawn_eof_sse_server(body: &'static str) -> String {
         std::io::Write::flush(&mut stream).expect("flush EOF body");
     });
     format!("http://{addr}")
+}
+
+fn capture_http_request_headers(model_id: &str) -> String {
+    let listener =
+        std::net::TcpListener::bind(("127.0.0.1", 0)).expect("bind request capture server");
+    let addr = listener.local_addr().expect("request capture address");
+    let (headers_tx, headers_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept captured request");
+        let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(1)));
+        let mut request = Vec::with_capacity(4096);
+        while request.len() < 16 * 1024 && !request.windows(4).any(|window| window == b"\r\n\r\n") {
+            let mut chunk = [0_u8; 1024];
+            let read = std::io::Read::read(&mut stream, &mut chunk)
+                .expect("read captured request headers");
+            if read == 0 {
+                break;
+            }
+            request.extend_from_slice(&chunk[..read]);
+        }
+        assert!(
+            request.windows(4).any(|window| window == b"\r\n\r\n"),
+            "captured request headers must be complete"
+        );
+        headers_tx
+            .send(String::from_utf8_lossy(&request).into_owned())
+            .expect("send captured headers");
+
+        let body = concat!(
+            "data: {\"type\":\"response.completed\",\"response\":",
+            "{\"id\":\"resp_test\",\"output\":[],\"usage\":",
+            "{\"input_tokens\":1,\"output_tokens\":1}}}\n\n"
+        );
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        std::io::Write::write_all(&mut stream, response.as_bytes())
+            .expect("write request capture response");
+    });
+
+    let config = ResponsesConfig {
+        base_url: format!("http://{addr}"),
+        model_id: model_id.to_owned(),
+        ..chain_test_config()
+    };
+    let request = basic_prompt_payload();
+    responses_stream(
+        "ap-header-capture",
+        &config,
+        &request,
+        &mut crate::NeverAbort,
+        &mut |_| {},
+    )
+    .expect("captured Responses request should complete");
+
+    headers_rx
+        .recv_timeout(std::time::Duration::from_secs(1))
+        .expect("captured request headers")
+}
+
+/// Ensures the HTTP Responses transport opts GPT-5.6 into Responses Lite
+/// without leaking the internal routing header onto legacy model requests.
+#[test]
+fn http_transport_scopes_responses_lite_header_to_gpt_5_6() {
+    let lite_headers = capture_http_request_headers("gpt-5.6-sol").to_ascii_lowercase();
+    let legacy_headers = capture_http_request_headers("gpt-5.5").to_ascii_lowercase();
+    let expected = "x-openai-internal-codex-responses-lite: true";
+
+    assert!(lite_headers.contains(expected));
+    assert!(!legacy_headers.contains("x-openai-internal-codex-responses-lite:"));
 }
 
 fn spawn_trickling_sse_server(chunks: Vec<&'static [u8]>, delay: std::time::Duration) -> String {

@@ -146,7 +146,7 @@ fn chatgpt_websocket_terminal_error_reports_websocket_backend() {
         base_url: base_url.clone(),
         api_key: "token".to_owned(),
         model_id: "gpt-5.3-codex".to_owned(),
-        context_window: 258_400,
+        raw_context_window: 258_400,
         account_id: Some("account".to_owned()),
         supports_reasoning_effort: false,
         supports_reasoning_summary: false,

@@ -15,6 +15,23 @@ silently replaying the same prompt over HTTP/SSE.
 HTTP/SSE remains the Responses transport for configs that do not advertise
 WebSocket support and for the HTTP/SSE-specific request/debug/replay paths.
 
+## GPT-5.6 Responses Lite
+
+The ChatGPT/Codex GPT-5.6 family uses the upstream Responses Lite request
+contract. HTTP requests carry the internal Responses Lite routing header, while
+WebSocket `response.create` messages carry the equivalent per-request
+`client_metadata` marker so pooled sockets remain reusable.
+
+Responses Lite moves tool declarations and base instructions from the top-level
+request fields into leading developer input items, disables parallel tool
+calls, and keeps reasoning context across all turns. Hosted Responses tools are
+not part of this contract; Tau's tools remain client-executed definitions.
+
+ChatGPT model metadata distinguishes the raw provider context window from the
+effective window published to the harness. Server-side compaction thresholds
+derive from the raw window, while UI usage and local context limits use the
+provider's 95-percent effective ceiling.
+
 ## Prompt-cache identity
 
 First-party ChatGPT/Codex prompt-cache keys are stable per provider base URL and durable target `AgentId`. Prompt provenance (`PromptOriginator`) is intentionally not part of the key: a target agent must stay on the same provider cache bucket whether a turn came from direct user input, extension-originated work, a manager relay, or an agent-to-agent message.

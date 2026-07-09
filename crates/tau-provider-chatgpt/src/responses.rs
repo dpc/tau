@@ -32,6 +32,7 @@ pub mod ws;
 pub mod ws_runtime;
 
 const PROVIDER_STREAM_CASSETTE_VERSION: u32 = 1;
+const RESPONSES_LITE_HEADER: &str = "X-OpenAI-Internal-Codex-Responses-Lite";
 /// Default idle watchdog for live provider streaming turns.
 ///
 /// This is intentionally an idle timeout, not an absolute turn timeout: long
@@ -102,8 +103,9 @@ pub struct ResponsesConfig {
     pub api_key: String,
     /// Upstream model id without the Tau provider namespace.
     pub model_id: String,
-    /// Total context window for the selected upstream model, in tokens.
-    pub context_window: u64,
+    /// Raw context window for the selected upstream model, before applying the
+    /// provider's effective-window safety margin.
+    pub raw_context_window: u64,
     /// `chatgpt-account-id` header extracted from JWT.
     pub account_id: Option<String>,
     /// Whether the provider's API accepts a `reasoning.effort` field.
@@ -367,6 +369,9 @@ fn responses_stream_live_with_idle_timeout(
 
     if let Some(ref account_id) = config.account_id {
         req = req.header("chatgpt-account-id", account_id);
+    }
+    if crate::uses_responses_lite(&config.model_id) {
+        req = req.header(RESPONSES_LITE_HEADER, "true");
     }
 
     let turn_started_at = Instant::now();
@@ -1363,6 +1368,11 @@ struct ResponsesRequest {
     tools: Vec<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_choice: Option<String>,
+    /// Whether the provider may issue multiple tool calls concurrently.
+    ///
+    /// Responses Lite requires this to be explicitly false.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    parallel_tool_calls: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     reasoning: Option<ReasoningRequest>,
     /// GPT-5 `text.verbosity` knob. Only set when the provider
@@ -1397,6 +1407,17 @@ struct ResponsesRequest {
     /// the public Responses API it requires `store: true`.
     #[serde(skip_serializing_if = "Option::is_none")]
     previous_response_id: Option<String>,
+    /// Per-request transport metadata used by Responses-over-WebSocket.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    client_metadata: Option<ResponsesClientMetadata>,
+}
+
+#[derive(Serialize)]
+/// Per-request metadata interpreted by the Responses WebSocket transport.
+struct ResponsesClientMetadata {
+    /// String-valued routing marker that opts this request into Responses Lite.
+    #[serde(rename = "ws_request_header_x_openai_internal_codex_responses_lite")]
+    responses_lite: &'static str,
 }
 
 #[derive(Serialize)]
@@ -1515,7 +1536,7 @@ fn build_request(
             _ => (context_items.as_slice(), None),
         };
 
-    let input = build_input_items(config, input_items);
+    let mut input = build_input_items(config, input_items);
 
     let tools: Vec<serde_json::Value> = request.tools.iter().map(convert_tool_definition).collect();
 
@@ -1531,6 +1552,28 @@ fn build_request(
         (tau_proto::ToolChoice::Auto, false) => Some("auto".to_owned()),
         (tau_proto::ToolChoice::Auto, true) => None,
     };
+    let responses_lite = crate::uses_responses_lite(&config.model_id);
+    let (instructions, tools, parallel_tool_calls) = if responses_lite {
+        let mut prefix = vec![ResponsesInputItem::json(serde_json::json!({
+            "type": "additional_tools",
+            "role": "developer",
+            "tools": tools,
+        }))];
+        if let Some(instructions) = instructions {
+            prefix.push(ResponsesInputItem::json(serde_json::json!({
+                "type": "message",
+                "role": "developer",
+                "content": [{
+                    "type": "input_text",
+                    "text": instructions,
+                }],
+            })));
+        }
+        input.splice(0..0, prefix);
+        (None, Vec::new(), Some(false))
+    } else {
+        (instructions, tools, None)
+    };
 
     let effort = if config.supports_reasoning_effort {
         effort_wire(request.params.effort)
@@ -1542,7 +1585,7 @@ fn build_request(
     } else {
         None
     };
-    let reasoning = if effort.is_some() || summary.is_some() {
+    let reasoning = if effort.is_some() || summary.is_some() || responses_lite {
         Some(ReasoningRequest {
             effort,
             context: Some(ReasoningContext::AllTurns),
@@ -1566,15 +1609,14 @@ fn build_request(
     } else {
         Vec::new()
     };
-    let context_management =
-        request.compaction.map(|compaction| {
-            vec![ContextManagementRequest {
-                ty: "compaction",
-                compact_threshold: Some(compaction.compact_threshold.unwrap_or_else(|| {
-                    provider_default_compaction_threshold(config.context_window)
-                })),
-            }]
-        });
+    let context_management = request.compaction.map(|compaction| {
+        vec![ContextManagementRequest {
+            ty: "compaction",
+            compact_threshold: Some(compaction.compact_threshold.unwrap_or_else(|| {
+                provider_default_compaction_threshold(config.raw_context_window)
+            })),
+        }]
+    });
 
     ResponsesRequest {
         model: config.model_id.clone(),
@@ -1588,6 +1630,7 @@ fn build_request(
         store: Some(config.surface.store_value()),
         tools,
         tool_choice,
+        parallel_tool_calls,
         reasoning,
         text,
         include,
@@ -1598,11 +1641,12 @@ fn build_request(
             .map(tau_proto::ServiceTier::as_wire),
         context_management,
         previous_response_id,
+        client_metadata: None,
     }
 }
 
-fn provider_default_compaction_threshold(context_window: u64) -> u64 {
-    (context_window * 9 / 10).max(1000)
+fn provider_default_compaction_threshold(raw_context_window: u64) -> u64 {
+    (raw_context_window * 9 / 10).max(1000)
 }
 
 fn build_input_items(
@@ -1646,8 +1690,8 @@ pub struct WsResponseCreate {
 
 /// Build the JSON envelope to send over a WebSocket text frame for
 /// one turn. Reuses the regular Responses request builder for the body — the
-/// only deltas vs. the HTTP body are (a) the top-level `type` tag and (b)
-/// dropping `stream` (transport-implicit on WS, per the WS guide).
+/// deltas vs. the HTTP body are the top-level `type` tag, dropping `stream`
+/// (transport-implicit on WS), and per-request Responses Lite metadata.
 pub(super) fn build_ws_envelope(
     config: &ResponsesConfig,
     request: &PromptPayload<'_>,
@@ -1656,6 +1700,11 @@ pub(super) fn build_ws_envelope(
 ) -> WsResponseCreate {
     let mut body = build_request(config, request, cached_response_id);
     body.stream = None;
+    if crate::uses_responses_lite(&config.model_id) {
+        body.client_metadata = Some(ResponsesClientMetadata {
+            responses_lite: "true",
+        });
+    }
     WsResponseCreate {
         ty: "response.create",
         generate,

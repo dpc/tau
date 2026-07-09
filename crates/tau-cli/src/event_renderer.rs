@@ -731,7 +731,8 @@ fn role_value_completion(setting: &str, value: &str) -> tau_cli_term::Completion
         ("effort", "low") => "light reasoning effort",
         ("effort", "medium") => "balanced reasoning effort",
         ("effort", "high") => "strong reasoning effort",
-        ("effort", "xhigh") => "maximum reasoning effort",
+        ("effort", "xhigh") => "extra-high reasoning effort",
+        ("effort", "max") => "maximum reasoning effort for GPT-5.6",
         ("verbosity", "low") => "terse responses",
         ("verbosity", "medium") => "normal responses",
         ("verbosity", "high") => "detailed responses",
@@ -819,7 +820,9 @@ fn role_setting_value_completions(
         | "disable-tool-groups"
         | "enable-tools"
         | "disable-tools" => &["reset"],
-        "effort" => &["reset", "off", "minimal", "low", "medium", "high", "xhigh"],
+        "effort" => &[
+            "reset", "off", "minimal", "low", "medium", "high", "xhigh", "max",
+        ],
         "verbosity" => &["reset", "low", "medium", "high"],
         "thinking-summary" => &["reset", "off", "auto", "concise", "detailed"],
         "service-tier" => &["reset", "fast", "flex"],
