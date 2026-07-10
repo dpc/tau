@@ -689,6 +689,7 @@ fn built_in_tau_self_knowledge_skills_load_from_embedded_markdown() {
             "tau-self-knowledge-ext-provider-builtin",
             "tau-self-knowledge-ext-rhai",
             "tau-self-knowledge-ext-shell",
+            "tau-self-knowledge-ext-slack",
             "tau-self-knowledge-ext-std-notifications",
             "tau-self-knowledge-ext-test-dummy",
             "tau-self-knowledge-ext-websearch",
@@ -729,6 +730,7 @@ fn built_in_tau_self_knowledge_skills_load_from_embedded_markdown() {
     );
     assert!(skill.content.contains("tau-self-knowledge-ext-rhai"));
     assert!(skill.content.contains("tau-self-knowledge-ext-shell"));
+    assert!(skill.content.contains("tau-self-knowledge-ext-slack"));
     assert!(
         skill
             .content
@@ -745,6 +747,19 @@ fn built_in_tau_self_knowledge_skills_load_from_embedded_markdown() {
     assert!(skill.content.contains("tau-self-knowledge-community"));
     assert!(skill.content.contains("tau-self-knowledge-debugging"));
     assert!(skill.content.contains("tau-self-knowledge-e2e-testing"));
+
+    let slack = skills
+        .iter()
+        .find(|skill| skill.name == "tau-self-knowledge-ext-slack")
+        .expect("built-in Slack self-knowledge skill");
+    assert!(!slack.add_to_prompt);
+    assert!(slack.description.contains("Slack Socket Mode"));
+    assert!(slack.content.contains("Every setup needs"));
+    assert!(slack.content.contains("users:read"));
+    assert!(slack.content.contains("chat:write"));
+    assert!(slack.content.contains("message.channels"));
+    assert!(slack.content.contains("reactions:read"));
+    assert!(slack.content.contains("slack_register"));
 
     let architecture = skills
         .iter()

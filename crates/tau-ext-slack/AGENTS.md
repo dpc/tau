@@ -8,3 +8,6 @@ routing, config, secrets, Socket Mode lifecycle, or tool behavior, read
 Keep configuration keys snake_case and reject unknown fields. Never log Slack
 app tokens, bot tokens, Socket Mode websocket URLs, or private message bodies
 unless the surrounding code already treats the text as user-visible prompt text.
+
+After user-visible capability, configuration, Slack scope/event, or operational
+changes, update the built-in `tau-self-knowledge-ext-slack` skill.

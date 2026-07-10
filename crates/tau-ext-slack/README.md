@@ -43,11 +43,33 @@ events. Unmentioned events accepted by `all_messages` are always prompt content,
 even when they begin with `start`, `to`, or `/select`. Linked DMs recognize
 commands without a mention.
 
-Required Slack bot events are `app_mention`, `message.channels`, `message.im`,
-`reaction_added`, and `reaction_removed`; required bot scopes are `chat:write`,
-`app_mentions:read`, `channels:history`, `im:history`, `reactions:read`, and `users:read`. Slack App ID, Client ID,
-Client Secret, and Signing Secret are not used by this Socket Mode
-MVP.
+Every setup needs app-token scope `connections:write`, bot-token scope
+`users:read` for ingress identity verification, and `chat:write` for Slack
+replies and command responses. Add the rows needed for enabled behavior:
+
+| Behavior | Additional bot event subscriptions | Additional bot token scopes |
+| --- | --- | --- |
+| Configured-channel mentions | `app_mention` | `app_mentions:read` |
+| Channel edits and `all_messages` | `message.channels` | `channels:history` |
+| Linked direct messages | `message.im` | `im:history` |
+| Reactions to Tau-authored posts | `reaction_added`, `reaction_removed` | `reactions:read` |
+
+Private-channel message/edit support analogously requires `message.groups` and
+`groups:history`; MPIM support requires `message.mpim` and `mpim:history`.
+Private channels and MPIMs must also be explicitly listed in `channel_ids`;
+the empty-`channel_ids` linked-DM mode accepts only a one-to-one IM.
+After adding scopes or event subscriptions, reinstall the app to the workspace,
+store the refreshed `xoxb-...` token if Slack changed it, and restart Tau.
+Invite the app to every configured Slack conversation as Slack requires.
+Missing `message.channels`/`channels:history` does not prevent `app_mention`
+delivery, but edits cannot arrive because Slack sends them as `message_changed`
+under the `message.channels` subscription. The app-level token needs
+`connections:write`. Slack App ID, Client ID, Client Secret, and Signing Secret
+are not used by this Socket Mode MVP.
+Incoming Webhooks, Slash Commands, OAuth redirect URLs, `channels:read`,
+`groups:read`, `users:read.email`, `reactions:write`, `chat:write.public`, and
+file scopes are also not required. Tau uses configured conversation ids, never
+writes reactions, and expects the app to be invited to allowed conversations.
 
 Operator logs distinguish Socket Mode connect/hello, envelope ACK status, and
 degraded/reconnecting workers without logging Slack payloads, identifiers, or
