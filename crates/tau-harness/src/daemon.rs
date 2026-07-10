@@ -24,7 +24,9 @@ use crate::harness::{
     assistant_text_from_output_items, tool_calls_from_output_items,
 };
 use crate::runtime_dir;
-use crate::settings::{Config, resolve_config, resolve_config_in};
+use crate::settings::{
+    Config, resolve_config, resolve_config_in, resolve_config_with_extension_cli_overrides,
+};
 
 /// Cap on how long [`send_daemon_message_with_trace`] (a synchronous test
 /// helper) waits for a daemon response. This is not a daemon-wide knob —
@@ -1127,7 +1129,21 @@ pub fn run_component() -> Result<(), Box<dyn std::error::Error>> {
 pub fn run_component_with_internal_tools(
     internal_tool_handlers: crate::InternalToolHandlers,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    run_component_with_internal_tools_and_initial_client(internal_tool_handlers, None)
+    run_component_with_internal_tools_and_initial_client(
+        internal_tool_handlers,
+        ComponentLaunch::Direct(Vec::new()),
+    )
+}
+
+/// Runs a direct harness component with typed ordered extension CLI overrides.
+pub fn run_component_with_internal_tools_and_extension_cli_overrides(
+    internal_tool_handlers: crate::InternalToolHandlers,
+    extension_cli_overrides: Vec<tau_config::settings::ExtensionCliOverride>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    run_component_with_internal_tools_and_initial_client(
+        internal_tool_handlers,
+        ComponentLaunch::Direct(extension_cli_overrides),
+    )
 }
 
 /// Entrypoint for `tau component harness` with injected internal tool handlers
@@ -1137,14 +1153,40 @@ pub fn run_component_with_internal_tools_and_initial_ui_stdio(
 ) -> Result<(), Box<dyn std::error::Error>> {
     run_component_with_internal_tools_and_initial_client(
         internal_tool_handlers,
-        Some(InitialClient::Stdio),
+        ComponentLaunch::SpawnedInitialUiStdio,
     )
+}
+
+enum ComponentLaunch {
+    Direct(Vec<tau_config::settings::ExtensionCliOverride>),
+    SpawnedInitialUiStdio,
+}
+
+impl ComponentLaunch {
+    fn uses_spawned_transport(&self) -> bool {
+        matches!(self, Self::SpawnedInitialUiStdio)
+    }
+
+    fn extension_overrides(
+        &self,
+        transport: Option<std::ffi::OsString>,
+    ) -> Result<Vec<tau_config::settings::ExtensionCliOverride>, Box<dyn std::error::Error>> {
+        match self {
+            Self::Direct(overrides) => Ok(overrides.clone()),
+            Self::SpawnedInitialUiStdio => {
+                crate::settings::parse_extension_cli_overrides_transport(transport)
+            }
+        }
+    }
 }
 
 fn run_component_with_internal_tools_and_initial_client(
     internal_tool_handlers: crate::InternalToolHandlers,
-    initial_client: Option<InitialClient>,
+    launch: ComponentLaunch,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let initial_client = launch
+        .uses_spawned_transport()
+        .then_some(InitialClient::Stdio);
     let mut initial_client_error_output = initial_client
         .as_ref()
         .map(|InitialClient::Stdio| InitialClientStartupErrorOutput::Stdout);
@@ -1168,7 +1210,10 @@ fn run_component_with_internal_tools_and_initial_client(
         crate::version::export_to_env();
         let project_root = std::env::current_dir()?;
         tracing::debug!(target: "tau_harness::startup", project_root = %project_root.display(), elapsed_ms = startup_started_at.elapsed().as_millis(), "resolved project root");
-        let config = resolve_config(None)?;
+        let extension_overrides = launch.extension_overrides(std::env::var_os(
+            crate::settings::EXTENSION_CLI_OVERRIDES_ENV,
+        ))?;
+        let config = resolve_config_with_extension_cli_overrides(&extension_overrides)?;
         tracing::debug!(target: "tau_harness::startup", elapsed_ms = startup_started_at.elapsed().as_millis(), "resolved config");
         // The CLI passes the minted/resumed session id via the harness's
         // SESSION_ID env var when spawning a daemon. Fallback to

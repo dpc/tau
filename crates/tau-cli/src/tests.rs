@@ -548,6 +548,30 @@ fn extension_cli_overrides_preserve_argument_order() {
     );
 }
 
+/// Ensures the supported environment list is documented in long help together
+/// with its grammar and precedence relative to CLI overrides.
+#[test]
+fn long_help_documents_extension_environment() {
+    use clap::CommandFactory;
+    let mut output = Vec::new();
+    super::cli::Cli::command()
+        .write_long_help(&mut output)
+        .expect("render long help");
+    let help = String::from_utf8(output).expect("help is UTF-8");
+    assert!(help.contains("TAU_ENABLE_EXTENSIONS=NAME[,NAME...]"));
+    assert!(help.contains("CLI enable/disable flags win"));
+}
+
+/// Ensures attaching rejects a nonempty public startup override while an empty
+/// environment remains a no-op.
+#[test]
+fn attach_rejects_public_extension_environment() {
+    super::reject_attach_extension_environment(&[]).expect("empty environment is allowed");
+    let error = super::reject_attach_extension_environment(&["std-pim".to_owned()])
+        .expect_err("nonempty environment must be rejected");
+    assert!(error.to_string().contains("TAU_ENABLE_EXTENSIONS"));
+}
+
 /// Proves the outer `tau dev tmux` dispatcher refuses startup overrides that
 /// would require normal harness configuration validation before the helper has
 /// switched into its scratch HOME/XDG environment.

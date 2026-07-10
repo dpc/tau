@@ -341,6 +341,19 @@ agent. They must be folded only into the next real user prompt for the agent
 whose background call was repaired, so one loaded agent in a resumed session
 cannot consume or see another agent's restored background-tool notice.
 
+## Extension availability startup data flow
+
+`tau-config` owns strict parsing of the supported names-only
+`TAU_ENABLE_EXTENSIONS` input. The outer CLI parses and validates it early for
+fresh-harness commands, preserving argv order for subsequent CLI operations.
+Normal launches pass only ordered CLI operations through the private,
+unstable `TAU_EXTENSION_CLI_OVERRIDES` child transport; the daemon command
+clears inherited transport when there are no operations. The spawned harness
+decodes that transport fail-closed. Direct in-process `component harness`
+dispatch passes the same typed operations explicitly and does not consult the
+private transport for them. Harness settings own the canonical final resolver:
+config, public environment named enables, then ordered CLI overrides.
+
 ## Lifecycle events
 
 Harness lifecycle events such as session start/shutdown and extension status are

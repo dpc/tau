@@ -398,6 +398,16 @@ fn reject_attach_startup_overrides(
     Ok(())
 }
 
+fn reject_attach_extension_environment(environment_names: &[String]) -> Result<(), CliError> {
+    if environment_names.is_empty() {
+        return Ok(());
+    }
+    Err(CliError::Participant(format!(
+        "--attach cannot apply {} to an already-running daemon",
+        tau_config::settings::TAU_ENABLE_EXTENSIONS_ENV
+    )))
+}
+
 fn reject_ephemeral_incompatible(
     ephemeral: bool,
     attach: bool,
@@ -535,9 +545,36 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
 
         reject_legacy_config_path(run.config.as_deref())?;
         let command = command.unwrap_or(cli::Command::Run(run));
+        let reads_extension_environment = match &command {
+            cli::Command::Run(_) => true,
+            cli::Command::Dev {
+                command:
+                    cli::DevCommand::PrintPrompt { .. }
+                    | cli::DevCommand::PrintSystemPrompt
+                    | cli::DevCommand::PrintTools
+                    | cli::DevCommand::Tmux { .. },
+            } => true,
+            cli::Command::Component { name, .. } => name == "harness",
+            _ => false,
+        };
+        let environment_extension_names = if reads_extension_environment {
+            tau_config::settings::parse_enable_extensions_env(std::env::var_os(
+                tau_config::settings::TAU_ENABLE_EXTENSIONS_ENV,
+            ))
+            .map_err(|error| CliError::Participant(error.to_string()))?
+        } else {
+            Vec::new()
+        };
+        let mut effective_extension_overrides = environment_extension_names
+            .iter()
+            .cloned()
+            .map(tau_config::settings::ExtensionCliOverride::Enable)
+            .collect::<Vec<_>>();
+        effective_extension_overrides.extend(extension_cli_overrides.iter().cloned());
         match &command {
             cli::Command::Run(run) if run.attach => {
                 reject_harness_config_overrides(&harness_config_overrides, "--attach")?;
+                reject_attach_extension_environment(&environment_extension_names)?;
             }
             cli::Command::Run(_)
             | cli::Command::Dev {
@@ -572,7 +609,7 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
                 reject_dev_tmux_startup_overrides(
                     harness.role.as_deref(),
                     &role_cli_overrides,
-                    &extension_cli_overrides,
+                    &effective_extension_overrides,
                     &harness_config_overrides,
                 )?;
             }
@@ -602,6 +639,15 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
             &harness_config_overrides,
         )
         .map_err(|error| CliError::Participant(error.to_string()))?;
+        if reads_extension_environment {
+            tau_harness::validate_extension_environment_and_cli_overrides(
+                &environment_extension_names,
+                &extension_cli_overrides,
+                &role_cli_overrides,
+                &harness_config_overrides,
+            )
+            .map_err(|error| CliError::Participant(error.to_string()))?;
+        }
         match command {
             cli::Command::Run(cli::RunArgs {
                 resume,
@@ -775,6 +821,16 @@ pub fn main_with_args_and_components(components: &[Component]) -> std::process::
                     );
                     return run_harness_component(true)
                         .map_err(|e| CliError::Participant(e.to_string()));
+                }
+                if name == "harness" {
+                    ui_logging::init_stderr_from_env(
+                        "tau_harness=info,tau_cli=info,provider-builtin=info",
+                    );
+                    return tau_harness::run_component_with_internal_tools_and_extension_cli_overrides(
+                        tau_harness_tools::builtin_handlers(),
+                        extension_cli_overrides.clone(),
+                    )
+                    .map_err(|error| CliError::Participant(error.to_string()));
                 }
                 let built_in_components = [Component {
                     name: "harness",

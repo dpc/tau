@@ -113,6 +113,8 @@ pub enum ResolveExtensionsError {
     EmptyCommand(String),
     /// A CLI override named an extension absent from built-ins and user config.
     UnknownCliOverride(String),
+    /// The public environment override named an unavailable extension.
+    UnknownEnvironmentOverride(String),
 }
 
 impl fmt::Display for ResolveExtensionsError {
@@ -125,6 +127,11 @@ impl fmt::Display for ResolveExtensionsError {
             Self::UnknownCliOverride(name) => {
                 write!(f, "unknown extension in CLI override: `{name}`")
             }
+            Self::UnknownEnvironmentOverride(name) => write!(
+                f,
+                "unknown extension in {}: `{name}`",
+                tau_config::settings::TAU_ENABLE_EXTENSIONS_ENV
+            ),
         }
     }
 }
@@ -203,8 +210,23 @@ pub fn resolve_extensions_with_cli_overrides_and_diagnostics(
     builtins: Vec<BuiltinExtension>,
     cli_overrides: &[ExtensionCliOverride],
 ) -> Result<ResolvedExtensions, ResolveExtensionsError> {
+    resolve_extensions_with_environment_and_cli_overrides(settings, builtins, &[], cli_overrides)
+}
+
+fn resolve_extensions_with_environment_and_cli_overrides(
+    settings: &HarnessSettings,
+    builtins: Vec<BuiltinExtension>,
+    environment_names: &[String],
+    cli_overrides: &[ExtensionCliOverride],
+) -> Result<ResolvedExtensions, ResolveExtensionsError> {
     let (order, entries) = seed_builtin_extension_entries(builtins);
-    let (order, entries) = apply_user_extension_entries(settings, order, entries);
+    let (order, mut entries) = apply_user_extension_entries(settings, order, entries);
+    for name in environment_names {
+        let entry = entries
+            .get_mut(name)
+            .ok_or_else(|| ResolveExtensionsError::UnknownEnvironmentOverride(name.clone()))?;
+        entry.enable = true;
+    }
     let entries = apply_extension_cli_overrides(entries, cli_overrides)?;
     resolved_extension_entries(order, entries)
 }
@@ -500,11 +522,18 @@ fn harness_config_overrides_from_env() -> Result<Vec<HarnessConfigCliOverride>, 
         .map(|overrides| overrides.unwrap_or_default())
 }
 
-fn extension_cli_overrides_from_env() -> Vec<ExtensionCliOverride> {
-    std::env::var(EXTENSION_CLI_OVERRIDES_ENV)
-        .ok()
-        .and_then(|value| serde_json::from_str(&value).ok())
-        .unwrap_or_default()
+pub(crate) fn parse_extension_cli_overrides_transport(
+    value: Option<std::ffi::OsString>,
+) -> Result<Vec<ExtensionCliOverride>, Box<dyn std::error::Error>> {
+    let Some(value) = value else {
+        return Ok(Vec::new());
+    };
+    let value = value.into_string().map_err(|_| {
+        format!("{EXTENSION_CLI_OVERRIDES_ENV} internal transport must be valid UTF-8 JSON")
+    })?;
+    serde_json::from_str(&value).map_err(|error| {
+        format!("malformed {EXTENSION_CLI_OVERRIDES_ENV} internal transport: {error}").into()
+    })
 }
 
 /// The set of extensions the harness ships with by default.
@@ -623,6 +652,26 @@ pub fn validate_cli_overrides(
     Ok(())
 }
 
+/// Validates public environment extension enables followed by ordered CLI
+/// extension overrides against the effective configured extension table.
+pub fn validate_extension_environment_and_cli_overrides(
+    environment_names: &[String],
+    cli_overrides: &[ExtensionCliOverride],
+    role_overrides: &[RoleCliOverride],
+    harness_config_overrides: &[HarnessConfigCliOverride],
+) -> Result<(), Box<dyn std::error::Error>> {
+    let dirs = tau_config::settings::TauDirs::default();
+    let settings =
+        load_settings_for_cli_overrides_in(&dirs, role_overrides, harness_config_overrides)?;
+    resolve_extensions_with_environment_and_cli_overrides(
+        &settings,
+        builtin_extensions(),
+        environment_names,
+        cli_overrides,
+    )?;
+    Ok(())
+}
+
 fn load_settings_for_cli_overrides_in(
     dirs: &tau_config::settings::TauDirs,
     role_overrides: &[RoleCliOverride],
@@ -665,8 +714,22 @@ pub(crate) fn resolve_config(
     resolve_config_in(&dirs)
 }
 
+pub(crate) fn resolve_config_with_extension_cli_overrides(
+    extension_overrides: &[ExtensionCliOverride],
+) -> Result<Config, Box<dyn std::error::Error>> {
+    let dirs = tau_config::settings::TauDirs::default();
+    resolve_config_in_with_extension_cli_overrides(&dirs, extension_overrides)
+}
+
 pub(crate) fn resolve_config_in(
     dirs: &tau_config::settings::TauDirs,
+) -> Result<Config, Box<dyn std::error::Error>> {
+    resolve_config_in_with_extension_cli_overrides(dirs, &[])
+}
+
+fn resolve_config_in_with_extension_cli_overrides(
+    dirs: &tau_config::settings::TauDirs,
+    extension_overrides: &[ExtensionCliOverride],
 ) -> Result<Config, Box<dyn std::error::Error>> {
     // Extensions live in `harness.yaml` under `extensions: { ... }`.
     // We start from the built-in provider + tools defaults and apply the
@@ -678,11 +741,14 @@ pub(crate) fn resolve_config_in(
     let harness_config_overrides = harness_config_overrides_from_env()?;
     let settings =
         load_settings_for_cli_overrides_in(dirs, &role_overrides, &harness_config_overrides)?;
-    let extension_overrides = extension_cli_overrides_from_env();
-    let resolved_extensions = resolve_extensions_with_cli_overrides_and_diagnostics(
+    let environment_names = tau_config::settings::parse_enable_extensions_env(std::env::var_os(
+        tau_config::settings::TAU_ENABLE_EXTENSIONS_ENV,
+    ))?;
+    let resolved_extensions = resolve_extensions_with_environment_and_cli_overrides(
         &settings,
         builtin_extensions(),
-        &extension_overrides,
+        &environment_names,
+        extension_overrides,
     )?;
     Ok(Config {
         core: CoreConfig {

@@ -74,6 +74,11 @@ pub struct ExtensionOverrideArgs {
     pub disable_extensions_all: u8,
 
     /// Enable a configured extension after all config files are loaded.
+    ///
+    /// `TAU_ENABLE_EXTENSIONS=NAME[,NAME...]` additively enables exact
+    /// configured names before ordered CLI overrides. Space/tab around
+    /// names is allowed; malformed or unknown names fail startup. CLI
+    /// enable/disable flags win.
     #[arg(long = "enable-extension", global = true)]
     pub enable_extension: Vec<String>,
 

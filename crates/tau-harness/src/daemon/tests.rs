@@ -11,6 +11,34 @@ use tempfile::TempDir;
 use super::*;
 use crate::harness::Harness;
 
+/// Protects the component startup source boundary: direct entrypoints ignore
+/// inherited private transport while only spawned initial-UI children consume
+/// it.
+#[test]
+fn component_launch_selects_private_transport_only_for_spawned_child() {
+    assert!(
+        !ComponentLaunch::Direct(Vec::new()).uses_spawned_transport(),
+        "bare/direct harness entrypoints use typed overrides"
+    );
+    assert!(ComponentLaunch::SpawnedInitialUiStdio.uses_spawned_transport());
+    let malformed = Some("not-json".into());
+    let direct = vec![tau_config::settings::ExtensionCliOverride::Disable(
+        "std-pim".to_owned(),
+    )];
+    assert_eq!(
+        ComponentLaunch::Direct(direct.clone())
+            .extension_overrides(malformed.clone())
+            .expect("direct launch ignores inherited private transport"),
+        direct
+    );
+    assert!(
+        ComponentLaunch::SpawnedInitialUiStdio
+            .extension_overrides(malformed)
+            .is_err(),
+        "spawned child must fail closed on malformed private transport"
+    );
+}
+
 /// Ensures the synchronous daemon-message helper subscribes only to the
 /// concrete trace events it consumes, instead of receiving every future event
 /// in broad protocol categories.

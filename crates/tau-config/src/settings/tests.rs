@@ -4,6 +4,69 @@ use tempfile::TempDir;
 
 use super::*;
 
+/// Ensures the supported extension environment grammar trims OWS, preserves
+/// first-seen order, and makes duplicate enables idempotent.
+#[test]
+fn enable_extensions_env_parses_and_deduplicates_names() {
+    assert_eq!(
+        parse_enable_extensions_env(Some("  std-pim,\tstd-rhai,std-pim ".into()))
+            .expect("valid extension names"),
+        ["std-pim", "std-rhai"]
+    );
+    assert!(
+        parse_enable_extensions_env(None)
+            .expect("absent environment")
+            .is_empty()
+    );
+    assert!(
+        parse_enable_extensions_env(Some(" \t".into()))
+            .expect("optional whitespace")
+            .is_empty()
+    );
+}
+
+/// Ensures empty elements and non-name characters fail loudly instead of
+/// silently changing which extensions run.
+#[test]
+fn enable_extensions_env_rejects_malformed_items() {
+    for value in [
+        ",std-pim",
+        "std-pim,",
+        "std-pim,,std-rhai",
+        "std pim",
+        "std-pim\n",
+    ] {
+        let error = parse_enable_extensions_env(Some(value.into()))
+            .expect_err("malformed extension environment");
+        assert!(
+            error.to_string().contains(TAU_ENABLE_EXTENSIONS_ENV),
+            "{error}"
+        );
+    }
+}
+
+/// Ensures the grammar is exact and case-preserving rather than shell-like or
+/// Unicode-whitespace tolerant.
+#[test]
+fn enable_extensions_env_rejects_quotes_unicode_and_newlines() {
+    for value in ["\"std-pim\"", "std-pim\n", "std\u{a0}pim", "std.pim"] {
+        assert!(parse_enable_extensions_env(Some(value.into())).is_err());
+    }
+    assert_eq!(
+        parse_enable_extensions_env(Some("Std-Pim".into())).expect("case-preserving name"),
+        ["Std-Pim"]
+    );
+}
+
+/// Ensures non-UTF-8 environment bytes fail instead of being lossily
+/// interpreted.
+#[cfg(unix)]
+#[test]
+fn enable_extensions_env_rejects_non_utf8() {
+    use std::os::unix::ffi::OsStringExt;
+    assert!(parse_enable_extensions_env(Some(OsString::from_vec(vec![0xff]))).is_err());
+}
+
 fn dirs_with_config(dir: &std::path::Path) -> TauDirs {
     TauDirs {
         config_dir: Some(dir.to_path_buf()),

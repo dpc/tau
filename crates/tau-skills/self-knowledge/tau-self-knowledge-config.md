@@ -9,6 +9,24 @@ advertise: false
 
 # Tau configuration
 
+## Enabling extensions from services and containers
+
+Set `TAU_ENABLE_EXTENSIONS=NAME[,NAME...]`, for example
+`TAU_ENABLE_EXTENSIONS=std-pim,std-xmpp`. Names are exact and case-sensitive.
+ASCII spaces or tabs around names are allowed; empty elements, other whitespace,
+punctuation, non-UTF-8 values, and unknown names fail startup. Duplicate names
+are harmless. These enables apply after config and before ordered CLI extension
+overrides, so a later `--disable-extension NAME` wins.
+Unset, empty, and space/tab-only values are no-ops. Leading, trailing, and
+consecutive commas are errors. `--attach` and the outer `tau dev tmux` helper
+reject nonempty values because they cannot apply them to their target harness.
+
+Use the same literal with systemd
+`Environment=TAU_ENABLE_EXTENSIONS=std-pim,std-xmpp`, Nix service environment
+attributes, or a container `--env`. Environment keys do not append when repeated,
+so construct one comma-separated value. The variable carries names only, not
+arguments, shell syntax, secrets, or extension configuration.
+
 Tau follows the XDG directory layout on Linux:
 
 - Config: `~/.config/tau/`

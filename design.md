@@ -2,6 +2,17 @@
 
 This file records major design decisions currently embodied by this directory's code, and how authoritative each decision is. It is not an architecture overview, ADR log, todo list, roadmap, implementation guide, or changelog.
 
+## Extension availability startup layering
+
+Status: unconfirmed
+
+Fresh harness startup resolves extension availability in one ordered pipeline:
+configuration, supported names-only `TAU_ENABLE_EXTENSIONS`, then argv-ordered
+CLI enable/disable operations. The public environment is parsed fail-closed
+without logging its raw value. `TAU_EXTENSION_CLI_OVERRIDES` remains unstable
+internal parent-child transport; parents clear inherited values and malformed
+transport is fatal.
+
 ## Successful tool-result displays use `ok`
 
 Status: confirmed, 2026-07-09, user

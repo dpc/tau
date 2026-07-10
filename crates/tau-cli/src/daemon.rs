@@ -384,6 +384,8 @@ fn build_daemon_command(spec: DaemonCommandSpec<'_>) -> Command {
             serde_json::to_string(spec.cli_overrides.extension)
                 .expect("extension overrides serialize"),
         );
+    } else {
+        cmd.env_remove(tau_harness::EXTENSION_CLI_OVERRIDES_ENV);
     }
     if !spec.cli_overrides.harness_config.is_empty() {
         cmd.env(

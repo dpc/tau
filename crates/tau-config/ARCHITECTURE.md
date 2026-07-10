@@ -1,5 +1,9 @@
 # tau-config architecture
 
+Extension availability is layered in this order: built-in defaults, harness
+configuration/drop-ins and ordered `--harness-config` layers,
+`TAU_ENABLE_EXTENSIONS` named enables, then extension CLI overrides in argv order.
+
 `tau-config` is the boundary between user-authored files/CLI overrides and the
 rest of Tau. Config mistakes must fail explicitly with path/key context; do not
 silently ignore unreadable files, invalid names, duplicate aliases, or malformed

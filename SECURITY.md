@@ -1,5 +1,12 @@
 # Security policy
 
+`TAU_ENABLE_EXTENSIONS` is trusted startup configuration: enabling an extension
+may execute its configured program and expose configured local or external
+boundaries. It accepts extension names only, not arguments, configuration, or
+shell syntax. Do not place credentials in it (environment values may be visible
+through process/service inspection); use Tau's secret mechanisms and run only
+extensions you trust.
+
 Tau is still early-stage software, but security issues are important. Please
 report suspected vulnerabilities through GitHub private vulnerability reporting
 for `dpc/tau` (`https://github.com/dpc/tau/security/advisories/new`) when

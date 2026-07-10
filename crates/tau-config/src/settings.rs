@@ -7,6 +7,7 @@
 //! Uses the `config` crate for layered YAML loading.
 
 use std::collections::{BTreeMap, HashMap};
+use std::ffi::OsString;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -20,7 +21,7 @@ use tau_proto::{
 };
 
 // ---------------------------------------------------------------------------
-// Built-in configs
+// Built-in configuration resources
 //
 // Tau ships its baseline `cli.yaml`, `cli-bindings.yaml` and
 // `harness.yaml` as ordinary source files under
@@ -37,6 +38,73 @@ fn parse_built_in_yaml<T: for<'de> Deserialize<'de>>(name: &str, text: &str) -> 
     serde_yaml_ng::from_str(text).unwrap_or_else(|err| {
         panic!("tau ships with malformed {name}: {err}\nthis is a bug; please report it")
     })
+}
+
+// ---------------------------------------------------------------------------
+// Extension environment input
+// ---------------------------------------------------------------------------
+
+/// Supported environment variable for additively enabling configured
+/// extensions.
+pub const TAU_ENABLE_EXTENSIONS_ENV: &str = "TAU_ENABLE_EXTENSIONS";
+
+/// Failure while parsing [`TAU_ENABLE_EXTENSIONS_ENV`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EnableExtensionsEnvError(String);
+
+impl fmt::Display for EnableExtensionsEnvError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for EnableExtensionsEnvError {}
+
+/// Parses `TAU_ENABLE_EXTENSIONS` as a strict comma-separated list of exact
+/// names.
+///
+/// ASCII space and tab around names are ignored. Empty values are a no-op and
+/// duplicate names are retained only at their first occurrence.
+///
+/// # Errors
+///
+/// Returns a source-specific diagnostic for non-UTF-8 input, empty items, or
+/// names outside Tau's exact extension-name grammar.
+pub fn parse_enable_extensions_env(
+    value: Option<OsString>,
+) -> Result<Vec<String>, EnableExtensionsEnvError> {
+    let Some(value) = value else {
+        return Ok(Vec::new());
+    };
+    let value = value.into_string().map_err(|_| {
+        EnableExtensionsEnvError(format!(
+            "{TAU_ENABLE_EXTENSIONS_ENV} must be valid UTF-8 and contain NAME[,NAME...]"
+        ))
+    })?;
+    let value = value.trim_matches([' ', '\t']);
+    if value.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut names = Vec::new();
+    for (index, item) in value.split(',').enumerate() {
+        let name = item.trim_matches([' ', '\t']);
+        if name.is_empty() {
+            return Err(EnableExtensionsEnvError(format!(
+                "{TAU_ENABLE_EXTENSIONS_ENV} item {} is empty; expected NAME[,NAME...]",
+                index + 1
+            )));
+        }
+        validate_extension_name(name).map_err(|_| {
+            EnableExtensionsEnvError(format!(
+                "{TAU_ENABLE_EXTENSIONS_ENV} item {} is invalid; names may contain only ASCII letters, digits, '_' and '-'",
+                index + 1
+            ))
+        })?;
+        if !names.iter().any(|existing| existing == name) {
+            names.push(name.to_owned());
+        }
+    }
+    Ok(names)
 }
 
 // ---------------------------------------------------------------------------

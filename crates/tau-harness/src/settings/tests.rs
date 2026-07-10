@@ -117,6 +117,68 @@ fn resolve_extensions_builtin_can_start_disabled() {
     assert!(resolved.iter().all(|e| e.name != "std-email"));
 }
 
+/// Ensures public environment enables are applied after configuration and
+/// before ordered CLI disables, including the normally disabled test fixture.
+#[test]
+fn environment_extension_enables_precede_cli_overrides() {
+    let settings = HarnessSettings::built_in();
+    let environment = vec!["std-pim".to_owned(), "test-dummy".to_owned()];
+    let cli = vec![ExtensionCliOverride::Disable("std-pim".to_owned())];
+    let resolved = resolve_extensions_with_environment_and_cli_overrides(
+        &settings,
+        builtins(),
+        &environment,
+        &cli,
+    )
+    .expect("environment and CLI overrides resolve");
+    assert!(
+        resolved
+            .extensions
+            .iter()
+            .all(|entry| entry.name != "std-pim")
+    );
+    assert!(
+        resolved
+            .extensions
+            .iter()
+            .any(|entry| entry.name == "test-dummy")
+    );
+}
+
+/// Ensures an environment typo is fatal even when a later CLI operation would
+/// otherwise disable every extension, and that the diagnostic names its source.
+#[test]
+fn unknown_environment_extension_is_source_specific() {
+    let error = resolve_extensions_with_environment_and_cli_overrides(
+        &HarnessSettings::built_in(),
+        builtins(),
+        &["missing-extension".to_owned()],
+        &[ExtensionCliOverride::DisableAll],
+    )
+    .expect_err("unknown environment name must fail");
+    assert_eq!(
+        error,
+        ResolveExtensionsError::UnknownEnvironmentOverride("missing-extension".to_owned())
+    );
+    assert!(error.to_string().contains("TAU_ENABLE_EXTENSIONS"));
+}
+
+/// Ensures malformed or non-UTF-8 private transport fails with source context.
+#[test]
+fn malformed_private_extension_transport_is_fatal() {
+    let error = parse_extension_cli_overrides_transport(Some("not-json".into()))
+        .expect_err("malformed JSON must fail");
+    assert!(error.to_string().contains(EXTENSION_CLI_OVERRIDES_ENV));
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStringExt;
+        let error =
+            parse_extension_cli_overrides_transport(Some(std::ffi::OsString::from_vec(vec![0xff])))
+                .expect_err("non-UTF-8 must fail");
+        assert!(error.to_string().contains(EXTENSION_CLI_OVERRIDES_ENV));
+    }
+}
+
 #[test]
 fn resolve_extensions_enables_disabled_std_pim_builtin() {
     // The standard PIM extension ships disabled. A user opt-in should keep the

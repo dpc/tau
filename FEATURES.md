@@ -311,6 +311,18 @@ with `tau policy-show`.
 
 ## Built-in extensions
 
+Configured extensions can be enabled for service and container launches with
+`TAU_ENABLE_EXTENSIONS=NAME[,NAME...]` (for example,
+`TAU_ENABLE_EXTENSIONS=std-pim,std-xmpp`). Names are exact and case-sensitive;
+ASCII space/tab around items is allowed, while empty, malformed, non-UTF-8, or
+unknown items fail startup. The environment list is additive after configuration,
+and ordered CLI extension overrides run afterward, so CLI disables win. This same
+literal value works in systemd `Environment=`, Nix service `environment`, and
+Docker/Podman `--env`; construct one joined list because repeated environment keys
+do not append. Unset, empty, or space/tab-only values are no-ops; leading,
+trailing, or repeated commas are errors. `--attach` and the outer `tau dev tmux`
+helper reject a nonempty value because they cannot apply it to their target.
+
 Most built-in integrations are regular extensions under `crates/tau-ext-*/`.
 They are configured under `extensions.<name>` in `harness.yaml` and can be
 disabled with `enable: false`, marked optional with `require: false`, started

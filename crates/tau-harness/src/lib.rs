@@ -52,10 +52,12 @@ pub(crate) fn parse_agent_id(value: impl AsRef<str>) -> AgentId {
 pub use crate::daemon::{
     EPHEMERAL_ENV, EmbeddedOptions, InteractionOutcome, ServeOptions, SessionLaunchStatus,
     get_daemon_rendered_system_prompt, get_daemon_rendered_tool_definitions, run_component,
-    run_component_with_internal_tools, run_component_with_internal_tools_and_initial_ui_stdio,
-    run_daemon, run_daemon_with_config, run_embedded_message, run_embedded_message_with_options,
-    run_embedded_message_with_trace, run_harness_daemon, run_harness_daemon_with_internal_tools,
-    send_daemon_message, send_daemon_message_with_trace,
+    run_component_with_internal_tools,
+    run_component_with_internal_tools_and_extension_cli_overrides,
+    run_component_with_internal_tools_and_initial_ui_stdio, run_daemon, run_daemon_with_config,
+    run_embedded_message, run_embedded_message_with_options, run_embedded_message_with_trace,
+    run_harness_daemon, run_harness_daemon_with_internal_tools, send_daemon_message,
+    send_daemon_message_with_trace,
 };
 #[cfg(any(test, feature = "echo-agent"))]
 pub use crate::daemon::{run_daemon_with_echo, run_embedded_message_with_echo};
@@ -67,4 +69,5 @@ pub use crate::internal_tools::{InternalToolHandler, InternalToolHandlers, Inter
 pub use crate::settings::{
     EXTENSION_CLI_OVERRIDES_ENV, HARNESS_CONFIG_CLI_OVERRIDES_ENV, ROLE_CLI_OVERRIDES_ENV,
     STARTUP_ROLE_ENV, builtin_extensions, default_config, validate_cli_overrides,
+    validate_extension_environment_and_cli_overrides,
 };
