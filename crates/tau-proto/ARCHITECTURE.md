@@ -81,13 +81,20 @@ must synthesize replay from the typed fields.
 
 ## Provider-visible message envelopes
 
-All `MessageOperation` variants share one provider-envelope formatter for
-transport, message identity, actor, conversation, content trust, identity
-assurance, and sender policy. Every metadata value is XML-escaped and encoded
-as a single line, including ASCII controls and Unicode line separators, so
-transport-owned values cannot inject authoritative-looking metadata. Only
-text-bearing operations append a separately XML-escaped payload block;
-reactions append operation metadata without growing a separate envelope header.
+All `MessageOperation` variants share one compact, valid `<tau_message>`
+provider projection. Harness-authored routing facts use canonically ordered XML
+attributes and text-bearing operations use the element's direct escaped text;
+delete and reaction occurrences are self-closing. `origin="external"` means
+all payload text is untrusted. `sender_allowlisted="true"` means the operator
+allowlisted the authenticated sender, while `"false"` means lax policy admitted
+an outsider; neither value grants instruction, tool, or control authority.
+
+Attribute and text escaping are deliberately separate. Attribute controls,
+line separators, bidi/format controls, and noncharacters become visible
+`\u{XXXX}` escapes; element text preserves ordinary LF/tab but visibly escapes
+unsafe controls and format characters. Reply attributes are transient: prompt
+assembly includes one only while the source-bound route is live and its named
+tool is present in that agent's effective tool policy.
 
 ## Event names and routing
 

@@ -95,7 +95,7 @@ canonical id shown in the typed Tau envelope. There is no channel, user, or
 thread argument. Each
 configured channel has independent agent selection, and replies return to the
 source-bound configured channel (or linked DM) and thread selected by the exact
-`reply_to` envelope. Top-level messages receive top-level replies; thread replies remain in
+`reply_to` message id. The model-facing `<tau_message>` advertises `reply="slack_send"` only while that route is live; its `message_id` is passed as `reply_to`. Top-level messages receive top-level replies; thread replies remain in
 their originating thread automatically.
 Allowed users' reaction additions/removals on recent messages posted through
 `slack_send` are routed back to the owning agent with channel, thread, message,

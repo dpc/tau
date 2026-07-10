@@ -65,6 +65,70 @@ fn incoming_message(agent_id: AgentId) -> Event {
     })
 }
 
+/// Sender labels must preserve stable verified identity and visibly qualify
+/// weaker assurance classes instead of presenting display names as authority.
+#[test]
+fn message_envelope_sender_labels_reflect_identity_assurance() {
+    let Event::AgentMessageIncoming(incoming) = incoming_message(agent_id()) else {
+        unreachable!("helper returns incoming message");
+    };
+    let mut envelope = incoming.envelope;
+    let cases = [
+        (
+            tau_proto::SenderIdentityAssurance::VerifiedAccount,
+            Some("U1"),
+            Some("Alice"),
+            "Alice (U1)",
+        ),
+        (
+            tau_proto::SenderIdentityAssurance::VerifiedAccount,
+            Some("U1"),
+            None,
+            "U1",
+        ),
+        (
+            tau_proto::SenderIdentityAssurance::VerifiedAccount,
+            None,
+            Some("Alice"),
+            "unverified Alice",
+        ),
+        (
+            tau_proto::SenderIdentityAssurance::RoomMembership,
+            None,
+            Some("Alice"),
+            "room occupant Alice",
+        ),
+        (
+            tau_proto::SenderIdentityAssurance::DisplayOnly,
+            None,
+            Some("Alice"),
+            "unverified Alice",
+        ),
+        (
+            tau_proto::SenderIdentityAssurance::Unknown,
+            None,
+            None,
+            "unverified external sender",
+        ),
+        (
+            tau_proto::SenderIdentityAssurance::AuthenticatedTauAgent,
+            Some("agent-a"),
+            None,
+            "agent-a",
+        ),
+    ];
+    for (identity, stable_id, display_name, expected) in cases {
+        envelope.trust.identity = identity;
+        envelope.source = tau_proto::MessageEndpoint::External {
+            stable_id: stable_id.map(str::to_owned),
+            display_name: display_name.map(str::to_owned),
+            actor_kind: tau_proto::ExternalActorKind::Human,
+        };
+        let item = super::message_envelope_item(tau_proto::MessageDirection::Incoming, &envelope);
+        assert_eq!(item.model_presentation.source_label, expected);
+    }
+}
+
 /// Ensures metadata set/unset facts fold into side state without creating
 /// transcript nodes, preventing extension state from polluting prompts.
 #[test]

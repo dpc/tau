@@ -34,10 +34,37 @@ fn message_envelope_item(
             stable_id,
             display_name,
             ..
-        } => display_name
-            .clone()
-            .or_else(|| stable_id.clone())
-            .unwrap_or_else(|| "external sender".to_owned()),
+        } => match envelope.trust.identity {
+            tau_proto::SenderIdentityAssurance::VerifiedAccount => {
+                match (display_name, stable_id) {
+                    (Some(display), Some(stable)) if display != stable => {
+                        format!("{display} ({stable})")
+                    }
+                    (_, Some(stable)) => stable.clone(),
+                    (Some(display), None) => format!("unverified {display}"),
+                    (None, None) => "unverified external sender".to_owned(),
+                }
+            }
+            tau_proto::SenderIdentityAssurance::RoomMembership => format!(
+                "room occupant {}",
+                display_name
+                    .clone()
+                    .or_else(|| stable_id.clone())
+                    .unwrap_or_else(|| "unknown".to_owned())
+            ),
+            tau_proto::SenderIdentityAssurance::DisplayOnly
+            | tau_proto::SenderIdentityAssurance::Unknown => format!(
+                "unverified {}",
+                display_name
+                    .clone()
+                    .or_else(|| stable_id.clone())
+                    .unwrap_or_else(|| "external sender".to_owned())
+            ),
+            tau_proto::SenderIdentityAssurance::AuthenticatedTauAgent => display_name
+                .clone()
+                .or_else(|| stable_id.clone())
+                .unwrap_or_else(|| "external sender".to_owned()),
+        },
     };
     tau_proto::MessageEnvelopeItem {
         direction,
@@ -45,6 +72,7 @@ fn message_envelope_item(
         model_presentation: tau_proto::MessageModelPresentation {
             transport_label: envelope.transport.name.clone(),
             source_label,
+            live_reply_tool: None,
             conversation_label: envelope.conversation.as_ref().and_then(|conversation| {
                 conversation
                     .display_name

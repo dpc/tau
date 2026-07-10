@@ -394,3 +394,7 @@ fact immediately before the full `agent.prompt_created` provider work request.
 Providers consume `agent.prompt_created`; UIs and side-effect observers should
 subscribe to `agent.prompt_started` so materialized prompt context and tool
 schemas are not sent over UI/control channels unnecessarily.
+
+## Transient reply presentation
+
+Durable envelopes retain source-owned `reply_path` for audit. Prompt assembly does not mutate that fact; it separately projects `reply` only when the route belongs to the target agent and the internally identified tool remains in the effective prompt snapshot, then uses its model-visible alias.

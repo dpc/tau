@@ -342,6 +342,10 @@ pub struct MessageModelPresentation {
     /// Safe conversation label.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conversation_label: Option<String>,
+    /// Prompt-local model-visible reply tool, present only while its route and
+    /// effective tool snapshot are both live.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub live_reply_tool: Option<ToolName>,
 }
 
 /// Typed provider-context item for one canonical envelope.
@@ -375,108 +379,86 @@ impl MessageEnvelopeItem {
     /// Render deterministic provider text while preserving payload boundaries.
     #[must_use]
     pub fn render_provider_text(&self) -> String {
-        let direction = match self.direction {
-            MessageDirection::Incoming => "incoming",
-            MessageDirection::Outgoing => "outgoing",
-        };
-        let (payload, operation, include_reply) = match &self.envelope.operation {
+        let (payload, operation, target, reaction, include_reply) = match &self.envelope.operation {
             MessageOperation::Create {
                 payload: MessagePayload::Text { text, .. },
-            } => (Some(text.as_str()), String::new(), true),
+            } => (Some(text.as_str()), None, None, None, true),
             MessageOperation::Edit {
                 target,
                 payload: MessagePayload::Text { text, .. },
-            } => (
-                Some(text.as_str()),
-                format!(
-                    "\noperation: edit target={}",
-                    metadata_escape(&message_ref_label(target))
-                ),
-                true,
-            ),
-            MessageOperation::Delete { target } => (
-                Some("[message deleted]"),
-                format!(
-                    "\noperation: delete target={}",
-                    metadata_escape(&message_ref_label(target))
-                ),
-                true,
-            ),
+            } => (Some(text.as_str()), Some("edit"), Some(target), None, true),
+            MessageOperation::Delete { target } => (None, Some("delete"), Some(target), None, true),
             MessageOperation::Reaction {
                 target,
                 action,
                 reaction,
             } => (
                 None,
-                format!(
-                    "\noperation: reaction {} {} target={}",
-                    reaction_action_name(*action),
-                    metadata_escape(&reaction.name),
-                    metadata_escape(&message_ref_label(target)),
-                ),
+                Some(match action {
+                    ReactionAction::Add => "reaction_add",
+                    ReactionAction::Remove => "reaction_remove",
+                }),
+                Some(target),
+                Some(reaction.name.as_str()),
                 false,
             ),
         };
-        let reply = if include_reply {
-            self.envelope
-                .reply_path
-                .as_ref()
-                .map_or_else(String::new, |path| {
-                    format!(
-                        "\nreply: {}(reply_to=\"{}\")",
-                        metadata_escape(path.tool_name.as_str()),
-                        metadata_escape(self.envelope.message_id.as_str())
-                    )
-                })
-        } else {
-            String::new()
-        };
-        let conversation = self
-            .model_presentation
-            .conversation_label
-            .as_ref()
-            .map(|label| format!("\nconversation: {}", metadata_escape(label)))
-            .unwrap_or_default();
-        let mut rendered = format!(
-            "<tau_message version=\"1\" direction=\"{direction}\">\ntransport: {}\nmessage_id: {}\nfrom: {}{conversation}\ncontent_trust: {}\nsender_identity: {}\nsender_policy: {}{operation}{reply}",
-            metadata_escape(&self.model_presentation.transport_label),
-            metadata_escape(self.envelope.message_id.as_str()),
-            metadata_escape(&self.model_presentation.source_label),
-            content_trust_name(self.envelope.trust.content),
-            identity_assurance_name(self.envelope.trust.identity),
-            policy_status_name(self.envelope.trust.policy),
+        let mut rendered = String::from("<tau_message");
+        push_xml_attribute(
+            &mut rendered,
+            "transport",
+            &self.model_presentation.transport_label,
         );
-        if let Some(payload) = payload {
-            rendered.push_str(&format!(
-                "\n<payload type=\"text\">\n{}\n</payload>",
-                xml_escape(payload)
-            ));
+        push_xml_attribute(
+            &mut rendered,
+            "message_id",
+            self.envelope.message_id.as_str(),
+        );
+        push_xml_attribute(
+            &mut rendered,
+            "sender",
+            &self.model_presentation.source_label,
+        );
+        if let Some(conversation) = &self.model_presentation.conversation_label {
+            push_xml_attribute(&mut rendered, "conversation", conversation);
         }
-        rendered.push_str("\n</tau_message>");
+        push_xml_attribute(
+            &mut rendered,
+            "origin",
+            origin_name(self.envelope.trust.content),
+        );
+        if let Some(allowlisted) = sender_allowlisted(self.envelope.trust.policy) {
+            push_xml_attribute(&mut rendered, "sender_allowlisted", allowlisted);
+        }
+        if let Some(operation) = operation {
+            push_xml_attribute(&mut rendered, "operation", operation);
+        }
+        if let Some(target) = target {
+            push_xml_attribute(&mut rendered, "target", &message_ref_label(target));
+        }
+        if let Some(reaction) = reaction {
+            push_xml_attribute(&mut rendered, "reaction", reaction);
+        }
+        if include_reply && let Some(tool) = &self.model_presentation.live_reply_tool {
+            push_xml_attribute(&mut rendered, "reply", tool.as_str());
+        }
+        if let Some(payload) = payload {
+            rendered.push('>');
+            rendered.push_str(&xml_text_escape(payload));
+            rendered.push_str("</tau_message>");
+        } else {
+            rendered.push_str("/>");
+        }
         rendered
     }
 }
 
-/// Escape one line-oriented envelope metadata value without preserving control
-/// characters that could introduce forged metadata lines.
-fn metadata_escape(value: &str) -> String {
-    xml_escape(value)
-        .chars()
-        .fold(String::new(), |mut escaped, character| {
-            match character {
-                '\n' => escaped.push_str("\\n"),
-                '\r' => escaped.push_str("\\r"),
-                '\t' => escaped.push_str("\\t"),
-                '\u{2028}' => escaped.push_str("\\u{2028}"),
-                '\u{2029}' => escaped.push_str("\\u{2029}"),
-                character if character.is_control() => {
-                    use std::fmt::Write as _;
-                    let _ = write!(escaped, "\\u{{{:x}}}", character as u32);
-                }
-                character => escaped.push(character),
-            }
-            escaped
-        })
+fn push_xml_attribute(output: &mut String, name: &str, value: &str) {
+    output.push(' ');
+    output.push_str(name);
+    output.push_str("=\"");
+    output.push_str(&xml_attribute_escape(value));
+    output.push('"');
 }
 
 fn message_ref_label(reference: &MessageRef) -> String {
@@ -488,52 +470,66 @@ fn message_ref_label(reference: &MessageRef) -> String {
         .unwrap_or_else(|| "unresolved".to_owned())
 }
 
-fn content_trust_name(value: MessageContentTrust) -> &'static str {
+fn origin_name(value: MessageContentTrust) -> &'static str {
     match value {
-        MessageContentTrust::AuthenticatedTauAgent => "authenticated_tau_agent",
-        MessageContentTrust::UntrustedExternal => "untrusted_external",
-        MessageContentTrust::HarnessInternal => "harness_internal",
+        MessageContentTrust::AuthenticatedTauAgent => "agent",
+        MessageContentTrust::UntrustedExternal => "external",
+        MessageContentTrust::HarnessInternal => "internal",
     }
 }
 
-fn identity_assurance_name(value: SenderIdentityAssurance) -> &'static str {
+fn sender_allowlisted(value: SenderPolicyStatus) -> Option<&'static str> {
     match value {
-        SenderIdentityAssurance::VerifiedAccount => "verified_account",
-        SenderIdentityAssurance::RoomMembership => "room_membership",
-        SenderIdentityAssurance::DisplayOnly => "display_only",
-        SenderIdentityAssurance::AuthenticatedTauAgent => "authenticated_tau_agent",
-        SenderIdentityAssurance::Unknown => "unknown",
+        SenderPolicyStatus::Allowlisted => Some("true"),
+        SenderPolicyStatus::LaxPermitted => Some("false"),
+        SenderPolicyStatus::Internal => None,
     }
 }
 
-fn policy_status_name(value: SenderPolicyStatus) -> &'static str {
-    match value {
-        SenderPolicyStatus::Allowlisted => "allowlisted",
-        SenderPolicyStatus::LaxPermitted => "lax_permitted",
-        SenderPolicyStatus::Internal => "internal",
-    }
+fn requires_visible_escape(character: char) -> bool {
+    character.is_control()
+        || matches!(character, '\u{00AD}' | '\u{061C}' | '\u{200B}'..='\u{200F}'
+            | '\u{2028}'..='\u{202E}' | '\u{2060}'..='\u{206F}'
+            | '\u{FDD0}'..='\u{FDEF}' | '\u{FEFF}')
+        || (character as u32 & 0xFFFF == 0xFFFE)
+        || (character as u32 & 0xFFFF == 0xFFFF)
 }
 
-fn reaction_action_name(value: ReactionAction) -> &'static str {
-    match value {
-        ReactionAction::Add => "add",
-        ReactionAction::Remove => "remove",
-    }
+fn push_visible_escape(output: &mut String, character: char) {
+    use std::fmt::Write as _;
+    let _ = write!(output, "\\u{{{:04X}}}", character as u32);
 }
 
-fn xml_escape(value: &str) -> String {
+fn xml_attribute_escape(value: &str) -> String {
     let mut escaped = String::with_capacity(value.len());
-    for ch in value.chars() {
-        match ch {
+    for character in value.chars() {
+        match character {
             '&' => escaped.push_str("&amp;"),
             '<' => escaped.push_str("&lt;"),
             '>' => escaped.push_str("&gt;"),
             '"' => escaped.push_str("&quot;"),
             '\'' => escaped.push_str("&apos;"),
-            ch if ch.is_control() && !matches!(ch, '\n' | '\t') => {
-                escaped.push_str(&format!("\\u{{{:x}}}", ch as u32));
+            character if requires_visible_escape(character) => {
+                push_visible_escape(&mut escaped, character)
             }
-            ch => escaped.push(ch),
+            character => escaped.push(character),
+        }
+    }
+    escaped
+}
+
+fn xml_text_escape(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for character in value.chars() {
+        match character {
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            '\n' | '\t' => escaped.push(character),
+            character if requires_visible_escape(character) => {
+                push_visible_escape(&mut escaped, character)
+            }
+            character => escaped.push(character),
         }
     }
     escaped

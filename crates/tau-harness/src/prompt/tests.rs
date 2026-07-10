@@ -661,7 +661,9 @@ pub(crate) fn assemble_conversation_from(
     tree: &tau_core::AgentTree,
     head: Option<tau_core::NodeId>,
 ) -> Vec<ContextItem> {
-    assemble_prompt_context_from(tree, head).context.flatten()
+    assemble_prompt_context_from(tree, head, &std::collections::HashMap::new())
+        .context
+        .flatten()
 }
 
 /// Tool errors must surface their `details` payload to the LLM,

@@ -621,12 +621,19 @@ pub(crate) fn chrono_free_date() -> String {
 /// not reliable as the prompt-assembly cursor — use the conv's own
 /// head instead.
 pub(crate) struct AssembledPromptContext {
+    /// Provider context with prompt-local presentation facts applied.
     pub(crate) context: tau_proto::PromptContext,
 }
 
+/// Assembles provider context while projecting currently live reply tools.
+///
+/// `live_reply_tools` supplies model-visible aliases for routes authorized by
+/// the target agent's effective tool snapshot. The durable envelope and its
+/// source-owned reply path remain unchanged.
 pub(crate) fn assemble_prompt_context_from(
     tree: &tau_core::AgentTree,
     head: Option<tau_core::NodeId>,
+    live_reply_tools: &std::collections::HashMap<tau_proto::MessageId, tau_proto::ToolName>,
 ) -> AssembledPromptContext {
     let mut blocks: Vec<tau_proto::ContextBlock> = Vec::new();
 
@@ -745,9 +752,12 @@ pub(crate) fn assemble_prompt_context_from(
                 }
             },
             AgentEntry::MessageEnvelope { item } => {
+                let mut item = item.clone();
+                item.model_presentation.live_reply_tool =
+                    live_reply_tools.get(&item.envelope.message_id).cloned();
                 blocks.push(tau_proto::ContextBlock::UserInput(
                     tau_proto::UserInputBlock {
-                        items: vec![ContextItem::MessageEnvelope(item.clone())],
+                        items: vec![ContextItem::MessageEnvelope(item)],
                     },
                 ));
             }

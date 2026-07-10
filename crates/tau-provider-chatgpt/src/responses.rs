@@ -1514,6 +1514,20 @@ fn build_request(
                         {
                             return None;
                         }
+                        // Message-envelope presentation depends on transient
+                        // route and effective-tool liveness. An envelope in
+                        // the server-owned prefix may therefore have rendered
+                        // differently when the anchor was created (for
+                        // example, with a reply tool that has since gone
+                        // stale). Resend the full context rather than letting
+                        // an immutable server-side prefix contradict the
+                        // truthful current projection.
+                        if context_items[..next_item_index]
+                            .iter()
+                            .any(|item| matches!(item, ContextItem::MessageEnvelope(_)))
+                        {
+                            return None;
+                        }
                         return Some((id, next_item_index));
                     }
                     next_item_index = next_item_index.saturating_sub(response.output_items.len());

@@ -47,6 +47,32 @@ fn context_with_response_id(
     }))
 }
 
+fn message_envelope(direction: &str, text: &str) -> ContextItem {
+    serde_json::from_value(serde_json::json!({
+        "type": "message_envelope",
+        "payload": {
+          "direction": direction,
+          "envelope": {
+            "message_id": "msg-1",
+            "transport": {"name": "slack"},
+            "source": {"kind": "external", "stable_id": "U1", "actor_kind": "human"},
+            "destination": {"kind": "agent", "agent_id": "main"},
+            "operation": {"kind": "create", "payload": {"kind": "text", "text": text, "format": "plain"}},
+            "trust": {
+                "content": "untrusted_external",
+                "identity": "verified_account",
+                "policy": "allowlisted"
+            }
+          },
+          "model_presentation": {
+            "transport_label": "slack",
+            "source_label": "U1"
+          }
+        }
+    }))
+    .expect("message envelope")
+}
+
 #[test]
 fn debug_provider_request_dir_requires_existing_session_dir() {
     // Provider diagnostics are allowed to create their own debug subdirectory,
@@ -521,6 +547,78 @@ fn build_request_chain_turn_sends_delta_and_previous_response_id() {
         "only messages after the anchor should be sent"
     );
     assert_eq!(input[0]["content"][0]["text"], "second turn");
+}
+
+/// A transient message-envelope projection in the server-owned prefix must
+/// force full replay so a formerly live reply hint cannot survive chaining.
+#[test]
+fn build_request_pre_anchor_envelope_forces_full_replay() {
+    let request = PromptPayload {
+        system_prompt: "sys",
+        context: context_with_response_id(
+            "resp_abc",
+            vec![message_envelope("incoming", "before")],
+            vec![assistant_text("response")],
+            vec![user_text("after")],
+        ),
+        tools: &[],
+        params: tau_proto::ModelParams::default(),
+        tool_choice: tau_proto::ToolChoice::default(),
+        compaction: None,
+        originator: &tau_proto::PromptOriginator::User,
+        session_id: &tau_proto::SessionId::new("test-session"),
+        agent_id: &tau_proto::AgentId::parse("test-agent").expect("agent"),
+        share_user_cache_key: false,
+        debug_provider_requests: false,
+    };
+    let body = serde_json::to_value(build_request(
+        &chain_test_config(),
+        &request,
+        Some("resp_abc"),
+    ))
+    .expect("serialize");
+    assert!(body.get("previous_response_id").is_none());
+    assert_eq!(body["input"].as_array().expect("input").len(), 3);
+    assert_eq!(body["input"][0]["role"], "user");
+    assert!(
+        body["input"][0]["content"][0]["text"]
+            .as_str()
+            .expect("text")
+            .starts_with("<tau_message")
+    );
+}
+
+/// An envelope added after the cached anchor belongs to the delta and must not
+/// unnecessarily disable otherwise valid Responses chaining.
+#[test]
+fn build_request_post_anchor_envelope_keeps_chain() {
+    let request = PromptPayload {
+        system_prompt: "sys",
+        context: context_with_response_id(
+            "resp_abc",
+            vec![user_text("before")],
+            vec![assistant_text("response")],
+            vec![message_envelope("incoming", "after")],
+        ),
+        tools: &[],
+        params: tau_proto::ModelParams::default(),
+        tool_choice: tau_proto::ToolChoice::default(),
+        compaction: None,
+        originator: &tau_proto::PromptOriginator::User,
+        session_id: &tau_proto::SessionId::new("test-session"),
+        agent_id: &tau_proto::AgentId::parse("test-agent").expect("agent"),
+        share_user_cache_key: false,
+        debug_provider_requests: false,
+    };
+    let body = serde_json::to_value(build_request(
+        &chain_test_config(),
+        &request,
+        Some("resp_abc"),
+    ))
+    .expect("serialize");
+    assert_eq!(body["previous_response_id"], "resp_abc");
+    assert_eq!(body["input"].as_array().expect("input").len(), 1);
+    assert_eq!(body["input"][0]["role"], "user");
 }
 
 /// Defensive: a cached response id missing from the prompt context must NOT

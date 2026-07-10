@@ -248,10 +248,14 @@ human content only from configured or linked conversations (including edits and
 reactions), while withholding bridge commands and arbitrary destination selection; accepted ingress activates only its authenticated source-bound reply route. This
 widens prompt-injection exposure. Content remains untrusted independently of
 typed verified identity and allowlist/lax policy metadata. Provider lowering
-separately escapes payload text and forces transport, source, conversation,
-reaction, and target metadata into single-line escaped values, so payload tags
-and metadata control/line injection cannot forge harness-stamped identity,
-policy, or content trust.
+uses one compact XML element: `origin="external"` always marks untrusted
+payload, while `sender_allowlisted="true"` means operator-allowlisted sender and
+`"false"` means a lax-delivered outsider. Neither grants instruction, tool, or
+control authority. Separate canonical attribute/text escaping prevents payload
+tags, controls, line separators, and bidi formatting from forging
+harness-stamped metadata. A `reply` attribute appears only when both its
+source-bound route and the named tool in the target agent's effective policy
+are live.
 Session changes clear Slack routes and renew the capability with a fresh
 correlation id, so stale registration results cannot cross generations.
 workspace admins, Slack itself, channel members, and Slack Connect participants

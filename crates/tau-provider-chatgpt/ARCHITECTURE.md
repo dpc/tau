@@ -135,3 +135,7 @@ under its mutex and notifies its condition variable, so checkout waits only for
 either the busy key to clear or an abort wake to change the generation. This
 keeps a canceled queued same-key turn from later sending a stale request after
 the active turn releases.
+
+## Message-envelope chaining
+
+When a cached Responses anchor has a message envelope in its server-owned prefix, request construction fully resends context without `previous_response_id`, because reply presentation is transient. Envelopes after the anchor remain in the normal delta.

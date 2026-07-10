@@ -643,6 +643,31 @@ struct TransportReplyRoute {
     conversation: Option<tau_proto::MessageConversation>,
 }
 
+fn live_reply_tools_for_prompt(
+    routes: &HashMap<tau_proto::MessageId, TransportReplyRoute>,
+    effective_tools: &[tau_proto::ToolSpec],
+    target_agent: Option<&tau_proto::AgentId>,
+) -> HashMap<tau_proto::MessageId, ToolName> {
+    routes
+        .iter()
+        .filter_map(|(message_id, route)| {
+            let internal_name = route.reply_tool.as_ref()?;
+            let tool = effective_tools
+                .iter()
+                .find(|spec| spec.name == *internal_name)?;
+            (target_agent == Some(&route.agent_id)).then(|| {
+                (
+                    message_id.clone(),
+                    tool.model_visible_name
+                        .as_ref()
+                        .unwrap_or(&tool.name)
+                        .clone(),
+                )
+            })
+        })
+        .collect()
+}
+
 #[derive(Clone)]
 struct TransportDedupRecord {
     draft: tau_proto::TransportMessageDraft,
@@ -11078,13 +11103,19 @@ impl Harness {
         let tree = agent_id_for_tree
             .as_deref()
             .and_then(|agent_id| self.agent_store.agent(agent_id));
+        let tool_specs = self.gather_effective_tool_specs_for_role_model(&role_name, Some(&model));
+        let target_agent_id = agent_id_for_tree.as_deref().map(crate::parse_agent_id);
+        let live_reply_tools = live_reply_tools_for_prompt(
+            &self.transport_reply_routes,
+            &tool_specs,
+            target_agent_id.as_ref(),
+        );
         let prompt_context = tree
-            .map(|t| assemble_prompt_context_from(t, head))
+            .map(|t| assemble_prompt_context_from(t, head, &live_reply_tools))
             .unwrap_or_else(|| crate::prompt::AssembledPromptContext {
                 context: tau_proto::PromptContext::default(),
             });
         let context = prompt_context.context;
-        let tool_specs = self.gather_effective_tool_specs_for_role_model(&role_name, Some(&model));
         let tools = self.tool_definitions_from_specs(&tool_specs);
         let durable_agent_id = agent_id_for_tree.as_deref().map(crate::parse_agent_id);
         let system_prompt =

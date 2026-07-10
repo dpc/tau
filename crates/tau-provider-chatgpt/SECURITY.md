@@ -57,3 +57,7 @@ non-terminal samples at no more than 1Hz, and may emit a final flush. The harnes
 validates ownership and broadcasts the stats unchanged. Stats must contain only
 byte counts, elapsed timing, and routing metadata, never raw provider text, tool
 arguments, prompt text, or wire payloads.
+
+## Transient reply hints
+
+Message-envelope `reply` attributes are capability hints, not durable authority. Responses chaining must not preserve an older server-side rendering after route or effective-tool liveness changes.

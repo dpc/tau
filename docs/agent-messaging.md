@@ -3,12 +3,12 @@
 ## External transport foundation
 
 The v2 bridge protocol uses canonical message envelopes instead of
-prefix-formatted user prompts. Built-in Slack, Telegram, and XMPP adapters still
-use their legacy prompt path until separate adapter migrations land; they do not
-yet receive these guarantees. Canonical external content remains
-`untrusted_external` even when its
+prefix-formatted user prompts. Slack uses this canonical path. Telegram and XMPP still use their legacy prompt
+path until separate adapter migrations land; they do not yet receive these
+guarantees. Canonical external content remains internally typed as untrusted even when its
 account identity is verified and allowlisted. Provider adapters lower the typed
-context item once to an escaped `<tau_message>` boundary; harness routing and UI
+context item once to compact XML such as `<tau_message transport="slack"
+message_id="…" sender="U123" origin="external" sender_allowlisted="true">…</tau_message>`; harness routing and UI
 code never infer authority from rendered text.
 
 Reply tools select an extension-private live destination with an opaque
