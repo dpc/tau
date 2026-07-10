@@ -247,8 +247,11 @@ never wakes an agent or activates a route.
 human content only from configured or linked conversations (including edits and
 reactions), while withholding bridge commands and arbitrary destination selection; accepted ingress activates only its authenticated source-bound reply route. This
 widens prompt-injection exposure. Content remains untrusted independently of
-typed verified identity and allowlist/lax policy metadata; escaped lowering makes
-payload lookalike tags non-authoritative.
+typed verified identity and allowlist/lax policy metadata. Provider lowering
+separately escapes payload text and forces transport, source, conversation,
+reaction, and target metadata into single-line escaped values, so payload tags
+and metadata control/line injection cannot forge harness-stamped identity,
+policy, or content trust.
 Session changes clear Slack routes and renew the capability with a fresh
 correlation id, so stale registration results cannot cross generations.
 workspace admins, Slack itself, channel members, and Slack Connect participants

@@ -379,69 +379,104 @@ impl MessageEnvelopeItem {
             MessageDirection::Incoming => "incoming",
             MessageDirection::Outgoing => "outgoing",
         };
-        let (payload, operation) = match &self.envelope.operation {
+        let (payload, operation, include_reply) = match &self.envelope.operation {
             MessageOperation::Create {
                 payload: MessagePayload::Text { text, .. },
-            } => (text.as_str(), String::new()),
+            } => (Some(text.as_str()), String::new(), true),
             MessageOperation::Edit {
                 target,
                 payload: MessagePayload::Text { text, .. },
             } => (
-                text.as_str(),
+                Some(text.as_str()),
                 format!(
                     "\noperation: edit target={}",
-                    xml_escape(&message_ref_label(target))
+                    metadata_escape(&message_ref_label(target))
                 ),
+                true,
             ),
             MessageOperation::Delete { target } => (
-                "[message deleted]",
+                Some("[message deleted]"),
                 format!(
                     "\noperation: delete target={}",
-                    xml_escape(&message_ref_label(target))
+                    metadata_escape(&message_ref_label(target))
                 ),
+                true,
             ),
             MessageOperation::Reaction {
-                action, reaction, ..
-            } => {
-                return format!(
-                    "<tau_message version=\"1\" direction=\"{direction}\">\ntransport: {}\nmessage_id: {}\ncontent_trust: {}\noperation: reaction {} {}\n</tau_message>",
-                    xml_escape(&self.model_presentation.transport_label),
-                    xml_escape(self.envelope.message_id.as_str()),
-                    content_trust_name(self.envelope.trust.content),
-                    reaction_action_name(*action),
-                    xml_escape(&reaction.name),
-                );
-            }
-        };
-        let reply = self
-            .envelope
-            .reply_path
-            .as_ref()
-            .map(|path| {
+                target,
+                action,
+                reaction,
+            } => (
+                None,
                 format!(
-                    "\nreply: {}(reply_to=\"{}\")",
-                    xml_escape(path.tool_name.as_str()),
-                    xml_escape(self.envelope.message_id.as_str())
-                )
-            })
-            .unwrap_or_default();
+                    "\noperation: reaction {} {} target={}",
+                    reaction_action_name(*action),
+                    metadata_escape(&reaction.name),
+                    metadata_escape(&message_ref_label(target)),
+                ),
+                false,
+            ),
+        };
+        let reply = if include_reply {
+            self.envelope
+                .reply_path
+                .as_ref()
+                .map_or_else(String::new, |path| {
+                    format!(
+                        "\nreply: {}(reply_to=\"{}\")",
+                        metadata_escape(path.tool_name.as_str()),
+                        metadata_escape(self.envelope.message_id.as_str())
+                    )
+                })
+        } else {
+            String::new()
+        };
         let conversation = self
             .model_presentation
             .conversation_label
             .as_ref()
-            .map(|label| format!("\nconversation: {}", xml_escape(label)))
+            .map(|label| format!("\nconversation: {}", metadata_escape(label)))
             .unwrap_or_default();
-        format!(
-            "<tau_message version=\"1\" direction=\"{direction}\">\ntransport: {}\nmessage_id: {}\nfrom: {}{conversation}\ncontent_trust: {}\nsender_identity: {}\nsender_policy: {}{operation}{reply}\n<payload type=\"text\">\n{}\n</payload>\n</tau_message>",
-            xml_escape(&self.model_presentation.transport_label),
-            xml_escape(self.envelope.message_id.as_str()),
-            xml_escape(&self.model_presentation.source_label),
+        let mut rendered = format!(
+            "<tau_message version=\"1\" direction=\"{direction}\">\ntransport: {}\nmessage_id: {}\nfrom: {}{conversation}\ncontent_trust: {}\nsender_identity: {}\nsender_policy: {}{operation}{reply}",
+            metadata_escape(&self.model_presentation.transport_label),
+            metadata_escape(self.envelope.message_id.as_str()),
+            metadata_escape(&self.model_presentation.source_label),
             content_trust_name(self.envelope.trust.content),
             identity_assurance_name(self.envelope.trust.identity),
             policy_status_name(self.envelope.trust.policy),
-            xml_escape(payload),
-        )
+        );
+        if let Some(payload) = payload {
+            rendered.push_str(&format!(
+                "\n<payload type=\"text\">\n{}\n</payload>",
+                xml_escape(payload)
+            ));
+        }
+        rendered.push_str("\n</tau_message>");
+        rendered
     }
+}
+
+/// Escape one line-oriented envelope metadata value without preserving control
+/// characters that could introduce forged metadata lines.
+fn metadata_escape(value: &str) -> String {
+    xml_escape(value)
+        .chars()
+        .fold(String::new(), |mut escaped, character| {
+            match character {
+                '\n' => escaped.push_str("\\n"),
+                '\r' => escaped.push_str("\\r"),
+                '\t' => escaped.push_str("\\t"),
+                '\u{2028}' => escaped.push_str("\\u{2028}"),
+                '\u{2029}' => escaped.push_str("\\u{2029}"),
+                character if character.is_control() => {
+                    use std::fmt::Write as _;
+                    let _ = write!(escaped, "\\u{{{:x}}}", character as u32);
+                }
+                character => escaped.push(character),
+            }
+            escaped
+        })
 }
 
 fn message_ref_label(reference: &MessageRef) -> String {

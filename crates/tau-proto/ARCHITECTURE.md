@@ -79,6 +79,16 @@ drop the sidecar for non-Responses providers. The sidecar is replay-eligible
 only when it decodes as a Responses assistant `message`; otherwise providers
 must synthesize replay from the typed fields.
 
+## Provider-visible message envelopes
+
+All `MessageOperation` variants share one provider-envelope formatter for
+transport, message identity, actor, conversation, content trust, identity
+assurance, and sender policy. Every metadata value is XML-escaped and encoded
+as a single line, including ASCII controls and Unicode line separators, so
+transport-owned values cannot inject authoritative-looking metadata. Only
+text-bearing operations append a separately XML-escaped payload block;
+reactions append operation metadata without growing a separate envelope header.
+
 ## Event names and routing
 
 `Event` serde `rename` values, `EventName` constants, and `Event::name()` are one contract. When adding or renaming an event, update all three together and update `docs/events.md` when the selected guide should mention the event.
