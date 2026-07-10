@@ -89,7 +89,7 @@ extensions:
         service: conference.example.org
         room_prefix: tau
         # Complete room-localpart Handlebars template. This example is the default.
-        room_template: "{{room_prefix}}-{{agent_slug}}-{{agent_hash}}"
+        room_template: "{{agent_id}}-{{agent_hash}}"
         expose_real_jids: true
         # Set true only if the room server enforces membership and intentionally
         # hides real JIDs from Tau.
@@ -112,10 +112,10 @@ still requires an existing registered conversation after that wait.
 - `muc` (recommended): creates/joins one room per globally unique Tau agent id.
   This gives ordinary XMPP clients a separate conversation per registered agent.
   By default, `muc.room_template` is
-  `{{room_prefix}}-{{agent_slug}}-{{agent_hash}}`, producing a short readable
-  localpart like `tau-manager-bq7e2a4f`. `agent_slug` is normalized and bounded;
-  `agent_hash` is a stable eight-character/40-bit BLAKE3 label over the full agent
-  id. The template controls the complete localpart: Tau does not implicitly add
+  `{{agent_id}}-{{agent_hash}}`, producing a localpart like
+  `manager-y3kg-bq7e2a4f` after XMPP localpart normalization. `agent_hash` is a stable
+  eight-character/40-bit BLAKE3 label over the full agent id. The template
+  controls the complete localpart: Tau does not implicitly add
   the prefix, hash, or randomness. For example, `{{agent_id}}` deliberately uses
   only the global durable agent id and accepts the operator's chosen collision
   policy. Tau sends a formal
@@ -152,8 +152,7 @@ Room templates use Handlebars strict mode and receive:
   the harness role snapshot are available; test `role_group_present` (or
   `group_id_present`).
 - `room_prefix` — the normalized legacy `muc.room_prefix` value.
-- `agent_slug` — a short normalized agent hint, and `agent_hash` — the stable
-  eight-character hash used by the default.
+- `agent_hash` — the stable eight-character hash used by the default.
 - `instance_name` plus `instance_name_present` — the extension instance name
   when supplied by the harness.
 - `random_alphanumeric <len>` — an optional helper requiring exactly one integer

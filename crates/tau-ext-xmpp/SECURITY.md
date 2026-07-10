@@ -24,9 +24,9 @@
   does not currently relax privacy settings or grant member affiliations.
   Deployments must enforce privacy and any members-only policy at the server or
   room-default layer.
-- The default MUC room template includes a readable agent slug plus a compact
-  40-bit, domain-separated BLAKE3 disambiguator derived from the full globally
-  unique, validated agent id. `muc.room_template` is trusted operator policy and
+- The default MUC room template includes the full global durable agent id plus a
+  compact 40-bit, domain-separated BLAKE3 disambiguator derived from that id.
+  `muc.room_template` is trusted operator policy and
   may omit the hash/randomness or use session/role/group identity; doing so accepts
   the resulting cross-process/restart collision and room-reuse risk.
   If two rendered room names ever collide in one process, registration fails

@@ -147,9 +147,9 @@ fn agent_id(text: &str) -> AgentId {
     AgentId::parse(text).expect("agent id")
 }
 
-fn assert_room_shape(room: &BareJid, agent_slug: &str) {
+fn assert_room_shape(room: &BareJid, agent_id: &str) {
     let room = room.to_string();
-    let expected_prefix = format!("tau-{agent_slug}-");
+    let expected_prefix = format!("{}-", agent_id.to_ascii_lowercase());
     assert!(room.starts_with(&expected_prefix), "{room}");
     assert!(room.ends_with("@conference.example.org"), "{room}");
     let localpart = room
@@ -821,17 +821,17 @@ fn xmpp_register_allows_two_muc_agents_in_same_session() {
     let agent_1 = registered.get(&agent_id("agent-1")).expect("agent 1");
     let agent_2 = registered.get(&agent_id("agent-2")).expect("agent 2");
     assert_ne!(agent_1, agent_2);
-    assert!(agent_1.starts_with("tau-agent-1-"), "{agent_1}");
+    assert!(agent_1.starts_with("agent-1-"), "{agent_1}");
     assert!(agent_1.ends_with("@conference.example.org"));
     assert_eq!(
         agent_1.len(),
-        "tau-agent-1-".len() + 8 + "@conference.example.org".len()
+        "agent-1-".len() + 8 + "@conference.example.org".len()
     );
-    assert!(agent_2.starts_with("tau-agent-2-"));
+    assert!(agent_2.starts_with("agent-2-"));
     assert!(agent_2.ends_with("@conference.example.org"));
     assert_eq!(
         agent_2.len(),
-        "tau-agent-2-".len() + 8 + "@conference.example.org".len()
+        "agent-2-".len() + 8 + "@conference.example.org".len()
     );
 }
 
@@ -1176,10 +1176,7 @@ fn muc_room_identity_uses_only_stable_agent_id() {
     let (tx, _rx) = mpsc::channel();
     let worker = WorkerState::new(cfg(), tx, shutdown_signal());
     let room = default_muc_room(&worker, &agent_id("agent-1"));
-    assert_eq!(
-        room.to_string(),
-        "tau-agent-1-4zqfxb1k@conference.example.org"
-    );
+    assert_eq!(room.to_string(), "agent-1-4zqfxb1k@conference.example.org");
 }
 
 /// A configured room template receives session, agent, role, and role-group
@@ -1410,8 +1407,12 @@ fn muc_room_identity_hashes_full_long_agent_ids() {
     let second_room = default_muc_room(&worker, &second);
 
     assert_ne!(first_room, second_room);
-    for room in [first_room, second_room] {
-        assert_room_shape(&room, &"a".repeat(18));
+    assert_ne!(
+        muc_room_disambiguator(&first),
+        muc_room_disambiguator(&second)
+    );
+    for (room, agent) in [(first_room, &first), (second_room, &second)] {
+        assert_room_shape(&room, agent.as_ref());
     }
 }
 
@@ -1427,19 +1428,19 @@ fn muc_room_identity_is_stable_across_xmpp_nodeprep_casefolding() {
 
     assert_eq!(
         uppercase.to_string(),
-        "tau-agenta-mj9z3t3v@conference.example.org"
+        "agenta-mj9z3t3v@conference.example.org"
     );
     assert_eq!(
         lowercase.to_string(),
-        "tau-agenta-vkqr78d6@conference.example.org"
+        "agenta-vkqr78d6@conference.example.org"
     );
     assert_ne!(uppercase, lowercase);
 }
 
-/// Generated Tau agent ids keep the human role name in the MUC room while the
-/// short disambiguator preserves full-id routing identity.
+/// The default retains the full generated Tau agent id, including its unique
+/// generated suffix.
 #[test]
-fn muc_room_identity_drops_generated_agent_suffix_from_slug() {
+fn muc_room_identity_keeps_full_generated_agent_id() {
     let (tx, _rx) = mpsc::channel();
     let worker = WorkerState::new(cfg(), tx, shutdown_signal());
 
@@ -1447,7 +1448,7 @@ fn muc_room_identity_drops_generated_agent_suffix_from_slug() {
 
     assert_eq!(
         room.to_string(),
-        "tau-manager-bq7e2a4f@conference.example.org"
+        "manager-y3kg-bq7e2a4f@conference.example.org"
     );
 }
 
@@ -1496,8 +1497,8 @@ fn muc_room_collision_does_not_overwrite_pending_join() {
     );
 }
 
-/// Generated room localparts use only characters that are safe in XMPP
-/// localparts and are bounded even when the configured prefix is long.
+/// Default room localparts remain XMPP-safe and bounded by the validated
+/// agent-id limit, regardless of the unused legacy room prefix.
 #[test]
 fn muc_room_identity_is_bounded_and_xmpp_localpart_safe() {
     let (tx, _rx) = mpsc::channel();
@@ -1505,13 +1506,13 @@ fn muc_room_identity_is_bounded_and_xmpp_localpart_safe() {
     cfg.muc.room_prefix = "x".repeat(48);
     let worker = WorkerState::new(cfg, tx, shutdown_signal());
 
-    let room = default_muc_room(&worker, &agent_id("AgentA")).to_string();
+    let room = default_muc_room(&worker, &agent_id(&"a".repeat(64))).to_string();
     let localpart = room
         .split_once('@')
         .map(|(localpart, _)| localpart)
         .expect("room localpart");
 
-    assert_eq!(localpart.len(), 48 + "-agenta-".len() + 8);
+    assert_eq!(localpart.len(), 64 + 1 + 8);
     assert!(
         localpart
             .chars()

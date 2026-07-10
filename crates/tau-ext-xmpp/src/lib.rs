@@ -63,8 +63,7 @@ const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 const WORKER_SHUTDOWN_CLEANUP_TIMEOUT: Duration = Duration::from_secs(4);
 const MUC_OWNER_NS: &str = "http://jabber.org/protocol/muc#owner";
 const MUC_ROOM_DISAMBIGUATOR_BYTES: usize = 5;
-const MUC_AGENT_SLUG_MAX_CHARS: usize = 18;
-const DEFAULT_ROOM_TEMPLATE: &str = "{{room_prefix}}-{{agent_slug}}-{{agent_hash}}";
+const DEFAULT_ROOM_TEMPLATE: &str = "{{agent_id}}-{{agent_hash}}";
 
 /// Run the XMPP extension over stdio.
 pub fn run_stdio() -> Result<(), Box<dyn Error>> {
@@ -494,8 +493,6 @@ fn validate_room_prefix(room_prefix: Option<String>) -> String {
 struct RoomTemplateContext<'a> {
     /// Full durable Tau agent id.
     agent_id: &'a str,
-    /// Normalized short display hint derived from the agent id.
-    agent_slug: String,
     /// Stable eight-character hash over the full agent id.
     agent_hash: String,
     /// Current Tau session id.
@@ -583,7 +580,6 @@ fn validate_room_template(
     }
     let sample = RoomTemplateContext {
         agent_id: "agent-A1b2",
-        agent_slug: "agent".to_owned(),
         agent_hash: "0123abcd".to_owned(),
         session_id: "session-1",
         role: "senior-engineer",
@@ -601,7 +597,6 @@ fn validate_room_template(
     let rendered = render_room_template(&template, &sample)?;
     let missing_metadata = RoomTemplateContext {
         agent_id: "agent-A1b2",
-        agent_slug: "agent".to_owned(),
         agent_hash: "0123abcd".to_owned(),
         session_id: "session-1",
         role: "",
@@ -682,7 +677,6 @@ fn room_localpart_for_registration(
     let instance_name = cfg.instance_name.as_deref();
     let context = RoomTemplateContext {
         agent_id: agent_id.as_ref(),
-        agent_slug: agent_room_slug(agent_id),
         agent_hash: muc_room_disambiguator(agent_id),
         session_id: session_id.as_ref(),
         role: role.map(String::as_str).unwrap_or(""),
@@ -2648,57 +2642,6 @@ fn muc_room_disambiguator(agent_id: &AgentId) -> String {
     hasher.update(agent_id.as_ref().as_bytes());
     let hash = hasher.finalize();
     base32_token(&hash.as_bytes()[..MUC_ROOM_DISAMBIGUATOR_BYTES])
-}
-
-fn agent_room_slug(agent_id: &AgentId) -> String {
-    let mut segments = localpart_segments(agent_id.as_ref());
-    if let Some(suffix) = likely_generated_agent_suffix(agent_id.as_ref())
-        && segments.last() == Some(&suffix)
-    {
-        segments.pop();
-    }
-    join_slug_segments(&segments, MUC_AGENT_SLUG_MAX_CHARS)
-}
-
-fn likely_generated_agent_suffix(input: &str) -> Option<String> {
-    // Tau-generated agent ids commonly end with a short mixed-case/digit suffix
-    // (for example `manager-Y3KG`). Hide that visual noise from room slugs while
-    // still feeding the complete AgentId into the disambiguator.
-    input
-        .rsplit_once(|ch: char| !ch.is_ascii_alphanumeric())
-        .map(|(_, suffix)| suffix)
-        .filter(|suffix| {
-            (4..=8).contains(&suffix.len())
-                && suffix.chars().any(|ch| ch.is_ascii_uppercase())
-                && suffix.chars().any(|ch| ch.is_ascii_digit())
-        })
-        .map(|suffix| suffix.to_ascii_lowercase())
-}
-
-fn localpart_segments(input: &str) -> Vec<String> {
-    input
-        .split(|ch: char| !ch.is_ascii_alphanumeric())
-        .filter(|segment| !segment.is_empty())
-        .map(str::to_ascii_lowercase)
-        .collect()
-}
-
-fn join_slug_segments(segments: &[String], max_chars: usize) -> String {
-    let mut out = String::new();
-    for segment in segments {
-        if out.len() >= max_chars {
-            break;
-        }
-        if !out.is_empty() {
-            out.push('-');
-        }
-        let remaining = max_chars.saturating_sub(out.len());
-        out.extend(segment.chars().take(remaining));
-        while out.ends_with('-') {
-            out.pop();
-        }
-    }
-    if out.is_empty() { "x".to_owned() } else { out }
 }
 
 fn base32_token(bytes: &[u8]) -> String {

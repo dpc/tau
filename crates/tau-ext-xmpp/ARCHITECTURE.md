@@ -23,8 +23,8 @@ recipient; those notices are best-effort and must not delay registration success
 or shutdown cleanup. Tau leaves the room with unavailable presence on unregister
 or session shutdown.
 Room identity is rendered by the strict Handlebars `muc.room_template`. Its
-default, `{{room_prefix}}-{{agent_slug}}-{{agent_hash}}`, preserves the readable
-slug and domain-separated 40-bit BLAKE3 label over the full `AgentId`. Operators
+default, `{{agent_id}}-{{agent_hash}}`, preserves the full global agent id and a
+domain-separated 40-bit BLAKE3 label over that id. Operators
 may instead use agent, session, role, role-group, instance, or explicit random
 inputs and may omit the hash entirely; the rendered value is the complete room
 localpart and therefore defines the operator's cross-process/restart collision

@@ -283,9 +283,9 @@ must come from server defaults or preconfiguration. MUC mode must verify real
 sender JIDs from room presence by default; if a server hides real JIDs, the
 extension fails closed unless the user explicitly configures trust in
 server-side room membership. Runtime registrations and room mappings are
-in-memory only. The default MUC room template uses a short readable agent slug
-plus an eight-character lowercase-base32, domain-separated BLAKE3 disambiguator
-over the full global durable agent id. Operators may configure the complete
+in-memory only. The default MUC room template uses the full global durable agent
+id plus an eight-character lowercase-base32, domain-separated BLAKE3
+disambiguator over that id. Operators may configure the complete
 localpart template and knowingly omit that collision protection; this accepts
 cross-process and restart room-reuse risk. If rendered rooms collide in-process
 after XMPP JID normalization, registration must fail closed instead of overwriting
