@@ -140,6 +140,41 @@ impl SlackClient for FailingAuthClient {
     }
 }
 
+/// Scripted identity client used to verify fail-closed outage and recovery
+/// behavior.
+struct IdentitySequenceClient {
+    /// Ordered users.info results consumed by calls.
+    results: Mutex<VecDeque<Result<bool, String>>>,
+}
+
+impl SlackClient for IdentitySequenceClient {
+    fn open_socket(&self, _cfg: &RuntimeConfig) -> Result<String, String> {
+        unreachable!("identity-only test client")
+    }
+
+    fn auth_test(&self, _cfg: &RuntimeConfig) -> Result<String, String> {
+        unreachable!("identity-only test client")
+    }
+
+    fn is_human_user(&self, _cfg: &RuntimeConfig, _user_id: &str) -> Result<bool, String> {
+        self.results
+            .lock()
+            .expect("lock identity sequence")
+            .pop_front()
+            .expect("scripted identity result")
+    }
+
+    fn post_message(
+        &self,
+        _cfg: &RuntimeConfig,
+        _channel_id: &str,
+        _text: &str,
+        _thread_ts: Option<&str>,
+    ) -> Result<PostedMessage, String> {
+        unreachable!("identity-only test client")
+    }
+}
+
 fn cfg() -> RuntimeConfig {
     RuntimeConfig {
         app_token: "xapp-test".to_owned(),
@@ -2413,4 +2448,153 @@ fn token_and_socket_diagnostics_are_sanitized() {
     assert!(socket_error.len() <= MAX_DIAGNOSTIC_BYTES + 3);
     assert!(validate_socket_url("ws://example.com/socket?ticket=secret").is_err());
     assert!(validate_socket_url("ws://127.0.0.1:9000/socket?ticket=secret").is_ok());
+}
+
+/// A users.info outage rejects every occurrence, reports only once per
+/// consecutive failure episode, bounds/redacts the notice, and reports again
+/// after a successful verification establishes recovery.
+#[test]
+fn identity_failure_notice_is_bounded_redacted_and_resets_after_recovery() {
+    let secret_error = format!("users.info xoxb-test {}", "detail".repeat(200));
+    let client = Arc::new(IdentitySequenceClient {
+        results: Mutex::new(
+            [
+                Err(secret_error.clone()),
+                Err(secret_error.clone()),
+                Ok(true),
+                Err(secret_error),
+            ]
+            .into_iter()
+            .collect(),
+        ),
+    });
+    let (tx, rx) = mpsc::channel();
+    let ext = Extension::new(client, tx);
+    assert!(!ext.verified_human(&cfg(), "U123"));
+    assert!(!ext.verified_human(&cfg(), "U123"));
+    assert!(ext.verified_human(&cfg(), "U123"));
+    assert!(!ext.verified_human(&cfg(), "U123"));
+
+    let notices = rx
+        .try_iter()
+        .filter_map(|message| match message {
+            HarnessInputMessage::Emit(emit) => match *emit.event {
+                Event::HarnessNotice(notice) => Some(notice),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(notices.len(), 2);
+    for notice in notices {
+        assert!(!notice.always_show);
+        assert_eq!(notice.level, NoticeLevel::Warning);
+        assert_eq!(notice.kind, tau_proto::notice_kind::EXTENSION_NOTICE);
+        assert!(!notice.message.contains("xoxb-test"));
+        assert!(notice.message.len() <= MAX_DIAGNOSTIC_BYTES + 3);
+    }
+}
+
+/// Envelope ids remain available for the exact wire ACK while diagnostics
+/// expose only ACK status and supported-event state. A failed required ACK must
+/// also return before the decoded event can route, preventing unacknowledged
+/// deliveries from creating duplicate ingress.
+#[test]
+fn socket_ack_diagnostics_are_safe_and_failure_prevents_routing() {
+    let (ext, rx, _client) = extension();
+    let secret_id = "env-secret-payload-token".repeat(50);
+    let text = serde_json::json!({
+        "type": "events_api",
+        "envelope_id": secret_id,
+        "payload": {"type": "unsupported"}
+    })
+    .to_string();
+    let action = handle_socket_text(&ext, &text);
+    assert_eq!(action.ack_envelope_id.as_deref(), Some(secret_id.as_str()));
+    assert!(action.event.is_none());
+
+    let trace = SharedWriter::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::TRACE)
+        .without_time()
+        .with_ansi(false)
+        .with_writer({
+            let trace = trace.clone();
+            move || trace.clone()
+        })
+        .finish();
+    tracing::subscriber::with_default(subscriber, || {
+        log_socket_ack_sent(false);
+        assert_eq!(
+            finish_socket_ack(Err("wire closed".to_owned()), true),
+            Err("wire closed".to_owned())
+        );
+    });
+    let output = String::from_utf8(trace.bytes()).expect("UTF-8 trace output");
+    assert!(output.contains("ack=\"sent\""));
+    assert!(output.contains("has_supported_event=false"));
+    assert!(output.contains("ack=\"failed\""));
+    assert!(output.contains("lifecycle=\"degraded\""));
+    assert!(output.contains("has_supported_event=true"));
+    assert!(!output.contains(&secret_id));
+    assert!(!output.contains("payload"));
+    assert!(!output.contains("token"));
+
+    let routed_text = serde_json::json!({
+        "type": "events_api",
+        "envelope_id": secret_id,
+        "payload": {
+            "type": "event_callback",
+            "event": {
+                "type": "app_mention", "channel": "C123", "user": "U123",
+                "text": "<@UBOT123> must-not-route", "ts": "2.0"
+            }
+        }
+    })
+    .to_string();
+    let action = handle_socket_text(&ext, &routed_text);
+    assert!(
+        complete_socket_action(&ext, action, Err("forced ACK write failure".to_owned())).is_err()
+    );
+    assert_no_ingress(&rx);
+}
+
+/// A users.info failure at the real create ingress boundary emits no transport
+/// request, while the next verified occurrence recovers and routes normally.
+#[test]
+fn message_identity_failure_is_fail_closed_then_recovers() {
+    let client = Arc::new(IdentitySequenceClient {
+        results: Mutex::new(
+            [Err("users.info unavailable".to_owned()), Ok(true)]
+                .into_iter()
+                .collect(),
+        ),
+    });
+    let (tx, rx) = mpsc::channel();
+    let ext = Extension::new(client, tx);
+    {
+        let mut state = ext.state.lock().expect("lock state");
+        state.config = Some(cfg());
+        state.registered_agents.insert(agent_id("agent-a"));
+        state.bot_user_id = Some("UBOT123".to_owned());
+        state.capability_active = true;
+    }
+    ext.process_slack_message(slack_message("C123", None, "<@UBOT123> first"));
+    assert_no_ingress(&rx);
+    ext.process_slack_message(slack_message("C123", None, "<@UBOT123> recovered"));
+    let ingress = (0..4)
+        .find_map(
+            |_| match rx.recv_timeout(Duration::from_millis(100)).ok()? {
+                HarnessInputMessage::TransportMessageIngress(request) => Some(request),
+                _ => None,
+            },
+        )
+        .expect("recovered occurrence should emit typed ingress");
+    let MessageOperation::Create {
+        payload: MessagePayload::Text { text, .. },
+    } = &ingress.draft.operation
+    else {
+        panic!("expected create ingress");
+    };
+    assert_eq!(text, "recovered");
 }

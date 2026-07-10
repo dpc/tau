@@ -59,3 +59,8 @@ Slack `listening_scope` defaults to `mentions_only`; `all_messages` expands only
 - Returned Socket Mode websocket URLs are validated and never logged. Production
   websocket URLs must use WSS; plaintext WS is accepted only for loopback tests.
 - All model-visible and log-visible diagnostics are bounded and token-redacted.
+- Socket Mode connection/hello and envelope ACK diagnostics contain only
+  lifecycle state, ACK status, and supported-event presence, never envelope
+  ids, payload, or token text. The first `users.info` failure in each consecutive
+  failure episode produces a bounded, redacted log warning and extension notice;
+  each unverifiable occurrence remains fail-closed.

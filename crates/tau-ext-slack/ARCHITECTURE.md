@@ -80,3 +80,13 @@ receive loop races incoming Slack frames against a shared shutdown notification,
 and reconnect backoff sleeps race the full backoff delay against the same signal.
 This keeps normal reconnect timing unchanged while allowing Tau shutdown to wake
 an idle connection or long backoff immediately.
+
+Socket Mode observability is a security invariant. Operator logs expose
+connected, hello, ACK sent/failed, degraded, and reconnecting milestones plus
+static fail-closed rejection categories. They never expose websocket URLs,
+tokens, payloads, Slack user ids, or envelope ids; the exact envelope id exists
+only in the ACK wire message. Expected policy rejections are debug-level to
+avoid warning spam. API and worker degradation is warning-level, bounded and
+token-redacted. A users.info outage emits one warning per consecutive failure
+episode, rejects each affected occurrence, and rearms only after a successful
+users.info response.

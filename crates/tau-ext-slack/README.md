@@ -49,6 +49,12 @@ Required Slack bot events are `app_mention`, `message.channels`, `message.im`,
 Client Secret, and Signing Secret are not used by this Socket Mode
 MVP.
 
+Operator logs distinguish Socket Mode connect/hello, envelope ACK status, and
+degraded/reconnecting workers without logging Slack payloads, identifiers, or
+secrets. A `users.info` failure logs and emits one bounded warning per
+consecutive failure episode; each affected occurrence is rejected and a later
+successful verification resets the warning limiter.
+
 ## Usage
 
 Ask an agent to call `slack_register` with `enabled: true`. Allowed Slack users

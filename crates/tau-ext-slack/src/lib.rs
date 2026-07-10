@@ -32,6 +32,31 @@ use posted_message_cache::{PostedMessageCache, PostedMessageKey, PostedMessageOw
 /// Tracing target used by this extension.
 pub const LOG_TARGET: &str = "slack";
 
+/// Record an expected fail-closed ingress decision without untrusted
+/// identifiers.
+fn log_ingress_rejection(category: &'static str) {
+    tracing::debug!(target: LOG_TARGET, rejection = category, "Slack ingress occurrence rejected");
+}
+
+/// Record a successful ACK without including its untrusted envelope identity.
+fn log_socket_ack_sent(has_supported_event: bool) {
+    tracing::debug!(target: LOG_TARGET, ack = "sent", has_supported_event, "Slack Socket Mode envelope acknowledged");
+}
+
+/// Finish one ACK attempt, surfacing failure without untrusted envelope data.
+fn finish_socket_ack(result: Result<(), String>, has_supported_event: bool) -> Result<(), String> {
+    match result {
+        Ok(()) => {
+            log_socket_ack_sent(has_supported_event);
+            Ok(())
+        }
+        Err(error) => {
+            tracing::warn!(target: LOG_TARGET, lifecycle = "degraded", ack = "failed", has_supported_event, "Slack Socket Mode envelope acknowledgement failed");
+            Err(error)
+        }
+    }
+}
+
 /// Internal tool name for registering the current agent as a Slack listener.
 pub const REGISTER_TOOL_NAME: &str = "slack_register";
 
@@ -493,6 +518,9 @@ struct State {
     worker_started: bool,
     worker_online: bool,
     worker_startup_failure_reported: bool,
+    /// Whether the current consecutive verified-human API failure episode was
+    /// reported.
+    identity_failure_reported: bool,
     bot_user_id: Option<String>,
     duplicate_events: DuplicateCache,
     /// Recent bridge-authored Slack posts and their owning agents.
@@ -868,6 +896,43 @@ impl Extension {
         }
     }
 
+    fn verified_human(&self, cfg: &RuntimeConfig, user_id: &str) -> bool {
+        match self.client.is_human_user(cfg, user_id) {
+            Ok(is_human) => {
+                self.state
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .identity_failure_reported = false;
+                if !is_human {
+                    log_ingress_rejection("sender_not_human");
+                }
+                is_human
+            }
+            Err(error) => {
+                let should_report = {
+                    let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+                    !std::mem::replace(&mut state.identity_failure_reported, true)
+                };
+                if should_report {
+                    tracing::warn!(target: LOG_TARGET, rejection = "identity_api_failure", error = %sanitize_diagnostic(&error, cfg), "Slack ingress occurrence rejected; users.info verification degraded");
+                    self.output.emit(Event::HarnessNotice(HarnessNotice {
+                        kind: tau_proto::notice_kind::EXTENSION_NOTICE.to_owned(),
+                        message: bounded_text(
+                            &format!(
+                                "Slack rejected one ingress occurrence because users.info verification failed (check users:read scope and app reinstall): {}",
+                                sanitize_diagnostic(&error, cfg)
+                            ),
+                            MAX_DIAGNOSTIC_BYTES,
+                        ),
+                        level: NoticeLevel::Warning,
+                        always_show: false,
+                    }));
+                }
+                false
+            }
+        }
+    }
+
     fn handle_send(&self, invoke: ToolStarted) -> Option<Event> {
         if let Err(message) = validate_object_fields(&invoke.arguments, &["message", "reply_to"]) {
             return Some(tool_error(invoke, message));
@@ -1029,6 +1094,7 @@ impl Extension {
                 .as_deref()
                 .is_some_and(|ts| validate_slack_ts(ts).is_err())
         {
+            log_ingress_rejection("malformed_event");
             return;
         }
         let cfg = {
@@ -1040,11 +1106,12 @@ impl Extension {
                 || state.bot_user_id.as_deref() == Some(reaction.user_id.as_str())
                 || !is_authorized_conversation(&state, &cfg, &reaction.channel_id)
             {
+                log_ingress_rejection("reaction_policy");
                 return;
             }
             cfg
         };
-        if self.client.is_human_user(&cfg, &reaction.user_id) != Ok(true) {
+        if !self.verified_human(&cfg, &reaction.user_id) {
             return;
         }
         let (cfg, agent_id, thread_ts, direct) = {
@@ -1056,13 +1123,16 @@ impl Extension {
                 || state.bot_user_id.as_deref() == Some(reaction.user_id.as_str())
                 || !is_authorized_conversation(&state, &cfg, &reaction.channel_id)
             {
+                log_ingress_rejection("reaction_route");
                 return;
             }
             let key = PostedMessageKey::new(&reaction.channel_id, &reaction.message_ts);
             let Some(owner) = state.posted_messages.get(&key) else {
+                log_ingress_rejection("reaction_unknown_target");
                 return;
             };
             if reaction.thread_ts.is_some() && reaction.thread_ts != owner.thread_ts {
+                log_ingress_rejection("thread_mismatch");
                 return;
             }
             if !state.registered_agents.contains(&owner.agent_id) {
@@ -1131,6 +1201,7 @@ impl Extension {
                 .as_deref()
                 .is_some_and(|thread| validate_slack_ts(thread).is_err())
         {
+            log_ingress_rejection("malformed_event");
             return;
         }
         let (cfg, owner) = {
@@ -1142,25 +1213,29 @@ impl Extension {
                 || state.bot_user_id.as_deref() == Some(edit.editor_user_id.as_str())
                 || !is_authorized_conversation(&state, &cfg, &edit.channel_id)
             {
+                log_ingress_rejection("edit_policy");
                 return;
             }
             let key = PostedMessageKey::new(&edit.channel_id, &edit.message_ts);
             let Some(owner) = state.incoming_messages.get(&key).cloned() else {
+                log_ingress_rejection("edit_unknown_target");
                 return;
             };
             if owner.user_id != edit.editor_user_id
                 || owner.conversation.thread_ts != edit.thread_ts
                 || !state.registered_agents.contains(&owner.agent_id)
             {
+                log_ingress_rejection("edit_owner_or_thread");
                 return;
             }
             (cfg, owner)
         };
-        if self.client.is_human_user(&cfg, &edit.editor_user_id) != Ok(true) {
+        if !self.verified_human(&cfg, &edit.editor_user_id) {
             return;
         }
         let text = edit.text.trim();
         if text.is_empty() || text.len() > cfg.max_message_bytes {
+            log_ingress_rejection("malformed_text");
             return;
         }
         let dedup_key = edit.event_id.clone().unwrap_or_else(|| {
@@ -1200,22 +1275,30 @@ impl Extension {
 
     fn process_slack_message(&self, message: SlackMessage) {
         if message.bot_id.is_some() || message.subtype.is_some() {
+            log_ingress_rejection(if message.bot_id.is_some() {
+                "bot_message"
+            } else {
+                "unsupported_subtype"
+            });
             return;
         }
         let Some(cfg) = self.config_for_allowed_message(&message) else {
             return;
         };
         if self.is_self_message(&message) {
+            log_ingress_rejection("bot_self");
             return;
         }
         if !matches!(message.event_type.as_str(), "app_mention" | "message") {
+            log_ingress_rejection("unsupported_event");
             return;
         }
         let is_dm = message.channel_type.as_deref() == Some("im");
         if !self.accepts_event_conversation(&cfg, &message, is_dm) {
+            log_ingress_rejection("conversation_or_trigger");
             return;
         }
-        if self.client.is_human_user(&cfg, &message.user_id) != Ok(true) {
+        if !self.verified_human(&cfg, &message.user_id) {
             return;
         }
         let Some(mut text) = self.trimmed_message_text(&cfg, &message) else {
@@ -1245,12 +1328,14 @@ impl Extension {
             ) || command.starts_with('/')
         }) && !cfg.allowed_user_ids.contains(&message.user_id)
         {
+            log_ingress_rejection("sender_control_policy");
             return;
         }
         if command.is_some()
             && !matches!(command, Some("to" | "/to"))
             && !self.insert_command_duplicate(&message)
         {
+            log_ingress_rejection("command_dedup");
             return;
         }
         if self.rejects_unlinked_command(&cfg, &message, command) {
@@ -1288,7 +1373,7 @@ impl Extension {
         if cfg.sender_policy(&message.user_id).is_some() {
             Some(cfg)
         } else {
-            tracing::warn!(target: LOG_TARGET, user_id = %message.user_id, "ignoring Slack message denied by security_mode");
+            log_ingress_rejection("sender_policy");
             None
         }
     }
@@ -1852,12 +1937,13 @@ fn socket_worker_loop(
     while !shutdown.is_requested() {
         match runtime.block_on(socket_worker_once(&ext, &cfg, startup.take())) {
             Ok(WorkerOutcome::ReconnectNow) => {
+                tracing::warn!(target: LOG_TARGET, lifecycle = "reconnecting", "Slack Socket Mode connection ended; reconnecting");
                 backoff = INITIAL_RECONNECT_BACKOFF;
             }
             Ok(WorkerOutcome::Shutdown) => break,
             Err(message) => {
                 ext.report_worker_startup_failure_once(&cfg, &message);
-                tracing::warn!(target: LOG_TARGET, error = %message, "Slack Socket Mode worker failed");
+                tracing::warn!(target: LOG_TARGET, lifecycle = "degraded", error = %sanitize_diagnostic(&message, &cfg), "Slack Socket Mode worker failed; reconnecting");
                 if runtime.block_on(shutdown.wait_timeout(backoff)) {
                     break;
                 }
@@ -1910,6 +1996,7 @@ async fn socket_worker_once(
                 &ws_url,
             )
         })?;
+    tracing::info!(target: LOG_TARGET, lifecycle = "connected", "Slack Socket Mode connected");
     loop {
         let frame = tokio::select! {
             biased;
@@ -1956,13 +2043,26 @@ async fn handle_socket_text_frame(
     text: &str,
 ) -> Result<Option<WorkerOutcome>, String> {
     if text.len() > MAX_SOCKET_FRAME_BYTES {
-        tracing::warn!(target: LOG_TARGET, "dropping oversized Slack Socket Mode frame");
+        tracing::warn!(target: LOG_TARGET, rejection = "oversized_frame", "dropping Slack Socket Mode frame");
         return Ok(None);
     }
     let action = handle_socket_text(ext, text);
-    if let Some(envelope_id) = &action.ack_envelope_id {
-        send_socket_ack(cfg, ws, envelope_id).await?;
-    }
+    let ack_result = if let Some(envelope_id) = &action.ack_envelope_id {
+        let supported_event = action.event.is_some();
+        finish_socket_ack(send_socket_ack(cfg, ws, envelope_id).await, supported_event)
+    } else {
+        Ok(())
+    };
+    complete_socket_action(ext, action, ack_result)
+}
+
+/// Route a decoded action only after its required ACK succeeds.
+fn complete_socket_action(
+    ext: &Extension,
+    action: SocketAction,
+    ack_result: Result<(), String>,
+) -> Result<Option<WorkerOutcome>, String> {
+    ack_result?;
     let outcome = action.outcome();
     if let Some(event) = action.event {
         match event {
@@ -2008,7 +2108,7 @@ impl SocketAction {
 
 fn handle_socket_text(ext: &Extension, text: &str) -> SocketAction {
     let Ok(value) = serde_json::from_str::<serde_json::Value>(text) else {
-        tracing::warn!(target: LOG_TARGET, "dropping invalid Slack Socket Mode JSON");
+        tracing::warn!(target: LOG_TARGET, rejection = "malformed_frame", "dropping invalid Slack Socket Mode JSON");
         return SocketAction::default();
     };
     let ack_envelope_id = value
@@ -2025,6 +2125,7 @@ fn handle_socket_text(ext: &Extension, text: &str) -> SocketAction {
         Some("hello") => {
             let mut state = ext.state.lock().unwrap_or_else(|e| e.into_inner());
             state.worker_online = true;
+            tracing::info!(target: LOG_TARGET, lifecycle = "hello", "Slack Socket Mode hello received");
         }
         Some("disconnect") => {
             let reason = value.get("reason").and_then(|value| value.as_str());
