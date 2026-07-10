@@ -42,7 +42,7 @@ impl Harness {
                 let role = self.selected_role.clone();
                 self.create_durable_user_agent(session_id, &role)
             });
-        self.dispatch_prompt_for_agent(&agent_id, PendingPrompt::user(text))
+        self.dispatch_prompt_for_agent(&agent_id, PendingPrompt::human_ui(text))
     }
 
     /// Publish one pending prompt as an `AgentPromptSubmitted` event on one
@@ -91,6 +91,7 @@ impl Harness {
                 text: prompt.text,
                 message_class: prompt.message_class,
                 originator,
+                submission_source: prompt.submission_source,
                 display_name: self.agent_display_name_for_cid(agent_id),
                 ctx_id: prompt.ctx_id,
             }),
@@ -179,6 +180,18 @@ impl Harness {
                 return;
             }
 
+            let has_message_wake = self
+                .agents
+                .get(&agent_id)
+                .is_some_and(|agent| !agent.pending_message_wakes.is_empty());
+            if has_message_wake {
+                if let Some(agent) = self.agents.get_mut(&agent_id) {
+                    agent.pending_message_wakes.clear();
+                }
+                self.dispatch_prompt_after_publish_idle(&agent_id);
+                continue;
+            }
+
             let prompt = self
                 .pop_next_runnable_prompt(&agent_id)
                 .expect("runnable agent has a prompt");
@@ -198,9 +211,11 @@ impl Harness {
         self.agents
             .iter()
             .find(|(agent_id, conv)| {
-                conv.pending_prompts
+                (conv
+                    .pending_prompts
                     .iter()
                     .any(|prompt| !prompt.is_passive_background_completion())
+                    || !conv.pending_message_wakes.is_empty())
                     && matches!(conv.turn_state, AgentTurnState::Idle)
                     && !self.has_deferred_prompt_dispatch_for(agent_id)
             })

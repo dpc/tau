@@ -140,6 +140,18 @@ impl EventLog {
             .map(|(_, entry)| entry.clone())
     }
 
+    /// Returns all test-observed committed events in runtime sequence order.
+    #[cfg(test)]
+    pub(crate) fn entries_for_test(&self) -> Vec<LogEntry> {
+        self.inner
+            .lock()
+            .expect("event log mutex poisoned")
+            .entries
+            .values()
+            .cloned()
+            .collect()
+    }
+
     /// Returns the next runtime event-log sequence. Used by tests to assert
     /// that no event-log sequence was consumed across a section of code.
     #[cfg(test)]

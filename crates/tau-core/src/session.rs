@@ -19,6 +19,42 @@ use tau_proto::{
     ToolResultStatus, ToolType, UnixMicros,
 };
 
+fn message_envelope_item(
+    direction: tau_proto::MessageDirection,
+    envelope: &tau_proto::MessageEnvelope,
+) -> tau_proto::MessageEnvelopeItem {
+    let source_label = match &envelope.source {
+        tau_proto::MessageEndpoint::Agent {
+            agent_id,
+            display_name,
+            ..
+        } => display_name.clone().unwrap_or_else(|| agent_id.to_string()),
+        tau_proto::MessageEndpoint::User => "user".to_owned(),
+        tau_proto::MessageEndpoint::External {
+            stable_id,
+            display_name,
+            ..
+        } => display_name
+            .clone()
+            .or_else(|| stable_id.clone())
+            .unwrap_or_else(|| "external sender".to_owned()),
+    };
+    tau_proto::MessageEnvelopeItem {
+        direction,
+        envelope: envelope.clone(),
+        model_presentation: tau_proto::MessageModelPresentation {
+            transport_label: envelope.transport.name.clone(),
+            source_label,
+            conversation_label: envelope.conversation.as_ref().and_then(|conversation| {
+                conversation
+                    .display_name
+                    .clone()
+                    .or_else(|| conversation.stable_id.clone())
+            }),
+        },
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AgentEventValidationError {
     message: String,
@@ -150,6 +186,11 @@ pub enum AgentEntry {
         /// Message body.
         message: String,
     },
+    /// Canonical v2 transport message preserved as a typed provider item.
+    MessageEnvelope {
+        /// Direction, envelope, and harness-derived presentation policy.
+        item: Box<tau_proto::MessageEnvelopeItem>,
+    },
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -262,6 +303,9 @@ pub struct AgentTree {
     materialized_prompt_count: u64,
     pending_tool_rounds: HashMap<NodeId, PendingToolRound>,
     tool_call_rounds: HashMap<ToolCallId, NodeId>,
+    /// Message facts committed while provider tool adjacency is open. They are
+    /// materialized immediately after the terminal tool-result node.
+    pending_message_envelopes: Vec<tau_proto::MessageEnvelopeItem>,
     /// Globally unique tool calls that already have one real background
     /// completion event.
     background_completed_tool_calls: HashSet<ToolCallId>,
@@ -339,6 +383,24 @@ impl AgentTree {
     #[must_use]
     pub fn current_branch(&self) -> Vec<&AgentEntry> {
         self.branch_from(self.head)
+    }
+
+    /// Returns every materialized transcript entry in durable append order,
+    /// independent of the currently selected branch.
+    pub fn all_entries(&self) -> impl Iterator<Item = &AgentEntry> {
+        self.nodes.iter().map(|node| &node.entry)
+    }
+
+    /// Returns canonical message items from materialized nodes and durable
+    /// facts deferred behind an open provider tool round.
+    pub fn all_message_envelopes(&self) -> impl Iterator<Item = &tau_proto::MessageEnvelopeItem> {
+        self.nodes
+            .iter()
+            .filter_map(|node| match &node.entry {
+                AgentEntry::MessageEnvelope { item } => Some(item.as_ref()),
+                _ => None,
+            })
+            .chain(self.pending_message_envelopes.iter())
     }
 
     /// Returns the entries along the branch ending at `head` (root to
@@ -604,6 +666,7 @@ impl AgentTree {
             materialized_prompt_count: 0,
             pending_tool_rounds: HashMap::new(),
             tool_call_rounds: HashMap::new(),
+            pending_message_envelopes: Vec::new(),
             background_completed_tool_calls: HashSet::new(),
         };
         for entry in events {
@@ -754,6 +817,22 @@ impl AgentTree {
             Event::AgentMessageReceived(message) => self
                 .agent_message_entry_from_received(message)
                 .map(|entry| self.append_node_at(parent, entry)),
+            Event::AgentMessageIncoming(message) if message.recipient_id == self.agent_id => self
+                .record_message_envelope(
+                    parent,
+                    Box::new(message_envelope_item(
+                        tau_proto::MessageDirection::Incoming,
+                        &message.envelope,
+                    )),
+                ),
+            Event::AgentMessageOutgoing(message) if message.sender_id == self.agent_id => self
+                .record_message_envelope(
+                    parent,
+                    Box::new(message_envelope_item(
+                        tau_proto::MessageDirection::Outgoing,
+                        &message.envelope,
+                    )),
+                ),
             Event::ProviderResponseFinished(response) => {
                 Some(self.apply_provider_response_finished(parent, response))
             }
@@ -776,6 +855,18 @@ impl AgentTree {
                 })],
             },
         )
+    }
+
+    fn record_message_envelope(
+        &mut self,
+        parent: Option<NodeId>,
+        item: Box<tau_proto::MessageEnvelopeItem>,
+    ) -> Option<NodeId> {
+        if !self.pending_tool_rounds.is_empty() {
+            self.pending_message_envelopes.push(*item);
+            return None;
+        }
+        Some(self.append_node_at(parent, AgentEntry::MessageEnvelope { item }))
     }
 
     fn append_compaction_trigger(&mut self, parent: Option<NodeId>) -> NodeId {
@@ -1008,6 +1099,12 @@ impl AgentTree {
             {
                 Some(Ok(()))
             }
+            Event::AgentMessageIncoming(message) if message.recipient_id == self.agent_id => {
+                Some(Ok(()))
+            }
+            Event::AgentMessageOutgoing(message) if message.sender_id == self.agent_id => {
+                Some(Ok(()))
+            }
             _ => None,
         }
     }
@@ -1075,6 +1172,8 @@ impl AgentTree {
                 | Event::AgentCompactionTriggered(_)
                 | Event::AgentMessageSent(_)
                 | Event::AgentMessageReceived(_)
+                | Event::AgentMessageIncoming(_)
+                | Event::AgentMessageOutgoing(_)
                 | Event::AgentHeadMoved(_)
                 | Event::ProviderResponseFinished(_)
         )
@@ -1157,10 +1256,19 @@ impl AgentTree {
                     .expect("terminal round missing tool result")
             })
             .collect();
-        Some(self.append_node_at(
+        let mut head = self.append_node_at(
             Some(round.assistant_node_id),
             AgentEntry::ToolResults { items },
-        ))
+        );
+        for item in std::mem::take(&mut self.pending_message_envelopes) {
+            head = self.append_node_at(
+                Some(head),
+                AgentEntry::MessageEnvelope {
+                    item: Box::new(item),
+                },
+            );
+        }
+        Some(head)
     }
 
     fn validate_background_tool_completion(

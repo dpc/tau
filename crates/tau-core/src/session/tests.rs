@@ -14,6 +14,7 @@ fn prompt_event(agent_id: AgentId) -> Event {
         text: "hello".to_owned(),
         message_class: tau_proto::PromptMessageClass::User,
         originator: PromptOriginator::User,
+        submission_source: Default::default(),
         display_name: None,
         ctx_id: None,
     })
@@ -23,6 +24,45 @@ fn validation_error(tree: &AgentTree, event: Event) -> String {
     tree.validate_event(&event)
         .expect_err("event should be rejected")
         .to_string()
+}
+
+fn incoming_message(agent_id: AgentId) -> Event {
+    Event::AgentMessageIncoming(tau_proto::AgentMessageIncoming {
+        recipient_id: agent_id.clone(),
+        envelope: tau_proto::MessageEnvelope {
+            message_id: tau_proto::MessageId::new("msg-during-tools"),
+            transport: tau_proto::MessageTransportRef {
+                name: "slack".to_owned(),
+                instance: Some(tau_proto::ExtensionName::from("std-slack")),
+            },
+            source: tau_proto::MessageEndpoint::External {
+                stable_id: Some("U1".to_owned()),
+                display_name: None,
+                actor_kind: tau_proto::ExternalActorKind::Human,
+            },
+            destination: tau_proto::MessageEndpoint::Agent {
+                session_id: None,
+                agent_id,
+                display_name: None,
+            },
+            conversation: None,
+            operation: tau_proto::MessageOperation::Create {
+                payload: tau_proto::MessagePayload::Text {
+                    text: "during tools".to_owned(),
+                    format: tau_proto::TextFormat::Plain,
+                },
+            },
+            trust: tau_proto::MessageTrust {
+                content: tau_proto::MessageContentTrust::UntrustedExternal,
+                identity: tau_proto::SenderIdentityAssurance::VerifiedAccount,
+                policy: tau_proto::SenderPolicyStatus::Allowlisted,
+            },
+            external_identity: None,
+            ordering: None,
+            occurred_at: None,
+            reply_path: None,
+        },
+    })
 }
 
 /// Ensures metadata set/unset facts fold into side state without creating
@@ -123,6 +163,14 @@ fn provider_tool_round_waits_for_all_terminal_results() {
     assert!(
         tree.apply_event_at(
             AgentEventParent::InheritHead,
+            &incoming_message(tree.agent_id.clone()),
+        )
+        .is_none(),
+        "message must wait until the tool result preserves provider adjacency"
+    );
+    assert!(
+        tree.apply_event_at(
+            AgentEventParent::InheritHead,
             &Event::ProviderToolResult(tau_proto::ToolResult {
                 call_id: second_call_id.clone(),
                 tool_name: ToolName::new("second_tool"),
@@ -137,7 +185,7 @@ fn provider_tool_round_waits_for_all_terminal_results() {
     );
     assert_eq!(tree.head(), Some(assistant_node_id));
 
-    let tool_results_node_id = tree
+    let final_node_id = tree
         .apply_event_at(
             AgentEventParent::InheritHead,
             &Event::ProviderToolError(tau_proto::ToolError {
@@ -151,8 +199,13 @@ fn provider_tool_round_waits_for_all_terminal_results() {
             }),
         )
         .expect("final terminal result should close the round");
+    let final_node = tree.node(final_node_id).expect("message node should exist");
+    assert!(matches!(
+        final_node.entry,
+        AgentEntry::MessageEnvelope { .. }
+    ));
     let tool_results_node = tree
-        .node(tool_results_node_id)
+        .node(final_node.parent_id.expect("message follows tool results"))
         .expect("tool results node should exist");
     assert_eq!(tool_results_node.parent_id, Some(assistant_node_id));
 
@@ -168,7 +221,7 @@ fn provider_tool_round_waits_for_all_terminal_results() {
     assert_eq!(items[1].call_id, second_call_id);
     assert!(matches!(items[1].status, ToolResultStatus::Success));
     assert!(
-        tree.unresolved_foreground_tool_calls_from(Some(tool_results_node_id))
+        tree.unresolved_foreground_tool_calls_from(Some(final_node_id))
             .is_empty()
     );
 }

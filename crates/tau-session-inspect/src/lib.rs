@@ -209,6 +209,7 @@ pub fn format_session_entry(entry: &AgentEntry) -> String {
             };
             format!("{event_name}: {message}")
         }
+        AgentEntry::MessageEnvelope { item } => item.render_provider_text(),
     }
 }
 

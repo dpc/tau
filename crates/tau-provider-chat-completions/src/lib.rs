@@ -1180,10 +1180,12 @@ fn append_context_block(block: &tau_proto::ContextBlock, messages: &mut Vec<serd
     match block {
         tau_proto::ContextBlock::UserInput(block) => {
             for item in &block.items {
-                let ContextItem::Message(message) = item else {
-                    continue;
+                let message = match item {
+                    ContextItem::Message(message) => message.clone(),
+                    ContextItem::MessageEnvelope(envelope) => envelope.to_provider_message(),
+                    _ => continue,
                 };
-                let text = message_text(message);
+                let text = message_text(&message);
                 if text.is_empty() || message.role == ContextRole::User && text.trim().is_empty() {
                     continue;
                 }
@@ -1210,6 +1212,12 @@ fn append_context_block(block: &tau_proto::ContextBlock, messages: &mut Vec<serd
                     }
                     ContextItem::Message(message) if message.role == ContextRole::Assistant => {
                         text.push_str(&message_text(message));
+                    }
+                    ContextItem::MessageEnvelope(envelope) => {
+                        let message = envelope.to_provider_message();
+                        if message.role == ContextRole::Assistant {
+                            text.push_str(&message_text(&message));
+                        }
                     }
                     ContextItem::ToolCall(call) => {
                         tool_calls.push(serde_json::json!({

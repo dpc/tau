@@ -80,6 +80,8 @@ pub(crate) struct Agent {
     /// independently; the provider extension
     /// serializes its own consumption of `AgentPromptCreated`.
     pub(crate) pending_prompts: VecDeque<PendingPrompt>,
+    /// Canonical incoming facts waiting to activate one coalesced model turn.
+    pub(crate) pending_message_wakes: VecDeque<tau_proto::MessageId>,
     /// Pending user/control-plane request to stop this conversation at
     /// the next stable turn boundary. Stored like queued prompts so
     /// races between provider responses and UI cancel events are
@@ -164,7 +166,7 @@ pub(crate) struct Agent {
 }
 
 /// Where a queued prompt came from.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum PendingPromptSource {
     /// A normal user or harness steering prompt.
     General,
@@ -191,6 +193,8 @@ pub(crate) struct PendingPrompt {
     /// Source marker for lifecycle decisions that must not confuse internal
     /// prompts.
     pub(crate) source: PendingPromptSource,
+    /// Harness-stamped provenance carried into the durable prompt fact.
+    pub(crate) submission_source: tau_proto::PromptSubmissionSource,
     /// Optional caller correlation id carried with this exact prompt.
     pub(crate) ctx_id: Option<String>,
 }
@@ -220,16 +224,38 @@ impl PendingPrompt {
             text,
             message_class: PromptMessageClass::User,
             source: PendingPromptSource::General,
+            submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
             ctx_id: None,
         }
     }
 
+    /// Create a prompt accepted from the authenticated interactive UI path.
+    pub(crate) fn human_ui(text: String) -> Self {
+        let mut prompt = Self::user(text);
+        prompt.submission_source = tau_proto::PromptSubmissionSource::HumanUi;
+        prompt
+    }
+
+    /// Create a watcher-notifying prompt from the interactive UI path.
+    pub(crate) fn human_ui_watch_notified(text: String) -> Self {
+        let mut prompt = Self::user(text);
+        prompt.source = PendingPromptSource::WatchNotifiedUser;
+        prompt.submission_source = tau_proto::PromptSubmissionSource::HumanUi;
+        prompt
+    }
+
     /// Create a user-visible queued prompt that should notify active watchers.
-    pub(crate) fn watch_notified_user(text: String) -> Self {
+    pub(crate) fn watch_notified_user(
+        text: String,
+        extension_name: tau_proto::ExtensionName,
+    ) -> Self {
         Self {
             text,
             message_class: PromptMessageClass::User,
             source: PendingPromptSource::WatchNotifiedUser,
+            submission_source: tau_proto::PromptSubmissionSource::Extension {
+                name: extension_name,
+            },
             ctx_id: None,
         }
     }
@@ -240,6 +266,7 @@ impl PendingPrompt {
             text,
             message_class: PromptMessageClass::Internal,
             source: PendingPromptSource::General,
+            submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
             ctx_id: None,
         }
     }
@@ -250,6 +277,7 @@ impl PendingPrompt {
             text,
             message_class: PromptMessageClass::Internal,
             source: PendingPromptSource::AgentMessageReceived,
+            submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
             ctx_id: None,
         }
     }
@@ -260,6 +288,7 @@ impl PendingPrompt {
             text,
             message_class: PromptMessageClass::Internal,
             source: PendingPromptSource::LoopGuard,
+            submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
             ctx_id: None,
         }
     }
@@ -271,6 +300,7 @@ impl PendingPrompt {
             text,
             message_class: PromptMessageClass::Internal,
             source: PendingPromptSource::PassiveBackgroundCompletion,
+            submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
             ctx_id: None,
         }
     }
@@ -328,6 +358,7 @@ impl Agent {
             source_connection,
             in_flight_prompt: None,
             pending_prompts: VecDeque::new(),
+            pending_message_wakes: VecDeque::new(),
             pending_cancel: None,
             last_prompt_id: None,
             next_prompt_index: 0,

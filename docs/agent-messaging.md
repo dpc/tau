@@ -1,5 +1,23 @@
 # Agent messaging tool
 
+## External transport foundation
+
+The v2 bridge protocol uses canonical message envelopes instead of
+prefix-formatted user prompts. Built-in Slack, Telegram, and XMPP adapters still
+use their legacy prompt path until separate adapter migrations land; they do not
+yet receive these guarantees. Canonical external content remains
+`untrusted_external` even when its
+account identity is verified and allowlisted. Provider adapters lower the typed
+context item once to an escaped `<tau_message>` boundary; harness routing and UI
+code never infer authority from rendered text.
+
+Reply tools select an extension-private live destination with an opaque
+canonical `reply_to` id. Replayed messages do not restore reply authority.
+The foundation exposes capability registration, durable ingress ack, and
+successful-send completion for bridge migration. The experimental Telegram
+gateway still requires a separate end-to-end pending-delivery/ack journal
+migration before offset advancement can claim durable Tau acceptance.
+
 The harness-owned `message` tool lets an agent send an asynchronous short text note to the user or to another agent. Every successful send is recorded as an `agent.message_sent` sender projection; agent recipients also get a separate `agent.message_received` recipient projection with the same `message_id`. User-recipient messages always render fully; agent-to-agent UI display depends on `/set show-messages`. When shown fully, a message renders as:
 
 ```text

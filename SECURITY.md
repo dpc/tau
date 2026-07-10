@@ -15,6 +15,19 @@ and avoid filing a public issue with exploit details.
 
 ## Harness and extension boundaries
 
+Canonical external-message intake uses source-bound transport capability
+registration and dedicated RPCs. Extension-provided labels or payload can never
+claim `HumanUi`, harness-internal, authenticated Tau-agent, or another extension
+instance authority. External payload always remains untrusted content; identity
+assurance and allowlist/lax routing policy are separate fields.
+
+Canonical `reply_to` ids are opaque selectors, not secrets or bearer
+capabilities. Send completion revalidates the owning live connection, active
+session generation, agent, reply tool, and originating route. Durable facts may
+contain bounded native sender, conversation/thread, event, and message ids
+visible to authorized event subscribers, but never transport credentials or raw
+private route capabilities.
+
 The harness treats extensions as less-trusted peers connected over the Tau
 protocol. For extension-owned persistent data, the harness confines paths to
 per-extension state roots, rejects path traversal and symlink escapes, uses

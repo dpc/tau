@@ -1,5 +1,21 @@
 # Event log reference
 
+## Canonical transport messages
+
+`agent.message_incoming` and `agent.message_outgoing` are harness-owned,
+immutable durable v2 facts carrying a transport-neutral `MessageEnvelope`.
+Extensions register a source-bound capability and use dedicated correlated
+ingress/completion RPCs; they cannot emit either fact. Ingress success is sent
+only after commit. Identical stable-key retries return the original canonical
+id, while conflicting reuse fails closed.
+
+An incoming fact folds directly into typed provider context and creates only a
+payload-free live wake marker. Replay restores and renders context but never
+wakes an agent or activates a reply route. Native identifiers are bounded
+durable metadata. A canonical `reply_to` id is an opaque selector rather than a
+bearer capability and is reauthorized against the live source, session, agent,
+route, and tool at send completion.
+
 The tau bus mostly carries facts: components broadcast what happened, while the
 `ui.*` category carries user-intent requests from attached UIs to the harness.
 Every event has a dotted name `<category>.<call>` and a typed payload defined in

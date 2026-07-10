@@ -1,5 +1,59 @@
 use super::*;
 
+fn test_message_envelope() -> MessageEnvelope {
+    MessageEnvelope {
+        message_id: MessageId::new("msg-1"),
+        transport: MessageTransportRef {
+            name: "slack".to_owned(),
+            instance: Some("std-slack".into()),
+        },
+        source: MessageEndpoint::External {
+            stable_id: Some("U123".to_owned()),
+            display_name: Some("Alice".to_owned()),
+            actor_kind: ExternalActorKind::Human,
+        },
+        destination: MessageEndpoint::Agent {
+            session_id: Some("s1".into()),
+            agent_id: AgentId::parse("agent-a").expect("agent"),
+            display_name: None,
+        },
+        conversation: Some(MessageConversation {
+            kind: ConversationKind::Channel,
+            stable_id: Some("C123".to_owned()),
+            display_name: Some("ops".to_owned()),
+            thread: Some(MessageThread {
+                stable_id: "1.0".to_owned(),
+                root: None,
+            }),
+            reply_to: None,
+        }),
+        operation: MessageOperation::Create {
+            payload: MessagePayload::Text {
+                text: "hello".to_owned(),
+                format: TextFormat::Plain,
+            },
+        },
+        trust: MessageTrust {
+            content: MessageContentTrust::UntrustedExternal,
+            identity: SenderIdentityAssurance::VerifiedAccount,
+            policy: SenderPolicyStatus::Allowlisted,
+        },
+        external_identity: Some(ExternalMessageIdentity {
+            event_id: Some("Ev1".to_owned()),
+            message_id: Some("1.1".to_owned()),
+            revision_id: None,
+            dedup_key: Some("event:Ev1".to_owned()),
+        }),
+        ordering: None,
+        occurred_at: Some(UnixMicros::new(1)),
+        reply_path: Some(MessageReplyPath {
+            tool_name: ToolName::new("slack_send"),
+            selector: ReplySelector::ReplyToMessage,
+            lifetime: ReplyPathLifetime::ActiveSession,
+        }),
+    }
+}
+
 /// Ensures older serialized `extension.skill_available` payloads remain
 /// readable and default to user-invocable/model-invocable behavior.
 #[test]
@@ -407,6 +461,7 @@ fn representative_events() -> Vec<Event> {
             text: "hello".to_owned(),
             message_class: PromptMessageClass::User,
             originator: PromptOriginator::User,
+            submission_source: Default::default(),
             display_name: None,
             ctx_id: None,
         }),
@@ -1328,6 +1383,91 @@ fn representative_directional_messages_round_trip_through_cbor() {
     }
 }
 
+/// Typed message envelopes must round-trip without flattening trust, thread,
+/// native identity, or reply-path metadata into presentation text.
+#[test]
+fn typed_message_envelope_round_trips_json_and_provider_context() {
+    let envelope = test_message_envelope();
+    let value = serde_json::to_value(&envelope).expect("serialize envelope");
+    let decoded: MessageEnvelope = serde_json::from_value(value).expect("decode envelope");
+    assert_eq!(decoded, envelope);
+
+    let item = ContextItem::MessageEnvelope(Box::new(MessageEnvelopeItem {
+        direction: MessageDirection::Incoming,
+        envelope,
+        model_presentation: MessageModelPresentation {
+            transport_label: "Slack".to_owned(),
+            source_label: "Alice (U123)".to_owned(),
+            conversation_label: Some("#ops › thread".to_owned()),
+        },
+    }));
+    let value = serde_json::to_value(&item).expect("serialize context item");
+    assert_eq!(
+        serde_json::from_value::<ContextItem>(value).expect("decode context item"),
+        item
+    );
+}
+
+/// V2 message facts and dedicated directional RPCs must preserve their wire
+/// names and round-trip through the protocol codec.
+#[test]
+fn typed_message_facts_and_rpcs_round_trip() {
+    let envelope = test_message_envelope();
+    let incoming = Event::AgentMessageIncoming(AgentMessageIncoming {
+        recipient_id: AgentId::parse("agent-a").expect("agent"),
+        envelope: envelope.clone(),
+    });
+    assert_eq!(incoming.name(), EventName::AGENT_MESSAGE_INCOMING);
+    assert!(!incoming.defaults_to_transient());
+
+    let outgoing = Event::AgentMessageOutgoing(AgentMessageOutgoing {
+        sender_id: AgentId::parse("agent-a").expect("agent"),
+        envelope: envelope.clone(),
+        acceptance: MessageTransportAcceptance::SubmittedToTransport,
+        in_reply_to: None,
+    });
+    assert_eq!(outgoing.name(), EventName::AGENT_MESSAGE_OUTGOING);
+    assert!(!outgoing.defaults_to_transient());
+
+    let ingress =
+        HarnessInputMessage::TransportMessageIngress(Box::new(TransportMessageIngressRequest {
+            request_id: "req-1".to_owned(),
+            target_agent_id: AgentId::parse("agent-a").expect("agent"),
+            draft: TransportMessageDraft {
+                transport_name: "slack".to_owned(),
+                external_endpoint: envelope.source,
+                conversation: envelope.conversation,
+                operation: envelope.operation,
+                identity_assurance: SenderIdentityAssurance::VerifiedAccount,
+                policy_status: SenderPolicyStatus::Allowlisted,
+                external_identity: envelope.external_identity,
+                ordering: None,
+                occurred_at: envelope.occurred_at,
+                reply_tool: Some(ToolName::new("slack_send")),
+            },
+        }));
+    let mut encoded = Vec::new();
+    encode_message(&mut encoded, &ingress).expect("encode ingress");
+    assert_eq!(
+        decode_harness_input_from_slice(&encoded).expect("decode ingress"),
+        ingress
+    );
+
+    let result =
+        HarnessOutputMessage::TransportMessageIngressResult(TransportMessageIngressResult {
+            request_id: "req-1".to_owned(),
+            message_id: Some(MessageId::new("msg-1")),
+            outcome: Some(TransportMessageIngressOutcome::Accepted),
+            error: None,
+        });
+    let mut encoded = Vec::new();
+    encode_message(&mut encoded, &result).expect("encode result");
+    assert_eq!(
+        decode_harness_output_from_slice(&encoded).expect("decode result"),
+        result
+    );
+}
+
 /// Ensures extension-data path wrappers keep the existing string wire shape
 /// while giving Rust callers semantic path fields.
 #[test]
@@ -2171,6 +2311,7 @@ fn event_defaults_to_transient_marks_progress_kinds() {
             text: "hi".to_owned(),
             message_class: PromptMessageClass::User,
             originator: PromptOriginator::User,
+            submission_source: Default::default(),
             display_name: None,
             ctx_id: None,
         }),

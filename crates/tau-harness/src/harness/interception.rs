@@ -120,6 +120,8 @@ const MUST_PASS_BY_DEFAULT: &[EventName] = &[
     EventName::AGENT_STARTED,
     EventName::AGENT_MESSAGE_SENT,
     EventName::AGENT_MESSAGE_RECEIVED,
+    EventName::AGENT_MESSAGE_INCOMING,
+    EventName::AGENT_MESSAGE_OUTGOING,
     // Agent request life-cycle: the agent extension consumes normal
     // `AgentPromptCreated` turns to know when to talk to the LLM. Dropping
     // one wedges the conversation.
@@ -171,6 +173,8 @@ fn immutable_protected_fact_was_modified(original: &Event, replacement: &Event) 
         Event::AgentStarted(_)
             | Event::AgentMessageSent(_)
             | Event::AgentMessageReceived(_)
+            | Event::AgentMessageIncoming(_)
+            | Event::AgentMessageOutgoing(_)
             | Event::SessionStarted(_)
             | Event::SessionShutdown(_)
             | Event::SessionAgentLoaded(_)
@@ -195,6 +199,7 @@ fn mutable_prompt_routing_identity_was_modified(original: &Event, replacement: &
             original.agent_id != replacement.agent_id
                 || original.message_class != replacement.message_class
                 || original.originator != replacement.originator
+                || original.submission_source != replacement.submission_source
         }
         (
             Event::AgentUserMessageInjected(original),

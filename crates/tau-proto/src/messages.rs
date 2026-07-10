@@ -17,8 +17,10 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    AgentId, AgentMessageId, AgentMessageKind, CborValue, ClientKind, Event, EventSelector,
-    ExtensionName, InterceptionPriority, SessionId, ToolDefinition,
+    AgentId, AgentMessageId, AgentMessageKind, CborValue, ClientKind, CompleteTransportSendRequest,
+    CompleteTransportSendResult, Event, EventSelector, ExtensionName, InterceptionPriority,
+    RegisterTransportCapabilityRequest, RegisterTransportCapabilityResult, SessionId,
+    ToolDefinition, TransportMessageIngressRequest, TransportMessageIngressResult,
 };
 
 // ---------------------------------------------------------------------------
@@ -797,6 +799,9 @@ pub enum HarnessInputMessage {
     ExtensionDataRequest(ExtensionDataRequest),
     ExternalAgentMessage(ExternalAgentMessageRequest),
     ExternalAgentMessageAuth(ExternalAgentMessageAuthRequest),
+    RegisterTransportCapability(RegisterTransportCapabilityRequest),
+    TransportMessageIngress(Box<TransportMessageIngressRequest>),
+    CompleteTransportSend(Box<CompleteTransportSendRequest>),
 }
 
 impl HarnessInputMessage {
@@ -832,6 +837,9 @@ pub enum HarnessOutputMessage {
     ExtensionDataResult(Box<ExtensionDataResult>),
     ExternalAgentMessageResult(ExternalAgentMessageResult),
     ExternalAgentMessageAuthResult(ExternalAgentMessageAuthResult),
+    RegisterTransportCapabilityResult(RegisterTransportCapabilityResult),
+    TransportMessageIngressResult(TransportMessageIngressResult),
+    CompleteTransportSendResult(CompleteTransportSendResult),
 }
 
 impl HarnessOutputMessage {

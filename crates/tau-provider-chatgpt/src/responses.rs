@@ -1845,6 +1845,14 @@ fn convert_context_item(
         ContextItem::Message(msg) if msg.role == ContextRole::Assistant => {
             convert_assistant_message(msg, supports_phase, out);
         }
+        ContextItem::MessageEnvelope(envelope) => {
+            let message = envelope.to_provider_message();
+            if message.role == ContextRole::User {
+                convert_user_message(&message, out);
+            } else if message.role == ContextRole::Assistant {
+                convert_assistant_message(&message, supports_phase, out);
+            }
+        }
         ContextItem::ToolCall(call) => convert_tool_call_item(call, out),
         ContextItem::ToolResult(result) => convert_tool_result_item(result, out),
         ContextItem::ReasoningText(_) => {}

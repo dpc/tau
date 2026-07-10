@@ -1192,6 +1192,7 @@ fn replayed_durable_first_user_prompt_selects_live_agent() {
         text: "hello".to_owned(),
         message_class: tau_proto::PromptMessageClass::User,
         originator: tau_proto::PromptOriginator::User,
+        submission_source: Default::default(),
         display_name: None,
         ctx_id: None,
     }));
@@ -1236,6 +1237,7 @@ fn timer_wakeup_prompt_submitted_renders_visible_marker() {
         text: "Timer `wake` fired: stand up".to_owned(),
         message_class: tau_proto::PromptMessageClass::Internal,
         originator: tau_proto::PromptOriginator::User,
+        submission_source: Default::default(),
         display_name: None,
         ctx_id: Some("timer:wake:1".to_owned()),
     }));
@@ -3075,6 +3077,7 @@ fn replay_learns_side_agent_from_durable_agent_prompt_submission() {
             text: "side task".to_owned(),
             message_class: tau_proto::PromptMessageClass::User,
             originator: originator.clone(),
+            submission_source: Default::default(),
             display_name: None,
             ctx_id: None,
         },

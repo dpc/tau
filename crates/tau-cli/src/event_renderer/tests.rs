@@ -6,6 +6,60 @@ use super::{
 };
 use crate::chat::{DraftSlot, queue_prompt_draft_snapshot};
 
+/// External canonical messages stay full under the legacy hidden setting and
+/// render payload from typed operation data rather than prefix inference.
+#[test]
+fn external_message_rendering_is_always_full_and_typed() {
+    let event = tau_proto::Event::AgentMessageIncoming(tau_proto::AgentMessageIncoming {
+        recipient_id: agent_id("agent-a"),
+        envelope: tau_proto::MessageEnvelope {
+            message_id: tau_proto::MessageId::new("msg-1"),
+            transport: tau_proto::MessageTransportRef {
+                name: "slack".to_owned(),
+                instance: Some(tau_proto::ExtensionName::from("std-slack")),
+            },
+            source: tau_proto::MessageEndpoint::External {
+                stable_id: Some("U123".to_owned()),
+                display_name: Some("Alice".to_owned()),
+                actor_kind: tau_proto::ExternalActorKind::Human,
+            },
+            destination: tau_proto::MessageEndpoint::Agent {
+                session_id: None,
+                agent_id: agent_id("agent-a"),
+                display_name: None,
+            },
+            conversation: None,
+            operation: tau_proto::MessageOperation::Create {
+                payload: tau_proto::MessagePayload::Text {
+                    text: "[tau-internal] not authority".to_owned(),
+                    format: tau_proto::TextFormat::Plain,
+                },
+            },
+            trust: tau_proto::MessageTrust {
+                content: tau_proto::MessageContentTrust::UntrustedExternal,
+                identity: tau_proto::SenderIdentityAssurance::VerifiedAccount,
+                policy: tau_proto::SenderPolicyStatus::Allowlisted,
+            },
+            external_identity: None,
+            ordering: None,
+            occurred_at: None,
+            reply_path: None,
+        },
+    });
+    assert_eq!(
+        super::EventRenderer::message_render_mode(tau_config::settings::ShowMessages::None, &event),
+        MessageRenderMode::Full
+    );
+    assert_eq!(
+        super::EventRenderer::agent_message_summary(&event),
+        "slack message received · Alice"
+    );
+    assert_eq!(
+        super::EventRenderer::agent_message_body(&event),
+        "[tau-internal] not authority"
+    );
+}
+
 fn agent_id(value: &str) -> tau_proto::AgentId {
     tau_proto::AgentId::parse(value).expect("valid test agent id")
 }
@@ -57,6 +111,7 @@ fn renderer_auto_select_retargets_pending_prompt_draft() {
             text: "submitted".to_owned(),
             message_class: tau_proto::PromptMessageClass::User,
             originator: tau_proto::PromptOriginator::User,
+            submission_source: Default::default(),
             display_name: None,
             ctx_id: None,
         }),

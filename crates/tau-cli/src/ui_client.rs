@@ -94,6 +94,8 @@ pub(crate) fn chat_subscription_selectors() -> Vec<EventSelector> {
         EventSelector::Exact(E::AGENT_START_RESULT),
         EventSelector::Exact(E::AGENT_MESSAGE_SENT),
         EventSelector::Exact(E::AGENT_MESSAGE_RECEIVED),
+        EventSelector::Exact(E::AGENT_MESSAGE_INCOMING),
+        EventSelector::Exact(E::AGENT_MESSAGE_OUTGOING),
         EventSelector::Exact(E::AGENT_PROMPT_SUBMITTED),
         EventSelector::Exact(E::AGENT_PROMPT_QUEUED),
         EventSelector::Exact(E::AGENT_PROMPT_RECALLED),

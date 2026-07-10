@@ -19,6 +19,7 @@ mod diff;
 mod event_name;
 mod events;
 mod interception;
+mod message_envelope;
 mod messages;
 pub mod notice_kind;
 mod prompt_fragment;
@@ -34,6 +35,7 @@ pub use diff::{DiffHunk, DiffLine, DiffSegment, DiffSummary, FileDiffSummary};
 pub use event_name::*;
 pub use events::*;
 pub use interception::*;
+pub use message_envelope::*;
 pub use messages::*;
 pub use prompt_fragment::*;
 use serde::Serialize;
@@ -57,7 +59,9 @@ pub use token_usage::*;
 ///
 /// Version 6 wraps opaque provider items with parsed CBOR plus an optional raw
 /// JSON replay sidecar.
-pub const PROTOCOL_VERSION: u32 = 7;
+/// Version 8 adds typed message-envelope facts plus dedicated ingress and
+/// successful-send completion RPCs.
+pub const PROTOCOL_VERSION: u32 = 8;
 
 /// UI marker text for responses, thinking blocks, and tool calls that
 /// are still in progress.
@@ -246,6 +250,8 @@ string_newtype!(/// Stable identifier for one agent transcript prompt.
     AgentPromptId);
 string_newtype!(/// Stable identifier for one global agent message.
     AgentMessageId);
+string_newtype!(/// Stable identifier for one canonical v2 message occurrence.
+    MessageId);
 // ToolName is defined manually below with validation.
 string_newtype!(/// Tool call identifier.
     ToolCallId);

@@ -249,6 +249,9 @@ pub(crate) fn dispatch_message<State>(
     builder: &mut ExtensionBuilder<State>,
     handle: &ClientHandle,
 ) -> ClientResult<DispatchOutcome> {
+    for handler in &mut builder.output_message_handlers {
+        handler.handle(&message, state, handle)?;
+    }
     match message {
         tau_proto::HarnessOutputMessage::Configure(configure) => {
             for handler in &mut builder.configure_handlers {
@@ -272,7 +275,10 @@ pub(crate) fn dispatch_message<State>(
         | tau_proto::HarnessOutputMessage::RenderedToolDefinitionsResult(_)
         | tau_proto::HarnessOutputMessage::ExtensionDataResult(_)
         | tau_proto::HarnessOutputMessage::ExternalAgentMessageResult(_)
-        | tau_proto::HarnessOutputMessage::ExternalAgentMessageAuthResult(_) => {
+        | tau_proto::HarnessOutputMessage::ExternalAgentMessageAuthResult(_)
+        | tau_proto::HarnessOutputMessage::RegisterTransportCapabilityResult(_)
+        | tau_proto::HarnessOutputMessage::TransportMessageIngressResult(_)
+        | tau_proto::HarnessOutputMessage::CompleteTransportSendResult(_) => {
             Ok(DispatchOutcome::Continue)
         }
     }

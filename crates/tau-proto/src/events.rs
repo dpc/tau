@@ -12,9 +12,10 @@ use serde::{Deserialize, Serialize};
 use crate::{
     ActionInvocationId, AgentContextKey, AgentId, AgentMessageId, AgentMetadataKey, AgentPromptId,
     CborValue, ContextItem, DiffSummary, EventCategory, EventName, ExtensionInstanceId,
-    ExtensionName, MessagePhase, ModelId, ModelTag, PromptContext, PromptFragment,
-    ProviderTokenUsage, ReasoningTextKind, SessionId, SkillName, ToolCallId, ToolDefinition,
-    ToolGroupName, ToolName, ToolTag,
+    ExtensionName, MessageEnvelope, MessageId, MessagePhase, MessageTransportAcceptance, ModelId,
+    ModelTag, PromptContext, PromptFragment, PromptSubmissionSource, ProviderTokenUsage,
+    ReasoningTextKind, SessionId, SkillName, ToolCallId, ToolDefinition, ToolGroupName, ToolName,
+    ToolTag,
 };
 
 fn default_true() -> bool {
@@ -1910,6 +1911,29 @@ pub struct AgentMessageReceived {
     pub message: String,
 }
 
+/// Harness-owned durable incoming v2 message fact.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AgentMessageIncoming {
+    /// Agent receiving this canonical message.
+    pub recipient_id: AgentId,
+    /// Transport-neutral canonical envelope.
+    pub envelope: MessageEnvelope,
+}
+
+/// Harness-owned durable outgoing v2 message fact.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AgentMessageOutgoing {
+    /// Agent sending this canonical message.
+    pub sender_id: AgentId,
+    /// Transport-neutral canonical envelope.
+    pub envelope: MessageEnvelope,
+    /// Honest transport acceptance strength.
+    pub acceptance: MessageTransportAcceptance,
+    /// Canonical incoming occurrence whose authorized route selected this send.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub in_reply_to: Option<MessageId>,
+}
+
 /// Durable agent branch-state fact: the selected head moved, so the next
 /// append should branch from that root-or-node target.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -2883,6 +2907,9 @@ pub struct AgentPromptSubmitted {
     /// Who initiated the prompt.
     #[serde(default)]
     pub originator: PromptOriginator,
+    /// Harness-stamped provenance of this accepted prompt.
+    #[serde(default)]
+    pub submission_source: PromptSubmissionSource,
     /// Human-friendly display name known when the prompt was submitted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
@@ -3628,6 +3655,10 @@ pub enum Event {
     AgentMessageSent(AgentMessageSent),
     #[serde(rename = "agent.message_received")]
     AgentMessageReceived(AgentMessageReceived),
+    #[serde(rename = "agent.message_incoming")]
+    AgentMessageIncoming(AgentMessageIncoming),
+    #[serde(rename = "agent.message_outgoing")]
+    AgentMessageOutgoing(AgentMessageOutgoing),
     #[serde(rename = "extension.event")]
     ExtensionEvent(CustomEvent),
     #[serde(rename = "provider.models_updated")]
@@ -3867,6 +3898,8 @@ impl Event {
             Self::StartAgentResult(_) => EventName::AGENT_START_RESULT,
             Self::AgentMessageSent(_) => EventName::AGENT_MESSAGE_SENT,
             Self::AgentMessageReceived(_) => EventName::AGENT_MESSAGE_RECEIVED,
+            Self::AgentMessageIncoming(_) => EventName::AGENT_MESSAGE_INCOMING,
+            Self::AgentMessageOutgoing(_) => EventName::AGENT_MESSAGE_OUTGOING,
             _ => return None,
         }
         .into()

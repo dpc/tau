@@ -1032,6 +1032,7 @@ fn test_prompt(text: &str) -> AgentPromptSubmitted {
         text: text.to_owned(),
         message_class: PromptMessageClass::User,
         originator: PromptOriginator::User,
+        submission_source: Default::default(),
         display_name: None,
         ctx_id: None,
     }

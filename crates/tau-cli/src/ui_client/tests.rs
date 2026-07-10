@@ -32,6 +32,8 @@ fn chat_subscription_uses_no_prefix_selectors() {
         EventName::AGENT_START_RESULT,
         EventName::AGENT_MESSAGE_SENT,
         EventName::AGENT_MESSAGE_RECEIVED,
+        EventName::AGENT_MESSAGE_INCOMING,
+        EventName::AGENT_MESSAGE_OUTGOING,
         EventName::AGENT_PROMPT_SUBMITTED,
         EventName::AGENT_PROMPT_QUEUED,
         EventName::AGENT_PROMPT_RECALLED,

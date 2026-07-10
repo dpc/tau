@@ -138,6 +138,9 @@ fn message_variant(msg: &HarnessInputMessage) -> &'static str {
         HarnessInputMessage::ExtensionDataRequest(_) => "ExtensionDataRequest",
         HarnessInputMessage::ExternalAgentMessage(_) => "ExternalAgentMessage",
         HarnessInputMessage::ExternalAgentMessageAuth(_) => "ExternalAgentMessageAuth",
+        HarnessInputMessage::RegisterTransportCapability(_) => "RegisterTransportCapability",
+        HarnessInputMessage::TransportMessageIngress(_) => "TransportMessageIngress",
+        HarnessInputMessage::CompleteTransportSend(_) => "CompleteTransportSend",
     }
 }
 
@@ -338,6 +341,7 @@ fn user_prompt_submitted_for_agent(
         text: text.into(),
         message_class: tau_proto::PromptMessageClass::User,
         originator,
+        submission_source: Default::default(),
         display_name: None,
         ctx_id: None,
     })
@@ -644,6 +648,7 @@ fn agent_start_hook_renders_multiple_configured_actions() {
             text: "hello".to_owned(),
             message_class: tau_proto::PromptMessageClass::User,
             originator: tau_proto::PromptOriginator::User,
+            submission_source: Default::default(),
             display_name: Some("Friendly main".to_owned()),
             ctx_id: None,
         }))
@@ -701,6 +706,7 @@ fn agent_start_hook_uses_display_name_set_with_id_fallback_for_blank_prompt_name
             text: "hello".to_owned(),
             message_class: tau_proto::PromptMessageClass::User,
             originator: tau_proto::PromptOriginator::User,
+            submission_source: Default::default(),
             display_name: Some("   ".to_owned()),
             ctx_id: None,
         }))
@@ -2563,6 +2569,7 @@ fn runtime_invalid_osc1337_key_is_skipped() {
             text: "hello".to_owned(),
             message_class: tau_proto::PromptMessageClass::User,
             originator: tau_proto::PromptOriginator::User,
+            submission_source: Default::default(),
             display_name: Some("bad=key".to_owned()),
             ctx_id: None,
         }))

@@ -516,7 +516,10 @@ fn handle_harness_message(
         | HarnessOutputMessage::RenderedToolDefinitionsResult(_)
         | HarnessOutputMessage::ExtensionDataResult(_)
         | HarnessOutputMessage::ExternalAgentMessageResult(_)
-        | HarnessOutputMessage::ExternalAgentMessageAuthResult(_) => false,
+        | HarnessOutputMessage::ExternalAgentMessageAuthResult(_)
+        | HarnessOutputMessage::RegisterTransportCapabilityResult(_)
+        | HarnessOutputMessage::TransportMessageIngressResult(_)
+        | HarnessOutputMessage::CompleteTransportSendResult(_) => false,
     }
 }
 

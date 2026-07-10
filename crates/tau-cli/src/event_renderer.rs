@@ -3942,7 +3942,10 @@ impl EventRenderer {
     fn handle_agent_message_event(&mut self, event: &Event) -> bool {
         if !matches!(
             event,
-            Event::AgentMessageSent(_) | Event::AgentMessageReceived(_)
+            Event::AgentMessageSent(_)
+                | Event::AgentMessageReceived(_)
+                | Event::AgentMessageIncoming(_)
+                | Event::AgentMessageOutgoing(_)
         ) {
             return false;
         }
@@ -4021,6 +4024,16 @@ impl EventRenderer {
                 Self::agent_message_received_sender_label(message),
                 message.recipient_id
             ),
+            Event::AgentMessageIncoming(message) => format!(
+                "{} message received · {}",
+                message.envelope.transport.name,
+                Self::message_endpoint_label(&message.envelope.source)
+            ),
+            Event::AgentMessageOutgoing(message) => format!(
+                "{} message sent · {}",
+                message.envelope.transport.name,
+                Self::message_endpoint_label(&message.envelope.destination)
+            ),
             _ => unreachable!("only agent message events are rendered here"),
         }
     }
@@ -4029,7 +4042,49 @@ impl EventRenderer {
         match event {
             Event::AgentMessageSent(message) => message.message.as_str(),
             Event::AgentMessageReceived(message) => message.message.as_str(),
+            Event::AgentMessageIncoming(message) => {
+                Self::message_operation_body(&message.envelope.operation)
+            }
+            Event::AgentMessageOutgoing(message) => {
+                Self::message_operation_body(&message.envelope.operation)
+            }
             _ => unreachable!("only agent message events are rendered here"),
+        }
+    }
+
+    fn message_endpoint_label(endpoint: &tau_proto::MessageEndpoint) -> String {
+        match endpoint {
+            tau_proto::MessageEndpoint::Agent {
+                agent_id,
+                display_name,
+                ..
+            } => display_name.clone().unwrap_or_else(|| agent_id.to_string()),
+            tau_proto::MessageEndpoint::User => "user".to_owned(),
+            tau_proto::MessageEndpoint::External {
+                stable_id,
+                display_name,
+                ..
+            } => display_name
+                .clone()
+                .or_else(|| stable_id.clone())
+                .unwrap_or_else(|| "external".to_owned()),
+        }
+    }
+
+    fn message_operation_body(operation: &tau_proto::MessageOperation) -> &str {
+        match operation {
+            tau_proto::MessageOperation::Create {
+                payload: tau_proto::MessagePayload::Text { text, .. },
+            }
+            | tau_proto::MessageOperation::Edit {
+                payload: tau_proto::MessagePayload::Text { text, .. },
+                ..
+            } => text,
+            tau_proto::MessageOperation::Delete { .. } => "[message deleted]",
+            tau_proto::MessageOperation::Reaction { action, .. } => match action {
+                tau_proto::ReactionAction::Add => "[reaction added]",
+                tau_proto::ReactionAction::Remove => "[reaction removed]",
+            },
         }
     }
 
@@ -4080,6 +4135,12 @@ impl EventRenderer {
         show_messages: tau_config::settings::ShowMessages,
         event: &Event,
     ) -> MessageRenderMode {
+        if matches!(
+            event,
+            Event::AgentMessageIncoming(_) | Event::AgentMessageOutgoing(_)
+        ) {
+            return MessageRenderMode::Full;
+        }
         if Self::is_user_broadcast_agent_message(event) {
             return MessageRenderMode::Full;
         }
@@ -4179,7 +4240,21 @@ impl EventRenderer {
         ) {
             return;
         }
-        self.handle_submitted_user_prompt(&prompt.text, prompt.message_class);
+        if !prompt.message_class.is_internal()
+            && matches!(
+                prompt.submission_source,
+                tau_proto::PromptSubmissionSource::Extension { .. }
+                    | tau_proto::PromptSubmissionSource::HarnessInternal
+            )
+        {
+            let block =
+                self.submitted_plain_block(tau_themes::names::SYSTEM_INFO, prompt.text.clone());
+            self.handle.print_output("extension-prompt", block);
+        } else {
+            // Legacy records intentionally retain their historical rendering:
+            // there is no safe prefix-based way to reclassify them.
+            self.handle_submitted_user_prompt(&prompt.text, prompt.message_class);
+        }
     }
 
     fn handle_timer_wakeup_prompt(

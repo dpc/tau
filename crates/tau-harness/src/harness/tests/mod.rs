@@ -75,6 +75,9 @@ enum TestMessage {
     ExtensionDataResult(Box<tau_proto::ExtensionDataResult>),
     ExternalAgentMessageResult(tau_proto::ExternalAgentMessageResult),
     ExternalAgentMessageAuthResult(tau_proto::ExternalAgentMessageAuthResult),
+    RegisterTransportCapabilityResult(tau_proto::RegisterTransportCapabilityResult),
+    TransportMessageIngressResult(tau_proto::TransportMessageIngressResult),
+    CompleteTransportSendResult(tau_proto::CompleteTransportSendResult),
 }
 
 impl TestProtocolItem {
@@ -124,6 +127,15 @@ impl TestProtocolItem {
             HarnessOutputMessage::ExternalAgentMessageAuthResult(message) => {
                 Self::Message(TestMessage::ExternalAgentMessageAuthResult(message))
             }
+            HarnessOutputMessage::RegisterTransportCapabilityResult(message) => {
+                Self::Message(TestMessage::RegisterTransportCapabilityResult(message))
+            }
+            HarnessOutputMessage::TransportMessageIngressResult(message) => {
+                Self::Message(TestMessage::TransportMessageIngressResult(message))
+            }
+            HarnessOutputMessage::CompleteTransportSendResult(message) => {
+                Self::Message(TestMessage::CompleteTransportSendResult(message))
+            }
         }
     }
 
@@ -168,7 +180,10 @@ impl TestMessage {
             | Self::RenderedToolDefinitionsResult(_)
             | Self::ExtensionDataResult(_)
             | Self::ExternalAgentMessageResult(_)
-            | Self::ExternalAgentMessageAuthResult(_) => {
+            | Self::ExternalAgentMessageAuthResult(_)
+            | Self::RegisterTransportCapabilityResult(_)
+            | Self::TransportMessageIngressResult(_)
+            | Self::CompleteTransportSendResult(_) => {
                 panic!("test frame shim cannot send harness-output message as input")
             }
         }
@@ -954,7 +969,7 @@ fn agent_tree_for_conversation<'a>(h: &'a Harness, cid: &AgentId) -> &'a AgentTr
     h.agent_store.agent(agent_id).expect("agent tree")
 }
 
-fn ensure_test_user_agent(h: &mut Harness) -> AgentId {
+pub(super) fn ensure_test_user_agent(h: &mut Harness) -> AgentId {
     let cid = h
         .agents
         .iter()
@@ -1072,7 +1087,7 @@ fn append_user_message_via_event(h: &mut Harness, session_id: &str, text: &str) 
         .expect("append user message");
 }
 
-fn echo_harness(state_dir: impl Into<PathBuf>) -> Result<Harness, HarnessError> {
+pub(super) fn echo_harness(state_dir: impl Into<PathBuf>) -> Result<Harness, HarnessError> {
     echo_harness_for("s1", state_dir)
 }
 
@@ -1279,7 +1294,7 @@ fn connect_test_client(
     events
 }
 
-fn connect_test_tool(h: &mut Harness, name: &str) -> Arc<Mutex<Vec<RoutedFrame>>> {
+pub(super) fn connect_test_tool(h: &mut Harness, name: &str) -> Arc<Mutex<Vec<RoutedFrame>>> {
     connect_test_client(h, name, tau_proto::ClientKind::Tool)
 }
 

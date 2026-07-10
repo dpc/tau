@@ -346,6 +346,7 @@ fn activate_prompt_origin(ext: &Extension, prompt: &tau_proto::ExtPromptSubmitRe
         text: prompt.text.clone(),
         message_class: prompt.message_class,
         originator: tau_proto::PromptOriginator::User,
+        submission_source: Default::default(),
         display_name: None,
         ctx_id: prompt.ctx_id.clone(),
     });
@@ -1606,6 +1607,7 @@ fn prompt_start_correlation_preserves_queued_origin_routing() {
         text: "local prompt".to_owned(),
         message_class: tau_proto::PromptMessageClass::User,
         originator: tau_proto::PromptOriginator::User,
+        submission_source: Default::default(),
         display_name: None,
         ctx_id: None,
     });
@@ -1758,6 +1760,7 @@ fn protocol_lifecycle_handlers_dispatch_live_and_ignore_replay() {
             text: text.to_owned(),
             message_class: tau_proto::PromptMessageClass::User,
             originator: tau_proto::PromptOriginator::User,
+            submission_source: Default::default(),
             display_name: None,
             ctx_id: Some(ctx.to_owned()),
         })
@@ -1925,6 +1928,7 @@ fn mismatched_prompt_lifecycle_cannot_authorize_send() {
             text: submitted_text.to_owned(),
             message_class: prompt.message_class,
             originator: tau_proto::PromptOriginator::User,
+            submission_source: Default::default(),
             display_name: None,
             ctx_id: submitted_ctx
                 .map(str::to_owned)

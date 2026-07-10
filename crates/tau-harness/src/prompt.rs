@@ -744,6 +744,13 @@ pub(crate) fn assemble_prompt_context_from(
                     }
                 }
             },
+            AgentEntry::MessageEnvelope { item } => {
+                blocks.push(tau_proto::ContextBlock::UserInput(
+                    tau_proto::UserInputBlock {
+                        items: vec![ContextItem::MessageEnvelope(item.clone())],
+                    },
+                ));
+            }
         }
     }
 

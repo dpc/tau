@@ -294,6 +294,7 @@ fn approx_context_item_provider_bytes(item: &ContextItem) -> u64 {
                 .sum();
             content_bytes + 16
         }
+        ContextItem::MessageEnvelope(envelope) => envelope.render_provider_text().len() as u64 + 16,
         ContextItem::ToolCall(call) => {
             call.call_id.as_str().len() as u64
                 + call.name.as_str().len() as u64
@@ -622,6 +623,73 @@ struct NormalizedFinishedToolCalls {
     invalid_errors: HashMap<ToolCallId, String>,
     /// Provider calls paired with their foreground/background support policy.
     calls: Vec<NormalizedFinishedToolCall>,
+}
+
+#[derive(Clone)]
+struct TransportCapability {
+    transport_name: String,
+    reply_tool: Option<ToolName>,
+    session_generation: u64,
+}
+
+#[derive(Clone)]
+struct TransportReplyRoute {
+    connection_id: String,
+    agent_id: tau_proto::AgentId,
+    session_generation: u64,
+    reply_tool: Option<ToolName>,
+    transport_name: String,
+    external_endpoint: tau_proto::MessageEndpoint,
+    conversation: Option<tau_proto::MessageConversation>,
+}
+
+#[derive(Clone)]
+struct TransportDedupRecord {
+    draft: tau_proto::TransportMessageDraft,
+    target_agent_id: tau_proto::AgentId,
+    message_id: tau_proto::MessageId,
+    committed: bool,
+    session_id: SessionId,
+}
+
+#[derive(Clone)]
+struct PendingIngressAck {
+    connection_id: String,
+    request_id: String,
+    session_generation: u64,
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct TransportDedupKey {
+    extension_name: ExtensionName,
+    transport_name: String,
+    dedup_key: String,
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct TransportOrderingRouteKey {
+    extension_name: ExtensionName,
+    transport_name: String,
+    conversation_id: Option<String>,
+    thread_id: Option<String>,
+}
+
+type TransportSendRetryKey = (String, String);
+
+#[derive(Clone)]
+struct PendingTransportSendAck {
+    connection_id: String,
+    retry_key: TransportSendRetryKey,
+    result: tau_proto::CompleteTransportSendResult,
+    tool_result: Option<tau_proto::ToolResult>,
+    message_id: tau_proto::MessageId,
+    request: tau_proto::CompleteTransportSendRequest,
+}
+
+#[derive(Clone)]
+struct CompletedTransportSend {
+    request: tau_proto::CompleteTransportSendRequest,
+    result: tau_proto::CompleteTransportSendResult,
 }
 
 struct NormalizedFinishedToolCall {
@@ -1223,6 +1291,7 @@ mod pending_notices;
 mod replay;
 mod semantic_event_router;
 mod subagents_tool;
+mod transport_messages;
 mod user_skill_invocation;
 
 pub(crate) use subagents_tool::ExternalMessageToolCompletion;
@@ -1406,6 +1475,30 @@ pub struct Harness {
     /// right provider.
     pub(crate) pending_tool_providers:
         std::collections::HashMap<ToolCallId, tau_proto::ConnectionId>,
+    /// Source-bound transport capabilities for the active session.
+    transport_capabilities: HashMap<String, Vec<TransportCapability>>,
+    /// Live opaque canonical-id reply routes. Raw destinations stay
+    /// extension-private.
+    transport_reply_routes: HashMap<tau_proto::MessageId, TransportReplyRoute>,
+    /// Bounded idempotency index keyed by extension instance, transport, and
+    /// dedup key.
+    transport_dedup: HashMap<TransportDedupKey, TransportDedupRecord>,
+    /// FIFO eviction order for committed ingress dedup records.
+    transport_dedup_order: VecDeque<TransportDedupKey>,
+    /// Ingress callers awaiting durable commit acknowledgement.
+    pending_ingress_acks: HashMap<tau_proto::MessageId, Vec<PendingIngressAck>>,
+    /// Last accepted source sequence for each extension transport route.
+    transport_route_sequences: HashMap<TransportOrderingRouteKey, u64>,
+    /// Accepted source sequences awaiting durable commit.
+    pending_transport_route_sequences:
+        HashMap<TransportOrderingRouteKey, HashMap<tau_proto::MessageId, u64>>,
+    /// Bounded exact retry results for successful-send completion.
+    completed_transport_sends: HashMap<TransportSendRetryKey, CompletedTransportSend>,
+    /// Successful completions waiting for the terminal provider tool fact to
+    /// commit.
+    pending_transport_send_acks: HashMap<ToolCallId, PendingTransportSendAck>,
+    /// FIFO eviction order for completion retry results.
+    completed_transport_send_order: VecDeque<TransportSendRetryKey>,
     /// `invocation_id` → action provider/requester pair for UI-directed
     /// action result routing and source validation.
     pending_action_invocations: HashMap<ActionInvocationId, PendingActionInvocation>,
@@ -2052,6 +2145,16 @@ impl Harness {
             completed_tool_calls: HashSet::new(),
             completed_tool_agents: HashMap::new(),
             pending_tool_providers: HashMap::new(),
+            transport_capabilities: HashMap::new(),
+            transport_reply_routes: HashMap::new(),
+            transport_dedup: HashMap::new(),
+            transport_dedup_order: VecDeque::new(),
+            pending_ingress_acks: HashMap::new(),
+            transport_route_sequences: HashMap::new(),
+            pending_transport_route_sequences: HashMap::new(),
+            completed_transport_sends: HashMap::new(),
+            pending_transport_send_acks: HashMap::new(),
+            completed_transport_send_order: VecDeque::new(),
             pending_action_invocations: HashMap::new(),
             event_log: EventLog::new(),
             client_writers: HashMap::new(),
@@ -3415,6 +3518,7 @@ impl Harness {
                     "event {} rejected by session store: {error}",
                     event.name()
                 ));
+                self.fail_transport_publish(&event);
                 return;
             }
         };
@@ -3531,6 +3635,17 @@ impl Harness {
         if let Event::AgentMessageReceived(message) = event {
             self.deliver_agent_message(message);
         }
+        if let Event::AgentMessageIncoming(message) = event
+            && self.complete_ingress_commit(message)
+        {
+            self.deliver_typed_message(message);
+        }
+        if let Event::AgentMessageOutgoing(message) = event {
+            self.continue_transport_send_after_outgoing_commit(&message.envelope.message_id);
+        }
+        if let Event::ProviderToolResult(result) = event {
+            self.complete_transport_send_commit(&result.call_id);
+        }
         if let Event::SessionAgentLoaded(loaded) = event {
             self.replay_loaded_agent_history_to_subscribers(&loaded.agent_id);
         }
@@ -3618,6 +3733,24 @@ impl Harness {
                 .pending_agent_messages
                 .push_back(PendingPrompt::agent_message_received(text));
         }
+    }
+
+    /// Wake a live recipient without publishing a duplicate prompt payload.
+    fn deliver_typed_message(&mut self, message: &tau_proto::AgentMessageIncoming) {
+        let Some(cid) = self
+            .agent_routes
+            .get(message.recipient_id.as_str())
+            .cloned()
+        else {
+            return;
+        };
+        if let Some(conv) = self.agents.get_mut(&cid) {
+            conv.pending_message_wakes
+                .push_back(message.envelope.message_id.clone());
+        }
+        self.interrupt_active_waits_for(&cid);
+        self.preempt_queued_tool_calls_for_message_received(&cid);
+        self.try_advance_queue();
     }
 
     fn preempt_queued_tool_calls_for_message_received(&mut self, cid: &AgentId) {
@@ -3935,6 +4068,8 @@ impl Harness {
             Event::AgentUserMessageInjected(injected) => Some(injected.agent_id.clone()),
             Event::AgentMessageSent(message) => Some(message.sender_id.clone()),
             Event::AgentMessageReceived(message) => Some(message.recipient_id.clone()),
+            Event::AgentMessageIncoming(message) => Some(message.recipient_id.clone()),
+            Event::AgentMessageOutgoing(message) => Some(message.sender_id.clone()),
             Event::AgentHeadMoved(moved) => Some(moved.agent_id.clone()),
             Event::ProviderResponseFinished(finished) => Some(finished.agent_id.clone()),
             Event::ProviderToolResult(result) => self
@@ -5125,6 +5260,15 @@ impl Harness {
             HarnessInputMessage::ExtensionDataRequest(request) => {
                 self.handle_extension_data_request(source_id, request);
             }
+            HarnessInputMessage::RegisterTransportCapability(request) => {
+                self.handle_register_transport_capability(source_id, request);
+            }
+            HarnessInputMessage::TransportMessageIngress(request) => {
+                self.handle_transport_message_ingress(source_id, *request);
+            }
+            HarnessInputMessage::CompleteTransportSend(request) => {
+                self.handle_complete_transport_send(source_id, *request);
+            }
             // Messages sent by clients only — extensions shouldn't round-trip
             // these. Ignore silently.
             HarnessInputMessage::Disconnect(_)
@@ -5269,6 +5413,7 @@ impl Harness {
         {
             self.mark_tool_unavailable_for_notice(unregister.tool_name.clone(), visible_name);
         }
+        self.revoke_transport_reply_tool(source_id, &unregister.tool_name);
         self.publish_event(Some(source_id), Event::ToolUnregister(unregister));
     }
 
@@ -5401,7 +5546,9 @@ impl Harness {
             | Event::SessionAgentUnloaded(_)
             | Event::AgentStarted(_)
             | Event::AgentMessageSent(_)
-            | Event::AgentMessageReceived(_) => None,
+            | Event::AgentMessageReceived(_)
+            | Event::AgentMessageIncoming(_)
+            | Event::AgentMessageOutgoing(_) => None,
             Event::ToolBackgroundResult(_) | Event::ToolBackgroundError(_)
                 if source_id != HARNESS_CONNECTION_ID =>
             {
@@ -5597,7 +5744,7 @@ impl Harness {
     ) -> Result<Option<Event>, HarnessError> {
         match event {
             Event::ExtPromptSubmitRequest(request) => {
-                self.handle_extension_prompt_submit_request(request)?;
+                self.handle_extension_prompt_submit_request(source_id, request)?;
                 Ok(None)
             }
             Event::AgentMetadataSet(set) => {
@@ -5833,7 +5980,10 @@ impl Harness {
             | HarnessInputMessage::Intercept(_)
             | HarnessInputMessage::InterceptReply(_)
             | HarnessInputMessage::Ready(_)
-            | HarnessInputMessage::ExtensionDataRequest(_) => Ok(true),
+            | HarnessInputMessage::ExtensionDataRequest(_)
+            | HarnessInputMessage::RegisterTransportCapability(_)
+            | HarnessInputMessage::TransportMessageIngress(_)
+            | HarnessInputMessage::CompleteTransportSend(_) => Ok(true),
         }
     }
 
@@ -6237,6 +6387,7 @@ impl Harness {
 
     fn handle_extension_prompt_submit_request(
         &mut self,
+        source_id: &str,
         request: tau_proto::ExtPromptSubmitRequest,
     ) -> Result<(), HarnessError> {
         let agent_id = request.agent_id.to_string();
@@ -6257,7 +6408,11 @@ impl Harness {
         let prompt = if is_internal {
             PendingPrompt::internal(text)
         } else {
-            PendingPrompt::watch_notified_user(text)
+            let extension_name = self
+                .find_extension_by_connection(source_id)
+                .map(|extension| ExtensionName::from(extension.name.clone()))
+                .unwrap_or_else(|| ExtensionName::from("unknown-extension"));
+            PendingPrompt::watch_notified_user(text, extension_name)
         }
         .with_ctx_id(request.ctx_id);
         let submission = self.submit_prompt_to_agent(session_id, &agent_id, prompt)?;
@@ -6307,9 +6462,9 @@ impl Harness {
         let pending = if prompt.message_class.is_internal() {
             PendingPrompt::internal(text.clone())
         } else if is_user_interaction {
-            PendingPrompt::watch_notified_user(text.clone())
+            PendingPrompt::human_ui_watch_notified(text.clone())
         } else {
-            PendingPrompt::user(text.clone())
+            PendingPrompt::human_ui(text.clone())
         }
         .with_ctx_id(prompt.ctx_id.clone());
         let submission = self.submit_prompt_to_agent(prompt.session_id, &agent_id, pending)?;
@@ -6487,6 +6642,8 @@ impl Harness {
             }
             let prompt = if req.message_class.is_internal() {
                 PendingPrompt::internal(initial_prompt)
+            } else if req.originator.is_user() {
+                PendingPrompt::human_ui(initial_prompt)
             } else {
                 PendingPrompt::user(initial_prompt)
             }
@@ -7124,6 +7281,13 @@ impl Harness {
         self.interceptors.remove_connection(connection_id);
         self.fail_pending_intercept_for_disconnect(connection_id);
         self.remove_extension_context_for_connection(connection_id);
+        self.transport_capabilities.remove(connection_id);
+        self.transport_reply_routes
+            .retain(|_, route| route.connection_id != connection_id);
+        self.pending_ingress_acks.retain(|_, waiters| {
+            waiters.retain(|waiter| waiter.connection_id != connection_id);
+            !waiters.is_empty()
+        });
 
         if is_extension {
             self.unregister_connection_tools_for_disconnect(connection_id);
@@ -7274,7 +7438,9 @@ impl Harness {
             .pending_tool_providers
             .iter()
             .filter_map(|(call_id, provider_id)| {
-                if provider_id.as_str() == connection_id {
+                if provider_id.as_str() == connection_id
+                    && !self.pending_transport_send_acks.contains_key(call_id)
+                {
                     Some(call_id.clone())
                 } else {
                     None
@@ -7775,6 +7941,8 @@ impl Harness {
                 | Event::AgentStarted(_)
                 | Event::AgentMessageSent(_)
                 | Event::AgentMessageReceived(_)
+                | Event::AgentMessageIncoming(_)
+                | Event::AgentMessageOutgoing(_)
         )
     }
 
@@ -9528,6 +9696,14 @@ impl Harness {
         self.completed_tool_calls.clear();
         self.completed_tool_agents.clear();
         self.pending_tool_providers.clear();
+        self.transport_capabilities.clear();
+        self.transport_reply_routes.clear();
+        self.transport_route_sequences.clear();
+        self.pending_transport_route_sequences.clear();
+        self.pending_ingress_acks.clear();
+        self.pending_transport_send_acks.clear();
+        self.completed_transport_sends.clear();
+        self.completed_transport_send_order.clear();
         self.pending_action_invocations.clear();
         self.prompt_agents.clear();
         self.pending_provider_prompts.clear();
@@ -12763,6 +12939,9 @@ impl Harness {
             false
         };
         if should_send {
+            if let Some(conv) = self.agents.get_mut(cid) {
+                conv.pending_message_wakes.clear();
+            }
             if self
                 .agents
                 .get(cid)
@@ -12838,6 +13017,8 @@ impl Harness {
             .get_mut(cid)
             .map(|c| c.pending_prompts.drain(..).collect())
             .unwrap_or_default();
+        // These markers request a turn only; their payload is already folded by
+        // the canonical incoming fact.
         if let Some(user_prompt_pos) = pending.iter().position(|prompt| !prompt.is_internal()) {
             self.reset_loop_guard_for_progress(cid);
             pending.retain(|prompt| !prompt.is_loop_guard());
@@ -13431,6 +13612,7 @@ impl Harness {
                 text: user_message.to_owned(),
                 message_class: tau_proto::PromptMessageClass::User,
                 originator: tau_proto::PromptOriginator::User,
+                submission_source: Default::default(),
                 display_name: None,
                 ctx_id: None,
             }),

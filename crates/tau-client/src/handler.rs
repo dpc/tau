@@ -7,6 +7,41 @@ use crate::contexts::{
 use crate::event_payload::EventPayload;
 use crate::{ClientHandle, ClientResult, InterceptDecision};
 
+/// Handler for a raw harness-to-client protocol message.
+pub(crate) trait OutputMessageHandler<State> {
+    /// Observe one decoded output message before variant-specific dispatch.
+    fn handle(
+        &mut self,
+        message: &tau_proto::HarnessOutputMessage,
+        state: &mut State,
+        handle: &ClientHandle,
+    ) -> ClientResult<()>;
+}
+
+pub(crate) struct RawOutputMessageHandler<F> {
+    handler: F,
+}
+
+impl<F> RawOutputMessageHandler<F> {
+    pub(crate) fn new(handler: F) -> Self {
+        Self { handler }
+    }
+}
+
+impl<State, F> OutputMessageHandler<State> for RawOutputMessageHandler<F>
+where
+    F: FnMut(&tau_proto::HarnessOutputMessage, &mut State, &ClientHandle) -> ClientResult<()>,
+{
+    fn handle(
+        &mut self,
+        message: &tau_proto::HarnessOutputMessage,
+        state: &mut State,
+        handle: &ClientHandle,
+    ) -> ClientResult<()> {
+        (self.handler)(message, state, handle)
+    }
+}
+
 /// Replay filtering policy for typed and raw event handlers.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum DeliveryPolicy {

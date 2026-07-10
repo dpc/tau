@@ -1,5 +1,25 @@
 # tau-harness architecture
 
+## Canonical transport message boundary
+
+Extensions register a transport family and optional reply tool. Registration is
+bound to the authenticated connection and current session generation. Dedicated
+ingress/send-completion RPCs replace generic event emission; the harness stamps
+instance, agent endpoint, trust class, canonical id, and commit time, then owns
+the protected durable fact.
+
+Deduplication precedes publication and a bounded index is lazily rebuilt from
+typed transcript entries. Source sequence checks are scoped by extension,
+transport, conversation, and thread; durable append order remains authoritative.
+Only the live post-commit hook acknowledges ingress, activates the runtime-only
+route, and queues a payload-free wake marker. Replay bypasses those effects.
+
+Remote transport acceptance cannot be transactional with Tau storage.
+Successful-send completion validates the live call and opaque route, then queues
+the outgoing fact immediately before its terminal tool result and caches exact
+retry results. A crash can still leave remote and local state different; the
+recorded acceptance must not imply delivery or read receipt.
+
 `tau-harness` owns the daemon-side control plane for Tau sessions. It connects
 clients and extensions, sequences events, applies interception, persists durable
 session/agent facts, and delivers committed events to subscribers.

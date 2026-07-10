@@ -1,5 +1,16 @@
 # Features
 
+## Typed external-message foundation
+
+Tau's bridge foundation supports a transport-neutral durable envelope and
+protected external incoming/outgoing facts. Built-in Slack, Telegram, and XMPP
+adapter migrations are follow-up work and retain their documented legacy
+behavior for now. Canonical incoming messages enter model context once, wake only
+after live commit, and render as always-visible gray semi-system blocks rather
+than human prompts. Provider lowering escapes untrusted payload boundaries and
+opaque reply ids keep raw destinations outside model control. Legacy transcript
+facts and prefix-only prompt history retain their historical rendering.
+
 A guide to the major features of (dpc's) Tau coding agent. For high-level
 philosophy and motivation see [README.md](README.md); for design notes see
 [DESIGN.md](DESIGN.md) and [ARCHITECTURE.md](ARCHITECTURE.md).

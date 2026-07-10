@@ -18,6 +18,28 @@ Bare top-level `Event` values are not valid protocol items. Peers ask the
 harness to publish events with `emit`; the harness delivers events to peers with
 `deliver`.
 
+## Protocol v8 transport-message RPCs
+
+Protocol v8 adds three extension-to-harness RPC families:
+`register_transport_capability`, `transport_message_ingress`, and
+`complete_transport_send`, each with a same-`request_id` result. Standard
+`tau-client` runtimes can observe non-event results with
+`ExtensionBuilder::on_output_message`; manual runtimes receive them through the
+ordinary manual input queue.
+
+Registration binds a transport and optional reply tool to the authenticated
+connection and active session. Ingress acceptance is returned only after its
+protected incoming fact commits; exact committed duplicates preserve the
+canonical id without another model wake. Successful-send completion first
+commits the outgoing fact, then publishes and commits the terminal tool result,
+then acknowledges. Remote API acceptance remains outside this local sequence and
+is not a delivery/read receipt.
+
+Version 7 peers cannot negotiate these variants with version 8. Upgrade harness
+and extension together; the version bump does not make newer on-disk agent logs
+downgrade-safe. Built-in bridge adapters are not migrated by the protocol
+foundation alone.
+
 Type definitions live in
 [`crates/tau-proto/src/messages.rs`](../crates/tau-proto/src/messages.rs). For
 bus events themselves, see [events.md](events.md).

@@ -766,6 +766,7 @@ fn interception_drop_of_must_pass_event_is_overridden() {
         text: "hello".to_owned(),
         message_class: tau_proto::PromptMessageClass::User,
         originator: tau_proto::PromptOriginator::User,
+        submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
         display_name: None,
         ctx_id: None,
     });
@@ -1533,6 +1534,7 @@ fn interception_mutating_prompt_reaches_agent() {
         text: "I love Tau".to_owned(),
         message_class: tau_proto::PromptMessageClass::User,
         originator: tau_proto::PromptOriginator::User,
+        submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
         display_name: None,
         ctx_id: None,
     });

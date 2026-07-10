@@ -7,9 +7,9 @@ use crate::contexts::{
 use crate::event_payload::EventPayload;
 use crate::handler::{
     ActionHandler, ConfigureHandler, DeliveryPolicy, EventHandler, InterceptHandler,
-    NamedActionHandler, NamedToolHandler, RawConfigureHandler, RawEventHandler, ToolHandler,
-    TypedConfigureHandler, TypedConfigureWithErrorHandler, TypedEventHandler,
-    TypedInterceptHandler, TypedRawEventHandler,
+    NamedActionHandler, NamedToolHandler, OutputMessageHandler, RawConfigureHandler,
+    RawEventHandler, RawOutputMessageHandler, ToolHandler, TypedConfigureHandler,
+    TypedConfigureWithErrorHandler, TypedEventHandler, TypedInterceptHandler, TypedRawEventHandler,
 };
 use crate::{ClientError, ClientResult, ExtensionPlugin, InterceptDecision};
 
@@ -34,6 +34,8 @@ pub struct ExtensionBuilder<State> {
     pub(crate) ready_message: Option<String>,
     /// Typed and raw configuration handlers.
     pub(crate) configure_handlers: Vec<Box<dyn ConfigureHandler<State>>>,
+    /// Raw output handlers, including correlated non-event RPC results.
+    pub(crate) output_message_handlers: Vec<Box<dyn OutputMessageHandler<State>>>,
     /// Typed event handlers.
     pub(crate) event_handlers: Vec<Box<dyn EventHandler<State>>>,
     /// Raw event delivery handlers.
@@ -49,6 +51,23 @@ pub struct ExtensionBuilder<State> {
 }
 
 impl<State> ExtensionBuilder<State> {
+    /// Observes every raw harness output, including correlated non-event RPC
+    /// results.
+    #[must_use]
+    pub fn on_output_message<F>(mut self, handler: F) -> Self
+    where
+        F: FnMut(
+                &tau_proto::HarnessOutputMessage,
+                &mut State,
+                &crate::ClientHandle,
+            ) -> ClientResult<()>
+            + 'static,
+    {
+        self.output_message_handlers
+            .push(Box::new(RawOutputMessageHandler::new(handler)));
+        self
+    }
+
     /// Creates an empty builder for one extension peer.
     #[must_use]
     pub fn new(name: impl Into<tau_proto::ExtensionName>, kind: tau_proto::ClientKind) -> Self {
@@ -62,6 +81,7 @@ impl<State> ExtensionBuilder<State> {
             startup_events: Vec::new(),
             ready_message: None,
             configure_handlers: Vec::new(),
+            output_message_handlers: Vec::new(),
             event_handlers: Vec::new(),
             raw_event_handlers: Vec::new(),
             tool_handlers: Vec::new(),

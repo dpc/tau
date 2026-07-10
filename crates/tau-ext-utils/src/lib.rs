@@ -626,6 +626,7 @@ fn handle_replay_prompt_steered(
         text: cx.event.text.clone(),
         message_class: cx.event.message_class,
         originator: tau_proto::PromptOriginator::User,
+        submission_source: Default::default(),
         display_name: None,
         ctx_id: cx.event.ctx_id.clone(),
     };
@@ -1025,6 +1026,7 @@ mod tests {
                 text: "Timer `once` fired: wake".to_owned(),
                 message_class: PromptMessageClass::Internal,
                 originator: tau_proto::PromptOriginator::User,
+                submission_source: Default::default(),
                 display_name: None,
                 ctx_id: Some("timer:once:1".to_owned()),
             },
@@ -1139,6 +1141,7 @@ mod tests {
             text: steered.text,
             message_class: steered.message_class,
             originator: tau_proto::PromptOriginator::User,
+            submission_source: Default::default(),
             display_name: None,
             ctx_id: steered.ctx_id,
         };
