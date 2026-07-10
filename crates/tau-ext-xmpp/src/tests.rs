@@ -82,12 +82,16 @@ impl XmppBridge for FakeBridge {
         Ok(())
     }
 
-    fn register_agent(&self, cfg: &RuntimeConfig, agent_id: &AgentId) -> Result<String, String> {
+    fn register_agent(
+        &self,
+        cfg: &RuntimeConfig,
+        agent_id: &AgentId,
+        room_localpart: Option<&str>,
+    ) -> Result<String, String> {
         let address = match cfg.routing_mode {
             RoutingMode::Muc => format!(
-                "{}-{}@conference.example.org",
-                cfg.muc.room_prefix,
-                muc_room_label(agent_id)
+                "{}@conference.example.org",
+                room_localpart.expect("MUC room localpart")
             ),
             RoutingMode::DirectResource => "tau@example.org/tau-test".to_owned(),
         };
@@ -161,6 +165,15 @@ fn assert_room_shape(room: &BareJid, agent_slug: &str) {
             .chars()
             .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit())
     );
+}
+
+fn default_muc_room(worker: &WorkerState, agent_id: &AgentId) -> BareJid {
+    let state = State::default();
+    let localpart =
+        room_localpart_for_registration(&state, &worker.cfg, &"session-1".into(), agent_id)
+            .expect("render default room")
+            .expect("MUC localpart");
+    worker.muc_room_for(&localpart).expect("room")
 }
 
 fn tool(name: &str, agent: &str, args: CborValue) -> ToolStarted {
@@ -768,9 +781,9 @@ fn xmpp_register_readiness_timeout_is_clear_and_does_not_register() {
     assert!(!state.conversations.contains_key(&agent_id("agent-1")));
 }
 
-/// Registration needs an active Tau session for lifecycle cleanup even though
-/// the generated room identity uses only the agent id; it should fail before
-/// starting XMPP if the extension has not observed `session.started`.
+/// Registration needs an active Tau session for lifecycle cleanup and template
+/// context; it should fail before starting XMPP if the extension has not
+/// observed `session.started`.
 #[test]
 fn xmpp_register_requires_active_session_before_starting_bridge() {
     let (tx, rx) = mpsc::channel();
@@ -1162,10 +1175,224 @@ fn muc_message_without_real_jid_is_not_routed() {
 fn muc_room_identity_uses_only_stable_agent_id() {
     let (tx, _rx) = mpsc::channel();
     let worker = WorkerState::new(cfg(), tx, shutdown_signal());
-    let room = worker.muc_room_for(&agent_id("agent-1")).expect("room");
+    let room = default_muc_room(&worker, &agent_id("agent-1"));
     assert_eq!(
         room.to_string(),
         "tau-agent-1-4zqfxb1k@conference.example.org"
+    );
+}
+
+/// A configured room template receives session, agent, role, and role-group
+/// identity and may deliberately omit the default hash when the operator
+/// accepts the resulting collision policy.
+#[test]
+fn muc_room_template_can_use_identity_without_mandatory_randomness() {
+    let mut cfg = cfg();
+    cfg.muc.room_template =
+        "{{session_id}}-{{agent_id}}-{{role}}-{{role_group}}-{{role_id}}-{{group_id}}".to_owned();
+    let mut state = State::default();
+    state
+        .agent_roles
+        .insert(agent_id("agent-1"), "senior-engineer".to_owned());
+    state
+        .role_groups
+        .insert("senior-engineer".to_owned(), "engineering".to_owned());
+
+    let localpart =
+        room_localpart_for_registration(&state, &cfg, &"session-1".into(), &agent_id("agent-1"))
+            .expect("render")
+            .expect("MUC room");
+
+    assert_eq!(
+        localpart,
+        "session-1-agent-1-senior-engineer-engineering-senior-engineer-engineering"
+    );
+    assert!(!localpart.contains(&muc_room_disambiguator(&agent_id("agent-1"))));
+}
+
+/// Optional role/group presence flags let one valid template handle
+/// registration before metadata catch-up without silently inventing role
+/// identifiers.
+#[test]
+fn muc_room_template_exposes_missing_metadata_flags() {
+    let mut cfg = cfg();
+    cfg.muc.room_template = "{{#if role_present}}{{role}}{{else}}no-role{{/if}}-{{#if role_group_present}}{{role_group}}{{else}}no-group{{/if}}".to_owned();
+
+    let localpart = room_localpart_for_registration(
+        &State::default(),
+        &cfg,
+        &"session-1".into(),
+        &agent_id("agent-1"),
+    )
+    .expect("render")
+    .expect("MUC room");
+
+    assert_eq!(localpart, "no-role-no-group");
+}
+
+/// The optional random helper matches agent-id template ergonomics while
+/// keeping randomness entirely opt-in and outside the stable default room
+/// policy.
+#[test]
+fn muc_room_template_supports_opt_in_random_alphanumeric() {
+    let mut cfg = cfg();
+    cfg.muc.room_template = "{{random_alphanumeric 12}}".to_owned();
+
+    let localpart = room_localpart_for_registration(
+        &State::default(),
+        &cfg,
+        &"session-1".into(),
+        &agent_id("agent-1"),
+    )
+    .expect("render")
+    .expect("MUC room");
+
+    assert_eq!(localpart.len(), 12);
+    assert!(localpart.chars().all(|ch| ch.is_ascii_alphanumeric()));
+}
+
+/// The random helper rejects ambiguous or unsafe argument shapes during
+/// configuration rather than silently substituting a different entropy policy.
+#[test]
+fn muc_room_template_rejects_invalid_random_lengths() {
+    for template in [
+        "{{random_alphanumeric}}",
+        "{{random_alphanumeric \"bad\"}}",
+        "{{random_alphanumeric -1}}",
+        "{{random_alphanumeric 0}}",
+        "{{random_alphanumeric 65}}",
+        "{{random_alphanumeric 4 5}}",
+        "{{random_alphanumeric 4 ignored=5}}",
+    ] {
+        let error = validate_room_template(
+            Some(template.to_owned()),
+            "tau",
+            Some(&Jid::new("conference.example.org").expect("JID").to_bare()),
+        )
+        .expect_err(template);
+        assert!(error.contains("random_alphanumeric"), "{template}: {error}");
+    }
+}
+
+/// Invalid Handlebars variables are extension configuration errors, rather than
+/// deferred bridge startup failures or silent fallback to a different room.
+#[test]
+fn invalid_muc_room_template_is_reported_as_config_error() {
+    let frames = run_protocol_messages(
+        &[HarnessOutputMessage::Configure(configure_from_json(
+            serde_json::json!({
+                "jid": "tau@example.org",
+                "password_secret": "xmpp_password",
+                "allowed_jids": ["me@example.org"],
+                "default_recipient": "me@example.org",
+                "routing": { "mode": "muc" },
+                "muc": {
+                    "service": "conference.example.org",
+                    "room_template": "{{unknown_identity}}"
+                },
+            }),
+        ))],
+        FakeBridge::new(),
+    );
+
+    assert!(frames.iter().any(|frame| matches!(
+        frame,
+        HarnessInputMessage::ConfigError(error)
+            if error.message.contains("muc.room_template")
+                && error.message.contains("unknown_identity")
+    )));
+}
+
+/// Metadata that is valid Tau identity text but invalid in an XMPP localpart
+/// fails the tool before the bridge starts.
+#[test]
+fn actual_room_template_metadata_is_validated_before_bridge_start() {
+    let (tx, rx) = mpsc::channel();
+    let bridge = FakeBridge::new();
+    let ext = Extension::new(bridge.clone(), tx);
+    let mut cfg = cfg();
+    cfg.muc.room_template = "{{role}}".to_owned();
+    ext.apply_config(cfg).expect("apply config");
+    let mut state = ext.state.lock().expect("lock");
+    state.current_session_id = Some("session-1".into());
+    state
+        .agent_roles
+        .insert(agent_id("agent-1"), "bad@role".to_owned());
+    drop(state);
+
+    ext.dispatch_tool(tool(REGISTER_TOOL_NAME, "agent-1", bool_args(true)));
+    let _progress = rx.recv().expect("progress");
+    let HarnessInputMessage::Emit(emit) = rx.recv().expect("result") else {
+        panic!("emit")
+    };
+    assert!(matches!(*emit.event, Event::ToolError(_)));
+    assert_eq!(*bridge.started.lock().expect("lock"), 0);
+}
+
+/// Replayed durable agent-role and reconstructed role-group metadata are cached
+/// before registration so role-based room templates work after daemon resume.
+#[test]
+fn replayed_role_metadata_populates_muc_room_template() {
+    let bridge = FakeBridge::new();
+    bridge.set_ready(true);
+    run_protocol_messages(
+        &[
+            HarnessOutputMessage::Configure(configure_from_json(serde_json::json!({
+                "jid": "tau@example.org",
+                "password_secret": "xmpp_password",
+                "allowed_jids": ["me@example.org"],
+                "default_recipient": "me@example.org",
+                "routing": { "mode": "muc" },
+                "muc": {
+                    "service": "conference.example.org",
+                    "room_template": "{{role}}-{{role_group}}-{{agent_id}}"
+                },
+            }))),
+            session_started_message("session-1"),
+            HarnessOutputMessage::deliver_replay(
+                tau_proto::UnixMicros::new(1),
+                Event::AgentStarted(tau_proto::AgentStarted {
+                    agent_id: agent_id("agent-1"),
+                    parent_agent: None,
+                    role: "senior-engineer".to_owned(),
+                    display_name: None,
+                    metadata: Vec::new(),
+                    ephemeral: false,
+                }),
+            ),
+            HarnessOutputMessage::deliver_replay(
+                tau_proto::UnixMicros::new(2),
+                Event::HarnessRolesAvailable(tau_proto::HarnessRolesAvailable {
+                    roles: vec![tau_proto::HarnessRoleInfo {
+                        name: "senior-engineer".to_owned(),
+                        description: String::new(),
+                        role_description: None,
+                        details: None,
+                    }],
+                    groups: vec![tau_proto::HarnessRoleGroup {
+                        name: "engineering".to_owned(),
+                        roles: vec!["senior-engineer".to_owned()],
+                    }],
+                    custom_prompts: Vec::new(),
+                }),
+            ),
+            HarnessOutputMessage::deliver(Event::ToolStarted(tool(
+                REGISTER_TOOL_NAME,
+                "agent-1",
+                bool_args(true),
+            ))),
+        ],
+        bridge.clone(),
+    );
+
+    assert_eq!(
+        bridge
+            .registered
+            .lock()
+            .expect("lock")
+            .get(&agent_id("agent-1"))
+            .map(String::as_str),
+        Some("senior-engineer-engineering-agent-1@conference.example.org")
     );
 }
 
@@ -1179,8 +1406,8 @@ fn muc_room_identity_hashes_full_long_agent_ids() {
     let first = agent_id(&format!("{}{}", "a".repeat(48), "b".repeat(16)));
     let second = agent_id(&format!("{}{}", "a".repeat(48), "c".repeat(16)));
 
-    let first_room = worker.muc_room_for(&first).expect("first room");
-    let second_room = worker.muc_room_for(&second).expect("second room");
+    let first_room = default_muc_room(&worker, &first);
+    let second_room = default_muc_room(&worker, &second);
 
     assert_ne!(first_room, second_room);
     for room in [first_room, second_room] {
@@ -1195,12 +1422,8 @@ fn muc_room_identity_hashes_full_long_agent_ids() {
 fn muc_room_identity_is_stable_across_xmpp_nodeprep_casefolding() {
     let (tx, _rx) = mpsc::channel();
     let worker = WorkerState::new(cfg(), tx, shutdown_signal());
-    let uppercase = worker
-        .muc_room_for(&agent_id("AgentA"))
-        .expect("uppercase room");
-    let lowercase = worker
-        .muc_room_for(&agent_id("agenta"))
-        .expect("lowercase room");
+    let uppercase = default_muc_room(&worker, &agent_id("AgentA"));
+    let lowercase = default_muc_room(&worker, &agent_id("agenta"));
 
     assert_eq!(
         uppercase.to_string(),
@@ -1220,9 +1443,7 @@ fn muc_room_identity_drops_generated_agent_suffix_from_slug() {
     let (tx, _rx) = mpsc::channel();
     let worker = WorkerState::new(cfg(), tx, shutdown_signal());
 
-    let room = worker
-        .muc_room_for(&agent_id("manager-Y3KG"))
-        .expect("room");
+    let room = default_muc_room(&worker, &agent_id("manager-Y3KG"));
 
     assert_eq!(
         room.to_string(),
@@ -1236,7 +1457,7 @@ fn muc_room_identity_drops_generated_agent_suffix_from_slug() {
 fn muc_room_collision_does_not_overwrite_existing_routing() {
     let (tx, _rx) = mpsc::channel();
     let mut worker = WorkerState::new(cfg(), tx, shutdown_signal());
-    let room = worker.muc_room_for(&agent_id("agent-1")).expect("room");
+    let room = default_muc_room(&worker, &agent_id("agent-1"));
     worker
         .room_to_agent
         .insert(room.clone(), agent_id("agent-2"));
@@ -1249,13 +1470,13 @@ fn muc_room_collision_does_not_overwrite_existing_routing() {
     assert_eq!(worker.room_to_agent.get(&room), Some(&agent_id("agent-2")));
 }
 
-/// A generated room that is already in a pending join for another agent must
+/// A rendered room that is already in a pending join for another agent must
 /// also fail closed so registration races cannot claim the same room.
 #[test]
 fn muc_room_collision_does_not_overwrite_pending_join() {
     let (tx, _rx) = mpsc::channel();
     let mut worker = WorkerState::new(cfg(), tx, shutdown_signal());
-    let room = worker.muc_room_for(&agent_id("agent-1")).expect("room");
+    let room = default_muc_room(&worker, &agent_id("agent-1"));
     worker.pending_muc_joins.insert(
         agent_id("agent-2"),
         MucOccupant::new(room.clone(), "tau-other".to_owned()),
@@ -1284,10 +1505,7 @@ fn muc_room_identity_is_bounded_and_xmpp_localpart_safe() {
     cfg.muc.room_prefix = "x".repeat(48);
     let worker = WorkerState::new(cfg, tx, shutdown_signal());
 
-    let room = worker
-        .muc_room_for(&agent_id("AgentA"))
-        .expect("room")
-        .to_string();
+    let room = default_muc_room(&worker, &agent_id("AgentA")).to_string();
     let localpart = room
         .split_once('@')
         .map(|(localpart, _)| localpart)
@@ -1677,7 +1895,7 @@ async fn direct_registration_rejects_second_agent() {
         "unused".to_owned(),
     );
     let err = worker
-        .register_agent(agent_id("agent-2"), &mut client)
+        .register_agent(agent_id("agent-2"), None, &mut client)
         .await
         .expect_err("second direct registration rejected");
     assert!(err.contains("only one registered agent"));

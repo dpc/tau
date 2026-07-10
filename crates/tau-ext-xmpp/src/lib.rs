@@ -64,6 +64,7 @@ const WORKER_SHUTDOWN_CLEANUP_TIMEOUT: Duration = Duration::from_secs(4);
 const MUC_OWNER_NS: &str = "http://jabber.org/protocol/muc#owner";
 const MUC_ROOM_DISAMBIGUATOR_BYTES: usize = 5;
 const MUC_AGENT_SLUG_MAX_CHARS: usize = 18;
+const DEFAULT_ROOM_TEMPLATE: &str = "{{room_prefix}}-{{agent_slug}}-{{agent_hash}}";
 
 /// Run the XMPP extension over stdio.
 pub fn run_stdio() -> Result<(), Box<dyn Error>> {
@@ -177,7 +178,12 @@ trait XmppBridge: Send + Sync + 'static {
     ) -> Result<(), String>;
 
     /// Register one agent conversation and return its XMPP address.
-    fn register_agent(&self, cfg: &RuntimeConfig, agent_id: &AgentId) -> Result<String, String>;
+    fn register_agent(
+        &self,
+        cfg: &RuntimeConfig,
+        agent_id: &AgentId,
+        room_localpart: Option<&str>,
+    ) -> Result<String, String>;
 
     /// Remove one registered agent conversation from the bridge.
     fn unregister_agent(&self, agent_id: &AgentId) -> Result<(), String>;
@@ -253,6 +259,8 @@ struct MucConfigRaw {
     service: Option<String>,
     /// Room localpart prefix.
     room_prefix: Option<String>,
+    /// Handlebars template rendering the complete room localpart.
+    room_template: Option<String>,
     /// Whether Tau requires real JID exposure in room presence.
     expose_real_jids: Option<bool>,
     /// Explicitly trust server-side room membership when real JIDs are hidden.
@@ -277,6 +285,8 @@ struct MucConfig {
     service: Option<BareJid>,
     /// Room localpart prefix.
     room_prefix: String,
+    /// Handlebars template rendering the complete room localpart.
+    room_template: String,
     /// Whether the deployment is expected to expose real JIDs in presence.
     expose_real_jids: bool,
     /// Whether membership may be trusted when real JIDs are hidden.
@@ -368,9 +378,13 @@ impl MucConfigRaw {
         if routing_mode == RoutingMode::Muc && service.is_none() {
             return Err("xmpp routing.mode `muc` requires `muc.service`".to_owned());
         }
+        let room_prefix = validate_room_prefix(self.room_prefix);
+        let room_template =
+            validate_room_template(self.room_template, &room_prefix, service.as_ref())?;
         Ok(MucConfig {
             service,
-            room_prefix: validate_room_prefix(self.room_prefix),
+            room_prefix,
+            room_template,
             expose_real_jids: self.expose_real_jids.unwrap_or(true),
             trust_muc_membership: self.trust_muc_membership.unwrap_or(false),
             invite_default_recipient: self.invite_default_recipient.unwrap_or(true),
@@ -475,6 +489,165 @@ fn validate_room_prefix(room_prefix: Option<String>) -> String {
     )
 }
 
+/// Values available while rendering one configured MUC room localpart.
+#[derive(serde::Serialize)]
+struct RoomTemplateContext<'a> {
+    /// Full durable Tau agent id.
+    agent_id: &'a str,
+    /// Normalized short display hint derived from the agent id.
+    agent_slug: String,
+    /// Stable eight-character hash over the full agent id.
+    agent_hash: String,
+    /// Current Tau session id.
+    session_id: &'a str,
+    /// Agent role id, or an empty string when its creation fact is unavailable.
+    role: &'a str,
+    /// Alias of [`Self::role`] that names its identifier semantics explicitly.
+    role_id: &'a str,
+    /// Whether [`Self::role`] is available.
+    role_present: bool,
+    /// Alias of [`Self::role_present`].
+    role_id_present: bool,
+    /// Agent role-group id, or an empty string when role metadata is
+    /// unavailable.
+    role_group: &'a str,
+    /// Alias of [`Self::role_group`] using the user's group-id terminology.
+    group_id: &'a str,
+    /// Whether [`Self::role_group`] is available.
+    role_group_present: bool,
+    /// Alias of [`Self::role_group_present`].
+    group_id_present: bool,
+    /// Validated legacy room prefix.
+    room_prefix: &'a str,
+    /// Configured extension instance name, or an empty string when unnamed.
+    instance_name: &'a str,
+    /// Whether [`Self::instance_name`] is available.
+    instance_name_present: bool,
+}
+
+/// Handlebars helper providing explicitly opt-in random room-name segments.
+struct RandomAlphanumericHelper;
+
+impl handlebars::HelperDef for RandomAlphanumericHelper {
+    fn call_inner<'reg: 'rc, 'rc>(
+        &self,
+        helper: &handlebars::Helper<'rc>,
+        _: &'reg handlebars::Handlebars<'reg>,
+        _: &'rc handlebars::Context,
+        _: &mut handlebars::RenderContext<'reg, 'rc>,
+    ) -> Result<handlebars::ScopedJson<'rc>, handlebars::RenderError> {
+        if helper.params().len() != 1 || !helper.hash().is_empty() {
+            return Err(handlebars::RenderErrorReason::Other(
+                "random_alphanumeric requires exactly one length argument".to_owned(),
+            )
+            .into());
+        }
+        let len = helper
+            .param(0)
+            .and_then(|param| param.value().as_u64())
+            .and_then(|value| usize::try_from(value).ok())
+            .filter(|value| (1..=64).contains(value))
+            .ok_or_else(|| {
+                handlebars::RenderErrorReason::Other(
+                    "random_alphanumeric length must be an integer from 1 through 64".to_owned(),
+                )
+            })?;
+        use rand::Rng as _;
+        const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+        let mut rng = rand::thread_rng();
+        let value = (0..len)
+            .map(|_| ALPHABET[rng.gen_range(0..ALPHABET.len())] as char)
+            .collect::<String>();
+        Ok(handlebars::ScopedJson::Derived(serde_json::Value::String(
+            value,
+        )))
+    }
+}
+
+fn room_template_engine() -> handlebars::Handlebars<'static> {
+    let mut handlebars = handlebars::Handlebars::new();
+    handlebars.set_strict_mode(true);
+    handlebars.register_escape_fn(handlebars::no_escape);
+    handlebars.register_helper("random_alphanumeric", Box::new(RandomAlphanumericHelper));
+    handlebars
+}
+
+fn validate_room_template(
+    template: Option<String>,
+    room_prefix: &str,
+    service: Option<&BareJid>,
+) -> Result<String, String> {
+    let template = template.unwrap_or_else(|| DEFAULT_ROOM_TEMPLATE.to_owned());
+    if template.trim().is_empty() {
+        return Err("xmpp muc.room_template must not be empty".to_owned());
+    }
+    let sample = RoomTemplateContext {
+        agent_id: "agent-A1b2",
+        agent_slug: "agent".to_owned(),
+        agent_hash: "0123abcd".to_owned(),
+        session_id: "session-1",
+        role: "senior-engineer",
+        role_id: "senior-engineer",
+        role_present: true,
+        role_id_present: true,
+        role_group: "engineering",
+        group_id: "engineering",
+        role_group_present: true,
+        group_id_present: true,
+        room_prefix,
+        instance_name: "default",
+        instance_name_present: true,
+    };
+    let rendered = render_room_template(&template, &sample)?;
+    let missing_metadata = RoomTemplateContext {
+        agent_id: "agent-A1b2",
+        agent_slug: "agent".to_owned(),
+        agent_hash: "0123abcd".to_owned(),
+        session_id: "session-1",
+        role: "",
+        role_id: "",
+        role_present: false,
+        role_id_present: false,
+        role_group: "",
+        group_id: "",
+        role_group_present: false,
+        group_id_present: false,
+        room_prefix,
+        instance_name: "",
+        instance_name_present: false,
+    };
+    render_room_template(&template, &missing_metadata)?;
+    let domain = service
+        .map(|service| service.domain().to_string())
+        .unwrap_or_else(|| "conference.invalid".to_owned());
+    validate_rendered_room_localpart(&rendered, &domain)?;
+    Ok(template)
+}
+
+fn render_room_template(
+    template: &str,
+    context: &RoomTemplateContext<'_>,
+) -> Result<String, String> {
+    room_template_engine()
+        .render_template(template, context)
+        .map_err(|error| format!("xmpp muc.room_template failed to render: {error}"))
+}
+
+fn validate_rendered_room_localpart(localpart: &str, domain: &str) -> Result<(), String> {
+    if localpart.is_empty() {
+        return Err("xmpp muc.room_template rendered an empty room localpart".to_owned());
+    }
+    let jid = Jid::new(&format!("{localpart}@{domain}")).map_err(|error| {
+        format!("xmpp muc.room_template rendered invalid room localpart `{localpart}`: {error}")
+    })?;
+    if jid.node().is_none() || jid.resource().is_some() || jid.domain().as_str() != domain {
+        return Err(format!(
+            "xmpp muc.room_template must render exactly one bare room localpart, got `{localpart}`"
+        ));
+    }
+    Ok(())
+}
+
 #[derive(Default)]
 struct State {
     /// Validated runtime config.
@@ -485,8 +658,53 @@ struct State {
     conversations: HashMap<AgentId, String>,
     /// Current Tau session id used to scope registration lifecycle cleanup.
     current_session_id: Option<SessionId>,
+    /// Durable role observed for each agent.
+    agent_roles: HashMap<AgentId, String>,
+    /// Memory-only agents whose cached roles may be dropped on unload/shutdown.
+    ephemeral_agent_roles: HashSet<AgentId>,
+    /// Available role-to-group mapping announced by the harness.
+    role_groups: HashMap<String, String>,
     /// Whether the XMPP bridge has been started.
     bridge_started: bool,
+}
+
+fn room_localpart_for_registration(
+    state: &State,
+    cfg: &RuntimeConfig,
+    session_id: &SessionId,
+    agent_id: &AgentId,
+) -> Result<Option<String>, String> {
+    if cfg.routing_mode != RoutingMode::Muc {
+        return Ok(None);
+    }
+    let role = state.agent_roles.get(agent_id);
+    let group = role.and_then(|role| state.role_groups.get(role));
+    let instance_name = cfg.instance_name.as_deref();
+    let context = RoomTemplateContext {
+        agent_id: agent_id.as_ref(),
+        agent_slug: agent_room_slug(agent_id),
+        agent_hash: muc_room_disambiguator(agent_id),
+        session_id: session_id.as_ref(),
+        role: role.map(String::as_str).unwrap_or(""),
+        role_id: role.map(String::as_str).unwrap_or(""),
+        role_present: role.is_some(),
+        role_id_present: role.is_some(),
+        role_group: group.map(String::as_str).unwrap_or(""),
+        group_id: group.map(String::as_str).unwrap_or(""),
+        role_group_present: group.is_some(),
+        group_id_present: group.is_some(),
+        room_prefix: &cfg.muc.room_prefix,
+        instance_name: instance_name.unwrap_or(""),
+        instance_name_present: instance_name.is_some(),
+    };
+    let localpart = render_room_template(&cfg.muc.room_template, &context)?;
+    let service = cfg
+        .muc
+        .service
+        .as_ref()
+        .ok_or_else(|| "xmpp muc.service is not configured".to_owned())?;
+    validate_rendered_room_localpart(&localpart, service.domain().as_str())?;
+    Ok(Some(localpart))
 }
 
 struct Extension {
@@ -564,17 +782,26 @@ impl Extension {
             Err(message) => return tool_error(invoke, message),
         };
         if enabled {
-            let cfg = {
+            let (cfg, room_localpart) = {
                 let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
                 let Some(cfg) = state.config.clone() else {
                     return tool_error(invoke, "xmpp extension is not configured".to_owned());
                 };
-                if state.current_session_id.is_none() {
+                let Some(session_id) = state.current_session_id.clone() else {
                     return tool_error(
                         invoke,
                         "xmpp_register requires an active Tau session; no session_started event has been observed yet".to_owned(),
                     );
-                }
+                };
+                let room_localpart = match room_localpart_for_registration(
+                    &state,
+                    &cfg,
+                    &session_id,
+                    &invoke.agent_id,
+                ) {
+                    Ok(localpart) => localpart,
+                    Err(message) => return tool_error(invoke, message),
+                };
                 if !state.bridge_started {
                     if let Err(message) = self.bridge.ensure_started(
                         cfg.clone(),
@@ -585,24 +812,19 @@ impl Extension {
                     }
                     state.bridge_started = true;
                 }
-                cfg
+                (cfg, room_localpart)
             };
             if let Err(message) = self.bridge.wait_until_ready(ONLINE_WAIT_TIMEOUT) {
                 return tool_error(invoke, message);
             }
-            {
-                let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-                if state.current_session_id.is_none() {
-                    return tool_error(
-                        invoke,
-                        "xmpp_register requires an active Tau session; no session_started event has been observed yet".to_owned(),
-                    );
-                }
-            }
-            let address = match self.bridge.register_agent(&cfg, &invoke.agent_id) {
-                Ok(address) => address,
-                Err(message) => return tool_error(invoke, message),
-            };
+            let address =
+                match self
+                    .bridge
+                    .register_agent(&cfg, &invoke.agent_id, room_localpart.as_deref())
+                {
+                    Ok(address) => address,
+                    Err(message) => return tool_error(invoke, message),
+                };
             let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
             state.registered_agents.insert(invoke.agent_id.clone());
             state
@@ -706,6 +928,8 @@ enum XmppCommand {
     Register {
         /// Agent to register.
         agent_id: AgentId,
+        /// Rendered MUC room localpart, absent in direct-resource mode.
+        room_localpart: Option<String>,
         /// Response channel carrying the conversation address.
         response: mpsc::Sender<Result<String, String>>,
     },
@@ -760,11 +984,17 @@ impl XmppBridge for LiveXmppBridge {
         Ok(())
     }
 
-    fn register_agent(&self, _cfg: &RuntimeConfig, agent_id: &AgentId) -> Result<String, String> {
+    fn register_agent(
+        &self,
+        _cfg: &RuntimeConfig,
+        agent_id: &AgentId,
+        room_localpart: Option<&str>,
+    ) -> Result<String, String> {
         let tx = self.command_sender()?;
         let (response_tx, response_rx) = mpsc::channel();
         tx.send(XmppCommand::Register {
             agent_id: agent_id.clone(),
+            room_localpart: room_localpart.map(ToOwned::to_owned),
             response: response_tx,
         })
         .map_err(|_| "xmpp worker is not running".to_owned())?;
@@ -1031,10 +1261,14 @@ impl WorkerState {
     /// Process one command from tool handlers.
     async fn handle_command(&mut self, command: XmppCommand, client: &mut Client) {
         match command {
-            XmppCommand::Register { agent_id, response } => {
+            XmppCommand::Register {
+                agent_id,
+                room_localpart,
+                response,
+            } => {
                 let result = match tokio::time::timeout(
                     REGISTER_TIMEOUT,
-                    self.register_agent(agent_id.clone(), client),
+                    self.register_agent(agent_id.clone(), room_localpart, client),
                 )
                 .await
                 {
@@ -1092,6 +1326,7 @@ impl WorkerState {
     async fn register_agent(
         &mut self,
         agent_id: AgentId,
+        room_localpart: Option<String>,
         client: &mut Client,
     ) -> Result<String, String> {
         if let Some(conversation) = self.conversations.get(&agent_id) {
@@ -1100,7 +1335,10 @@ impl WorkerState {
         let conversation = match self.cfg.routing_mode {
             RoutingMode::Muc => {
                 self.ensure_online(client).await?;
-                let room = self.muc_room_for(&agent_id)?;
+                let room_localpart = room_localpart.ok_or_else(|| {
+                    "xmpp MUC registration is missing a rendered room id".to_owned()
+                })?;
+                let room = self.muc_room_for(&room_localpart)?;
                 self.ensure_muc_room_available(&room, &agent_id)?;
                 let nick = format!("{}-{}", self.cfg.resource_prefix, short_random_hex());
                 let occupant = MucOccupant::new(room.clone(), nick);
@@ -1218,25 +1456,20 @@ impl WorkerState {
         }
     }
 
-    /// Build the stable MUC room JID for a Tau agent.
-    fn muc_room_for(&self, agent_id: &AgentId) -> Result<BareJid, String> {
+    /// Build a MUC room JID from a rendered localpart.
+    fn muc_room_for(&self, room_localpart: &str) -> Result<BareJid, String> {
         let service = self
             .cfg
             .muc
             .service
             .clone()
             .ok_or_else(|| "xmpp muc.service is not configured".to_owned())?;
-        Jid::new(&format!(
-            "{}-{}@{}",
-            self.cfg.muc.room_prefix,
-            muc_room_label(agent_id),
-            service.domain()
-        ))
-        .map_err(|e| format!("failed to build muc room jid: {e}"))
-        .map(|jid| jid.to_bare())
+        Jid::new(&format!("{room_localpart}@{}", service.domain()))
+            .map_err(|e| format!("failed to build muc room jid: {e}"))
+            .map(|jid| jid.to_bare())
     }
 
-    /// Fail closed if a generated MUC room is already owned by another agent.
+    /// Fail closed if a rendered MUC room is already owned by another agent.
     fn ensure_muc_room_available(&self, room: &BareJid, agent_id: &AgentId) -> Result<(), String> {
         if let Some(existing) = self.room_to_agent.get(room)
             && existing != agent_id
@@ -2083,6 +2316,22 @@ impl TauExtension for XmppExtension {
                 tau_proto::EventSelector::Exact(tau_proto::EventName::SESSION_STARTED),
                 handle_session_started,
             )
+            .on_raw_restore(
+                tau_proto::EventSelector::Exact(tau_proto::EventName::AGENT_STARTED),
+                handle_template_metadata,
+            )
+            .on_raw_live(
+                tau_proto::EventSelector::Exact(tau_proto::EventName::AGENT_STARTED),
+                handle_template_metadata,
+            )
+            .on_raw_restore(
+                tau_proto::EventSelector::Exact(tau_proto::EventName::HARNESS_ROLES_AVAILABLE),
+                handle_template_metadata,
+            )
+            .on_raw_live(
+                tau_proto::EventSelector::Exact(tau_proto::EventName::HARNESS_ROLES_AVAILABLE),
+                handle_template_metadata,
+            )
             .on_raw_live(
                 tau_proto::EventSelector::Exact(tau_proto::EventName::SESSION_AGENT_UNLOADED),
                 handle_live_event,
@@ -2139,6 +2388,37 @@ fn handle_session_started(cx: tau_client::RawEventContext<'_, XmppRuntime>) -> C
     Ok(())
 }
 
+fn handle_template_metadata(cx: tau_client::RawEventContext<'_, XmppRuntime>) -> ClientResult<()> {
+    let mut state = cx.state.ext.state.lock().unwrap_or_else(|e| e.into_inner());
+    match cx.event() {
+        Event::AgentStarted(started) => {
+            state
+                .agent_roles
+                .insert(started.agent_id.clone(), started.role.clone());
+            if started.ephemeral {
+                state.ephemeral_agent_roles.insert(started.agent_id.clone());
+            } else {
+                state.ephemeral_agent_roles.remove(&started.agent_id);
+            }
+        }
+        Event::HarnessRolesAvailable(available) => {
+            let mut role_groups = available
+                .roles
+                .iter()
+                .map(|role| (role.name.clone(), role.name.clone()))
+                .collect::<HashMap<_, _>>();
+            for group in &available.groups {
+                for role in &group.roles {
+                    role_groups.insert(role.clone(), group.name.clone());
+                }
+            }
+            state.role_groups = role_groups;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 fn handle_live_event(cx: tau_client::RawEventContext<'_, XmppRuntime>) -> ClientResult<()> {
     match cx.event() {
         Event::SessionAgentUnloaded(unloaded) => {
@@ -2162,6 +2442,9 @@ fn unload_agent(ext: &Extension, agent_id: AgentId) {
     let mut state = ext.state.lock().unwrap_or_else(|e| e.into_inner());
     state.registered_agents.remove(&agent_id);
     state.conversations.remove(&agent_id);
+    if state.ephemeral_agent_roles.remove(&agent_id) {
+        state.agent_roles.remove(&agent_id);
+    }
 }
 
 fn shutdown_session(ext: &Extension, session_id: SessionId) {
@@ -2170,6 +2453,9 @@ fn shutdown_session(ext: &Extension, session_id: SessionId) {
         let agents = state.registered_agents.iter().cloned().collect::<Vec<_>>();
         state.registered_agents.clear();
         state.conversations.clear();
+        for agent_id in state.ephemeral_agent_roles.drain().collect::<Vec<_>>() {
+            state.agent_roles.remove(&agent_id);
+        }
         if state.current_session_id.as_ref() == Some(&session_id) {
             state.current_session_id = None;
         }
@@ -2354,13 +2640,6 @@ fn generated_resource(cfg: &RuntimeConfig) -> String {
         std::process::id(),
         short_random_hex()
     )
-}
-
-/// Return a short, readable, normalization-safe MUC room identity label.
-fn muc_room_label(agent_id: &AgentId) -> String {
-    let agent_slug = agent_room_slug(agent_id);
-    let disambiguator = muc_room_disambiguator(agent_id);
-    format!("{agent_slug}-{disambiguator}")
 }
 
 fn muc_room_disambiguator(agent_id: &AgentId) -> String {

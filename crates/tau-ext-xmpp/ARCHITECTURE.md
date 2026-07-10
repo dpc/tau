@@ -22,16 +22,16 @@ the XEP-0045 mediated invite plus direct fallback notice to the default
 recipient; those notices are best-effort and must not delay registration success
 or shutdown cleanup. Tau leaves the room with unavailable presence on unregister
 or session shutdown.
-Room identity must remain stable and collision-resistant for registered routing
-keys after XMPP JID normalization: the room localpart is
-`<room_prefix>-<agent-slug>-<8-char-disambiguator>`. The slug is a short,
-lowercase, localpart-safe hint derived from the agent id; generated-looking agent
-suffixes such as `-Y3KG` are omitted from the slug.
-The disambiguator is a compact base32 encoding of a domain-separated BLAKE3 label
-over the full validated, globally unique `AgentId`, so the truncated/readable slug
-is not routing authority. The 40-bit disambiguator is collision-resistant, not
-injective; before joining, the worker rejects any normalized generated room already
-active or pending for a different agent instead of overwriting `room_to_agent`.
+Room identity is rendered by the strict Handlebars `muc.room_template`. Its
+default, `{{room_prefix}}-{{agent_slug}}-{{agent_hash}}`, preserves the readable
+slug and domain-separated 40-bit BLAKE3 label over the full `AgentId`. Operators
+may instead use agent, session, role, role-group, instance, or explicit random
+inputs and may omit the hash entirely; the rendered value is the complete room
+localpart and therefore defines the operator's cross-process/restart collision
+policy. The extension caches replayed/live `agent.started` roles and reconstructed
+`harness.roles_available` groups for render-time metadata. Before joining, the
+worker rejects any normalized rendered room already active or pending for a
+different agent instead of overwriting `room_to_agent`.
 Once MUC join presence is sent, the worker records pending
 non-routable room/nick state until setup succeeds so timeout,
 configuration failure, dropped registration response, unregister, or shutdown

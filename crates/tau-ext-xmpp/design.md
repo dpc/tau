@@ -35,7 +35,7 @@ The extension generates a high-entropy resource for the configured bare account 
 
 Status: unconfirmed
 
-Recommended routing is one MUC room per globally unique Tau agent id. The room name uses `<room_prefix>-<agent-slug>-<8-char-disambiguator>`, where the slug is a short normalized lowercase hint and the 40-bit disambiguator is compact base32 over a domain-separated BLAKE3 label of the full validated agent id. This keeps each agent on the same XMPP room without exposing long raw Tau ids or creating unbounded room localparts. The readable slug identity must not be treated as authoritative: the short disambiguator covers valid `AgentId`s that differ only by case, by generated suffix, or after slug truncation, but it is intentionally not injective. If a normalized generated room is already active or pending for a different agent, the worker rejects registration before join/routing insertion instead of overwriting `room_to_agent`.
+Recommended routing is one MUC room per globally unique Tau agent id. `muc.room_template` renders the complete localpart in Handlebars strict mode. Its default is `{{room_prefix}}-{{agent_slug}}-{{agent_hash}}`, where the slug is a short normalized hint and the hash is 40-bit compact base32 over a domain-separated BLAKE3 label of the full agent id. Templates can instead use agent/session/role/role-group/instance identity or explicit randomness and may omit collision protection as trusted operator policy. If a normalized rendered room is already active or pending for a different agent, the worker rejects registration before join/routing insertion instead of overwriting `room_to_agent`.
 
 ## MUC invitations and lifecycle
 

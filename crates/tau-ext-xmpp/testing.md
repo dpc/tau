@@ -2,10 +2,10 @@
 
 Use `cargo test -p tau-ext-xmpp` for the crate's fast regression suite. The
 unit tests cover configuration validation, tool schemas, registration/send
-gating, bounded readiness waits, room-name derivation, MUC join confirmation,
-history suppression, real-JID allowlist enforcement, model-visible prompt prefix
-privacy, prompt-label sanitization, direct-resource routing, and shutdown
-handling.
+gating, bounded readiness waits, default and custom room-template derivation,
+strict helper/runtime validation, replayed role metadata, MUC join
+confirmation, history suppression, real-JID allowlist enforcement, model-visible
+prompt-prefix privacy, direct-resource routing, and shutdown handling.
 
 For a live Prosody smoke test, use a private test account and MUC component:
 
@@ -25,6 +25,10 @@ For a live Prosody smoke test, use a private test account and MUC component:
    delayed room history is not converted into fresh prompts.
 8. Unregister the agent or shut down the session and confirm Tau sends
    unavailable presence / leaves the room on the server.
+9. Configure a role/group-based `muc.room_template`, resume Tau, and confirm the
+   replayed agent role and current group render the expected room.
+10. Configure `{{agent_id}}-{{random_alphanumeric 6}}`, unregister/re-register,
+    and confirm the explicitly unstable policy creates a different room.
 
 If the MUC service hides real JIDs, keep `trust_muc_membership: false` for the
 default smoke test and verify replies are rejected. Only repeat with

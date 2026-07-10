@@ -88,6 +88,8 @@ extensions:
         # Domain-only MUC service JID; localparts/resources are rejected.
         service: conference.example.org
         room_prefix: tau
+        # Complete room-localpart Handlebars template. This example is the default.
+        room_template: "{{room_prefix}}-{{agent_slug}}-{{agent_hash}}"
         expose_real_jids: true
         # Set true only if the room server enforces membership and intentionally
         # hides real JIDs from Tau.
@@ -109,13 +111,14 @@ still requires an existing registered conversation after that wait.
 
 - `muc` (recommended): creates/joins one room per globally unique Tau agent id.
   This gives ordinary XMPP clients a separate conversation per registered agent.
-  The room localpart is a short readable label like `tau-manager-bq7e2a4f`:
-  `<room_prefix>-<agent-slug>-<8-char-disambiguator>`. The slug is a normalized
-  lowercase hint capped to a short length; generated-looking agent
-  suffixes such as `-Y3KG` are omitted from the visible slug. The disambiguator
-  is 40 bits of compact base32 over a domain-separated BLAKE3 label of the full
-  agent id, so distinct agents remain collision-resistant after XMPP JID
-  normalization without exposing long raw ids. Tau sends a formal
+  By default, `muc.room_template` is
+  `{{room_prefix}}-{{agent_slug}}-{{agent_hash}}`, producing a short readable
+  localpart like `tau-manager-bq7e2a4f`. `agent_slug` is normalized and bounded;
+  `agent_hash` is a stable eight-character/40-bit BLAKE3 label over the full agent
+  id. The template controls the complete localpart: Tau does not implicitly add
+  the prefix, hash, or randomness. For example, `{{agent_id}}` deliberately uses
+  only the global durable agent id and accepts the operator's chosen collision
+  policy. Tau sends a formal
   XEP-0045 mediated invite to `default_recipient` plus a direct fallback notice
   with the room JID, and enforces `allowed_jids` from current real-JID presence
   when available. Registration waits for the exact post-join `room/nick`
@@ -135,6 +138,44 @@ still requires an existing registered conversation after that wait.
   use `routing.mode: muc` for multiple Tau agents or separate conversations. If
   reconnect changes the resource, Tau sends the default recipient a new address
   notice.
+
+### MUC room-template variables
+
+Room templates use Handlebars strict mode and receive:
+
+- `agent_id` and `session_id` — always-available full Tau identifiers.
+- `role` (`role_id` alias) — the durable agent role, or `""` if its
+  `agent.started` fact is unavailable. Test `role_present` (or
+  `role_id_present`) before relying on it.
+- `role_group` (`group_id` alias) — the configured role-group name, or the role
+  name for an available ungrouped role. It is `""` until both role metadata and
+  the harness role snapshot are available; test `role_group_present` (or
+  `group_id_present`).
+- `room_prefix` — the normalized legacy `muc.room_prefix` value.
+- `agent_slug` — a short normalized agent hint, and `agent_hash` — the stable
+  eight-character hash used by the default.
+- `instance_name` plus `instance_name_present` — the extension instance name
+  when supplied by the harness.
+- `random_alphanumeric <len>` — an optional helper requiring exactly one integer
+  length from 1 through 64 and producing that many random ASCII alphanumeric
+  characters. Using it makes room identity intentionally unstable across later
+  registrations.
+
+Configuration rejects empty templates, syntax errors, unknown variables reached
+by representative present/missing-metadata renders, helper errors, and an invalid
+representative XMPP localpart as mandatory config errors. Strict rendering and
+localpart validation run again on actual values during `xmpp_register`, so a
+data-dependent invalid or previously untaken bad branch is a tool error before
+the XMPP bridge starts. Templates may
+omit every hash/random variable, but if two different active agents render the
+same normalized room in one extension process, registration still fails closed
+because inbound routing would otherwise be ambiguous.
+
+`agent_id` is identifier-safe. `session_id`, `role`, and `role_group` are
+inserted as raw configured text rather than slugged; punctuation that XMPP
+forbids therefore produces the runtime tool error described above. Changing
+`room_template` affects future registrations only: Tau does not rename, migrate,
+or delete rooms created by the old template.
 
 Tau requests zero MUC history on join and drops delayed/history message stanzas
 if they are still delivered, so initial room backlog is not converted into
