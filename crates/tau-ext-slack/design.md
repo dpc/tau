@@ -31,7 +31,7 @@ Status: unconfirmed
 
 Reaction events are not general Slack-channel ingress. The bridge remembers a
 bounded set of message identities returned by successful `slack_send` calls and
-routes an allowlisted human's add/remove reaction only to the registered agent
+routes a policy-permitted verified human's add/remove reaction only to the registered agent
 that created that exact post in an authorized conversation. This state is
 runtime-only; reactions to unknown or evicted posts fail closed.
 The authoritative thread root comes from the authenticated outbound request.
@@ -57,3 +57,10 @@ commit-confirmed `(channel, ts)` identities binds the mutation to its original
 agent, canonical id, sender, conversation, and thread. Consistent edits append
 immutable typed operations; unknown, evicted, or conflicting edits fail closed
 without a replacement create.
+
+
+## Sender admission is independent from trigger scope and content trust
+
+Status: unconfirmed
+
+Strict mode is the default and admits only allowlisted verified humans. Lax mode accepts the increased prompt-injection exposure of other Slack-verified non-bot humans only in configured channels or an already-linked DM. This changes sender admission, not content trust: payloads remain untrusted, and identity plus `Allowlisted`/`LaxPermitted` policy are typed separately. Lax senders cannot link DMs or use agent-selection and bridge-control commands. Accepted ingress activates only an opaque source-bound reply route for the authenticated actor, conversation, and thread; it grants no arbitrary destination selection. Mentions-only/all-messages trigger scope is orthogonal and must preserve these sender, conversation, control, and route invariants.

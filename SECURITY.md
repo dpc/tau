@@ -241,13 +241,19 @@ canonical id to private route state. `slack_send` requires that id as `reply_to`
 extension and harness revalidate the live connection/session/agent/tool plus
 exact external actor, configured or linked conversation, and thread. Replay
 never wakes an agent or activates a route.
+`security_mode` defaults to `strict`. Setting it to `lax` admits other verified
+human content only from configured or linked conversations (including edits and
+reactions), while withholding bridge commands and arbitrary destination selection; accepted ingress activates only its authenticated source-bound reply route. This
+widens prompt-injection exposure. Content remains untrusted independently of
+typed verified identity and allowlist/lax policy metadata; escaped lowering makes
+payload lookalike tags non-authoritative.
 Session changes clear Slack routes and renew the capability with a fresh
 correlation id, so stale registration results cannot cross generations.
 workspace admins, Slack itself, channel members, and Slack Connect participants
 with access to a channel may be able to read messages; this MVP makes no E2EE
 claim. Runtime registrations, per-channel selected agents, per-agent reply
 origins, learned DM, duplicate-event cache, and websocket state are in-memory
-only. A bounded in-memory post-ownership cache permits allowlisted human
+only. A bounded in-memory post-ownership cache permits policy-permitted verified human
 reaction add/remove events to route only to the agent whose `slack_send`
 created that exact authorized-conversation message; arbitrary post reactions
 and retries cannot route prompts. Unconfigured channels and DMs are ignored

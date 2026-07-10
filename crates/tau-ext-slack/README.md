@@ -19,13 +19,24 @@ extensions:
       app_token_secret: slack_app_token
       bot_token_secret: slack_bot_token
       allowed_user_ids: ["U12345678"]
+      # Optional: strict (default) or lax. Read the warning below before lax.
+      security_mode: strict
       # Optional. If omitted or empty, one allowlisted DM can link with `start`.
       channel_ids: ["C12345678", "C87654321"]
       max_message_bytes: 16384
 ```
 
+`security_mode: strict` forwards only verified humans in `allowed_user_ids`.
+`lax` additionally forwards verified human messages, edits, and reactions from
+already configured channels (or the already linked DM); non-allowlisted users
+cannot link DMs or run bridge commands. Lax substantially expands prompt-injection
+exposure but grants no bridge-control or destination-selection authority; accepted ingress activates only its authenticated source-bound reply route.
+All Slack payload text remains untrusted in both modes. Identity verification,
+allowlist/policy classification, and content trust are separate typed envelope
+fields; provider lowering escapes payload text, so lookalike tags have no authority.
+
 Recommended Slack bot events: `app_mention`, `message.channels`, `message.im`,
-`reaction_added`, and `reaction_removed`; recommended bot scopes are `chat:write`,
+`reaction_added`, and `reaction_removed`; required bot scopes are `chat:write`,
 `app_mentions:read`, `channels:history`, `im:history`, `reactions:read`, and `users:read`. Slack App ID, Client ID,
 Client Secret, and Signing Secret are not used by this Socket Mode
 MVP.

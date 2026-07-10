@@ -640,9 +640,14 @@ allowlisted DM linked at runtime with `start`. Each channel has independent agen
 selection, and replies return to the source-bound configured or linked
 conversation selected by `reply_to`, preserving its originating thread
 automatically; the model cannot choose channel, user, or thread destinations.
+`security_mode` is `strict` by default. Optional `lax` also forwards verified
+human creates, edits, and reactions from authorized conversations, without
+granting bridge commands or destination-selection authority. It materially increases
+prompt-injection exposure; all payloads remain untrusted and typed policy,
+identity, and content-trust fields cannot be forged with payload tags.
 Runtime registrations, selected agents, opaque reply routes,
 learned DM link, duplicate event cache, and websocket state are in-memory only.
-Allowlisted human reactions added to or removed from a recent `slack_send` post
+Policy-permitted verified human reactions added to or removed from a recent `slack_send` post
 route to the post's owning agent with stable channel/thread/message metadata;
 reactions to arbitrary posts or unconfigured conversations are ignored.
 Slack edits are separate immutable typed occurrences that visibly reference the

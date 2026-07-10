@@ -145,6 +145,7 @@ fn cfg() -> RuntimeConfig {
         app_token: "xapp-test".to_owned(),
         bot_token: "xoxb-test".to_owned(),
         allowed_user_ids: ["U123".to_owned()].into_iter().collect(),
+        security_mode: SecurityMode::Strict,
         configured_channel_ids: ["C123".to_owned()].into_iter().collect(),
         api_base: DEFAULT_API_BASE.to_owned(),
         max_message_bytes: DEFAULT_MAX_MESSAGE_BYTES,
@@ -436,12 +437,22 @@ fn complete_pending_send(
 }
 
 /// Commit-gated harness results, rather than Slack text or prompt lifecycle
-/// strings, activate the exact opaque route used by successful send completion.
+/// strings, activate the exact opaque route used by successful send completion
+/// and preserve the originating sender policy on that completion.
 #[test]
 fn typed_ingress_result_activates_exact_send_completion_route() {
     let (ext, rx, _client) = extension();
+    ext.state
+        .lock()
+        .expect("lock")
+        .config
+        .as_mut()
+        .expect("config")
+        .security_mode = SecurityMode::Lax;
     register_agent(&ext, "agent-a");
-    ext.process_slack_message(slack_message("C123", None, "<@UBOT123> typed"));
+    let mut message = slack_message("C123", None, "<@UBOT123> typed");
+    message.user_id = "U999".to_owned();
+    ext.process_slack_message(message);
     let ingress = recv_prompt_request(&rx);
     apply_output_message(
         &HarnessOutputMessage::TransportMessageIngressResult(
@@ -473,6 +484,10 @@ fn typed_ingress_result_activates_exact_send_completion_route() {
         panic!("expected successful-send completion");
     };
     assert_eq!(request.in_reply_to, Some(MessageId::new("msg-canonical")));
+    assert_eq!(
+        request.draft.policy_status,
+        SenderPolicyStatus::LaxPermitted
+    );
     assert_eq!(
         request.draft.conversation,
         Some(message_conversation(&slack_conversation("C123", None)))
@@ -508,6 +523,29 @@ fn typed_ingress_result_activates_exact_send_completion_route() {
     );
 }
 
+/// Lax mode cannot use an unlinked DM even to trigger validation replies or
+/// bridge commands; an allowlisted user must establish the link first.
+#[test]
+fn lax_unlinked_dm_has_no_ingress_or_reply_side_effects() {
+    let (ext, rx, client) = extension();
+    ext.state.lock().expect("lock").config = Some(dm_cfg());
+    ext.state
+        .lock()
+        .expect("lock")
+        .config
+        .as_mut()
+        .expect("config")
+        .security_mode = SecurityMode::Lax;
+    register_agent(&ext, "agent-a");
+    for text in ["", "start", "/select agent-a", "x"] {
+        let mut message = slack_message("D999", Some("im"), text);
+        message.user_id = "U999".to_owned();
+        ext.process_slack_message(message);
+    }
+    assert_no_ingress(&rx);
+    assert!(client.sent.lock().expect("lock").is_empty());
+}
+
 /// Canonical reply routes evict oldest selectors at their hard capacity instead
 /// of growing connection state.
 #[test]
@@ -520,6 +558,7 @@ fn typed_reply_route_state_is_bounded() {
                 agent_id: agent_id("agent-a"),
                 conversation: slack_conversation("C123", None),
                 user_id: "U123".to_owned(),
+                policy_status: SenderPolicyStatus::Allowlisted,
             },
         );
     }
@@ -1753,6 +1792,7 @@ fn slack_send_rejects_missing_or_forged_origin_context() {
                 direct: false,
             },
             user_id: "U123".to_owned(),
+            policy_status: SenderPolicyStatus::Allowlisted,
         },
     );
     assert!(matches!(
@@ -1791,6 +1831,62 @@ fn unallowed_user_produces_no_prompt_or_reply() {
     ext.process_slack_message(msg);
     assert!(rx.try_recv().is_err());
     assert!(client.sent.lock().expect("lock").is_empty());
+}
+
+/// Lax mode admits a verified non-allowlisted human only in a configured
+/// conversation and labels that independent policy fact in the typed draft.
+#[test]
+fn lax_mode_routes_verified_human_with_lax_policy() {
+    let (ext, rx, _client) = extension();
+    ext.state
+        .lock()
+        .expect("lock")
+        .config
+        .as_mut()
+        .expect("config")
+        .security_mode = SecurityMode::Lax;
+    register_agent(&ext, "agent-a");
+    let mut msg = slack_message("C123", None, "<@UBOT123> hello");
+    msg.user_id = "U999".to_owned();
+    ext.process_slack_message(msg);
+    let HarnessInputMessage::TransportMessageIngress(request) = rx.recv().expect("lax ingress")
+    else {
+        panic!("expected typed ingress");
+    };
+    assert_eq!(
+        request.draft.identity_assurance,
+        SenderIdentityAssurance::VerifiedAccount
+    );
+    assert_eq!(
+        request.draft.policy_status,
+        SenderPolicyStatus::LaxPermitted
+    );
+}
+
+/// Security mode omission is strict, both supported spellings deserialize, and
+/// ambiguous values fail parsing rather than silently expanding ingress.
+#[test]
+fn security_mode_config_is_strict_by_default_and_rejects_invalid_values() {
+    for (value, expected) in [
+        (serde_json::json!({}), SecurityMode::Strict),
+        (
+            serde_json::json!({"security_mode": "strict"}),
+            SecurityMode::Strict,
+        ),
+        (
+            serde_json::json!({"security_mode": "lax"}),
+            SecurityMode::Lax,
+        ),
+    ] {
+        let config = tau_proto::json_to_cbor(&value)
+            .deserialized::<ExtConfig>()
+            .expect("valid mode");
+        assert_eq!(config.security_mode, expected);
+    }
+    let error = tau_proto::json_to_cbor(&serde_json::json!({"security_mode": "permissive"}))
+        .deserialized::<ExtConfig>()
+        .expect_err("invalid mode");
+    assert!(format!("{error:?}").contains("unknown variant"));
 }
 
 /// Configured channel policy silently rejects other channels and DMs without

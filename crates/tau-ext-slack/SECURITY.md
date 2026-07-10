@@ -21,14 +21,18 @@
   channel prompts. Unconfigured channels and DMs are ignored without reply side
   effects. With an empty list, one allowlisted DM can link with `start` and route
   direct `message` events.
-- Messages from users outside `allowed_user_ids` are ignored before any routing
-  or Slack reply side effects.
-- Reactions route only for allowlisted human users, authorized conversations,
+- `security_mode` defaults to `strict`, where users outside `allowed_user_ids`
+  are ignored. `lax` admits verified non-bot humans only in an already configured
+  channel or linked DM, including their edits and owned-post reactions. They
+  cannot link, select agents, or run bridge commands. Lax expands prompt-injection
+  exposure; it grants no bridge-control or destination-selection authority; accepted ingress activates only its authenticated source-bound reply route.
+- Reactions route only for policy-permitted verified human users, authorized conversations,
   and bounded in-memory `(channel, message timestamp)` identities returned by
   Slack for successful `slack_send` posts. Reactions to arbitrary posts,
   stale/unregistered owners, bot-self reactions, and retries are ignored.
-  Human-account status is checked fail-closed with `users.info`; reaction
-  support therefore requires the `users:read` bot scope.
+  Human-account status is checked fail-closed with `users.info` for creates,
+  edits, and reactions; all ingress therefore requires the `users:read` bot
+  scope.
 - `message_changed` routes only when its original incoming create committed and
   remains in the bounded native-identity cache. Channel, thread, original
   sender/editor, message timestamp, and revision metadata must agree exactly;
@@ -36,6 +40,9 @@
 - Slack text is untrusted external content and can contain prompt injection. It
   stays an unprefixed payload in a harness-stamped typed envelope; allowlist and
   verified-account metadata do not make its content trusted.
+  Typed identity assurance, allowlist/policy status, and content trust remain
+  separate; escaped provider lowering prevents payload lookalike tags from
+  forging any of them.
 - Slack workspace admins, Slack itself, channel members, and Slack Connect
   participants with access to a channel may be able to read messages. This MVP
   does not provide end-to-end encryption.

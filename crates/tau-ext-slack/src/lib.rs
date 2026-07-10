@@ -116,8 +116,11 @@ struct RuntimeConfig {
     app_token: String,
     /// Resolved Slack bot token. Never log this value.
     bot_token: String,
-    /// Slack user ids allowed to interact with this bridge.
+    /// Slack user ids explicitly allowlisted for ingress and bridge-control
+    /// commands.
     allowed_user_ids: HashSet<String>,
+    /// Policy controlling which verified human senders may enter Tau.
+    security_mode: SecurityMode,
     /// Explicitly allowed Slack channels for inbound routing.
     configured_channel_ids: HashSet<String>,
     /// Slack Web API base URL.
@@ -134,8 +137,11 @@ struct ExtConfig {
     app_token_secret: Option<String>,
     /// Secret name carrying the Slack bot token.
     bot_token_secret: Option<String>,
-    /// Slack user ids allowed to drive Tau agents.
+    /// Explicitly allowlisted Slack user ids; only these may run bridge-control
+    /// commands.
     allowed_user_ids: Vec<String>,
+    /// Ingress sender policy. Omission deliberately preserves strict behavior.
+    security_mode: SecurityMode,
     /// Slack channel ids allowed to route messages to Tau.
     channel_ids: Vec<String>,
     /// Optional Slack Web API base URL, mostly for tests.
@@ -195,11 +201,44 @@ impl ExtConfig {
             app_token: app_token.to_owned(),
             bot_token: bot_token.to_owned(),
             allowed_user_ids,
+            security_mode: self.security_mode,
             configured_channel_ids,
             api_base,
             max_message_bytes,
         })
     }
+}
+
+/// Slack ingress sender policy.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum SecurityMode {
+    /// Admit only explicitly allowlisted verified humans.
+    #[default]
+    Strict,
+    /// Also admit verified humans in an already authorized conversation.
+    Lax,
+}
+
+impl RuntimeConfig {
+    /// Classify an admitted sender, or deny it under the configured policy.
+    fn sender_policy(&self, user_id: &str) -> Option<SenderPolicyStatus> {
+        if self.allowed_user_ids.contains(user_id) {
+            Some(SenderPolicyStatus::Allowlisted)
+        } else if self.security_mode == SecurityMode::Lax {
+            Some(SenderPolicyStatus::LaxPermitted)
+        } else {
+            None
+        }
+    }
+}
+
+/// Verified Slack sender and its already-evaluated ingress policy.
+struct IngressSender {
+    /// Transport-stable Slack user id.
+    user_id: String,
+    /// Policy classification established before submission.
+    policy_status: SenderPolicyStatus,
 }
 
 fn secret_value<'a>(
@@ -339,6 +378,8 @@ struct PendingIngress {
     conversation: SlackConversation,
     /// Verified Slack account that authored the occurrence.
     user_id: String,
+    /// Sender policy retained for the eventual source-bound reply route.
+    policy_status: SenderPolicyStatus,
     /// Native create identity to bind after durable commit, when applicable.
     original_key: Option<PostedMessageKey>,
 }
@@ -352,6 +393,8 @@ struct ReplyRoute {
     conversation: SlackConversation,
     /// Verified Slack account bound to the original route.
     user_id: String,
+    /// Policy of the sender that activated this route.
+    policy_status: SenderPolicyStatus,
 }
 
 /// A successful Slack post awaiting durable outgoing-fact completion.
@@ -903,6 +946,7 @@ impl Extension {
                             route.conversation.channel_id, posted.ts
                         )),
                     },
+                    route.policy_status,
                 );
                 let tool_result = successful_tool_result(&invoke, "sent Slack message");
                 self.state
@@ -975,7 +1019,7 @@ impl Extension {
             let Some(cfg) = state.config.clone() else {
                 return;
             };
-            if !cfg.allowed_user_ids.contains(&reaction.user_id)
+            if cfg.sender_policy(&reaction.user_id).is_none()
                 || state.bot_user_id.as_deref() == Some(reaction.user_id.as_str())
                 || !is_authorized_conversation(&state, &cfg, &reaction.channel_id)
             {
@@ -991,7 +1035,7 @@ impl Extension {
             let Some(cfg) = state.config.clone() else {
                 return;
             };
-            if !cfg.allowed_user_ids.contains(&reaction.user_id)
+            if cfg.sender_policy(&reaction.user_id).is_none()
                 || state.bot_user_id.as_deref() == Some(reaction.user_id.as_str())
                 || !is_authorized_conversation(&state, &cfg, &reaction.channel_id)
             {
@@ -1032,7 +1076,12 @@ impl Extension {
                 direct,
             },
             agent_id,
-            reaction.user_id,
+            IngressSender {
+                policy_status: cfg
+                    .sender_policy(&reaction.user_id)
+                    .expect("sender revalidated"),
+                user_id: reaction.user_id,
+            },
             MessageOperation::Reaction {
                 target: MessageRef {
                     message_id: None,
@@ -1072,7 +1121,7 @@ impl Extension {
             let Some(cfg) = state.config.clone() else {
                 return;
             };
-            if !cfg.allowed_user_ids.contains(&edit.editor_user_id)
+            if cfg.sender_policy(&edit.editor_user_id).is_none()
                 || state.bot_user_id.as_deref() == Some(edit.editor_user_id.as_str())
                 || !is_authorized_conversation(&state, &cfg, &edit.channel_id)
             {
@@ -1107,7 +1156,12 @@ impl Extension {
             &cfg,
             owner.conversation,
             owner.agent_id,
-            edit.editor_user_id,
+            IngressSender {
+                policy_status: cfg
+                    .sender_policy(&edit.editor_user_id)
+                    .expect("sender admitted"),
+                user_id: edit.editor_user_id,
+            },
             MessageOperation::Edit {
                 target: MessageRef {
                     message_id: Some(owner.message_id),
@@ -1147,6 +1201,9 @@ impl Extension {
         if !self.accepts_event_conversation(&cfg, &message, is_dm) {
             return;
         }
+        if self.client.is_human_user(&cfg, &message.user_id) != Ok(true) {
+            return;
+        }
         let Some(mut text) = self.trimmed_message_text(&cfg, &message) else {
             return;
         };
@@ -1161,6 +1218,17 @@ impl Extension {
             return;
         }
         let (command, rest) = parse_command(&text);
+        // Lax senders contribute untrusted prompt content; they never gain
+        // bridge-control authority (including linking or target selection).
+        if command.is_some_and(|command| {
+            matches!(
+                command,
+                "start" | "/start" | "agents" | "/agents" | "select" | "/select" | "to" | "/to"
+            ) || command.starts_with('/')
+        }) && !cfg.allowed_user_ids.contains(&message.user_id)
+        {
+            return;
+        }
         if command.is_some()
             && !matches!(command, Some("to" | "/to"))
             && !self.insert_command_duplicate(&message)
@@ -1199,10 +1267,10 @@ impl Extension {
     fn config_for_allowed_message(&self, message: &SlackMessage) -> Option<RuntimeConfig> {
         let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let cfg = state.config.clone()?;
-        if cfg.allowed_user_ids.contains(&message.user_id) {
+        if cfg.sender_policy(&message.user_id).is_some() {
             Some(cfg)
         } else {
-            tracing::warn!(target: LOG_TARGET, user_id = %message.user_id, "ignoring Slack message from unallowed user");
+            tracing::warn!(target: LOG_TARGET, user_id = %message.user_id, "ignoring Slack message denied by security_mode");
             None
         }
     }
@@ -1227,10 +1295,10 @@ impl Extension {
                 return false;
             }
             let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-            return state
-                .learned_dm
-                .as_ref()
-                .is_none_or(|link| link.channel_id == message.channel_id);
+            return state.learned_dm.as_ref().map_or_else(
+                || cfg.allowed_user_ids.contains(&message.user_id),
+                |link| link.channel_id == message.channel_id,
+            );
         }
         message.event_type == "app_mention"
             && cfg.configured_channel_ids.contains(&message.channel_id)
@@ -1506,7 +1574,12 @@ impl Extension {
                 direct: message.channel_type.as_deref() == Some("im"),
             },
             agent_id,
-            message.user_id.clone(),
+            IngressSender {
+                policy_status: cfg
+                    .sender_policy(&message.user_id)
+                    .expect("sender admitted"),
+                user_id: message.user_id.clone(),
+            },
             MessageOperation::Create {
                 payload: MessagePayload::Text {
                     text: text.to_owned(),
@@ -1528,10 +1601,14 @@ impl Extension {
         cfg: &RuntimeConfig,
         conversation: SlackConversation,
         agent_id: AgentId,
-        user_id: String,
+        sender: IngressSender,
         operation: MessageOperation,
         external_identity: ExternalMessageIdentity,
     ) {
+        let IngressSender {
+            user_id,
+            policy_status,
+        } = sender;
         let original_key = matches!(operation, MessageOperation::Create { .. })
             .then(|| {
                 external_identity
@@ -1566,6 +1643,7 @@ impl Extension {
                     agent_id: agent_id.clone(),
                     conversation: conversation.clone(),
                     user_id: user_id.clone(),
+                    policy_status,
                     original_key,
                 },
             );
@@ -1585,6 +1663,7 @@ impl Extension {
                         &conversation,
                         operation,
                         external_identity,
+                        policy_status,
                     ),
                 },
             )));
@@ -1631,6 +1710,7 @@ fn transport_draft(
     conversation: &SlackConversation,
     operation: MessageOperation,
     external_identity: ExternalMessageIdentity,
+    policy_status: SenderPolicyStatus,
 ) -> TransportMessageDraft {
     TransportMessageDraft {
         transport_name: TRANSPORT_NAME.to_owned(),
@@ -1638,7 +1718,7 @@ fn transport_draft(
         conversation: Some(message_conversation(conversation)),
         operation,
         identity_assurance: SenderIdentityAssurance::VerifiedAccount,
-        policy_status: SenderPolicyStatus::Allowlisted,
+        policy_status,
         external_identity: Some(external_identity),
         ordering: None,
         occurred_at: None,
@@ -2201,6 +2281,7 @@ fn apply_output_message(message: &tau_proto::HarnessOutputMessage, ext: &Extensi
                         agent_id: pending.agent_id,
                         conversation: pending.conversation,
                         user_id: pending.user_id,
+                        policy_status: pending.policy_status,
                     },
                 );
             }
