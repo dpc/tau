@@ -2886,6 +2886,28 @@ impl HttpSlackClient {
             .map_err(|e| sanitize_diagnostic(&format!("reading Slack response: {e}"), cfg))?;
         parse_slack_api_response(cfg, method, status.as_u16(), retry_after.as_deref(), &text)
     }
+
+    /// Call `users.info` with a form-encoded parameter.
+    ///
+    /// Slack accepts this method via GET/form encoding but treats a JSON POST
+    /// body as if the required `user` argument were absent.
+    fn get_user(&self, cfg: &RuntimeConfig, user_id: &str) -> Result<serde_json::Value, String> {
+        let url = format!("{}/users.info", cfg.api_base);
+        let mut response = self
+            .agent
+            .post(&url)
+            .header("Authorization", &format!("Bearer {}", cfg.bot_token))
+            .send_form([("user", user_id)])
+            .map_err(|error| {
+                sanitize_diagnostic(&format!("Slack transport error: {error}"), cfg)
+            })?;
+        let status = response.status();
+        let text = response
+            .body_mut()
+            .read_to_string()
+            .map_err(|e| sanitize_diagnostic(&format!("reading Slack response: {e}"), cfg))?;
+        parse_slack_api_response(cfg, "users.info", status.as_u16(), None, &text)
+    }
 }
 
 impl Default for HttpSlackClient {
@@ -2957,12 +2979,7 @@ impl SlackClient for HttpSlackClient {
     }
 
     fn is_human_user(&self, cfg: &RuntimeConfig, user_id: &str) -> Result<bool, String> {
-        let value = self.post(
-            cfg,
-            "users.info",
-            &cfg.bot_token,
-            serde_json::json!({ "user": user_id }),
-        )?;
+        let value = self.get_user(cfg, user_id)?;
         human_user_from_response(&value, user_id)
     }
 

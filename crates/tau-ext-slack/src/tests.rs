@@ -1,4 +1,4 @@
-use std::io::Write;
+use std::io::{Read, Write};
 use std::sync::Mutex;
 
 use tau_proto::{HarnessInputMessage, HarnessOutputMessage, ToolStarted};
@@ -1710,6 +1710,62 @@ fn users_info_response_requires_explicit_live_human_facts() {
         )
         .expect("slackbot")
     );
+}
+
+/// `users.info` must put its required user argument in a form body rather than
+/// a JSON body, which Slack treats as a missing user and reports as
+/// `user_not_found`.
+#[test]
+fn users_info_uses_form_encoding() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind test API");
+    let address = listener.local_addr().expect("test API address");
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept users.info request");
+        let mut request = Vec::new();
+        loop {
+            let mut chunk = [0_u8; 4096];
+            let length = stream.read(&mut chunk).expect("read users.info request");
+            request.extend_from_slice(&chunk[..length]);
+            let text = String::from_utf8_lossy(&request);
+            let Some(header_end) = text.find("\r\n\r\n") else {
+                continue;
+            };
+            let content_length = text
+                .lines()
+                .find_map(|line| line.strip_prefix("content-length: "))
+                .and_then(|value| value.parse::<usize>().ok())
+                .expect("request content length");
+            if request.len() >= header_end + 4 + content_length {
+                break;
+            }
+        }
+        let request = String::from_utf8_lossy(&request);
+        assert!(
+            request.starts_with("POST /api/users.info HTTP/1.1\r\n"),
+            "unexpected request line: {}",
+            request.lines().next().unwrap_or_default()
+        );
+        assert!(request.contains("authorization: Bearer xoxb-test\r\n"));
+        assert!(request.contains("content-type: application/x-www-form-urlencoded\r\n"));
+        assert!(request.contains("\r\n\r\nuser=U123"));
+        let body = r#"{"ok":true,"user":{"id":"U123","deleted":false,"is_bot":false,"is_app_user":false}}"#;
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\ncontent-length: {}\r\ncontent-type: application/json\r\nconnection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .expect("write users.info response");
+    });
+    let cfg = RuntimeConfig {
+        api_base: format!("http://{address}/api"),
+        ..cfg()
+    };
+    assert!(
+        HttpSlackClient::default()
+            .is_human_user(&cfg, "U123")
+            .expect("form-encoded users.info")
+    );
+    server.join().expect("users.info test server");
 }
 
 /// Reactions from unauthorized users, unconfigured conversations, or messages
