@@ -17,7 +17,12 @@ changed Slack credentials, allowlists, routing, or message limits.
 Runtime state is intentionally in memory: registered agents, display labels,
 selected agents per Slack conversation, per-agent authorized reply origins,
 learned DM link, duplicate event cache, bot user id, and websocket state are
-forgotten when the extension restarts. Every id in `channel_ids` is an allowed
+forgotten when the extension restarts. A bounded post-ownership cache maps
+Slack's returned `(channel, ts)` identity for successful `slack_send` posts to
+the sending agent and optional thread root. Allowed-user reaction add/remove
+events route only through an exact cached identity in an authorized
+conversation; arbitrary posts and duplicate retries are ignored. Every id in
+`channel_ids` is an allowed
 Slack channel with independent agent selection. Unconfigured channels and DMs
 cannot route prompts or cause replies. If `channel_ids` is empty, exactly one
 allowlisted Slack DM can link itself with `start`; other DMs cannot replace the

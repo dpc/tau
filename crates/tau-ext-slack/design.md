@@ -30,3 +30,13 @@ steered agent, exact text, and private correlation id before retiring the
 pending record. Because the follow-up mixes the prior turn with steered input
 and has no single safe reply origin, any steer revokes `slack_send` authorization
 instead of choosing a destination.
+
+## Reactions require remembered bridge post ownership
+
+Status: unconfirmed
+
+Reaction events are not general Slack-channel ingress. The bridge remembers a
+bounded set of message identities returned by successful `slack_send` calls and
+routes an allowlisted human's add/remove reaction only to the registered agent
+that created that exact post in an authorized conversation. This state is
+runtime-only; reactions to unknown or evicted posts fail closed.

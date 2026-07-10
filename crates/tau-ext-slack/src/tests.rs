@@ -56,17 +56,22 @@ impl SlackClient for FakeClient {
         Ok("UBOT123".to_owned())
     }
 
+    fn is_human_user(&self, _cfg: &RuntimeConfig, user_id: &str) -> Result<bool, String> {
+        Ok(user_id != "UBOT999")
+    }
+
     fn post_message(
         &self,
         _cfg: &RuntimeConfig,
         channel_id: &str,
         text: &str,
-    ) -> Result<(), String> {
-        self.sent
-            .lock()
-            .expect("lock")
-            .push((channel_id.to_owned(), text.to_owned()));
-        Ok(())
+    ) -> Result<PostedMessage, String> {
+        let mut sent = self.sent.lock().expect("lock");
+        sent.push((channel_id.to_owned(), text.to_owned()));
+        Ok(PostedMessage {
+            ts: format!("{}.0", sent.len()),
+            thread_ts: None,
+        })
     }
 }
 
@@ -81,13 +86,20 @@ impl SlackClient for FailingAuthClient {
         Err("Slack API auth.test failed: invalid_auth".to_owned())
     }
 
+    fn is_human_user(&self, _cfg: &RuntimeConfig, _user_id: &str) -> Result<bool, String> {
+        Ok(true)
+    }
+
     fn post_message(
         &self,
         _cfg: &RuntimeConfig,
         _channel_id: &str,
         _text: &str,
-    ) -> Result<(), String> {
-        Ok(())
+    ) -> Result<PostedMessage, String> {
+        Ok(PostedMessage {
+            ts: "1.0".to_owned(),
+            thread_ts: None,
+        })
     }
 }
 
@@ -229,6 +241,27 @@ fn slack_message(channel_id: &str, channel_type: Option<&str>, text: &str) -> Sl
         subtype: None,
         bot_id: None,
         ts: Some("1.0".to_owned()),
+    }
+}
+
+fn slack_reaction(
+    event_id: &str,
+    event_type: &str,
+    channel_id: &str,
+    message_ts: &str,
+) -> SlackReaction {
+    SlackReaction {
+        event_id: Some(event_id.to_owned()),
+        event_type: if event_type == "reaction_added" {
+            ReactionKind::Added
+        } else {
+            ReactionKind::Removed
+        },
+        user_id: "U123".to_owned(),
+        reaction: "thumbsup".to_owned(),
+        channel_id: channel_id.to_owned(),
+        message_ts: message_ts.to_owned(),
+        thread_ts: Some("9.0".to_owned()),
     }
 }
 
@@ -685,10 +718,49 @@ fn config_after_worker_start_is_rejected() {
 fn invalid_pre_start_reconfiguration_clears_inactive_state() {
     let (ext, _rx, _client) = extension();
     register_agent(&ext, "agent-a");
+    ext.remember_posted_message(
+        "C123",
+        PostedMessage {
+            ts: "1.0".to_owned(),
+            thread_ts: None,
+        },
+        agent_id("agent-a"),
+    );
     ext.clear_config_after_error();
     let state = ext.state.lock().expect("lock");
     assert!(state.config.is_none());
     assert!(state.registered_agents.is_empty());
+    assert!(
+        state
+            .posted_messages
+            .get(&PostedMessageKey::new("C123", "1.0"))
+            .is_none()
+    );
+}
+
+/// Changing the configured channel set before startup clears post ownership
+/// along with registrations so old destinations cannot survive reconfiguration.
+#[test]
+fn channel_reconfiguration_clears_post_ownership() {
+    let (ext, _rx, _client) = extension();
+    register_agent(&ext, "agent-a");
+    ext.remember_posted_message(
+        "C123",
+        PostedMessage {
+            ts: "1.0".to_owned(),
+            thread_ts: None,
+        },
+        agent_id("agent-a"),
+    );
+    ext.apply_config(multi_channel_cfg()).expect("reconfigure");
+    let state = ext.state.lock().expect("lock");
+    assert!(state.registered_agents.is_empty());
+    assert!(
+        state
+            .posted_messages
+            .get(&PostedMessageKey::new("C123", "1.0"))
+            .is_none()
+    );
 }
 
 /// Protocol migration regression: a malformed pre-start config must emit a
@@ -911,11 +983,25 @@ fn slack_register_toggles_agent_and_starts_worker() {
         .expect("lock")
         .selected_agent_by_channel
         .insert("C123".to_owned(), agent_id("agent-a"));
+    ext.remember_posted_message(
+        "C123",
+        PostedMessage {
+            ts: "1.0".to_owned(),
+            thread_ts: None,
+        },
+        agent_id("agent-a"),
+    );
     let result = ext.handle_register(tool(REGISTER_TOOL_NAME, "agent-a", bool_args(false)));
     assert!(matches!(result, Event::ToolResult(_)));
     let state = ext.state.lock().expect("lock");
     assert!(!state.registered_agents.contains(&agent_id("agent-a")));
     assert!(state.selected_agent_by_channel.is_empty());
+    assert!(
+        state
+            .posted_messages
+            .get(&PostedMessageKey::new("C123", "1.0"))
+            .is_none()
+    );
 }
 
 /// Registration performs a bounded Slack auth/open preflight before reporting
@@ -952,6 +1038,193 @@ fn slack_send_uses_originating_conversation() {
         *client.sent.lock().expect("lock"),
         vec![("C456".to_owned(), "[agent-a] hello".to_owned())]
     );
+}
+
+/// Authorized reactions to an agent-owned bridge post route to that same agent
+/// with stable source metadata and duplicate retries are suppressed.
+#[test]
+fn authorized_reactions_to_agent_posts_are_routed_and_deduplicated() {
+    let (ext, rx, _client) = extension();
+    register_agent(&ext, "agent-a");
+    ext.process_slack_message(slack_message("C123", None, "<@UBOT123> question"));
+    let prompt = recv_prompt_request(&rx);
+    activate_prompt_origin(&ext, &prompt);
+    assert!(matches!(
+        ext.handle_send(tool(SEND_TOOL_NAME, "agent-a", message_args("answer"))),
+        Event::ToolResult(_)
+    ));
+    let reaction = slack_reaction("ER1", "reaction_added", "C123", "1.0");
+    let mut reaction = reaction;
+    reaction.reaction = "thumbsup::skin-tone-6".to_owned();
+    ext.process_slack_reaction(reaction);
+    let prompt = recv_prompt_request(&rx);
+    assert_eq!(prompt.agent_id, agent_id("agent-a"));
+    assert_eq!(
+        prompt.text,
+        "[slack reaction type=reaction_added user=U123 channel=C123 message_ts=1.0 thread_ts=9.0 reaction=thumbsup::skin-tone-6]"
+    );
+    ext.process_slack_reaction(slack_reaction("ER1", "reaction_added", "C123", "1.0"));
+    assert!(rx.try_recv().is_err());
+}
+
+/// Canonical Slack skin-tone reactions are accepted, while malformed colon
+/// suffixes and unsafe timestamp metadata fail closed.
+#[test]
+fn reaction_metadata_validation_matches_slack_grammar() {
+    for valid in ["thumbsup", "thumbsup::skin-tone-2", "wave::skin-tone-6"] {
+        assert!(validate_reaction_name(valid).is_ok(), "{valid}");
+    }
+    for invalid in [
+        "",
+        "thumbsup:",
+        "thumbsup::",
+        "thumbsup::skin-tone-1",
+        "thumbsup::skin-tone-7",
+        "thumbsup::skin-tone-2::extra",
+        "bad reaction",
+    ] {
+        assert!(validate_reaction_name(invalid).is_err(), "{invalid}");
+    }
+    for valid in ["1.0", "1712345678.123456"] {
+        assert!(validate_slack_ts(valid).is_ok(), "{valid}");
+    }
+    for invalid in ["", "1", ".1", "1.", "1.2.3", "x.1", "1. x"] {
+        assert!(validate_slack_ts(invalid).is_err(), "{invalid}");
+    }
+}
+
+/// Bot users remain unable to route reactions even if an operator mistakenly
+/// includes their U-shaped bot user id in the allowlist.
+#[test]
+fn allowlisted_non_human_reaction_actor_is_rejected() {
+    let (ext, rx, _client) = extension();
+    {
+        let mut state = ext.state.lock().expect("lock");
+        state
+            .config
+            .as_mut()
+            .expect("config")
+            .allowed_user_ids
+            .insert("UBOT999".to_owned());
+    }
+    register_agent(&ext, "agent-a");
+    ext.remember_posted_message(
+        "C123",
+        PostedMessage {
+            ts: "1.0".to_owned(),
+            thread_ts: None,
+        },
+        agent_id("agent-a"),
+    );
+    let mut reaction = slack_reaction("ER-BOT", "reaction_added", "C123", "1.0");
+    reaction.user_id = "UBOT999".to_owned();
+    ext.process_slack_reaction(reaction);
+    assert!(rx.try_recv().is_err());
+}
+
+/// Slack post responses require a canonical message timestamp and propagate
+/// only a canonical optional thread root into ownership state.
+#[test]
+fn posted_message_response_validates_identity_metadata() {
+    assert!(posted_message_from_response(&serde_json::json!({})).is_err());
+    assert!(posted_message_from_response(&serde_json::json!({ "ts": "bad" })).is_err());
+    let post = posted_message_from_response(&serde_json::json!({
+        "ts": "12.34",
+        "message": { "thread_ts": "not-a-ts" }
+    }))
+    .expect("valid message ts");
+    assert_eq!(post.ts, "12.34");
+    assert!(post.thread_ts.is_none());
+}
+
+/// Eviction, agent removal, and clear keep semantic post ownership synchronized
+/// so stale message identities cannot reappear.
+#[test]
+fn posted_message_cache_eviction_and_cleanup_are_synchronized() {
+    let agent_a = agent_id("agent-a");
+    let agent_b = agent_id("agent-b");
+    let mut cache = PostedMessageCache::new(2);
+    for (ts, agent_id) in [
+        ("1.0", agent_a.clone()),
+        ("2.0", agent_b.clone()),
+        ("3.0", agent_a.clone()),
+    ] {
+        cache.insert(
+            PostedMessageKey::new("C123", ts),
+            PostedMessageOwner {
+                agent_id,
+                thread_ts: None,
+            },
+        );
+    }
+    assert!(cache.get(&PostedMessageKey::new("C123", "1.0")).is_none());
+    assert!(cache.get(&PostedMessageKey::new("C123", "2.0")).is_some());
+    assert!(cache.get(&PostedMessageKey::new("C123", "3.0")).is_some());
+    cache.remove_agent(&agent_a);
+    assert!(cache.get(&PostedMessageKey::new("C123", "2.0")).is_some());
+    assert!(cache.get(&PostedMessageKey::new("C123", "3.0")).is_none());
+    cache.clear();
+    assert!(cache.get(&PostedMessageKey::new("C123", "2.0")).is_none());
+}
+
+/// Human verification fails closed when Slack omits account-type facts and
+/// rejects deleted, bot, and app-user accounts.
+#[test]
+fn users_info_response_requires_explicit_live_human_facts() {
+    assert!(human_user_from_response(&serde_json::json!({}), "U123").is_err());
+    assert!(!human_user_from_response(&serde_json::json!({ "user": {} }), "U123").expect("shape"));
+    assert!(
+        human_user_from_response(
+            &serde_json::json!({
+                "user": { "id": "U123", "deleted": false, "is_bot": false, "is_app_user": false }
+            }),
+            "U123"
+        )
+        .expect("human")
+    );
+    for user in [
+        serde_json::json!({ "id": "U123", "deleted": true, "is_bot": false }),
+        serde_json::json!({ "id": "U123", "deleted": false, "is_bot": true }),
+        serde_json::json!({ "id": "U123", "deleted": false, "is_bot": false, "is_app_user": true }),
+        serde_json::json!({ "id": "U999", "deleted": false, "is_bot": false }),
+        serde_json::json!({ "id": "U123", "deleted": "false", "is_bot": false }),
+    ] {
+        assert!(
+            !human_user_from_response(&serde_json::json!({ "user": user }), "U123")
+                .expect("account")
+        );
+    }
+    assert!(
+        !human_user_from_response(
+            &serde_json::json!({
+                "user": { "id": "USLACKBOT", "deleted": false, "is_bot": false }
+            }),
+            "USLACKBOT"
+        )
+        .expect("slackbot")
+    );
+}
+
+/// Reactions from unauthorized users, unconfigured conversations, or messages
+/// not posted by this bridge never become prompts.
+#[test]
+fn reactions_outside_authorized_owned_posts_are_ignored() {
+    let (ext, rx, _client) = extension();
+    register_agent(&ext, "agent-a");
+    ext.remember_posted_message(
+        "C123",
+        PostedMessage {
+            ts: "1.0".to_owned(),
+            thread_ts: None,
+        },
+        agent_id("agent-a"),
+    );
+    let mut unauthorized = slack_reaction("ER1", "reaction_added", "C123", "1.0");
+    unauthorized.user_id = "U999".to_owned();
+    ext.process_slack_reaction(unauthorized);
+    ext.process_slack_reaction(slack_reaction("ER2", "reaction_added", "C999", "1.0"));
+    ext.process_slack_reaction(slack_reaction("ER3", "reaction_removed", "C123", "404.0"));
+    assert!(rx.try_recv().is_err());
 }
 
 /// A registered agent cannot send proactively merely because channels are
@@ -1353,6 +1626,78 @@ fn protocol_lifecycle_handlers_dispatch_live_and_ignore_replay() {
     }
 }
 
+/// Live unload and shutdown handlers remove cached post ownership so later
+/// reactions cannot target agents after their lifecycle ends.
+#[test]
+fn live_lifecycle_handlers_clear_post_ownership() {
+    let (tx, _rx) = mpsc::channel();
+    let ext = Extension::new(FakeClient::new(), tx);
+    ext.apply_config(cfg()).expect("config");
+    register_agent(&ext, "agent-a");
+    ext.remember_posted_message(
+        "C123",
+        PostedMessage {
+            ts: "1.0".to_owned(),
+            thread_ts: None,
+        },
+        agent_id("agent-a"),
+    );
+    let mut runtime = tau_client::TauExtensionRunner::new(SlackExtension)
+        .start_manual_loop(
+            std::io::Cursor::new(Vec::new()),
+            SharedWriter::default(),
+            SlackRuntime { ext },
+        )
+        .expect("runtime");
+    runtime
+        .dispatch_one(HarnessOutputMessage::deliver_live(
+            tau_proto::UnixMicros::new(1),
+            Event::SessionAgentUnloaded(tau_proto::SessionAgentUnloaded {
+                session_id: "s1".into(),
+                agent_id: agent_id("agent-a"),
+            }),
+        ))
+        .expect("unload");
+    assert!(
+        runtime
+            .state()
+            .ext
+            .state
+            .lock()
+            .expect("lock")
+            .posted_messages
+            .get(&PostedMessageKey::new("C123", "1.0"))
+            .is_none()
+    );
+
+    register_agent(&runtime.state().ext, "agent-a");
+    runtime.state().ext.remember_posted_message(
+        "C123",
+        PostedMessage {
+            ts: "2.0".to_owned(),
+            thread_ts: None,
+        },
+        agent_id("agent-a"),
+    );
+    runtime
+        .dispatch_one(HarnessOutputMessage::deliver_live(
+            tau_proto::UnixMicros::new(2),
+            Event::SessionShutdown(tau_proto::SessionShutdown {
+                session_id: "s1".into(),
+            }),
+        ))
+        .expect("shutdown");
+    let state = runtime.finish().expect("finish").ext.state.clone();
+    assert!(
+        state
+            .lock()
+            .expect("lock")
+            .posted_messages
+            .get(&PostedMessageKey::new("C123", "2.0"))
+            .is_none()
+    );
+}
+
 /// Forged lifecycle facts with mismatched text or agent cannot activate a
 /// pending Slack destination and consume the pending record fail closed.
 #[test]
@@ -1512,8 +1857,47 @@ fn valid_envelopes_are_acked_and_routed() {
     .to_string();
     let action = handle_socket_text(&ext, &text);
     assert_eq!(action.ack_envelope_id.as_deref(), Some("env-1"));
-    ext.process_slack_message(action.message.expect("decoded message"));
+    let Some(DecodedSlackEvent::Message(message)) = action.event else {
+        panic!("decoded message");
+    };
+    ext.process_slack_message(message);
     assert_eq!(recv_prompt(&rx), "[slack from U123] hello");
+}
+
+/// Socket Mode reaction envelopes retain stable message identity metadata and
+/// are acked independently of later authorization checks.
+#[test]
+fn reaction_envelopes_are_acked_and_decoded() {
+    let (ext, _rx, _client) = extension();
+    let text = serde_json::json!({
+        "type": "events_api",
+        "envelope_id": "env-reaction",
+        "payload": {
+            "type": "event_callback",
+            "event_id": "Er1",
+            "event": {
+                "type": "reaction_removed",
+                "user": "U123",
+                "reaction": "eyes",
+                "item": {
+                    "type": "message",
+                    "channel": "C123",
+                    "ts": "12.34",
+                    "thread_ts": "10.00"
+                }
+            }
+        }
+    })
+    .to_string();
+    let action = handle_socket_text(&ext, &text);
+    assert_eq!(action.ack_envelope_id.as_deref(), Some("env-reaction"));
+    let Some(DecodedSlackEvent::Reaction(reaction)) = action.event else {
+        panic!("decoded reaction");
+    };
+    assert_eq!(reaction.event_type.as_str(), "reaction_removed");
+    assert_eq!(reaction.channel_id, "C123");
+    assert_eq!(reaction.message_ts, "12.34");
+    assert_eq!(reaction.thread_ts.as_deref(), Some("10.00"));
 }
 
 /// Slack event types are conversation-specific: configured channels accept

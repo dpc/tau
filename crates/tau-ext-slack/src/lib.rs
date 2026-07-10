@@ -21,6 +21,10 @@ use tau_proto::{
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 
+mod posted_message_cache;
+
+use posted_message_cache::{PostedMessageCache, PostedMessageKey, PostedMessageOwner};
+
 /// Tracing target used by this extension.
 pub const LOG_TARGET: &str = "slack";
 
@@ -44,6 +48,7 @@ const DEFAULT_MAX_MESSAGE_BYTES: usize = 16 * 1024;
 const MAX_MESSAGE_BYTES: usize = 128 * 1024;
 const HTTP_TIMEOUT: Duration = Duration::from_secs(30);
 const DUPLICATE_CACHE_SIZE: usize = 1024;
+const POSTED_MESSAGE_CACHE_SIZE: usize = 1024;
 const ROUTE_CORRELATION_LIMIT: usize = 1024;
 const MAX_DIAGNOSTIC_BYTES: usize = 512;
 const MAX_SOCKET_FRAME_BYTES: usize = 256 * 1024;
@@ -73,10 +78,26 @@ trait SlackClient: Send + Sync + 'static {
     /// Return the bot user id from `auth.test` using the configured bot token.
     fn auth_test(&self, cfg: &RuntimeConfig) -> Result<String, String>;
 
+    /// Return whether an allowlisted Slack user is a live human account.
+    fn is_human_user(&self, cfg: &RuntimeConfig, user_id: &str) -> Result<bool, String>;
+
     /// Send a plain text message to one configured or linked Slack
     /// conversation.
-    fn post_message(&self, cfg: &RuntimeConfig, channel_id: &str, text: &str)
-    -> Result<(), String>;
+    fn post_message(
+        &self,
+        cfg: &RuntimeConfig,
+        channel_id: &str,
+        text: &str,
+    ) -> Result<PostedMessage, String>;
+}
+
+/// Stable identity returned by Slack for one successfully posted message.
+#[derive(Clone)]
+struct PostedMessage {
+    /// Slack message timestamp used as its stable id.
+    ts: String,
+    /// Root thread timestamp when Slack reports this post as a reply.
+    thread_ts: Option<String>,
 }
 
 /// Validated runtime configuration, including resolved secret values.
@@ -209,6 +230,51 @@ struct SlackMessage {
     ts: Option<String>,
 }
 
+/// Slack reaction event awaiting validation and authorization.
+struct SlackReaction {
+    /// Slack event id used for retry suppression.
+    event_id: Option<String>,
+    /// Reaction lifecycle kind.
+    event_type: ReactionKind,
+    /// Slack user who changed the reaction.
+    user_id: String,
+    /// Slack reaction name without surrounding colons.
+    reaction: String,
+    /// Conversation containing the reacted-to post.
+    channel_id: String,
+    /// Stable timestamp/id of the reacted-to post.
+    message_ts: String,
+    /// Optional root thread timestamp reported by Slack.
+    thread_ts: Option<String>,
+}
+
+/// Supported Slack reaction lifecycle kinds.
+#[derive(Clone, Copy)]
+enum ReactionKind {
+    /// A reaction was added.
+    Added,
+    /// A reaction was removed.
+    Removed,
+}
+
+impl ReactionKind {
+    /// Return the stable Slack event name.
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Added => "reaction_added",
+            Self::Removed => "reaction_removed",
+        }
+    }
+}
+
+/// One decoded Socket Mode event supported by this bridge.
+enum DecodedSlackEvent {
+    /// A text message or app mention.
+    Message(SlackMessage),
+    /// A reaction awaiting validation and authorization.
+    Reaction(SlackReaction),
+}
+
 /// Private DM learned through `start` when no channels are configured.
 #[derive(Clone)]
 struct LinkedConversation {
@@ -279,6 +345,8 @@ struct State {
     worker_startup_failure_reported: bool,
     bot_user_id: Option<String>,
     duplicate_events: DuplicateCache,
+    /// Recent bridge-authored Slack posts and their owning agents.
+    posted_messages: PostedMessageCache,
 }
 
 #[derive(Clone)]
@@ -371,6 +439,7 @@ impl Extension {
             state.outbound_channel_by_agent.clear();
             state.pending_origin_by_ctx.clear();
             state.accepted_origin_by_ctx.clear();
+            state.posted_messages.clear();
         }
         Ok(())
     }
@@ -388,6 +457,7 @@ impl Extension {
         state.outbound_channel_by_agent.clear();
         state.pending_origin_by_ctx.clear();
         state.accepted_origin_by_ctx.clear();
+        state.posted_messages.clear();
         state.learned_dm = None;
         state.bot_user_id = None;
         state.duplicate_events = DuplicateCache::default();
@@ -468,6 +538,7 @@ impl Extension {
             state
                 .accepted_origin_by_ctx
                 .retain(|_, origin| origin.agent_id != invoke.agent_id);
+            state.posted_messages.remove_agent(&invoke.agent_id);
         }
         tool_result(
             invoke,
@@ -586,9 +657,100 @@ impl Extension {
         };
         let text = format!("[{}] {message}", invoke.agent_id.as_ref());
         match self.client.post_message(&cfg, &channel_id, &text) {
-            Ok(()) => tool_result(invoke, "sent Slack message"),
+            Ok(posted) => {
+                self.remember_posted_message(&channel_id, posted, invoke.agent_id.clone());
+                tool_result(invoke, "sent Slack message")
+            }
             Err(message) => tool_error(invoke, message),
         }
+    }
+
+    fn remember_posted_message(&self, channel_id: &str, post: PostedMessage, agent_id: AgentId) {
+        let key = PostedMessageKey::new(channel_id, &post.ts);
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.posted_messages.insert(
+            key,
+            PostedMessageOwner {
+                agent_id,
+                thread_ts: post.thread_ts,
+            },
+        );
+    }
+
+    fn process_slack_reaction(&self, reaction: SlackReaction) {
+        if validate_reaction_name(&reaction.reaction).is_err()
+            || validate_slack_ts(&reaction.message_ts).is_err()
+            || reaction
+                .thread_ts
+                .as_deref()
+                .is_some_and(|ts| validate_slack_ts(ts).is_err())
+        {
+            return;
+        }
+        let cfg = {
+            let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            let Some(cfg) = state.config.clone() else {
+                return;
+            };
+            if !cfg.allowed_user_ids.contains(&reaction.user_id)
+                || state.bot_user_id.as_deref() == Some(reaction.user_id.as_str())
+                || !is_authorized_conversation(&state, &cfg, &reaction.channel_id)
+            {
+                return;
+            }
+            cfg
+        };
+        if self.client.is_human_user(&cfg, &reaction.user_id) != Ok(true) {
+            return;
+        }
+        let (cfg, agent_id, thread_ts) = {
+            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            let Some(cfg) = state.config.clone() else {
+                return;
+            };
+            if !cfg.allowed_user_ids.contains(&reaction.user_id)
+                || state.bot_user_id.as_deref() == Some(reaction.user_id.as_str())
+                || !is_authorized_conversation(&state, &cfg, &reaction.channel_id)
+            {
+                return;
+            }
+            let duplicate_key = reaction.event_id.clone().unwrap_or_else(|| {
+                format!(
+                    "reaction:{}:{}:{}:{}:{}",
+                    reaction.event_type.as_str(),
+                    reaction.channel_id,
+                    reaction.message_ts,
+                    reaction.reaction,
+                    reaction.user_id
+                )
+            });
+            if !state.duplicate_events.insert_new(duplicate_key) {
+                return;
+            }
+            let key = PostedMessageKey::new(&reaction.channel_id, &reaction.message_ts);
+            let Some(owner) = state.posted_messages.get(&key) else {
+                return;
+            };
+            if !state.registered_agents.contains(&owner.agent_id) {
+                return;
+            }
+            (
+                cfg,
+                owner.agent_id.clone(),
+                reaction.thread_ts.or_else(|| owner.thread_ts.clone()),
+            )
+        };
+        let thread = thread_ts.as_deref().unwrap_or("-");
+        let prompt = format!(
+            "[slack reaction type={} user={} channel={} message_ts={} thread_ts={} reaction={}]",
+            reaction.event_type.as_str(),
+            reaction.user_id,
+            reaction.channel_id,
+            reaction.message_ts,
+            thread,
+            reaction.reaction
+        );
+        self.route_authorized_prompt(&cfg, &reaction.channel_id, agent_id, prompt);
     }
 
     fn process_slack_message(&self, message: SlackMessage) {
@@ -895,13 +1057,29 @@ impl Extension {
     fn route_text(&self, message: &SlackMessage, agent_id: AgentId, text: &str) {
         let source = sanitize_source_label(&message.user_id);
         let prompt = format!("[slack from {source}] {text}");
+        let Some(cfg) = self
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .config
+            .clone()
+        else {
+            return;
+        };
+        self.route_authorized_prompt(&cfg, &message.channel_id, agent_id, prompt);
+    }
+
+    fn route_authorized_prompt(
+        &self,
+        cfg: &RuntimeConfig,
+        channel_id: &str,
+        agent_id: AgentId,
+        prompt: String,
+    ) {
         let ctx_id = {
             let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-            let Some(cfg) = state.config.clone() else {
-                return;
-            };
             if !state.registered_agents.contains(&agent_id)
-                || !is_authorized_conversation(&state, &cfg, &message.channel_id)
+                || !is_authorized_conversation(&state, cfg, channel_id)
             {
                 return;
             }
@@ -910,8 +1088,8 @@ impl Extension {
             {
                 drop(state);
                 self.reply(
-                    &cfg,
-                    &message.channel_id,
+                    cfg,
+                    channel_id,
                     "Tau has too many pending Slack prompts; try again later.",
                 );
                 return;
@@ -922,7 +1100,7 @@ impl Extension {
                 ctx_id.clone(),
                 PendingOrigin {
                     agent_id: agent_id.clone(),
-                    channel_id: message.channel_id.clone(),
+                    channel_id: channel_id.to_owned(),
                     prompt: prompt.clone(),
                 },
             );
@@ -1214,8 +1392,11 @@ async fn handle_socket_text_frame(
         send_socket_ack(cfg, ws, envelope_id).await?;
     }
     let outcome = action.outcome();
-    if let Some(message) = action.message {
-        ext.process_slack_message(message);
+    if let Some(event) = action.event {
+        match event {
+            DecodedSlackEvent::Message(message) => ext.process_slack_message(message),
+            DecodedSlackEvent::Reaction(reaction) => ext.process_slack_reaction(reaction),
+        }
     }
     Ok(outcome)
 }
@@ -1234,7 +1415,8 @@ async fn send_socket_ack(
 #[derive(Default)]
 struct SocketAction {
     ack_envelope_id: Option<String>,
-    message: Option<SlackMessage>,
+    /// Decoded supported event, when the envelope carries one.
+    event: Option<DecodedSlackEvent>,
     reconnect: bool,
     shutdown: bool,
 }
@@ -1278,50 +1460,83 @@ fn handle_socket_text(ext: &Extension, text: &str) -> SocketAction {
             action.shutdown = !action.reconnect;
         }
         Some("events_api") => {
-            action.message = decode_socket_event(&value);
+            action.event = decode_socket_event(&value);
         }
         _ => {}
     }
     action
 }
 
-fn decode_socket_event(value: &serde_json::Value) -> Option<SlackMessage> {
+fn decode_socket_event(value: &serde_json::Value) -> Option<DecodedSlackEvent> {
     let payload = value.get("payload")?;
     if payload.get("type").and_then(|value| value.as_str()) != Some("event_callback") {
         return None;
     }
     let event = payload.get("event")?;
-    let event_type = event.get("type")?.as_str()?.to_owned();
-    if !matches!(event_type.as_str(), "app_mention" | "message") {
+    let event_type = event.get("type").and_then(|value| value.as_str())?;
+    let event_id = payload
+        .get("event_id")
+        .and_then(|value| value.as_str())
+        .map(str::to_owned);
+    if matches!(event_type, "reaction_added" | "reaction_removed") {
+        let item = event.get("item");
+        if item
+            .and_then(|item| item.get("type"))
+            .and_then(|value| value.as_str())
+            != Some("message")
+        {
+            return None;
+        }
+        return item.and_then(|item| {
+            Some(DecodedSlackEvent::Reaction(SlackReaction {
+                event_id,
+                event_type: if event_type == "reaction_added" {
+                    ReactionKind::Added
+                } else {
+                    ReactionKind::Removed
+                },
+                user_id: event.get("user")?.as_str()?.to_owned(),
+                reaction: event.get("reaction")?.as_str()?.to_owned(),
+                channel_id: item.get("channel")?.as_str()?.to_owned(),
+                message_ts: item.get("ts")?.as_str()?.to_owned(),
+                thread_ts: event
+                    .get("item")
+                    .and_then(|item| item.get("thread_ts"))
+                    .and_then(|value| value.as_str())
+                    .map(str::to_owned),
+            }))
+        });
+    }
+    if !matches!(event_type, "app_mention" | "message") {
         return None;
     }
-    let text = event.get("text")?.as_str()?.to_owned();
-    Some(SlackMessage {
-        event_id: payload
-            .get("event_id")
-            .and_then(|value| value.as_str())
-            .map(str::to_owned),
-        channel_id: event.get("channel")?.as_str()?.to_owned(),
-        channel_type: event
-            .get("channel_type")
-            .and_then(|value| value.as_str())
-            .map(str::to_owned),
-        user_id: event.get("user")?.as_str()?.to_owned(),
-        text,
-        event_type,
-        subtype: event
-            .get("subtype")
-            .and_then(|value| value.as_str())
-            .map(str::to_owned),
-        bot_id: event
-            .get("bot_id")
-            .and_then(|value| value.as_str())
-            .map(str::to_owned),
-        ts: event
-            .get("ts")
-            .and_then(|value| value.as_str())
-            .map(str::to_owned),
-    })
+    let text = event.get("text").and_then(|value| value.as_str())?;
+    let message = (|| {
+        Some(SlackMessage {
+            event_id,
+            channel_id: event.get("channel")?.as_str()?.to_owned(),
+            channel_type: event
+                .get("channel_type")
+                .and_then(|value| value.as_str())
+                .map(str::to_owned),
+            user_id: event.get("user")?.as_str()?.to_owned(),
+            text: text.to_owned(),
+            event_type: event_type.to_owned(),
+            subtype: event
+                .get("subtype")
+                .and_then(|value| value.as_str())
+                .map(str::to_owned),
+            bot_id: event
+                .get("bot_id")
+                .and_then(|value| value.as_str())
+                .map(str::to_owned),
+            ts: event
+                .get("ts")
+                .and_then(|value| value.as_str())
+                .map(str::to_owned),
+        })
+    })();
+    message.map(DecodedSlackEvent::Message)
 }
 
 fn run_with_client<R, W>(
@@ -1480,6 +1695,7 @@ fn handle_live_event(cx: tau_client::RawEventContext<'_, SlackRuntime>) -> Clien
             state
                 .accepted_origin_by_ctx
                 .retain(|_, origin| origin.agent_id != unloaded.agent_id);
+            state.posted_messages.remove_agent(&unloaded.agent_id);
         }
         Event::SessionShutdown(_) => {
             let mut state = cx.state.ext.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -1489,6 +1705,7 @@ fn handle_live_event(cx: tau_client::RawEventContext<'_, SlackRuntime>) -> Clien
             state.outbound_channel_by_agent.clear();
             state.pending_origin_by_ctx.clear();
             state.accepted_origin_by_ctx.clear();
+            state.posted_messages.clear();
         }
         _ => {}
     }
@@ -1740,6 +1957,47 @@ fn validate_slack_id(field: &str, value: &str) -> Result<String, String> {
     Ok(value.to_owned())
 }
 
+fn validate_reaction_name(value: &str) -> Result<(), ()> {
+    let (base, tone) = match value.split_once("::") {
+        Some((base, tone)) if !tone.contains("::") => (base, Some(tone)),
+        Some(_) => return Err(()),
+        None => (value, None),
+    };
+    if base.is_empty()
+        || base.len() > 64
+        || !base
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '+' | '-'))
+    {
+        return Err(());
+    }
+    if tone.is_some_and(|tone| {
+        !matches!(
+            tone,
+            "skin-tone-2" | "skin-tone-3" | "skin-tone-4" | "skin-tone-5" | "skin-tone-6"
+        )
+    }) {
+        return Err(());
+    }
+    Ok(())
+}
+
+fn validate_slack_ts(value: &str) -> Result<(), ()> {
+    let mut parts = value.split('.');
+    let seconds = parts.next().unwrap_or_default();
+    let micros = parts.next().unwrap_or_default();
+    if seconds.is_empty()
+        || micros.is_empty()
+        || parts.next().is_some()
+        || value.len() > 32
+        || !seconds.bytes().all(|byte| byte.is_ascii_digit())
+        || !micros.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return Err(());
+    }
+    Ok(())
+}
+
 fn sanitize_source_label(user_id: &str) -> String {
     user_id
         .chars()
@@ -1906,20 +2164,60 @@ impl SlackClient for HttpSlackClient {
             .ok_or_else(|| "Slack auth.test response missing user_id".to_owned())
     }
 
+    fn is_human_user(&self, cfg: &RuntimeConfig, user_id: &str) -> Result<bool, String> {
+        let value = self.post(
+            cfg,
+            "users.info",
+            &cfg.bot_token,
+            serde_json::json!({ "user": user_id }),
+        )?;
+        human_user_from_response(&value, user_id)
+    }
+
     fn post_message(
         &self,
         cfg: &RuntimeConfig,
         channel_id: &str,
         text: &str,
-    ) -> Result<(), String> {
-        self.post(
+    ) -> Result<PostedMessage, String> {
+        let value = self.post(
             cfg,
             "chat.postMessage",
             &cfg.bot_token,
             serde_json::json!({ "channel": channel_id, "text": text }),
         )?;
-        Ok(())
+        posted_message_from_response(&value)
     }
+}
+
+fn human_user_from_response(
+    value: &serde_json::Value,
+    expected_user_id: &str,
+) -> Result<bool, String> {
+    let user = value
+        .get("user")
+        .ok_or_else(|| "Slack users.info response missing user".to_owned())?;
+    Ok(expected_user_id != "USLACKBOT"
+        && user.get("id").and_then(|value| value.as_str()) == Some(expected_user_id)
+        && user.get("deleted").and_then(|value| value.as_bool()) == Some(false)
+        && user.get("is_bot").and_then(|value| value.as_bool()) == Some(false)
+        && user.get("is_app_user").and_then(|value| value.as_bool()) == Some(false))
+}
+
+fn posted_message_from_response(value: &serde_json::Value) -> Result<PostedMessage, String> {
+    let ts = value
+        .get("ts")
+        .and_then(|value| value.as_str())
+        .filter(|ts| validate_slack_ts(ts).is_ok())
+        .ok_or_else(|| "Slack chat.postMessage response missing ts".to_owned())?
+        .to_owned();
+    let thread_ts = value
+        .get("message")
+        .and_then(|message| message.get("thread_ts"))
+        .and_then(|value| value.as_str())
+        .filter(|ts| validate_slack_ts(ts).is_ok())
+        .map(str::to_owned);
+    Ok(PostedMessage { ts, thread_ts })
 }
 
 fn sanitize_diagnostic(text: &str, cfg: &RuntimeConfig) -> String {

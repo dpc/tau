@@ -24,9 +24,10 @@ extensions:
       max_message_bytes: 16384
 ```
 
-Recommended Slack bot events: `app_mention` and `message.im`; recommended bot
-scopes: `chat:write`, `app_mentions:read`, and `im:history`. Slack App ID,
-Client ID, Client Secret, and Signing Secret are not used by this Socket Mode
+Recommended Slack bot events: `app_mention`, `message.im`, `reaction_added`, and
+`reaction_removed`; recommended bot scopes are `chat:write`,
+`app_mentions:read`, `im:history`, `reactions:read`, and `users:read`. Slack App ID, Client ID,
+Client Secret, and Signing Secret are not used by this Socket Mode
 MVP.
 
 ## Usage
@@ -45,6 +46,10 @@ In channels, mention the bot first, for example
 agent use `slack_send`; there is no channel, user, or thread argument. Each
 configured channel has independent agent selection, and replies return to the
 configured channel (or linked DM) that most recently routed that agent a prompt.
+Allowed users' reaction additions/removals on recent messages posted through
+`slack_send` are routed back to the owning agent with channel, thread, message,
+reaction, event-kind, and user metadata. Other posts and conversations are
+ignored.
 
 The singular `channel_id` key is intentionally unsupported. Empty, malformed,
 or duplicate ids and duplicate user ids are configuration errors.

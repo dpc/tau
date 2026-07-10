@@ -626,6 +626,9 @@ selection, and replies return to the configured or linked conversation that
 routed the agent's latest Slack prompt; the model cannot choose channel, user,
 or thread destinations. Runtime registrations, selected agents, reply origins,
 learned DM link, duplicate event cache, and websocket state are in-memory only.
+Allowlisted human reactions added to or removed from a recent `slack_send` post
+route to the post's owning agent with stable channel/thread/message metadata;
+reactions to arbitrary posts or unconfigured conversations are ignored.
 
 ### Web search extensions
 

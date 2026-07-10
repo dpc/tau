@@ -19,6 +19,12 @@
   direct `message` events.
 - Messages from users outside `allowed_user_ids` are ignored before any routing
   or Slack reply side effects.
+- Reactions route only for allowlisted human users, authorized conversations,
+  and bounded in-memory `(channel, message timestamp)` identities returned by
+  Slack for successful `slack_send` posts. Reactions to arbitrary posts,
+  stale/unregistered owners, bot-self reactions, and retries are ignored.
+  Human-account status is checked fail-closed with `users.info`; reaction
+  support therefore requires the `users:read` bot scope.
 - Slack text is untrusted prompt input and can contain prompt injection. Tau
   prefixes it with compact Slack source context before submitting it as a normal
   prompt request.

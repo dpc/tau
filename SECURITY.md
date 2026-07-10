@@ -232,7 +232,11 @@ workspace admins, Slack itself, channel members, and Slack Connect participants
 with access to a channel may be able to read messages; this MVP makes no E2EE
 claim. Runtime registrations, per-channel selected agents, per-agent reply
 origins, learned DM, duplicate-event cache, and websocket state are in-memory
-only. Unconfigured channels and DMs are ignored without reply side effects.
+only. A bounded in-memory post-ownership cache permits allowlisted human
+reaction add/remove events to route only to the agent whose `slack_send`
+created that exact authorized-conversation message; arbitrary post reactions
+and retries cannot route prompts. Unconfigured channels and DMs are ignored
+without reply side effects.
 Endpoint overrides must reject
 userinfo/query/fragment, production Web API calls must use HTTPS, production
 Socket Mode URLs must use WSS, and returned websocket URLs must not be logged.
