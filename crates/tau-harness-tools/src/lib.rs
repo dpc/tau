@@ -684,7 +684,7 @@ fn agent_start_success_display(
         stats: prompt_stats,
         info_chips: vec![format!("@{agent_id}")],
         status: ToolUseStatus::Success,
-        status_text: "started".to_owned(),
+        status_text: "ok".to_owned(),
         ..Default::default()
     }
 }

@@ -788,7 +788,7 @@ fn delegate_result_includes_only_caller_and_sub_agent_ids() {
 /// contains the started agent id and prompt-size metadata that replaced the old
 /// long-running delegate progress line.
 #[test]
-fn agent_start_success_display_names_started_agent_and_prompt_stats() {
+fn agent_start_success_display_names_agent_and_uses_standard_status() {
     // Immediate `agent_start` completion no longer carries the child's final
     // answer, so its display descriptor must still give the user useful spawn
     // metadata in the normal tool-call block.
@@ -807,7 +807,7 @@ fn agent_start_success_display_names_started_agent_and_prompt_stats() {
     assert_eq!(display.stats.bytes, Some(12));
     assert_eq!(display.info_chips, vec!["@engineer_child"]);
     assert_eq!(display.status, ToolUseStatus::Success);
-    assert_eq!(display.status_text, "started");
+    assert_eq!(display.status_text, "ok");
 }
 
 #[derive(Default)]
@@ -888,7 +888,7 @@ fn finish_agent_start_success_passes_informative_display() {
     assert_eq!(display.stats.bytes, Some(12));
     assert_eq!(display.info_chips, vec!["@engineer_child"]);
     assert_eq!(display.status, ToolUseStatus::Success);
-    assert_eq!(display.status_text, "started");
+    assert_eq!(display.status_text, "ok");
 }
 
 #[test]

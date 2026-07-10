@@ -6514,7 +6514,7 @@ fn watched_agent_terminal_event_wins_over_delayed_prompt_start() {
 /// `agent_watch` notifications.
 
 #[test]
-fn immediate_agent_start_completion_shows_started_agent_and_prompt_stats() {
+fn immediate_agent_start_completion_shows_agent_stats_and_standard_status() {
     let (_term, handle, vt) = setup(100, 24);
     let mut renderer = EventRenderer::new(
         handle.clone(),
@@ -6542,7 +6542,7 @@ fn immediate_agent_start_completion_shows_started_agent_and_prompt_stats() {
             },
             info_chips: vec!["@engineer_child".into()],
             status: tau_proto::ToolUseStatus::Success,
-            status_text: "started".into(),
+            status_text: "ok".into(),
             ..Default::default()
         }),
         originator: tau_proto::PromptOriginator::User,
@@ -6559,8 +6559,8 @@ fn immediate_agent_start_completion_shows_started_agent_and_prompt_stats() {
         "immediate agent_start completion should include spawned id and prompt size: {rows:?}",
     );
     assert!(
-        line.contains("started"),
-        "immediate agent_start completion should use an informative success status: {rows:?}",
+        line.contains("ok"),
+        "immediate agent_start completion should use the standard success status: {rows:?}",
     );
 }
 
