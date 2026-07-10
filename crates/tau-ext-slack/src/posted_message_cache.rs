@@ -28,7 +28,7 @@ impl PostedMessageKey {
 pub(super) struct PostedMessageOwner {
     /// Registered agent that created the post through `slack_send`.
     pub(super) agent_id: AgentId,
-    /// Optional thread root returned by Slack.
+    /// Optional authenticated outbound-request thread root.
     pub(super) thread_ts: Option<String>,
 }
 

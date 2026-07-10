@@ -7,8 +7,11 @@
   text and never log websocket URLs.
 - The model cannot choose arbitrary Slack destinations. `slack_send` has no
   destination argument and uses only the configured channel or single
-  allowlisted DM that most recently routed a prompt to the calling registered
-  agent. It fails before such an authorized origin exists.
+  allowlisted DM established by the accepted/started lifecycle for the calling
+  registered agent's active prompt, plus its validated originating thread root
+  when present. It fails
+  before such an authorized origin exists and never accepts model-supplied
+  `thread_ts`.
 - Authorization activates only after matching live submitted/started lifecycle
   facts. An unrelated submitted prompt or any steered prompt revokes it; a
   context-less tool-result follow-up preserves it only when no user prompt

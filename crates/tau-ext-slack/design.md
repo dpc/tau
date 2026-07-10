@@ -40,3 +40,17 @@ bounded set of message identities returned by successful `slack_send` calls and
 routes an allowlisted human's add/remove reaction only to the registered agent
 that created that exact post in an authorized conversation. This state is
 runtime-only; reactions to unknown or evicted posts fail closed.
+The authoritative thread root comes from the authenticated outbound request.
+Omitted thread metadata in the Slack post response or reaction is tolerated,
+while conflicting metadata prevents ownership caching or reaction routing.
+
+## Thread destinations come only from authenticated prompt origins
+
+Status: unconfirmed
+
+Slack thread roots are validated event metadata and travel inside the same
+pending, accepted, and active conversation state as the configured channel or
+linked DM. `slack_send` exposes no thread argument. Top-level origins store no
+thread root, while threaded origins supply their root to `chat.postMessage`;
+steered and unrelated prompt lifecycle events keep the existing fail-closed
+authorization behavior.

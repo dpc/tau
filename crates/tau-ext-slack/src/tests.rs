@@ -29,8 +29,19 @@ impl Write for SharedWriter {
     }
 }
 
+/// One complete fake Slack post recorded atomically for assertions.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct SentMessage {
+    /// Destination conversation.
+    channel_id: String,
+    /// Posted text.
+    text: String,
+    /// Optional originating thread root.
+    thread_ts: Option<String>,
+}
+
 struct FakeClient {
-    sent: Mutex<Vec<(String, String)>>,
+    sent: Mutex<Vec<SentMessage>>,
     open_count: Mutex<usize>,
     auth_count: Mutex<usize>,
 }
@@ -42,6 +53,26 @@ impl FakeClient {
             open_count: Mutex::new(0),
             auth_count: Mutex::new(0),
         })
+    }
+
+    /// Return channel/text pairs for assertions that predate thread routing.
+    fn sent_pairs(&self) -> Vec<(String, String)> {
+        self.sent
+            .lock()
+            .expect("lock")
+            .iter()
+            .map(|message| (message.channel_id.clone(), message.text.clone()))
+            .collect()
+    }
+
+    /// Return thread destinations from the same atomic post records.
+    fn sent_thread_ids(&self) -> Vec<Option<String>> {
+        self.sent
+            .lock()
+            .expect("lock")
+            .iter()
+            .map(|message| message.thread_ts.clone())
+            .collect()
     }
 }
 
@@ -65,9 +96,14 @@ impl SlackClient for FakeClient {
         _cfg: &RuntimeConfig,
         channel_id: &str,
         text: &str,
+        thread_ts: Option<&str>,
     ) -> Result<PostedMessage, String> {
         let mut sent = self.sent.lock().expect("lock");
-        sent.push((channel_id.to_owned(), text.to_owned()));
+        sent.push(SentMessage {
+            channel_id: channel_id.to_owned(),
+            text: text.to_owned(),
+            thread_ts: thread_ts.map(str::to_owned),
+        });
         Ok(PostedMessage {
             ts: format!("{}.0", sent.len()),
             thread_ts: None,
@@ -95,6 +131,7 @@ impl SlackClient for FailingAuthClient {
         _cfg: &RuntimeConfig,
         _channel_id: &str,
         _text: &str,
+        _thread_ts: Option<&str>,
     ) -> Result<PostedMessage, String> {
         Ok(PostedMessage {
             ts: "1.0".to_owned(),
@@ -241,6 +278,14 @@ fn slack_message(channel_id: &str, channel_type: Option<&str>, text: &str) -> Sl
         subtype: None,
         bot_id: None,
         ts: Some("1.0".to_owned()),
+        thread_ts: None,
+    }
+}
+
+fn slack_conversation(channel_id: &str, thread_ts: Option<&str>) -> SlackConversation {
+    SlackConversation {
+        channel_id: channel_id.to_owned(),
+        thread_ts: thread_ts.map(str::to_owned),
     }
 }
 
@@ -261,7 +306,7 @@ fn slack_reaction(
         reaction: "thumbsup".to_owned(),
         channel_id: channel_id.to_owned(),
         message_ts: message_ts.to_owned(),
-        thread_ts: Some("9.0".to_owned()),
+        thread_ts: None,
     }
 }
 
@@ -719,7 +764,7 @@ fn invalid_pre_start_reconfiguration_clears_inactive_state() {
     let (ext, _rx, _client) = extension();
     register_agent(&ext, "agent-a");
     ext.remember_posted_message(
-        "C123",
+        slack_conversation("C123", Some("10.0")),
         PostedMessage {
             ts: "1.0".to_owned(),
             thread_ts: None,
@@ -745,7 +790,7 @@ fn channel_reconfiguration_clears_post_ownership() {
     let (ext, _rx, _client) = extension();
     register_agent(&ext, "agent-a");
     ext.remember_posted_message(
-        "C123",
+        slack_conversation("C123", Some("10.0")),
         PostedMessage {
             ts: "1.0".to_owned(),
             thread_ts: None,
@@ -984,7 +1029,7 @@ fn slack_register_toggles_agent_and_starts_worker() {
         .selected_agent_by_channel
         .insert("C123".to_owned(), agent_id("agent-a"));
     ext.remember_posted_message(
-        "C123",
+        slack_conversation("C123", None),
         PostedMessage {
             ts: "1.0".to_owned(),
             thread_ts: None,
@@ -1035,8 +1080,43 @@ fn slack_send_uses_originating_conversation() {
     let result = ext.handle_send(tool(SEND_TOOL_NAME, "agent-a", message_args("hello")));
     assert!(matches!(result, Event::ToolResult(_)));
     assert_eq!(
-        *client.sent.lock().expect("lock"),
+        client.sent_pairs(),
         vec![("C456".to_owned(), "[agent-a] hello".to_owned())]
+    );
+}
+
+/// Root messages keep replies top-level while thread messages automatically
+/// carry their originating root without any model-supplied destination.
+#[test]
+fn slack_send_preserves_root_and_thread_context() {
+    let (ext, rx, client) = extension();
+    register_agent(&ext, "agent-a");
+
+    ext.process_slack_message(slack_message("C123", None, "<@UBOT123> root"));
+    let root = recv_prompt_request(&rx);
+    activate_prompt_origin(&ext, &root);
+    assert!(matches!(
+        ext.handle_send(tool(SEND_TOOL_NAME, "agent-a", message_args("root reply"))),
+        Event::ToolResult(_)
+    ));
+
+    let mut threaded = slack_message("C123", None, "<@UBOT123> threaded");
+    threaded.thread_ts = Some("42.0".to_owned());
+    ext.process_slack_message(threaded);
+    let threaded = recv_prompt_request(&rx);
+    activate_prompt_origin(&ext, &threaded);
+    assert!(matches!(
+        ext.handle_send(tool(
+            SEND_TOOL_NAME,
+            "agent-a",
+            message_args("thread reply")
+        )),
+        Event::ToolResult(_)
+    ));
+
+    assert_eq!(
+        client.sent_thread_ids(),
+        vec![None, Some("42.0".to_owned())]
     );
 }
 
@@ -1061,7 +1141,7 @@ fn authorized_reactions_to_agent_posts_are_routed_and_deduplicated() {
     assert_eq!(prompt.agent_id, agent_id("agent-a"));
     assert_eq!(
         prompt.text,
-        "[slack reaction type=reaction_added user=U123 channel=C123 message_ts=1.0 thread_ts=9.0 reaction=thumbsup::skin-tone-6]"
+        "[slack reaction type=reaction_added user=U123 channel=C123 message_ts=1.0 thread_ts=- reaction=thumbsup::skin-tone-6]"
     );
     ext.process_slack_reaction(slack_reaction("ER1", "reaction_added", "C123", "1.0"));
     assert!(rx.try_recv().is_err());
@@ -1109,7 +1189,7 @@ fn allowlisted_non_human_reaction_actor_is_rejected() {
     }
     register_agent(&ext, "agent-a");
     ext.remember_posted_message(
-        "C123",
+        slack_conversation("C123", None),
         PostedMessage {
             ts: "1.0".to_owned(),
             thread_ts: None,
@@ -1122,8 +1202,8 @@ fn allowlisted_non_human_reaction_actor_is_rejected() {
     assert!(rx.try_recv().is_err());
 }
 
-/// Slack post responses require a canonical message timestamp and propagate
-/// only a canonical optional thread root into ownership state.
+/// Slack post response parsing requires a canonical message timestamp and
+/// retains only canonical optional thread metadata.
 #[test]
 fn posted_message_response_validates_identity_metadata() {
     assert!(posted_message_from_response(&serde_json::json!({})).is_err());
@@ -1135,6 +1215,24 @@ fn posted_message_response_validates_identity_metadata() {
     .expect("valid message ts");
     assert_eq!(post.ts, "12.34");
     assert!(post.thread_ts.is_none());
+}
+
+/// Web API request serialization omits thread metadata for root posts and
+/// includes a supplied validated root for threaded posts.
+#[test]
+fn post_message_body_serializes_optional_thread_context() {
+    assert_eq!(
+        post_message_body("C123", "root", None),
+        serde_json::json!({ "channel": "C123", "text": "root" })
+    );
+    assert_eq!(
+        post_message_body("C123", "reply", Some("42.0")),
+        serde_json::json!({
+            "channel": "C123",
+            "text": "reply",
+            "thread_ts": "42.0"
+        })
+    );
 }
 
 /// Eviction, agent removal, and clear keep semantic post ownership synchronized
@@ -1212,7 +1310,7 @@ fn reactions_outside_authorized_owned_posts_are_ignored() {
     let (ext, rx, _client) = extension();
     register_agent(&ext, "agent-a");
     ext.remember_posted_message(
-        "C123",
+        slack_conversation("C123", None),
         PostedMessage {
             ts: "1.0".to_owned(),
             thread_ts: None,
@@ -1224,6 +1322,80 @@ fn reactions_outside_authorized_owned_posts_are_ignored() {
     ext.process_slack_reaction(unauthorized);
     ext.process_slack_reaction(slack_reaction("ER2", "reaction_added", "C999", "1.0"));
     ext.process_slack_reaction(slack_reaction("ER3", "reaction_removed", "C123", "404.0"));
+    assert!(rx.try_recv().is_err());
+}
+
+/// Reaction prompts use the authenticated thread from the original outbound
+/// request even when Slack omits it in the response, and conflicting event
+/// metadata can never redirect a root or threaded post.
+#[test]
+fn reaction_routing_uses_cached_authenticated_thread_only() {
+    let (ext, rx, client) = extension();
+    register_agent(&ext, "agent-a");
+    ext.remember_posted_message(
+        slack_conversation("C123", Some("10.0")),
+        PostedMessage {
+            ts: "1.0".to_owned(),
+            thread_ts: None,
+        },
+        agent_id("agent-a"),
+    );
+    let mut reaction = slack_reaction("ER-THREAD", "reaction_added", "C123", "1.0");
+    reaction.thread_ts = None;
+    ext.process_slack_reaction(reaction);
+    let prompt = recv_prompt_request(&rx);
+    activate_prompt_origin(&ext, &prompt);
+    assert!(matches!(
+        ext.handle_send(tool(
+            SEND_TOOL_NAME,
+            "agent-a",
+            message_args("thread reply")
+        )),
+        Event::ToolResult(_)
+    ));
+    assert_eq!(
+        client.sent_thread_ids().last(),
+        Some(&Some("10.0".to_owned()))
+    );
+
+    ext.remember_posted_message(
+        slack_conversation("C123", None),
+        PostedMessage {
+            ts: "2.0".to_owned(),
+            thread_ts: None,
+        },
+        agent_id("agent-a"),
+    );
+    let mut root_conflict = slack_reaction("ER-ROOT-CONFLICT", "reaction_added", "C123", "2.0");
+    root_conflict.thread_ts = Some("99.0".to_owned());
+    ext.process_slack_reaction(root_conflict);
+
+    ext.remember_posted_message(
+        slack_conversation("C123", Some("10.0")),
+        PostedMessage {
+            ts: "3.0".to_owned(),
+            thread_ts: Some("10.0".to_owned()),
+        },
+        agent_id("agent-a"),
+    );
+    let mut thread_conflict = slack_reaction("ER-THREAD-CONFLICT", "reaction_added", "C123", "3.0");
+    thread_conflict.thread_ts = Some("99.0".to_owned());
+    ext.process_slack_reaction(thread_conflict);
+
+    ext.remember_posted_message(
+        slack_conversation("C123", None),
+        PostedMessage {
+            ts: "4.0".to_owned(),
+            thread_ts: Some("99.0".to_owned()),
+        },
+        agent_id("agent-a"),
+    );
+    ext.process_slack_reaction(slack_reaction(
+        "ER-RESPONSE-CONFLICT",
+        "reaction_added",
+        "C123",
+        "4.0",
+    ));
     assert!(rx.try_recv().is_err());
 }
 
@@ -1240,8 +1412,14 @@ fn slack_send_rejects_missing_or_forged_origin_context() {
     ext.state
         .lock()
         .expect("lock")
-        .outbound_channel_by_agent
-        .insert(agent_id("agent-a"), "C999".to_owned());
+        .outbound_conversation_by_agent
+        .insert(
+            agent_id("agent-a"),
+            SlackConversation {
+                channel_id: "C999".to_owned(),
+                thread_ts: Some("9.0".to_owned()),
+            },
+        );
     assert!(matches!(
         ext.handle_send(tool(SEND_TOOL_NAME, "agent-a", message_args("hello"))),
         Event::ToolError(_)
@@ -1304,8 +1482,12 @@ fn configured_channels_keep_independent_agent_selections() {
 
     ext.process_slack_message(slack_message("C123", None, "<@UBOT123> select agent-alpha"));
     ext.process_slack_message(slack_message("C456", None, "<@UBOT123> select agent-beta"));
-    ext.process_slack_message(slack_message("C123", None, "<@UBOT123> first"));
-    ext.process_slack_message(slack_message("C456", None, "<@UBOT123> second"));
+    let mut first_message = slack_message("C123", None, "<@UBOT123> first");
+    first_message.thread_ts = Some("10.0".to_owned());
+    let mut second_message = slack_message("C456", None, "<@UBOT123> second");
+    second_message.thread_ts = Some("20.0".to_owned());
+    ext.process_slack_message(first_message);
+    ext.process_slack_message(second_message);
 
     let first = recv_prompt_request(&rx);
     let second = recv_prompt_request(&rx);
@@ -1326,7 +1508,7 @@ fn dm_linking_is_explicit_and_exclusive() {
     assert!(rx.try_recv().is_err());
     assert!(
         client.sent.lock().expect("lock")[0]
-            .1
+            .text
             .contains("Send start")
     );
 
@@ -1360,7 +1542,9 @@ fn dm_send_uses_linked_prompt_origin() {
     ext.apply_config(dm_cfg()).expect("dm config");
     register_agent(&ext, "agent-a");
     ext.process_slack_message(slack_message("D123", Some("im"), "start"));
-    ext.process_slack_message(slack_message("D123", Some("im"), "question"));
+    let mut question = slack_message("D123", Some("im"), "question");
+    question.thread_ts = Some("7.0".to_owned());
+    ext.process_slack_message(question);
     let prompt = recv_prompt_request(&rx);
     assert_eq!(prompt.text, "[slack from U123] question");
     activate_prompt_origin(&ext, &prompt);
@@ -1369,8 +1553,12 @@ fn dm_send_uses_linked_prompt_origin() {
         Event::ToolResult(_)
     ));
     assert_eq!(
-        client.sent.lock().expect("lock").last(),
+        client.sent_pairs().last(),
         Some(&("D123".to_owned(), "[agent-a] answer".to_owned()))
+    );
+    assert_eq!(
+        client.sent_thread_ids().last(),
+        Some(&Some("7.0".to_owned()))
     );
 }
 
@@ -1382,8 +1570,12 @@ fn prompt_start_correlation_preserves_queued_origin_routing() {
     ext.apply_config(multi_channel_cfg())
         .expect("multi-channel config");
     register_agent(&ext, "agent-a");
-    ext.process_slack_message(slack_message("C123", None, "<@UBOT123> first"));
-    ext.process_slack_message(slack_message("C456", None, "<@UBOT123> second"));
+    let mut first_message = slack_message("C123", None, "<@UBOT123> first");
+    first_message.thread_ts = Some("10.0".to_owned());
+    let mut second_message = slack_message("C456", None, "<@UBOT123> second");
+    second_message.thread_ts = Some("20.0".to_owned());
+    ext.process_slack_message(first_message);
+    ext.process_slack_message(second_message);
     let first = recv_prompt_request(&rx);
     let second = recv_prompt_request(&rx);
 
@@ -1398,11 +1590,15 @@ fn prompt_start_correlation_preserves_queued_origin_routing() {
         Event::ToolResult(_)
     ));
     assert_eq!(
-        *client.sent.lock().expect("lock"),
+        client.sent_pairs(),
         vec![
             ("C123".to_owned(), "[agent-a] one".to_owned()),
             ("C456".to_owned(), "[agent-a] two".to_owned()),
         ]
+    );
+    assert_eq!(
+        client.sent_thread_ids(),
+        vec![Some("10.0".to_owned()), Some("20.0".to_owned())]
     );
 
     ext.handle_prompt_submitted(&tau_proto::AgentPromptSubmitted {
@@ -1494,7 +1690,9 @@ fn recalled_prompt_reclaims_pending_correlation() {
 fn contextless_followup_preserves_uncontaminated_origin() {
     let (ext, rx, client) = extension();
     register_agent(&ext, "agent-a");
-    ext.process_slack_message(slack_message("C123", None, "<@UBOT123> investigate"));
+    let mut message = slack_message("C123", None, "<@UBOT123> investigate");
+    message.thread_ts = Some("33.0".to_owned());
+    ext.process_slack_message(message);
     let prompt = recv_prompt_request(&rx);
     activate_prompt_origin(&ext, &prompt);
     ext.handle_prompt_started(&agent_id("agent-a"), None);
@@ -1503,6 +1701,10 @@ fn contextless_followup_preserves_uncontaminated_origin() {
         Event::ToolResult(_)
     ));
     assert_eq!(client.sent.lock().expect("lock").len(), 1);
+    assert_eq!(
+        client.sent_thread_ids().last(),
+        Some(&Some("33.0".to_owned()))
+    );
 }
 
 /// The registered tau-client live handlers must dispatch every Slack
@@ -1515,9 +1717,13 @@ fn protocol_lifecycle_handlers_dispatch_live_and_ignore_replay() {
     register_agent(&ext, "agent-a");
     {
         let mut state = ext.state.lock().expect("lock");
-        state
-            .outbound_channel_by_agent
-            .insert(agent_id("agent-a"), "C123".to_owned());
+        state.outbound_conversation_by_agent.insert(
+            agent_id("agent-a"),
+            SlackConversation {
+                channel_id: "C123".to_owned(),
+                thread_ts: None,
+            },
+        );
         for (ctx, channel, text) in [
             ("ctx-live", "C456", "live prompt"),
             ("ctx-replay", "C456", "replayed prompt"),
@@ -1528,7 +1734,10 @@ fn protocol_lifecycle_handlers_dispatch_live_and_ignore_replay() {
                 ctx.to_owned(),
                 PendingOrigin {
                     agent_id: agent_id("agent-a"),
-                    channel_id: channel.to_owned(),
+                    conversation: SlackConversation {
+                        channel_id: channel.to_owned(),
+                        thread_ts: None,
+                    },
                     prompt: text.to_owned(),
                 },
             );
@@ -1600,7 +1809,7 @@ fn protocol_lifecycle_handlers_dispatch_live_and_ignore_replay() {
         .expect("live recalled");
     let state = runtime.finish().expect("finish").ext.state.clone();
     let state = state.lock().expect("lock");
-    assert!(state.outbound_channel_by_agent.is_empty());
+    assert!(state.outbound_conversation_by_agent.is_empty());
     assert!(state.pending_origin_by_ctx.contains_key("ctx-replay"));
     assert!(!state.pending_origin_by_ctx.contains_key("ctx-live"));
     assert!(!state.pending_origin_by_ctx.contains_key("ctx-steer"));
@@ -1635,7 +1844,7 @@ fn live_lifecycle_handlers_clear_post_ownership() {
     ext.apply_config(cfg()).expect("config");
     register_agent(&ext, "agent-a");
     ext.remember_posted_message(
-        "C123",
+        slack_conversation("C123", None),
         PostedMessage {
             ts: "1.0".to_owned(),
             thread_ts: None,
@@ -1672,7 +1881,7 @@ fn live_lifecycle_handlers_clear_post_ownership() {
 
     register_agent(&runtime.state().ext, "agent-a");
     runtime.state().ext.remember_posted_message(
-        "C123",
+        slack_conversation("C123", None),
         PostedMessage {
             ts: "2.0".to_owned(),
             thread_ts: None,
@@ -1743,7 +1952,10 @@ fn route_correlation_limit_counts_pending_and_accepted_together() {
                 format!("accepted:{index}"),
                 AcceptedOrigin {
                     agent_id: agent_id("agent-a"),
-                    channel_id: "C123".to_owned(),
+                    conversation: SlackConversation {
+                        channel_id: "C123".to_owned(),
+                        thread_ts: None,
+                    },
                 },
             );
         }
@@ -1758,7 +1970,7 @@ fn route_correlation_limit_counts_pending_and_accepted_together() {
             .lock()
             .expect("lock")
             .last()
-            .is_some_and(|(_, text)| text.contains("too many pending"))
+            .is_some_and(|message| message.text.contains("too many pending"))
     );
 }
 
@@ -1783,7 +1995,7 @@ fn multiple_agents_without_selection_get_guidance() {
     assert!(rx.try_recv().is_err());
     assert!(
         client.sent.lock().expect("lock")[0]
-            .1
+            .text
             .contains("Multiple Tau agents")
     );
 }
@@ -1804,7 +2016,7 @@ fn agents_select_and_to_route_by_agent_id() {
     ext.process_slack_message(slack_message("C123", None, "<@UBOT123> agents"));
     assert!(
         client.sent.lock().expect("lock")[0]
-            .1
+            .text
             .contains("agent-alpha (Alpha Display)")
     );
 
@@ -1826,10 +2038,18 @@ fn agents_select_and_to_route_by_agent_id() {
 fn malformed_commands_do_not_become_prompts() {
     let (ext, rx, client) = extension();
     register_agent(&ext, "agent-a");
-    ext.process_slack_message(slack_message("C123", None, "<@UBOT123> select"));
-    ext.process_slack_message(slack_message("C123", None, "<@UBOT123> /unknown"));
+    let mut select = slack_message("C123", None, "<@UBOT123> select");
+    select.thread_ts = Some("44.0".to_owned());
+    let mut unknown = slack_message("C123", None, "<@UBOT123> /unknown");
+    unknown.thread_ts = Some("44.0".to_owned());
+    ext.process_slack_message(select);
+    ext.process_slack_message(unknown);
     assert!(rx.try_recv().is_err());
     assert_eq!(client.sent.lock().expect("lock").len(), 2);
+    assert_eq!(
+        client.sent_thread_ids(),
+        vec![Some("44.0".to_owned()), Some("44.0".to_owned())]
+    );
 }
 
 /// Socket Mode envelopes with ids are acked before routing, so Slack retries
@@ -1850,7 +2070,8 @@ fn valid_envelopes_are_acked_and_routed() {
                 "channel": "C123",
                 "user": "U123",
                 "text": "<@UBOT123> hello",
-                "ts": "1.0"
+                "ts": "1.0",
+                "thread_ts": "0.5"
             }
         }
     })
@@ -1860,8 +2081,30 @@ fn valid_envelopes_are_acked_and_routed() {
     let Some(DecodedSlackEvent::Message(message)) = action.event else {
         panic!("decoded message");
     };
+    assert_eq!(message.thread_ts.as_deref(), Some("0.5"));
     ext.process_slack_message(message);
     assert_eq!(recv_prompt(&rx), "[slack from U123] hello");
+}
+
+/// Malformed thread metadata is rejected rather than downgraded to a top-level
+/// destination that could misroute a reply.
+#[test]
+fn malformed_message_thread_metadata_is_rejected() {
+    let value = serde_json::json!({
+        "payload": {
+            "type": "event_callback",
+            "event_id": "Ev-thread-bad",
+            "event": {
+                "type": "app_mention",
+                "channel": "C123",
+                "user": "U123",
+                "text": "<@UBOT123> hello",
+                "ts": "1.0",
+                "thread_ts": "not-a-ts"
+            }
+        }
+    });
+    assert!(decode_socket_event(&value).is_none());
 }
 
 /// Socket Mode reaction envelopes retain stable message identity metadata and

@@ -21,7 +21,10 @@ forgotten when the extension restarts. A bounded post-ownership cache maps
 Slack's returned `(channel, ts)` identity for successful `slack_send` posts to
 the sending agent and optional thread root. Allowed-user reaction add/remove
 events route only through an exact cached identity in an authorized
-conversation; arbitrary posts and duplicate retries are ignored. Every id in
+conversation; arbitrary posts and duplicate retries are ignored. The cached
+thread root is the authenticated outbound request conversation, not later Slack
+response or reaction metadata. Omitted later thread metadata is tolerated, but
+conflicting metadata fails closed. Every id in
 `channel_ids` is an allowed
 Slack channel with independent agent selection. Unconfigured channels and DMs
 cannot route prompts or cause replies. If `channel_ids` is empty, exactly one
@@ -41,14 +44,16 @@ exists. Command designators always put the stable `agent_id` first, with display
 name only as context. Routing a prompt records its authorized originating
 conversation for that agent. `slack_send` has no destination argument and fails
 until the calling registered agent has such an origin; it sends only to that
-configured channel or linked DM. Agent replies are prefixed with `[agent_id]`.
+configured channel or linked DM and uses the validated originating thread root
+when present. Top-level origins remain top-level. Agent replies are prefixed
+with `[agent_id]`.
 
 Outbound authorization follows an explicit live-only state machine. Routing an
 inbound Slack prompt creates a bounded pending record keyed by an
-extension-owned correlation id and containing the exact agent, channel, and
+extension-owned correlation id and containing the exact agent, channel, thread, and
 prompt text. A matching live harness-owned `agent.prompt_submitted` durable fact
 moves it to accepted state; the matching live `agent.prompt_started` activates
-that channel for the agent. Pending plus accepted records share a 1024-entry
+that channel/thread conversation for the agent. Pending plus accepted records share a 1024-entry
 limit. Mismatched agent/text/context facts fail closed, and replayed lifecycle
 facts are ignored by the live-only subscriptions. An unrelated durable prompt
 submission clears the agent's active Slack origin. Busy-agent prompts instead

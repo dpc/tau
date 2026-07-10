@@ -88,6 +88,7 @@ trait SlackClient: Send + Sync + 'static {
         cfg: &RuntimeConfig,
         channel_id: &str,
         text: &str,
+        thread_ts: Option<&str>,
     ) -> Result<PostedMessage, String>;
 }
 
@@ -228,6 +229,21 @@ struct SlackMessage {
     bot_id: Option<String>,
     /// Slack message timestamp used as a duplicate key fallback.
     ts: Option<String>,
+    /// Root thread timestamp when this message is a thread reply.
+    thread_ts: Option<String>,
+}
+
+/// Slack destination derived exclusively from authenticated inbound context.
+///
+/// The channel is configured or linked when captured, and `thread_ts` is absent
+/// or passed `validate_slack_ts`; neither value comes from model input. Channel
+/// authorization is checked again immediately before every send.
+#[derive(Clone)]
+struct SlackConversation {
+    /// Configured channel or linked DM id.
+    channel_id: String,
+    /// Root thread timestamp, absent for a top-level conversation.
+    thread_ts: Option<String>,
 }
 
 /// Slack reaction event awaiting validation and authorization.
@@ -288,8 +304,8 @@ struct LinkedConversation {
 struct PendingOrigin {
     /// Agent targeted by the Slack message.
     agent_id: AgentId,
-    /// Authorized configured channel or linked DM.
-    channel_id: String,
+    /// Authorized channel/DM and optional validated originating thread root.
+    conversation: SlackConversation,
     /// Exact prompt text expected in the durable confirmation.
     prompt: String,
 }
@@ -298,8 +314,8 @@ struct PendingOrigin {
 struct AcceptedOrigin {
     /// Agent owning the confirmed prompt.
     agent_id: AgentId,
-    /// Authorized configured channel or linked DM.
-    channel_id: String,
+    /// Authorized channel/DM and optional validated originating thread root.
+    conversation: SlackConversation,
 }
 
 #[derive(Default)]
@@ -332,7 +348,7 @@ struct State {
     agent_labels: HashMap<AgentId, String>,
     selected_agent_by_channel: HashMap<String, AgentId>,
     /// Last authorized inbound conversation routed to each registered agent.
-    outbound_channel_by_agent: HashMap<AgentId, String>,
+    outbound_conversation_by_agent: HashMap<AgentId, SlackConversation>,
     /// Authorized origins waiting for the harness to start their exact prompt.
     pending_origin_by_ctx: HashMap<String, PendingOrigin>,
     /// Origins authenticated by the matching durable prompt-submitted fact.
@@ -436,7 +452,7 @@ impl Extension {
         if old_channels != new_channels {
             state.registered_agents.clear();
             state.selected_agent_by_channel.clear();
-            state.outbound_channel_by_agent.clear();
+            state.outbound_conversation_by_agent.clear();
             state.pending_origin_by_ctx.clear();
             state.accepted_origin_by_ctx.clear();
             state.posted_messages.clear();
@@ -454,7 +470,7 @@ impl Extension {
         state.config = None;
         state.registered_agents.clear();
         state.selected_agent_by_channel.clear();
-        state.outbound_channel_by_agent.clear();
+        state.outbound_conversation_by_agent.clear();
         state.pending_origin_by_ctx.clear();
         state.accepted_origin_by_ctx.clear();
         state.posted_messages.clear();
@@ -531,7 +547,9 @@ impl Extension {
             state
                 .selected_agent_by_channel
                 .retain(|_, agent| agent != &invoke.agent_id);
-            state.outbound_channel_by_agent.remove(&invoke.agent_id);
+            state
+                .outbound_conversation_by_agent
+                .remove(&invoke.agent_id);
             state
                 .pending_origin_by_ctx
                 .retain(|_, origin| origin.agent_id != invoke.agent_id);
@@ -619,7 +637,7 @@ impl Extension {
         if message.trim().is_empty() {
             return tool_error(invoke, "`message` must not be empty".to_owned());
         }
-        let (cfg, channel_id) = {
+        let (cfg, conversation) = {
             let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
             if !state.registered_agents.contains(&invoke.agent_id) {
                 return tool_error(
@@ -636,8 +654,8 @@ impl Extension {
                     "`message` exceeds slack max_message_bytes".to_owned(),
                 );
             }
-            let Some(channel_id) = state
-                .outbound_channel_by_agent
+            let Some(conversation) = state
+                .outbound_conversation_by_agent
                 .get(&invoke.agent_id)
                 .cloned()
             else {
@@ -647,32 +665,49 @@ impl Extension {
                         .to_owned(),
                 );
             };
-            if !is_authorized_conversation(&state, &cfg, &channel_id) {
+            if !is_authorized_conversation(&state, &cfg, &conversation.channel_id) {
                 return tool_error(
                     invoke,
                     "slack_send originating conversation is no longer authorized".to_owned(),
                 );
             }
-            (cfg, channel_id)
+            (cfg, conversation)
         };
         let text = format!("[{}] {message}", invoke.agent_id.as_ref());
-        match self.client.post_message(&cfg, &channel_id, &text) {
+        match self.client.post_message(
+            &cfg,
+            &conversation.channel_id,
+            &text,
+            conversation.thread_ts.as_deref(),
+        ) {
             Ok(posted) => {
-                self.remember_posted_message(&channel_id, posted, invoke.agent_id.clone());
+                self.remember_posted_message(conversation, posted, invoke.agent_id.clone());
                 tool_result(invoke, "sent Slack message")
             }
             Err(message) => tool_error(invoke, message),
         }
     }
 
-    fn remember_posted_message(&self, channel_id: &str, post: PostedMessage, agent_id: AgentId) {
-        let key = PostedMessageKey::new(channel_id, &post.ts);
+    /// Cache ownership using the authenticated outbound request conversation.
+    ///
+    /// Slack may omit thread metadata in its response. A present response
+    /// thread must agree with the request or ownership is not cached.
+    fn remember_posted_message(
+        &self,
+        conversation: SlackConversation,
+        post: PostedMessage,
+        agent_id: AgentId,
+    ) {
+        if post.thread_ts.is_some() && post.thread_ts != conversation.thread_ts {
+            return;
+        }
+        let key = PostedMessageKey::new(&conversation.channel_id, &post.ts);
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         state.posted_messages.insert(
             key,
             PostedMessageOwner {
                 agent_id,
-                thread_ts: post.thread_ts,
+                thread_ts: conversation.thread_ts,
             },
         );
     }
@@ -731,14 +766,13 @@ impl Extension {
             let Some(owner) = state.posted_messages.get(&key) else {
                 return;
             };
+            if reaction.thread_ts.is_some() && reaction.thread_ts != owner.thread_ts {
+                return;
+            }
             if !state.registered_agents.contains(&owner.agent_id) {
                 return;
             }
-            (
-                cfg,
-                owner.agent_id.clone(),
-                reaction.thread_ts.or_else(|| owner.thread_ts.clone()),
-            )
+            (cfg, owner.agent_id.clone(), owner.thread_ts.clone())
         };
         let thread = thread_ts.as_deref().unwrap_or("-");
         let prompt = format!(
@@ -750,7 +784,15 @@ impl Extension {
             thread,
             reaction.reaction
         );
-        self.route_authorized_prompt(&cfg, &reaction.channel_id, agent_id, prompt);
+        self.route_authorized_prompt(
+            &cfg,
+            SlackConversation {
+                channel_id: reaction.channel_id,
+                thread_ts,
+            },
+            agent_id,
+            prompt,
+        );
     }
 
     fn process_slack_message(&self, message: SlackMessage) {
@@ -794,7 +836,12 @@ impl Extension {
         };
         text = self.strip_bot_mention(&text);
         if text.is_empty() {
-            self.reply(&cfg, &message.channel_id, help_text());
+            self.reply(
+                &cfg,
+                &message.channel_id,
+                message.thread_ts.as_deref(),
+                help_text(),
+            );
             return;
         }
         let (command, rest) = parse_command(&text);
@@ -853,6 +900,7 @@ impl Extension {
             self.reply(
                 cfg,
                 &message.channel_id,
+                message.thread_ts.as_deref(),
                 "Only text messages are supported by this Tau bridge.",
             );
             None
@@ -860,6 +908,7 @@ impl Extension {
             self.reply(
                 cfg,
                 &message.channel_id,
+                message.thread_ts.as_deref(),
                 "Slack message is too large for this Tau bridge.",
             );
             None
@@ -907,6 +956,7 @@ impl Extension {
         self.reply(
             cfg,
             &message.channel_id,
+            message.thread_ts.as_deref(),
             "Send start in an allowlisted Slack DM before routing messages to Tau.",
         );
         true
@@ -926,11 +976,11 @@ impl Extension {
                 true
             }
             Some("agents" | "/agents") => {
-                self.handle_agents_command(cfg, &message.channel_id);
+                self.handle_agents_command(cfg, message);
                 true
             }
             Some("select" | "/select") => {
-                self.handle_select_command(cfg, &message.channel_id, rest);
+                self.handle_select_command(cfg, message, rest);
                 true
             }
             Some("to" | "/to") => {
@@ -941,6 +991,7 @@ impl Extension {
                 self.reply(
                     cfg,
                     &message.channel_id,
+                    message.thread_ts.as_deref(),
                     "Unknown Slack command. Supported commands: start, agents, select, to.",
                 );
                 true
@@ -955,6 +1006,7 @@ impl Extension {
                 self.reply(
                     cfg,
                     &message.channel_id,
+                    message.thread_ts.as_deref(),
                     "Slack channel messages require an explicitly configured channel_ids entry.",
                 );
                 return;
@@ -965,20 +1017,35 @@ impl Extension {
                 user_id: message.user_id.clone(),
             });
         }
-        self.reply(cfg, &message.channel_id, help_text());
+        self.reply(
+            cfg,
+            &message.channel_id,
+            message.thread_ts.as_deref(),
+            help_text(),
+        );
     }
 
-    fn handle_agents_command(&self, cfg: &RuntimeConfig, channel_id: &str) {
+    fn handle_agents_command(&self, cfg: &RuntimeConfig, message: &SlackMessage) {
         let reply = {
             let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
             agents_text(&state)
         };
-        self.reply(cfg, channel_id, &reply);
+        self.reply(
+            cfg,
+            &message.channel_id,
+            message.thread_ts.as_deref(),
+            &reply,
+        );
     }
 
-    fn handle_select_command(&self, cfg: &RuntimeConfig, channel_id: &str, rest: &str) {
+    fn handle_select_command(&self, cfg: &RuntimeConfig, message: &SlackMessage, rest: &str) {
         if rest.trim().is_empty() {
-            self.reply(cfg, channel_id, "Usage: select <agent-id-or-prefix>");
+            self.reply(
+                cfg,
+                &message.channel_id,
+                message.thread_ts.as_deref(),
+                "Usage: select <agent-id-or-prefix>",
+            );
             return;
         }
         let reply = {
@@ -987,13 +1054,18 @@ impl Extension {
                 Ok(agent_id) => {
                     state
                         .selected_agent_by_channel
-                        .insert(channel_id.to_owned(), agent_id.clone());
+                        .insert(message.channel_id.clone(), agent_id.clone());
                     format!("Selected {}", agent_designator(&state, &agent_id))
                 }
                 Err(reply) => reply,
             }
         };
-        self.reply(cfg, channel_id, &reply);
+        self.reply(
+            cfg,
+            &message.channel_id,
+            message.thread_ts.as_deref(),
+            &reply,
+        );
     }
 
     fn handle_to_command(&self, cfg: &RuntimeConfig, message: &SlackMessage, rest: &str) {
@@ -1002,20 +1074,31 @@ impl Extension {
             self.reply(
                 cfg,
                 &message.channel_id,
+                message.thread_ts.as_deref(),
                 "Usage: to <agent-id-or-prefix> <message>",
             );
             return;
         }
         match self.resolve_registered_agent(target) {
             Ok(agent_id) => self.route_text(message, agent_id, body.trim()),
-            Err(reply) => self.reply(cfg, &message.channel_id, &reply),
+            Err(reply) => self.reply(
+                cfg,
+                &message.channel_id,
+                message.thread_ts.as_deref(),
+                &reply,
+            ),
         }
     }
 
     fn route_plain_text(&self, cfg: &RuntimeConfig, message: &SlackMessage, text: &str) {
         match self.plain_text_target(&message.channel_id) {
             Ok(agent_id) => self.route_text(message, agent_id, text),
-            Err(reply) => self.reply(cfg, &message.channel_id, &reply),
+            Err(reply) => self.reply(
+                cfg,
+                &message.channel_id,
+                message.thread_ts.as_deref(),
+                &reply,
+            ),
         }
     }
 
@@ -1050,8 +1133,8 @@ impl Extension {
         resolve_agent(&state, target)
     }
 
-    fn reply(&self, cfg: &RuntimeConfig, channel_id: &str, text: &str) {
-        let _ = self.client.post_message(cfg, channel_id, text);
+    fn reply(&self, cfg: &RuntimeConfig, channel_id: &str, thread_ts: Option<&str>, text: &str) {
+        let _ = self.client.post_message(cfg, channel_id, text, thread_ts);
     }
 
     fn route_text(&self, message: &SlackMessage, agent_id: AgentId, text: &str) {
@@ -1066,20 +1149,28 @@ impl Extension {
         else {
             return;
         };
-        self.route_authorized_prompt(&cfg, &message.channel_id, agent_id, prompt);
+        self.route_authorized_prompt(
+            &cfg,
+            SlackConversation {
+                channel_id: message.channel_id.clone(),
+                thread_ts: message.thread_ts.clone(),
+            },
+            agent_id,
+            prompt,
+        );
     }
 
     fn route_authorized_prompt(
         &self,
         cfg: &RuntimeConfig,
-        channel_id: &str,
+        conversation: SlackConversation,
         agent_id: AgentId,
         prompt: String,
     ) {
         let ctx_id = {
             let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
             if !state.registered_agents.contains(&agent_id)
-                || !is_authorized_conversation(&state, cfg, channel_id)
+                || !is_authorized_conversation(&state, cfg, &conversation.channel_id)
             {
                 return;
             }
@@ -1089,7 +1180,8 @@ impl Extension {
                 drop(state);
                 self.reply(
                     cfg,
-                    channel_id,
+                    &conversation.channel_id,
+                    conversation.thread_ts.as_deref(),
                     "Tau has too many pending Slack prompts; try again later.",
                 );
                 return;
@@ -1100,7 +1192,7 @@ impl Extension {
                 ctx_id.clone(),
                 PendingOrigin {
                     agent_id: agent_id.clone(),
-                    channel_id: channel_id.to_owned(),
+                    conversation,
                     prompt: prompt.clone(),
                 },
             );
@@ -1126,12 +1218,14 @@ impl Extension {
             .filter(|origin| origin.agent_id == prompt.agent_id && origin.prompt == prompt.text)
             .map(|origin| AcceptedOrigin {
                 agent_id: origin.agent_id,
-                channel_id: origin.channel_id,
+                conversation: origin.conversation,
             });
         if let (Some(ctx_id), Some(origin)) = (prompt.ctx_id.clone(), origin) {
             state.accepted_origin_by_ctx.insert(ctx_id, origin);
         } else {
-            state.outbound_channel_by_agent.remove(&prompt.agent_id);
+            state
+                .outbound_conversation_by_agent
+                .remove(&prompt.agent_id);
         }
     }
 
@@ -1151,7 +1245,9 @@ impl Extension {
                 tracing::warn!(target: LOG_TARGET, agent_id = %prompt.agent_id, "Slack prompt steer did not match pending origin");
             }
         }
-        state.outbound_channel_by_agent.remove(&prompt.agent_id);
+        state
+            .outbound_conversation_by_agent
+            .remove(&prompt.agent_id);
     }
 
     /// Retire recalled queued Slack prompts conservatively by agent and text.
@@ -1160,7 +1256,9 @@ impl Extension {
         state
             .pending_origin_by_ctx
             .retain(|_, origin| origin.agent_id != prompt.agent_id || origin.prompt != prompt.text);
-        state.outbound_channel_by_agent.remove(&prompt.agent_id);
+        state
+            .outbound_conversation_by_agent
+            .remove(&prompt.agent_id);
     }
 
     /// Bind outbound Slack authorization to the exact prompt the harness
@@ -1170,11 +1268,11 @@ impl Extension {
         let origin = ctx_id
             .and_then(|ctx_id| state.accepted_origin_by_ctx.remove(ctx_id))
             .filter(|origin| &origin.agent_id == agent_id)
-            .map(|origin| origin.channel_id);
-        if let Some(channel_id) = origin {
+            .map(|origin| origin.conversation);
+        if let Some(conversation) = origin {
             state
-                .outbound_channel_by_agent
-                .insert(agent_id.clone(), channel_id);
+                .outbound_conversation_by_agent
+                .insert(agent_id.clone(), conversation);
         }
     }
 }
@@ -1511,32 +1609,38 @@ fn decode_socket_event(value: &serde_json::Value) -> Option<DecodedSlackEvent> {
         return None;
     }
     let text = event.get("text").and_then(|value| value.as_str())?;
-    let message = (|| {
-        Some(SlackMessage {
-            event_id,
-            channel_id: event.get("channel")?.as_str()?.to_owned(),
-            channel_type: event
-                .get("channel_type")
-                .and_then(|value| value.as_str())
-                .map(str::to_owned),
-            user_id: event.get("user")?.as_str()?.to_owned(),
-            text: text.to_owned(),
-            event_type: event_type.to_owned(),
-            subtype: event
-                .get("subtype")
-                .and_then(|value| value.as_str())
-                .map(str::to_owned),
-            bot_id: event
-                .get("bot_id")
-                .and_then(|value| value.as_str())
-                .map(str::to_owned),
-            ts: event
-                .get("ts")
-                .and_then(|value| value.as_str())
-                .map(str::to_owned),
-        })
-    })();
-    message.map(DecodedSlackEvent::Message)
+    let thread_ts = match event.get("thread_ts") {
+        Some(value) => {
+            let ts = value.as_str()?;
+            validate_slack_ts(ts).ok()?;
+            Some(ts.to_owned())
+        }
+        None => None,
+    };
+    Some(DecodedSlackEvent::Message(SlackMessage {
+        event_id,
+        channel_id: event.get("channel")?.as_str()?.to_owned(),
+        channel_type: event
+            .get("channel_type")
+            .and_then(|value| value.as_str())
+            .map(str::to_owned),
+        user_id: event.get("user")?.as_str()?.to_owned(),
+        text: text.to_owned(),
+        event_type: event_type.to_owned(),
+        subtype: event
+            .get("subtype")
+            .and_then(|value| value.as_str())
+            .map(str::to_owned),
+        bot_id: event
+            .get("bot_id")
+            .and_then(|value| value.as_str())
+            .map(str::to_owned),
+        ts: event
+            .get("ts")
+            .and_then(|value| value.as_str())
+            .map(str::to_owned),
+        thread_ts,
+    }))
 }
 
 fn run_with_client<R, W>(
@@ -1688,7 +1792,9 @@ fn handle_live_event(cx: tau_client::RawEventContext<'_, SlackRuntime>) -> Clien
             state
                 .selected_agent_by_channel
                 .retain(|_, agent_id| agent_id != &unloaded.agent_id);
-            state.outbound_channel_by_agent.remove(&unloaded.agent_id);
+            state
+                .outbound_conversation_by_agent
+                .remove(&unloaded.agent_id);
             state
                 .pending_origin_by_ctx
                 .retain(|_, origin| origin.agent_id != unloaded.agent_id);
@@ -1702,7 +1808,7 @@ fn handle_live_event(cx: tau_client::RawEventContext<'_, SlackRuntime>) -> Clien
             state.registered_agents.clear();
             state.agent_labels.clear();
             state.selected_agent_by_channel.clear();
-            state.outbound_channel_by_agent.clear();
+            state.outbound_conversation_by_agent.clear();
             state.pending_origin_by_ctx.clear();
             state.accepted_origin_by_ctx.clear();
             state.posted_messages.clear();
@@ -1766,7 +1872,7 @@ fn send_tool_spec() -> ToolSpec {
         name: tau_proto::ToolName::new(SEND_TOOL_NAME),
         model_visible_name: Some(tau_proto::ToolName::new(SEND_TOOL_NAME)),
         description: Some(
-            "Reply to the authorized Slack conversation that most recently routed a prompt to this registered agent. It cannot choose arbitrary channel, user, or thread destinations. Use it to answer prompts prefixed with [slack from ...]."
+            "Reply to the currently authorized Slack origin established for this registered agent's active prompt. Its configured channel or linked DM and optional validated thread are preserved automatically; it cannot choose arbitrary destinations. Use it to answer prompts prefixed with [slack from ...]."
                 .to_owned(),
         ),
         tool_type: tau_proto::ToolType::Function,
@@ -2179,15 +2285,20 @@ impl SlackClient for HttpSlackClient {
         cfg: &RuntimeConfig,
         channel_id: &str,
         text: &str,
+        thread_ts: Option<&str>,
     ) -> Result<PostedMessage, String> {
-        let value = self.post(
-            cfg,
-            "chat.postMessage",
-            &cfg.bot_token,
-            serde_json::json!({ "channel": channel_id, "text": text }),
-        )?;
+        let body = post_message_body(channel_id, text, thread_ts);
+        let value = self.post(cfg, "chat.postMessage", &cfg.bot_token, body)?;
         posted_message_from_response(&value)
     }
+}
+
+fn post_message_body(channel_id: &str, text: &str, thread_ts: Option<&str>) -> serde_json::Value {
+    let mut body = serde_json::json!({ "channel": channel_id, "text": text });
+    if let Some(thread_ts) = thread_ts {
+        body["thread_ts"] = serde_json::Value::String(thread_ts.to_owned());
+    }
+    body
 }
 
 fn human_user_from_response(

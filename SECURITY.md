@@ -222,12 +222,16 @@ User `/skill` invocation explicitly reads the selected skill file, strips frontm
 external Slack text into Tau prompts. When enabled, it requires explicit Slack
 app-token and bot-token secrets plus a non-empty allowlist of Slack user ids. The
 model cannot provide arbitrary channel, user, or thread destinations:
-`slack_send` uses only the configured Slack channel or a single allowlisted DM
-that most recently routed a prompt to the calling registered agent. It has no
+`slack_send` uses only the configured Slack channel or single allowlisted DM
+established by accepted/started lifecycle facts for the calling registered
+agent's active prompt. It has no
 destination argument and fails until such an authorized origin exists. Slack
 prompt lifecycle is fail-closed: matching live submitted/started facts activate
 the origin, unrelated submissions and all steered prompts revoke it, and queued
 prompts folded into a mixed tool-result follow-up never authorize a destination.
+The authenticated origin includes an optional validated Slack thread root, so
+`slack_send` preserves threads without accepting model-supplied `thread_ts`;
+top-level prompts remain top-level.
 workspace admins, Slack itself, channel members, and Slack Connect participants
 with access to a channel may be able to read messages; this MVP makes no E2EE
 claim. Runtime registrations, per-channel selected agents, per-agent reply
