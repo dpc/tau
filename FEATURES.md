@@ -627,6 +627,8 @@ destination.
 
 ### `std-slack` — personal Slack Socket Mode text bridge
 
+Slack `listening_scope` defaults to `mentions_only`; `all_messages` expands only trigger scope in authorized conversations. Verified-human, strict/lax sender policy, bot/self denial, untrusted content, and source-bound reply authorization remain unchanged. Duplicate `message` and `app_mention` delivery of one `(channel, ts)` shares durable dedup identity.
+
 Disabled by default, `std-slack` lets allowlisted Slack users send text to
 explicitly registered Tau agents and lets those agents reply with `slack_send`.
 Incoming creates and owned-post reactions use typed message envelopes with

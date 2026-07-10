@@ -21,6 +21,8 @@ extensions:
       allowed_user_ids: ["U12345678"]
       # Optional: strict (default) or lax. Read the warning below before lax.
       security_mode: strict
+      # Optional: mentions_only (default) or all_messages.
+      listening_scope: mentions_only
       # Optional. If omitted or empty, one allowlisted DM can link with `start`.
       channel_ids: ["C12345678", "C87654321"]
       max_message_bytes: 16384
@@ -35,7 +37,13 @@ All Slack payload text remains untrusted in both modes. Identity verification,
 allowlist/policy classification, and content trust are separate typed envelope
 fields; provider lowering escapes payload text, so lookalike tags have no authority.
 
-Recommended Slack bot events: `app_mention`, `message.channels`, `message.im`,
+`listening_scope: mentions_only` requires an `app_mention` in configured channels; `all_messages` also accepts eligible unmentioned `message` events. This trigger choice is independent of strict/lax sender admission and never admits bots, unconfigured conversations, or bridge control by lax senders. Slack can deliver one mentioned post as both event types; Tau gives both the same `(channel, ts)` durable dedup identity.
+In configured channels, bridge commands are recognized only from `app_mention`
+events. Unmentioned events accepted by `all_messages` are always prompt content,
+even when they begin with `start`, `to`, or `/select`. Linked DMs recognize
+commands without a mention.
+
+Required Slack bot events are `app_mention`, `message.channels`, `message.im`,
 `reaction_added`, and `reaction_removed`; required bot scopes are `chat:write`,
 `app_mentions:read`, `channels:history`, `im:history`, `reactions:read`, and `users:read`. Slack App ID, Client ID,
 Client Secret, and Signing Secret are not used by this Socket Mode
@@ -52,7 +60,7 @@ can then use:
 - `to <agent-id-or-prefix> <message>` — send one prompt to an agent;
 - plain text — route to the selected agent, or to the only registered agent.
 
-In channels, mention the bot first, for example
+With `mentions_only`, mention the bot first in channels, for example
 `@Tau to agent-abc investigate this`. DMs may omit the mention. Replies from an
 agent use `slack_send(message, reply_to)`, where `reply_to` is the opaque
 canonical id shown in the typed Tau envelope. There is no channel, user, or

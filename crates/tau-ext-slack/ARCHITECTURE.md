@@ -52,7 +52,12 @@ Outbound authorization uses canonical opaque selectors. Each accepted Slack occu
 
 ## Sender admission and trigger scope
 
-Sender admission is independent of event trigger scope. `strict` is the default and admits only allowlisted Slack-verified humans. `lax` additionally admits Slack-verified non-bot humans, but only in configured channels or the already-linked DM. Lax never grants DM linking, agent selection, bridge-command, arbitrary-destination, or route-selection authority; an accepted occurrence does activate the same opaque source-bound reply route for its authenticated actor, conversation, and thread. External content remains `UntrustedExternal`, while typed policy is `Allowlisted` or `LaxPermitted` and identity is independently `VerifiedAccount`. Future mentions-only/all-messages changes may alter trigger scope only; they must not weaken sender, conversation, control, or reply-route checks.
+Sender admission is independent of event trigger scope. `strict` is the default and admits only allowlisted Slack-verified humans. `lax` additionally admits Slack-verified non-bot humans, but only in configured channels or the already-linked DM. Lax never grants DM linking, agent selection, bridge-command, arbitrary-destination, or route-selection authority; an accepted occurrence does activate the same opaque source-bound reply route for its authenticated actor, conversation, and thread. External content remains `UntrustedExternal`, while typed policy is `Allowlisted` or `LaxPermitted` and identity is independently `VerifiedAccount`. The configured `listening_scope` alters trigger scope only and must not weaken sender, conversation, control, or reply-route checks.
+Configured-channel bridge commands are recognized only on `app_mention`.
+Unmentioned `all_messages` events are prompt content even when command-shaped;
+linked DMs continue to recognize commands directly.
+
+Slack `listening_scope` defaults to `mentions_only`; `all_messages` expands only trigger scope in authorized conversations. Verified-human, strict/lax sender policy, bot/self denial, untrusted content, and source-bound reply authorization remain unchanged. Duplicate `message` and `app_mention` delivery of one `(channel, ts)` shares durable dedup identity.
 
 ## Harness boundary
 
@@ -68,9 +73,7 @@ timestamp, and revision must agree; unknown or conflicting edits fail closed.
 
 The worker obtains temporary websocket URLs through `apps.connections.open`,
 validates that production URLs use `wss` (loopback tests may use `ws`), connects,
-acks valid envelopes quickly with `{"envelope_id":"..."}`, and then routes only
-text `app_mention` events in configured channels and `message` events in the
-linked IM conversation. Slack event ids, or scoped `(channel, ts)` fallback identities, are sent as durable dedup metadata. Bridge-local dedup remains only for command reply side effects; message/reaction retries are resubmitted so harness dedup survives reconnect and restart.
+acks valid envelopes quickly with `{"envelope_id":"..."}`, and then routes `app_mention` events in configured channels by default; `all_messages` also routes ordinary channel `message` events, while linked DMs use `message`. Canonical `(channel, ts)` identities are sent as durable dedup metadata so overlapping Slack event deliveries compare identically. Bridge-local dedup remains only for command reply side effects; message/reaction retries are resubmitted so harness dedup survives reconnect and restart.
 
 Socket Mode shutdown is event-driven rather than polling based. The websocket
 receive loop races incoming Slack frames against a shared shutdown notification,

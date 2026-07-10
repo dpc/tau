@@ -146,6 +146,7 @@ fn cfg() -> RuntimeConfig {
         bot_token: "xoxb-test".to_owned(),
         allowed_user_ids: ["U123".to_owned()].into_iter().collect(),
         security_mode: SecurityMode::Strict,
+        listening_scope: ListeningScope::MentionsOnly,
         configured_channel_ids: ["C123".to_owned()].into_iter().collect(),
         api_base: DEFAULT_API_BASE.to_owned(),
         max_message_bytes: DEFAULT_MAX_MESSAGE_BYTES,
@@ -2240,6 +2241,101 @@ fn mention_and_message_event_types_do_not_cross_conversation_modes() {
     ext.process_slack_message(dm_mention);
     assert!(rx.try_recv().is_err());
     assert!(client.sent.lock().expect("lock").is_empty());
+}
+
+/// All-messages scope accepts an eligible unmentioned configured-channel post,
+/// while duplicate `message` and `app_mention` deliveries share native dedup.
+#[test]
+fn all_messages_accepts_unmentioned_posts_and_shares_durable_identity() {
+    let (ext, rx, _client) = extension();
+    ext.state
+        .lock()
+        .expect("lock")
+        .config
+        .as_mut()
+        .expect("config")
+        .listening_scope = ListeningScope::AllMessages;
+    register_agent(&ext, "agent-a");
+    let mut message = slack_message("C123", None, "ordinary channel text");
+    message.event_type = "message".to_owned();
+    let mut mention = message.clone();
+    mention.event_type = "app_mention".to_owned();
+    mention.event_id = Some("E-mention-copy".to_owned());
+    ext.process_slack_message(message);
+    ext.process_slack_message(mention);
+    let first = recv_prompt_request(&rx);
+    let second = recv_prompt_request(&rx);
+    assert_eq!(ingress_text(&first), "ordinary channel text");
+    assert_eq!(first.draft, second.draft);
+    assert_eq!(
+        first
+            .draft
+            .external_identity
+            .as_ref()
+            .and_then(|identity| identity.dedup_key.as_ref()),
+        second
+            .draft
+            .external_identity
+            .as_ref()
+            .and_then(|identity| identity.dedup_key.as_ref())
+    );
+    assert_eq!(
+        first
+            .draft
+            .external_identity
+            .as_ref()
+            .and_then(|identity| identity.dedup_key.as_deref()),
+        Some("message:C123:1.0")
+    );
+}
+
+/// Unmentioned all-messages chatter must remain prompt content even when its
+/// first word resembles a bridge command, and must cause no Slack reply.
+#[test]
+fn all_messages_unmentioned_chatter_cannot_invoke_bridge_commands() {
+    let (ext, rx, client) = extension();
+    ext.state
+        .lock()
+        .expect("lock")
+        .config
+        .as_mut()
+        .expect("config")
+        .listening_scope = ListeningScope::AllMessages;
+    register_agent(&ext, "agent-a");
+    for text in ["start", "to clarify this", "/select agent-b"] {
+        let mut message = slack_message("C123", None, text);
+        message.event_type = "message".to_owned();
+        ext.process_slack_message(message);
+        assert_eq!(recv_prompt(&rx), text);
+    }
+    assert!(client.sent.lock().expect("lock").is_empty());
+}
+
+/// Listening scope defaults to mentions-only, accepts only the two explicit
+/// values, and rejects ambiguous spellings as configuration errors.
+#[test]
+fn listening_scope_config_default_valid_and_invalid_values() {
+    for (value, expected) in [
+        (serde_json::json!({}), ListeningScope::MentionsOnly),
+        (
+            serde_json::json!({"listening_scope": "mentions_only"}),
+            ListeningScope::MentionsOnly,
+        ),
+        (
+            serde_json::json!({"listening_scope": "all_messages"}),
+            ListeningScope::AllMessages,
+        ),
+    ] {
+        let config = tau_proto::json_to_cbor(&value)
+            .deserialized::<ExtConfig>()
+            .expect("valid listening scope");
+        assert_eq!(config.listening_scope, expected);
+    }
+    let error =
+        tau_proto::json_to_cbor(&serde_json::json!({"listening_scope": "mentions-or-messages"}))
+            .deserialized::<ExtConfig>()
+            .expect_err("invalid scope");
+    assert!(format!("{error:?}").contains("unknown variant"));
 }
 
 /// Slack retries and reconnect replays are resubmitted with the same durable

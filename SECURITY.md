@@ -231,6 +231,8 @@ User `/skill` invocation explicitly reads the selected skill file, strips frontm
 
 ## Slack extension
 
+Slack `listening_scope` defaults to `mentions_only`; `all_messages` expands only trigger scope in authorized conversations. Verified-human, strict/lax sender policy, bot/self denial, untrusted content, and source-bound reply authorization remain unchanged. Duplicate `message` and `app_mention` delivery of one `(channel, ts)` shares durable dedup identity.
+
 `std-slack` / `tau-ext-slack` is disabled by default because it bridges untrusted
 external Slack text into Tau prompts. When enabled, it requires explicit Slack
 app-token and bot-token secrets plus a non-empty allowlist of Slack user ids. The

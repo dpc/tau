@@ -1,5 +1,7 @@
 # tau-ext-slack security notes
 
+Slack `listening_scope` defaults to `mentions_only`; `all_messages` expands only trigger scope in authorized conversations. Verified-human, strict/lax sender policy, bot/self denial, untrusted content, and source-bound reply authorization remain unchanged. Duplicate `message` and `app_mention` delivery of one `(channel, ts)` shares durable dedup identity.
+
 - The built-in extension is disabled by default and requires explicit app-token
   and bot-token secrets plus a non-empty `allowed_user_ids` allowlist.
 - Slack app tokens (`xapp-...`), bot tokens (`xoxb-...`), and Socket Mode
@@ -17,10 +19,11 @@
   pending completions are each capped at 1024 entries.
   Session changes clear routes and use a new correlation id to renew the
   source-bound capability; late results from earlier sessions are ignored.
-- Only `app_mention` events from ids explicitly listed in `channel_ids` route
-  channel prompts. Unconfigured channels and DMs are ignored without reply side
-  effects. With an empty list, one allowlisted DM can link with `start` and route
-  direct `message` events.
+- In default `mentions_only`, configured channels route `app_mention`; in
+  `all_messages` they also route ordinary `message` events. Unconfigured channels
+  and DMs are ignored without reply side effects. With an empty list, one
+  allowlisted DM can link with `start` and route direct `message` events in either
+  scope.
 - `security_mode` defaults to `strict`, where users outside `allowed_user_ids`
   are ignored. `lax` admits verified non-bot humans only in an already configured
   channel or linked DM, including their edits and owned-post reactions. They

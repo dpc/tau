@@ -121,6 +121,8 @@ struct RuntimeConfig {
     allowed_user_ids: HashSet<String>,
     /// Policy controlling which verified human senders may enter Tau.
     security_mode: SecurityMode,
+    /// Which eligible Slack message events trigger ingress.
+    listening_scope: ListeningScope,
     /// Explicitly allowed Slack channels for inbound routing.
     configured_channel_ids: HashSet<String>,
     /// Slack Web API base URL.
@@ -142,6 +144,8 @@ struct ExtConfig {
     allowed_user_ids: Vec<String>,
     /// Ingress sender policy. Omission deliberately preserves strict behavior.
     security_mode: SecurityMode,
+    /// Message trigger scope, independent of sender security policy.
+    listening_scope: ListeningScope,
     /// Slack channel ids allowed to route messages to Tau.
     channel_ids: Vec<String>,
     /// Optional Slack Web API base URL, mostly for tests.
@@ -202,6 +206,7 @@ impl ExtConfig {
             bot_token: bot_token.to_owned(),
             allowed_user_ids,
             security_mode: self.security_mode,
+            listening_scope: self.listening_scope,
             configured_channel_ids,
             api_base,
             max_message_bytes,
@@ -218,6 +223,18 @@ enum SecurityMode {
     Strict,
     /// Also admit verified humans in an already authorized conversation.
     Lax,
+}
+
+/// Eligible Slack message events that wake Tau.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ListeningScope {
+    /// Configured channels require `app_mention`; linked DMs remain direct.
+    #[default]
+    MentionsOnly,
+    /// Configured channels also accept ordinary `message` events; DMs are
+    /// unchanged.
+    AllMessages,
 }
 
 impl RuntimeConfig {
@@ -1195,9 +1212,6 @@ impl Extension {
             return;
         }
         let is_dm = message.channel_type.as_deref() == Some("im");
-        if message.event_type == "message" && !is_dm {
-            return;
-        }
         if !self.accepts_event_conversation(&cfg, &message, is_dm) {
             return;
         }
@@ -1217,7 +1231,11 @@ impl Extension {
             );
             return;
         }
-        let (command, rest) = parse_command(&text);
+        let (command, rest) = if is_dm || message.event_type == "app_mention" {
+            parse_command(&text)
+        } else {
+            (None, "")
+        };
         // Lax senders contribute untrusted prompt content; they never gain
         // bridge-control authority (including linking or target selection).
         if command.is_some_and(|command| {
@@ -1300,8 +1318,10 @@ impl Extension {
                 |link| link.channel_id == message.channel_id,
             );
         }
-        message.event_type == "app_mention"
-            && cfg.configured_channel_ids.contains(&message.channel_id)
+        cfg.configured_channel_ids.contains(&message.channel_id)
+            && (message.event_type == "app_mention"
+                || (message.event_type == "message"
+                    && cfg.listening_scope == ListeningScope::AllMessages))
     }
 
     fn trimmed_message_text(&self, cfg: &RuntimeConfig, message: &SlackMessage) -> Option<String> {
@@ -1557,12 +1577,13 @@ impl Extension {
         else {
             return;
         };
-        let dedup_key = message.event_id.clone().or_else(|| {
-            message
-                .ts
-                .as_ref()
-                .map(|ts| format!("message:{}:{ts}", message.channel_id))
-        });
+        // Slack may deliver the same mentioned post through both `message` and
+        // `app_mention`; native message identity, not event kind/id, is canonical.
+        let dedup_key = message
+            .ts
+            .as_ref()
+            .map(|ts| format!("message:{}:{ts}", message.channel_id))
+            .or_else(|| message.event_id.clone());
         let Some(dedup_key) = dedup_key else {
             return;
         };
@@ -1587,7 +1608,11 @@ impl Extension {
                 },
             },
             ExternalMessageIdentity {
-                event_id: message.event_id.clone(),
+                event_id: message
+                    .ts
+                    .is_none()
+                    .then(|| message.event_id.clone())
+                    .flatten(),
                 message_id: message.ts.clone(),
                 revision_id: None,
                 dedup_key: Some(dedup_key),
