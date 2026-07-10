@@ -645,6 +645,9 @@ learned DM link, duplicate event cache, and websocket state are in-memory only.
 Allowlisted human reactions added to or removed from a recent `slack_send` post
 route to the post's owning agent with stable channel/thread/message metadata;
 reactions to arbitrary posts or unconfigured conversations are ignored.
+Slack edits are separate immutable typed occurrences that visibly reference the
+original canonical/native message. They never rewrite history or fall through
+as indistinguishable new messages.
 
 ### Web search extensions
 

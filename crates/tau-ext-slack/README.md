@@ -24,9 +24,9 @@ extensions:
       max_message_bytes: 16384
 ```
 
-Recommended Slack bot events: `app_mention`, `message.im`, `reaction_added`, and
-`reaction_removed`; recommended bot scopes are `chat:write`,
-`app_mentions:read`, `im:history`, `reactions:read`, and `users:read`. Slack App ID, Client ID,
+Recommended Slack bot events: `app_mention`, `message.channels`, `message.im`,
+`reaction_added`, and `reaction_removed`; recommended bot scopes are `chat:write`,
+`app_mentions:read`, `channels:history`, `im:history`, `reactions:read`, and `users:read`. Slack App ID, Client ID,
 Client Secret, and Signing Secret are not used by this Socket Mode
 MVP.
 
@@ -54,6 +54,10 @@ Allowed users' reaction additions/removals on recent messages posted through
 `slack_send` are routed back to the owning agent with channel, thread, message,
 reaction, event-kind, and user metadata. Other posts and conversations are
 ignored.
+Edits of recent committed incoming messages are routed as explicit immutable
+edit occurrences to the original agent. Their envelopes reference the canonical
+original and Slack revision; unknown or conflicting edits are ignored rather
+than treated as new text.
 
 The singular `channel_id` key is intentionally unsupported. Empty, malformed,
 or duplicate ids and duplicate user ids are configuration errors.

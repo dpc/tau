@@ -332,6 +332,24 @@ fn slack_reaction(
     }
 }
 
+fn slack_edit(
+    event_id: &str,
+    channel_id: &str,
+    message_ts: &str,
+    thread_ts: Option<&str>,
+    text: &str,
+) -> SlackEdit {
+    SlackEdit {
+        event_id: Some(event_id.to_owned()),
+        channel_id: channel_id.to_owned(),
+        editor_user_id: "U123".to_owned(),
+        text: text.to_owned(),
+        message_ts: message_ts.to_owned(),
+        thread_ts: thread_ts.map(str::to_owned),
+        revision_ts: "2.0".to_owned(),
+    }
+}
+
 fn register_agent(ext: &Extension, agent: &str) {
     {
         let mut state = ext.state.lock().expect("lock");
@@ -1362,6 +1380,107 @@ fn authorized_reactions_to_agent_posts_preserve_durable_dedup_identity() {
     ));
 }
 
+/// A commit-confirmed Slack create makes later root-message edits immutable
+/// typed mutations that reference both canonical and native original identity.
+#[test]
+fn committed_root_message_edit_references_canonical_original() {
+    let (ext, rx, _client) = extension();
+    register_agent(&ext, "agent-a");
+    ext.process_slack_message(slack_message("C123", None, "<@UBOT123> original"));
+    let original = recv_prompt_request(&rx);
+    activate_prompt_origin(&ext, &original);
+
+    ext.process_slack_edit(slack_edit("EE1", "C123", "1.0", None, "edited"));
+    let edit = recv_prompt_request(&rx);
+    assert_eq!(edit.target_agent_id, agent_id("agent-a"));
+    assert_eq!(
+        edit.draft.operation,
+        MessageOperation::Edit {
+            target: MessageRef {
+                message_id: Some(MessageId::new("msg-test")),
+                external_message_id: Some("1.0".to_owned()),
+            },
+            payload: MessagePayload::Text {
+                text: "edited".to_owned(),
+                format: TextFormat::Plain,
+            },
+        }
+    );
+    let identity = edit.draft.external_identity.expect("edit identity");
+    assert_eq!(identity.event_id.as_deref(), Some("EE1"));
+    assert_eq!(identity.message_id.as_deref(), Some("1.0"));
+    assert_eq!(identity.revision_id.as_deref(), Some("2.0"));
+}
+
+/// Incoming native identity ownership is bounded, immutable on collision, and
+/// remains synchronized through agent removal and full clear.
+#[test]
+fn incoming_edit_identity_cache_is_bounded_and_immutable() {
+    let mut state = State::default();
+    for index in 0..=REPLY_ROUTE_LIMIT {
+        let key = PostedMessageKey::new("C123", &format!("{index}.0"));
+        assert!(state.insert_incoming_message(
+            key,
+            IncomingMessageOwner {
+                agent_id: agent_id("agent-a"),
+                message_id: MessageId::new(format!("msg-{index}")),
+                conversation: slack_conversation("C123", None),
+                user_id: "U123".to_owned(),
+            },
+        ));
+    }
+    assert_eq!(state.incoming_messages.len(), REPLY_ROUTE_LIMIT);
+    let key = PostedMessageKey::new("C123", "1.0");
+    let original = state.incoming_messages.get(&key).cloned().expect("owner");
+    assert!(!state.insert_incoming_message(
+        key.clone(),
+        IncomingMessageOwner {
+            agent_id: agent_id("agent-b"),
+            message_id: MessageId::new("msg-conflict"),
+            conversation: slack_conversation("C123", Some("9.0")),
+            user_id: "U999".to_owned(),
+        },
+    ));
+    assert!(state.incoming_messages.get(&key) == Some(&original));
+    state.remove_agent_incoming_messages(&agent_id("agent-a"));
+    assert!(state.incoming_messages.is_empty());
+    assert!(state.incoming_message_order.is_empty());
+    state.clear_incoming_messages();
+}
+
+/// Thread edits preserve the original thread route, retries retain one durable
+/// dedup identity, and unknown/conflicting originals fail closed.
+#[test]
+fn thread_edit_retry_and_original_confusion_fail_closed() {
+    let (ext, rx, _client) = extension();
+    register_agent(&ext, "agent-a");
+    let mut original = slack_message("C123", None, "<@UBOT123> original");
+    original.thread_ts = Some("9.0".to_owned());
+    ext.process_slack_message(original);
+    let ingress = recv_prompt_request(&rx);
+    activate_prompt_origin(&ext, &ingress);
+
+    let edit = slack_edit("EE2", "C123", "1.0", Some("9.0"), "edited");
+    ext.process_slack_edit(slack_edit("UNKNOWN", "C123", "8.0", Some("9.0"), "bad"));
+    ext.process_slack_edit(slack_edit("THREAD", "C123", "1.0", Some("8.0"), "bad"));
+    assert_no_ingress(&rx);
+    ext.process_slack_edit(edit);
+    ext.process_slack_edit(slack_edit("EE2", "C123", "1.0", Some("9.0"), "edited"));
+    let first = recv_prompt_request(&rx);
+    let second = recv_prompt_request(&rx);
+    assert_eq!(
+        first.draft.external_identity,
+        second.draft.external_identity
+    );
+    assert_eq!(
+        first.draft.conversation,
+        Some(message_conversation(&slack_conversation(
+            "C123",
+            Some("9.0")
+        )))
+    );
+}
+
 /// Canonical Slack skin-tone reactions are accepted, while malformed colon
 /// suffixes and unsafe timestamp metadata fail closed.
 #[test]
@@ -1945,6 +2064,70 @@ fn reaction_envelopes_are_acked_and_decoded() {
     assert_eq!(reaction.channel_id, "C123");
     assert_eq!(reaction.message_ts, "12.34");
     assert_eq!(reaction.thread_ts.as_deref(), Some("10.00"));
+}
+
+/// Slack `message_changed` decoding requires consistent original/editor/thread
+/// metadata and retains explicit native revision identity.
+#[test]
+fn message_changed_envelopes_decode_as_edits_and_reject_conflicts() {
+    let envelope = |message_ts: &str, previous_ts: &str, thread: Option<&str>| {
+        serde_json::json!({
+            "payload": {
+                "type": "event_callback",
+                "event_id": "EE-DECODE",
+                "event": {
+                    "type": "message",
+                    "subtype": "message_changed",
+                    "channel": "C123",
+                    "message": {
+                        "user": "U123",
+                        "text": "edited",
+                        "ts": message_ts,
+                        "thread_ts": thread,
+                        "edited": {"user": "U123", "ts": "2.0"}
+                    },
+                    "previous_message": {
+                        "user": "U123",
+                        "text": "original",
+                        "ts": previous_ts,
+                        "thread_ts": thread
+                    }
+                }
+            }
+        })
+    };
+    let Some(DecodedSlackEvent::Edit(edit)) =
+        decode_socket_event(&envelope("1.0", "1.0", Some("9.0")))
+    else {
+        panic!("expected typed edit");
+    };
+    assert_eq!(edit.message_ts, "1.0");
+    assert_eq!(edit.thread_ts.as_deref(), Some("9.0"));
+    assert_eq!(edit.revision_ts, "2.0");
+    assert!(decode_socket_event(&envelope("1.0", "3.0", Some("9.0"))).is_none());
+
+    let mut conflicting = envelope("1.0", "1.0", None);
+    conflicting["payload"]["event"]["previous_message"]["user"] =
+        serde_json::Value::String("U999".to_owned());
+    assert!(decode_socket_event(&conflicting).is_none());
+    let mut conflicting = envelope("1.0", "1.0", None);
+    conflicting["payload"]["event"]["message"]["user"] =
+        serde_json::Value::String("U999".to_owned());
+    assert!(decode_socket_event(&conflicting).is_none());
+    let mut conflicting = envelope("1.0", "1.0", Some("9.0"));
+    conflicting["payload"]["event"]["previous_message"]["thread_ts"] =
+        serde_json::Value::String("8.0".to_owned());
+    assert!(decode_socket_event(&conflicting).is_none());
+    for malformed in [
+        envelope("bad", "bad", None),
+        envelope("1.0", "1.0", Some("bad")),
+    ] {
+        assert!(decode_socket_event(&malformed).is_none());
+    }
+    let mut malformed_revision = envelope("1.0", "1.0", None);
+    malformed_revision["payload"]["event"]["message"]["edited"]["ts"] =
+        serde_json::Value::String("bad".to_owned());
+    assert!(decode_socket_event(&malformed_revision).is_none());
 }
 
 /// Slack event types are conversation-specific: configured channels accept

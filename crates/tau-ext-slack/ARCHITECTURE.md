@@ -54,6 +54,12 @@ Outbound authorization uses canonical opaque selectors. Each accepted Slack occu
 
 Incoming Slack creates and owned-post reactions use the dedicated typed ingress RPC. The harness owns the resulting durable incoming fact, fold, UI projection, and single live wake. Replay is display/model history only and cannot wake an agent or reactivate a route.
 
+Commit results for incoming creates also populate a bounded native
+`(channel, ts)` index. `message_changed` is admitted only through that index and
+becomes an immutable typed `Edit` targeting the original canonical and native
+ids. The editor/original sender, authorized conversation, thread, message
+timestamp, and revision must agree; unknown or conflicting edits fail closed.
+
 ## Socket Mode
 
 The worker obtains temporary websocket URLs through `apps.connections.open`,

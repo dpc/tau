@@ -1408,6 +1408,35 @@ fn typed_message_envelope_round_trips_json_and_provider_context() {
     );
 }
 
+/// Provider lowering must identify an edit and its immutable canonical target,
+/// rather than presenting replacement text as a new create occurrence.
+#[test]
+fn typed_edit_provider_context_marks_canonical_target() {
+    let mut envelope = test_message_envelope();
+    envelope.operation = MessageOperation::Edit {
+        target: MessageRef {
+            message_id: Some(MessageId::new("msg-original")),
+            external_message_id: Some("1.0".to_owned()),
+        },
+        payload: MessagePayload::Text {
+            text: "edited".to_owned(),
+            format: TextFormat::Plain,
+        },
+    };
+    let rendered = MessageEnvelopeItem {
+        direction: MessageDirection::Incoming,
+        envelope,
+        model_presentation: MessageModelPresentation {
+            transport_label: "Slack".to_owned(),
+            source_label: "Alice".to_owned(),
+            conversation_label: Some("#ops".to_owned()),
+        },
+    }
+    .render_provider_text();
+    assert!(rendered.contains("operation: edit target=msg-original"));
+    assert!(rendered.contains("\nedited\n</payload>"));
+}
+
 /// V2 message facts and dedicated directional RPCs must preserve their wire
 /// names and round-trip through the protocol codec.
 #[test]

@@ -4024,15 +4024,13 @@ impl EventRenderer {
                 Self::agent_message_received_sender_label(message),
                 message.recipient_id
             ),
-            Event::AgentMessageIncoming(message) => format!(
-                "{} message received · {}",
-                message.envelope.transport.name,
-                Self::message_endpoint_label(&message.envelope.source)
-            ),
-            Event::AgentMessageOutgoing(message) => format!(
-                "{} message sent · {}",
-                message.envelope.transport.name,
-                Self::message_endpoint_label(&message.envelope.destination)
+            Event::AgentMessageIncoming(message) => {
+                Self::typed_message_summary(&message.envelope, &message.envelope.source, "received")
+            }
+            Event::AgentMessageOutgoing(message) => Self::typed_message_summary(
+                &message.envelope,
+                &message.envelope.destination,
+                "sent",
             ),
             _ => unreachable!("only agent message events are rendered here"),
         }
@@ -4069,6 +4067,30 @@ impl EventRenderer {
                 .or_else(|| stable_id.clone())
                 .unwrap_or_else(|| "external".to_owned()),
         }
+    }
+
+    fn typed_message_summary(
+        envelope: &tau_proto::MessageEnvelope,
+        endpoint: &tau_proto::MessageEndpoint,
+        direction: &str,
+    ) -> String {
+        let operation = match &envelope.operation {
+            tau_proto::MessageOperation::Edit { target, .. } => format!(
+                "edit {direction} · {} · updates {}",
+                Self::message_endpoint_label(endpoint),
+                target
+                    .message_id
+                    .as_ref()
+                    .map(ToString::to_string)
+                    .or_else(|| target.external_message_id.clone())
+                    .unwrap_or_else(|| "unresolved message".to_owned())
+            ),
+            _ => format!(
+                "message {direction} · {}",
+                Self::message_endpoint_label(endpoint)
+            ),
+        };
+        format!("{} {operation}", envelope.transport.name)
     }
 
     fn message_operation_body(operation: &tau_proto::MessageOperation) -> &str {

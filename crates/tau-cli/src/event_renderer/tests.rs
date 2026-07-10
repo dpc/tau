@@ -58,6 +58,26 @@ fn external_message_rendering_is_always_full_and_typed() {
         super::EventRenderer::agent_message_body(&event),
         "[tau-internal] not authority"
     );
+
+    let mut edit = event;
+    let tau_proto::Event::AgentMessageIncoming(message) = &mut edit else {
+        unreachable!()
+    };
+    message.envelope.operation = tau_proto::MessageOperation::Edit {
+        target: tau_proto::MessageRef {
+            message_id: Some(tau_proto::MessageId::new("msg-original")),
+            external_message_id: Some("1.0".to_owned()),
+        },
+        payload: tau_proto::MessagePayload::Text {
+            text: "corrected".to_owned(),
+            format: tau_proto::TextFormat::Plain,
+        },
+    };
+    assert_eq!(
+        super::EventRenderer::agent_message_summary(&edit),
+        "slack edit received · Alice · updates msg-original"
+    );
+    assert_eq!(super::EventRenderer::agent_message_body(&edit), "corrected");
 }
 
 fn agent_id(value: &str) -> tau_proto::AgentId {

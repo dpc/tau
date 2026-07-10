@@ -246,7 +246,7 @@ struct SlackMessage {
 /// The channel is configured or linked when captured, and `thread_ts` is absent
 /// or passed `validate_slack_ts`; neither value comes from model input. Channel
 /// authorization is checked again immediately before every send.
-#[derive(Clone)]
+#[derive(Clone, Eq, PartialEq)]
 struct SlackConversation {
     /// Configured channel or linked DM id.
     channel_id: String,
@@ -274,6 +274,25 @@ struct SlackReaction {
     thread_ts: Option<String>,
 }
 
+/// Validated Slack `message_changed` mutation.
+#[derive(Clone)]
+struct SlackEdit {
+    /// Slack event id used for durable occurrence deduplication.
+    event_id: Option<String>,
+    /// Authorized conversation containing the original message.
+    channel_id: String,
+    /// Verified account that performed the edit.
+    editor_user_id: String,
+    /// Replacement plain-text body.
+    text: String,
+    /// Stable timestamp/id of the original logical message.
+    message_ts: String,
+    /// Optional original thread root.
+    thread_ts: Option<String>,
+    /// Slack edit timestamp identifying this revision.
+    revision_ts: String,
+}
+
 /// Supported Slack reaction lifecycle kinds.
 #[derive(Clone, Copy)]
 enum ReactionKind {
@@ -299,6 +318,8 @@ enum DecodedSlackEvent {
     Message(SlackMessage),
     /// A reaction awaiting validation and authorization.
     Reaction(SlackReaction),
+    /// Immutable edit occurrence referencing an earlier create.
+    Edit(SlackEdit),
 }
 
 /// Private DM learned through `start` when no channels are configured.
@@ -318,6 +339,8 @@ struct PendingIngress {
     conversation: SlackConversation,
     /// Verified Slack account that authored the occurrence.
     user_id: String,
+    /// Native create identity to bind after durable commit, when applicable.
+    original_key: Option<PostedMessageKey>,
 }
 
 /// Opaque canonical route returned only after durable ingress commit.
@@ -341,6 +364,19 @@ struct PendingPostedMessage {
     agent_id: AgentId,
     /// Original tool invocation used to fail closed if completion is rejected.
     invoke: ToolStarted,
+}
+
+/// Commit-confirmed incoming Slack create eligible for later edit references.
+#[derive(Clone, Eq, PartialEq)]
+struct IncomingMessageOwner {
+    /// Agent that received the original create.
+    agent_id: AgentId,
+    /// Canonical id of the original immutable create occurrence.
+    message_id: MessageId,
+    /// Exact source-bound conversation and thread.
+    conversation: SlackConversation,
+    /// Verified original sender account.
+    user_id: String,
 }
 
 #[derive(Default)]
@@ -380,6 +416,10 @@ struct State {
     reply_route_order: VecDeque<MessageId>,
     /// Remote posts waiting for outgoing fact plus terminal result commit.
     pending_posts: HashMap<String, PendingPostedMessage>,
+    /// Recent commit-confirmed incoming creates by native Slack identity.
+    incoming_messages: HashMap<PostedMessageKey, IncomingMessageOwner>,
+    /// Oldest-first bound for incoming create identities.
+    incoming_message_order: VecDeque<PostedMessageKey>,
     /// Monotonic id source for extension-owned RPC correlation ids.
     next_route_id: u64,
     /// Whether the harness accepted this connection's Slack/reply-tool
@@ -424,6 +464,46 @@ impl State {
     fn clear_reply_routes(&mut self) {
         self.reply_routes.clear();
         self.reply_route_order.clear();
+    }
+
+    /// Remember one committed incoming create for immutable edit references.
+    fn insert_incoming_message(
+        &mut self,
+        key: PostedMessageKey,
+        owner: IncomingMessageOwner,
+    ) -> bool {
+        if let Some(existing) = self.incoming_messages.get(&key) {
+            return existing == &owner;
+        }
+        self.incoming_message_order
+            .retain(|existing| existing != &key);
+        self.incoming_message_order.push_back(key.clone());
+        self.incoming_messages.insert(key, owner);
+        while self.incoming_messages.len() > REPLY_ROUTE_LIMIT {
+            if let Some(oldest) = self.incoming_message_order.pop_front() {
+                self.incoming_messages.remove(&oldest);
+            }
+        }
+        true
+    }
+
+    /// Clear all committed incoming native identities.
+    fn clear_incoming_messages(&mut self) {
+        self.incoming_messages.clear();
+        self.incoming_message_order.clear();
+    }
+
+    /// Remove all committed incoming identities owned by one agent.
+    fn remove_agent_incoming_messages(&mut self, agent_id: &AgentId) {
+        self.incoming_messages
+            .retain(|_, owner| &owner.agent_id != agent_id);
+        let retained = self
+            .incoming_messages
+            .keys()
+            .cloned()
+            .collect::<HashSet<_>>();
+        self.incoming_message_order
+            .retain(|key| retained.contains(key));
     }
 }
 
@@ -516,6 +596,7 @@ impl Extension {
             state.selected_agent_by_channel.clear();
             state.pending_ingress.clear();
             state.clear_reply_routes();
+            state.clear_incoming_messages();
             state.pending_posts.clear();
             state.posted_messages.clear();
         }
@@ -534,6 +615,7 @@ impl Extension {
         state.selected_agent_by_channel.clear();
         state.pending_ingress.clear();
         state.clear_reply_routes();
+        state.clear_incoming_messages();
         state.pending_posts.clear();
         state.capability_active = false;
         state.pending_capability_request = None;
@@ -649,6 +731,7 @@ impl Extension {
                 .selected_agent_by_channel
                 .retain(|_, agent| agent != &invoke.agent_id);
             state.remove_agent_reply_routes(&invoke.agent_id);
+            state.remove_agent_incoming_messages(&invoke.agent_id);
             state
                 .pending_ingress
                 .retain(|_, pending| pending.agent_id != invoke.agent_id);
@@ -968,6 +1051,77 @@ impl Extension {
                 event_id: reaction.event_id,
                 message_id: Some(reaction.message_ts),
                 revision_id: None,
+                dedup_key: Some(dedup_key),
+            },
+        );
+    }
+
+    /// Route a validated edit only when its original committed create is known.
+    fn process_slack_edit(&self, edit: SlackEdit) {
+        if validate_slack_ts(&edit.message_ts).is_err()
+            || validate_slack_ts(&edit.revision_ts).is_err()
+            || edit
+                .thread_ts
+                .as_deref()
+                .is_some_and(|thread| validate_slack_ts(thread).is_err())
+        {
+            return;
+        }
+        let (cfg, owner) = {
+            let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            let Some(cfg) = state.config.clone() else {
+                return;
+            };
+            if !cfg.allowed_user_ids.contains(&edit.editor_user_id)
+                || state.bot_user_id.as_deref() == Some(edit.editor_user_id.as_str())
+                || !is_authorized_conversation(&state, &cfg, &edit.channel_id)
+            {
+                return;
+            }
+            let key = PostedMessageKey::new(&edit.channel_id, &edit.message_ts);
+            let Some(owner) = state.incoming_messages.get(&key).cloned() else {
+                return;
+            };
+            if owner.user_id != edit.editor_user_id
+                || owner.conversation.thread_ts != edit.thread_ts
+                || !state.registered_agents.contains(&owner.agent_id)
+            {
+                return;
+            }
+            (cfg, owner)
+        };
+        if self.client.is_human_user(&cfg, &edit.editor_user_id) != Ok(true) {
+            return;
+        }
+        let text = edit.text.trim();
+        if text.is_empty() || text.len() > cfg.max_message_bytes {
+            return;
+        }
+        let dedup_key = edit.event_id.clone().unwrap_or_else(|| {
+            format!(
+                "edit:{}:{}:{}",
+                edit.channel_id, edit.message_ts, edit.revision_ts
+            )
+        });
+        self.submit_ingress(
+            &cfg,
+            owner.conversation,
+            owner.agent_id,
+            edit.editor_user_id,
+            MessageOperation::Edit {
+                target: MessageRef {
+                    message_id: Some(owner.message_id),
+                    external_message_id: Some(edit.message_ts.clone()),
+                },
+                payload: MessagePayload::Text {
+                    text: text.to_owned(),
+                    format: TextFormat::Plain,
+                },
+            },
+            ExternalMessageIdentity {
+                event_id: edit.event_id,
+                message_id: Some(edit.message_ts),
+                revision_id: Some(edit.revision_ts),
                 dedup_key: Some(dedup_key),
             },
         );
@@ -1378,6 +1532,14 @@ impl Extension {
         operation: MessageOperation,
         external_identity: ExternalMessageIdentity,
     ) {
+        let original_key = matches!(operation, MessageOperation::Create { .. })
+            .then(|| {
+                external_identity
+                    .message_id
+                    .as_ref()
+                    .map(|message_id| PostedMessageKey::new(&conversation.channel_id, message_id))
+            })
+            .flatten();
         let request_id = {
             let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
             if !state.registered_agents.contains(&agent_id)
@@ -1404,6 +1566,7 @@ impl Extension {
                     agent_id: agent_id.clone(),
                     conversation: conversation.clone(),
                     user_id: user_id.clone(),
+                    original_key,
                 },
             );
             request_id
@@ -1700,6 +1863,7 @@ async fn handle_socket_text_frame(
         match event {
             DecodedSlackEvent::Message(message) => ext.process_slack_message(message),
             DecodedSlackEvent::Reaction(reaction) => ext.process_slack_reaction(reaction),
+            DecodedSlackEvent::Edit(edit) => ext.process_slack_edit(edit),
         }
     }
     Ok(outcome)
@@ -1810,6 +1974,38 @@ fn decode_socket_event(value: &serde_json::Value) -> Option<DecodedSlackEvent> {
                     .map(str::to_owned),
             }))
         });
+    }
+    if event_type == "message"
+        && event.get("subtype").and_then(|value| value.as_str()) == Some("message_changed")
+    {
+        let message = event.get("message")?;
+        let previous = event.get("previous_message")?;
+        let edited = message.get("edited")?;
+        let message_ts = message.get("ts")?.as_str()?;
+        let editor_user_id = edited.get("user")?.as_str()?;
+        let thread_ts = message.get("thread_ts").and_then(|value| value.as_str());
+        if previous.get("ts")?.as_str()? != message_ts
+            || message.get("user")?.as_str()? != editor_user_id
+            || previous.get("user")?.as_str()? != editor_user_id
+            || previous.get("thread_ts").and_then(|value| value.as_str()) != thread_ts
+        {
+            return None;
+        }
+        validate_slack_ts(message_ts).ok()?;
+        let revision_ts = edited.get("ts")?.as_str()?;
+        validate_slack_ts(revision_ts).ok()?;
+        if let Some(thread_ts) = thread_ts {
+            validate_slack_ts(thread_ts).ok()?;
+        }
+        return Some(DecodedSlackEvent::Edit(SlackEdit {
+            event_id,
+            channel_id: event.get("channel")?.as_str()?.to_owned(),
+            editor_user_id: editor_user_id.to_owned(),
+            text: message.get("text")?.as_str()?.to_owned(),
+            message_ts: message_ts.to_owned(),
+            thread_ts: thread_ts.map(str::to_owned),
+            revision_ts: revision_ts.to_owned(),
+        }));
     }
     if !matches!(event_type, "app_mention" | "message") {
         return None;
@@ -1988,6 +2184,17 @@ fn apply_output_message(message: &tau_proto::HarnessOutputMessage, ext: &Extensi
                 return;
             };
             if let (Some(message_id), Some(_)) = (&result.message_id, result.outcome) {
+                if let Some(original_key) = pending.original_key.clone() {
+                    state.insert_incoming_message(
+                        original_key,
+                        IncomingMessageOwner {
+                            agent_id: pending.agent_id.clone(),
+                            message_id: message_id.clone(),
+                            conversation: pending.conversation.clone(),
+                            user_id: pending.user_id.clone(),
+                        },
+                    );
+                }
                 state.insert_reply_route(
                     message_id.clone(),
                     ReplyRoute {
@@ -2059,6 +2266,7 @@ fn handle_live_event(cx: tau_client::RawEventContext<'_, SlackRuntime>) -> Clien
                 .selected_agent_by_channel
                 .retain(|_, agent_id| agent_id != &unloaded.agent_id);
             state.remove_agent_reply_routes(&unloaded.agent_id);
+            state.remove_agent_incoming_messages(&unloaded.agent_id);
             state
                 .pending_ingress
                 .retain(|_, pending| pending.agent_id != unloaded.agent_id);
@@ -2074,6 +2282,7 @@ fn handle_live_event(cx: tau_client::RawEventContext<'_, SlackRuntime>) -> Clien
             state.selected_agent_by_channel.clear();
             state.pending_ingress.clear();
             state.clear_reply_routes();
+            state.clear_incoming_messages();
             state.pending_posts.clear();
             state.capability_active = false;
             state.pending_capability_request = None;

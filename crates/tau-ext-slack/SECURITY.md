@@ -29,6 +29,10 @@
   stale/unregistered owners, bot-self reactions, and retries are ignored.
   Human-account status is checked fail-closed with `users.info`; reaction
   support therefore requires the `users:read` bot scope.
+- `message_changed` routes only when its original incoming create committed and
+  remains in the bounded native-identity cache. Channel, thread, original
+  sender/editor, message timestamp, and revision metadata must agree exactly;
+  unknown or conflicting edits fail closed and never become new creates.
 - Slack text is untrusted external content and can contain prompt injection. It
   stays an unprefixed payload in a harness-stamped typed envelope; allowlist and
   verified-account metadata do not make its content trusted.

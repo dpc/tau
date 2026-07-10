@@ -379,15 +379,27 @@ impl MessageEnvelopeItem {
             MessageDirection::Incoming => "incoming",
             MessageDirection::Outgoing => "outgoing",
         };
-        let payload = match &self.envelope.operation {
+        let (payload, operation) = match &self.envelope.operation {
             MessageOperation::Create {
                 payload: MessagePayload::Text { text, .. },
-            }
-            | MessageOperation::Edit {
+            } => (text.as_str(), String::new()),
+            MessageOperation::Edit {
+                target,
                 payload: MessagePayload::Text { text, .. },
-                ..
-            } => text.as_str(),
-            MessageOperation::Delete { .. } => "[message deleted]",
+            } => (
+                text.as_str(),
+                format!(
+                    "\noperation: edit target={}",
+                    xml_escape(&message_ref_label(target))
+                ),
+            ),
+            MessageOperation::Delete { target } => (
+                "[message deleted]",
+                format!(
+                    "\noperation: delete target={}",
+                    xml_escape(&message_ref_label(target))
+                ),
+            ),
             MessageOperation::Reaction {
                 action, reaction, ..
             } => {
@@ -420,7 +432,7 @@ impl MessageEnvelopeItem {
             .map(|label| format!("\nconversation: {}", xml_escape(label)))
             .unwrap_or_default();
         format!(
-            "<tau_message version=\"1\" direction=\"{direction}\">\ntransport: {}\nmessage_id: {}\nfrom: {}{conversation}\ncontent_trust: {}\nsender_identity: {}\nsender_policy: {}{reply}\n<payload type=\"text\">\n{}\n</payload>\n</tau_message>",
+            "<tau_message version=\"1\" direction=\"{direction}\">\ntransport: {}\nmessage_id: {}\nfrom: {}{conversation}\ncontent_trust: {}\nsender_identity: {}\nsender_policy: {}{operation}{reply}\n<payload type=\"text\">\n{}\n</payload>\n</tau_message>",
             xml_escape(&self.model_presentation.transport_label),
             xml_escape(self.envelope.message_id.as_str()),
             xml_escape(&self.model_presentation.source_label),
@@ -430,6 +442,15 @@ impl MessageEnvelopeItem {
             xml_escape(payload),
         )
     }
+}
+
+fn message_ref_label(reference: &MessageRef) -> String {
+    reference
+        .message_id
+        .as_ref()
+        .map(ToString::to_string)
+        .or_else(|| reference.external_message_id.clone())
+        .unwrap_or_else(|| "unresolved".to_owned())
 }
 
 fn content_trust_name(value: MessageContentTrust) -> &'static str {
