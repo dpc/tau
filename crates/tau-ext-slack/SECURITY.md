@@ -5,9 +5,18 @@
 - Slack app tokens (`xapp-...`), bot tokens (`xoxb-...`), and Socket Mode
   websocket URLs are secrets. Do not derive `Debug` for structs containing token
   text and never log websocket URLs.
-- The model cannot choose arbitrary Slack destinations. `slack_send` uses only
-  the configured `channel_id` or the single allowlisted DM that linked itself
-  with `start`, and only after the calling agent has registered.
+- The model cannot choose arbitrary Slack destinations. `slack_send` has no
+  destination argument and uses only the configured channel or single
+  allowlisted DM that most recently routed a prompt to the calling registered
+  agent. It fails before such an authorized origin exists.
+- Authorization activates only after matching live submitted/started lifecycle
+  facts. An unrelated submitted prompt or any steered prompt revokes it; a
+  context-less tool-result follow-up preserves it only when no user prompt
+  intervened. Queued prompts folded as steers never authorize a destination.
+- Only `app_mention` events from ids explicitly listed in `channel_ids` route
+  channel prompts. Unconfigured channels and DMs are ignored without reply side
+  effects. With an empty list, one allowlisted DM can link with `start` and route
+  direct `message` events.
 - Messages from users outside `allowed_user_ids` are ignored before any routing
   or Slack reply side effects.
 - Slack text is untrusted prompt input and can contain prompt injection. Tau

@@ -19,8 +19,8 @@ extensions:
       app_token_secret: slack_app_token
       bot_token_secret: slack_bot_token
       allowed_user_ids: ["U12345678"]
-      # Optional. If omitted, one allowlisted DM can link with `start`.
-      channel_id: "C12345678"
+      # Optional. If omitted or empty, one allowlisted DM can link with `start`.
+      channel_ids: ["C12345678", "C87654321"]
       max_message_bytes: 16384
 ```
 
@@ -34,7 +34,7 @@ MVP.
 Ask an agent to call `slack_register` with `enabled: true`. Allowed Slack users
 can then use:
 
-- `start` — link a DM when no `channel_id` is configured and show help;
+- `start` — link a DM when `channel_ids` is empty and show help;
 - `agents` — list registered Tau agents;
 - `select <agent-id-or-prefix>` — select a target for later plain text;
 - `to <agent-id-or-prefix> <message>` — send one prompt to an agent;
@@ -42,4 +42,9 @@ can then use:
 
 In channels, mention the bot first, for example
 `@Tau to agent-abc investigate this`. DMs may omit the mention. Replies from an
-agent use `slack_send`; there is no channel, user, or thread argument.
+agent use `slack_send`; there is no channel, user, or thread argument. Each
+configured channel has independent agent selection, and replies return to the
+configured channel (or linked DM) that most recently routed that agent a prompt.
+
+The singular `channel_id` key is intentionally unsupported. Empty, malformed,
+or duplicate ids and duplicate user ids are configuration errors.

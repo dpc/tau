@@ -222,12 +222,18 @@ User `/skill` invocation explicitly reads the selected skill file, strips frontm
 external Slack text into Tau prompts. When enabled, it requires explicit Slack
 app-token and bot-token secrets plus a non-empty allowlist of Slack user ids. The
 model cannot provide arbitrary channel, user, or thread destinations:
-`slack_send` uses only the configured Slack conversation or a single allowlisted
-DM linked with `start`, and only after the calling agent registered. Slack
+`slack_send` uses only the configured Slack channel or a single allowlisted DM
+that most recently routed a prompt to the calling registered agent. It has no
+destination argument and fails until such an authorized origin exists. Slack
+prompt lifecycle is fail-closed: matching live submitted/started facts activate
+the origin, unrelated submissions and all steered prompts revoke it, and queued
+prompts folded into a mixed tool-result follow-up never authorize a destination.
 workspace admins, Slack itself, channel members, and Slack Connect participants
 with access to a channel may be able to read messages; this MVP makes no E2EE
-claim. Runtime registrations, selected agents, learned DM, duplicate-event
-cache, and websocket state are in-memory only. Endpoint overrides must reject
+claim. Runtime registrations, per-channel selected agents, per-agent reply
+origins, learned DM, duplicate-event cache, and websocket state are in-memory
+only. Unconfigured channels and DMs are ignored without reply side effects.
+Endpoint overrides must reject
 userinfo/query/fragment, production Web API calls must use HTTPS, production
 Socket Mode URLs must use WSS, and returned websocket URLs must not be logged.
 Avoid logs that include Slack tokens, Socket Mode URLs, or unexpected private

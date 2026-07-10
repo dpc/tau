@@ -18,3 +18,15 @@ Regression tests should prefer this fake-client and loopback approach over real
 Slack workspaces. When testing shutdown paths, drive the worker to the blocked
 state being exercised, request shutdown through the shared signal, and bound the
 post-request wait below any removed polling interval so polling regressions fail.
+
+## Queued prompts fail closed across channels
+
+Status: inferred
+
+Slack reply authorization follows harness prompt lifecycle rather than arrival
+order. A busy-agent Slack prompt may be queued and later folded as
+`agent.prompt_steered` into a tool-result follow-up. The bridge authenticates the
+steered agent, exact text, and private correlation id before retiring the
+pending record. Because the follow-up mixes the prior turn with steered input
+and has no single safe reply origin, any steer revokes `slack_send` authorization
+instead of choosing a destination.

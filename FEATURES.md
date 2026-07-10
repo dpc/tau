@@ -620,10 +620,12 @@ Disabled by default, `std-slack` lets allowlisted Slack users send text to
 explicitly registered Tau agents and lets those agents reply with `slack_send`.
 It uses Slack Socket Mode with an app-token secret (`xapp-...`), a bot-token
 secret (`xoxb-...`), and a non-empty `allowed_user_ids` allowlist. Outgoing
-messages use only a configured `channel_id` or a single allowlisted DM linked at
-runtime with `start`; the model cannot choose channel, user, or thread
-destinations. Runtime registrations, selected agents, learned DM link, duplicate
-event cache, and websocket state are in-memory only.
+messages use only an explicitly configured `channel_ids` entry or a single
+allowlisted DM linked at runtime with `start`. Each channel has independent agent
+selection, and replies return to the configured or linked conversation that
+routed the agent's latest Slack prompt; the model cannot choose channel, user,
+or thread destinations. Runtime registrations, selected agents, reply origins,
+learned DM link, duplicate event cache, and websocket state are in-memory only.
 
 ### Web search extensions
 
