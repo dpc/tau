@@ -30,9 +30,7 @@ use tau_session_inspect::{
 };
 use tempfile::TempDir;
 
-use super::{
-    AgentState, AgentToolCall, HARNESS_CONNECTION_ID, Harness, NormalizedFinishedToolCall,
-};
+use super::{AgentToolCall, HARNESS_CONNECTION_ID, Harness, NormalizedFinishedToolCall};
 use crate::AgentId;
 use crate::agent::{AgentTurnState, PendingPrompt};
 use crate::daemon::{
@@ -1313,7 +1311,6 @@ fn seed_agent_thinking(h: &mut Harness, cid: &crate::AgentId, spid: &str) {
         agent_prompt_id: spid.into(),
     };
     h.agent_routes.insert(agent_id.clone(), cid.clone());
-    h.agent_states.insert(agent_id, AgentState::Active);
     if let Some(model) = model {
         h.prompt_models.insert(spid.into(), model);
     }

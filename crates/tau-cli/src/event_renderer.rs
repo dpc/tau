@@ -113,6 +113,12 @@ pub(crate) struct EventRenderer {
     /// Agent ids locally hidden from active prompt targets until explicitly
     /// resumed. Effective active agents are `live_agents - suspended_agents`.
     suspended_agents: std::sync::Arc<std::sync::Mutex<HashSet<String>>>,
+    /// Agents promoted by accepted input during this UI session.
+    ///
+    /// This replay-derived guard prevents completion of an original delegated
+    /// turn from hiding an agent after a user or another agent interacted with
+    /// it.
+    interacted_agents: HashSet<String>,
     /// Map side-query ids to the accepted agent id for routing prompt/provider
     /// events whose originator only carries `query_id`.
     query_agents: HashMap<String, String>,
@@ -1271,6 +1277,7 @@ impl EventRenderer {
             live_agents: std::sync::Arc::new(std::sync::Mutex::new(HashSet::new())),
             ephemeral_agents: std::sync::Arc::new(std::sync::Mutex::new(HashSet::new())),
             suspended_agents: std::sync::Arc::new(std::sync::Mutex::new(HashSet::new())),
+            interacted_agents: HashSet::new(),
             query_agents: HashMap::new(),
             prompt_agents: HashMap::new(),
             tool_agents: HashMap::new(),
@@ -1885,8 +1892,9 @@ impl EventRenderer {
         }
     }
 
-    fn mark_agent_live_and_unsuspended(&mut self, agent_id: String) {
+    fn mark_agent_interacted(&mut self, agent_id: String) {
         self.remember_agent(agent_id.clone());
+        self.interacted_agents.insert(agent_id.clone());
         if let Ok(mut agents) = self.live_agents.lock() {
             agents.insert(agent_id.clone());
         }
@@ -1894,14 +1902,13 @@ impl EventRenderer {
             agents.remove(&agent_id);
         }
         self.render_model_status_if_present();
+        if self.current_agent_id.as_deref() == Some(agent_id.as_str()) {
+            self.refresh_prompt_placeholder();
+        }
     }
 
     pub(crate) fn resume_agent(&mut self, agent_id: String) {
-        let resumed_current_agent = self.current_agent_id.as_deref() == Some(agent_id.as_str());
-        self.mark_agent_live_and_unsuspended(agent_id);
-        if resumed_current_agent {
-            self.refresh_prompt_placeholder();
-        }
+        self.mark_agent_interacted(agent_id);
     }
 
     pub(crate) fn suspend_agent(&mut self, agent_id: &str) {
@@ -1916,6 +1923,12 @@ impl EventRenderer {
         self.render_model_status_if_present();
         if self.current_agent_id.as_deref() == Some(agent_id) {
             self.refresh_prompt_placeholder();
+        }
+    }
+
+    fn auto_suspend_agent(&mut self, agent_id: &str) {
+        if !self.interacted_agents.contains(agent_id) {
+            self.mark_agent_suspended(agent_id);
         }
     }
 
@@ -2529,6 +2542,7 @@ impl EventRenderer {
         self.agent_stats.clear();
         self.active_agent_prompts.clear();
         self.terminal_agent_prompts.clear();
+        self.interacted_agents.clear();
         self.clear_watched_agent_blocks();
         if let Ok(mut agents) = self.known_agents.lock() {
             agents.clear();
@@ -3480,7 +3494,7 @@ impl EventRenderer {
             }
             Event::StartAgentResult(result) => {
                 if let Some(agent_id) = self.query_agents.get(&result.query_id).cloned() {
-                    self.mark_agent_suspended(&agent_id);
+                    self.auto_suspend_agent(&agent_id);
                 }
                 true
             }
@@ -3509,11 +3523,9 @@ impl EventRenderer {
         match event {
             Event::UiPromptSubmitted(prompt) => {
                 let agent_id = prompt.agent_id.to_string();
-                if prompt.originator.is_user() {
-                    self.mark_agent_live(agent_id.clone());
-                } else {
-                    self.remember_agent(agent_id.clone());
-                }
+                // This is only a transient UI request. Activation waits for an
+                // accepted queue or committed submission event from the harness.
+                self.remember_agent(agent_id.clone());
                 if let tau_proto::PromptOriginator::Extension { query_id, .. } = &prompt.originator
                 {
                     self.query_agents.insert(query_id.clone(), agent_id);
@@ -3521,12 +3533,20 @@ impl EventRenderer {
                 true
             }
             Event::AgentPromptQueued(queued) => {
-                self.mark_agent_live(queued.agent_id.to_string());
+                if queued.message_class.is_internal() {
+                    self.mark_agent_live(queued.agent_id.to_string());
+                } else {
+                    self.mark_agent_interacted(queued.agent_id.to_string());
+                }
                 true
             }
             Event::AgentPromptSubmitted(prompt) => {
                 let agent_id = prompt.agent_id.to_string();
-                self.mark_agent_live(agent_id.clone());
+                if prompt.originator.is_user() && !prompt.message_class.is_internal() {
+                    self.mark_agent_interacted(agent_id.clone());
+                } else {
+                    self.mark_agent_live(agent_id.clone());
+                }
                 if let tau_proto::PromptOriginator::Extension { query_id, .. } = &prompt.originator
                 {
                     self.query_agents.insert(query_id.clone(), agent_id);
@@ -3569,7 +3589,7 @@ impl EventRenderer {
                 if terminated.originator.is_user() {
                     self.mark_agent_live(agent_id);
                 } else {
-                    self.mark_agent_suspended(&agent_id);
+                    self.auto_suspend_agent(&agent_id);
                 }
                 self.mark_agent_prompt_inactive(
                     terminated.agent_id.as_str(),
@@ -3627,7 +3647,7 @@ impl EventRenderer {
                 {
                     self.mark_agent_live(agent_id.clone());
                 } else {
-                    self.mark_agent_suspended(&agent_id);
+                    self.auto_suspend_agent(&agent_id);
                 }
                 self.prompt_agents
                     .insert(finished.agent_prompt_id.to_string(), agent_id.clone());
@@ -3689,7 +3709,7 @@ impl EventRenderer {
             }
             Event::AgentMessageReceived(message) => {
                 self.remember_agent(message.sender_id.to_string());
-                self.remember_agent(message.recipient_id.to_string());
+                self.mark_agent_interacted(message.recipient_id.to_string());
             }
             _ => {}
         }

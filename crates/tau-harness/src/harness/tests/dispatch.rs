@@ -2,7 +2,7 @@ use super::*;
 use crate::AgentId;
 use crate::agent::{Agent, AgentTurnState, PendingPrompt};
 use crate::harness::{
-    AgentState, BackgroundCompletionPromptMode, PendingTool, background_completion_prompt,
+    BackgroundCompletionPromptMode, PendingTool, background_completion_prompt,
     extension_disconnected_background_tool_call_error_message,
     extension_disconnected_tool_call_error_message, is_restore_notice_prompt_text,
     restore_notice_prompt_for_elapsed, unavailable_tool_error_message,
@@ -7193,8 +7193,6 @@ fn switch_session_clears_loaded_agents_until_next_prompt() {
         .expect("default conversation")
         .agent_id = Some("old-agent".to_owned());
     h.agent_routes.insert("old-agent".to_owned(), cid.clone());
-    h.agent_states
-        .insert("old-agent".to_owned(), AgentState::Suspended);
 
     let shell_conn = h
         .extension_connection_id("shell")
@@ -7228,7 +7226,6 @@ fn switch_session_clears_loaded_agents_until_next_prompt() {
     );
     assert!(h.agents.is_empty());
     assert!(h.agent_routes.is_empty());
-    assert!(h.agent_states.is_empty());
 
     // Drive the new session through init so submit_user_prompt
     // actually dispatches (rather than queuing).
@@ -8019,11 +8016,6 @@ fn start_agent_request_dispatches_while_tool_is_running_and_restores_turn() {
         .get(&side_cid)
         .and_then(|conv| conv.agent_id.clone())
         .expect("side agent id");
-    assert_eq!(
-        h.agent_states.get(&side_agent_id),
-        Some(&AgentState::ActiveDelegated),
-        "tool-backed delegate is active while its initial turn is running"
-    );
     assert!(
         h.agents
             .values()
@@ -8096,11 +8088,6 @@ fn start_agent_request_dispatches_while_tool_is_running_and_restores_turn() {
         })
         .expect("query result routed");
     assert_eq!(result.text, "delegated answer");
-    assert_eq!(
-        h.agent_states.get(&side_agent_id),
-        Some(&AgentState::Suspended),
-        "completed untouched delegates are automatically suspended"
-    );
 
     let side_cid = h
         .agent_routes
@@ -8155,18 +8142,9 @@ fn delegated_agent_user_interaction_prevents_auto_suspend() {
         .get(&side_cid)
         .and_then(|conv| conv.agent_id.clone())
         .expect("side agent id");
-    assert_eq!(
-        h.agent_states.get(&side_agent_id),
-        Some(&AgentState::ActiveDelegated)
-    );
 
     h.submit_prompt_to_agent("s1".into(), &side_agent_id, "user follow-up".to_owned())
         .expect("user prompt to delegate");
-    assert_eq!(
-        h.agent_states.get(&side_agent_id),
-        Some(&AgentState::Active),
-        "user interaction converts active-delegated into ordinary active"
-    );
 
     let side_spid = h
         .prompt_agents
@@ -8199,11 +8177,6 @@ fn delegated_agent_user_interaction_prevents_auto_suspend() {
     })
     .expect("side finished");
 
-    assert_eq!(
-        h.agent_states.get(&side_agent_id),
-        Some(&AgentState::Active),
-        "delegate completion only auto-suspends untouched active-delegated agents"
-    );
     assert!(
         h.agent_routes.contains_key(&side_agent_id),
         "interacted delegate remains targetable"

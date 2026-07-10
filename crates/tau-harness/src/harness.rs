@@ -144,13 +144,6 @@ enum RuntimeEventWait {
 
 const RESTORE_NOTICE_BODY_PREFIX: &str = "Previous session was interrupted and restored.";
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum AgentState {
-    Active,
-    ActiveDelegated,
-    Suspended,
-}
-
 fn agent_runtime_state_for_turn(state: &AgentTurnState) -> tau_proto::AgentRuntimeState {
     match state {
         AgentTurnState::Idle => tau_proto::AgentRuntimeState::Idle,
@@ -1466,7 +1459,6 @@ pub struct Harness {
     /// `session.agent_loaded` before the durable session store can fold it.
     pub(crate) session_loaded_agents: HashSet<AgentId>,
     /// Harness-owned lifecycle state for current-session agents.
-    pub(crate) agent_states: HashMap<String, AgentState>,
     /// Session-local watch sets keyed by watcher public agent id.
     pub(crate) agent_watches: HashMap<String, BTreeSet<String>>,
     /// Reverse session-local watch index keyed by watched public agent id.
@@ -2073,7 +2065,6 @@ impl Harness {
             agents: HashMap::new(),
             agent_routes: HashMap::new(),
             session_loaded_agents: HashSet::new(),
-            agent_states: HashMap::new(),
             agent_watches: HashMap::new(),
             agent_watchers: HashMap::new(),
             stopped_agent_ids: HashSet::new(),
@@ -8755,10 +8746,6 @@ impl Harness {
                 }),
             );
         }
-        if is_tool_backed {
-            self.set_agent_state(&agent_id, AgentState::ActiveDelegated);
-        }
-
         // Emit the initial generic agent stats snapshot as soon as the side
         // agent exists, before it spends tokens or starts nested tools.
         self.emit_agent_stats_updated(&cid);
@@ -9243,7 +9230,6 @@ impl Harness {
                 reason: format!("unknown agent `{agent_id}`"),
             });
         };
-        self.set_agent_state(agent_id, AgentState::Active);
         if !self.session_initialized(&session_id)
             || (self.selected_model.is_none() && self.provider_model_info.is_empty())
             || !self.turn_state.is_idle()
@@ -9570,7 +9556,6 @@ impl Harness {
         // created explicitly by `UiCreateAgent`/first prompt in the new session.
         self.agents.clear();
         self.agent_routes.clear();
-        self.agent_states.clear();
         self.agent_watches.clear();
         self.agent_watchers.clear();
         self.stopped_agent_ids.clear();
@@ -10374,10 +10359,6 @@ impl Harness {
             .expect("test prompt requires a selected model")
     }
 
-    fn set_agent_state(&mut self, agent_id: &str, state: AgentState) {
-        self.agent_states.insert(agent_id.to_owned(), state);
-    }
-
     fn set_agent_turn_state(&mut self, cid: &AgentId, state: AgentTurnState) {
         let new_state = agent_runtime_state_for_turn(&state);
         let changed_agent_id = self.agents.get(cid).and_then(|agent| {
@@ -10414,7 +10395,6 @@ impl Harness {
             let session_id = conv.session_id.clone();
             self.unload_agent_from_session_if_loaded(&session_id, &agent_id);
             self.agent_routes.remove(&agent_id);
-            self.agent_states.remove(&agent_id);
             self.stopped_agent_ids.insert(agent_id);
         }
         self.agents.remove(cid)
@@ -10508,8 +10488,6 @@ impl Harness {
             }
             self.agent_routes.insert(agent_id_string.clone(), cid);
             self.session_loaded_agents.insert(agent_id.clone());
-            self.agent_states
-                .insert(agent_id_string, AgentState::Active);
         }
     }
 
@@ -10706,9 +10684,6 @@ impl Harness {
     pub(crate) fn ensure_agent_id_for_agent(&mut self, cid: &AgentId) -> Option<String> {
         if let Some(agent_id) = self.agents.get(cid)?.agent_id.clone() {
             self.ensure_loaded_agent_for_agent(cid, &agent_id);
-            if self.agent_states.get(&agent_id).copied() != Some(AgentState::ActiveDelegated) {
-                self.set_agent_state(&agent_id, AgentState::Active);
-            }
             self.emit_agent_stats_updated(cid);
             return Some(agent_id);
         }
@@ -10735,7 +10710,6 @@ impl Harness {
             }
         }
         self.ensure_loaded_agent_for_agent(cid, &agent_id);
-        self.set_agent_state(&agent_id, AgentState::Active);
         self.emit_agent_stats_updated(cid);
         Some(agent_id)
     }
@@ -12076,24 +12050,16 @@ impl Harness {
     }
 
     fn complete_finished_side_conversation(&mut self, cid: &AgentId) {
-        let completed_agent_id = self.agents.get(cid).and_then(|conv| conv.agent_id.clone());
         let keep_tool_backed_conversation = self
             .agents
             .get(cid)
             .is_some_and(|conv| conv.parent_tool_call_id.is_some());
-        let should_auto_suspend_delegate = keep_tool_backed_conversation
-            && completed_agent_id.as_deref().is_some_and(|agent_id| {
-                self.agent_states.get(agent_id).copied() == Some(AgentState::ActiveDelegated)
-            });
         // Release before removing or detaching the side agent so
         // queued descendants can still resolve their parent agent
         // while starting. Active descendants keep their own copied state.
         self.set_agent_turn_state(cid, AgentTurnState::Idle);
         self.release_start_agent_request(cid);
         if keep_tool_backed_conversation {
-            if should_auto_suspend_delegate && let Some(agent_id) = completed_agent_id.as_deref() {
-                self.set_agent_state(agent_id, AgentState::Suspended);
-            }
             self.detach_completed_tool_backed_start_agent(cid);
         } else {
             self.transfer_background_completion_target_before_teardown(cid);

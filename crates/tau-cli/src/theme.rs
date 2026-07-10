@@ -46,7 +46,7 @@ pub(crate) fn prompt_input_placeholder(
 
     let parts = if current_agent_suspended {
         vec![SpanTree::text(
-            "This agent is suspended. Use /resume before sending messages.",
+            "This agent is suspended. Sending a message will mark it as active.",
         )]
     } else {
         match current_agent_id {

@@ -17,10 +17,10 @@ use tau_proto::{
 };
 
 use super::chat::{
-    DraftSlot, SUSPENDED_AGENT_PROMPT, agent_is_active_in_sets, custom_prompt_replacement,
-    invalidate_pending_draft, is_local_slash_command, leading_slash_action, next_active_agent,
-    queue_prompt_draft_snapshot, redacted_command_echo_line, redacted_prompt_history_line,
-    retarget_prompt_draft_snapshot, role_cycling_enabled, should_send_draft_snapshot,
+    DraftSlot, agent_is_active_in_sets, custom_prompt_replacement, invalidate_pending_draft,
+    is_local_slash_command, leading_slash_action, next_active_agent, queue_prompt_draft_snapshot,
+    redacted_command_echo_line, redacted_prompt_history_line, retarget_prompt_draft_snapshot,
+    role_cycling_enabled, should_send_draft_snapshot,
 };
 use super::event_renderer::{EventRenderer, watched_agent_tool_display};
 
@@ -707,16 +707,6 @@ fn runtime_version_label_matches_cli_version_shape() {
     let label = super::version_label();
     assert!(label.starts_with(concat!("tau ", env!("CARGO_PKG_VERSION"), " (")));
     assert!(label.ends_with(')'));
-}
-
-#[test]
-fn suspended_agent_prompt_text_is_stable() {
-    // Regression coverage for the exact prompt shown when the selected agent is
-    // suspended and the user tries to submit another message to it.
-    assert_eq!(
-        SUSPENDED_AGENT_PROMPT,
-        "This agent is suspended. Use `/resume` to resume it before sending messages."
-    );
 }
 
 /// Writer that feeds bytes into a vt100::Parser. Bytes are
@@ -2410,12 +2400,10 @@ fn agent_stats_does_not_overwrite_display_name() {
     );
 }
 
+/// Ensures replay/live ordering is monotonic: an accepted message promotes a
+/// hidden delegate and stale completion from its original turn cannot hide it.
 #[test]
-fn suspended_agent_stays_blocked_after_lifecycle_updates_until_resume() {
-    // Regression: manual suspension is a separate UI state. Later lifecycle
-    // updates may prove the harness still knows the agent, but they must not
-    // make prompt submission active again until `/agent resume` clears the
-    // suspension set.
+fn accepted_message_reactivates_suspended_agent_before_delegate_completion() {
     let (_term, handle, _vt) = setup(80, 24);
     let mut renderer = EventRenderer::new(
         handle,
@@ -2426,6 +2414,36 @@ fn suspended_agent_stays_blocked_after_lifecycle_updates_until_resume() {
     renderer.handle(&Event::SessionStarted(tau_proto::SessionStarted {
         session_id: "s1".into(),
         reason: tau_proto::SessionStartReason::Initial,
+    }));
+    renderer.handle(&Event::StartAgentAccepted(tau_proto::StartAgentAccepted {
+        query_id: "q-worker".to_owned(),
+        agent_id: agent_id("worker-1"),
+    }));
+    renderer.handle(&Event::UiPromptSubmitted(tau_proto::UiPromptSubmitted {
+        session_id: "s1".into(),
+        text: "not yet accepted".to_owned(),
+        agent_id: agent_id("worker-1"),
+        message_class: tau_proto::PromptMessageClass::User,
+        originator: tau_proto::PromptOriginator::User,
+        ctx_id: None,
+    }));
+    renderer.handle(&Event::StartAgentResult(tau_proto::StartAgentResult {
+        query_id: "q-worker".to_owned(),
+        text: "done".to_owned(),
+        error: None,
+    }));
+    assert!(
+        renderer
+            .suspended_agents()
+            .lock()
+            .expect("suspended agents lock poisoned")
+            .contains("worker-1"),
+        "transient submission must not protect an active delegate from completion"
+    );
+
+    renderer.handle(&Event::SessionStarted(tau_proto::SessionStarted {
+        session_id: "s2".into(),
+        reason: tau_proto::SessionStartReason::New,
     }));
     renderer.handle(&Event::StartAgentAccepted(tau_proto::StartAgentAccepted {
         query_id: "q-worker".to_owned(),
@@ -2445,6 +2463,14 @@ fn suspended_agent_stays_blocked_after_lifecycle_updates_until_resume() {
     renderer.handle(&Event::AgentPromptCreated(AgentPromptCreated {
         agent_id: agent_id("worker-1"),
         ..agent_prompt_created("worker-sp", "s1")
+    }));
+    renderer.handle(&Event::UiPromptSubmitted(tau_proto::UiPromptSubmitted {
+        session_id: "s1".into(),
+        text: "not yet accepted".to_owned(),
+        agent_id: agent_id("worker-1"),
+        message_class: tau_proto::PromptMessageClass::User,
+        originator: tau_proto::PromptOriginator::User,
+        ctx_id: None,
     }));
     renderer.handle(&Event::ProviderResponseFinished(ProviderResponseFinished {
         agent_id: agent_id("worker-1"),
@@ -2470,7 +2496,25 @@ fn suspended_agent_stays_blocked_after_lifecycle_updates_until_resume() {
     assert!(suspended.contains("worker-1"));
     assert!(!agent_is_active_in_sets(&live, &suspended, "worker-1"));
 
-    renderer.resume_agent("worker-1".to_owned());
+    renderer.handle(&Event::AgentMessageReceived(
+        tau_proto::AgentMessageReceived {
+            message_id: "message-1".into(),
+            sender_id: agent_id("sender-1"),
+            sender_session_id: None,
+            recipient_id: agent_id("worker-1"),
+            kind: tau_proto::AgentMessageKind::Message,
+            message: "follow up".to_owned(),
+        },
+    ));
+    renderer.handle(&Event::ProviderResponseFinished(ProviderResponseFinished {
+        agent_id: agent_id("worker-1"),
+        ..finished_response("worker-sp", vec![assistant_message_item("done")])
+    }));
+    renderer.handle(&Event::StartAgentResult(tau_proto::StartAgentResult {
+        query_id: "q-worker".to_owned(),
+        text: "done".to_owned(),
+        error: None,
+    }));
     let live = renderer
         .live_agents()
         .lock()
@@ -2485,7 +2529,7 @@ fn suspended_agent_stays_blocked_after_lifecycle_updates_until_resume() {
 }
 
 #[test]
-fn selected_suspended_agent_placeholder_refreshes_until_resume() {
+fn selected_suspended_agent_placeholder_explains_implicit_activation() {
     // Regression: suspending the currently selected agent must update the live
     // input placeholder immediately, so the empty prompt itself explains why a
     // normal message cannot be sent until `/resume` runs.
@@ -2508,7 +2552,7 @@ fn selected_suspended_agent_placeholder_refreshes_until_resume() {
     sync(&handle);
     assert!(vt.screen_contains(
         100,
-        "This agent is suspended. Use /resume before sending messages."
+        "This agent is suspended. Sending a message will mark it as active."
     ));
 
     renderer.resume_agent("worker-1".to_owned());
@@ -2516,7 +2560,7 @@ fn selected_suspended_agent_placeholder_refreshes_until_resume() {
     assert!(vt.screen_contains(100, "Write a message to worker-1"));
     assert!(!vt.screen_contains(
         100,
-        "This agent is suspended. Use /resume before sending messages."
+        "This agent is suspended. Sending a message will mark it as active."
     ));
 }
 

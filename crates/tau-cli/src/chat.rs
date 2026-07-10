@@ -618,8 +618,6 @@ fn cycle_role(
 const DRAFT_DEBOUNCE: Duration = Duration::from_secs(1);
 const EOF_DURING_AGENT_NOTICE: &str =
     "An agent is still running; use /quit to terminate the session in progress.";
-pub(crate) const SUSPENDED_AGENT_PROMPT: &str =
-    "This agent is suspended. Use `/resume` to resume it before sending messages.";
 const TREE_NAVIGATION_USAGE: &str = "/tree: use a prompt anchor, `root`, or explicit `node <id>`";
 const BUILTIN_SLASH_COMMANDS: &[(&str, &str)] = &[
     ("/quit", "Exit the chat session"),
@@ -2548,10 +2546,6 @@ impl<'a> TerminalInputSession<'a> {
         self.ctx.routing.agent_is_known(agent_id)
     }
 
-    fn agent_is_active(&self, agent_id: &str) -> bool {
-        self.ctx.routing.agent_is_active(agent_id)
-    }
-
     fn handle_role_selection_command(&mut self, text: &str) -> bool {
         if text == "/role" || text.starts_with("/role ") {
             self.handle_role_command(text);
@@ -2670,12 +2664,6 @@ impl<'a> TerminalInputSession<'a> {
         self.invalidate_pending_draft();
 
         let selected_agent = self.ctx.routing.selected_agent_id();
-        if let Some(selected_agent) = selected_agent.as_deref()
-            && !self.agent_is_active(selected_agent)
-        {
-            self.output.system_info(SUSPENDED_AGENT_PROMPT);
-            return None;
-        }
         self.ctx
             .agent_in_progress
             .store(true, std::sync::atomic::Ordering::Relaxed);

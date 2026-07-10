@@ -70,9 +70,9 @@ must not mutate display names or durable transcript state.
 
 Two agent-state concepts are intentionally distinct:
 
-- `active` / `suspended` is UI navigation state. It controls whether an agent is
-  selectable as a view, appears in switching/autocomplete sets, and can receive
-  user prompts from the terminal.
+- `active` / `suspended` is UI navigation state only. It controls whether an
+  agent appears in ordinary switching/autocomplete sets; it does not affect
+  loading, addressability, or prompt/message delivery.
 - `running` / `waiting` is execution state. It controls whether an agent is
   currently processing a turn after receiving a prompt and before the provider
   response or prompt termination makes that turn terminal.
@@ -154,9 +154,9 @@ agent instead of sending an untargeted agent update.
 Agent switch commands distinguish known transcript selection from active prompt
 routing. `/agent switch` completions list active agents and `none`, keeping
 suspended agents out of ordinary switch suggestions. An explicitly typed known
-suspended agent id is still accepted so the UI can view that transcript; prompt
-submission remains blocked while the selected agent is suspended until `/agent
-resume` or `/resume` marks it active again.
+suspended agent id is still accepted so the UI can view that transcript and
+submit a prompt. An accepted user prompt or agent-message receipt marks it
+active again; `/agent resume` and `/resume` remain explicit alternatives.
 
 `/name <display name>` is the selected-agent shortcut for `/agent name
 <agent_id> <display name>`. It emits the same display-name update as `/agent

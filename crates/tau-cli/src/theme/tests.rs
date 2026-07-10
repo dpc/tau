@@ -340,10 +340,10 @@ fn prompt_input_placeholder_keeps_placeholder_style_around_role_style() {
 }
 
 #[test]
-fn suspended_prompt_input_placeholder_explains_messages_are_blocked() {
+fn suspended_prompt_input_placeholder_explains_implicit_activation() {
     // Regression coverage for the disabled-input copy shown while the selected
     // agent is suspended. The text must make clear that users need to resume it
-    // before sending messages.
+    // while explaining that accepted input activates the agent.
     let theme = tau_themes::Theme::new();
     let prompt = prompt_input_placeholder(&theme, Some("engineer"), Some("engineer_abc"), true);
     let text: String = prompt
@@ -354,7 +354,7 @@ fn suspended_prompt_input_placeholder_explains_messages_are_blocked() {
 
     assert_eq!(
         text,
-        "This agent is suspended. Use /resume before sending messages."
+        "This agent is suspended. Sending a message will mark it as active."
     );
 }
 

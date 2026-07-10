@@ -675,8 +675,9 @@ preferences to other UIs.
 `/agent switch` completion lists active agents so suspended transcripts stay out
 of normal prompt-routing choices. If you explicitly type a known suspended agent
 id, `/agent switch <id>` still selects that transcript for viewing; prompts
-remain blocked for that selected agent until `/agent resume <id>` or `/resume`
-marks it active again.
+can be submitted normally, and accepted user prompts or agent-message receipts
+mark it active again. `/agent resume <id>` and `/resume` remain explicit ways
+to restore it before interaction.
 
 Available `/set` names include `show-diff` (expanded vs. compact diffs),
 `show-thinking` (agent reasoning summaries), `show-turn-stats` (per-turn
