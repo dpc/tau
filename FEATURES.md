@@ -3,9 +3,9 @@
 ## Typed external-message foundation
 
 Tau's bridge foundation supports a transport-neutral durable envelope and
-protected external incoming/outgoing facts. Built-in Slack, Telegram, and XMPP
-adapter migrations are follow-up work and retain their documented legacy
-behavior for now. Canonical incoming messages enter model context once, wake only
+protected external incoming/outgoing facts. Slack uses this canonical path;
+Telegram and XMPP adapter migrations remain follow-up work and retain their
+documented legacy behavior for now. Canonical incoming messages enter model context once, wake only
 after live commit, and render as always-visible gray semi-system blocks rather
 than human prompts. Provider lowering escapes untrusted payload boundaries and
 opaque reply ids keep raw destinations outside model control. Legacy transcript
@@ -629,14 +629,18 @@ destination.
 
 Disabled by default, `std-slack` lets allowlisted Slack users send text to
 explicitly registered Tau agents and lets those agents reply with `slack_send`.
+Incoming creates and owned-post reactions use typed message envelopes with
+durable native ids and gray semi-system provenance; no duplicate legacy prompt
+is created. Replies require the envelope's opaque `reply_to` id and produce a
+durable outgoing fact before terminal tool completion.
 It uses Slack Socket Mode with an app-token secret (`xapp-...`), a bot-token
 secret (`xoxb-...`), and a non-empty `allowed_user_ids` allowlist. Outgoing
 messages use only an explicitly configured `channel_ids` entry or a single
 allowlisted DM linked at runtime with `start`. Each channel has independent agent
-selection, and replies return to the configured or linked conversation that
-routed the agent's active Slack prompt, preserving its originating thread
+selection, and replies return to the source-bound configured or linked
+conversation selected by `reply_to`, preserving its originating thread
 automatically; the model cannot choose channel, user, or thread destinations.
-Runtime registrations, selected agents, reply origins,
+Runtime registrations, selected agents, opaque reply routes,
 learned DM link, duplicate event cache, and websocket state are in-memory only.
 Allowlisted human reactions added to or removed from a recent `slack_send` post
 route to the post's owning agent with stable channel/thread/message metadata;

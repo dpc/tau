@@ -19,17 +19,11 @@ Slack workspaces. When testing shutdown paths, drive the worker to the blocked
 state being exercised, request shutdown through the shared signal, and bound the
 post-request wait below any removed polling interval so polling regressions fail.
 
-## Queued prompts fail closed across channels
+## Canonical reply selectors replace prompt lifecycle correlation
 
 Status: inferred
 
-Slack reply authorization follows harness prompt lifecycle rather than arrival
-order. A busy-agent Slack prompt may be queued and later folded as
-`agent.prompt_steered` into a tool-result follow-up. The bridge authenticates the
-steered agent, exact text, and private correlation id before retiring the
-pending record. Because the follow-up mixes the prior turn with steered input
-and has no single safe reply origin, any steer revokes `slack_send` authorization
-instead of choosing a destination.
+New Slack traffic is one durable typed incoming occurrence and never a legacy prompt node. The harness commit result returns an opaque canonical id; the bridge binds that id to its private source route. `slack_send` requires the exact id, so queued or coalesced work cannot select a destination from prompt text or arrival order. Replay and failed ingress never activate a route.
 
 ## Reactions require remembered bridge post ownership
 
@@ -52,5 +46,4 @@ Slack thread roots are validated event metadata and travel inside the same
 pending, accepted, and active conversation state as the configured channel or
 linked DM. `slack_send` exposes no thread argument. Top-level origins store no
 thread root, while threaded origins supply their root to `chat.postMessage`;
-steered and unrelated prompt lifecycle events keep the existing fail-closed
-authorization behavior.
+successful completion must repeat the exact typed route metadata or fail closed.

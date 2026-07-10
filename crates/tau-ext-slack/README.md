@@ -43,10 +43,12 @@ can then use:
 
 In channels, mention the bot first, for example
 `@Tau to agent-abc investigate this`. DMs may omit the mention. Replies from an
-agent use `slack_send`; there is no channel, user, or thread argument. Each
+agent use `slack_send(message, reply_to)`, where `reply_to` is the opaque
+canonical id shown in the typed Tau envelope. There is no channel, user, or
+thread argument. Each
 configured channel has independent agent selection, and replies return to the
-configured channel (or linked DM) and thread that routed that agent's active
-prompt. Top-level prompts receive top-level replies; thread replies remain in
+source-bound configured channel (or linked DM) and thread selected by the exact
+`reply_to` envelope. Top-level messages receive top-level replies; thread replies remain in
 their originating thread automatically.
 Allowed users' reaction additions/removals on recent messages posted through
 `slack_send` are routed back to the owning agent with channel, thread, message,

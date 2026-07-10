@@ -5,17 +5,18 @@
 - Slack app tokens (`xapp-...`), bot tokens (`xoxb-...`), and Socket Mode
   websocket URLs are secrets. Do not derive `Debug` for structs containing token
   text and never log websocket URLs.
-- The model cannot choose arbitrary Slack destinations. `slack_send` has no
-  destination argument and uses only the configured channel or single
-  allowlisted DM established by the accepted/started lifecycle for the calling
-  registered agent's active prompt, plus its validated originating thread root
-  when present. It fails
-  before such an authorized origin exists and never accepts model-supplied
-  `thread_ts`.
-- Authorization activates only after matching live submitted/started lifecycle
-  facts. An unrelated submitted prompt or any steered prompt revokes it; a
-  context-less tool-result follow-up preserves it only when no user prompt
-  intervened. Queued prompts folded as steers never authorize a destination.
+- The model cannot choose arbitrary Slack destinations. `slack_send` requires
+  an opaque canonical `reply_to` selector and accepts no channel, user, or
+  thread argument. Both extension and harness revalidate the live
+  connection/session/agent/tool and exact source-bound actor/conversation/thread.
+- Authorization activates only after the harness reports durable ingress
+  commit. Retry returns the same id; replay cannot activate routes or wake an
+  agent. Unregister, unload, extension/harness disconnect, shutdown, and
+  reconfiguration revoke runtime-only routes. Socket Mode websocket reconnects
+  preserve routes in the same authenticated extension/session. Reply routes and
+  pending completions are each capped at 1024 entries.
+  Session changes clear routes and use a new correlation id to renew the
+  source-bound capability; late results from earlier sessions are ignored.
 - Only `app_mention` events from ids explicitly listed in `channel_ids` route
   channel prompts. Unconfigured channels and DMs are ignored without reply side
   effects. With an empty list, one allowlisted DM can link with `start` and route
@@ -28,9 +29,9 @@
   stale/unregistered owners, bot-self reactions, and retries are ignored.
   Human-account status is checked fail-closed with `users.info`; reaction
   support therefore requires the `users:read` bot scope.
-- Slack text is untrusted prompt input and can contain prompt injection. Tau
-  prefixes it with compact Slack source context before submitting it as a normal
-  prompt request.
+- Slack text is untrusted external content and can contain prompt injection. It
+  stays an unprefixed payload in a harness-stamped typed envelope; allowlist and
+  verified-account metadata do not make its content trusted.
 - Slack workspace admins, Slack itself, channel members, and Slack Connect
   participants with access to a channel may be able to read messages. This MVP
   does not provide end-to-end encryption.

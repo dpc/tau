@@ -53,8 +53,7 @@ pub struct ExtensionBuilder<State> {
 impl<State> ExtensionBuilder<State> {
     /// Observes every raw harness output, including correlated non-event RPC
     /// results.
-    #[must_use]
-    pub fn on_output_message<F>(mut self, handler: F) -> Self
+    pub fn on_output_message<F>(&mut self, handler: F) -> &mut Self
     where
         F: FnMut(
                 &tau_proto::HarnessOutputMessage,

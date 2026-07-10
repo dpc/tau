@@ -234,17 +234,15 @@ User `/skill` invocation explicitly reads the selected skill file, strips frontm
 `std-slack` / `tau-ext-slack` is disabled by default because it bridges untrusted
 external Slack text into Tau prompts. When enabled, it requires explicit Slack
 app-token and bot-token secrets plus a non-empty allowlist of Slack user ids. The
-model cannot provide arbitrary channel, user, or thread destinations:
-`slack_send` uses only the configured Slack channel or single allowlisted DM
-established by accepted/started lifecycle facts for the calling registered
-agent's active prompt. It has no
-destination argument and fails until such an authorized origin exists. Slack
-prompt lifecycle is fail-closed: matching live submitted/started facts activate
-the origin, unrelated submissions and all steered prompts revoke it, and queued
-prompts folded into a mixed tool-result follow-up never authorize a destination.
-The authenticated origin includes an optional validated Slack thread root, so
-`slack_send` preserves threads without accepting model-supplied `thread_ts`;
-top-level prompts remain top-level.
+model cannot provide arbitrary channel, user, or thread destinations. New
+Slack traffic is an untrusted payload inside a harness-stamped typed envelope,
+not a prefixed user prompt. A commit-gated ingress result binds its opaque
+canonical id to private route state. `slack_send` requires that id as `reply_to`;
+extension and harness revalidate the live connection/session/agent/tool plus
+exact external actor, configured or linked conversation, and thread. Replay
+never wakes an agent or activates a route.
+Session changes clear Slack routes and renew the capability with a fresh
+correlation id, so stale registration results cannot cross generations.
 workspace admins, Slack itself, channel members, and Slack Connect participants
 with access to a channel may be able to read messages; this MVP makes no E2EE
 claim. Runtime registrations, per-channel selected agents, per-agent reply

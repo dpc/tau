@@ -187,10 +187,16 @@ fn bool_args(value: bool) -> CborValue {
 }
 
 fn message_args(value: &str) -> CborValue {
-    CborValue::Map(vec![(
-        CborValue::Text("message".to_owned()),
-        CborValue::Text(value.to_owned()),
-    )])
+    CborValue::Map(vec![
+        (
+            CborValue::Text("message".to_owned()),
+            CborValue::Text(value.to_owned()),
+        ),
+        (
+            CborValue::Text("reply_to".to_owned()),
+            CborValue::Text("msg-test".to_owned()),
+        ),
+    ])
 }
 
 fn valid_config_message() -> HarnessOutputMessage {
@@ -231,6 +237,20 @@ fn run_protocol_messages(
     let mut writer = tau_proto::HarnessOutputWriter::new(&mut input);
     for message in messages {
         writer.write_message(message).expect("write input");
+        if matches!(
+            message,
+            HarnessOutputMessage::Configure(configure) if !configure.secrets.is_empty()
+        ) {
+            writer
+                .write_message(&HarnessOutputMessage::RegisterTransportCapabilityResult(
+                    tau_proto::RegisterTransportCapabilityResult {
+                        request_id: format!("{CAPABILITY_REQUEST_PREFIX}1"),
+                        accepted: true,
+                        error: None,
+                    },
+                ))
+                .expect("write capability result");
+        }
     }
     writer.flush().expect("flush input");
 
@@ -258,6 +278,7 @@ fn extension() -> (
     {
         let mut state = ext.state.lock().expect("lock");
         state.bot_user_id = Some("UBOT123".to_owned());
+        state.capability_active = true;
     }
     (ext, rx, client)
 }
@@ -286,6 +307,7 @@ fn slack_conversation(channel_id: &str, thread_ts: Option<&str>) -> SlackConvers
     SlackConversation {
         channel_id: channel_id.to_owned(),
         thread_ts: thread_ts.map(str::to_owned),
+        direct: false,
     }
 }
 
@@ -319,47 +341,211 @@ fn register_agent(ext: &Extension, agent: &str) {
 }
 
 fn recv_prompt(rx: &mpsc::Receiver<HarnessInputMessage>) -> String {
-    let HarnessInputMessage::Emit(emit) = rx.recv().expect("message") else {
-        panic!("expected emit");
-    };
-    let Event::ExtPromptSubmitRequest(prompt) = *emit.event else {
-        panic!("expected prompt request");
-    };
-    prompt.text
+    let request = recv_prompt_request(rx);
+    match request.draft.operation {
+        MessageOperation::Create {
+            payload: MessagePayload::Text { text, .. },
+        } => text,
+        operation => panic!("expected text create, got {operation:?}"),
+    }
 }
 
 fn recv_prompt_request(
     rx: &mpsc::Receiver<HarnessInputMessage>,
-) -> tau_proto::ExtPromptSubmitRequest {
-    let HarnessInputMessage::Emit(emit) = rx.recv().expect("message") else {
-        panic!("expected emit");
-    };
-    let Event::ExtPromptSubmitRequest(prompt) = *emit.event else {
-        panic!("expected prompt request");
-    };
-    prompt
+) -> tau_proto::TransportMessageIngressRequest {
+    loop {
+        if let HarnessInputMessage::TransportMessageIngress(request) = rx.recv().expect("message") {
+            return *request;
+        }
+    }
 }
 
-fn activate_prompt_origin(ext: &Extension, prompt: &tau_proto::ExtPromptSubmitRequest) {
-    ext.handle_prompt_submitted(&tau_proto::AgentPromptSubmitted {
-        agent_id: prompt.agent_id.clone(),
-        text: prompt.text.clone(),
-        message_class: prompt.message_class,
-        originator: tau_proto::PromptOriginator::User,
-        submission_source: Default::default(),
-        display_name: None,
-        ctx_id: prompt.ctx_id.clone(),
-    });
-    ext.handle_prompt_started(&prompt.agent_id, prompt.ctx_id.as_deref());
+fn activate_prompt_origin(ext: &Extension, prompt: &tau_proto::TransportMessageIngressRequest) {
+    apply_output_message(
+        &HarnessOutputMessage::TransportMessageIngressResult(
+            tau_proto::TransportMessageIngressResult {
+                request_id: prompt.request_id.clone(),
+                message_id: Some(MessageId::new("msg-test")),
+                outcome: Some(tau_proto::TransportMessageIngressOutcome::Accepted),
+                error: None,
+            },
+        ),
+        ext,
+    );
 }
 
-fn steer_prompt_origin(ext: &Extension, prompt: &tau_proto::ExtPromptSubmitRequest) {
-    ext.handle_prompt_steered(&tau_proto::AgentPromptSteered {
-        agent_id: prompt.agent_id.clone(),
-        text: prompt.text.clone(),
-        message_class: prompt.message_class,
-        ctx_id: prompt.ctx_id.clone(),
-    });
+fn ingress_text(request: &tau_proto::TransportMessageIngressRequest) -> &str {
+    match &request.draft.operation {
+        MessageOperation::Create {
+            payload: MessagePayload::Text { text, .. },
+        } => text,
+        operation => panic!("expected text create, got {operation:?}"),
+    }
+}
+
+fn assert_no_ingress(rx: &mpsc::Receiver<HarnessInputMessage>) {
+    while let Ok(message) = rx.try_recv() {
+        assert!(
+            !matches!(message, HarnessInputMessage::TransportMessageIngress(_)),
+            "unexpected typed ingress"
+        );
+    }
+}
+
+fn complete_pending_send(
+    ext: &Extension,
+    rx: &mpsc::Receiver<HarnessInputMessage>,
+    accepted: bool,
+) {
+    loop {
+        if let HarnessInputMessage::CompleteTransportSend(request) =
+            rx.recv().expect("send completion request")
+        {
+            apply_output_message(
+                &HarnessOutputMessage::CompleteTransportSendResult(
+                    tau_proto::CompleteTransportSendResult {
+                        request_id: request.request_id.clone(),
+                        message_id: accepted.then(|| MessageId::new("msg-outgoing")),
+                        accepted,
+                        error: (!accepted).then(|| "rejected_for_test".to_owned()),
+                    },
+                ),
+                ext,
+            );
+            return;
+        }
+    }
+}
+
+/// Commit-gated harness results, rather than Slack text or prompt lifecycle
+/// strings, activate the exact opaque route used by successful send completion.
+#[test]
+fn typed_ingress_result_activates_exact_send_completion_route() {
+    let (ext, rx, _client) = extension();
+    register_agent(&ext, "agent-a");
+    ext.process_slack_message(slack_message("C123", None, "<@UBOT123> typed"));
+    let ingress = recv_prompt_request(&rx);
+    apply_output_message(
+        &HarnessOutputMessage::TransportMessageIngressResult(
+            tau_proto::TransportMessageIngressResult {
+                request_id: ingress.request_id,
+                message_id: Some(MessageId::new("msg-canonical")),
+                outcome: Some(tau_proto::TransportMessageIngressOutcome::Accepted),
+                error: None,
+            },
+        ),
+        &ext,
+    );
+
+    let args = CborValue::Map(vec![
+        (
+            CborValue::Text("message".to_owned()),
+            CborValue::Text("reply".to_owned()),
+        ),
+        (
+            CborValue::Text("reply_to".to_owned()),
+            CborValue::Text("msg-canonical".to_owned()),
+        ),
+    ]);
+    assert!(
+        ext.handle_send(tool(SEND_TOOL_NAME, "agent-a", args))
+            .is_none()
+    );
+    let HarnessInputMessage::CompleteTransportSend(request) = rx.recv().expect("completion") else {
+        panic!("expected successful-send completion");
+    };
+    assert_eq!(request.in_reply_to, Some(MessageId::new("msg-canonical")));
+    assert_eq!(
+        request.draft.conversation,
+        Some(message_conversation(&slack_conversation("C123", None)))
+    );
+    assert!(
+        ext.state
+            .lock()
+            .expect("lock")
+            .posted_messages
+            .get(&PostedMessageKey::new("C123", "1.0"))
+            .is_none(),
+        "post ownership must wait for durable completion"
+    );
+    apply_output_message(
+        &HarnessOutputMessage::CompleteTransportSendResult(
+            tau_proto::CompleteTransportSendResult {
+                request_id: request.request_id.clone(),
+                message_id: None,
+                accepted: false,
+                error: Some("rejected_for_test".to_owned()),
+            },
+        ),
+        &ext,
+    );
+    assert!(
+        ext.state
+            .lock()
+            .expect("lock")
+            .posted_messages
+            .get(&PostedMessageKey::new("C123", "1.0"))
+            .is_none(),
+        "rejected completion must never activate ownership"
+    );
+}
+
+/// Canonical reply routes evict oldest selectors at their hard capacity instead
+/// of growing connection state.
+#[test]
+fn typed_reply_route_state_is_bounded() {
+    let mut state = State::default();
+    for index in 0..=REPLY_ROUTE_LIMIT {
+        state.insert_reply_route(
+            MessageId::new(format!("msg-{index}")),
+            ReplyRoute {
+                agent_id: agent_id("agent-a"),
+                conversation: slack_conversation("C123", None),
+                user_id: "U123".to_owned(),
+            },
+        );
+    }
+    assert_eq!(state.reply_routes.len(), REPLY_ROUTE_LIMIT);
+    assert!(!state.reply_routes.contains_key(&MessageId::new("msg-0")));
+}
+
+/// Session capability renewal uses unique correlation ids and ignores late
+/// results from an earlier harness generation.
+#[test]
+fn capability_renewal_ignores_stale_results() {
+    let (ext, rx, _client) = extension();
+    ext.request_transport_capability();
+    let HarnessInputMessage::RegisterTransportCapability(first) = rx.recv().expect("first") else {
+        panic!("expected capability request");
+    };
+    ext.request_transport_capability();
+    let HarnessInputMessage::RegisterTransportCapability(second) = rx.recv().expect("second")
+    else {
+        panic!("expected capability request");
+    };
+    assert_ne!(first.request_id, second.request_id);
+    apply_output_message(
+        &HarnessOutputMessage::RegisterTransportCapabilityResult(
+            tau_proto::RegisterTransportCapabilityResult {
+                request_id: first.request_id,
+                accepted: true,
+                error: None,
+            },
+        ),
+        &ext,
+    );
+    assert!(!ext.state.lock().expect("lock").capability_active);
+    apply_output_message(
+        &HarnessOutputMessage::RegisterTransportCapabilityResult(
+            tau_proto::RegisterTransportCapabilityResult {
+                request_id: second.request_id,
+                accepted: true,
+                error: None,
+            },
+        ),
+        &ext,
+    );
+    assert!(ext.state.lock().expect("lock").capability_active);
 }
 
 /// Ensures the shared shutdown signal wakes async waiters immediately,
@@ -550,7 +736,7 @@ fn slack_send_rejects_destination_arguments() {
             ),
         ]),
     ));
-    let Event::ToolError(err) = event else {
+    let Some(Event::ToolError(err)) = event else {
         panic!("expected error");
     };
     assert!(err.message.contains("unknown argument `channel_id`"));
@@ -844,7 +1030,7 @@ fn run_malformed_pre_start_config_clears_inactive_state() {
                     emit.event.as_ref(),
                     Event::ToolError(error)
                         if error.tool_name.as_str() == REGISTER_TOOL_NAME
-                            && error.message.contains("not configured")
+                            && error.message.contains("capability is not active")
                 )
         )),
         "register should fail after malformed config clears active config"
@@ -901,7 +1087,7 @@ fn run_malformed_post_start_config_preserves_active_state() {
                 emit.event.as_ref(),
                 Event::ToolError(error)
                     if error.tool_name.as_str() == SEND_TOOL_NAME
-                        && error.message.contains("originating conversation")
+                        && error.message.contains("unknown or stale")
             )
     )));
 }
@@ -942,7 +1128,7 @@ fn run_replayed_lifecycle_event_does_not_clear_registration() {
                 emit.event.as_ref(),
                 Event::ToolError(error)
                     if error.tool_name.as_str() == SEND_TOOL_NAME
-                        && error.message.contains("originating conversation")
+                        && error.message.contains("unknown or stale")
             )
     )));
 }
@@ -1006,7 +1192,7 @@ fn run_bad_tool_args_do_not_stop_runner() {
 fn slack_send_fails_before_register() {
     let (ext, _rx, _client) = extension();
     let event = ext.handle_send(tool(SEND_TOOL_NAME, "agent-a", message_args("hi")));
-    let Event::ToolError(err) = event else {
+    let Some(Event::ToolError(err)) = event else {
         panic!("expected error");
     };
     assert!(err.message.contains("slack_register"));
@@ -1058,6 +1244,7 @@ fn slack_register_reports_initial_auth_failure() {
     let (tx, _rx) = mpsc::channel();
     let ext = Extension::new(Arc::new(FailingAuthClient), tx);
     ext.apply_config(cfg()).expect("config");
+    ext.state.lock().expect("lock").capability_active = true;
     let event = ext.handle_register(tool(REGISTER_TOOL_NAME, "agent-a", bool_args(true)));
     let Event::ToolError(err) = event else {
         panic!("expected tool error");
@@ -1067,7 +1254,7 @@ fn slack_register_reports_initial_auth_failure() {
 }
 
 /// Registered agents reply only to the configured conversation from which
-/// their most recent Slack prompt originated.
+/// the exact source-bound canonical selector returned by durable ingress.
 #[test]
 fn slack_send_uses_originating_conversation() {
     let (ext, rx, client) = extension();
@@ -1076,10 +1263,10 @@ fn slack_send_uses_originating_conversation() {
     register_agent(&ext, "agent-a");
     ext.process_slack_message(slack_message("C456", None, "<@UBOT123> hello"));
     let prompt = recv_prompt_request(&rx);
-    assert_eq!(prompt.text, "[slack from U123] hello");
+    assert_eq!(ingress_text(&prompt), "hello");
     activate_prompt_origin(&ext, &prompt);
     let result = ext.handle_send(tool(SEND_TOOL_NAME, "agent-a", message_args("hello")));
-    assert!(matches!(result, Event::ToolResult(_)));
+    assert!(result.is_none());
     assert_eq!(
         client.sent_pairs(),
         vec![("C456".to_owned(), "[agent-a] hello".to_owned())]
@@ -1096,24 +1283,24 @@ fn slack_send_preserves_root_and_thread_context() {
     ext.process_slack_message(slack_message("C123", None, "<@UBOT123> root"));
     let root = recv_prompt_request(&rx);
     activate_prompt_origin(&ext, &root);
-    assert!(matches!(
-        ext.handle_send(tool(SEND_TOOL_NAME, "agent-a", message_args("root reply"))),
-        Event::ToolResult(_)
-    ));
+    assert!(
+        ext.handle_send(tool(SEND_TOOL_NAME, "agent-a", message_args("root reply")))
+            .is_none()
+    );
 
     let mut threaded = slack_message("C123", None, "<@UBOT123> threaded");
     threaded.thread_ts = Some("42.0".to_owned());
     ext.process_slack_message(threaded);
     let threaded = recv_prompt_request(&rx);
     activate_prompt_origin(&ext, &threaded);
-    assert!(matches!(
+    assert!(
         ext.handle_send(tool(
             SEND_TOOL_NAME,
             "agent-a",
             message_args("thread reply")
-        )),
-        Event::ToolResult(_)
-    ));
+        ))
+        .is_none()
+    );
 
     assert_eq!(
         client.sent_thread_ids(),
@@ -1121,31 +1308,58 @@ fn slack_send_preserves_root_and_thread_context() {
     );
 }
 
-/// Authorized reactions to an agent-owned bridge post route to that same agent
-/// with stable source metadata and duplicate retries are suppressed.
+/// Authorized reactions to an agent-owned bridge post preserve structured
+/// source metadata, and retries are resubmitted with the same durable identity.
 #[test]
-fn authorized_reactions_to_agent_posts_are_routed_and_deduplicated() {
+fn authorized_reactions_to_agent_posts_preserve_durable_dedup_identity() {
     let (ext, rx, _client) = extension();
     register_agent(&ext, "agent-a");
     ext.process_slack_message(slack_message("C123", None, "<@UBOT123> question"));
     let prompt = recv_prompt_request(&rx);
     activate_prompt_origin(&ext, &prompt);
-    assert!(matches!(
-        ext.handle_send(tool(SEND_TOOL_NAME, "agent-a", message_args("answer"))),
-        Event::ToolResult(_)
-    ));
+    assert!(
+        ext.handle_send(tool(SEND_TOOL_NAME, "agent-a", message_args("answer")))
+            .is_none()
+    );
+    complete_pending_send(&ext, &rx, true);
     let reaction = slack_reaction("ER1", "reaction_added", "C123", "1.0");
     let mut reaction = reaction;
     reaction.reaction = "thumbsup::skin-tone-6".to_owned();
     ext.process_slack_reaction(reaction);
     let prompt = recv_prompt_request(&rx);
-    assert_eq!(prompt.agent_id, agent_id("agent-a"));
+    assert_eq!(prompt.target_agent_id, agent_id("agent-a"));
     assert_eq!(
-        prompt.text,
-        "[slack reaction type=reaction_added user=U123 channel=C123 message_ts=1.0 thread_ts=- reaction=thumbsup::skin-tone-6]"
+        prompt.draft.external_endpoint,
+        MessageEndpoint::External {
+            stable_id: Some("U123".to_owned()),
+            display_name: None,
+            actor_kind: ExternalActorKind::Human,
+        }
     );
+    assert_eq!(
+        prompt.draft.conversation,
+        Some(message_conversation(&slack_conversation("C123", None)))
+    );
+    assert_eq!(
+        prompt
+            .draft
+            .external_identity
+            .as_ref()
+            .and_then(|identity| identity.event_id.as_deref()),
+        Some("ER1")
+    );
+    assert!(matches!(
+        prompt.draft.operation,
+        MessageOperation::Reaction {
+            action: ReactionAction::Add,
+            ..
+        }
+    ));
     ext.process_slack_reaction(slack_reaction("ER1", "reaction_added", "C123", "1.0"));
-    assert!(rx.try_recv().is_err());
+    assert!(matches!(
+        rx.try_recv(),
+        Ok(HarnessInputMessage::TransportMessageIngress(_))
+    ));
 }
 
 /// Canonical Slack skin-tone reactions are accepted, while malformed colon
@@ -1346,14 +1560,14 @@ fn reaction_routing_uses_cached_authenticated_thread_only() {
     ext.process_slack_reaction(reaction);
     let prompt = recv_prompt_request(&rx);
     activate_prompt_origin(&ext, &prompt);
-    assert!(matches!(
+    assert!(
         ext.handle_send(tool(
             SEND_TOOL_NAME,
             "agent-a",
             message_args("thread reply")
-        )),
-        Event::ToolResult(_)
-    ));
+        ))
+        .is_none()
+    );
     assert_eq!(
         client.sent_thread_ids().last(),
         Some(&Some("10.0".to_owned()))
@@ -1397,7 +1611,7 @@ fn reaction_routing_uses_cached_authenticated_thread_only() {
         "C123",
         "4.0",
     ));
-    assert!(rx.try_recv().is_err());
+    assert_no_ingress(&rx);
 }
 
 /// A registered agent cannot send proactively merely because channels are
@@ -1408,22 +1622,23 @@ fn slack_send_rejects_missing_or_forged_origin_context() {
     register_agent(&ext, "agent-a");
     assert!(matches!(
         ext.handle_send(tool(SEND_TOOL_NAME, "agent-a", message_args("hello"))),
-        Event::ToolError(_)
+        Some(Event::ToolError(_))
     ));
-    ext.state
-        .lock()
-        .expect("lock")
-        .outbound_conversation_by_agent
-        .insert(
-            agent_id("agent-a"),
-            SlackConversation {
+    ext.state.lock().expect("lock").reply_routes.insert(
+        MessageId::new("msg-test"),
+        ReplyRoute {
+            agent_id: agent_id("agent-a"),
+            conversation: SlackConversation {
                 channel_id: "C999".to_owned(),
                 thread_ts: Some("9.0".to_owned()),
+                direct: false,
             },
-        );
+            user_id: "U123".to_owned(),
+        },
+    );
     assert!(matches!(
         ext.handle_send(tool(SEND_TOOL_NAME, "agent-a", message_args("hello"))),
-        Event::ToolError(_)
+        Some(Event::ToolError(_))
     ));
     assert!(client.sent.lock().expect("lock").is_empty());
 }
@@ -1436,12 +1651,12 @@ fn slack_send_rejects_blank_and_oversized_messages() {
     register_agent(&ext, "agent-a");
     assert!(matches!(
         ext.handle_send(tool(SEND_TOOL_NAME, "agent-a", message_args("   "))),
-        Event::ToolError(_)
+        Some(Event::ToolError(_))
     ));
     let long = "x".repeat(DEFAULT_MAX_MESSAGE_BYTES + 1);
     assert!(matches!(
         ext.handle_send(tool(SEND_TOOL_NAME, "agent-a", message_args(&long))),
-        Event::ToolError(_)
+        Some(Event::ToolError(_))
     ));
     assert!(client.sent.lock().expect("lock").is_empty());
 }
@@ -1492,10 +1707,10 @@ fn configured_channels_keep_independent_agent_selections() {
 
     let first = recv_prompt_request(&rx);
     let second = recv_prompt_request(&rx);
-    assert_eq!(first.agent_id, agent_id("agent-alpha"));
-    assert_eq!(first.text, "[slack from U123] first");
-    assert_eq!(second.agent_id, agent_id("agent-beta"));
-    assert_eq!(second.text, "[slack from U123] second");
+    assert_eq!(first.target_agent_id, agent_id("agent-alpha"));
+    assert_eq!(ingress_text(&first), "first");
+    assert_eq!(second.target_agent_id, agent_id("agent-beta"));
+    assert_eq!(ingress_text(&second), "second");
 }
 
 /// In DM-link mode, text before `start` receives guidance and the first linked
@@ -1547,12 +1762,12 @@ fn dm_send_uses_linked_prompt_origin() {
     question.thread_ts = Some("7.0".to_owned());
     ext.process_slack_message(question);
     let prompt = recv_prompt_request(&rx);
-    assert_eq!(prompt.text, "[slack from U123] question");
+    assert_eq!(ingress_text(&prompt), "question");
     activate_prompt_origin(&ext, &prompt);
-    assert!(matches!(
-        ext.handle_send(tool(SEND_TOOL_NAME, "agent-a", message_args("answer"))),
-        Event::ToolResult(_)
-    ));
+    assert!(
+        ext.handle_send(tool(SEND_TOOL_NAME, "agent-a", message_args("answer")))
+            .is_none()
+    );
     assert_eq!(
         client.sent_pairs().last(),
         Some(&("D123".to_owned(), "[agent-a] answer".to_owned()))
@@ -1563,429 +1778,14 @@ fn dm_send_uses_linked_prompt_origin() {
     );
 }
 
-/// Queued Slack prompts cannot redirect an in-flight reply: authorization
-/// changes only when the harness starts the exact correlated prompt.
-#[test]
-fn prompt_start_correlation_preserves_queued_origin_routing() {
-    let (ext, rx, client) = extension();
-    ext.apply_config(multi_channel_cfg())
-        .expect("multi-channel config");
-    register_agent(&ext, "agent-a");
-    let mut first_message = slack_message("C123", None, "<@UBOT123> first");
-    first_message.thread_ts = Some("10.0".to_owned());
-    let mut second_message = slack_message("C456", None, "<@UBOT123> second");
-    second_message.thread_ts = Some("20.0".to_owned());
-    ext.process_slack_message(first_message);
-    ext.process_slack_message(second_message);
-    let first = recv_prompt_request(&rx);
-    let second = recv_prompt_request(&rx);
-
-    activate_prompt_origin(&ext, &first);
-    assert!(matches!(
-        ext.handle_send(tool(SEND_TOOL_NAME, "agent-a", message_args("one"))),
-        Event::ToolResult(_)
-    ));
-    activate_prompt_origin(&ext, &second);
-    assert!(matches!(
-        ext.handle_send(tool(SEND_TOOL_NAME, "agent-a", message_args("two"))),
-        Event::ToolResult(_)
-    ));
-    assert_eq!(
-        client.sent_pairs(),
-        vec![
-            ("C123".to_owned(), "[agent-a] one".to_owned()),
-            ("C456".to_owned(), "[agent-a] two".to_owned()),
-        ]
-    );
-    assert_eq!(
-        client.sent_thread_ids(),
-        vec![Some("10.0".to_owned()), Some("20.0".to_owned())]
-    );
-
-    ext.handle_prompt_submitted(&tau_proto::AgentPromptSubmitted {
-        agent_id: agent_id("agent-a"),
-        text: "local prompt".to_owned(),
-        message_class: tau_proto::PromptMessageClass::User,
-        originator: tau_proto::PromptOriginator::User,
-        submission_source: Default::default(),
-        display_name: None,
-        ctx_id: None,
-    });
-    ext.handle_prompt_started(&agent_id("agent-a"), None);
-    assert!(matches!(
-        ext.handle_send(tool(SEND_TOOL_NAME, "agent-a", message_args("local"))),
-        Event::ToolError(_)
-    ));
-}
-
-/// Busy-agent prompts authenticate and retire through the real queued/steered
-/// lifecycle, but always revoke sending because the follow-up mixes origins.
-#[test]
-fn steered_prompt_origins_revoke_send_and_reclaim_correlations() {
-    let (ext, rx, client) = extension();
-    ext.apply_config(multi_channel_cfg())
-        .expect("multi-channel config");
-    register_agent(&ext, "agent-a");
-    ext.process_slack_message(slack_message("C456", None, "<@UBOT123> queued"));
-    let queued = recv_prompt_request(&rx);
-    steer_prompt_origin(&ext, &queued);
-    ext.handle_prompt_started(&agent_id("agent-a"), None);
-    assert!(matches!(
-        ext.handle_send(tool(SEND_TOOL_NAME, "agent-a", message_args("reply"))),
-        Event::ToolError(_)
-    ));
-    assert!(client.sent.lock().expect("lock").is_empty());
-    assert!(
-        ext.state
-            .lock()
-            .expect("lock")
-            .pending_origin_by_ctx
-            .is_empty()
-    );
-
-    ext.process_slack_message(slack_message("C123", None, "<@UBOT123> first mixed"));
-    ext.process_slack_message(slack_message("C456", None, "<@UBOT123> second mixed"));
-    steer_prompt_origin(&ext, &recv_prompt_request(&rx));
-    steer_prompt_origin(&ext, &recv_prompt_request(&rx));
-    ext.handle_prompt_started(&agent_id("agent-a"), None);
-    assert!(matches!(
-        ext.handle_send(tool(SEND_TOOL_NAME, "agent-a", message_args("ambiguous"))),
-        Event::ToolError(_)
-    ));
-    assert!(
-        ext.state
-            .lock()
-            .expect("lock")
-            .pending_origin_by_ctx
-            .is_empty()
-    );
-}
-
-/// Recalling a queued Slack prompt retires its pending correlation so repeated
-/// queue/recall cycles cannot exhaust the bridge's bounded route state.
-#[test]
-fn recalled_prompt_reclaims_pending_correlation() {
-    let (ext, rx, _client) = extension();
-    register_agent(&ext, "agent-a");
-    ext.process_slack_message(slack_message("C123", None, "<@UBOT123> recall me"));
-    let prompt = recv_prompt_request(&rx);
-    assert_eq!(
-        ext.state.lock().expect("lock").pending_origin_by_ctx.len(),
-        1
-    );
-    ext.handle_prompt_recalled(&tau_proto::AgentPromptRecalled {
-        agent_id: prompt.agent_id,
-        text: prompt.text,
-    });
-    assert!(
-        ext.state
-            .lock()
-            .expect("lock")
-            .pending_origin_by_ctx
-            .is_empty()
-    );
-}
-
-/// Context-less tool-result follow-up starts preserve a previously activated
-/// Slack origin only when no submitted, steered, or recalled prompt intervenes.
-#[test]
-fn contextless_followup_preserves_uncontaminated_origin() {
-    let (ext, rx, client) = extension();
-    register_agent(&ext, "agent-a");
-    let mut message = slack_message("C123", None, "<@UBOT123> investigate");
-    message.thread_ts = Some("33.0".to_owned());
-    ext.process_slack_message(message);
-    let prompt = recv_prompt_request(&rx);
-    activate_prompt_origin(&ext, &prompt);
-    ext.handle_prompt_started(&agent_id("agent-a"), None);
-    assert!(matches!(
-        ext.handle_send(tool(SEND_TOOL_NAME, "agent-a", message_args("done"))),
-        Event::ToolResult(_)
-    ));
-    assert_eq!(client.sent.lock().expect("lock").len(), 1);
-    assert_eq!(
-        client.sent_thread_ids().last(),
-        Some(&Some("33.0".to_owned()))
-    );
-}
-
-/// The registered tau-client live handlers must dispatch every Slack
-/// authorization lifecycle event while replayed lifecycle facts remain inert.
-#[test]
-fn protocol_lifecycle_handlers_dispatch_live_and_ignore_replay() {
-    let (tx, _rx) = mpsc::channel();
-    let ext = Extension::new(FakeClient::new(), tx);
-    ext.apply_config(multi_channel_cfg()).expect("config");
-    register_agent(&ext, "agent-a");
-    {
-        let mut state = ext.state.lock().expect("lock");
-        state.outbound_conversation_by_agent.insert(
-            agent_id("agent-a"),
-            SlackConversation {
-                channel_id: "C123".to_owned(),
-                thread_ts: None,
-            },
-        );
-        for (ctx, channel, text) in [
-            ("ctx-live", "C456", "live prompt"),
-            ("ctx-replay", "C456", "replayed prompt"),
-            ("ctx-steer", "C456", "steered prompt"),
-            ("ctx-recall", "C456", "recalled prompt"),
-        ] {
-            state.pending_origin_by_ctx.insert(
-                ctx.to_owned(),
-                PendingOrigin {
-                    agent_id: agent_id("agent-a"),
-                    conversation: SlackConversation {
-                        channel_id: channel.to_owned(),
-                        thread_ts: None,
-                    },
-                    prompt: text.to_owned(),
-                },
-            );
-        }
-    }
-    let writer = SharedWriter::default();
-    let written = writer.clone();
-    let mut runtime = tau_client::TauExtensionRunner::new(SlackExtension)
-        .start_manual_loop(
-            std::io::Cursor::new(Vec::new()),
-            writer,
-            SlackRuntime { ext },
-        )
-        .expect("manual runtime");
-    let submitted = |ctx: &str, text: &str| {
-        Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
-            agent_id: agent_id("agent-a"),
-            text: text.to_owned(),
-            message_class: tau_proto::PromptMessageClass::User,
-            originator: tau_proto::PromptOriginator::User,
-            submission_source: Default::default(),
-            display_name: None,
-            ctx_id: Some(ctx.to_owned()),
-        })
-    };
-    runtime
-        .dispatch_one(HarnessOutputMessage::deliver_replay(
-            tau_proto::UnixMicros::new(1),
-            submitted("ctx-replay", "replayed prompt"),
-        ))
-        .expect("replayed submitted");
-    runtime
-        .dispatch_one(HarnessOutputMessage::deliver_live(
-            tau_proto::UnixMicros::new(2),
-            submitted("ctx-live", "live prompt"),
-        ))
-        .expect("live submitted");
-    runtime
-        .dispatch_one(HarnessOutputMessage::deliver_live(
-            tau_proto::UnixMicros::new(3),
-            Event::AgentPromptStarted(tau_proto::AgentPromptStarted {
-                agent_prompt_id: "sp1".into(),
-                agent_id: agent_id("agent-a"),
-                session_id: "s1".into(),
-                model: "test/model".parse().expect("model"),
-                originator: tau_proto::PromptOriginator::User,
-                ctx_id: Some("ctx-live".to_owned()),
-            }),
-        ))
-        .expect("live started");
-    runtime
-        .dispatch_one(HarnessOutputMessage::deliver_live(
-            tau_proto::UnixMicros::new(4),
-            Event::AgentPromptSteered(tau_proto::AgentPromptSteered {
-                agent_id: agent_id("agent-a"),
-                text: "steered prompt".to_owned(),
-                message_class: tau_proto::PromptMessageClass::User,
-                ctx_id: Some("ctx-steer".to_owned()),
-            }),
-        ))
-        .expect("live steered");
-    runtime
-        .dispatch_one(HarnessOutputMessage::deliver_live(
-            tau_proto::UnixMicros::new(5),
-            Event::AgentPromptRecalled(tau_proto::AgentPromptRecalled {
-                agent_id: agent_id("agent-a"),
-                text: "recalled prompt".to_owned(),
-            }),
-        ))
-        .expect("live recalled");
-    let state = runtime.finish().expect("finish").ext.state.clone();
-    let state = state.lock().expect("lock");
-    assert!(state.outbound_conversation_by_agent.is_empty());
-    assert!(state.pending_origin_by_ctx.contains_key("ctx-replay"));
-    assert!(!state.pending_origin_by_ctx.contains_key("ctx-live"));
-    assert!(!state.pending_origin_by_ctx.contains_key("ctx-steer"));
-    assert!(!state.pending_origin_by_ctx.contains_key("ctx-recall"));
-    drop(state);
-    let mut reader = tau_proto::HarnessInputReader::new(std::io::Cursor::new(written.bytes()));
-    let mut subscribe = None;
-    while let Some(frame) = reader.read_message().expect("startup frame") {
-        if let HarnessInputMessage::Subscribe(value) = frame {
-            subscribe = Some(value);
-        }
-    }
-    let subscribe = subscribe.expect("subscribe frame");
-    for event_name in [
-        tau_proto::EventName::AGENT_PROMPT_SUBMITTED,
-        tau_proto::EventName::AGENT_PROMPT_STARTED,
-        tau_proto::EventName::AGENT_PROMPT_STEERED,
-        tau_proto::EventName::AGENT_PROMPT_RECALLED,
-    ] {
-        let selector = tau_proto::EventSelector::Exact(event_name);
-        assert!(subscribe.live_selectors.contains(&selector));
-        assert!(!subscribe.historical_selectors.contains(&selector));
-    }
-}
-
-/// Live unload and shutdown handlers remove cached post ownership so later
-/// reactions cannot target agents after their lifecycle ends.
-#[test]
-fn live_lifecycle_handlers_clear_post_ownership() {
-    let (tx, _rx) = mpsc::channel();
-    let ext = Extension::new(FakeClient::new(), tx);
-    ext.apply_config(cfg()).expect("config");
-    register_agent(&ext, "agent-a");
-    ext.remember_posted_message(
-        slack_conversation("C123", None),
-        PostedMessage {
-            ts: "1.0".to_owned(),
-            thread_ts: None,
-        },
-        agent_id("agent-a"),
-    );
-    let mut runtime = tau_client::TauExtensionRunner::new(SlackExtension)
-        .start_manual_loop(
-            std::io::Cursor::new(Vec::new()),
-            SharedWriter::default(),
-            SlackRuntime { ext },
-        )
-        .expect("runtime");
-    runtime
-        .dispatch_one(HarnessOutputMessage::deliver_live(
-            tau_proto::UnixMicros::new(1),
-            Event::SessionAgentUnloaded(tau_proto::SessionAgentUnloaded {
-                session_id: "s1".into(),
-                agent_id: agent_id("agent-a"),
-            }),
-        ))
-        .expect("unload");
-    assert!(
-        runtime
-            .state()
-            .ext
-            .state
-            .lock()
-            .expect("lock")
-            .posted_messages
-            .get(&PostedMessageKey::new("C123", "1.0"))
-            .is_none()
-    );
-
-    register_agent(&runtime.state().ext, "agent-a");
-    runtime.state().ext.remember_posted_message(
-        slack_conversation("C123", None),
-        PostedMessage {
-            ts: "2.0".to_owned(),
-            thread_ts: None,
-        },
-        agent_id("agent-a"),
-    );
-    runtime
-        .dispatch_one(HarnessOutputMessage::deliver_live(
-            tau_proto::UnixMicros::new(2),
-            Event::SessionShutdown(tau_proto::SessionShutdown {
-                session_id: "s1".into(),
-            }),
-        ))
-        .expect("shutdown");
-    let state = runtime.finish().expect("finish").ext.state.clone();
-    assert!(
-        state
-            .lock()
-            .expect("lock")
-            .posted_messages
-            .get(&PostedMessageKey::new("C123", "2.0"))
-            .is_none()
-    );
-}
-
-/// Forged lifecycle facts with mismatched text or agent cannot activate a
-/// pending Slack destination and consume the pending record fail closed.
-#[test]
-fn mismatched_prompt_lifecycle_cannot_authorize_send() {
-    for (submitted_agent, submitted_text, submitted_ctx) in [
-        ("agent-a", "forged", None),
-        ("agent-b", "[slack from U123] genuine", None),
-        ("agent-a", "[slack from U123] genuine", Some("wrong-ctx")),
-    ] {
-        let (ext, rx, client) = extension();
-        register_agent(&ext, "agent-a");
-        ext.process_slack_message(slack_message("C123", None, "<@UBOT123> genuine"));
-        let prompt = recv_prompt_request(&rx);
-        ext.handle_prompt_submitted(&tau_proto::AgentPromptSubmitted {
-            agent_id: agent_id(submitted_agent),
-            text: submitted_text.to_owned(),
-            message_class: prompt.message_class,
-            originator: tau_proto::PromptOriginator::User,
-            submission_source: Default::default(),
-            display_name: None,
-            ctx_id: submitted_ctx
-                .map(str::to_owned)
-                .or_else(|| prompt.ctx_id.clone()),
-        });
-        ext.handle_prompt_started(&prompt.agent_id, prompt.ctx_id.as_deref());
-        assert!(matches!(
-            ext.handle_send(tool(SEND_TOOL_NAME, "agent-a", message_args("no"))),
-            Event::ToolError(_)
-        ));
-        assert!(client.sent.lock().expect("lock").is_empty());
-    }
-}
-
-/// Pending and accepted correlations share one hard capacity so moving records
-/// between lifecycle stages cannot bypass the memory bound.
-#[test]
-fn route_correlation_limit_counts_pending_and_accepted_together() {
-    let (ext, rx, client) = extension();
-    register_agent(&ext, "agent-a");
-    {
-        let mut state = ext.state.lock().expect("lock");
-        for index in 0..ROUTE_CORRELATION_LIMIT - 1 {
-            state.accepted_origin_by_ctx.insert(
-                format!("accepted:{index}"),
-                AcceptedOrigin {
-                    agent_id: agent_id("agent-a"),
-                    conversation: SlackConversation {
-                        channel_id: "C123".to_owned(),
-                        thread_ts: None,
-                    },
-                },
-            );
-        }
-    }
-    ext.process_slack_message(slack_message("C123", None, "<@UBOT123> last slot"));
-    let _ = recv_prompt_request(&rx);
-    ext.process_slack_message(slack_message("C123", None, "<@UBOT123> over limit"));
-    assert!(rx.try_recv().is_err());
-    assert!(
-        client
-            .sent
-            .lock()
-            .expect("lock")
-            .last()
-            .is_some_and(|message| message.text.contains("too many pending"))
-    );
-}
-
-/// With exactly one registered agent, plain Slack text becomes a normal
-/// external prompt request with compact sanitized source context.
+/// With exactly one registered agent, plain Slack text becomes an unprefixed
+/// typed payload with structured external provenance.
 #[test]
 fn one_registered_agent_receives_plain_text() {
     let (ext, rx, _client) = extension();
     register_agent(&ext, "agent-a");
     ext.process_slack_message(slack_message("C123", None, "<@UBOT123> hello"));
-    assert_eq!(recv_prompt(&rx), "[slack from U123] hello");
+    assert_eq!(recv_prompt(&rx), "hello");
 }
 
 /// Multiple registered agents without a selection produce Slack guidance rather
@@ -2026,14 +1826,14 @@ fn agents_select_and_to_route_by_agent_id() {
 
     ext.process_slack_message(slack_message("C123", None, "<@UBOT123> select agent-al"));
     ext.process_slack_message(slack_message("C123", None, "<@UBOT123> later"));
-    assert_eq!(recv_prompt(&rx), "[slack from U123] later");
+    assert_eq!(recv_prompt(&rx), "later");
 
     ext.process_slack_message(slack_message(
         "C123",
         None,
         "<@UBOT123> to agent-beta direct",
     ));
-    assert_eq!(recv_prompt(&rx), "[slack from U123] direct");
+    assert_eq!(recv_prompt(&rx), "direct");
 }
 
 /// Malformed command-shaped text is handled as command feedback and must not
@@ -2087,7 +1887,7 @@ fn valid_envelopes_are_acked_and_routed() {
     };
     assert_eq!(message.thread_ts.as_deref(), Some("0.5"));
     ext.process_slack_message(message);
-    assert_eq!(recv_prompt(&rx), "[slack from U123] hello");
+    assert_eq!(recv_prompt(&rx), "hello");
 }
 
 /// Malformed thread metadata is rejected rather than downgraded to a top-level
@@ -2163,17 +1963,36 @@ fn mention_and_message_event_types_do_not_cross_conversation_modes() {
     assert!(client.sent.lock().expect("lock").is_empty());
 }
 
-/// Slack retries and reconnect replays with the same event id are dropped so
-/// Tau does not receive duplicate external prompts.
+/// Slack retries and reconnect replays are resubmitted with the same durable
+/// dedup identity so the harness decides idempotence.
 #[test]
-fn duplicate_slack_event_ids_are_dropped() {
+fn duplicate_slack_event_ids_are_resubmitted_for_durable_dedup() {
     let (ext, rx, _client) = extension();
     register_agent(&ext, "agent-a");
     let msg = slack_message("C123", None, "<@UBOT123> hello");
     ext.process_slack_message(msg.clone());
     ext.process_slack_message(msg);
-    assert_eq!(recv_prompt(&rx), "[slack from U123] hello");
-    assert!(rx.try_recv().is_err());
+    assert_eq!(recv_prompt(&rx), "hello");
+    assert_eq!(recv_prompt(&rx), "hello");
+}
+
+/// `to` is transport ingress rather than a local command side effect, so Slack
+/// retries reach durable harness dedup with identical native identity.
+#[test]
+fn duplicate_to_command_is_resubmitted_for_durable_dedup() {
+    let (ext, rx, _client) = extension();
+    register_agent(&ext, "agent-a");
+    let message = slack_message("C123", None, "<@UBOT123> to agent-a hello");
+    ext.process_slack_message(message.clone());
+    ext.process_slack_message(message);
+    let first = recv_prompt_request(&rx);
+    let second = recv_prompt_request(&rx);
+    assert_eq!(
+        first.draft.external_identity,
+        second.draft.external_identity
+    );
+    assert_eq!(ingress_text(&first), "hello");
+    assert_eq!(ingress_text(&second), "hello");
 }
 
 /// Bot/self messages and message subtypes are ignored to avoid routing Slack
