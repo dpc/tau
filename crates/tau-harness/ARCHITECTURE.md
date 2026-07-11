@@ -485,3 +485,7 @@ compaction and explicit agent model changes also clear the usage, head, model,
 cached-token, and percentage baseline. Consequently the first post-resume
 activation runs the same projected standalone-compaction decision as a live
 agent.
+
+## Watched provider work
+
+Provider retry visibility is harness-owned. After validating provider source and prompt ownership, the harness stores one sanitized current snapshot and fans it out only to current session-local watchers. Delivery is hard-deduplicated by subscription, turn generation, prompt, phase, and closed category: repeated same-category attempts update the late-watch snapshot without waking the model. First/category-change/terminal notifications are durable recipient facts; replay folds them but never re-fans them out. Enabling or re-enabling emits a non-prompt initial client snapshot and includes current state in the tool result. Disable, prune, and session shutdown remove applicable runtime state.

@@ -84,3 +84,11 @@ Responses assistant `message` items.
 Status: confirmed, 2026-07-08
 
 WebSocket URL, credential, account, and header construction failures derived from mutable provider profiles return `LlmError::ReloadableConfig`. The outer scheduler retries them at auth/config cadence and reloads profile state before the next attempt. Provider HTTP status/body strings, including 499 and cancellation-looking prose, never impersonate typed local cancellation.
+
+## Structured retry observability
+
+Status: confirmed, 2026-07-11, dpc
+
+Adapters classify attempts and the shared scheduler emits safe structured retry
+facts independently of local UI prose. Watch subscriptions, dedupe, and fanout
+remain harness-owned.

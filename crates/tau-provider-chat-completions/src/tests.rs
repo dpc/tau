@@ -954,6 +954,7 @@ fn empty_response_retry_emits_status_not_message_delta() {
         Some(tau_proto::ProviderResponseStatusUpdate {
             text,
             clear_response: true,
+            retry: None,
         }) if text.contains("provider returned an empty response")
     ));
 }
@@ -1630,6 +1631,7 @@ fn repetition_error_finishes_with_clear_response_contract() {
         Some(tau_proto::ProviderResponseStatusUpdate {
             clear_response: true,
             text,
+            ..
         }) if text.contains("repetition detected")
     ));
 

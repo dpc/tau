@@ -23,3 +23,6 @@ provider/tool replay surface once the tool call is complete.
 Terminal context classification trusts only canonical OpenAI-style `error.code` and `error.type`;
 echoed nested fields and provider prose are not authoritative. Known canonical transient
 identifiers override deterministic HTTP status classification and remain retryable.
+
+Watcher-visible retry state never includes the upstream body or human error text;
+only the provider's closed structured classification crosses into the harness.

@@ -530,3 +530,7 @@ the UI is the only consumer. Components without a terminal silently no-op.
 ## Provider repetition stop reason
 
 `provider.response_finished.stop_reason` may be `repetition_detected` when a provider aborts a tight exact streaming loop. Such responses have no tool request, use empty `output_items`, and carry a bounded display-only `error`; clients should treat prior transient deltas as cleared when the preceding status update has `clear_response: true`.
+
+## Watched provider status
+
+`provider.response_updated.status.retry` carries structured retry facts independently of human display text. The harness projects current retry and terminal state as `agent.message_received` with `kind=watch_provider_status`. Its nested `state` is tagged by `phase`; variant-specific required fields prevent retry, recovery, blocked, uncertain, and terminal shapes from being mixed. `recovering_context` is reserved for reactive compaction. Live model notification occurs for the first retry category, category/phase transitions, and terminal failure, not every attempt. Initial late-watch snapshots are client-visible but non-prompt; historical attempts are not replayed.

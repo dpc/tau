@@ -305,8 +305,9 @@ pub(crate) enum PendingPromptSource {
     WatchNotifiedUser,
     /// A prompt created from an `agent.message_received` delivery.
     AgentMessageReceived,
-    /// A model-turn watch notification; isolated to prevent cyclic watches.
-    WatchTurnState,
+    /// A lifecycle/provider watch notification; isolated to prevent cyclic
+    /// watches.
+    WatchNotification,
     /// Internal loop-guard pivot prompt.
     LoopGuard,
     /// A passive background-completion notice that should be folded into the
@@ -405,12 +406,12 @@ impl PendingPrompt {
         }
     }
 
-    /// Create a hidden lifecycle notification prompt.
-    pub(crate) fn watch_turn_state(text: String) -> Self {
+    /// Create a hidden watch notification prompt.
+    pub(crate) fn watch_notification(text: String) -> Self {
         Self {
             text,
             message_class: PromptMessageClass::Internal,
-            source: PendingPromptSource::WatchTurnState,
+            source: PendingPromptSource::WatchNotification,
             ctx_id: None,
             submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
         }
@@ -478,14 +479,14 @@ impl PendingPrompt {
     pub(crate) fn is_agent_message_received(&self) -> bool {
         matches!(
             self.source,
-            PendingPromptSource::AgentMessageReceived | PendingPromptSource::WatchTurnState
+            PendingPromptSource::AgentMessageReceived | PendingPromptSource::WatchNotification
         )
     }
 
-    /// Whether this prompt is a content-free watch lifecycle notification.
+    /// Whether this prompt is a harness-authored watch notification.
     #[must_use]
-    pub(crate) fn is_watch_turn_state(&self) -> bool {
-        self.source == PendingPromptSource::WatchTurnState
+    pub(crate) fn is_watch_notification(&self) -> bool {
+        self.source == PendingPromptSource::WatchNotification
     }
 
     /// Whether this user prompt should produce a watcher context notification.

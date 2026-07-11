@@ -1579,6 +1579,7 @@ fn status_clear_response_removes_live_thinking_block() {
         status: Some(tau_proto::ProviderResponseStatusUpdate {
             text: "retrying".to_owned(),
             clear_response: true,
+            retry: None,
         }),
         response_stats: None,
         originator: tau_proto::PromptOriginator::User,
@@ -2532,6 +2533,7 @@ fn accepted_message_reactivates_suspended_agent_before_delegate_completion() {
             recipient_id: agent_id("worker-1"),
             kind: tau_proto::AgentMessageKind::Message,
             watch_turn_state: None,
+            watch_provider_status: None,
             message: "follow up".to_owned(),
         },
     ));
@@ -3738,6 +3740,7 @@ fn external_agent_messages_render_session_agent_labels() {
             recipient_id: agent_id("manager_11111111"),
             kind: tau_proto::AgentMessageKind::Message,
             watch_turn_state: None,
+            watch_provider_status: None,
             message: "hello back".to_owned(),
         },
     ));
@@ -3778,6 +3781,7 @@ fn watched_turn_transition_renders_as_compact_status() {
                 initial: false,
                 turn_generation: 1,
             }),
+            watch_provider_status: None,
             message: "[tau-internal]: compatibility presentation".to_owned(),
         },
     ));

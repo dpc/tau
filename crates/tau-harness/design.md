@@ -237,3 +237,9 @@ receive an empty available list because local authorization forbids calls even
 though wire definitions remain cache-compatible. Extension enabled/Ready state
 is captured at render time. Render failures are explicit and prevent provider
 dispatch; capability state is not persisted separately.
+
+## Watcher-visible provider work
+
+Status: confirmed, 2026-07-11, dpc
+
+Provider retries carry closed structured categories, saturating attempt counts, and approximate bounded delays independently of human UI prose. After validating prompt ownership, the harness owns the current per-agent/turn/prompt snapshot and session-local watcher fanout. Live delivery is limited to first category, category/phase changes, and terminal failure; same-category storms only refresh the late-watch snapshot. Enabling or re-enabling returns current sanitized state and emits an initial client snapshot without prompting the model. Durable live facts replay as transcript context without re-fanout; disable, prune, and session change stop delivery. Raw provider bodies, status text, errors, headers, account data, secrets, and prompt content never cross this boundary.

@@ -43,6 +43,7 @@ fn user_status_clear_update(spid: &str) -> ProviderResponseUpdated {
         status: Some(tau_proto::ProviderResponseStatusUpdate {
             text: "retrying".to_owned(),
             clear_response: true,
+            retry: None,
         }),
         response_stats: None,
         originator: PromptOriginator::User,

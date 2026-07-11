@@ -2,6 +2,52 @@ use tau_provider_chat_completions::openrouter::OpenRouterProfile;
 
 use super::*;
 
+/// Every provider retry class must map to its stable provider retry category.
+#[test]
+fn retry_classes_map_to_provider_categories() {
+    for (class, expected) in [
+        (
+            RetryClass::Transport,
+            tau_proto::ProviderRetryCategory::Transport,
+        ),
+        (
+            RetryClass::Overload,
+            tau_proto::ProviderRetryCategory::Overload,
+        ),
+        (
+            RetryClass::Throttle,
+            tau_proto::ProviderRetryCategory::Throttle,
+        ),
+        (
+            RetryClass::UsageWindow,
+            tau_proto::ProviderRetryCategory::UsageWindow,
+        ),
+        (
+            RetryClass::Account,
+            tau_proto::ProviderRetryCategory::Account,
+        ),
+        (RetryClass::Auth, tau_proto::ProviderRetryCategory::Auth),
+        (
+            RetryClass::Unknown,
+            tau_proto::ProviderRetryCategory::Unknown,
+        ),
+    ] {
+        assert_eq!(retry_class_provider_category(class), expected);
+    }
+}
+
+/// Retry telemetry conversion must saturate rather than wrap at wire bounds.
+#[test]
+fn retry_status_numeric_fields_saturate_to_wire_bounds() {
+    assert_eq!(saturating_retry_attempt(u64::MAX), u32::MAX);
+    assert_eq!(
+        saturating_retry_delay(Duration::from_secs(u64::MAX)),
+        u32::MAX
+    );
+    assert_eq!(saturating_retry_attempt(7), 7);
+    assert_eq!(saturating_retry_delay(Duration::from_secs(8)), 8);
+}
+
 struct RecordingRetrySleeper;
 
 struct NoopAbortWaker;
@@ -978,6 +1024,7 @@ fn chatgpt_repetition_error_uses_clear_response_and_empty_final_output() {
         Some(tau_proto::ProviderResponseStatusUpdate {
             clear_response: true,
             text,
+            ..
         }) if text.contains("repetition detected")
     ));
 

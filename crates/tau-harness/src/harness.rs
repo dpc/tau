@@ -1416,6 +1416,64 @@ impl HarnessSessionLaunch {
     }
 }
 
+/// Dedupe projection for one provider status notification.
+///
+/// Attempts and retry delays intentionally do not participate: repeated
+/// same-category retries update the snapshot without prompting again.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) enum AgentWatchProviderDeliveryKind {
+    /// Retrying with the enclosed sanitized category.
+    Retrying(tau_proto::AgentWatchProviderCategory),
+    /// Recovering from a context-window rejection.
+    RecoveringContext,
+    /// Blocked with the enclosed sanitized category.
+    Blocked(tau_proto::AgentWatchProviderCategory),
+    /// Dispatch is uncertain for the enclosed sanitized category.
+    DispatchUncertain(tau_proto::AgentWatchProviderCategory),
+    /// Terminal with the enclosed sanitized failure kind.
+    TerminalError(tau_proto::ProviderFailureKind),
+}
+
+impl From<&tau_proto::AgentWatchProviderState> for AgentWatchProviderDeliveryKind {
+    fn from(state: &tau_proto::AgentWatchProviderState) -> Self {
+        match state {
+            tau_proto::AgentWatchProviderState::Retrying { category, .. } => {
+                Self::Retrying(*category)
+            }
+            tau_proto::AgentWatchProviderState::RecoveringContext { .. } => Self::RecoveringContext,
+            tau_proto::AgentWatchProviderState::Blocked { category } => Self::Blocked(*category),
+            tau_proto::AgentWatchProviderState::DispatchUncertain { category } => {
+                Self::DispatchUncertain(*category)
+            }
+            tau_proto::AgentWatchProviderState::TerminalError { failure_kind, .. } => {
+                Self::TerminalError(*failure_kind)
+            }
+        }
+    }
+}
+
+fn watch_category_for_retry(
+    category: tau_proto::ProviderRetryCategory,
+) -> tau_proto::AgentWatchProviderCategory {
+    match category {
+        tau_proto::ProviderRetryCategory::Transport => {
+            tau_proto::AgentWatchProviderCategory::Transport
+        }
+        tau_proto::ProviderRetryCategory::Overload => {
+            tau_proto::AgentWatchProviderCategory::Overload
+        }
+        tau_proto::ProviderRetryCategory::Throttle => {
+            tau_proto::AgentWatchProviderCategory::Throttle
+        }
+        tau_proto::ProviderRetryCategory::UsageWindow => {
+            tau_proto::AgentWatchProviderCategory::UsageWindow
+        }
+        tau_proto::ProviderRetryCategory::Account => tau_proto::AgentWatchProviderCategory::Account,
+        tau_proto::ProviderRetryCategory::Auth => tau_proto::AgentWatchProviderCategory::Auth,
+        tau_proto::ProviderRetryCategory::Unknown => tau_proto::AgentWatchProviderCategory::Unknown,
+    }
+}
+
 /// Central harness event loop and runtime state.
 ///
 /// `Harness` owns the event bus, live connections, durable session and agent
@@ -1594,6 +1652,13 @@ pub struct Harness {
     pub(crate) agent_watchers: HashMap<String, BTreeSet<String>>,
     /// Subscription identity for each directed session-local watch relation.
     pub(crate) agent_watch_subscriptions: HashMap<(String, String), String>,
+    /// Current sanitized provider-work snapshot by watched public agent id.
+    pub(crate) agent_watch_provider_status:
+        HashMap<String, tau_proto::AgentWatchProviderStatusNotification>,
+    /// Already delivered status keys; bounded by the closed phase/category sets
+    /// and cleared whenever a watched agent begins a new whole turn.
+    pub(crate) agent_watch_provider_deliveries:
+        HashMap<String, HashSet<(u64, AgentPromptId, AgentWatchProviderDeliveryKind)>>,
     /// Agent ids that were once known but can no longer receive messages.
     pub(crate) stopped_agent_ids: HashSet<String>,
     /// Global harness state. Currently only tracks per-session init
@@ -2219,6 +2284,8 @@ impl Harness {
             agent_watches: HashMap::new(),
             agent_watchers: HashMap::new(),
             agent_watch_subscriptions: HashMap::new(),
+            agent_watch_provider_status: HashMap::new(),
+            agent_watch_provider_deliveries: HashMap::new(),
             stopped_agent_ids: HashSet::new(),
             turn_state: TurnState::Idle,
             debug_log: None,
@@ -3746,6 +3813,10 @@ impl Harness {
             && let Some(cid) =
                 self.runtime_agent_id_for_target_agent(Some(failed.agent_id.as_str()))
         {
+            let failed_prompt_id = self
+                .agents
+                .get(&cid)
+                .and_then(|agent| agent.in_flight_prompt.clone());
             if let Some(agent) = self.agents.get_mut(&cid) {
                 agent.activation_dispatch = crate::agent::ActivationDispatchState::Blocked {
                     failed_id: failed.transaction_id.clone(),
@@ -3753,6 +3824,15 @@ impl Harness {
                     resume_through: failed.resume_through,
                 };
                 agent.in_flight_prompt = None;
+            }
+            if let Some(failed_prompt_id) = failed_prompt_id {
+                self.project_agent_watch_provider_state(
+                    &cid,
+                    failed_prompt_id,
+                    tau_proto::AgentWatchProviderState::Blocked {
+                        category: tau_proto::AgentWatchProviderCategory::Compaction,
+                    },
+                );
             }
             self.set_agent_turn_state(&cid, AgentTurnState::Idle);
             self.try_advance_queue();
@@ -4001,6 +4081,15 @@ impl Harness {
                 };
                 text
             }
+            tau_proto::AgentMessageKind::WatchProviderStatus => {
+                let Some(status) = message.watch_provider_status.as_ref() else {
+                    return;
+                };
+                if status.initial {
+                    return;
+                }
+                crate::prompt::watch_provider_status_text(&sender_label, status)
+            }
         };
         if let Some(cid) = self
             .agent_routes
@@ -4011,8 +4100,12 @@ impl Harness {
                 return;
             }
             if let Some(conv) = self.agents.get_mut(&cid) {
-                let prompt = if message.kind == tau_proto::AgentMessageKind::WatchTurnState {
-                    PendingPrompt::watch_turn_state(text)
+                let prompt = if matches!(
+                    message.kind,
+                    tau_proto::AgentMessageKind::WatchTurnState
+                        | tau_proto::AgentMessageKind::WatchProviderStatus
+                ) {
+                    PendingPrompt::watch_notification(text)
                 } else {
                     PendingPrompt::agent_message_received(text)
                 };
@@ -4028,8 +4121,12 @@ impl Harness {
             .iter_mut()
             .find(|pending| pending.agent_id == message.recipient_id.as_str())
         {
-            let prompt = if message.kind == tau_proto::AgentMessageKind::WatchTurnState {
-                PendingPrompt::watch_turn_state(text)
+            let prompt = if matches!(
+                message.kind,
+                tau_proto::AgentMessageKind::WatchTurnState
+                    | tau_proto::AgentMessageKind::WatchProviderStatus
+            ) {
+                PendingPrompt::watch_notification(text)
             } else {
                 PendingPrompt::agent_message_received(text)
             };
@@ -6221,6 +6318,36 @@ impl Harness {
                         updated.agent_id = agent_id;
                     }
                     self.enrich_provider_response_updated_compaction(&mut updated);
+                    if let Some(retry) = updated
+                        .status
+                        .as_ref()
+                        .and_then(|status| status.retry.clone())
+                        && !self
+                            .agents
+                            .get(&updated.agent_id)
+                            .is_some_and(|agent| agent.lifecycle_notification_only_turn)
+                        && let Some(public_id) = self.ensure_agent_id_for_agent(&updated.agent_id)
+                    {
+                        let turn_generation = self
+                            .agents
+                            .get(&updated.agent_id)
+                            .map_or(0, |agent| agent.turn_generation);
+                        self.update_agent_watch_provider_status(
+                            &public_id,
+                            tau_proto::AgentWatchProviderStatusNotification {
+                                session_id: self.current_session_id.clone(),
+                                subscription_id: String::new(),
+                                turn_generation,
+                                agent_prompt_id: updated.agent_prompt_id.clone(),
+                                state: tau_proto::AgentWatchProviderState::Retrying {
+                                    category: watch_category_for_retry(retry.category),
+                                    attempt: retry.attempt,
+                                    next_retry_delay_secs: retry.next_retry_delay_secs,
+                                },
+                                initial: false,
+                            },
+                        );
+                    }
                     if provider_response_update_has_public_content(&updated) {
                         self.publish_event(
                             Some(source_id),
@@ -10423,6 +10550,8 @@ impl Harness {
         self.agent_watches.clear();
         self.agent_watchers.clear();
         self.agent_watch_subscriptions.clear();
+        self.agent_watch_provider_status.clear();
+        self.agent_watch_provider_deliveries.clear();
         self.stopped_agent_ids.clear();
 
         self.current_session_id = new_session_id.clone();
@@ -11255,6 +11384,17 @@ impl Harness {
         let Some(agent_id) = changed_agent_id else {
             return;
         };
+        if new_state == tau_proto::AgentRuntimeState::Running {
+            self.agent_watch_provider_status.remove(&agent_id);
+            for watcher_id in self.watchers_for_agent(&agent_id) {
+                if let Some(subscription_id) = self
+                    .agent_watch_subscriptions
+                    .get(&(watcher_id, agent_id.clone()))
+                {
+                    self.agent_watch_provider_deliveries.remove(subscription_id);
+                }
+            }
+        }
         self.publish_event(
             Some(HARNESS_CONNECTION_ID),
             Event::AgentState(tau_proto::AgentStateChanged {
@@ -11479,7 +11619,10 @@ impl Harness {
                         .map(|window| context_percent_used(input_tokens, window));
             }
             match restored_compaction.clone() {
-                Some(tau_core::StandaloneCompactionRecovery::Blocked(failed)) => {
+                Some(tau_core::StandaloneCompactionRecovery::Blocked {
+                    failed,
+                    compact_prompt_id,
+                }) => {
                     if let Some(conv) = self.agents.get_mut(&cid) {
                         conv.activation_dispatch = crate::agent::ActivationDispatchState::Blocked {
                             failed_id: failed.transaction_id,
@@ -11487,6 +11630,13 @@ impl Harness {
                             resume_through: failed.resume_through,
                         };
                     }
+                    self.project_agent_watch_provider_state(
+                        &cid,
+                        compact_prompt_id,
+                        tau_proto::AgentWatchProviderState::Blocked {
+                            category: tau_proto::AgentWatchProviderCategory::Compaction,
+                        },
+                    );
                 }
                 Some(tau_core::StandaloneCompactionRecovery::AwaitingCheckpoint {
                     transaction_id,
@@ -11523,6 +11673,7 @@ impl Harness {
                     );
                 }
                 Some(tau_core::StandaloneCompactionRecovery::DispatchUncertain(checkpoint)) => {
+                    let status_prompt_id = checkpoint.agent_prompt_id.clone();
                     if let Some(conv) = self.agents.get_mut(&cid) {
                         conv.activation_dispatch =
                             crate::agent::ActivationDispatchState::DispatchUncertain {
@@ -11535,6 +11686,13 @@ impl Harness {
                                 through: checkpoint.through,
                             };
                     }
+                    self.project_agent_watch_provider_state(
+                        &cid,
+                        status_prompt_id,
+                        tau_proto::AgentWatchProviderState::DispatchUncertain {
+                            category: tau_proto::AgentWatchProviderCategory::Compaction,
+                        },
+                    );
                     self.emit_info_important(&format!(
                         "inference dispatch for restored agent `{cid}` is uncertain; retry explicitly"
                     ));
@@ -11545,6 +11703,7 @@ impl Harness {
                 && let Some(tau_core::InferenceDispatchRecovery::DispatchUncertain(checkpoint)) =
                     restored_inference.clone()
             {
+                let status_prompt_id = checkpoint.agent_prompt_id.clone();
                 if let Some(conv) = self.agents.get_mut(&cid) {
                     conv.activation_dispatch =
                         crate::agent::ActivationDispatchState::DispatchUncertain {
@@ -11558,12 +11717,21 @@ impl Harness {
                             through: checkpoint.through,
                         };
                 }
+                self.project_agent_watch_provider_state(
+                    &cid,
+                    status_prompt_id,
+                    tau_proto::AgentWatchProviderState::DispatchUncertain {
+                        category: tau_proto::AgentWatchProviderCategory::Unknown,
+                    },
+                );
                 self.emit_info_important(&format!(
                     "inference dispatch for restored agent `{cid}` is uncertain; retry explicitly"
                 ));
             }
             let recovery_watermark = match &restored_compaction {
-                Some(tau_core::StandaloneCompactionRecovery::Blocked(failed)) => Some(failed.cut),
+                Some(tau_core::StandaloneCompactionRecovery::Blocked { failed, .. }) => {
+                    Some(failed.cut)
+                }
                 Some(tau_core::StandaloneCompactionRecovery::AwaitingCheckpoint { .. }) => None,
                 Some(tau_core::StandaloneCompactionRecovery::DispatchUncertain(checkpoint)) => {
                     Some(checkpoint.through)
@@ -13077,6 +13245,57 @@ impl Harness {
         if !active_compaction_response && self.discard_finished_response_if_stale(&cid, &response) {
             return Ok(());
         }
+        let safe_failure_kind = response.failure_kind.or(response
+            .error
+            .as_ref()
+            .map(|_| tau_proto::ProviderFailureKind::Unknown));
+        if let Some(failure_kind) = safe_failure_kind
+            && let Some(public_id) = self.ensure_agent_id_for_agent(&cid)
+            && !self
+                .agents
+                .get(&cid)
+                .is_some_and(|agent| agent.lifecycle_notification_only_turn)
+        {
+            let turn_generation = self
+                .agents
+                .get(&cid)
+                .map_or(0, |agent| agent.turn_generation);
+            let attempt = self
+                .agent_watch_provider_status
+                .get(&public_id)
+                .filter(|status| {
+                    status.turn_generation == turn_generation
+                        && status.agent_prompt_id == response.agent_prompt_id
+                })
+                .and_then(|status| match status.state {
+                    tau_proto::AgentWatchProviderState::Retrying { attempt, .. }
+                    | tau_proto::AgentWatchProviderState::RecoveringContext { attempt }
+                    | tau_proto::AgentWatchProviderState::TerminalError { attempt, .. } => {
+                        Some(attempt)
+                    }
+                    tau_proto::AgentWatchProviderState::Blocked { .. }
+                    | tau_proto::AgentWatchProviderState::DispatchUncertain { .. } => None,
+                })
+                .map_or(1, |attempt| attempt.saturating_add(1));
+            self.update_agent_watch_provider_status(
+                &public_id,
+                tau_proto::AgentWatchProviderStatusNotification {
+                    session_id: self.current_session_id.clone(),
+                    subscription_id: String::new(),
+                    turn_generation,
+                    agent_prompt_id: response.agent_prompt_id.clone(),
+                    state: tau_proto::AgentWatchProviderState::TerminalError {
+                        failure_kind,
+                        attempt,
+                    },
+                    initial: false,
+                },
+            );
+        } else if response.error.is_none()
+            && let Some(public_id) = self.ensure_agent_id_for_agent(&cid)
+        {
+            self.agent_watch_provider_status.remove(&public_id);
+        }
 
         self.attach_finished_response_usage(
             &mut response,
@@ -13707,7 +13926,13 @@ impl Harness {
                 ProviderStopReason::Error | ProviderStopReason::RepetitionDetected
             )
         {
-            response.error.clone()
+            Some(format!(
+                "provider failure: {}",
+                response
+                    .failure_kind
+                    .unwrap_or(tau_proto::ProviderFailureKind::Unknown)
+                    .as_str()
+            ))
         } else {
             None
         }
@@ -14509,7 +14734,7 @@ impl Harness {
 
     fn publish_prompts_as_steered(&mut self, cid: &AgentId, prompts: Vec<PendingPrompt>) {
         for prompt in prompts {
-            if !prompt.is_watch_turn_state() {
+            if !prompt.is_watch_notification() {
                 self.promote_lifecycle_notification_turn(cid);
             }
             let agent_id = self

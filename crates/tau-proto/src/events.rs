@@ -72,7 +72,7 @@ impl fmt::Display for NodeId {
 }
 
 /// Durable branch-head target for one agent transcript tree.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "kind", content = "node_id")]
 pub enum AgentHead {
     /// Select the transcript root before any materialized node.
@@ -1904,6 +1904,8 @@ pub enum AgentMessageKind {
     WatchPrompt,
     /// An automatic structured `agent_watch` model-turn state notification.
     WatchTurnState,
+    /// An automatic structured, sanitized provider-work status notification.
+    WatchProviderStatus,
 }
 
 impl AgentMessageKind {
@@ -1964,8 +1966,154 @@ pub struct AgentMessageReceived {
     /// [`AgentMessageKind::WatchTurnState`] and absent for every other kind.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub watch_turn_state: Option<AgentWatchTurnStateNotification>,
+    /// Structured status carried by [`AgentMessageKind::WatchProviderStatus`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub watch_provider_status: Option<AgentWatchProviderStatusNotification>,
     /// Message body.
     pub message: String,
+}
+
+/// Provider-owned reason that an unchanged logical request will be retried.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderRetryCategory {
+    /// Network or transport failure.
+    Transport,
+    /// Provider overload.
+    Overload,
+    /// Provider throttling.
+    Throttle,
+    /// Provider usage-window exhaustion.
+    UsageWindow,
+    /// Provider account state.
+    Account,
+    /// Authentication or authorization state.
+    Auth,
+    /// Unclassified retryable provider failure.
+    Unknown,
+}
+
+/// A closed, sanitized provider-work category safe for cross-agent delivery.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentWatchProviderCategory {
+    /// Network or transport failure.
+    Transport,
+    /// Provider overload.
+    Overload,
+    /// Provider throttling.
+    Throttle,
+    /// Provider usage-window exhaustion.
+    UsageWindow,
+    /// Provider account state.
+    Account,
+    /// Authentication or authorization state.
+    Auth,
+    /// Unclassified retryable provider failure.
+    Unknown,
+    /// Context-window exhaustion or recovery.
+    ContextWindow,
+    /// Standalone or inline compaction work.
+    Compaction,
+}
+
+impl AgentWatchProviderCategory {
+    /// Stable wire-compatible label used in safe presentation.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Transport => "transport",
+            Self::Overload => "overload",
+            Self::Throttle => "throttle",
+            Self::UsageWindow => "usage_window",
+            Self::Account => "account",
+            Self::Auth => "auth",
+            Self::Unknown => "unknown",
+            Self::ContextWindow => "context_window",
+            Self::Compaction => "compaction",
+        }
+    }
+}
+
+/// Provider-owned structured retry facts alongside human UI status.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ProviderRetryStatus {
+    /// Sanitized retry category.
+    pub category: ProviderRetryCategory,
+    /// Saturating logical attempt count.
+    pub attempt: u32,
+    /// Approximate delay until the next attempt, rounded to whole seconds.
+    pub next_retry_delay_secs: u32,
+}
+
+/// Invariant-preserving current state of watched provider work.
+///
+/// The phase is the serde discriminator rather than an independent field, so
+/// malformed phase/category/attempt combinations cannot be constructed through
+/// this API or accepted from the wire.
+#[derive(Clone, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "phase", rename_all = "snake_case", deny_unknown_fields)]
+pub enum AgentWatchProviderState {
+    /// The provider will retry the unchanged logical request.
+    Retrying {
+        /// Sanitized reason for retrying.
+        category: AgentWatchProviderCategory,
+        /// Saturating logical attempt count.
+        attempt: u32,
+        /// Approximate delay until the next attempt, rounded to whole seconds.
+        next_retry_delay_secs: u32,
+    },
+    /// The harness is recovering from a canonical context-window rejection.
+    RecoveringContext {
+        /// Saturating provider attempt that triggered recovery.
+        attempt: u32,
+    },
+    /// Durable work is blocked pending manual recovery.
+    Blocked {
+        /// Sanitized reason the work is blocked.
+        category: AgentWatchProviderCategory,
+    },
+    /// Dispatch may have happened and automatic replay is unsafe.
+    DispatchUncertain {
+        /// Sanitized class of the uncertain work.
+        category: AgentWatchProviderCategory,
+    },
+    /// Provider work ended in a terminal error.
+    TerminalError {
+        /// Sanitized terminal failure category.
+        failure_kind: ProviderFailureKind,
+        /// Saturating provider attempt correlated with this prompt.
+        attempt: u32,
+    },
+}
+
+impl AgentWatchProviderState {
+    /// Stable wire-compatible phase label used in safe presentation.
+    pub const fn phase_str(&self) -> &'static str {
+        match self {
+            Self::Retrying { .. } => "retrying",
+            Self::RecoveringContext { .. } => "recovering_context",
+            Self::Blocked { .. } => "blocked",
+            Self::DispatchUncertain { .. } => "dispatch_uncertain",
+            Self::TerminalError { .. } => "terminal_error",
+        }
+    }
+}
+
+/// Harness-authored current provider-work snapshot for one watched agent.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AgentWatchProviderStatusNotification {
+    /// Session containing the watch relation.
+    pub session_id: SessionId,
+    /// Fresh identity for the directed watch relation.
+    pub subscription_id: String,
+    /// Watched-agent whole-turn generation.
+    pub turn_generation: u64,
+    /// Prompt whose provider work produced this status.
+    pub agent_prompt_id: AgentPromptId,
+    /// Tagged provider-work state whose variants enforce phase invariants.
+    pub state: AgentWatchProviderState,
+    /// Whether this snapshot was returned when enabling an existing/new watch.
+    pub initial: bool,
 }
 
 /// Structured state delivered to one watcher for a watched agent's model turn.
@@ -3617,6 +3765,10 @@ pub struct ProviderResponseStatusUpdate {
     /// hidden because the provider is retrying or otherwise replacing work.
     #[serde(default, skip_serializing_if = "is_false")]
     pub clear_response: bool,
+    /// Structured retry facts. Raw provider diagnostics must never be placed
+    /// here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry: Option<ProviderRetryStatus>,
 }
 
 /// The provider finished processing a prompt.
@@ -3644,7 +3796,7 @@ impl ProviderStopReason {
 }
 
 /// Machine-readable category for a terminal provider request failure.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProviderFailureKind {
     /// The provider rejected the unchanged request because its context was too
@@ -3653,6 +3805,19 @@ pub enum ProviderFailureKind {
     /// The provider deterministically rejected the unchanged request for
     /// another reason.
     RequestRejected,
+    /// A terminal provider failure without a more specific safe classification.
+    Unknown,
+}
+
+impl ProviderFailureKind {
+    /// Stable wire-compatible label used in safe presentation.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ContextWindowExceeded => "context_window_exceeded",
+            Self::RequestRejected => "request_rejected",
+            Self::Unknown => "unknown",
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

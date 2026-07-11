@@ -208,3 +208,7 @@ wire-compatibility, and serialization tests.
 `ProviderResponseFinished.failure_kind` carries a closed, display-prose-independent category for
 terminal provider request rejection. `context_window_exceeded` allows lifecycle consumers to
 reason about the outcome without parsing the bounded human-readable `error` field.
+
+## Structured watched provider status
+
+Transient retry updates may carry `ProviderRetryStatus`: a closed work category, saturating attempt number, and approximate whole-second delay. Human status text remains UI presentation and is not an authority for harness decisions. `AgentWatchProviderStatusNotification` is the harness-authored cross-agent projection and contains only bounded facts, prompt/turn correlation, watch subscription identity, and a nested serde-tagged `state`. The `phase` discriminator selects `retrying`, `recovering_context`, `blocked`, `dispatch_uncertain`, or `terminal_error`; each variant owns exactly the category, attempt, delay, or failure fields valid for that phase, so contradictory option combinations are neither constructible nor decodable. `recovering_context` is reserved for the separately approved reactive-compaction implementation; retry, terminal, blocked-compaction, and restored dispatch-uncertain projections are emitted today.

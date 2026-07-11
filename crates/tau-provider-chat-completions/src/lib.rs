@@ -381,6 +381,7 @@ fn emit_empty_response_retry_update<W: Write>(
             status: Some(ProviderResponseStatusUpdate {
                 text,
                 clear_response: true,
+                retry: None,
             }),
             response_stats: None,
             originator: prompt.originator.clone(),
@@ -407,6 +408,7 @@ fn emit_repetition_detected_update<W: Write>(
             status: Some(ProviderResponseStatusUpdate {
                 text,
                 clear_response: true,
+                retry: None,
             }),
             response_stats: None,
             originator: prompt.originator.clone(),

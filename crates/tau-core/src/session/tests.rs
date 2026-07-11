@@ -260,11 +260,44 @@ fn validate_event_enforces_watch_turn_state_payload_discriminator() {
             recipient_id: id.clone(),
             kind,
             watch_turn_state,
+            watch_provider_status: None,
             message: String::new(),
         });
         assert!(
             validation_error(&tree, event).contains("payload must be present exactly"),
             "mismatched discriminator and payload must fail closed"
+        );
+    }
+
+    let provider_payload = tau_proto::AgentWatchProviderStatusNotification {
+        session_id: "session-1".into(),
+        subscription_id: "watch-1".to_owned(),
+        turn_generation: 1,
+        agent_prompt_id: "sp-watch".into(),
+        state: tau_proto::AgentWatchProviderState::Retrying {
+            category: tau_proto::AgentWatchProviderCategory::Transport,
+            attempt: 1,
+            next_retry_delay_secs: 2,
+        },
+        initial: false,
+    };
+    for (kind, watch_provider_status) in [
+        (AgentMessageKind::WatchProviderStatus, None),
+        (AgentMessageKind::Message, Some(provider_payload)),
+    ] {
+        let event = Event::AgentMessageReceived(AgentMessageReceived {
+            message_id: "msg-invalid-watch-provider-status".into(),
+            sender_id: other_agent_id(),
+            sender_session_id: None,
+            recipient_id: id.clone(),
+            kind,
+            watch_turn_state: None,
+            watch_provider_status,
+            message: String::new(),
+        });
+        assert!(
+            validation_error(&tree, event).contains("payload must be present exactly"),
+            "provider-status payloads must match their discriminator"
         );
     }
 }

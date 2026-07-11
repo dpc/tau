@@ -468,6 +468,26 @@ impl<'a> InternalToolHost<'a> {
         self.harness.watchers_for_agent(watched_agent_id)
     }
 
+    /// Return the sanitized current provider status for a watched agent.
+    pub fn agent_watch_provider_status_summary(&self, watched_agent_id: &str) -> Option<String> {
+        self.harness
+            .agent_watch_provider_status_summary(watched_agent_id)
+    }
+
+    /// Return whether the current generation may fan out a final watch
+    /// response.
+    ///
+    /// Generations caused only by watch notifications are suppressed to prevent
+    /// mutual watches from creating response feedback. Ordinary input promotes
+    /// the generation before completion and restores normal response fanout.
+    pub fn agent_watch_response_allowed(&self, watched_agent_id: &str) -> bool {
+        self.harness
+            .agent_routes
+            .get(watched_agent_id)
+            .and_then(|cid| self.harness.agents.get(cid))
+            .is_none_or(|agent| !agent.lifecycle_notification_only_turn)
+    }
+
     /// Prune a stale watch relationship after notification delivery failed.
     pub fn prune_agent_watch(&mut self, watcher_id: &str, watched_agent_id: &str) {
         self.harness.prune_agent_watch(watcher_id, watched_agent_id);

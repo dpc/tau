@@ -422,7 +422,11 @@ impl BuiltinTools {
                     true,
                     tau_proto::AgentWatchUpdateCause::AgentWatchEnable,
                 );
-                Ok(format!("Watching agent `{}`", parsed.agent_id))
+                let snapshot = host.agent_watch_provider_status_summary(&parsed.agent_id);
+                Ok(agent_watch_enabled_result(
+                    &parsed.agent_id,
+                    snapshot.as_deref(),
+                ))
             } else {
                 host.set_agent_watch(
                     &self_agent_id,
@@ -467,6 +471,9 @@ impl BuiltinTools {
             return Ok(());
         };
         let sender_id = response.agent_id.to_string();
+        if !host.agent_watch_response_allowed(&sender_id) {
+            return Ok(());
+        }
         self.notify_agent_watchers(host, &sender_id, message);
         Ok(())
     }
@@ -499,6 +506,13 @@ impl BuiltinTools {
                 host.prune_agent_watch(&watcher_id, sender_id);
             }
         }
+    }
+}
+
+fn agent_watch_enabled_result(agent_id: &str, current_status: Option<&str>) -> String {
+    match current_status {
+        Some(status) => format!("Watching agent `{agent_id}`; current status: {status}"),
+        None => format!("Watching agent `{agent_id}`"),
     }
 }
 
@@ -1457,6 +1471,9 @@ fn agent_watch_response_should_notify(response: &ProviderResponseFinished) -> Op
     if !response.originator.is_user() || response.stop_reason.requests_tool_calls() {
         return None;
     }
+    if response.failure_kind.is_some() || response.error.is_some() {
+        return None;
+    }
     agent_watch_notification_message(response)
 }
 
@@ -1472,16 +1489,17 @@ fn start_agent_watch_notification_message(
     if let Some(error) = result.error.as_deref()
         && !error.trim().is_empty()
     {
-        return Some(error.to_owned());
+        return Some("agent failed".to_owned());
     }
     (!result.text.trim().is_empty()).then(|| result.text.clone())
 }
 
 fn agent_watch_notification_message(response: &ProviderResponseFinished) -> Option<String> {
-    if let Some(error) = response.error.as_deref()
-        && !error.trim().is_empty()
-    {
-        return Some(error.to_owned());
+    if let Some(kind) = response.failure_kind {
+        return Some(format!("provider failure: {kind:?}").to_lowercase());
+    }
+    if response.error.is_some() {
+        return Some("provider failure: unknown".to_owned());
     }
     assistant_text_from_output_items(&response.output_items)
 }

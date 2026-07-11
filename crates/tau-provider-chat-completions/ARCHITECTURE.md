@@ -86,3 +86,6 @@ it must never silently omit one.
 Canonical OpenAI-style `error.code`/`error.type` context-window rejections are returned as typed
 terminal failures before retry scheduling. Deterministic request 4xx responses are terminal,
 while explicit transport, throttle, authentication-repair, and server failures remain retryable.
+
+Retryable classifications feed the shared scheduler's closed structured status;
+the harness, not this adapter, owns watcher correlation and fanout.

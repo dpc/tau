@@ -1102,6 +1102,7 @@ fn agent_message_received_event(recipient_id: &str) -> Event {
         recipient_id: tau_proto::AgentId::parse(recipient_id).expect("agent id"),
         kind: tau_proto::AgentMessageKind::Message,
         watch_turn_state: None,
+        watch_provider_status: None,
         message: "hello".to_owned(),
     })
 }

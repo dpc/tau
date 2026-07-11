@@ -332,6 +332,7 @@ fn watch_turn_state_renders_as_compact_typed_status() {
             initial: false,
             turn_generation: 1,
         }),
+        watch_provider_status: None,
         message: "[tau-internal]: stale presentation".to_owned(),
     });
 

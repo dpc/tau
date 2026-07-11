@@ -157,3 +157,11 @@ grep -n 'agent.start_request\|std-notifications\|"kind":"extension"' ~/.local/st
 # Search logs for runtime errors; no matches does not rule out token waste.
 grep -RniE 'error|warn|panic|cache|token' ~/.local/state/tau/sessions/<session_id>/logs
 ```
+
+## Debug watcher-visible provider status
+
+`agent_watch` reports only sanitized retry/work categories, saturating attempts,
+and approximate delays. Enabling or re-enabling shows the current snapshot rather
+than attempt history. Raw endpoint bodies and provider error text intentionally
+remain unavailable across the watch boundary; inspect provider-local debug logs
+under the existing diagnostics policy when those details are required.

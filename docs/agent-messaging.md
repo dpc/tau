@@ -110,6 +110,16 @@ and reject stale state. The initial snapshot is client-visible status only and
 is not injected into the watching agent's model context; later genuine
 transitions are injected as content-free internal notifications.
 
+While provider work is retrying, the watcher receives a sanitized structured
+status on the first retry and whenever its closed category or phase changes.
+Repeated attempts in the same category update the current snapshot without
+waking the model again. Enabling or re-enabling a watch returns that current
+snapshot and emits an initial client-visible, non-model event; it never replays
+the attempt history. A terminal provider status is delivered before the matching
+turn-stop edge. Provider bodies, human status/error text, headers, account data,
+secrets, and prompt content never cross this boundary; see
+[Watched provider status](events.md#watched-provider-status) for the wire shape.
+
 The CLI presents lifecycle records as compact status lines such as
 `Watching engineer_b · idle` and `engineer_b · turn started`. These statuses are
 not agent-authored messages and remain visible independently of the

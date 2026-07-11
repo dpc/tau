@@ -111,3 +111,12 @@ final provider event shapes. Backend wire-format parsing and HTTP/SSE/WebSocket
 transport details belong in `tau-provider-chatgpt` and
 `tau-provider-chat-completions`; this crate should test its integration with
 those backends without duplicating their protocol parser matrices.
+
+## Structured provider retry facts
+
+Status: confirmed, 2026-07-11, dpc
+
+Provider retries carry closed structured categories, saturating attempt counts,
+and approximate bounded delays independently of human UI prose. Providers emit
+only these safe facts alongside their local display status; the harness
+validates prompt ownership and exclusively owns watcher snapshots and fanout.

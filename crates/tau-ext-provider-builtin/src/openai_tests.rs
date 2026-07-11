@@ -216,6 +216,7 @@ fn retry_banner_emits_status_not_message_delta() {
         Some(tau_proto::ProviderResponseStatusUpdate {
             text,
             clear_response: true,
+            retry: None,
         }) if text.contains("provider error")
     ));
 }

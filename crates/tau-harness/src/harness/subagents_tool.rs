@@ -19,6 +19,47 @@ use crate::harness::{
     PendingExternalAgentMessageAuth,
 };
 
+fn provider_status_attempt(state: &tau_proto::AgentWatchProviderState) -> Option<u32> {
+    match state {
+        tau_proto::AgentWatchProviderState::Retrying { attempt, .. }
+        | tau_proto::AgentWatchProviderState::RecoveringContext { attempt }
+        | tau_proto::AgentWatchProviderState::TerminalError { attempt, .. } => Some(*attempt),
+        tau_proto::AgentWatchProviderState::Blocked { .. }
+        | tau_proto::AgentWatchProviderState::DispatchUncertain { .. } => None,
+    }
+}
+
+fn provider_status_update_is_stale(
+    current: &tau_proto::AgentWatchProviderStatusNotification,
+    next: &tau_proto::AgentWatchProviderStatusNotification,
+) -> bool {
+    if next.turn_generation < current.turn_generation {
+        return true;
+    }
+    if next.turn_generation != current.turn_generation
+        || next.agent_prompt_id != current.agent_prompt_id
+    {
+        return false;
+    }
+    if matches!(
+        (&current.state, &next.state),
+        (
+            tau_proto::AgentWatchProviderState::TerminalError { .. },
+            tau_proto::AgentWatchProviderState::Retrying { .. }
+                | tau_proto::AgentWatchProviderState::TerminalError { .. }
+        )
+    ) {
+        return true;
+    }
+    matches!(
+        (
+            provider_status_attempt(&current.state),
+            provider_status_attempt(&next.state)
+        ),
+        (Some(current_attempt), Some(next_attempt)) if next_attempt < current_attempt
+    )
+}
+
 /// Model-visible name of the harness-owned wait tool.
 pub(crate) const WAIT_TOOL_NAME: &str = "wait";
 #[cfg(test)]
@@ -275,10 +316,22 @@ impl Harness {
                     (watcher_id.to_owned(), watched_agent_id.to_owned()),
                     subscription_id,
                 );
-                self.publish_agent_watches_snapshot(watcher_id, Some(watched_agent_id), cause);
-                self.notify_agent_watcher_turn_state(watcher_id, watched_agent_id, true);
-                return;
             }
+            self.publish_agent_watches_snapshot(watcher_id, Some(watched_agent_id), cause);
+            self.notify_agent_watcher_turn_state(watcher_id, watched_agent_id, true);
+            if let Some(status) = self
+                .agent_watch_provider_status
+                .get(watched_agent_id)
+                .cloned()
+            {
+                self.notify_agent_watcher_provider_status(
+                    watcher_id,
+                    watched_agent_id,
+                    &status,
+                    true,
+                );
+            }
+            return;
         } else {
             if let Some(watched) = self.agent_watches.get_mut(watcher_id) {
                 watched.remove(watched_agent_id);
@@ -292,8 +345,13 @@ impl Harness {
                     self.agent_watchers.remove(watched_agent_id);
                 }
             }
-            self.agent_watch_subscriptions
-                .remove(&(watcher_id.to_owned(), watched_agent_id.to_owned()));
+            if let Some(subscription_id) = self
+                .agent_watch_subscriptions
+                .remove(&(watcher_id.to_owned(), watched_agent_id.to_owned()))
+            {
+                self.agent_watch_provider_deliveries
+                    .remove(&subscription_id);
+            }
         }
         self.publish_agent_watches_snapshot(watcher_id, Some(watched_agent_id), cause);
     }
@@ -304,6 +362,18 @@ impl Harness {
             .get(watched_agent_id)
             .map(|watchers| watchers.iter().cloned().collect())
             .unwrap_or_default()
+    }
+
+    /// Return a safe one-line current provider snapshot for an `agent_watch`
+    /// tool result. Historical attempts and provider-authored text are
+    /// excluded.
+    pub(crate) fn agent_watch_provider_status_summary(
+        &self,
+        watched_agent_id: &str,
+    ) -> Option<String> {
+        self.agent_watch_provider_status
+            .get(watched_agent_id)
+            .map(|status| crate::prompt::watch_provider_status_summary(&status.state))
     }
 
     /// Remove a stale watch relation and publish the updated watcher snapshot.
@@ -395,6 +465,111 @@ impl Harness {
                     initial,
                     turn_generation,
                 }),
+                watch_provider_status: None,
+                message,
+            }),
+        );
+    }
+
+    /// Record and fan out a sanitized provider snapshot, hard-deduplicated per
+    /// subscription, turn, prompt, phase, and category.
+    pub(crate) fn update_agent_watch_provider_status(
+        &mut self,
+        watched_agent_id: &str,
+        mut status: tau_proto::AgentWatchProviderStatusNotification,
+    ) {
+        status.initial = false;
+        if self
+            .agent_watch_provider_status
+            .get(watched_agent_id)
+            .is_some_and(|current| provider_status_update_is_stale(current, &status))
+        {
+            return;
+        }
+        self.agent_watch_provider_status
+            .insert(watched_agent_id.to_owned(), status.clone());
+        for watcher_id in self.watchers_for_agent(watched_agent_id) {
+            self.notify_agent_watcher_provider_status(
+                &watcher_id,
+                watched_agent_id,
+                &status,
+                false,
+            );
+        }
+    }
+
+    /// Project harness-owned durable recovery state into the current sanitized
+    /// watcher snapshot.
+    pub(crate) fn project_agent_watch_provider_state(
+        &mut self,
+        cid: &crate::AgentId,
+        agent_prompt_id: tau_proto::AgentPromptId,
+        state: tau_proto::AgentWatchProviderState,
+    ) {
+        let Some(watched_agent_id) = self.ensure_agent_id_for_agent(cid) else {
+            return;
+        };
+        let turn_generation = self
+            .agents
+            .get(cid)
+            .map_or(0, |agent| agent.turn_generation);
+        self.update_agent_watch_provider_status(
+            &watched_agent_id,
+            tau_proto::AgentWatchProviderStatusNotification {
+                session_id: self.current_session_id.clone(),
+                subscription_id: String::new(),
+                turn_generation,
+                agent_prompt_id,
+                state,
+                initial: false,
+            },
+        );
+    }
+
+    fn notify_agent_watcher_provider_status(
+        &mut self,
+        watcher_id: &str,
+        watched_agent_id: &str,
+        status: &tau_proto::AgentWatchProviderStatusNotification,
+        initial: bool,
+    ) {
+        let Some(subscription_id) = self
+            .agent_watch_subscriptions
+            .get(&(watcher_id.to_owned(), watched_agent_id.to_owned()))
+            .cloned()
+        else {
+            return;
+        };
+        let key = (
+            status.turn_generation,
+            status.agent_prompt_id.clone(),
+            crate::harness::AgentWatchProviderDeliveryKind::from(&status.state),
+        );
+        if !initial
+            && !self
+                .agent_watch_provider_deliveries
+                .entry(subscription_id.clone())
+                .or_default()
+                .insert(key)
+        {
+            return;
+        }
+        let mut status = status.clone();
+        status.session_id = self.current_session_id.clone();
+        status.subscription_id = subscription_id;
+        status.initial = initial;
+        let sender_id = crate::parse_agent_id(watched_agent_id);
+        let message = crate::prompt::watch_provider_status_text(watched_agent_id, &status);
+        self.publish_event(
+            Some(HARNESS_CONNECTION_ID),
+            Event::AgentMessageReceived(AgentMessageReceived {
+                message_id: next_agent_message_id(&sender_id),
+                sender_id,
+                sender_session_id: None,
+                recipient_id: crate::parse_agent_id(watcher_id),
+                kind: tau_proto::AgentMessageKind::WatchProviderStatus,
+                watch_turn_state: None,
+                watch_provider_status: Some(status),
                 message,
             }),
         );
@@ -453,6 +628,7 @@ impl Harness {
                     recipient_id: agent_id,
                     kind,
                     watch_turn_state: None,
+                    watch_provider_status: None,
                     message,
                 }),
             );
@@ -648,6 +824,7 @@ impl Harness {
                 recipient_id: request.recipient_id,
                 kind: request.kind,
                 watch_turn_state: None,
+                watch_provider_status: None,
                 message: request.message,
             }),
         );

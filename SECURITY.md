@@ -526,3 +526,7 @@ another model's threshold or context window.
 Provider discovery may be staggered, so an as-yet-undiscovered qualified model
 is retained as unresolved rather than treated as a mismatch. It remains
 unusable at the scheduler until exact resolution succeeds.
+
+### Watcher-visible provider work
+
+Provider retries carry closed structured categories, saturating attempt counts, and approximate bounded delays independently of human UI prose. After validating prompt ownership, the harness owns the current per-agent/turn/prompt snapshot and session-local watcher fanout. Live delivery is limited to first category, category/phase changes, and terminal failure; same-category storms only refresh the late-watch snapshot. Enabling or re-enabling returns current sanitized state and emits an initial client snapshot without prompting the model. Durable live facts replay as transcript context without re-fanout; disable, prune, and session change stop delivery. Raw provider bodies, status text, errors, headers, account data, secrets, and prompt content never cross this boundary.

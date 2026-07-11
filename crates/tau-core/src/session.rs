@@ -216,6 +216,8 @@ pub enum AgentEntry {
         kind: AgentMessageKind,
         /// Typed watched-turn state for receiver-only lifecycle projections.
         watch_turn_state: Option<tau_proto::AgentWatchTurnStateNotification>,
+        /// Typed provider status for receiver-only watch projections.
+        watch_provider_status: Option<tau_proto::AgentWatchProviderStatusNotification>,
         /// Message body.
         message: String,
     },
@@ -393,7 +395,12 @@ pub enum StandaloneCompactionRecovery {
     /// A start has no terminal outcome and must be repaired as interrupted.
     Interrupted(tau_proto::AgentStandaloneCompactionStarted),
     /// A terminal failure retains an explicit recovery obligation.
-    Blocked(tau_proto::AgentStandaloneCompactionFailed),
+    Blocked {
+        /// Durable terminal failure.
+        failed: tau_proto::AgentStandaloneCompactionFailed,
+        /// Actual provider prompt reserved by the matching durable start.
+        compact_prompt_id: tau_proto::AgentPromptId,
+    },
     /// Success still owes a durable inference-dispatch checkpoint.
     AwaitingCheckpoint {
         /// Successful transaction id.
@@ -445,7 +452,10 @@ impl AgentTree {
                 transaction.started.clone(),
             )),
             (Some(CompactionTransactionOutcome::Failed(failed)), _) => {
-                Some(StandaloneCompactionRecovery::Blocked(failed.clone()))
+                Some(StandaloneCompactionRecovery::Blocked {
+                    failed: failed.clone(),
+                    compact_prompt_id: transaction.started.compact_prompt_id.clone(),
+                })
             }
             (Some(CompactionTransactionOutcome::Succeeded(_)), None) => {
                 transaction.started.resume_through.map(|resume| {
@@ -1248,6 +1258,7 @@ impl AgentTree {
             recipient: message.recipient.clone(),
             kind: message.kind,
             watch_turn_state: None,
+            watch_provider_status: None,
             message: message.message.clone(),
         })
     }
@@ -1266,6 +1277,7 @@ impl AgentTree {
             },
             kind: message.kind,
             watch_turn_state: message.watch_turn_state.clone(),
+            watch_provider_status: message.watch_provider_status.clone(),
             message: message.message.clone(),
         })
     }
@@ -1363,13 +1375,15 @@ impl AgentTree {
             Event::AgentMessageReceived(message)
                 if self.agent_message_entry_from_received(message).is_some() =>
             {
-                let payload_matches_kind = (message.kind == AgentMessageKind::WatchTurnState)
-                    == message.watch_turn_state.is_some();
+                let payload_matches_kind = ((message.kind == AgentMessageKind::WatchTurnState)
+                    == message.watch_turn_state.is_some())
+                    && ((message.kind == AgentMessageKind::WatchProviderStatus)
+                        == message.watch_provider_status.is_some());
                 Some(if payload_matches_kind {
                     Ok(())
                 } else {
                     Err(AgentEventValidationError::new(
-                        "watch_turn_state payload must be present exactly for watch_turn_state messages",
+                        "watch payload must be present exactly for its matching watch message kind",
                     ))
                 })
             }

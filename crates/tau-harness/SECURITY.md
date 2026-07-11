@@ -51,3 +51,5 @@ foreground tool-completion prompts, explicit `message` tool deliveries to the
 watched agent, or other hidden/non-user inputs. A completed `agent_start` result
 is the started child agent's terminal final response to its direct delegating
 watcher and remains watchable under the response label.
+
+Provider-authored status text, response bodies, headers, prompt text, account identifiers, and raw errors never cross the watch boundary. Only protocol closed enums and bounded numeric retry facts are accepted after prompt ownership validation. Terminal watched responses use the typed failure kind rather than `ProviderResponseFinished.error`.

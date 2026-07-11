@@ -418,6 +418,7 @@ fn representative_events() -> Vec<Event> {
             recipient_id: agent_id("reviewer_efgh5678"),
             kind: AgentMessageKind::Message,
             watch_turn_state: None,
+            watch_provider_status: None,
             message: "hello back".to_owned(),
         }),
         Event::AgentWatchesUpdated(AgentWatchesUpdated {
@@ -1369,6 +1370,7 @@ fn agent_message_events_have_names_and_persistence_defaults() {
         recipient_id: agent_id("reviewer_efgh5678"),
         kind: AgentMessageKind::Message,
         watch_turn_state: None,
+        watch_provider_status: None,
         message: "hello back".to_owned(),
     });
     assert_eq!(received.name(), EventName::AGENT_MESSAGE_RECEIVED);
@@ -1396,6 +1398,7 @@ fn agent_message_kind_defaults_and_serializes_only_when_non_default() {
         recipient_id: agent_id("reviewer_efgh5678"),
         kind: AgentMessageKind::Message,
         watch_turn_state: None,
+        watch_provider_status: None,
         message: "hello".to_owned(),
     };
     let message_json = serde_json::to_value(&explicit_message).expect("serialize message");
@@ -3485,5 +3488,126 @@ fn provider_failure_kind_wire_contract_is_backward_compatible() {
     assert!(
         none_value.get("failure_kind").is_none(),
         "None must preserve the legacy omitted wire shape"
+    );
+}
+
+/// Provider-watch wire states must round-trip with one tagged phase shape and
+/// reject option-soup payloads that could contradict the selected phase.
+#[test]
+fn agent_watch_provider_state_wire_contract_enforces_phase_invariants() {
+    for (category, label) in [
+        (AgentWatchProviderCategory::Transport, "transport"),
+        (AgentWatchProviderCategory::Overload, "overload"),
+        (AgentWatchProviderCategory::Throttle, "throttle"),
+        (AgentWatchProviderCategory::UsageWindow, "usage_window"),
+        (AgentWatchProviderCategory::Account, "account"),
+        (AgentWatchProviderCategory::Auth, "auth"),
+        (AgentWatchProviderCategory::Unknown, "unknown"),
+        (AgentWatchProviderCategory::ContextWindow, "context_window"),
+        (AgentWatchProviderCategory::Compaction, "compaction"),
+    ] {
+        assert_eq!(category.as_str(), label);
+        assert_eq!(
+            serde_json::to_value(category).expect("category JSON"),
+            label
+        );
+    }
+    let states = [
+        AgentWatchProviderState::Retrying {
+            category: AgentWatchProviderCategory::Throttle,
+            attempt: u32::MAX,
+            next_retry_delay_secs: u32::MAX,
+        },
+        AgentWatchProviderState::RecoveringContext { attempt: 7 },
+        AgentWatchProviderState::Blocked {
+            category: AgentWatchProviderCategory::Compaction,
+        },
+        AgentWatchProviderState::DispatchUncertain {
+            category: AgentWatchProviderCategory::Transport,
+        },
+        AgentWatchProviderState::TerminalError {
+            failure_kind: ProviderFailureKind::ContextWindowExceeded,
+            attempt: 9,
+        },
+    ];
+
+    for state in states {
+        let json = serde_json::to_value(&state).expect("serialize state as JSON");
+        assert_eq!(
+            json["phase"],
+            serde_json::Value::String(state.phase_str().to_owned())
+        );
+        assert_eq!(
+            serde_json::from_value::<AgentWatchProviderState>(json).expect("decode JSON state"),
+            state
+        );
+        let mut cbor = Vec::new();
+        ciborium::into_writer(&state, &mut cbor).expect("serialize state as CBOR");
+        assert_eq!(
+            ciborium::from_reader::<AgentWatchProviderState, _>(cbor.as_slice())
+                .expect("decode CBOR state"),
+            state
+        );
+    }
+
+    for malformed in [
+        serde_json::json!({"phase":"retrying","attempt":1,"next_retry_delay_secs":2}),
+        serde_json::json!({"phase":"terminal_error","attempt":1}),
+        serde_json::json!({
+            "phase":"recovering_context",
+            "attempt":1,
+            "category":"unknown"
+        }),
+        serde_json::json!({
+            "phase":"blocked",
+            "category":"transport",
+            "failure_kind":"unknown"
+        }),
+    ] {
+        assert!(
+            serde_json::from_value::<AgentWatchProviderState>(malformed).is_err(),
+            "contradictory or incomplete tagged state must be rejected"
+        );
+    }
+
+    let notification = AgentWatchProviderStatusNotification {
+        session_id: "session-wire".into(),
+        subscription_id: "watch-wire".to_owned(),
+        turn_generation: 4,
+        agent_prompt_id: "sp-wire".into(),
+        state: AgentWatchProviderState::Retrying {
+            category: AgentWatchProviderCategory::Throttle,
+            attempt: 5,
+            next_retry_delay_secs: 6,
+        },
+        initial: false,
+    };
+    let mut notification_json =
+        serde_json::to_value(&notification).expect("serialize notification");
+    assert_eq!(notification_json["state"]["phase"], "retrying");
+    assert!(
+        notification_json.get("phase").is_none(),
+        "state discriminator stays nested so additive envelope fields remain compatible"
+    );
+    notification_json["future_envelope_field"] = serde_json::json!("ignored");
+    assert_eq!(
+        serde_json::from_value::<AgentWatchProviderStatusNotification>(notification_json.clone())
+            .expect("unknown envelope field is additive"),
+        notification
+    );
+    notification_json["state"]["future_state_field"] = serde_json::json!(true);
+    assert!(
+        serde_json::from_value::<AgentWatchProviderStatusNotification>(notification_json).is_err(),
+        "unknown state fields remain fail-closed"
+    );
+    let mut notification_cbor = Vec::new();
+    ciborium::into_writer(&notification, &mut notification_cbor)
+        .expect("serialize notification CBOR");
+    assert_eq!(
+        ciborium::from_reader::<AgentWatchProviderStatusNotification, _>(
+            notification_cbor.as_slice()
+        )
+        .expect("decode notification CBOR"),
+        notification
     );
 }

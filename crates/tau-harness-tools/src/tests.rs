@@ -281,6 +281,26 @@ fn agent_watch_success_display_keeps_action_and_agent() {
     assert_eq!(display.status_text, "ok");
 }
 
+/// Enabling or re-enabling through the actual tool-result formatter includes
+/// the sanitized current snapshot exactly once and never model-input framing.
+#[test]
+fn agent_watch_enable_result_includes_safe_current_snapshot() {
+    let result = agent_watch_enabled_result(
+        "agent-a",
+        Some("retrying (throttle, attempt 50, next retry about 60s)"),
+    );
+    assert_eq!(
+        result,
+        "Watching agent `agent-a`; current status: retrying (throttle, attempt 50, next retry about 60s)"
+    );
+    assert_eq!(result.matches("current status:").count(), 1);
+    assert!(!result.contains("[tau-internal]"));
+    assert_eq!(
+        agent_watch_enabled_result("agent-a", None),
+        "Watching agent `agent-a`"
+    );
+}
+
 /// Terminal agent watch errors must also preserve sanitized display args while
 /// keeping unsafe malformed identifiers out of the compact history row.
 #[test]
@@ -528,6 +548,30 @@ fn agent_watch_ignores_internal_originated_responses() {
             name: tau_proto::ExtensionName::new("__harness__"),
             query_id: "background-completion".to_owned(),
         },
+        compaction_original_input_tokens: None,
+        compaction_compacted_input_tokens: None,
+        backend: None,
+        provider_response_id: None,
+        ws_pool_delta: None,
+    };
+
+    assert!(agent_watch_response_should_notify(&response).is_none());
+}
+
+/// Untyped provider errors are represented by the harness's structured unknown
+/// terminal status and must not also produce a legacy watch response containing
+/// provider-authored diagnostics.
+#[test]
+fn agent_watch_legacy_response_suppresses_untyped_provider_errors() {
+    let response = ProviderResponseFinished {
+        agent_prompt_id: "sp-watch-error".into(),
+        agent_id: tau_proto::AgentId::parse("agent-a").expect("agent id"),
+        output_items: Vec::new(),
+        stop_reason: tau_proto::ProviderStopReason::Error,
+        error: Some("secret raw endpoint body".to_owned()),
+        failure_kind: None,
+        usage: None,
+        originator: tau_proto::PromptOriginator::User,
         compaction_original_input_tokens: None,
         compaction_compacted_input_tokens: None,
         backend: None,

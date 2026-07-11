@@ -153,3 +153,8 @@ particular, `context_length_exceeded` is a typed terminal provider failure acros
 SSE, and non-2xx responses: it cannot reopen a cached socket, replay a full request, fall back
 between transports, or enter the logical-prompt retry scheduler. Unknown stream failures and
 explicit transient status/code classes retain their existing retry ownership.
+
+Retry classification remains provider-owned and is exported only as a closed
+structured category, saturating attempt, and bounded approximate delay. The
+harness validates prompt ownership before projecting those facts to watchers;
+provider display text and response bodies are never watcher data.

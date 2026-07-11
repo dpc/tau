@@ -4,6 +4,49 @@ use tau_proto::{
 };
 
 use super::*;
+
+/// Tool-result provider summaries cover every tagged state without model-input
+/// framing or provider-authored text.
+#[test]
+fn watch_provider_status_summaries_are_concise_and_safe() {
+    for (state, expected) in [
+        (
+            tau_proto::AgentWatchProviderState::Retrying {
+                category: tau_proto::AgentWatchProviderCategory::Throttle,
+                attempt: 2,
+                next_retry_delay_secs: 3,
+            },
+            "retrying (throttle, attempt 2, next retry about 3s)",
+        ),
+        (
+            tau_proto::AgentWatchProviderState::RecoveringContext { attempt: 2 },
+            "recovering context",
+        ),
+        (
+            tau_proto::AgentWatchProviderState::Blocked {
+                category: tau_proto::AgentWatchProviderCategory::Compaction,
+            },
+            "blocked (compaction)",
+        ),
+        (
+            tau_proto::AgentWatchProviderState::DispatchUncertain {
+                category: tau_proto::AgentWatchProviderCategory::Unknown,
+            },
+            "dispatch uncertain (unknown)",
+        ),
+        (
+            tau_proto::AgentWatchProviderState::TerminalError {
+                failure_kind: tau_proto::ProviderFailureKind::RequestRejected,
+                attempt: 1,
+            },
+            "terminal error (request_rejected)",
+        ),
+    ] {
+        let summary = watch_provider_status_summary(&state);
+        assert_eq!(summary, expected);
+        assert!(!summary.contains("[tau-internal]"));
+    }
+}
 use crate::discovery::DiscoveredAgentsFile;
 fn assistant_message(text: &str) -> ContextItem {
     ContextItem::Message(MessageItem {
@@ -976,6 +1019,7 @@ fn assemble_conversation_assigns_roles_for_sent_and_received_agent_messages() {
             recipient_id: tau_proto::AgentId::parse("main").expect("agent id"),
             kind: tau_proto::AgentMessageKind::Message,
             watch_turn_state: None,
+            watch_provider_status: None,
             message: "please investigate".to_owned(),
         },
     ));
@@ -1014,6 +1058,7 @@ fn assemble_conversation_replays_watch_response_as_notification_only() {
             recipient_id: main,
             kind: tau_proto::AgentMessageKind::WatchResponse,
             watch_turn_state: None,
+            watch_provider_status: None,
             message: "done <response>&</response>".to_owned(),
         },
     ));
@@ -1068,6 +1113,7 @@ fn assemble_conversation_replays_watch_turn_state_as_notification_only() {
                 initial: false,
                 turn_generation: 1,
             }),
+            watch_provider_status: None,
             message: "untrusted stale presentation".to_owned(),
         },
     ));
@@ -1103,6 +1149,7 @@ fn assemble_conversation_omits_initial_watch_turn_state() {
                 initial: true,
                 turn_generation: 0,
             }),
+            watch_provider_status: None,
             message: "[tau-internal]: Watched agent watched is not currently running a model turn"
                 .to_owned(),
         },

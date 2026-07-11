@@ -1755,10 +1755,7 @@ fn side_agent_repetition_response_propagates_error_result() {
         })
         .expect("start-agent result routed");
     assert!(result.text.is_empty());
-    assert_eq!(
-        result.error.as_deref(),
-        Some("provider stream repetition detected")
-    );
+    assert_eq!(result.error.as_deref(), Some("provider failure: unknown"));
 }
 
 #[test]
@@ -1821,7 +1818,14 @@ fn side_agent_error_response_propagates_error_result() {
         })
         .expect("start-agent result routed");
     assert!(result.text.is_empty());
-    assert_eq!(result.error.as_deref(), Some("provider failed"));
+    assert_eq!(
+        result.error.as_deref(),
+        Some("provider failure: context_window_exceeded")
+    );
+    assert!(
+        !format!("{result:?}").contains("provider failed"),
+        "raw provider diagnostics must not cross the delegated result boundary"
+    );
     assert!(!h.prompt_agents.contains_key(&side_spid));
     assert!(h.turn_state.is_idle());
 }
@@ -5006,8 +5010,24 @@ fn provider_execution_events_must_come_from_prompt_owner() {
         .model = Some(model_id.clone());
     h.selected_model = Some(model_id);
 
+    let watched_cid = ensure_test_user_agent(&mut h);
+    let watcher_cid =
+        h.create_durable_user_agent(h.current_session_id.clone(), &h.selected_role.clone());
+    let watched_id = durable_agent_id_for_conversation(&h, &watched_cid).to_string();
+    let watcher_id = durable_agent_id_for_conversation(&h, &watcher_cid).to_string();
+    h.agents.get_mut(&watcher_cid).expect("watcher").turn_state = AgentTurnState::AgentThinking {
+        agent_prompt_id: "watcher-busy".into(),
+    };
+    h.set_agent_watch(
+        &watcher_id,
+        &watched_id,
+        true,
+        tau_proto::AgentWatchUpdateCause::AgentWatchEnable,
+    );
     append_user_message_via_event(&mut h, "s1", "hello");
-    let spid = h.send_prompt_to_agent("s1");
+    let spid = h
+        .send_prompt_to_agent_for(&watched_cid)
+        .expect("send watched prompt");
     assert_eq!(
         h.pending_provider_prompts.get(&spid).map(|id| id.as_str()),
         Some("provider-owner"),
@@ -5018,10 +5038,18 @@ fn provider_execution_events_must_come_from_prompt_owner() {
         "provider-other",
         TestProtocolItem::Event(Event::ProviderResponseUpdated(ProviderResponseUpdated {
             agent_prompt_id: spid.clone(),
-            agent_id: durable_agent_id_for_conversation(&h, &test_user_agent(&h)),
+            agent_id: crate::parse_agent_id(&watched_id),
             deltas: Vec::new(),
             compaction: None,
-            status: None,
+            status: Some(tau_proto::ProviderResponseStatusUpdate {
+                text: "secret forged provider status".to_owned(),
+                clear_response: true,
+                retry: Some(tau_proto::ProviderRetryStatus {
+                    category: tau_proto::ProviderRetryCategory::Transport,
+                    attempt: 1,
+                    next_retry_delay_secs: 2,
+                }),
+            }),
             response_stats: None,
             originator: tau_proto::PromptOriginator::User,
         })),
@@ -5031,7 +5059,7 @@ fn provider_execution_events_must_come_from_prompt_owner() {
         "tool-impersonator",
         TestProtocolItem::Event(Event::ProviderResponseUpdated(ProviderResponseUpdated {
             agent_prompt_id: spid.clone(),
-            agent_id: durable_agent_id_for_conversation(&h, &test_user_agent(&h)),
+            agent_id: crate::parse_agent_id(&watched_id),
             deltas: Vec::new(),
             compaction: None,
             status: None,
@@ -5044,7 +5072,7 @@ fn provider_execution_events_must_come_from_prompt_owner() {
         "provider-other",
         TestProtocolItem::Event(Event::ProviderResponseFinished(provider_text_response(
             &spid,
-            durable_agent_id_for_conversation(&h, &test_user_agent(&h)),
+            crate::parse_agent_id(&watched_id),
             "spoofed final",
         ))),
     )
@@ -5056,7 +5084,7 @@ fn provider_execution_events_must_come_from_prompt_owner() {
         "wrong-source events must not consume the pending owner"
     );
     assert!(matches!(
-        h.agents[&test_user_agent(&h)].turn_state,
+        h.agents[&watched_cid].turn_state,
         AgentTurnState::AgentThinking { .. }
     ));
     assert!(!event_log_contains(&h, "provider-other", |event| matches!(
@@ -5071,29 +5099,49 @@ fn provider_execution_events_must_come_from_prompt_owner() {
             Event::ProviderResponseUpdated(_) | Event::ProviderResponseFinished(_)
         )
     ));
+    assert!(
+        session_agent_message_received_events(&h)
+            .iter()
+            .all(|message| message.kind != tau_proto::AgentMessageKind::WatchProviderStatus),
+        "wrong-owner retry status must not reach watchers"
+    );
 
     h.handle_extension_event(
         "provider-owner",
         TestProtocolItem::Event(Event::ProviderResponseUpdated(ProviderResponseUpdated {
             agent_prompt_id: spid.clone(),
-            agent_id: durable_agent_id_for_conversation(&h, &test_user_agent(&h)),
+            agent_id: crate::parse_agent_id(&watched_id),
             deltas: vec![tau_proto::ProviderResponseTextDelta::Message {
                 output_index: 0,
                 text: "real".to_owned(),
                 phase: None,
             }],
             compaction: None,
-            status: None,
+            status: Some(tau_proto::ProviderResponseStatusUpdate {
+                text: "secret raw owner diagnostic".to_owned(),
+                clear_response: true,
+                retry: Some(tau_proto::ProviderRetryStatus {
+                    category: tau_proto::ProviderRetryCategory::Throttle,
+                    attempt: 9,
+                    next_retry_delay_secs: 10,
+                }),
+            }),
             response_stats: None,
             originator: tau_proto::PromptOriginator::User,
         })),
     )
     .expect("owner stream");
+    let safe_status = session_agent_message_received_events(&h)
+        .into_iter()
+        .find(|message| message.kind == tau_proto::AgentMessageKind::WatchProviderStatus)
+        .expect("owner retry status reaches watcher");
+    assert!(safe_status.message.contains("throttle"));
+    assert!(!safe_status.message.contains("secret raw owner diagnostic"));
     h.handle_extension_event(
         "provider-owner",
         TestProtocolItem::Event(Event::ProviderResponseFinished(provider_text_response(
             &spid,
-            durable_agent_id_for_conversation(&h, &test_user_agent(&h)),
+            crate::parse_agent_id(&watched_id),
             "real final",
         ))),
     )
@@ -5101,7 +5149,7 @@ fn provider_execution_events_must_come_from_prompt_owner() {
 
     assert!(!h.pending_provider_prompts.contains_key(&spid));
     assert!(matches!(
-        h.agents[&test_user_agent(&h)].turn_state,
+        h.agents[&watched_cid].turn_state,
         AgentTurnState::Idle
     ));
     assert_eq!(
@@ -7362,11 +7410,12 @@ fn replay_respects_activation_checkpoint_ranges_and_uncertainty() {
     );
     drop(store);
 
-    {
+    let uncertain_prompt_id = {
         let mut h =
             quiet_provider_harness_with_start_reason(&state, tau_proto::SessionStartReason::Resume)
                 .expect("first resume");
         let prompt = read_nth_prompt_created(&h, 0);
+        let uncertain_prompt_id = prompt.agent_prompt_id.clone();
         let context = serde_json::to_string(&prompt.context).expect("context");
         assert_eq!(context.matches("activation C").count(), 1);
         assert_eq!(
@@ -7378,7 +7427,8 @@ fn replay_respects_activation_checkpoint_ranges_and_uncertainty() {
             "later activation should be checkpointed exactly once"
         );
         h.shutdown().expect("shutdown");
-    }
+        uncertain_prompt_id
+    };
 
     let mut h =
         quiet_provider_harness_with_start_reason(&state, tau_proto::SessionStartReason::Resume)
@@ -7387,6 +7437,17 @@ fn replay_respects_activation_checkpoint_ranges_and_uncertainty() {
         event,
         Event::AgentPromptCreated(_) | Event::AgentInferenceDispatchStarted(_)
     )));
+    let uncertain = h
+        .agent_watch_provider_status
+        .get("main")
+        .expect("restored uncertain watcher snapshot");
+    assert!(matches!(
+        uncertain.state,
+        tau_proto::AgentWatchProviderState::DispatchUncertain {
+            category: tau_proto::AgentWatchProviderCategory::Unknown
+        }
+    ));
+    assert_eq!(uncertain.agent_prompt_id, uncertain_prompt_id);
     h.shutdown().expect("shutdown");
 }
 
@@ -8382,6 +8443,41 @@ fn standalone_compaction_failure_does_not_retry_automatically() {
         h.agents[&cid].activation_dispatch,
         crate::agent::ActivationDispatchState::Blocked { .. }
     ));
+    assert!(matches!(
+        h.agent_watch_provider_status[&agent_id].state,
+        tau_proto::AgentWatchProviderState::Blocked {
+            category: tau_proto::AgentWatchProviderCategory::Compaction
+        }
+    ));
+    let watcher_cid =
+        h.create_durable_user_agent(h.current_session_id.clone(), &h.selected_role.clone());
+    let watcher_id = durable_agent_id_for_conversation(&h, &watcher_cid).to_string();
+    h.agents.get_mut(&watcher_cid).expect("watcher").turn_state = AgentTurnState::AgentThinking {
+        agent_prompt_id: "blocked-watcher-busy".into(),
+    };
+    h.set_agent_watch(
+        &watcher_id,
+        &agent_id,
+        true,
+        tau_proto::AgentWatchUpdateCause::AgentWatchEnable,
+    );
+    assert!(
+        session_agent_message_received_events(&h)
+            .iter()
+            .any(|message| {
+                message.recipient_id.as_str() == watcher_id
+                    && message
+                        .watch_provider_status
+                        .as_ref()
+                        .is_some_and(|status| {
+                            status.initial
+                                && matches!(
+                                    status.state,
+                                    tau_proto::AgentWatchProviderState::Blocked { .. }
+                                )
+                        })
+            })
+    );
     assert_eq!(
         event_log_events(&h)
             .into_iter()
@@ -8414,6 +8510,127 @@ fn standalone_compaction_failure_does_not_retry_automatically() {
         Some(&starts[0].transaction_id)
     );
     assert_ne!(starts[1].transaction_id, starts[0].transaction_id);
+}
+
+/// Cold replay must recover the actual durable compact prompt correlation for a
+/// blocked snapshot; it must never synthesize one from the transaction id.
+#[test]
+fn blocked_compaction_replay_preserves_watch_prompt_correlation() {
+    let td = TempDir::new().expect("tempdir");
+    let state = td.path().join("state");
+    let (agent_id, compact_prompt_id);
+    {
+        let mut h = quiet_provider_harness(&state).expect("start");
+        enable_remote_compaction_for_test_model(&mut h);
+        let info = h
+            .provider_model_info
+            .get_mut(&"test/model".into())
+            .expect("test model");
+        info.supports_compaction = false;
+        info.supports_standalone_compaction = true;
+        let cid = ensure_test_user_agent(&mut h);
+        agent_id = h.agents[&cid].agent_id.clone().expect("durable agent");
+        h.handle_compact_request("s1".into(), Some(&agent_id));
+        let compact = read_nth_prompt_created(&h, 0);
+        compact_prompt_id = compact.agent_prompt_id.clone();
+        h.handle_provider_response_finished(ProviderResponseFinished {
+            agent_prompt_id: compact.agent_prompt_id,
+            agent_id: crate::parse_agent_id(&agent_id),
+            output_items: Vec::new(),
+            stop_reason: tau_proto::ProviderStopReason::Error,
+            error: Some("raw compact failure".to_owned()),
+            failure_kind: None,
+            originator: tau_proto::PromptOriginator::User,
+            usage: None,
+            compaction_original_input_tokens: None,
+            compaction_compacted_input_tokens: None,
+            backend: None,
+            provider_response_id: None,
+            ws_pool_delta: None,
+        })
+        .expect("record compact failure");
+        h.shutdown().expect("shutdown");
+    }
+    wait_for_session_unlock(&state, "s1");
+
+    let mut resumed =
+        quiet_provider_harness_with_start_reason(&state, tau_proto::SessionStartReason::Resume)
+            .expect("resume");
+    assert!(matches!(
+        resumed.agent_watch_provider_status[&agent_id].state,
+        tau_proto::AgentWatchProviderState::Blocked { .. }
+    ));
+    assert_eq!(
+        resumed.agent_watch_provider_status[&agent_id].agent_prompt_id,
+        compact_prompt_id
+    );
+    resumed.shutdown().expect("shutdown");
+}
+
+/// Cold replay projects inference owed by a successful standalone compaction as
+/// compaction-owned uncertainty with the exact checkpoint prompt.
+#[test]
+fn standalone_dispatch_uncertain_replay_projects_compaction_category() {
+    let td = TempDir::new().expect("tempdir");
+    let state = td.path().join("state");
+    let (agent_id, inference_prompt_id);
+    {
+        let mut h = quiet_provider_harness(&state).expect("start");
+        enable_remote_compaction_for_test_model(&mut h);
+        let info = h
+            .provider_model_info
+            .get_mut(&"test/model".into())
+            .expect("test model");
+        info.supports_compaction = false;
+        info.supports_standalone_compaction = true;
+        info.standalone_compaction_threshold = Some(900);
+        let cid = ensure_test_user_agent(&mut h);
+        agent_id = h.agents[&cid].agent_id.clone().expect("durable agent");
+        h.agents.get_mut(&cid).expect("agent").context_input_tokens = Some(900);
+        h.agents.get_mut(&cid).expect("agent").context_usage_model = Some("test/model".into());
+        h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("activation".to_owned()))
+            .expect("start automatic compaction");
+        let compact = read_nth_prompt_created(&h, 0);
+        h.handle_provider_response_finished(ProviderResponseFinished {
+            agent_prompt_id: compact.agent_prompt_id,
+            agent_id: crate::parse_agent_id(&agent_id),
+            output_items: vec![ContextItem::Message(MessageItem {
+                role: ContextRole::Assistant,
+                content: vec![ContentPart::Text {
+                    text: "summary".to_owned(),
+                }],
+                phase: None,
+                responses_raw_json: None,
+            })],
+            stop_reason: tau_proto::ProviderStopReason::EndTurn,
+            error: None,
+            failure_kind: None,
+            originator: tau_proto::PromptOriginator::User,
+            usage: None,
+            compaction_original_input_tokens: None,
+            compaction_compacted_input_tokens: None,
+            backend: None,
+            provider_response_id: None,
+            ws_pool_delta: None,
+        })
+        .expect("accept compaction");
+        inference_prompt_id = read_nth_prompt_created(&h, 1).agent_prompt_id;
+        h.shutdown().expect("shutdown");
+    }
+    wait_for_session_unlock(&state, "s1");
+
+    let mut resumed =
+        quiet_provider_harness_with_start_reason(&state, tau_proto::SessionStartReason::Resume)
+            .expect("resume");
+    let status = &resumed.agent_watch_provider_status[&agent_id];
+    assert_eq!(status.agent_prompt_id, inference_prompt_id);
+    assert!(matches!(
+        status.state,
+        tau_proto::AgentWatchProviderState::DispatchUncertain {
+            category: tau_proto::AgentWatchProviderCategory::Compaction
+        }
+    ));
+    resumed.shutdown().expect("shutdown");
 }
 
 /// A failed automatic transaction retains A across an explicit retry, while B
@@ -8958,6 +9175,7 @@ fn agent_message_interrupts_recipient_active_wait() {
             recipient_id: crate::parse_agent_id(&recipient_id),
             kind: tau_proto::AgentMessageKind::Message,
             watch_turn_state: None,
+            watch_provider_status: None,
             message: "please stop waiting".to_owned(),
         }),
     );
@@ -9197,6 +9415,7 @@ fn cross_owner_exact_wait_is_rejected_without_active_wait_state() {
             recipient_id: crate::parse_agent_id(&target_agent_id),
             kind: tau_proto::AgentMessageKind::Message,
             watch_turn_state: None,
+            watch_provider_status: None,
             message: "target owner only".to_owned(),
         }),
     );
@@ -9217,6 +9436,7 @@ fn cross_owner_exact_wait_is_rejected_without_active_wait_state() {
             recipient_id: crate::parse_agent_id(&waiter_agent_id),
             kind: tau_proto::AgentMessageKind::Message,
             watch_turn_state: None,
+            watch_provider_status: None,
             message: "waiter should resume".to_owned(),
         }),
     );
@@ -9559,6 +9779,7 @@ fn side_agent_drains_agent_message_before_extension_teardown() {
             recipient_id: crate::parse_agent_id(&recipient_id),
             kind: tau_proto::AgentMessageKind::Message,
             watch_turn_state: None,
+            watch_provider_status: None,
             message: "please include this".to_owned(),
         }),
     );
@@ -12136,6 +12357,602 @@ fn generic_agent_watch_snapshots_replay_and_clear_on_session_switch() {
     h.shutdown().expect("shutdown");
 }
 
+/// Provider-watch fanout must sanitize payloads, dedupe retry storms without
+/// freezing the late-watcher snapshot, preserve phase/category transitions, and
+/// stop immediately when the relation or session is removed.
+#[test]
+fn agent_watch_provider_status_fanout_dedupes_and_cleans_up() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    let watched_cid = ensure_test_user_agent(&mut h);
+    let watcher_cid =
+        h.create_durable_user_agent(h.current_session_id.clone(), &h.selected_role.clone());
+    let late_cid =
+        h.create_durable_user_agent(h.current_session_id.clone(), &h.selected_role.clone());
+    let watched_id = durable_agent_id_for_conversation(&h, &watched_cid).to_string();
+    let watcher_id = durable_agent_id_for_conversation(&h, &watcher_cid).to_string();
+    let late_id = durable_agent_id_for_conversation(&h, &late_cid).to_string();
+    for cid in [&watcher_cid, &late_cid] {
+        h.agents.get_mut(cid).expect("watcher").turn_state = AgentTurnState::AgentThinking {
+            agent_prompt_id: format!("busy-{cid}").into(),
+        };
+    }
+    h.set_agent_watch(
+        &watcher_id,
+        &watched_id,
+        true,
+        tau_proto::AgentWatchUpdateCause::AgentWatchEnable,
+    );
+
+    let session_id = h.current_session_id.clone();
+    let status = |state| tau_proto::AgentWatchProviderStatusNotification {
+        session_id: session_id.clone(),
+        subscription_id: String::new(),
+        turn_generation: 4,
+        agent_prompt_id: "sp-provider-watch".into(),
+        state,
+        initial: false,
+    };
+    for attempt in 1..=50 {
+        h.update_agent_watch_provider_status(
+            &watched_id,
+            status(tau_proto::AgentWatchProviderState::Retrying {
+                category: tau_proto::AgentWatchProviderCategory::Transport,
+                attempt,
+                next_retry_delay_secs: attempt,
+            }),
+        );
+    }
+    h.update_agent_watch_provider_status(
+        &watched_id,
+        status(tau_proto::AgentWatchProviderState::Retrying {
+            category: tau_proto::AgentWatchProviderCategory::Transport,
+            attempt: 3,
+            next_retry_delay_secs: 3,
+        }),
+    );
+    assert!(matches!(
+        h.agent_watch_provider_status[&watched_id].state,
+        tau_proto::AgentWatchProviderState::Retrying { attempt: 50, .. }
+    ));
+    h.update_agent_watch_provider_status(
+        &watched_id,
+        status(tau_proto::AgentWatchProviderState::Retrying {
+            category: tau_proto::AgentWatchProviderCategory::Throttle,
+            attempt: 51,
+            next_retry_delay_secs: 60,
+        }),
+    );
+    h.update_agent_watch_provider_status(
+        &watched_id,
+        status(tau_proto::AgentWatchProviderState::RecoveringContext { attempt: 51 }),
+    );
+    h.update_agent_watch_provider_status(
+        &watched_id,
+        status(tau_proto::AgentWatchProviderState::TerminalError {
+            failure_kind: tau_proto::ProviderFailureKind::ContextWindowExceeded,
+            attempt: 51,
+        }),
+    );
+
+    let watcher_statuses: Vec<_> = session_agent_message_received_events(&h)
+        .into_iter()
+        .filter(|message| {
+            message.kind == tau_proto::AgentMessageKind::WatchProviderStatus
+                && message.recipient_id.as_str() == watcher_id
+        })
+        .collect();
+    assert_eq!(watcher_statuses.len(), 4);
+    assert!(matches!(
+        watcher_statuses[0]
+            .watch_provider_status
+            .as_ref()
+            .expect("retry status")
+            .state,
+        tau_proto::AgentWatchProviderState::Retrying {
+            category: tau_proto::AgentWatchProviderCategory::Transport,
+            attempt: 1,
+            ..
+        }
+    ));
+    assert!(matches!(
+        h.agent_watch_provider_status[&watched_id].state,
+        tau_proto::AgentWatchProviderState::TerminalError { attempt: 51, .. }
+    ));
+    assert!(
+        watcher_statuses
+            .iter()
+            .all(|message| !message.message.contains("secret-provider-body")),
+        "only closed categories may cross the watch boundary"
+    );
+
+    h.set_agent_watch(
+        &late_id,
+        &watched_id,
+        true,
+        tau_proto::AgentWatchUpdateCause::AgentWatchEnable,
+    );
+    let late = session_agent_message_received_events(&h)
+        .into_iter()
+        .rev()
+        .find(|message| {
+            message.kind == tau_proto::AgentMessageKind::WatchProviderStatus
+                && message.recipient_id.as_str() == late_id
+        })
+        .expect("late status snapshot");
+    let late_status = late.watch_provider_status.expect("late typed status");
+    assert!(late_status.initial);
+    assert!(matches!(
+        late_status.state,
+        tau_proto::AgentWatchProviderState::TerminalError { attempt: 51, .. }
+    ));
+    assert!(
+        h.agents
+            .get(&late_cid)
+            .expect("late watcher")
+            .pending_prompts
+            .is_empty(),
+        "initial snapshots are client-visible but never model prompts"
+    );
+    assert_eq!(
+        h.agent_watch_provider_status_summary(&watched_id)
+            .as_deref(),
+        Some("terminal error (context_window_exceeded)")
+    );
+    h.set_agent_watch(
+        &late_id,
+        &watched_id,
+        true,
+        tau_proto::AgentWatchUpdateCause::AgentWatchEnable,
+    );
+    let reenabled_initials = session_agent_message_received_events(&h)
+        .iter()
+        .filter(|message| {
+            message.recipient_id.as_str() == late_id
+                && message
+                    .watch_provider_status
+                    .as_ref()
+                    .is_some_and(|status| status.initial)
+        })
+        .count();
+    assert_eq!(reenabled_initials, 2);
+    assert!(h.agents[&late_cid].pending_prompts.is_empty());
+
+    h.set_agent_watch(
+        &watcher_id,
+        &watched_id,
+        false,
+        tau_proto::AgentWatchUpdateCause::AgentWatchDisable,
+    );
+    assert!(
+        h.agent_watch_provider_deliveries
+            .keys()
+            .all(|subscription_id| {
+                h.agent_watch_subscriptions
+                    .values()
+                    .any(|active| active == subscription_id)
+            }),
+        "disable must remove only the retired subscription's dedupe keys"
+    );
+    let before = session_agent_message_received_events(&h).len();
+    h.update_agent_watch_provider_status(
+        &watched_id,
+        status(tau_proto::AgentWatchProviderState::Blocked {
+            category: tau_proto::AgentWatchProviderCategory::Compaction,
+        }),
+    );
+    let after_disable = session_agent_message_received_events(&h);
+    assert_eq!(
+        after_disable
+            .iter()
+            .skip(before)
+            .filter(|message| message.recipient_id.as_str() == watcher_id)
+            .count(),
+        0
+    );
+    h.prune_agent_watch(&late_id, &watched_id);
+    assert!(h.watchers_for_agent(&watched_id).is_empty());
+    assert!(
+        h.agent_watch_provider_deliveries.is_empty(),
+        "pruning the final relation drops its delivery bucket"
+    );
+
+    h.switch_session(
+        "watch-status-next".into(),
+        tau_proto::SessionStartReason::New,
+    )
+    .expect("switch session");
+    assert!(h.agent_watch_provider_status.is_empty());
+    assert!(h.agent_watch_provider_deliveries.is_empty());
+    assert!(h.agent_watch_subscriptions.is_empty());
+    h.shutdown().expect("shutdown");
+}
+
+/// Per-agent turn generation cleanup must not erase another watched agent's
+/// active same-category dedupe bucket.
+#[test]
+fn agent_watch_provider_dedupe_isolated_across_watched_agents() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    let a_cid = ensure_test_user_agent(&mut h);
+    let b_cid = h.create_durable_user_agent(h.current_session_id.clone(), &h.selected_role.clone());
+    let watcher_cid =
+        h.create_durable_user_agent(h.current_session_id.clone(), &h.selected_role.clone());
+    let a_id = durable_agent_id_for_conversation(&h, &a_cid).to_string();
+    let b_id = durable_agent_id_for_conversation(&h, &b_cid).to_string();
+    let watcher_id = durable_agent_id_for_conversation(&h, &watcher_cid).to_string();
+    h.agents.get_mut(&watcher_cid).expect("watcher").turn_state = AgentTurnState::AgentThinking {
+        agent_prompt_id: "watcher-busy".into(),
+    };
+    for watched in [&a_id, &b_id] {
+        h.set_agent_watch(
+            &watcher_id,
+            watched,
+            true,
+            tau_proto::AgentWatchUpdateCause::AgentWatchEnable,
+        );
+    }
+    let session_id = h.current_session_id.clone();
+    let b_status = |attempt| tau_proto::AgentWatchProviderStatusNotification {
+        session_id: session_id.clone(),
+        subscription_id: String::new(),
+        turn_generation: 1,
+        agent_prompt_id: "sp-b-retry".into(),
+        state: tau_proto::AgentWatchProviderState::Retrying {
+            category: tau_proto::AgentWatchProviderCategory::Transport,
+            attempt,
+            next_retry_delay_secs: attempt,
+        },
+        initial: false,
+    };
+    h.update_agent_watch_provider_status(&b_id, b_status(1));
+    for generation in 0..5 {
+        h.set_agent_turn_state(
+            &a_cid,
+            AgentTurnState::AgentThinking {
+                agent_prompt_id: format!("sp-a-{generation}").into(),
+            },
+        );
+        h.set_agent_turn_state(&a_cid, AgentTurnState::Idle);
+    }
+    h.update_agent_watch_provider_status(&b_id, b_status(2));
+    assert_eq!(
+        session_agent_message_received_events(&h)
+            .iter()
+            .filter(|message| {
+                message.kind == tau_proto::AgentMessageKind::WatchProviderStatus
+                    && message.sender_id.as_str() == b_id
+                    && !message
+                        .watch_provider_status
+                        .as_ref()
+                        .is_some_and(|status| status.initial)
+            })
+            .count(),
+        1
+    );
+    h.shutdown().expect("shutdown");
+}
+
+/// Harness mapping from provider-owned retry vocabulary to watcher vocabulary
+/// must remain exhaustive and semantic.
+#[test]
+fn provider_retry_categories_map_to_watcher_categories() {
+    for (provider, watched) in [
+        (
+            tau_proto::ProviderRetryCategory::Transport,
+            tau_proto::AgentWatchProviderCategory::Transport,
+        ),
+        (
+            tau_proto::ProviderRetryCategory::Overload,
+            tau_proto::AgentWatchProviderCategory::Overload,
+        ),
+        (
+            tau_proto::ProviderRetryCategory::Throttle,
+            tau_proto::AgentWatchProviderCategory::Throttle,
+        ),
+        (
+            tau_proto::ProviderRetryCategory::UsageWindow,
+            tau_proto::AgentWatchProviderCategory::UsageWindow,
+        ),
+        (
+            tau_proto::ProviderRetryCategory::Account,
+            tau_proto::AgentWatchProviderCategory::Account,
+        ),
+        (
+            tau_proto::ProviderRetryCategory::Auth,
+            tau_proto::AgentWatchProviderCategory::Auth,
+        ),
+        (
+            tau_proto::ProviderRetryCategory::Unknown,
+            tau_proto::AgentWatchProviderCategory::Unknown,
+        ),
+    ] {
+        assert_eq!(crate::harness::watch_category_for_retry(provider), watched);
+    }
+}
+
+/// Restart must preserve an already delivered provider-status fact as
+/// transcript context without reconstructing memory-only retry state or
+/// re-fanning it out.
+#[test]
+fn agent_watch_provider_status_replay_preserves_context_without_refanout() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let (watched_id, watcher_id);
+    {
+        let mut h = echo_harness(&sp).expect("start");
+        let watched_cid = ensure_test_user_agent(&mut h);
+        let watcher_cid =
+            h.create_durable_user_agent(h.current_session_id.clone(), &h.selected_role.clone());
+        watched_id = durable_agent_id_for_conversation(&h, &watched_cid).to_string();
+        watcher_id = durable_agent_id_for_conversation(&h, &watcher_cid).to_string();
+        h.agents.get_mut(&watcher_cid).expect("watcher").turn_state =
+            AgentTurnState::AgentThinking {
+                agent_prompt_id: "watcher-busy".into(),
+            };
+        h.set_agent_watch(
+            &watcher_id,
+            &watched_id,
+            true,
+            tau_proto::AgentWatchUpdateCause::AgentWatchEnable,
+        );
+        h.update_agent_watch_provider_status(
+            &watched_id,
+            tau_proto::AgentWatchProviderStatusNotification {
+                session_id: h.current_session_id.clone(),
+                subscription_id: String::new(),
+                turn_generation: 1,
+                agent_prompt_id: "sp-replay-status".into(),
+                state: tau_proto::AgentWatchProviderState::Retrying {
+                    category: tau_proto::AgentWatchProviderCategory::Throttle,
+                    attempt: 8,
+                    next_retry_delay_secs: 9,
+                },
+                initial: false,
+            },
+        );
+        h.shutdown().expect("shutdown");
+    }
+    wait_for_session_unlock(&sp, "s1");
+
+    let mut resumed =
+        echo_harness_with_start_reason("s1", &sp, tau_proto::SessionStartReason::Resume)
+            .expect("resume");
+    assert!(resumed.agent_watch_provider_status.is_empty());
+    assert!(resumed.agent_watch_provider_deliveries.is_empty());
+    assert!(resumed.agent_watches.is_empty());
+    let watcher_cid = resumed
+        .agent_routes
+        .get(&watcher_id)
+        .cloned()
+        .expect("watcher restored");
+    assert!(
+        agent_tree_for_conversation(&resumed, &watcher_cid)
+            .nodes()
+            .iter()
+            .any(|node| matches!(
+                &node.entry,
+                AgentEntry::AgentMessage {
+                    kind: tau_proto::AgentMessageKind::WatchProviderStatus,
+                    watch_provider_status: Some(status),
+                    ..
+                } if status.agent_prompt_id.as_str() == "sp-replay-status"
+            )),
+        "durable live status remains transcript context"
+    );
+    assert!(
+        resumed.agents[&watcher_cid].pending_prompts.is_empty(),
+        "replay must not queue the historical status as fresh model input"
+    );
+    resumed
+        .handle_ui_prompt_submitted(UiPromptSubmitted {
+            session_id: "s1".into(),
+            text: "continue after restart".to_owned(),
+            agent_id: crate::parse_agent_id(&watcher_id),
+            message_class: tau_proto::PromptMessageClass::User,
+            originator: tau_proto::PromptOriginator::User,
+            ctx_id: None,
+        })
+        .expect("activate restored watcher");
+    let prompt = read_nth_prompt_created(&resumed, 0);
+    let context = serde_json::to_string(&prompt.context).expect("serialize prompt context");
+    assert_eq!(
+        context.matches("provider status: retrying").count(),
+        1,
+        "durable status appears exactly once in the next provider context"
+    );
+    resumed.shutdown().expect("shutdown");
+}
+
+/// The production finished-response path must retain the matching retry attempt
+/// for a terminal update, publish that update before the turn-stop edge, clear
+/// retry state after success, and ignore duplicate/stale terminal responses.
+#[test]
+fn agent_watch_provider_terminal_ordering_attempt_and_success_cleanup() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    let watched_cid = ensure_test_user_agent(&mut h);
+    let watcher_cid =
+        h.create_durable_user_agent(h.current_session_id.clone(), &h.selected_role.clone());
+    let watched_id = durable_agent_id_for_conversation(&h, &watched_cid).to_string();
+    let watcher_id = durable_agent_id_for_conversation(&h, &watcher_cid).to_string();
+    h.agents.get_mut(&watcher_cid).expect("watcher").turn_state = AgentTurnState::AgentThinking {
+        agent_prompt_id: "watcher-busy".into(),
+    };
+    h.set_agent_watch(
+        &watcher_id,
+        &watched_id,
+        true,
+        tau_proto::AgentWatchUpdateCause::AgentWatchEnable,
+    );
+
+    let terminal_prompt: tau_proto::AgentPromptId = "sp-watch-terminal".into();
+    seed_agent_thinking(&mut h, &watched_cid, terminal_prompt.as_str());
+    h.agents
+        .get_mut(&watched_cid)
+        .expect("watched")
+        .published_runtime_state = tau_proto::AgentRuntimeState::Running;
+    h.agents
+        .get_mut(&watched_cid)
+        .expect("watched")
+        .turn_generation = 1;
+    h.prompt_agents
+        .insert(terminal_prompt.clone(), watched_cid.clone());
+    let generation = h.agents[&watched_cid].turn_generation;
+    h.update_agent_watch_provider_status(
+        &watched_id,
+        tau_proto::AgentWatchProviderStatusNotification {
+            session_id: h.current_session_id.clone(),
+            subscription_id: String::new(),
+            turn_generation: generation,
+            agent_prompt_id: terminal_prompt.clone(),
+            state: tau_proto::AgentWatchProviderState::Retrying {
+                category: tau_proto::AgentWatchProviderCategory::Throttle,
+                attempt: 17,
+                next_retry_delay_secs: 30,
+            },
+            initial: false,
+        },
+    );
+    let terminal = ProviderResponseFinished {
+        agent_prompt_id: terminal_prompt.clone(),
+        agent_id: crate::parse_agent_id(&watched_id),
+        output_items: Vec::new(),
+        stop_reason: tau_proto::ProviderStopReason::Error,
+        error: Some("secret raw endpoint response".to_owned()),
+        failure_kind: Some(tau_proto::ProviderFailureKind::RequestRejected),
+        usage: None,
+        originator: tau_proto::PromptOriginator::User,
+        compaction_original_input_tokens: None,
+        compaction_compacted_input_tokens: None,
+        backend: None,
+        provider_response_id: None,
+        ws_pool_delta: None,
+    };
+    h.handle_provider_response_finished(terminal.clone())
+        .expect("terminal response");
+
+    let watched_edges: Vec<_> = session_agent_message_received_events(&h)
+        .into_iter()
+        .filter(|message| {
+            message.recipient_id.as_str() == watcher_id
+                && matches!(
+                    message.kind,
+                    tau_proto::AgentMessageKind::WatchProviderStatus
+                        | tau_proto::AgentMessageKind::WatchTurnState
+                )
+                && !message
+                    .watch_turn_state
+                    .as_ref()
+                    .is_some_and(|state| state.initial)
+        })
+        .collect();
+    let terminal_index = watched_edges
+        .iter()
+        .position(|message| {
+            matches!(
+                message
+                    .watch_provider_status
+                    .as_ref()
+                    .map(|status| &status.state),
+                Some(tau_proto::AgentWatchProviderState::TerminalError {
+                    failure_kind: tau_proto::ProviderFailureKind::RequestRejected,
+                    attempt: 18,
+                })
+            )
+        })
+        .expect("terminal status");
+    let stop_index = watched_edges
+        .iter()
+        .position(|message| {
+            message
+                .watch_turn_state
+                .as_ref()
+                .is_some_and(|state| state.state == tau_proto::AgentRuntimeState::Idle)
+        })
+        .expect("turn stop");
+    assert!(terminal_index < stop_index);
+    assert!(
+        watched_edges
+            .iter()
+            .all(|message| !message.message.contains("secret raw endpoint response"))
+    );
+    let before_duplicate = watched_edges.len();
+    h.handle_provider_response_finished(terminal)
+        .expect("duplicate terminal is ignored");
+    assert_eq!(
+        session_agent_message_received_events(&h)
+            .into_iter()
+            .filter(|message| {
+                message.recipient_id.as_str() == watcher_id
+                    && matches!(
+                        message.kind,
+                        tau_proto::AgentMessageKind::WatchProviderStatus
+                            | tau_proto::AgentMessageKind::WatchTurnState
+                    )
+                    && !message
+                        .watch_turn_state
+                        .as_ref()
+                        .is_some_and(|state| state.initial)
+            })
+            .count(),
+        before_duplicate
+    );
+
+    let success_prompt: tau_proto::AgentPromptId = "sp-watch-success".into();
+    seed_agent_thinking(&mut h, &watched_cid, success_prompt.as_str());
+    h.prompt_agents
+        .insert(success_prompt.clone(), watched_cid.clone());
+    h.update_agent_watch_provider_status(
+        &watched_id,
+        tau_proto::AgentWatchProviderStatusNotification {
+            session_id: h.current_session_id.clone(),
+            subscription_id: String::new(),
+            turn_generation: h.agents[&watched_cid].turn_generation,
+            agent_prompt_id: success_prompt.clone(),
+            state: tau_proto::AgentWatchProviderState::Retrying {
+                category: tau_proto::AgentWatchProviderCategory::Transport,
+                attempt: 3,
+                next_retry_delay_secs: 4,
+            },
+            initial: false,
+        },
+    );
+    h.handle_provider_response_finished(provider_text_response(
+        &success_prompt,
+        crate::parse_agent_id(&watched_id),
+        "completed",
+    ))
+    .expect("successful response");
+    assert!(
+        !h.agent_watch_provider_status.contains_key(&watched_id),
+        "success must clear a prior retry snapshot"
+    );
+
+    let first_attempt_prompt: tau_proto::AgentPromptId = "sp-watch-first-terminal".into();
+    seed_agent_thinking(&mut h, &watched_cid, first_attempt_prompt.as_str());
+    h.prompt_agents
+        .insert(first_attempt_prompt.clone(), watched_cid.clone());
+    let mut first_attempt_terminal = provider_text_response(
+        &first_attempt_prompt,
+        crate::parse_agent_id(&watched_id),
+        "",
+    );
+    first_attempt_terminal.stop_reason = tau_proto::ProviderStopReason::Error;
+    first_attempt_terminal.error = Some("raw first-attempt error".to_owned());
+    first_attempt_terminal.failure_kind = Some(tau_proto::ProviderFailureKind::RequestRejected);
+    h.handle_provider_response_finished(first_attempt_terminal)
+        .expect("first-attempt terminal");
+    assert!(matches!(
+        h.agent_watch_provider_status[&watched_id].state,
+        tau_proto::AgentWatchProviderState::TerminalError { attempt: 1, .. }
+    ));
+    h.shutdown().expect("shutdown");
+}
+
 #[test]
 fn disabling_agent_watch_removes_response_fanout_route() {
     let td = TempDir::new().expect("tempdir");
@@ -12228,7 +13045,7 @@ fn agent_watch_reports_structured_whole_turn_state() {
         .into_iter()
         .filter(|message| message.kind == tau_proto::AgentMessageKind::WatchTurnState)
         .collect();
-    assert_eq!(notifications.len(), 3);
+    assert_eq!(notifications.len(), 4);
     let initial = notifications[0]
         .watch_turn_state
         .as_ref()
@@ -12236,14 +13053,21 @@ fn agent_watch_reports_structured_whole_turn_state() {
     assert!(initial.initial);
     assert_eq!(initial.state, tau_proto::AgentRuntimeState::Idle);
     assert_eq!(initial.turn_generation, 0);
-    let started = notifications[1]
+    assert!(
+        notifications[1]
+            .watch_turn_state
+            .as_ref()
+            .expect("re-enabled snapshot")
+            .initial
+    );
+    let started = notifications[2]
         .watch_turn_state
         .as_ref()
         .expect("start payload");
     assert!(!started.initial);
     assert_eq!(started.state, tau_proto::AgentRuntimeState::Running);
     assert_eq!(started.turn_generation, 1);
-    let stopped = notifications[2]
+    let stopped = notifications[3]
         .watch_turn_state
         .as_ref()
         .expect("stop payload");
@@ -12257,7 +13081,7 @@ fn agent_watch_reports_structured_whole_turn_state() {
             .into_iter()
             .filter(|message| message.kind == tau_proto::AgentMessageKind::WatchTurnState)
             .count(),
-        3
+        4
     );
 
     h.set_agent_watch(
@@ -12360,7 +13184,7 @@ fn mutual_watch_mixed_lifecycle_turn_emits_paired_state() {
             .is_empty(),
         "initial watch snapshots must not create lifecycle turns"
     );
-    let lifecycle_prompt = PendingPrompt::watch_turn_state(
+    let lifecycle_prompt = PendingPrompt::watch_notification(
         "[tau-internal]: Watched agent peer started a model turn".to_owned(),
     );
     h.dispatch_prompt_for_agent(&b_cid, lifecycle_prompt)
@@ -12452,6 +13276,71 @@ fn mutual_watch_mixed_lifecycle_turn_emits_paired_state() {
         )
     );
 
+    h.shutdown().expect("shutdown");
+}
+
+/// A successful model response to a provider-status-only turn must not be
+/// reflected back through a mutual watch and start an unbounded feedback loop.
+#[test]
+fn mutual_watch_provider_status_turn_does_not_fan_out_final_response() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    h.selected_model = Some("test/model".into());
+    let a_cid = ensure_test_user_agent(&mut h);
+    let b_cid = h.create_durable_user_agent(h.current_session_id.clone(), &h.selected_role.clone());
+    let a_id = durable_agent_id_for_conversation(&h, &a_cid).to_string();
+    let b_id = durable_agent_id_for_conversation(&h, &b_cid).to_string();
+    h.set_agent_watch(
+        &a_id,
+        &b_id,
+        true,
+        tau_proto::AgentWatchUpdateCause::AgentWatchEnable,
+    );
+    h.set_agent_watch(
+        &b_id,
+        &a_id,
+        true,
+        tau_proto::AgentWatchUpdateCause::AgentWatchEnable,
+    );
+
+    h.update_agent_watch_provider_status(
+        &a_id,
+        tau_proto::AgentWatchProviderStatusNotification {
+            session_id: h.current_session_id.clone(),
+            subscription_id: String::new(),
+            turn_generation: 1,
+            agent_prompt_id: "sp-a-retry".into(),
+            state: tau_proto::AgentWatchProviderState::Retrying {
+                category: tau_proto::AgentWatchProviderCategory::Transport,
+                attempt: 1,
+                next_retry_delay_secs: 1,
+            },
+            initial: false,
+        },
+    );
+    let response_prompt_id = match &h.agents[&b_cid].turn_state {
+        AgentTurnState::AgentThinking { agent_prompt_id } => agent_prompt_id.clone(),
+        state => panic!("status notification should dispatch b: {state:?}"),
+    };
+    assert!(h.agents[&b_cid].lifecycle_notification_only_turn);
+    h.handle_provider_response_finished(provider_text_response(
+        &response_prompt_id,
+        crate::parse_agent_id(&b_id),
+        "acknowledged status",
+    ))
+    .expect("finish status-only turn");
+
+    assert!(
+        !session_agent_message_received_events(&h)
+            .iter()
+            .any(|message| {
+                message.kind == tau_proto::AgentMessageKind::WatchResponse
+                    && message.sender_id.as_str() == b_id
+                    && message.recipient_id.as_str() == a_id
+            }),
+        "successful status-only completion must not feed back through mutual watch"
+    );
     h.shutdown().expect("shutdown");
 }
 
@@ -14473,6 +15362,7 @@ fn terminating_agent_route_rejects_direct_work() {
         recipient_id: tau_proto::AgentId::parse(&recipient_id).expect("agent id"),
         kind: tau_proto::AgentMessageKind::Message,
         watch_turn_state: None,
+        watch_provider_status: None,
         message: "must be rejected".to_owned(),
     });
     assert!(h.agents[&cid].pending_prompts.is_empty());
@@ -14843,6 +15733,7 @@ fn inbound_agent_message_events_are_ignored() {
         recipient_id: crate::parse_agent_id("victim"),
         kind: tau_proto::AgentMessageKind::Message,
         watch_turn_state: None,
+        watch_provider_status: None,
         message: "forged received".to_owned(),
     });
     for forged in [forged_sent, forged_received] {

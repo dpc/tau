@@ -68,3 +68,7 @@ Terminal context classification trusts only canonical Responses envelope `code`/
 echoed nested fields and provider prose are not authoritative. A typed context-window rejection
 cannot trigger cached-WebSocket replay, transport fallback, or logical retry scheduling. Known
 canonical transient identifiers retain precedence over deterministic HTTP status classification.
+
+Cross-agent retry visibility contains only the closed structured category,
+saturating attempt, and bounded delay. Raw provider bodies, headers, credentials,
+account identifiers, and human error text remain behind the provider boundary.

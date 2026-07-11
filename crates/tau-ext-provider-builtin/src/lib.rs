@@ -1840,11 +1840,36 @@ fn emit_retry_status(
             status: Some(ProviderResponseStatusUpdate {
                 text,
                 clear_response: true,
+                retry: Some(tau_proto::ProviderRetryStatus {
+                    category: retry_class_provider_category(class),
+                    attempt: saturating_retry_attempt(job.retry_state.attempts),
+                    next_retry_delay_secs: saturating_retry_delay(delay),
+                }),
             }),
             response_stats: None,
             originator: job.prompt.originator.clone(),
         },
     )))
+}
+
+fn retry_class_provider_category(class: RetryClass) -> tau_proto::ProviderRetryCategory {
+    match class {
+        RetryClass::Transport => tau_proto::ProviderRetryCategory::Transport,
+        RetryClass::Overload => tau_proto::ProviderRetryCategory::Overload,
+        RetryClass::Throttle => tau_proto::ProviderRetryCategory::Throttle,
+        RetryClass::UsageWindow => tau_proto::ProviderRetryCategory::UsageWindow,
+        RetryClass::Account => tau_proto::ProviderRetryCategory::Account,
+        RetryClass::Auth => tau_proto::ProviderRetryCategory::Auth,
+        RetryClass::Unknown => tau_proto::ProviderRetryCategory::Unknown,
+    }
+}
+
+fn saturating_retry_attempt(attempt: u64) -> u32 {
+    u32::try_from(attempt).unwrap_or(u32::MAX)
+}
+
+fn saturating_retry_delay(delay: Duration) -> u32 {
+    u32::try_from(delay.as_secs()).unwrap_or(u32::MAX)
 }
 
 fn materialize_prompt(prompt: &tau_proto::AgentPromptCreated) -> tau_proto::AgentPromptCreated {
@@ -2130,6 +2155,7 @@ fn emit_retry_banner<W: Write>(
             status: Some(ProviderResponseStatusUpdate {
                 text: banner,
                 clear_response: true,
+                retry: None,
             }),
             response_stats: None,
             originator: originator.clone(),
@@ -2817,6 +2843,7 @@ fn emit_repetition_detected_update<W: Write>(
             status: Some(ProviderResponseStatusUpdate {
                 text,
                 clear_response: true,
+                retry: None,
             }),
             response_stats: None,
             originator: originator.clone(),

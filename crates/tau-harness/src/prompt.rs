@@ -631,6 +631,67 @@ pub(crate) fn watch_turn_transition_text(
     ))
 }
 
+/// Render only closed structured provider categories; no provider-authored text
+/// crosses the watch boundary.
+pub(crate) fn watch_provider_status_text(
+    sender_label: &str,
+    status: &tau_proto::AgentWatchProviderStatusNotification,
+) -> String {
+    match status.state {
+        tau_proto::AgentWatchProviderState::Retrying {
+            category,
+            attempt,
+            next_retry_delay_secs,
+        } => format!(
+            "[tau-internal]: Watched agent {sender_label} provider status: retrying ({category}, attempt {}, next retry about {}s)",
+            attempt,
+            next_retry_delay_secs,
+            category = category.as_str(),
+        ),
+        tau_proto::AgentWatchProviderState::RecoveringContext { .. } => format!(
+            "[tau-internal]: Watched agent {sender_label} provider status: recovering_context (context_window)"
+        ),
+        tau_proto::AgentWatchProviderState::Blocked { category } => format!(
+            "[tau-internal]: Watched agent {sender_label} provider status: blocked ({})",
+            category.as_str()
+        ),
+        tau_proto::AgentWatchProviderState::DispatchUncertain { category } => format!(
+            "[tau-internal]: Watched agent {sender_label} provider status: dispatch_uncertain ({})",
+            category.as_str()
+        ),
+        tau_proto::AgentWatchProviderState::TerminalError { failure_kind, .. } => format!(
+            "[tau-internal]: Watched agent {sender_label} provider status: terminal error ({})",
+            failure_kind.as_str()
+        ),
+    }
+}
+
+/// Render a concise provider snapshot for an `agent_watch` tool result.
+pub(crate) fn watch_provider_status_summary(state: &tau_proto::AgentWatchProviderState) -> String {
+    match state {
+        tau_proto::AgentWatchProviderState::Retrying {
+            category,
+            attempt,
+            next_retry_delay_secs,
+        } => format!(
+            "retrying ({}, attempt {attempt}, next retry about {next_retry_delay_secs}s)",
+            category.as_str()
+        ),
+        tau_proto::AgentWatchProviderState::RecoveringContext { .. } => {
+            "recovering context".to_owned()
+        }
+        tau_proto::AgentWatchProviderState::Blocked { category } => {
+            format!("blocked ({})", category.as_str())
+        }
+        tau_proto::AgentWatchProviderState::DispatchUncertain { category } => {
+            format!("dispatch uncertain ({})", category.as_str())
+        }
+        tau_proto::AgentWatchProviderState::TerminalError { failure_kind, .. } => {
+            format!("terminal error ({})", failure_kind.as_str())
+        }
+    }
+}
+
 struct SortHelper;
 
 impl handlebars::HelperDef for SortHelper {
@@ -899,6 +960,7 @@ pub(crate) fn assemble_prompt_context_from(
                 sender_session_id,
                 kind,
                 watch_turn_state,
+                watch_provider_status,
                 message,
                 ..
             } => match kind {
@@ -992,6 +1054,29 @@ pub(crate) fn assemble_prompt_context_from(
                                 items: vec![ContextItem::Message(tau_proto::MessageItem {
                                     role: tau_proto::ContextRole::User,
                                     content: vec![tau_proto::ContentPart::Text { text }],
+                                    phase: None,
+                                    responses_raw_json: None,
+                                })],
+                            },
+                        ));
+                    }
+                }
+                tau_proto::AgentMessageKind::WatchProviderStatus => {
+                    if let (tau_core::AgentMessageDirection::Inbound, Some(status)) =
+                        (direction, watch_provider_status.as_ref())
+                        && !status.initial
+                    {
+                        let sender_label = sender_session_id
+                            .as_ref()
+                            .map(|session_id| format!("{session_id}/{sender_id}"))
+                            .unwrap_or_else(|| sender_id.to_string());
+                        blocks.push(tau_proto::ContextBlock::UserInput(
+                            tau_proto::UserInputBlock {
+                                items: vec![ContextItem::Message(tau_proto::MessageItem {
+                                    role: tau_proto::ContextRole::User,
+                                    content: vec![tau_proto::ContentPart::Text {
+                                        text: watch_provider_status_text(&sender_label, status),
+                                    }],
                                     phase: None,
                                     responses_raw_json: None,
                                 })],
