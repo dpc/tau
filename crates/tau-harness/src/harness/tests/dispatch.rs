@@ -584,6 +584,7 @@ pub(super) fn provider_text_response(
         })],
         stop_reason: tau_proto::ProviderStopReason::EndTurn,
         error: None,
+        failure_kind: None,
         usage: None,
         originator: tau_proto::PromptOriginator::User,
         compaction_original_input_tokens: None,
@@ -604,6 +605,7 @@ fn provider_repetition_response(
         output_items: Vec::new(),
         stop_reason: tau_proto::ProviderStopReason::RepetitionDetected,
         error: Some("provider stream repetition detected".to_owned()),
+        failure_kind: None,
         usage: None,
         originator: tau_proto::PromptOriginator::User,
         compaction_original_input_tokens: None,
@@ -818,6 +820,7 @@ fn seed_background_placeholder_for_agent(
                 })],
                 stop_reason: tau_proto::ProviderStopReason::ToolCalls,
                 error: None,
+                failure_kind: None,
                 usage: None,
                 originator: tau_proto::PromptOriginator::User,
                 compaction_original_input_tokens: None,
@@ -1051,6 +1054,7 @@ fn setup_routed_test_tool_call(call_id: &str, tool_name: &str) -> (TempDir, Harn
         })],
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
+        failure_kind: None,
         usage: None,
         originator: tau_proto::PromptOriginator::User,
         compaction_original_input_tokens: None,
@@ -1141,6 +1145,7 @@ fn invalid_tool_arguments_are_rejected_before_logical_dispatch() {
         })],
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
+        failure_kind: None,
         usage: None,
         originator: tau_proto::PromptOriginator::User,
         compaction_original_input_tokens: None,
@@ -1265,6 +1270,7 @@ fn invalid_tool_arguments_are_repaired_and_revalidated_before_dispatch() {
         })],
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
+        failure_kind: None,
         usage: None,
         originator: tau_proto::PromptOriginator::User,
         compaction_original_input_tokens: None,
@@ -1359,6 +1365,7 @@ fn repaired_tool_arguments_are_rejected_when_revalidation_fails() {
         })],
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
+        failure_kind: None,
         usage: None,
         originator: tau_proto::PromptOriginator::User,
         compaction_original_input_tokens: None,
@@ -1783,11 +1790,12 @@ fn side_agent_error_response_propagates_error_result() {
         .find_map(|(spid, prompt_cid)| (prompt_cid.as_str() != "default").then_some(spid.clone()))
         .expect("side prompt id");
     h.handle_provider_response_finished(ProviderResponseFinished {
-        agent_prompt_id: side_spid,
+        agent_prompt_id: side_spid.clone(),
         agent_id: tau_proto::AgentId::parse("side").expect("agent id"),
         output_items: Vec::new(),
         stop_reason: tau_proto::ProviderStopReason::Error,
         error: Some("provider failed".to_owned()),
+        failure_kind: Some(tau_proto::ProviderFailureKind::ContextWindowExceeded),
         usage: None,
         originator: tau_proto::PromptOriginator::Extension {
             name: "conn-side-error".into(),
@@ -1814,6 +1822,8 @@ fn side_agent_error_response_propagates_error_result() {
         .expect("start-agent result routed");
     assert!(result.text.is_empty());
     assert_eq!(result.error.as_deref(), Some("provider failed"));
+    assert!(!h.prompt_agents.contains_key(&side_spid));
+    assert!(h.turn_state.is_idle());
 }
 
 #[test]
@@ -2395,6 +2405,7 @@ fn unavailable_tool_errors_are_actionable_for_unknown_and_disabled_tools() {
         ],
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
+        failure_kind: None,
         usage: None,
         originator: tau_proto::PromptOriginator::User,
         compaction_original_input_tokens: None,
@@ -2525,6 +2536,7 @@ fn unknown_tool_suggestion_uses_prompt_tool_snapshot() {
         ],
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
+        failure_kind: None,
         usage: None,
         originator: tau_proto::PromptOriginator::User,
         compaction_original_input_tokens: None,
@@ -2611,6 +2623,7 @@ fn old_prompt_missing_provider_wins_over_strict_schema_validation() {
         })],
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
+        failure_kind: None,
         usage: None,
         originator: tau_proto::PromptOriginator::User,
         compaction_original_input_tokens: None,
@@ -2704,6 +2717,7 @@ fn disconnect_with_multiple_inflight_tools_cleans_up_all_calls() {
         ],
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
+        failure_kind: None,
         usage: None,
         originator: tau_proto::PromptOriginator::User,
         compaction_original_input_tokens: None,
@@ -2898,6 +2912,7 @@ fn background_result_clears_actual_running_call_without_blocking_later_tool() {
         ],
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
+        failure_kind: None,
         usage: None,
         originator: tau_proto::PromptOriginator::User,
         compaction_original_input_tokens: None,
@@ -2989,6 +3004,7 @@ fn background_error_clears_actual_running_call() {
         ],
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
+        failure_kind: None,
         usage: None,
         originator: tau_proto::PromptOriginator::User,
         compaction_original_input_tokens: None,
@@ -3092,6 +3108,7 @@ fn background_cancel_clears_actual_running_call() {
         ],
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
+        failure_kind: None,
         usage: None,
         originator: tau_proto::PromptOriginator::User,
         compaction_original_input_tokens: None,
@@ -3233,6 +3250,7 @@ fn disconnect_background_errors_do_not_affect_other_inflight_tools() {
         ],
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
+        failure_kind: None,
         usage: None,
         originator: tau_proto::PromptOriginator::User,
         compaction_original_input_tokens: None,
@@ -3332,6 +3350,7 @@ fn disconnect_idle_multi_background_errors_dispatch_prompt_after_batch() {
         ],
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
+        failure_kind: None,
         usage: None,
         originator: tau_proto::PromptOriginator::User,
         compaction_original_input_tokens: None,
@@ -3439,6 +3458,7 @@ fn disconnect_mixed_foreground_and_background_errors_dispatch_prompt_after_batch
         ],
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
+        failure_kind: None,
         usage: None,
         originator: tau_proto::PromptOriginator::User,
         compaction_original_input_tokens: None,
@@ -3800,6 +3820,7 @@ fn provider_owner_validation_rejects_provider_event_message_emit() {
                 output_items: Vec::new(),
                 stop_reason: tau_proto::ProviderStopReason::EndTurn,
                 error: None,
+                failure_kind: None,
                 usage: None,
                 originator: tau_proto::PromptOriginator::User,
                 compaction_original_input_tokens: None,
@@ -3889,6 +3910,7 @@ fn cancel_publishes_tool_cancel_request() {
         })],
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
+        failure_kind: None,
         usage: None,
         originator: tau_proto::PromptOriginator::User,
         compaction_original_input_tokens: None,
@@ -4026,6 +4048,7 @@ fn cancel_remaining_backgrounded_extension_call_publishes_background_error_only(
         })],
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
+        failure_kind: None,
         usage: None,
         originator: tau_proto::PromptOriginator::User,
         compaction_original_input_tokens: None,
@@ -4299,6 +4322,7 @@ fn live_cancel_tools_running_includes_already_backgrounded_siblings() {
         ],
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
+        failure_kind: None,
         usage: None,
         originator: tau_proto::PromptOriginator::User,
         compaction_original_input_tokens: None,
@@ -4455,6 +4479,7 @@ fn cancel_backgrounded_builtin_agent_start_publishes_background_error_only() {
         })],
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
+        failure_kind: None,
         usage: None,
         originator: tau_proto::PromptOriginator::User,
         compaction_original_input_tokens: None,
@@ -4533,6 +4558,7 @@ fn live_cancel_backgrounded_builtin_agent_start_keeps_passive_completion_notice(
         })],
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
+        failure_kind: None,
         usage: None,
         originator: tau_proto::PromptOriginator::User,
         compaction_original_input_tokens: None,
@@ -4740,6 +4766,7 @@ fn cancel_while_thinking_terminates_prompt_and_drops_late_response() {
         })],
         stop_reason: tau_proto::ProviderStopReason::EndTurn,
         error: None,
+        failure_kind: None,
         usage: None,
         originator: tau_proto::PromptOriginator::User,
         compaction_original_input_tokens: None,
@@ -5246,6 +5273,7 @@ fn tool_turn_dispatches_provider_calls_without_global_locking() {
         ],
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
+        failure_kind: None,
         usage: match (None, None, None) {
             (None, None, None) => None,
             (input_tokens, cached_tokens, output_tokens) => Some(tau_proto::ProviderTokenUsage {
@@ -5366,6 +5394,7 @@ fn multi_tool_turn_keeps_all_results_in_followup_prompt() {
         ],
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
+        failure_kind: None,
         usage: match (None, None, None) {
             (None, None, None) => None,
             (input_tokens, cached_tokens, output_tokens) => Some(tau_proto::ProviderTokenUsage {
@@ -5918,6 +5947,7 @@ fn queued_prompt_is_steered_into_next_round_after_tool_result() {
         })],
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
+        failure_kind: None,
         usage: match (None, None, None) {
             (None, None, None) => None,
             (input_tokens, cached_tokens, output_tokens) => Some(tau_proto::ProviderTokenUsage {
@@ -6075,6 +6105,7 @@ fn tool_calls_stop_reason_without_tool_items_does_not_wedge_turn() {
         })],
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
+        failure_kind: None,
         usage: None,
         originator: tau_proto::PromptOriginator::User,
         compaction_original_input_tokens: None,
@@ -6129,6 +6160,7 @@ fn agent_prompt_created_uses_refs_for_linear_extension() {
 
         stop_reason: tau_proto::ProviderStopReason::EndTurn,
         error: None,
+        failure_kind: None,
         usage: match (None, None, None) {
             (None, None, None) => None,
             (input_tokens, cached_tokens, output_tokens) => Some(tau_proto::ProviderTokenUsage {
@@ -6189,6 +6221,7 @@ fn linear_agent_prompts_strictly_extend_previous_messages() {
 
         stop_reason: tau_proto::ProviderStopReason::EndTurn,
         error: None,
+        failure_kind: None,
         usage: match (None, None, None) {
             (None, None, None) => None,
             (input_tokens, cached_tokens, output_tokens) => Some(tau_proto::ProviderTokenUsage {
@@ -6268,6 +6301,7 @@ fn response_id_anchors_next_prompt_with_previous_response() {
 
         stop_reason: tau_proto::ProviderStopReason::EndTurn,
         error: None,
+        failure_kind: None,
         usage: match (None, None, None) {
             (None, None, None) => None,
             (input_tokens, cached_tokens, output_tokens) => Some(tau_proto::ProviderTokenUsage {
@@ -6326,6 +6360,7 @@ fn chained_sub_chunk_cacheable_tokens_does_not_emit_diagnostic() {
 
         stop_reason: tau_proto::ProviderStopReason::EndTurn,
         error: None,
+        failure_kind: None,
         usage: match (Some(500), Some(0), None) {
             (None, None, None) => None,
             (input_tokens, cached_tokens, output_tokens) => Some(tau_proto::ProviderTokenUsage {
@@ -6365,6 +6400,7 @@ fn chained_sub_chunk_cacheable_tokens_does_not_emit_diagnostic() {
 
         stop_reason: tau_proto::ProviderStopReason::EndTurn,
         error: None,
+        failure_kind: None,
         usage: match (Some(500), Some(0), None) {
             (None, None, None) => None,
             (input_tokens, cached_tokens, output_tokens) => Some(tau_proto::ProviderTokenUsage {
@@ -6428,6 +6464,7 @@ fn model_switch_invalidates_chain_anchor() {
 
         stop_reason: tau_proto::ProviderStopReason::EndTurn,
         error: None,
+        failure_kind: None,
         usage: match (None, None, None) {
             (None, None, None) => None,
             (input_tokens, cached_tokens, output_tokens) => Some(tau_proto::ProviderTokenUsage {
@@ -6500,6 +6537,7 @@ fn params_drift_invalidates_chain_anchor() {
 
         stop_reason: tau_proto::ProviderStopReason::EndTurn,
         error: None,
+        failure_kind: None,
         usage: match (None, None, None) {
             (None, None, None) => None,
             (input_tokens, cached_tokens, output_tokens) => Some(tau_proto::ProviderTokenUsage {
@@ -6570,6 +6608,7 @@ fn system_prompt_drift_invalidates_chain_anchor() {
 
         stop_reason: tau_proto::ProviderStopReason::EndTurn,
         error: None,
+        failure_kind: None,
         usage: match (None, None, None) {
             (None, None, None) => None,
             (input_tokens, cached_tokens, output_tokens) => Some(tau_proto::ProviderTokenUsage {
@@ -6652,6 +6691,7 @@ fn tools_drift_invalidates_chain_anchor() {
 
         stop_reason: tau_proto::ProviderStopReason::EndTurn,
         error: None,
+        failure_kind: None,
         usage: match (None, None, None) {
             (None, None, None) => None,
             (input_tokens, cached_tokens, output_tokens) => Some(tau_proto::ProviderTokenUsage {
@@ -6734,6 +6774,7 @@ fn stable_params_preserve_chain_anchor() {
 
         stop_reason: tau_proto::ProviderStopReason::EndTurn,
         error: None,
+        failure_kind: None,
         usage: match (None, None, None) {
             (None, None, None) => None,
             (input_tokens, cached_tokens, output_tokens) => Some(tau_proto::ProviderTokenUsage {
@@ -6795,6 +6836,7 @@ fn missing_response_id_leaves_chain_unset() {
 
         stop_reason: tau_proto::ProviderStopReason::EndTurn,
         error: None,
+        failure_kind: None,
         usage: match (None, None, None) {
             (None, None, None) => None,
             (input_tokens, cached_tokens, output_tokens) => Some(tau_proto::ProviderTokenUsage {
@@ -6867,6 +6909,7 @@ fn queued_prompt_extends_completed_first_prompt() {
 
         stop_reason: tau_proto::ProviderStopReason::EndTurn,
         error: None,
+        failure_kind: None,
         usage: match (None, None, None) {
             (None, None, None) => None,
             (input_tokens, cached_tokens, output_tokens) => Some(tau_proto::ProviderTokenUsage {
@@ -7474,6 +7517,7 @@ fn resumed_lost_background_tool_gets_error_and_wait_returns() {
         })],
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
+        failure_kind: None,
         usage: None,
         originator: tau_proto::PromptOriginator::User,
         compaction_original_input_tokens: None,
@@ -7599,6 +7643,7 @@ fn resumed_completed_background_result_can_be_consumed_by_no_arg_wait() {
         })],
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
+        failure_kind: None,
         usage: None,
         originator: tau_proto::PromptOriginator::User,
         compaction_original_input_tokens: None,
@@ -8197,6 +8242,7 @@ fn manual_standalone_compact_installs_one_boundary() {
         })],
         stop_reason: tau_proto::ProviderStopReason::EndTurn,
         error: None,
+        failure_kind: None,
         originator: tau_proto::PromptOriginator::User,
         usage: None,
         compaction_original_input_tokens: None,
@@ -8319,6 +8365,7 @@ fn standalone_compaction_failure_does_not_retry_automatically() {
         output_items: Vec::new(),
         stop_reason: tau_proto::ProviderStopReason::EndTurn,
         error: Some("secret provider detail".to_owned()),
+        failure_kind: None,
         originator: tau_proto::PromptOriginator::User,
         usage: None,
         compaction_original_input_tokens: None,
@@ -8486,6 +8533,7 @@ fn standalone_auto_compaction_schedules_at_threshold() {
         })],
         stop_reason: tau_proto::ProviderStopReason::EndTurn,
         error: None,
+        failure_kind: None,
         originator: tau_proto::PromptOriginator::User,
         usage: None,
         compaction_original_input_tokens: None,
@@ -8651,6 +8699,7 @@ fn start_background_tool_and_finish_placeholder_turn(
         })],
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
+        failure_kind: None,
         usage: None,
         originator: tau_proto::PromptOriginator::User,
         compaction_original_input_tokens: None,
@@ -9243,6 +9292,7 @@ fn start_agent_request_dispatches_while_tool_is_running_and_restores_turn() {
         })],
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
+        failure_kind: None,
         usage: match (None, None, None) {
             (None, None, None) => None,
             (input_tokens, cached_tokens, output_tokens) => Some(tau_proto::ProviderTokenUsage {
@@ -9325,6 +9375,7 @@ fn start_agent_request_dispatches_while_tool_is_running_and_restores_turn() {
 
         stop_reason: tau_proto::ProviderStopReason::EndTurn,
         error: None,
+        failure_kind: None,
         usage: match (None, None, None) {
             (None, None, None) => None,
             (input_tokens, cached_tokens, output_tokens) => Some(tau_proto::ProviderTokenUsage {
@@ -9438,6 +9489,7 @@ fn delegated_agent_user_interaction_prevents_auto_suspend() {
         })],
         stop_reason: tau_proto::ProviderStopReason::EndTurn,
         error: None,
+        failure_kind: None,
         usage: None,
         originator: tau_proto::PromptOriginator::Extension {
             name: "conn-delegate".into(),
@@ -9524,6 +9576,7 @@ fn side_agent_drains_agent_message_before_extension_teardown() {
         })],
         stop_reason: tau_proto::ProviderStopReason::EndTurn,
         error: None,
+        failure_kind: None,
         usage: None,
         originator: tau_proto::PromptOriginator::Extension {
             name: "conn-delegate".into(),
@@ -9578,6 +9631,7 @@ fn side_agent_drains_agent_message_before_extension_teardown() {
         })],
         stop_reason: tau_proto::ProviderStopReason::EndTurn,
         error: None,
+        failure_kind: None,
         usage: None,
         originator: tau_proto::PromptOriginator::Extension {
             name: "conn-delegate".into(),
@@ -9729,6 +9783,7 @@ fn start_agent_request_during_tool_call_branches_off_unresolved_tool_use() {
         })],
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
+        failure_kind: None,
         usage: match (None, None, None) {
             (None, None, None) => None,
             (input_tokens, cached_tokens, output_tokens) => Some(tau_proto::ProviderTokenUsage {
@@ -9864,6 +9919,7 @@ fn non_tool_start_agent_request_starts_fresh_agent_branch() {
 
         stop_reason: tau_proto::ProviderStopReason::EndTurn,
         error: None,
+        failure_kind: None,
         usage: match (None, None, None) {
             (None, None, None) => None,
             (input_tokens, cached_tokens, output_tokens) => Some(tau_proto::ProviderTokenUsage {
@@ -10015,6 +10071,7 @@ fn non_tool_start_agent_request_preserves_tool_choice_without_parent_chain_ancho
 
         stop_reason: tau_proto::ProviderStopReason::EndTurn,
         error: None,
+        failure_kind: None,
         usage: match (None, None, None) {
             (None, None, None) => None,
             (input_tokens, cached_tokens, output_tokens) => Some(tau_proto::ProviderTokenUsage {
@@ -10130,6 +10187,7 @@ fn delegate_start_agent_request_keeps_tool_choice_auto() {
         })],
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
+        failure_kind: None,
         usage: match (None, None, None) {
             (None, None, None) => None,
             (input_tokens, cached_tokens, output_tokens) => Some(tau_proto::ProviderTokenUsage {
@@ -10340,6 +10398,7 @@ fn side_conversation_shared_tool_dispatches_through_parent_exclusive_delegate() 
         })],
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
+        failure_kind: None,
         usage: match (None, None, None) {
             (None, None, None) => None,
             (input_tokens, cached_tokens, output_tokens) => Some(tau_proto::ProviderTokenUsage {
@@ -10397,6 +10456,7 @@ fn side_conversation_shared_tool_dispatches_through_parent_exclusive_delegate() 
         })],
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
+        failure_kind: None,
         usage: match (None, None, None) {
             (None, None, None) => None,
             (input_tokens, cached_tokens, output_tokens) => Some(tau_proto::ProviderTokenUsage {
@@ -10519,6 +10579,7 @@ fn background_completion_from_preserved_delegate_queues_on_delegate() {
         })],
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
+        failure_kind: None,
         usage: None,
         originator: tau_proto::PromptOriginator::User,
         compaction_original_input_tokens: None,
@@ -10552,6 +10613,7 @@ fn background_completion_from_preserved_delegate_queues_on_delegate() {
         })],
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
+        failure_kind: None,
         usage: None,
         originator: tau_proto::PromptOriginator::Extension {
             name: "core-subagents".into(),
@@ -10596,6 +10658,7 @@ fn background_completion_from_preserved_delegate_queues_on_delegate() {
         })],
         stop_reason: tau_proto::ProviderStopReason::EndTurn,
         error: None,
+        failure_kind: None,
         usage: None,
         originator: tau_proto::PromptOriginator::Extension {
             name: "core-subagents".into(),
@@ -10788,6 +10851,7 @@ fn canceled_side_conversation_drops_inner_background_completion() {
         })],
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
+        failure_kind: None,
         usage: None,
         originator: tau_proto::PromptOriginator::User,
         compaction_original_input_tokens: None,
@@ -10822,6 +10886,7 @@ fn canceled_side_conversation_drops_inner_background_completion() {
         })],
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
+        failure_kind: None,
         usage: None,
         originator: tau_proto::PromptOriginator::Extension {
             name: "core-subagents".into(),
@@ -10936,6 +11001,7 @@ fn background_notification_suppression_keeps_error_event_but_skips_prompt() {
         })],
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
+        failure_kind: None,
         usage: None,
         originator: tau_proto::PromptOriginator::User,
         compaction_original_input_tokens: None,
@@ -11162,6 +11228,7 @@ fn backgrounded_tool_progress_is_not_published() {
         })],
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
+        failure_kind: None,
         usage: None,
         originator: tau_proto::PromptOriginator::User,
         compaction_original_input_tokens: None,
@@ -11448,6 +11515,7 @@ fn wait_tool_reply_is_folded_into_followup_prompt() {
         })],
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
+        failure_kind: None,
         usage: None,
         originator: tau_proto::PromptOriginator::User,
         compaction_original_input_tokens: None,
@@ -11557,6 +11625,7 @@ fn delegate_launcher_does_not_block_same_turn_exclusive_tool() {
         ],
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
+        failure_kind: None,
         usage: None,
         originator: tau_proto::PromptOriginator::User,
         compaction_original_input_tokens: None,
@@ -11663,6 +11732,7 @@ fn mutating_tools_in_distinct_side_conversations_dispatch_concurrently() {
         ],
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
+        failure_kind: None,
         usage: None,
         originator: tau_proto::PromptOriginator::User,
         compaction_original_input_tokens: None,
@@ -11748,6 +11818,7 @@ fn mutating_tools_in_distinct_side_conversations_dispatch_concurrently() {
         })],
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
+        failure_kind: None,
         usage: None,
         originator: tau_proto::PromptOriginator::Extension {
             name: "core-subagents".into(),
@@ -11773,6 +11844,7 @@ fn mutating_tools_in_distinct_side_conversations_dispatch_concurrently() {
         })],
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
+        failure_kind: None,
         usage: None,
         originator: tau_proto::PromptOriginator::Extension {
             name: "core-subagents".into(),
@@ -12641,6 +12713,7 @@ fn sibling_side_conv_teardown_does_not_misplace_other_side_conv_tool_result() {
         })],
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
+        failure_kind: None,
         usage: match (None, None, None) {
             (None, None, None) => None,
             (input_tokens, cached_tokens, output_tokens) => Some(tau_proto::ProviderTokenUsage {
@@ -12699,6 +12772,7 @@ fn sibling_side_conv_teardown_does_not_misplace_other_side_conv_tool_result() {
         })],
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
+        failure_kind: None,
         usage: match (None, None, None) {
             (None, None, None) => None,
             (input_tokens, cached_tokens, output_tokens) => Some(tau_proto::ProviderTokenUsage {
@@ -12765,6 +12839,7 @@ fn sibling_side_conv_teardown_does_not_misplace_other_side_conv_tool_result() {
 
         stop_reason: tau_proto::ProviderStopReason::EndTurn,
         error: None,
+        failure_kind: None,
         usage: match (None, None, None) {
             (None, None, None) => None,
             (input_tokens, cached_tokens, output_tokens) => Some(tau_proto::ProviderTokenUsage {
@@ -12907,6 +12982,7 @@ fn nested_start_agent_request_branches_from_tool_owner_conversation() {
         })],
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
+        failure_kind: None,
         usage: match (None, None, None) {
             (None, None, None) => None,
             (input_tokens, cached_tokens, output_tokens) => Some(tau_proto::ProviderTokenUsage {
@@ -12959,6 +13035,7 @@ fn nested_start_agent_request_branches_from_tool_owner_conversation() {
         })],
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
+        failure_kind: None,
         usage: match (None, None, None) {
             (None, None, None) => None,
             (input_tokens, cached_tokens, output_tokens) => Some(tau_proto::ProviderTokenUsage {
@@ -13078,6 +13155,7 @@ fn completed_side_conversation_tool_result_reprompts_parent() {
         })],
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
+        failure_kind: None,
         usage: match (None, None, None) {
             (None, None, None) => None,
             (input_tokens, cached_tokens, output_tokens) => Some(tau_proto::ProviderTokenUsage {
@@ -13135,6 +13213,7 @@ fn completed_side_conversation_tool_result_reprompts_parent() {
 
         stop_reason: tau_proto::ProviderStopReason::EndTurn,
         error: None,
+        failure_kind: None,
         usage: match (None, None, None) {
             (None, None, None) => None,
             (input_tokens, cached_tokens, output_tokens) => Some(tau_proto::ProviderTokenUsage {
@@ -13247,6 +13326,7 @@ fn recursive_delegate_prompt_contains_only_leaf_instruction() {
         })],
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
+        failure_kind: None,
         usage: match (None, None, None) {
             (None, None, None) => None,
             (input_tokens, cached_tokens, output_tokens) => Some(tau_proto::ProviderTokenUsage {
@@ -13299,6 +13379,7 @@ fn recursive_delegate_prompt_contains_only_leaf_instruction() {
         })],
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
+        failure_kind: None,
         usage: match (None, None, None) {
             (None, None, None) => None,
             (input_tokens, cached_tokens, output_tokens) => Some(tau_proto::ProviderTokenUsage {
@@ -13421,6 +13502,7 @@ fn stale_same_conversation_tool_call_response_is_ignored() {
         })],
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
+        failure_kind: None,
         usage: None,
         originator: tau_proto::PromptOriginator::User,
         compaction_original_input_tokens: None,

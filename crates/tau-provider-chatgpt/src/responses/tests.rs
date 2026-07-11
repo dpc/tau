@@ -1645,10 +1645,22 @@ fn remote_terminal_lookalikes_remain_retryable_over_http() {
         let Err(error) = result else {
             panic!("remote error must fail its current attempt");
         };
-        assert!(
-            error.retry_decision().is_some(),
-            "remote lookalike must remain pending: {status} {provider_body}"
-        );
+        if status == 499 {
+            assert!(
+                error.retry_decision().is_some(),
+                "remote 499 remains retryable"
+            );
+        } else {
+            assert_eq!(
+                error.retry_decision(),
+                None,
+                "deterministic request rejection must terminate: {provider_body}"
+            );
+            assert_eq!(
+                error.failure_kind(),
+                Some(tau_proto::ProviderFailureKind::RequestRejected)
+            );
+        }
     }
 }
 
@@ -3619,4 +3631,24 @@ fn repeated_custom_tool_input_delta_aborts_before_appending() {
         Err(crate::common::LlmError::RepetitionDetected(_))
     ));
     assert!(state.output_items.is_empty());
+}
+/// A canonical `response.failed` context rejection preserves its code so the
+/// outer logical scheduler receives a typed terminal disposition.
+#[test]
+fn response_failed_context_rejection_is_typed_terminal() {
+    let event = serde_json::json!({
+        "type": "response.failed",
+        "response": {
+            "error": {
+                "message": "Your input exceeds the context window",
+                "code": "context_length_exceeded"
+            }
+        }
+    });
+    let error = response_failed_error(&event);
+    assert_eq!(error.retry_decision(), None);
+    assert_eq!(
+        error.failure_kind(),
+        Some(tau_proto::ProviderFailureKind::ContextWindowExceeded)
+    );
 }

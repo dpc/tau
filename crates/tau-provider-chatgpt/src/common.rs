@@ -5,7 +5,7 @@ use std::time::{Duration, SystemTime};
 
 use tau_proto::{
     CborValue, ContentPart, ContextItem, ContextRole, MessageItem, OpaqueProviderItem,
-    PromptContext, PromptOriginator, ProviderResponseCompactionStatus,
+    PromptContext, PromptOriginator, ProviderFailureKind, ProviderResponseCompactionStatus,
     ProviderResponseCompactionUpdate, ProviderResponseTextDelta, ProviderTokenUsage,
     ReasoningTextItem, ReasoningTextKind, ResponsesToolCallEnvelope, SessionId, ToolCallItem,
     ToolDefinition,
@@ -90,6 +90,9 @@ pub enum LlmError {
     Json(serde_json::Error),
     Vcr(tau_vcr::VcrError),
     RepetitionDetected(tau_provider::StreamRepetition),
+    /// A canonical provider envelope proved that replaying the request is
+    /// futile.
+    ProviderFailure(ProviderFailureKind, String),
 }
 
 impl std::fmt::Display for LlmError {
@@ -105,6 +108,7 @@ impl std::fmt::Display for LlmError {
             Self::Json(e) => write!(f, "JSON error: {e}"),
             Self::Vcr(e) => write!(f, "VCR error: {e}"),
             Self::RepetitionDetected(repetition) => write!(f, "{repetition}"),
+            Self::ProviderFailure(_, detail) => write!(f, "{detail}"),
         }
     }
 }
@@ -117,6 +121,7 @@ impl std::error::Error for LlmError {
             Self::Json(e) => Some(e),
             Self::Vcr(e) => Some(e),
             Self::RepetitionDetected(_)
+            | Self::ProviderFailure(_, _)
             | Self::Canceled
             | Self::InvalidResponse(_)
             | Self::ReloadableConfig(_)
@@ -136,7 +141,10 @@ impl LlmError {
         match self {
             Self::Http(_) | Self::Io(_) => Some(RetryDecision::new(RetryClass::Transport)),
             Self::Json(_) => Some(RetryDecision::new(RetryClass::Unknown)),
-            Self::Vcr(_) | Self::RepetitionDetected(_) | Self::Canceled => None,
+            Self::Vcr(_)
+            | Self::RepetitionDetected(_)
+            | Self::ProviderFailure(_, _)
+            | Self::Canceled => None,
             Self::ReloadableConfig(_) => Some(RetryDecision::new(RetryClass::Auth)),
             Self::InvalidResponse(_) => None,
             Self::HttpStatus(code, body) => classify_http_status(*code, body, None),
@@ -158,6 +166,18 @@ impl LlmError {
         self.retry_decision()
             .map(|decision| decision.retry_after.unwrap_or(Duration::ZERO))
     }
+
+    /// Return the typed terminal provider category, when one was proven.
+    #[must_use]
+    pub fn failure_kind(&self) -> Option<ProviderFailureKind> {
+        match self {
+            Self::ProviderFailure(kind, _) => Some(*kind),
+            Self::HttpStatus(status, body) | Self::HttpStatusHinted(status, body, _) => {
+                http_failure_kind(*status, body)
+            }
+            _ => None,
+        }
+    }
 }
 
 fn classify_http_status(
@@ -171,6 +191,9 @@ fn classify_http_status(
             .and_then(|suffix| suffix.split(')').next())
             .map(ToOwned::to_owned)
     });
+    if http_failure_kind(code, body).is_some() {
+        return None;
+    }
     let class = provider_code
         .as_deref()
         .map(classify_error_code)
@@ -188,6 +211,47 @@ fn classify_http_status(
         RetryDecision::new(class)
             .with_retry_after(transport_hint.into_iter().chain(body_hint).max()),
     )
+}
+
+fn http_failure_kind(status: u16, body: &str) -> Option<ProviderFailureKind> {
+    let identifiers = canonical_error_identifiers(body);
+    if identifiers
+        .iter()
+        .any(|code| code == "context_length_exceeded")
+    {
+        return Some(ProviderFailureKind::ContextWindowExceeded);
+    }
+    let known_transient = identifiers
+        .iter()
+        .any(|code| classify_error_code(code) != RetryClass::Unknown);
+    if !known_transient && matches!(status, 400 | 404 | 409 | 413 | 422) {
+        Some(ProviderFailureKind::RequestRejected)
+    } else {
+        None
+    }
+}
+
+fn canonical_error_identifiers(body: &str) -> Vec<String> {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(body) else {
+        return Vec::new();
+    };
+    let canonical_objects = [
+        Some(&value),
+        value.get("error"),
+        value
+            .get("response")
+            .and_then(|response| response.get("error")),
+    ];
+    canonical_objects
+        .into_iter()
+        .flatten()
+        .flat_map(|object| {
+            ["code", "type"]
+                .into_iter()
+                .filter_map(|field| object[field].as_str())
+        })
+        .map(ToOwned::to_owned)
+        .collect()
 }
 
 /// Account-level limits that won't clear with any reasonable backoff —

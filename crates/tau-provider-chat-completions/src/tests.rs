@@ -1504,18 +1504,20 @@ fn non_empty_end_turn_is_accepted() {
     assert!(ensure_non_empty_end_turn(state).is_ok());
 }
 
-/// Provider codes, recursive echoes, and prose are cadence hints rather than
-/// proof that immutable Tau-owned request state cannot be repaired.
+/// Deterministic request statuses are terminal, but recursive echoes and prose
+/// never manufacture the more specific context-window category.
 #[test]
-fn terminal_looking_http_content_remains_retryable() {
+fn deterministic_request_status_is_terminal_without_trusting_echoes() {
     for body in [
         r#"{"error":{"code":"unsupported_parameter"}}"#,
         r#"{"error":{"message":"temporary upstream failure"},"echo":{"code":"unsupported_parameter"}}"#,
         r#"{"error":{"message":"temporary (type=content_policy_violation)"}}"#,
     ] {
+        assert_eq!(retry_decision_for_http_error(400, body, None), None);
         assert!(
-            retry_decision_for_http_error(400, body, None).is_some(),
-            "provider-authored terminal-looking content must retry: {body}"
+            !canonical_error_identifiers(body)
+                .iter()
+                .any(|identifier| identifier == "context_length_exceeded")
         );
     }
 }
@@ -1646,4 +1648,47 @@ fn repetition_error_finishes_with_clear_response_contract() {
     assert_eq!(finished.stop_reason, ProviderStopReason::RepetitionDetected);
     assert!(finished.output_items.is_empty());
     assert!(finished.error.as_deref().unwrap_or_default().len() <= 520);
+}
+/// OpenAI and OpenRouter canonical context errors are typed and terminal,
+/// independent of an outer scheduler's retry budget.
+#[test]
+fn canonical_context_error_bypasses_retry_scheduler() {
+    let error = LlmError::HttpStatus(
+        400,
+        r#"{"error":{"type":"invalid_request_error","code":"context_length_exceeded"}}"#.to_owned(),
+    );
+    assert_eq!(error.retry_decision(), None);
+    assert_eq!(
+        error.failure_kind(),
+        Some(tau_proto::ProviderFailureKind::ContextWindowExceeded)
+    );
+}
+
+/// Retry ownership remains unchanged for transient provider throttling.
+#[test]
+fn canonical_rate_limit_remains_retryable() {
+    let decision =
+        retry_decision_for_http_error(429, r#"{"error":{"code":"rate_limit_exceeded"}}"#, None)
+            .expect("rate limit remains retryable");
+    assert_eq!(decision.class, RetryClass::Throttle);
+}
+
+/// Status-only terminalization yields to canonical transient identifiers, but
+/// not to untrusted echoed fields.
+#[test]
+fn deterministic_status_transient_override_uses_only_error_envelope() {
+    assert!(
+        retry_decision_for_http_error(
+            400,
+            r#"{"error":{"type":"invalid_request_error","code":"rate_limit_exceeded"}}"#,
+            None,
+        )
+        .is_some()
+    );
+    let echoed = r#"{"error":{"message":"rejected"},"echo":{"code":"rate_limit_exceeded"}}"#;
+    assert_eq!(retry_decision_for_http_error(400, echoed, None), None);
+    assert_eq!(
+        http_failure_kind(400, echoed),
+        Some(tau_proto::ProviderFailureKind::RequestRejected)
+    );
 }

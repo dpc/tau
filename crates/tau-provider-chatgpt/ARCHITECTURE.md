@@ -145,3 +145,11 @@ When a cached Responses anchor has a message envelope in its server-owned prefix
 The Responses adapter publishes and serializes both Function and Custom tool
 types. Model metadata must continue to advertise both so harness prompt
 capability truth matches the upstream request.
+
+## Terminal request rejection
+
+Responses transports classify canonical provider error codes before transport recovery. In
+particular, `context_length_exceeded` is a typed terminal provider failure across WebSocket,
+SSE, and non-2xx responses: it cannot reopen a cached socket, replay a full request, fall back
+between transports, or enter the logical-prompt retry scheduler. Unknown stream failures and
+explicit transient status/code classes retain their existing retry ownership.

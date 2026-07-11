@@ -1300,3 +1300,13 @@ fn make_config(base_url: &str, account_id: Option<&str>) -> ResponsesConfig {
         supports_encrypted_reasoning: false,
     }
 }
+/// A provider-authored context rejection must never enter the cached-socket
+/// silent reconnect path that replays the full logical request.
+#[test]
+fn context_window_rejection_does_not_trigger_full_request_replay() {
+    let error = LlmError::ProviderFailure(
+        tau_proto::ProviderFailureKind::ContextWindowExceeded,
+        "stream error: maximum context reached (type=context_length_exceeded)".to_owned(),
+    );
+    assert!(!is_recoverable_ws_error(&error));
+}

@@ -204,3 +204,7 @@ metadata. Omitted or empty metadata is legacy-compatible Function-only support;
 Custom tools require explicit publication. The harness may narrow this set with
 policy but must not widen it. Changes require coordinated provider, harness,
 wire-compatibility, and serialization tests.
+
+`ProviderResponseFinished.failure_kind` carries a closed, display-prose-independent category for
+terminal provider request rejection. `context_window_exceeded` allows lifecycle consumers to
+reason about the outcome without parsing the bounded human-readable `error` field.

@@ -57,3 +57,10 @@ while allowing active prompt workers to finish and flush their messages. Explici
 disconnect/shutdown must abort retry sleeps, wake registered backend abort
 wakers, and detach/finish without leaving the harness waiting for a provider
 terminal path.
+
+## Terminal provider failures
+
+Adapters, not display text, classify canonical provider rejection envelopes. The built-in
+scheduler bypasses all retry and delay paths for typed terminal failures, including context-window
+rejection, even when required-work retries are configured without a practical limit. Raw provider
+bodies never become the typed category.

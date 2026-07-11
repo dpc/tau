@@ -230,8 +230,11 @@ Emitted by the provider backend that owns the selected model.
 
 - **`provider.response_finished`** — Final assistant output in original
   item order via `output_items`, plus optional usage, provider
-  response id, backend metadata, and echoed originator. Routed by the
-  harness based on the originator.
+  response id, backend metadata, and echoed originator. Terminal request
+  rejection may carry a machine-readable `failure_kind`; notably,
+  `context_window_exceeded` is independent of bounded display `error` prose.
+  Successful responses and retryable attempts omit it. Routed by the harness
+  based on the originator.
 - **`provider.tool_result`** / **`provider.tool_error`** — Provider-facing
   terminal tool-call completions. These satisfy provider protocol state and
   fold into prompt history, but are not logical UI tool completions. The

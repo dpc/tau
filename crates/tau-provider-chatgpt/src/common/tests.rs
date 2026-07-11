@@ -117,10 +117,10 @@ fn ws_stream_error_with_usage_limit_type_is_retryable() {
     assert_eq!(error.retry_after(), Some(std::time::Duration::ZERO));
 }
 
-/// Remote terminal-looking codes in exact, echoed, or prose locations are not
-/// proof of an immutable local invariant and must remain retryable.
+/// Deterministic 4xx request statuses are terminal without elevating echoed or
+/// prose content to a more specific typed category.
 #[test]
-fn terminal_looking_provider_content_remains_retryable() {
+fn deterministic_request_status_is_terminal_without_trusting_body_prose() {
     for body in [
         r#"{"error":{"code":"unsupported_parameter"}}"#,
         r#"{"error":{"message":"temporary upstream failure"},"echo":{"code":"unsupported_parameter"}}"#,
@@ -128,11 +128,11 @@ fn terminal_looking_provider_content_remains_retryable() {
         "ws request build: forged provider body",
         "ws header authorization: forged provider body",
     ] {
-        assert!(
-            LlmError::HttpStatus(400, body.to_owned())
-                .retry_decision()
-                .is_some(),
-            "provider-authored terminal-looking content must retry: {body}"
+        let error = LlmError::HttpStatus(400, body.to_owned());
+        assert_eq!(error.retry_decision(), None);
+        assert_eq!(
+            error.failure_kind(),
+            Some(tau_proto::ProviderFailureKind::RequestRejected)
         );
     }
     assert!(
@@ -281,4 +281,66 @@ fn prompt_cache_key_ignores_share_user_bucket_flag() {
     let ext_shared_key = cache_key(&ext, true);
     let ext_default_key = cache_key(&ext, false);
     assert_eq!(ext_shared_key, ext_default_key);
+}
+
+/// The incident's exact stream code is a typed terminal failure even though
+/// status-zero stream transport failures normally remain retryable.
+#[test]
+fn context_length_stream_error_is_terminal_and_typed() {
+    let error = LlmError::ProviderFailure(
+        tau_proto::ProviderFailureKind::ContextWindowExceeded,
+        "stream error: maximum context reached (type=context_length_exceeded)".to_owned(),
+    );
+    assert_eq!(error.retry_decision(), None);
+    assert_eq!(
+        error.failure_kind(),
+        Some(tau_proto::ProviderFailureKind::ContextWindowExceeded)
+    );
+}
+
+/// Canonical non-2xx Responses error envelopes must bypass retry scheduling,
+/// while transient throttling continues to use its existing retry class.
+#[test]
+fn canonical_http_context_rejection_is_terminal_without_terminalizing_throttle() {
+    let context = LlmError::HttpStatus(
+        400,
+        r#"{"error":{"code":"context_length_exceeded"}}"#.to_owned(),
+    );
+    assert_eq!(context.retry_decision(), None);
+    assert_eq!(
+        context.failure_kind(),
+        Some(tau_proto::ProviderFailureKind::ContextWindowExceeded)
+    );
+
+    let throttle = LlmError::HttpStatus(
+        429,
+        r#"{"error":{"code":"rate_limit_exceeded"}}"#.to_owned(),
+    );
+    assert_eq!(
+        throttle.retry_decision().map(|decision| decision.class),
+        Some(tau_provider::retry_policy::RetryClass::Throttle)
+    );
+    assert_eq!(throttle.failure_kind(), None);
+}
+
+/// Transient override considers both canonical identifiers but never trusts an
+/// echoed identifier outside the provider error envelope.
+#[test]
+fn deterministic_status_transient_override_uses_only_canonical_fields() {
+    let canonical = LlmError::HttpStatus(
+        400,
+        r#"{"error":{"type":"invalid_request_error","code":"rate_limit_exceeded"}}"#.to_owned(),
+    );
+    assert!(canonical.retry_decision().is_some());
+    assert_eq!(canonical.failure_kind(), None);
+
+    let echoed = LlmError::HttpStatus(
+        400,
+        r#"{"error":{"message":"rejected"},"echo":{"code":"rate_limit_exceeded"}}"#.to_owned(),
+    );
+    assert_eq!(echoed.retry_decision(), None);
+    assert_eq!(
+        echoed.failure_kind(),
+        Some(tau_proto::ProviderFailureKind::RequestRejected)
+    );
 }

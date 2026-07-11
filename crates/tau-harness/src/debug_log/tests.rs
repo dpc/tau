@@ -27,6 +27,7 @@ fn published_line_preserves_enriched_token_usage() {
         output_items: Vec::new(),
         stop_reason: tau_proto::ProviderStopReason::EndTurn,
         error: None,
+        failure_kind: None,
         originator: PromptOriginator::User,
         usage: Some(ProviderTokenUsage {
             model: Some(model),

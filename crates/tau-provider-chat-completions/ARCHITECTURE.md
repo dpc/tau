@@ -80,3 +80,9 @@ only for profile/model discovery, which is not a logical prompt attempt.
 Chat Completions publishes Function-only model tool support. Request conversion
 is fallible and rejects any non-Function definition as an invariant violation;
 it must never silently omit one.
+
+## Terminal request rejection
+
+Canonical OpenAI-style `error.code`/`error.type` context-window rejections are returned as typed
+terminal failures before retry scheduling. Deterministic request 4xx responses are terminal,
+while explicit transport, throttle, authentication-repair, and server failures remain retryable.

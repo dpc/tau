@@ -915,6 +915,9 @@ pub fn run_prewarm_through_shared_pool(
 /// classifier (`LlmError::retry_after`), which returns `None` and
 /// surfaces the error immediately.
 fn is_recoverable_ws_error(err: &LlmError) -> bool {
+    if err.failure_kind().is_some() {
+        return false;
+    }
     let LlmError::HttpStatus(0, body) = err else {
         return false;
     };

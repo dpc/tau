@@ -455,6 +455,7 @@ fn provider_tool_round_waits_for_all_terminal_results() {
                 ],
                 stop_reason: tau_proto::ProviderStopReason::ToolCalls,
                 error: None,
+                failure_kind: None,
                 usage: None,
                 originator: PromptOriginator::User,
                 compaction_original_input_tokens: None,

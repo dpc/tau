@@ -1416,6 +1416,7 @@ fn finished_response(
         output_items,
         stop_reason,
         error: None,
+        failure_kind: None,
         originator: tau_proto::PromptOriginator::User,
         usage: None,
         compaction_original_input_tokens: None,
@@ -4450,6 +4451,7 @@ fn model_status_shows_main_tool_usage_before_context() {
         })],
         stop_reason: ProviderStopReason::ToolCalls,
         error: None,
+        failure_kind: None,
         originator: tau_proto::PromptOriginator::Extension {
             name: "core-subagents".into(),
             query_id: "q1".to_owned(),
@@ -6405,6 +6407,7 @@ fn watched_agent_response_finished_removes_active_indicator() {
         output_items: Vec::new(),
         stop_reason: ProviderStopReason::EndTurn,
         error: None,
+        failure_kind: None,
         originator: tau_proto::PromptOriginator::Extension {
             name: "__harness__".into(),
             query_id: "delegate-1".to_owned(),
@@ -6474,6 +6477,7 @@ fn watched_agent_provider_prompt_submitted_starts_active_indicator() {
         output_items: Vec::new(),
         stop_reason: ProviderStopReason::EndTurn,
         error: None,
+        failure_kind: None,
         originator: tau_proto::PromptOriginator::Extension {
             name: "__harness__".into(),
             query_id: "delegate-1".to_owned(),
@@ -6545,6 +6549,7 @@ fn watched_agent_provider_response_update_uses_authoritative_agent_id() {
         output_items: Vec::new(),
         stop_reason: ProviderStopReason::EndTurn,
         error: None,
+        failure_kind: None,
         originator: tau_proto::PromptOriginator::Extension {
             name: "__harness__".into(),
             query_id: "parent-query".to_owned(),
@@ -6592,6 +6597,7 @@ fn watched_agent_terminal_event_wins_over_delayed_prompt_start() {
         output_items: Vec::new(),
         stop_reason: ProviderStopReason::EndTurn,
         error: None,
+        failure_kind: None,
         originator: tau_proto::PromptOriginator::Extension {
             name: "__harness__".into(),
             query_id: "delegate-1".to_owned(),

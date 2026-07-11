@@ -544,17 +544,29 @@ impl LlmError {
             }
         }
     }
+
+    fn failure_kind(&self) -> Option<tau_proto::ProviderFailureKind> {
+        let (Self::HttpStatus(status, body) | Self::HttpStatusHinted(status, body, _)) = self
+        else {
+            return None;
+        };
+        http_failure_kind(*status, body)
+    }
 }
 
 /// Classifies provider-authored HTTP failures for retry cadence.
 ///
-/// Provider codes are never sufficient proof of an immutable local invariant.
+/// Only canonical context rejection and deterministic status classes prove that
+/// replaying unchanged input is futile; arbitrary codes and prose remain hints.
 fn retry_decision_for_http_error(
     status: u16,
     body: &str,
     header_hint: Option<Duration>,
 ) -> Option<RetryDecision> {
     let provider_code = parse_json_error_code(body);
+    if http_failure_kind(status, body).is_some() {
+        return None;
+    }
     let class = provider_code
         .as_deref()
         .map(classify_error_code)
@@ -568,6 +580,40 @@ fn retry_decision_for_http_error(
         });
     let body_hint = parse_json_reset_hint(body, SystemTime::now());
     Some(RetryDecision::new(class).with_retry_after(header_hint.into_iter().chain(body_hint).max()))
+}
+
+fn http_failure_kind(status: u16, body: &str) -> Option<tau_proto::ProviderFailureKind> {
+    let identifiers = canonical_error_identifiers(body);
+    if identifiers
+        .iter()
+        .any(|code| code == "context_length_exceeded")
+    {
+        return Some(tau_proto::ProviderFailureKind::ContextWindowExceeded);
+    }
+    let known_transient = identifiers
+        .iter()
+        .any(|code| classify_error_code(code) != RetryClass::Unknown);
+    if !known_transient && matches!(status, 400 | 404 | 409 | 413 | 422) {
+        Some(tau_proto::ProviderFailureKind::RequestRejected)
+    } else {
+        None
+    }
+}
+
+fn canonical_error_identifiers(body: &str) -> Vec<String> {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(body) else {
+        return Vec::new();
+    };
+    value
+        .get("error")
+        .into_iter()
+        .flat_map(|error| {
+            ["code", "type"]
+                .into_iter()
+                .filter_map(|field| error[field].as_str())
+        })
+        .map(ToOwned::to_owned)
+        .collect()
 }
 
 /// One fallible Chat Completions attempt for the outer logical-prompt
@@ -1897,6 +1943,7 @@ fn finish_success(
         output_items: state.output_items(),
         stop_reason: state.stop_reason,
         error: None,
+        failure_kind: None,
         originator: prompt.originator.clone(),
         usage: state.usage(),
         compaction_original_input_tokens: None,
@@ -1922,6 +1969,7 @@ fn finish_error(
             _ => ProviderStopReason::Error,
         },
         error: Some(bounded_provider_error(&format!("LLM error: {error}"))),
+        failure_kind: error.failure_kind(),
         originator: prompt.originator.clone(),
         usage: None,
         compaction_original_input_tokens: None,

@@ -1555,15 +1555,29 @@ fn response_incomplete_error(event: &serde_json::Value) -> LlmError {
 }
 
 fn response_failed_error(event: &serde_json::Value) -> LlmError {
-    let detail = event
+    let error = event
         .get("response")
-        .and_then(|r| {
-            r["error"]["message"]
+        .and_then(|response| response.get("error"));
+    let detail = error
+        .and_then(|error| {
+            error["message"]
                 .as_str()
-                .or_else(|| r["error"]["code"].as_str())
+                .or_else(|| error["code"].as_str())
+                .or_else(|| error["type"].as_str())
         })
         .unwrap_or("unknown error");
-    LlmError::HttpStatus(0, format!("response failed: {detail}"))
+    let code = error.and_then(|error| error["code"].as_str().or_else(|| error["type"].as_str()));
+    let body = code.map_or_else(
+        || format!("response failed: {detail}"),
+        |code| format!("response failed: {detail} (type={code})"),
+    );
+    if code == Some("context_length_exceeded") {
+        return LlmError::ProviderFailure(
+            tau_proto::ProviderFailureKind::ContextWindowExceeded,
+            body,
+        );
+    }
+    LlmError::HttpStatus(0, body)
 }
 
 fn stream_error_event(event: &serde_json::Value) -> LlmError {
@@ -1589,6 +1603,12 @@ fn stream_error_event(event: &serde_json::Value) -> LlmError {
         Some(code) => format!("stream error: {detail} (type={code})"),
         None => format!("stream error: {detail}"),
     };
+    if error_code == Some("context_length_exceeded") {
+        return LlmError::ProviderFailure(
+            tau_proto::ProviderFailureKind::ContextWindowExceeded,
+            body,
+        );
+    }
     let reset_hint = tau_provider::retry_policy::parse_json_reset_hint(
         &event.to_string(),
         std::time::SystemTime::now(),

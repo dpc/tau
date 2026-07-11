@@ -68,6 +68,10 @@ succeeds, is canceled, the process/session shuts down, or the unchanged request
 is positively proven deterministic and invalid. Unknown remote failures retry;
 classification selects cadence, shared cooldown, visible explanation, and
 profile reload behavior rather than default termination.
+Provider adapters attach a machine-readable terminal failure category to the
+single final `ProviderResponseFinished`. Terminal request rejections bypass the
+logical-work retry scheduler even when its configured retry budget is
+effectively unlimited.
 
 Workers execute one finite attempt. Retryable outcomes return the logical job to
 one process-lifetime delayed scheduler, releasing the bounded execution slot

@@ -1308,6 +1308,7 @@ mod tests {
                 })],
                 stop_reason: tau_proto::ProviderStopReason::ToolCalls,
                 error: None,
+                failure_kind: None,
                 usage: None,
                 originator: tau_proto::PromptOriginator::User,
                 compaction_original_input_tokens: None,

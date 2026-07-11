@@ -758,6 +758,7 @@ fn deferred_tool_result_persists_after_call_tracking_is_cleared() {
             })],
             stop_reason: tau_proto::ProviderStopReason::ToolCalls,
             error: None,
+            failure_kind: None,
             usage: None,
             originator: tau_proto::PromptOriginator::User,
             compaction_original_input_tokens: None,

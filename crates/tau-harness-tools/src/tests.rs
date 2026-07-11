@@ -458,6 +458,7 @@ fn agent_watch_notification_extracts_assistant_response_text() {
         })],
         stop_reason: tau_proto::ProviderStopReason::EndTurn,
         error: None,
+        failure_kind: None,
         usage: None,
         originator: tau_proto::PromptOriginator::User,
         compaction_original_input_tokens: None,
@@ -490,6 +491,7 @@ fn agent_watch_ignores_mid_turn_tool_call_responses() {
         })],
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
+        failure_kind: None,
         usage: None,
         originator: tau_proto::PromptOriginator::User,
         compaction_original_input_tokens: None,
@@ -520,6 +522,7 @@ fn agent_watch_ignores_internal_originated_responses() {
         })],
         stop_reason: tau_proto::ProviderStopReason::EndTurn,
         error: None,
+        failure_kind: None,
         usage: None,
         originator: tau_proto::PromptOriginator::Extension {
             name: tau_proto::ExtensionName::new("__harness__"),

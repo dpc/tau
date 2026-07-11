@@ -643,6 +643,7 @@ fn representative_events() -> Vec<Event> {
             })],
             stop_reason: ProviderStopReason::EndTurn,
             error: None,
+            failure_kind: None,
             usage: None,
             originator: PromptOriginator::User,
 
@@ -2281,6 +2282,7 @@ fn execution_events_use_provider_wire_family() {
                 agent_id: agent_id("engineer_abcd1234"),
                 stop_reason: ProviderStopReason::EndTurn,
                 error: None,
+                failure_kind: None,
                 originator: PromptOriginator::User,
                 output_items: Vec::new(),
                 usage: None,
@@ -3434,5 +3436,54 @@ fn provider_model_supported_tool_types_json_roundtrip() {
     assert_eq!(
         encoded["supported_tool_types"],
         serde_json::json!(["function", "custom"])
+    );
+}
+/// Terminal provider failure categories have stable snake-case wire values,
+/// while old response frames without the additive field remain decodable.
+#[test]
+fn provider_failure_kind_wire_contract_is_backward_compatible() {
+    assert_eq!(
+        serde_json::to_value(ProviderFailureKind::ContextWindowExceeded).expect("serialize"),
+        serde_json::json!("context_window_exceeded")
+    );
+    assert_eq!(
+        serde_json::to_value(ProviderFailureKind::RequestRejected).expect("serialize"),
+        serde_json::json!("request_rejected")
+    );
+
+    let mut value = serde_json::to_value(ProviderResponseFinished {
+        agent_prompt_id: "sp-wire".into(),
+        agent_id: agent_id("engineer_abcd1234"),
+        output_items: Vec::new(),
+        stop_reason: ProviderStopReason::Error,
+        error: Some("bounded detail".to_owned()),
+        failure_kind: Some(ProviderFailureKind::ContextWindowExceeded),
+        originator: PromptOriginator::User,
+        usage: None,
+        compaction_original_input_tokens: None,
+        compaction_compacted_input_tokens: None,
+        backend: None,
+        provider_response_id: None,
+        ws_pool_delta: None,
+    })
+    .expect("serialize response");
+    assert_eq!(
+        value.get("failure_kind"),
+        Some(&serde_json::json!("context_window_exceeded"))
+    );
+    value
+        .as_object_mut()
+        .expect("response object")
+        .remove("failure_kind");
+    let legacy: ProviderResponseFinished =
+        serde_json::from_value(value.clone()).expect("decode legacy response");
+    assert_eq!(legacy.failure_kind, None);
+    assert!(value.get("failure_kind").is_none());
+    let mut none_response = legacy;
+    none_response.failure_kind = None;
+    let none_value = serde_json::to_value(none_response).expect("serialize response without kind");
+    assert!(
+        none_value.get("failure_kind").is_none(),
+        "None must preserve the legacy omitted wire shape"
     );
 }

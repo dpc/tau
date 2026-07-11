@@ -61,3 +61,10 @@ arguments, prompt text, or wire payloads.
 ## Transient reply hints
 
 Message-envelope `reply` attributes are capability hints, not durable authority. Responses chaining must not preserve an older server-side rendering after route or effective-tool liveness changes.
+
+## Provider error authority
+
+Terminal context classification trusts only canonical Responses envelope `code`/`type` fields;
+echoed nested fields and provider prose are not authoritative. A typed context-window rejection
+cannot trigger cached-WebSocket replay, transport fallback, or logical retry scheduling. Known
+canonical transient identifiers retain precedence over deterministic HTTP status classification.

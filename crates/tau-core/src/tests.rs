@@ -163,6 +163,7 @@ fn provider_tool_call(agent_id: &str, call_id: &str) -> Event {
         })],
         stop_reason: ProviderStopReason::ToolCalls,
         error: None,
+        failure_kind: None,
         originator: PromptOriginator::User,
         usage: None,
         compaction_original_input_tokens: None,

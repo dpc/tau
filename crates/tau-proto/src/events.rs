@@ -3643,6 +3643,18 @@ impl ProviderStopReason {
     }
 }
 
+/// Machine-readable category for a terminal provider request failure.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderFailureKind {
+    /// The provider rejected the unchanged request because its context was too
+    /// large.
+    ContextWindowExceeded,
+    /// The provider deterministically rejected the unchanged request for
+    /// another reason.
+    RequestRejected,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ProviderResponseFinished {
     /// Prompt id the provider finished.
@@ -3660,6 +3672,10 @@ pub struct ProviderResponseFinished {
     /// provider prompts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Typed terminal failure category, independent of display-oriented error
+    /// prose.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_kind: Option<ProviderFailureKind>,
     /// Echo of [`AgentPromptCreated::originator`]. The provider must
     /// copy this from the prompt; the harness routes the response
     /// based on it.

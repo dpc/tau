@@ -10,6 +10,7 @@ struct TransportCounts {
 enum WsFailureMode {
     Upgrade426,
     CloseWithoutResponse,
+    ContextWindowExceeded,
 }
 
 fn spawn_ws_426_server() -> (String, std::sync::Arc<TransportCounts>) {
@@ -18,6 +19,10 @@ fn spawn_ws_426_server() -> (String, std::sync::Arc<TransportCounts>) {
 
 fn spawn_ws_disconnect_server() -> (String, std::sync::Arc<TransportCounts>) {
     spawn_ws_failure_server(WsFailureMode::CloseWithoutResponse)
+}
+
+fn spawn_ws_context_error_server() -> (String, std::sync::Arc<TransportCounts>) {
+    spawn_ws_failure_server(WsFailureMode::ContextWindowExceeded)
 }
 
 fn spawn_ws_failure_server(mode: WsFailureMode) -> (String, std::sync::Arc<TransportCounts>) {
@@ -40,6 +45,41 @@ fn spawn_ws_failure_server(mode: WsFailureMode) -> (String, std::sync::Arc<Trans
                 Err(_) => break,
             };
             let _ = stream.set_read_timeout(Some(std::time::Duration::from_millis(200)));
+            if matches!(mode, WsFailureMode::ContextWindowExceeded) {
+                thread_counts
+                    .ws_upgrade_requests
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let Ok(mut socket) = tungstenite::accept(stream) else {
+                    continue;
+                };
+                let _ = socket.read();
+                let _ = socket.send(tungstenite::Message::Text(
+                    serde_json::json!({
+                        "type": "response.completed",
+                        "response": {
+                            "id": "resp_prewarm",
+                            "usage": {
+                                "input_tokens": 1,
+                                "output_tokens": 0,
+                                "input_tokens_details": { "cached_tokens": 0 }
+                            }
+                        }
+                    })
+                    .to_string()
+                    .into(),
+                ));
+                let _ = socket.read();
+                let _ = socket.send(tungstenite::Message::Text(
+                    serde_json::json!({
+                        "type": "error",
+                        "code": "context_length_exceeded",
+                        "message": "maximum context reached"
+                    })
+                    .to_string()
+                    .into(),
+                ));
+                continue;
+            }
             let mut request = [0_u8; 1024];
             let read = std::io::Read::read(&mut stream, &mut request).unwrap_or(0);
             if request[..read].starts_with(b"POST ") {
@@ -63,10 +103,58 @@ fn spawn_ws_failure_server(mode: WsFailureMode) -> (String, std::sync::Arc<Trans
                     let _ = std::io::Write::write_all(&mut stream, response.as_bytes());
                 }
                 WsFailureMode::CloseWithoutResponse => {}
+                WsFailureMode::ContextWindowExceeded => unreachable!("handled above"),
             }
         }
     });
     (format!("http://{addr}/backend-api"), counts)
+}
+
+/// Reproduces the incident: an exact WebSocket context rejection under an
+/// unlimited outer budget terminates after one upstream request without replay
+/// or HTTP/SSE fallback.
+#[test]
+fn websocket_context_rejection_bypasses_unlimited_retry_budget() {
+    let (base_url, counts) = spawn_ws_context_error_server();
+    let config = test_config(base_url);
+    let runtime = ChatGptRuntime::new();
+    let session_id = tau_proto::SessionId::new("session-ws-context");
+    let agent_id = tau_proto::AgentId::parse("agent-ws-context").expect("agent id");
+    let context = tau_proto::PromptContext::default();
+    let request = test_prompt_payload(&session_id, &agent_id, &context);
+    runtime
+        .prewarm(&config, session_id.as_str(), &request)
+        .expect("prewarm cached websocket");
+    let mut turn_state = ChatGptTurnState::new(usize::MAX);
+    let mut abort = NeverAbort;
+
+    let error = match runtime.stream(
+        "ap-ws-context",
+        &config,
+        &request,
+        &mut turn_state,
+        &mut abort,
+        &mut |_| {},
+    ) {
+        Ok(_) => panic!("context rejection must terminate"),
+        Err(error) => error,
+    };
+    assert_eq!(
+        error.failure_kind(),
+        Some(tau_proto::ProviderFailureKind::ContextWindowExceeded)
+    );
+    assert_eq!(
+        counts
+            .ws_upgrade_requests
+            .load(std::sync::atomic::Ordering::SeqCst),
+        1
+    );
+    assert_eq!(
+        counts
+            .http_post_requests
+            .load(std::sync::atomic::Ordering::SeqCst),
+        0
+    );
 }
 
 fn test_config(base_url: String) -> responses::ResponsesConfig {

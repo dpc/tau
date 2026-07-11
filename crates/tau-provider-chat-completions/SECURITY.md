@@ -17,3 +17,9 @@ the stats unchanged. Stats must contain only byte counts, elapsed timing, and
 routing metadata, never raw provider text, tool arguments, prompt text, or wire
 payloads. Parsed `ToolCallItem.arguments` and `raw_arguments_json` remain the
 provider/tool replay surface once the tool call is complete.
+
+## Provider error authority
+
+Terminal context classification trusts only canonical OpenAI-style `error.code` and `error.type`;
+echoed nested fields and provider prose are not authoritative. Known canonical transient
+identifiers override deterministic HTTP status classification and remain retryable.

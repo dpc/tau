@@ -798,6 +798,90 @@ fn retryable_attempt_is_rescheduled_then_finishes_once() {
     assert_eq!(attempts.load(Ordering::SeqCst), 2);
 }
 
+/// A typed context-window rejection bypasses the effectively unlimited logical
+/// retry scheduler and emits one final response with no retry status.
+#[test]
+fn context_window_rejection_finishes_once_without_retry_status() {
+    let input = BlockingInput::default();
+    input.push(encode_frames(&[live_event(
+        11,
+        Event::AgentPromptCreated(prompt()),
+    )]));
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let executor_attempts = Arc::clone(&attempts);
+    let executor: PromptExecutor = Arc::new(move |execution| {
+        executor_attempts.fetch_add(1, Ordering::SeqCst);
+        let mut writer = execution.frame_writer();
+        let mut finished = simple_finished(
+            execution.job.agent_prompt_id,
+            execution.job.prompt.agent_id,
+            execution.job.prompt.originator,
+            "context window exceeded",
+        );
+        finished.failure_kind = Some(tau_proto::ProviderFailureKind::ContextWindowExceeded);
+        writer
+            .write_message(&HarnessInputMessage::emit(Event::ProviderResponseFinished(
+                finished,
+            )))
+            .expect("terminal frame");
+        writer.flush().expect("flush terminal frame");
+    });
+    let profiles = profiles_with_chatgpt_auth(chatgpt_auth());
+    let prompt_profiles = profiles.clone();
+    let writer = SharedWriter::default();
+    let output = writer.clone();
+    let runtime_input = input.clone();
+    let runtime = thread::spawn(move || {
+        run_inner_with_prompt_executor(
+            runtime_input,
+            writer,
+            profiles,
+            move || prompt_profiles.clone(),
+            1,
+            executor,
+        )
+        .expect("run provider");
+    });
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let frames = decode_frames(&output.bytes());
+        let terminal: Vec<_> = frames
+            .iter()
+            .filter_map(|frame| match input_event(frame) {
+                Some(Event::ProviderResponseFinished(finished))
+                    if finished.agent_prompt_id.as_str() == "sp-1" =>
+                {
+                    Some(finished)
+                }
+                _ => None,
+            })
+            .collect();
+        if let Some(finished) = terminal.first() {
+            assert_eq!(terminal.len(), 1);
+            assert_eq!(
+                finished.failure_kind,
+                Some(tau_proto::ProviderFailureKind::ContextWindowExceeded)
+            );
+            assert!(!frames.iter().any(|frame| matches!(
+                input_event(frame),
+                Some(Event::ProviderResponseUpdated(update)) if update.status.is_some()
+            )));
+            break;
+        }
+        assert!(Instant::now() < deadline, "terminal response not emitted");
+        thread::sleep(Duration::from_millis(5));
+    }
+    input.push(encode_frames(&[HarnessOutputMessage::Disconnect(
+        tau_proto::Disconnect {
+            reason: Some("done".to_owned()),
+        },
+    )]));
+    input.close();
+    runtime.join().expect("runtime join");
+    assert_eq!(attempts.load(Ordering::SeqCst), 1);
+}
+
 /// Proves four far-future retries release all four bounded worker permits so an
 /// unrelated provider can run immediately, with no attempt before fake repair.
 #[test]
