@@ -476,7 +476,7 @@ impl Harness {
             self.defer_prompt_dispatch(cid.clone(), PromptDispatchGate::PublishIdle);
             return;
         }
-        self.checkpoint_or_send_prompt(cid);
+        self.checkpoint_or_send_prompt(cid, None);
     }
 
     /// Commit an immutable inference watermark before transient dispatch.
@@ -485,7 +485,11 @@ impl Harness {
     /// are sent directly. Ordinary inference first enters
     /// `AwaitingCheckpoint`; only the checkpoint's post-commit reaction sends
     /// the exact reserved prompt id and head.
-    fn checkpoint_or_send_prompt(&mut self, cid: &AgentId) {
+    fn checkpoint_or_send_prompt(
+        &mut self,
+        cid: &AgentId,
+        captured_activation_cut: Option<tau_proto::AgentHead>,
+    ) {
         let _ = self.ensure_agent_id_for_agent(cid);
         let state = self
             .agents
@@ -504,6 +508,12 @@ impl Harness {
         if !self.validate_prompt_render_for_dispatch(cid) {
             return;
         }
+        let model = self
+            .agents
+            .get(cid)
+            .and_then(|agent| self.model_for_agent_role(agent));
+        let activation_cut =
+            captured_activation_cut.or_else(|| self.activation_cut_before_current_head(cid));
         let Some((durable_agent_id, prompt_id, through)) =
             self.agents.get_mut(cid).and_then(|agent| {
                 let durable_agent_id = agent.agent_id.clone()?;
@@ -520,6 +530,7 @@ impl Harness {
                         owner: crate::agent::InferenceCheckpointOwner::Inference,
                         agent_prompt_id: prompt_id.clone(),
                         through,
+                        model: model.clone(),
                     };
                 Some((durable_agent_id, prompt_id, through))
             })
@@ -533,6 +544,9 @@ impl Harness {
                 transaction_id: None,
                 agent_prompt_id: prompt_id,
                 through,
+                model,
+                operation: Some(tau_proto::PromptOperation::Inference),
+                activation_cut,
             }),
         );
     }
@@ -889,7 +903,7 @@ impl Harness {
             {
                 continue;
             }
-            self.checkpoint_or_send_prompt(&cid);
+            self.checkpoint_or_send_prompt(&cid, deferred.activation_cut);
         }
     }
 }

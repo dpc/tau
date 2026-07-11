@@ -1,3 +1,4 @@
+use super::dispatch::context_overflow_response;
 use super::*;
 use crate::harness::{PendingTool, background_completion_prompt};
 
@@ -11,6 +12,90 @@ fn prompt_created_count(h: &Harness) -> u64 {
         }
     }
     count
+}
+
+/// A replay-drift claim parked by interception must remain uniquely pending;
+/// after commit its suppression is consumed and the correlated failure blocks
+/// recovery without ever creating a compact provider prompt.
+#[test]
+fn intercepted_reactive_drift_terminalization_never_dispatches() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(tmp.path()).expect("harness");
+    let cid = ensure_test_user_agent(&mut h);
+    h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("overflow".to_owned()))
+        .expect("dispatch inference");
+    let inference = read_nth_prompt_created(&h, 0);
+    let checkpoint = event_log_events(&h)
+        .into_iter()
+        .find_map(|event| match event {
+            Event::AgentInferenceDispatchStarted(checkpoint)
+                if checkpoint.agent_prompt_id == inference.agent_prompt_id =>
+            {
+                Some(checkpoint)
+            }
+            _ => None,
+        })
+        .expect("checkpoint");
+    let mut planned = context_overflow_response(&inference);
+    planned.recovery_disposition = tau_proto::ContextRecoveryDisposition::ReactiveCompactionPlanned;
+    h.publish_for_agent(&cid, Event::ProviderResponseFinished(planned));
+    h.agents.get_mut(&cid).expect("agent").activation_dispatch =
+        crate::agent::ActivationDispatchState::ContextRecoveryPending {
+            checkpoint: checkpoint.clone(),
+        };
+
+    let interceptor = connect_test_tool(&mut h, "reactive-start-interceptor");
+    h.handle_extension_event(
+        "reactive-start-interceptor",
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(
+                tau_proto::EventName::AGENT_STANDALONE_COMPACTION_STARTED,
+            )],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("register interceptor");
+    h.reconcile_pending_context_recoveries(false);
+    assert!(matches!(
+        h.agents[&cid].activation_dispatch,
+        crate::agent::ActivationDispatchState::ContextRecoveryClaimPending { .. }
+    ));
+    assert_eq!(
+        event_log_events(&h)
+            .iter()
+            .filter(|event| matches!(
+                event,
+                Event::AgentPromptCreated(prompt)
+                    if prompt.operation == tau_proto::PromptOperation::StandaloneCompaction
+            ))
+            .count(),
+        0
+    );
+    let _ = intercepted_payload(&interceptor);
+    h.handle_extension_event(
+        "reactive-start-interceptor",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Pass(None),
+        })),
+    )
+    .expect("release start");
+    assert!(h.suppressed_compaction_dispatches.is_empty());
+    assert_eq!(
+        event_log_events(&h)
+            .iter()
+            .filter(|event| matches!(
+                event,
+                Event::AgentPromptCreated(prompt)
+                    if prompt.operation == tau_proto::PromptOperation::StandaloneCompaction
+            ))
+            .count(),
+        0
+    );
+    assert!(matches!(
+        h.agents[&cid].activation_dispatch,
+        crate::agent::ActivationDispatchState::Blocked { .. }
+    ));
+    h.shutdown().expect("shutdown");
 }
 
 /// Real interception replies cannot flip the harness-owned activation bit in
@@ -759,6 +844,7 @@ fn deferred_tool_result_persists_after_call_tracking_is_cleared() {
             stop_reason: tau_proto::ProviderStopReason::ToolCalls,
             error: None,
             failure_kind: None,
+            recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
             usage: None,
             originator: tau_proto::PromptOriginator::User,
             compaction_original_input_tokens: None,

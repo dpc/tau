@@ -1,5 +1,11 @@
 # tau-ext-provider-builtin security notes
 
+The provider boundary is not trusted to request transcript mutation or
+compaction. Built-in providers may report a typed context-window failure, but
+the harness clears provider-supplied recovery disposition and independently
+checks operation, accepted output, checkpoint, model capability, role policy,
+and branch correlation.
+
 This crate is Tau's built-in provider bridge. It handles local provider
 credentials, receives model-visible prompt/tool context from the harness, sends
 requests to external model services, and turns provider responses back into Tau

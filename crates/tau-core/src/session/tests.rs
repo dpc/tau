@@ -38,6 +38,213 @@ fn compaction_start(id: &str) -> tau_proto::AgentStandaloneCompactionStarted {
         model: tau_proto::ModelId::from("provider/model"),
         originator: PromptOriginator::User,
         supersedes: None,
+        trigger: tau_proto::StandaloneCompactionTrigger::Manual,
+    }
+}
+
+/// A canonical planned overflow must project one unclaimed recovery and accept
+/// exactly one model/cut-correlated standalone transaction claim.
+#[test]
+fn reactive_overflow_recovery_is_claimed_exactly_once() {
+    let mut tree = AgentTree::from_events(agent_id(), &[]);
+    let checkpoint = tau_proto::AgentInferenceDispatchStarted {
+        agent_id: agent_id(),
+        transaction_id: None,
+        agent_prompt_id: "ap-overflow".into(),
+        through: AgentHead::Root,
+        model: Some("provider/model".into()),
+        operation: Some(tau_proto::PromptOperation::Inference),
+        activation_cut: Some(AgentHead::Root),
+    };
+    tree.validate_event(&Event::AgentInferenceDispatchStarted(checkpoint.clone()))
+        .expect("ordinary checkpoint is valid");
+    tree.apply_event(&Event::AgentInferenceDispatchStarted(checkpoint.clone()));
+    let response = tau_proto::ProviderResponseFinished {
+        agent_prompt_id: checkpoint.agent_prompt_id.clone(),
+        agent_id: agent_id(),
+        output_items: Vec::new(),
+        stop_reason: tau_proto::ProviderStopReason::Error,
+        error: Some("bounded display error".to_owned()),
+        failure_kind: Some(tau_proto::ProviderFailureKind::ContextWindowExceeded),
+        recovery_disposition: tau_proto::ContextRecoveryDisposition::ReactiveCompactionPlanned,
+        originator: PromptOriginator::User,
+        usage: None,
+        compaction_original_input_tokens: None,
+        compaction_compacted_input_tokens: None,
+        backend: None,
+        provider_response_id: None,
+        ws_pool_delta: None,
+    };
+    tree.validate_event(&Event::ProviderResponseFinished(response.clone()))
+        .expect("canonical planned rejection is valid");
+    tree.apply_event(&Event::ProviderResponseFinished(response));
+    assert_eq!(
+        tree.inference_dispatch_recovery(),
+        Some(InferenceDispatchRecovery::ContextRecoveryRequired(
+            checkpoint.clone()
+        ))
+    );
+
+    let mut started = compaction_start("ct-reactive");
+    started.trigger = tau_proto::StandaloneCompactionTrigger::ReactiveContextOverflow {
+        failed_agent_prompt_id: checkpoint.agent_prompt_id,
+    };
+    tree.validate_event(&Event::AgentStandaloneCompactionStarted(started.clone()))
+        .expect("matching claim is valid");
+    tree.apply_event(&Event::AgentStandaloneCompactionStarted(started.clone()));
+    assert_eq!(
+        tree.inference_dispatch_recovery(),
+        Some(InferenceDispatchRecovery::CompletedThrough(AgentHead::Root))
+    );
+    let mut second_claim = started.clone();
+    second_claim.transaction_id =
+        tau_proto::CompactionTransactionId::parse("ct-reactive-second").expect("valid id");
+    second_claim.compact_prompt_id = "ap-agent-metadata-test-1".into();
+    assert!(
+        validation_error(&tree, Event::AgentStandaloneCompactionStarted(second_claim))
+            .contains("uniquely match"),
+        "a distinct transaction and prompt must not claim the same source rejection twice"
+    );
+}
+
+/// Reactive claims must fail closed for unknown, unfinished, unplanned,
+/// transaction-bound, wrong-operation, and mismatched immutable correlations.
+#[test]
+fn reactive_overflow_claim_rejects_invalid_source_correlations() {
+    let base_checkpoint = tau_proto::AgentInferenceDispatchStarted {
+        agent_id: agent_id(),
+        transaction_id: None,
+        agent_prompt_id: "ap-overflow-negative".into(),
+        through: AgentHead::Root,
+        model: Some("provider/model".into()),
+        operation: Some(tau_proto::PromptOperation::Inference),
+        activation_cut: Some(AgentHead::Root),
+    };
+    let planned_response = tau_proto::ProviderResponseFinished {
+        agent_prompt_id: base_checkpoint.agent_prompt_id.clone(),
+        agent_id: agent_id(),
+        output_items: Vec::new(),
+        stop_reason: tau_proto::ProviderStopReason::Error,
+        error: Some("bounded".to_owned()),
+        failure_kind: Some(tau_proto::ProviderFailureKind::ContextWindowExceeded),
+        recovery_disposition: tau_proto::ContextRecoveryDisposition::ReactiveCompactionPlanned,
+        originator: PromptOriginator::User,
+        usage: None,
+        compaction_original_input_tokens: None,
+        compaction_compacted_input_tokens: None,
+        backend: None,
+        provider_response_id: None,
+        ws_pool_delta: None,
+    };
+    let claim = |source: &str| {
+        let mut started = compaction_start("ct-negative");
+        started.trigger = tau_proto::StandaloneCompactionTrigger::ReactiveContextOverflow {
+            failed_agent_prompt_id: source.into(),
+        };
+        started
+    };
+
+    let empty = AgentTree::from_events(agent_id(), &[]);
+    assert!(
+        validation_error(
+            &empty,
+            Event::AgentStandaloneCompactionStarted(claim("ap-unknown"))
+        )
+        .contains("unknown")
+    );
+
+    let mut unfinished = AgentTree::from_events(agent_id(), &[]);
+    unfinished
+        .validate_event(&Event::AgentInferenceDispatchStarted(
+            base_checkpoint.clone(),
+        ))
+        .expect("checkpoint");
+    unfinished.apply_event(&Event::AgentInferenceDispatchStarted(
+        base_checkpoint.clone(),
+    ));
+    assert!(
+        validation_error(
+            &unfinished,
+            Event::AgentStandaloneCompactionStarted(claim(
+                base_checkpoint.agent_prompt_id.as_str()
+            ))
+        )
+        .contains("uniquely match")
+    );
+
+    let mut unplanned = unfinished.clone();
+    let mut ordinary_response = planned_response.clone();
+    ordinary_response.recovery_disposition = tau_proto::ContextRecoveryDisposition::None;
+    unplanned
+        .validate_event(&Event::ProviderResponseFinished(ordinary_response.clone()))
+        .expect("ordinary terminal response");
+    unplanned.apply_event(&Event::ProviderResponseFinished(ordinary_response));
+    assert!(
+        validation_error(
+            &unplanned,
+            Event::AgentStandaloneCompactionStarted(claim(
+                base_checkpoint.agent_prompt_id.as_str()
+            ))
+        )
+        .contains("uniquely match")
+    );
+
+    let mismatches = [
+        ("model", {
+            let mut value = claim(base_checkpoint.agent_prompt_id.as_str());
+            value.model = "provider/other".into();
+            value
+        }),
+        ("cut", {
+            let mut value = claim(base_checkpoint.agent_prompt_id.as_str());
+            value.cut = AgentHead::Node(NodeId::new(42));
+            value
+        }),
+        ("resume", {
+            let mut value = claim(base_checkpoint.agent_prompt_id.as_str());
+            value.resume_through = None;
+            value
+        }),
+    ];
+    for (name, mismatched) in mismatches {
+        let mut tree = unfinished.clone();
+        tree.validate_event(&Event::ProviderResponseFinished(planned_response.clone()))
+            .expect("planned response");
+        tree.apply_event(&Event::ProviderResponseFinished(planned_response.clone()));
+        assert!(
+            validation_error(&tree, Event::AgentStandaloneCompactionStarted(mismatched))
+                .contains("uniquely match"),
+            "{name} mismatch"
+        );
+    }
+
+    for (name, mutate) in [("transaction-bound", 0_u8), ("wrong-operation", 1_u8)] {
+        let mut checkpoint = base_checkpoint.clone();
+        checkpoint.agent_prompt_id = format!("ap-{name}").into();
+        if mutate == 0 {
+            checkpoint.transaction_id =
+                Some(tau_proto::CompactionTransactionId::parse("ct-source").expect("id"));
+        } else {
+            checkpoint.operation = Some(tau_proto::PromptOperation::StandaloneCompaction);
+        }
+        let mut tree = AgentTree::from_events(agent_id(), &[]);
+        tree.inference_dispatches.insert(
+            checkpoint.agent_prompt_id.clone(),
+            InferenceDispatchFold {
+                checkpoint: checkpoint.clone(),
+                finished: true,
+                recovery_disposition:
+                    tau_proto::ContextRecoveryDisposition::ReactiveCompactionPlanned,
+            },
+        );
+        assert!(
+            validation_error(
+                &tree,
+                Event::AgentStandaloneCompactionStarted(claim(checkpoint.agent_prompt_id.as_str()))
+            )
+            .contains("uniquely match"),
+            "{name}"
+        );
     }
 }
 
@@ -97,6 +304,9 @@ fn compaction_fold_rejects_premature_and_unknown_checkpoints() {
         transaction_id: Some(started.transaction_id),
         agent_prompt_id: "ap-agent-metadata-test-1".into(),
         through: AgentHead::Root,
+        model: None,
+        operation: None,
+        activation_cut: None,
     };
     assert!(
         validation_error(
@@ -489,6 +699,7 @@ fn provider_tool_round_waits_for_all_terminal_results() {
                 stop_reason: tau_proto::ProviderStopReason::ToolCalls,
                 error: None,
                 failure_kind: None,
+                recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
                 usage: None,
                 originator: PromptOriginator::User,
                 compaction_original_input_tokens: None,

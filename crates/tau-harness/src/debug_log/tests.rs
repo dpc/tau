@@ -28,6 +28,7 @@ fn published_line_preserves_enriched_token_usage() {
         stop_reason: tau_proto::ProviderStopReason::EndTurn,
         error: None,
         failure_kind: None,
+        recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         originator: PromptOriginator::User,
         usage: Some(ProviderTokenUsage {
             model: Some(model),

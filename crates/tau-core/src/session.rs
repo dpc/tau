@@ -367,10 +367,17 @@ pub struct AgentTree {
     /// Durable insertion order for deterministic recovery projection.
     compaction_transaction_order: Vec<tau_proto::CompactionTransactionId>,
     /// All durable inference checkpoints keyed by their provider prompt id.
-    inference_dispatches:
-        HashMap<tau_proto::AgentPromptId, (tau_proto::AgentInferenceDispatchStarted, bool)>,
+    inference_dispatches: HashMap<tau_proto::AgentPromptId, InferenceDispatchFold>,
     /// Durable inference checkpoint insertion order.
     inference_dispatch_order: Vec<tau_proto::AgentPromptId>,
+}
+
+/// Folded state for one durable inference checkpoint.
+#[derive(Clone, Debug, PartialEq)]
+struct InferenceDispatchFold {
+    checkpoint: tau_proto::AgentInferenceDispatchStarted,
+    finished: bool,
+    recovery_disposition: tau_proto::ContextRecoveryDisposition,
 }
 
 /// Validated durable state for one standalone compaction transaction.
@@ -407,6 +414,8 @@ pub enum StandaloneCompactionRecovery {
         transaction_id: tau_proto::CompactionTransactionId,
         /// Immutable compact cut.
         cut: tau_proto::AgentHead,
+        /// Exact provider-qualified model captured by the successful start.
+        model: tau_proto::ModelId,
         /// Snapshot through which inference remains owed.
         through: tau_proto::AgentHead,
     },
@@ -420,6 +429,9 @@ pub enum StandaloneCompactionRecovery {
 pub enum InferenceDispatchRecovery {
     /// A terminal provider response durably completed this snapshot.
     CompletedThrough(tau_proto::AgentHead),
+    /// A canonical no-output rejection durably authorized one compaction start,
+    /// but no transaction has claimed it yet.
+    ContextRecoveryRequired(tau_proto::AgentInferenceDispatchStarted),
     /// Dispatch may have reached the provider but has no durable terminal
     /// response.
     DispatchUncertain(tau_proto::AgentInferenceDispatchStarted),
@@ -465,6 +477,7 @@ impl AgentTree {
                     StandaloneCompactionRecovery::AwaitingCheckpoint {
                         transaction_id: id.clone(),
                         cut: transaction.started.cut,
+                        model: transaction.started.model.clone(),
                         through: if self.is_ancestor_head(resume, current) {
                             current
                         } else {
@@ -488,15 +501,34 @@ impl AgentTree {
     #[must_use]
     pub fn inference_dispatch_recovery(&self) -> Option<InferenceDispatchRecovery> {
         let prompt_id = self.inference_dispatch_order.last()?;
-        let (checkpoint, finished) = self.inference_dispatches.get(prompt_id)?;
-        if *finished {
-            Some(InferenceDispatchRecovery::CompletedThrough(
-                checkpoint.through,
-            ))
-        } else {
-            Some(InferenceDispatchRecovery::DispatchUncertain(
+        let dispatch = self.inference_dispatches.get(prompt_id)?;
+        let checkpoint = &dispatch.checkpoint;
+        match (dispatch.finished, &dispatch.recovery_disposition) {
+            (true, tau_proto::ContextRecoveryDisposition::ReactiveCompactionPlanned) => {
+                let claimed = self.compaction_transactions.values().any(|transaction| {
+                    matches!(
+                        &transaction.started.trigger,
+                        tau_proto::StandaloneCompactionTrigger::ReactiveContextOverflow {
+                            failed_agent_prompt_id
+                        } if failed_agent_prompt_id == prompt_id
+                    )
+                });
+                if claimed {
+                    Some(InferenceDispatchRecovery::CompletedThrough(
+                        checkpoint.through,
+                    ))
+                } else {
+                    Some(InferenceDispatchRecovery::ContextRecoveryRequired(
+                        checkpoint.clone(),
+                    ))
+                }
+            }
+            (true, tau_proto::ContextRecoveryDisposition::None) => Some(
+                InferenceDispatchRecovery::CompletedThrough(checkpoint.through),
+            ),
+            (false, _) => Some(InferenceDispatchRecovery::DispatchUncertain(
                 checkpoint.clone(),
-            ))
+            )),
         }
     }
 
@@ -962,7 +994,11 @@ impl AgentTree {
                     .push(checkpoint.agent_prompt_id.clone());
                 self.inference_dispatches.insert(
                     checkpoint.agent_prompt_id.clone(),
-                    (checkpoint.clone(), false),
+                    InferenceDispatchFold {
+                        checkpoint: checkpoint.clone(),
+                        finished: false,
+                        recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
+                    },
                 );
                 if let Some(transaction_id) = &checkpoint.transaction_id
                     && let Some(transaction) = self.compaction_transactions.get_mut(transaction_id)
@@ -971,10 +1007,10 @@ impl AgentTree {
                 }
             }
             Event::ProviderResponseFinished(response) => {
-                if let Some((_, finished)) =
-                    self.inference_dispatches.get_mut(&response.agent_prompt_id)
+                if let Some(dispatch) = self.inference_dispatches.get_mut(&response.agent_prompt_id)
                 {
-                    *finished = true;
+                    dispatch.finished = true;
+                    dispatch.recovery_disposition = response.recovery_disposition;
                 }
                 for transaction in self.compaction_transactions.values_mut() {
                     if transaction.checkpoint.as_ref().is_some_and(|checkpoint| {
@@ -1458,6 +1494,38 @@ impl AgentTree {
                 "duplicate standalone compaction transaction id",
             ));
         }
+        if let tau_proto::StandaloneCompactionTrigger::ReactiveContextOverflow {
+            failed_agent_prompt_id,
+        } = &started.trigger
+        {
+            let Some(dispatch) = self.inference_dispatches.get(failed_agent_prompt_id) else {
+                return Err(AgentEventValidationError::new(
+                    "reactive compaction references unknown inference checkpoint",
+                ));
+            };
+            let checkpoint = &dispatch.checkpoint;
+            if !dispatch.finished
+                || dispatch.recovery_disposition
+                    != tau_proto::ContextRecoveryDisposition::ReactiveCompactionPlanned
+                || checkpoint.transaction_id.is_some()
+                || checkpoint.operation != Some(tau_proto::PromptOperation::Inference)
+                || checkpoint.model.as_ref() != Some(&started.model)
+                || checkpoint.activation_cut != Some(started.cut)
+                || started.resume_through != Some(checkpoint.through)
+                || self.compaction_transactions.values().any(|transaction| {
+                    matches!(
+                        &transaction.started.trigger,
+                        tau_proto::StandaloneCompactionTrigger::ReactiveContextOverflow {
+                            failed_agent_prompt_id: claimed
+                        } if claimed == failed_agent_prompt_id
+                    )
+                })
+            {
+                return Err(AgentEventValidationError::new(
+                    "reactive compaction does not uniquely match its planned inference recovery",
+                ));
+            }
+        }
         if !self.is_ancestor_head(started.cut, started.resume_through.unwrap_or(started.cut)) {
             return Err(AgentEventValidationError::new(
                 "standalone compaction cut must be an ancestor of resume_through",
@@ -1691,6 +1759,31 @@ impl AgentTree {
         &self,
         response: &tau_proto::ProviderResponseFinished,
     ) -> Result<(), AgentEventValidationError> {
+        if response.recovery_disposition
+            == tau_proto::ContextRecoveryDisposition::ReactiveCompactionPlanned
+        {
+            let eligible_checkpoint = self
+                .inference_dispatches
+                .get(&response.agent_prompt_id)
+                .is_some_and(|dispatch| {
+                    !dispatch.finished
+                        && dispatch.checkpoint.transaction_id.is_none()
+                        && dispatch.checkpoint.operation
+                            == Some(tau_proto::PromptOperation::Inference)
+                        && dispatch.checkpoint.model.is_some()
+                        && dispatch.checkpoint.activation_cut.is_some()
+                });
+            if !eligible_checkpoint
+                || response.failure_kind
+                    != Some(tau_proto::ProviderFailureKind::ContextWindowExceeded)
+                || response.stop_reason != tau_proto::ProviderStopReason::Error
+                || !response.output_items.is_empty()
+            {
+                return Err(AgentEventValidationError::new(
+                    "planned reactive compaction requires one canonical no-output inference rejection",
+                ));
+            }
+        }
         let mut seen = HashSet::new();
         for item in &response.output_items {
             let ContextItem::ToolCall(call) = item else {

@@ -54,6 +54,8 @@ pub(crate) enum ActivationDispatchState {
         agent_prompt_id: AgentPromptId,
         /// Immutable inference snapshot covered by the checkpoint.
         through: tau_proto::AgentHead,
+        /// Exact provider-qualified model captured by compaction.
+        model: Option<ModelId>,
     },
     /// The checkpoint committed; remote inference completion is not durable
     /// yet.
@@ -65,9 +67,23 @@ pub(crate) enum ActivationDispatchState {
         /// Immutable inference snapshot sent to the provider.
         through: tau_proto::AgentHead,
     },
+    /// A durable planned context recovery awaits authoritative provider model
+    /// discovery before it can be claimed or terminalized.
+    ContextRecoveryPending {
+        /// Ordinary inference checkpoint rejected for context length.
+        checkpoint: tau_proto::AgentInferenceDispatchStarted,
+    },
+    /// One reactive claim has been enqueued but its durable start has not yet
+    /// committed through interception.
+    ContextRecoveryClaimPending {
+        /// Source inference checkpoint claimed by the queued start.
+        checkpoint: tau_proto::AgentInferenceDispatchStarted,
+        /// Durable transaction reserved by the queued start.
+        transaction_id: tau_proto::CompactionTransactionId,
+    },
     /// Terminal failure retained its recovery obligation.
     Blocked {
-        /// Failed transaction id.
+        /// Failed durable transaction id.
         failed_id: tau_proto::CompactionTransactionId,
         /// Failed transaction cut.
         cut: tau_proto::AgentHead,
@@ -116,7 +132,9 @@ impl ActivationDispatchState {
             Self::None
             | Self::Running { .. }
             | Self::AwaitingCheckpoint { .. }
-            | Self::DispatchUncertain { .. } => None,
+            | Self::DispatchUncertain { .. }
+            | Self::ContextRecoveryPending { .. }
+            | Self::ContextRecoveryClaimPending { .. } => None,
         }
     }
 }

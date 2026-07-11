@@ -243,3 +243,11 @@ dispatch; capability state is not persisted separately.
 Status: confirmed, 2026-07-11, dpc
 
 Provider retries carry closed structured categories, saturating attempt counts, and approximate bounded delays independently of human UI prose. After validating prompt ownership, the harness owns the current per-agent/turn/prompt snapshot and session-local watcher fanout. Live delivery is limited to first category, category/phase changes, and terminal failure; same-category storms only refresh the late-watch snapshot. Enabling or re-enabling returns current sanitized state and emits an initial client snapshot without prompting the model. Durable live facts replay as transcript context without re-fanout; disable, prune, and session change stop delivery. Raw provider bodies, status text, errors, headers, account data, secrets, and prompt content never cross this boundary.
+
+## Reactive overflow transaction
+
+Status: confirmed, 2026-07-11, dpc
+
+Eligible ordinary inference overflow is durably recorded before one correlated standalone compaction starts. The compact transaction claims the failed prompt, compacts only through the pre-activation cut, and resumes through the original checkpoint so concurrent suffix facts and the owed activation are preserved. Any second overflow or ambiguous dispatch is terminal rather than recursive.
+
+Testing is split by owner: `tau-proto` fixes default and tagged wire forms; `tau-core` fixes unique claim validation and planned/claimed replay folding; `tau-harness` covers eligibility, durable ordering, no-recursion, continuation, watcher projection, and crash cuts.

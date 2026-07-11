@@ -225,7 +225,11 @@ impl Harness {
                 if !self.validate_prompt_render_for_dispatch(&agent_id) {
                     return;
                 }
-                let Some((durable_agent_id, prompt_id, through)) =
+                let model = self
+                    .agents
+                    .get(&agent_id)
+                    .and_then(|agent| self.model_for_agent_role(agent));
+                let Some((durable_agent_id, prompt_id, through, activation_cut)) =
                     self.agents.get_mut(&agent_id).and_then(|agent| {
                         let durable_agent_id = agent.agent_id.clone()?;
                         let prompt_id = tau_proto::AgentPromptId::from(format!(
@@ -241,8 +245,14 @@ impl Harness {
                                 owner: crate::agent::InferenceCheckpointOwner::Inference,
                                 agent_prompt_id: prompt_id.clone(),
                                 through,
+                                model: model.clone(),
                             };
-                        Some((durable_agent_id, prompt_id, through))
+                        let activation_cut = agent
+                            .head
+                            .and_then(|head| self.agent_store.agent(&durable_agent_id)?.node(head))
+                            .and_then(|node| node.parent_id)
+                            .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node);
+                        Some((durable_agent_id, prompt_id, through, activation_cut))
                     })
                 else {
                     continue;
@@ -255,6 +265,9 @@ impl Harness {
                             transaction_id: None,
                             agent_prompt_id: prompt_id,
                             through,
+                            model,
+                            operation: Some(tau_proto::PromptOperation::Inference),
+                            activation_cut: Some(activation_cut),
                         },
                     ),
                 );

@@ -3247,6 +3247,24 @@ pub struct AgentStandaloneCompactionStarted {
     /// Earlier failed transaction explicitly replaced by this attempt.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub supersedes: Option<CompactionTransactionId>,
+    /// Cause that created this transaction and, for reactive recovery, the
+    /// rejected inference prompt it uniquely claims.
+    #[serde(default)]
+    pub trigger: StandaloneCompactionTrigger,
+}
+
+/// Durable cause of a standalone compaction transaction.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum StandaloneCompactionTrigger {
+    /// Explicit or proactive compaction without a failed inference claim.
+    #[default]
+    Manual,
+    /// Automatic recovery of one canonically rejected ordinary inference.
+    ReactiveContextOverflow {
+        /// Failed inference prompt uniquely claimed by this transaction.
+        failed_agent_prompt_id: AgentPromptId,
+    },
 }
 
 /// Durable terminal failure of one standalone-compaction transaction.
@@ -3277,6 +3295,17 @@ pub struct AgentInferenceDispatchStarted {
     pub agent_prompt_id: AgentPromptId,
     /// Immutable transcript head represented by the provider prompt.
     pub through: AgentHead,
+    /// Provider-qualified model captured before dispatch. Absent on legacy
+    /// checkpoints, which are deliberately recovery-ineligible.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<ModelId>,
+    /// Provider operation captured before dispatch. Absent on legacy records.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation: Option<PromptOperation>,
+    /// Immutable transcript head immediately before the owed activation.
+    /// Absent on legacy records.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activation_cut: Option<AgentHead>,
 }
 
 /// The harness accepted one standalone provider compaction result.
@@ -3809,6 +3838,24 @@ pub enum ProviderFailureKind {
     Unknown,
 }
 
+/// Harness-authored durable disposition of a terminal provider response.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextRecoveryDisposition {
+    /// No automatic context recovery was authorized.
+    #[default]
+    None,
+    /// The matching rejected inference must be claimed by one standalone
+    /// compaction transaction.
+    ReactiveCompactionPlanned,
+}
+
+impl ContextRecoveryDisposition {
+    fn is_none(value: &Self) -> bool {
+        matches!(value, Self::None)
+    }
+}
+
 impl ProviderFailureKind {
     /// Stable wire-compatible label used in safe presentation.
     pub const fn as_str(self) -> &'static str {
@@ -3841,6 +3888,10 @@ pub struct ProviderResponseFinished {
     /// prose.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failure_kind: Option<ProviderFailureKind>,
+    /// Harness-authored recovery decision. Provider-supplied values are
+    /// overwritten before the event is committed.
+    #[serde(default, skip_serializing_if = "ContextRecoveryDisposition::is_none")]
+    pub recovery_disposition: ContextRecoveryDisposition,
     /// Echo of [`AgentPromptCreated::originator`]. The provider must
     /// copy this from the prompt; the harness routes the response
     /// based on it.

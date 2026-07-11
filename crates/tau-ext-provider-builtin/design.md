@@ -1,5 +1,10 @@
 # Design decisions
 
+Provider adapters classify canonical context-window rejection into the typed
+terminal failure category. They do not authorize reactive recovery:
+`ContextRecoveryDisposition` is harness-owned and any provider-supplied value is
+discarded at ingress before eligibility is evaluated.
+
 This file records major design decisions currently embodied by this directory's
 code, and how authoritative each decision is. It is not an architecture
 overview, ADR log, todo list, roadmap, implementation guide, or changelog.

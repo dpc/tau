@@ -53,3 +53,7 @@ is the started child agent's terminal final response to its direct delegating
 watcher and remains watchable under the response label.
 
 Provider-authored status text, response bodies, headers, prompt text, account identifiers, and raw errors never cross the watch boundary. Only protocol closed enums and bounded numeric retry facts are accepted after prompt ownership validation. Terminal watched responses use the typed failure kind rather than `ProviderResponseFinished.error`.
+
+Reactive context recovery never trusts provider prose or a provider-authored recovery decision. Eligibility uses the closed failure category, an empty output set, harness-owned prompt operation/model routing, durable activation cut, advertised model capability, and role policy. Watchers receive only the existing sanitized `recovering_context` state; prompt bodies and raw provider errors are not included.
+
+Provider-supplied recovery disposition is unconditionally cleared at ingress and may only be stamped by the harness after eligibility checks. Any accepted streamed semantic output makes the response recovery-ineligible. Cancellation durably terminalizes an active reactive compaction transaction.

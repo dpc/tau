@@ -509,6 +509,7 @@ fn representative_events() -> Vec<Event> {
             model: ModelId::from("provider/model"),
             originator: PromptOriginator::User,
             supersedes: None,
+            trigger: StandaloneCompactionTrigger::Manual,
         }),
         Event::AgentStandaloneCompactionFailed(AgentStandaloneCompactionFailed {
             agent_id: agent_id("engineer_abcd1234"),
@@ -522,6 +523,9 @@ fn representative_events() -> Vec<Event> {
             transaction_id: Some(CompactionTransactionId::parse("ct-1").expect("transaction id")),
             agent_prompt_id: "sp-1".into(),
             through: AgentHead::Node(NodeId::new(1)),
+            model: None,
+            operation: None,
+            activation_cut: None,
         }),
         Event::AgentPromptCreated(AgentPromptCreated {
             agent_prompt_id: "sp-1".into(),
@@ -645,6 +649,7 @@ fn representative_events() -> Vec<Event> {
             stop_reason: ProviderStopReason::EndTurn,
             error: None,
             failure_kind: None,
+            recovery_disposition: ContextRecoveryDisposition::None,
             usage: None,
             originator: PromptOriginator::User,
 
@@ -2286,6 +2291,7 @@ fn execution_events_use_provider_wire_family() {
                 stop_reason: ProviderStopReason::EndTurn,
                 error: None,
                 failure_kind: None,
+                recovery_disposition: ContextRecoveryDisposition::None,
                 originator: PromptOriginator::User,
                 output_items: Vec::new(),
                 usage: None,
@@ -3461,6 +3467,7 @@ fn provider_failure_kind_wire_contract_is_backward_compatible() {
         stop_reason: ProviderStopReason::Error,
         error: Some("bounded detail".to_owned()),
         failure_kind: Some(ProviderFailureKind::ContextWindowExceeded),
+        recovery_disposition: ContextRecoveryDisposition::None,
         originator: PromptOriginator::User,
         usage: None,
         compaction_original_input_tokens: None,
@@ -3610,4 +3617,213 @@ fn agent_watch_provider_state_wire_contract_enforces_phase_invariants() {
         .expect("decode notification CBOR"),
         notification
     );
+}
+
+/// Recovery fields must preserve legacy omission defaults and reactive
+/// correlation in their enclosing durable DTOs across JSON and CBOR replay.
+#[test]
+fn reactive_context_recovery_wire_contract() {
+    fn cbor_event(event: &Event) -> ciborium::value::Value {
+        let mut bytes = Vec::new();
+        ciborium::into_writer(event, &mut bytes).expect("encode event CBOR");
+        ciborium::from_reader(bytes.as_slice()).expect("decode CBOR value")
+    }
+
+    fn remove_cbor_field(value: &mut ciborium::value::Value, field: &str) -> bool {
+        match value {
+            ciborium::value::Value::Map(entries) => {
+                let original_len = entries.len();
+                entries.retain(
+                    |(key, _)| !matches!(key, ciborium::value::Value::Text(text) if text == field),
+                );
+                let removed = entries.len() != original_len;
+                removed
+                    || entries
+                        .iter_mut()
+                        .any(|(_, value)| remove_cbor_field(value, field))
+            }
+            ciborium::value::Value::Array(values) => values
+                .iter_mut()
+                .any(|value| remove_cbor_field(value, field)),
+            _ => false,
+        }
+    }
+
+    fn decode_cbor_event(value: &ciborium::value::Value) -> Event {
+        let mut bytes = Vec::new();
+        ciborium::into_writer(value, &mut bytes).expect("encode modified CBOR");
+        ciborium::from_reader(bytes.as_slice()).expect("decode modified event")
+    }
+
+    let mut started = AgentStandaloneCompactionStarted {
+        agent_id: AgentId::parse("wire-agent").expect("agent id"),
+        transaction_id: CompactionTransactionId::parse("ct-wire").expect("transaction id"),
+        compact_prompt_id: "ap-compact".into(),
+        cut: AgentHead::Root,
+        resume_through: Some(AgentHead::Root),
+        model: "provider/model".into(),
+        operation: PromptOperation::StandaloneCompaction,
+        originator: PromptOriginator::User,
+        supersedes: None,
+        trigger: StandaloneCompactionTrigger::Manual,
+    };
+    let mut legacy_started = serde_json::to_value(&started).expect("encode manual start");
+    legacy_started
+        .as_object_mut()
+        .expect("start object")
+        .remove("trigger");
+    assert_eq!(
+        serde_json::from_value::<AgentStandaloneCompactionStarted>(legacy_started)
+            .expect("omitted trigger defaults"),
+        started
+    );
+
+    let trigger = StandaloneCompactionTrigger::ReactiveContextOverflow {
+        failed_agent_prompt_id: "ap-overflow".into(),
+    };
+    started.trigger = trigger.clone();
+    let encoded = serde_json::to_value(&started).expect("encode reactive start");
+    assert_eq!(
+        serde_json::from_value::<AgentStandaloneCompactionStarted>(encoded)
+            .expect("decode reactive start"),
+        started
+    );
+    let mut started_cbor = Vec::new();
+    ciborium::into_writer(&started, &mut started_cbor).expect("encode reactive start CBOR");
+    assert_eq!(
+        ciborium::from_reader::<AgentStandaloneCompactionStarted, _>(started_cbor.as_slice())
+            .expect("decode reactive start CBOR"),
+        started
+    );
+    let manual_event = Event::AgentStandaloneCompactionStarted(AgentStandaloneCompactionStarted {
+        trigger: StandaloneCompactionTrigger::Manual,
+        ..started.clone()
+    });
+    let mut legacy_started_cbor = cbor_event(&manual_event);
+    assert!(remove_cbor_field(&mut legacy_started_cbor, "trigger"));
+    assert_eq!(decode_cbor_event(&legacy_started_cbor), manual_event);
+    let reactive_event = Event::AgentStandaloneCompactionStarted(started.clone());
+    assert_eq!(
+        decode_cbor_event(&cbor_event(&reactive_event)),
+        reactive_event
+    );
+
+    let checkpoint = AgentInferenceDispatchStarted {
+        agent_id: started.agent_id.clone(),
+        transaction_id: None,
+        agent_prompt_id: "ap-inference".into(),
+        through: AgentHead::Root,
+        model: Some("provider/model".into()),
+        operation: Some(PromptOperation::Inference),
+        activation_cut: Some(AgentHead::Root),
+    };
+    let checkpoint_json = serde_json::to_value(&checkpoint).expect("encode checkpoint");
+    assert_eq!(
+        serde_json::from_value::<AgentInferenceDispatchStarted>(checkpoint_json)
+            .expect("decode checkpoint"),
+        checkpoint
+    );
+    let mut legacy_checkpoint = serde_json::to_value(&checkpoint).expect("encode checkpoint");
+    let object = legacy_checkpoint
+        .as_object_mut()
+        .expect("checkpoint object");
+    object.remove("model");
+    object.remove("operation");
+    object.remove("activation_cut");
+    let decoded_legacy = serde_json::from_value::<AgentInferenceDispatchStarted>(legacy_checkpoint)
+        .expect("decode legacy checkpoint");
+    assert_eq!(decoded_legacy.model, None);
+    assert_eq!(decoded_legacy.operation, None);
+    assert_eq!(decoded_legacy.activation_cut, None);
+    let mut checkpoint_cbor = Vec::new();
+    ciborium::into_writer(&checkpoint, &mut checkpoint_cbor).expect("encode checkpoint CBOR");
+    assert_eq!(
+        ciborium::from_reader::<AgentInferenceDispatchStarted, _>(checkpoint_cbor.as_slice())
+            .expect("decode checkpoint CBOR"),
+        checkpoint
+    );
+    let checkpoint_event = Event::AgentInferenceDispatchStarted(checkpoint.clone());
+    assert_eq!(
+        decode_cbor_event(&cbor_event(&checkpoint_event)),
+        checkpoint_event
+    );
+    let legacy_checkpoint_event =
+        Event::AgentInferenceDispatchStarted(AgentInferenceDispatchStarted {
+            model: None,
+            operation: None,
+            activation_cut: None,
+            ..checkpoint.clone()
+        });
+    let mut legacy_checkpoint_cbor = cbor_event(&checkpoint_event);
+    for field in ["model", "operation", "activation_cut"] {
+        assert!(remove_cbor_field(&mut legacy_checkpoint_cbor, field));
+    }
+    assert_eq!(
+        decode_cbor_event(&legacy_checkpoint_cbor),
+        legacy_checkpoint_event
+    );
+
+    let mut response = ProviderResponseFinished {
+        agent_prompt_id: checkpoint.agent_prompt_id,
+        agent_id: started.agent_id,
+        output_items: Vec::new(),
+        stop_reason: ProviderStopReason::Error,
+        error: Some("safe error".to_owned()),
+        failure_kind: Some(ProviderFailureKind::ContextWindowExceeded),
+        recovery_disposition: ContextRecoveryDisposition::None,
+        originator: PromptOriginator::User,
+        usage: None,
+        compaction_original_input_tokens: None,
+        compaction_compacted_input_tokens: None,
+        backend: None,
+        provider_response_id: None,
+        ws_pool_delta: None,
+    };
+    let none_json = serde_json::to_value(&response).expect("encode no-disposition response");
+    assert!(none_json.get("recovery_disposition").is_none());
+    assert_eq!(
+        serde_json::from_value::<ProviderResponseFinished>(none_json)
+            .expect("omitted disposition defaults"),
+        response
+    );
+    response.recovery_disposition = ContextRecoveryDisposition::ReactiveCompactionPlanned;
+    let planned_json = serde_json::to_value(&response).expect("encode planned response");
+    assert_eq!(
+        planned_json["recovery_disposition"],
+        "reactive_compaction_planned"
+    );
+    assert_eq!(
+        serde_json::from_value::<ProviderResponseFinished>(planned_json)
+            .expect("decode planned response"),
+        response
+    );
+    let mut response_cbor = Vec::new();
+    ciborium::into_writer(&response, &mut response_cbor).expect("encode planned response CBOR");
+    assert_eq!(
+        ciborium::from_reader::<ProviderResponseFinished, _>(response_cbor.as_slice())
+            .expect("decode planned response CBOR"),
+        response
+    );
+    let planned_event = Event::ProviderResponseFinished(response.clone());
+    assert_eq!(
+        decode_cbor_event(&cbor_event(&planned_event)),
+        planned_event
+    );
+    let none_event = Event::ProviderResponseFinished(ProviderResponseFinished {
+        recovery_disposition: ContextRecoveryDisposition::None,
+        ..response
+    });
+    let none_cbor = cbor_event(&none_event);
+    let mut disposition_probe = none_cbor.clone();
+    assert!(
+        !remove_cbor_field(&mut disposition_probe, "recovery_disposition"),
+        "None disposition is omitted from the enclosing CBOR event"
+    );
+    assert_eq!(decode_cbor_event(&none_cbor), none_event);
+    let mut legacy_response_cbor = cbor_event(&planned_event);
+    assert!(remove_cbor_field(
+        &mut legacy_response_cbor,
+        "recovery_disposition"
+    ));
+    assert_eq!(decode_cbor_event(&legacy_response_cbor), none_event);
 }

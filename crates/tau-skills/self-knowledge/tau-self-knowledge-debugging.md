@@ -7,6 +7,12 @@ description: >
 advertise: false
 ---
 
+For context-window failures, distinguish the provider's typed rejection from
+the harness recovery decision. Providers cannot authorize reactive compaction;
+inspect the durable inference checkpoint, model capability, role policy,
+activation cut, branch correlation, and whether streamed/final semantic output
+made recovery unsafe.
+
 ## Important paths
 
 Tau follows the XDG directories:

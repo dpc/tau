@@ -585,6 +585,7 @@ pub(super) fn provider_text_response(
         stop_reason: tau_proto::ProviderStopReason::EndTurn,
         error: None,
         failure_kind: None,
+        recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
         originator: tau_proto::PromptOriginator::User,
         compaction_original_input_tokens: None,
@@ -606,6 +607,7 @@ fn provider_repetition_response(
         stop_reason: tau_proto::ProviderStopReason::RepetitionDetected,
         error: Some("provider stream repetition detected".to_owned()),
         failure_kind: None,
+        recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
         originator: tau_proto::PromptOriginator::User,
         compaction_original_input_tokens: None,
@@ -821,6 +823,7 @@ fn seed_background_placeholder_for_agent(
                 stop_reason: tau_proto::ProviderStopReason::ToolCalls,
                 error: None,
                 failure_kind: None,
+                recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
                 usage: None,
                 originator: tau_proto::PromptOriginator::User,
                 compaction_original_input_tokens: None,
@@ -1055,6 +1058,7 @@ fn setup_routed_test_tool_call(call_id: &str, tool_name: &str) -> (TempDir, Harn
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
         failure_kind: None,
+        recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
         originator: tau_proto::PromptOriginator::User,
         compaction_original_input_tokens: None,
@@ -1146,6 +1150,7 @@ fn invalid_tool_arguments_are_rejected_before_logical_dispatch() {
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
         failure_kind: None,
+        recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
         originator: tau_proto::PromptOriginator::User,
         compaction_original_input_tokens: None,
@@ -1271,6 +1276,7 @@ fn invalid_tool_arguments_are_repaired_and_revalidated_before_dispatch() {
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
         failure_kind: None,
+        recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
         originator: tau_proto::PromptOriginator::User,
         compaction_original_input_tokens: None,
@@ -1366,6 +1372,7 @@ fn repaired_tool_arguments_are_rejected_when_revalidation_fails() {
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
         failure_kind: None,
+        recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
         originator: tau_proto::PromptOriginator::User,
         compaction_original_input_tokens: None,
@@ -1793,6 +1800,7 @@ fn side_agent_error_response_propagates_error_result() {
         stop_reason: tau_proto::ProviderStopReason::Error,
         error: Some("provider failed".to_owned()),
         failure_kind: Some(tau_proto::ProviderFailureKind::ContextWindowExceeded),
+        recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
         originator: tau_proto::PromptOriginator::Extension {
             name: "conn-side-error".into(),
@@ -2410,6 +2418,7 @@ fn unavailable_tool_errors_are_actionable_for_unknown_and_disabled_tools() {
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
         failure_kind: None,
+        recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
         originator: tau_proto::PromptOriginator::User,
         compaction_original_input_tokens: None,
@@ -2541,6 +2550,7 @@ fn unknown_tool_suggestion_uses_prompt_tool_snapshot() {
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
         failure_kind: None,
+        recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
         originator: tau_proto::PromptOriginator::User,
         compaction_original_input_tokens: None,
@@ -2628,6 +2638,7 @@ fn old_prompt_missing_provider_wins_over_strict_schema_validation() {
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
         failure_kind: None,
+        recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
         originator: tau_proto::PromptOriginator::User,
         compaction_original_input_tokens: None,
@@ -2722,6 +2733,7 @@ fn disconnect_with_multiple_inflight_tools_cleans_up_all_calls() {
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
         failure_kind: None,
+        recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
         originator: tau_proto::PromptOriginator::User,
         compaction_original_input_tokens: None,
@@ -2917,6 +2929,7 @@ fn background_result_clears_actual_running_call_without_blocking_later_tool() {
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
         failure_kind: None,
+        recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
         originator: tau_proto::PromptOriginator::User,
         compaction_original_input_tokens: None,
@@ -3009,6 +3022,7 @@ fn background_error_clears_actual_running_call() {
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
         failure_kind: None,
+        recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
         originator: tau_proto::PromptOriginator::User,
         compaction_original_input_tokens: None,
@@ -3113,6 +3127,7 @@ fn background_cancel_clears_actual_running_call() {
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
         failure_kind: None,
+        recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
         originator: tau_proto::PromptOriginator::User,
         compaction_original_input_tokens: None,
@@ -3255,6 +3270,7 @@ fn disconnect_background_errors_do_not_affect_other_inflight_tools() {
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
         failure_kind: None,
+        recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
         originator: tau_proto::PromptOriginator::User,
         compaction_original_input_tokens: None,
@@ -3355,6 +3371,7 @@ fn disconnect_idle_multi_background_errors_dispatch_prompt_after_batch() {
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
         failure_kind: None,
+        recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
         originator: tau_proto::PromptOriginator::User,
         compaction_original_input_tokens: None,
@@ -3463,6 +3480,7 @@ fn disconnect_mixed_foreground_and_background_errors_dispatch_prompt_after_batch
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
         failure_kind: None,
+        recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
         originator: tau_proto::PromptOriginator::User,
         compaction_original_input_tokens: None,
@@ -3825,6 +3843,7 @@ fn provider_owner_validation_rejects_provider_event_message_emit() {
                 stop_reason: tau_proto::ProviderStopReason::EndTurn,
                 error: None,
                 failure_kind: None,
+                recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
                 usage: None,
                 originator: tau_proto::PromptOriginator::User,
                 compaction_original_input_tokens: None,
@@ -3915,6 +3934,7 @@ fn cancel_publishes_tool_cancel_request() {
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
         failure_kind: None,
+        recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
         originator: tau_proto::PromptOriginator::User,
         compaction_original_input_tokens: None,
@@ -4053,6 +4073,7 @@ fn cancel_remaining_backgrounded_extension_call_publishes_background_error_only(
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
         failure_kind: None,
+        recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
         originator: tau_proto::PromptOriginator::User,
         compaction_original_input_tokens: None,
@@ -4327,6 +4348,7 @@ fn live_cancel_tools_running_includes_already_backgrounded_siblings() {
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
         failure_kind: None,
+        recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
         originator: tau_proto::PromptOriginator::User,
         compaction_original_input_tokens: None,
@@ -4484,6 +4506,7 @@ fn cancel_backgrounded_builtin_agent_start_publishes_background_error_only() {
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
         failure_kind: None,
+        recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
         originator: tau_proto::PromptOriginator::User,
         compaction_original_input_tokens: None,
@@ -4563,6 +4586,7 @@ fn live_cancel_backgrounded_builtin_agent_start_keeps_passive_completion_notice(
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
         failure_kind: None,
+        recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
         originator: tau_proto::PromptOriginator::User,
         compaction_original_input_tokens: None,
@@ -4771,6 +4795,7 @@ fn cancel_while_thinking_terminates_prompt_and_drops_late_response() {
         stop_reason: tau_proto::ProviderStopReason::EndTurn,
         error: None,
         failure_kind: None,
+        recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
         originator: tau_proto::PromptOriginator::User,
         compaction_original_input_tokens: None,
@@ -5322,6 +5347,7 @@ fn tool_turn_dispatches_provider_calls_without_global_locking() {
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
         failure_kind: None,
+        recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: match (None, None, None) {
             (None, None, None) => None,
             (input_tokens, cached_tokens, output_tokens) => Some(tau_proto::ProviderTokenUsage {
@@ -5443,6 +5469,7 @@ fn multi_tool_turn_keeps_all_results_in_followup_prompt() {
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
         failure_kind: None,
+        recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: match (None, None, None) {
             (None, None, None) => None,
             (input_tokens, cached_tokens, output_tokens) => Some(tau_proto::ProviderTokenUsage {
@@ -5996,6 +6023,7 @@ fn queued_prompt_is_steered_into_next_round_after_tool_result() {
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
         failure_kind: None,
+        recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: match (None, None, None) {
             (None, None, None) => None,
             (input_tokens, cached_tokens, output_tokens) => Some(tau_proto::ProviderTokenUsage {
@@ -6154,6 +6182,7 @@ fn tool_calls_stop_reason_without_tool_items_does_not_wedge_turn() {
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
         failure_kind: None,
+        recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
         originator: tau_proto::PromptOriginator::User,
         compaction_original_input_tokens: None,
@@ -6209,6 +6238,7 @@ fn agent_prompt_created_uses_refs_for_linear_extension() {
         stop_reason: tau_proto::ProviderStopReason::EndTurn,
         error: None,
         failure_kind: None,
+        recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: match (None, None, None) {
             (None, None, None) => None,
             (input_tokens, cached_tokens, output_tokens) => Some(tau_proto::ProviderTokenUsage {
@@ -6270,6 +6300,7 @@ fn linear_agent_prompts_strictly_extend_previous_messages() {
         stop_reason: tau_proto::ProviderStopReason::EndTurn,
         error: None,
         failure_kind: None,
+        recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: match (None, None, None) {
             (None, None, None) => None,
             (input_tokens, cached_tokens, output_tokens) => Some(tau_proto::ProviderTokenUsage {
@@ -6350,6 +6381,7 @@ fn response_id_anchors_next_prompt_with_previous_response() {
         stop_reason: tau_proto::ProviderStopReason::EndTurn,
         error: None,
         failure_kind: None,
+        recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: match (None, None, None) {
             (None, None, None) => None,
             (input_tokens, cached_tokens, output_tokens) => Some(tau_proto::ProviderTokenUsage {
@@ -6409,6 +6441,7 @@ fn chained_sub_chunk_cacheable_tokens_does_not_emit_diagnostic() {
         stop_reason: tau_proto::ProviderStopReason::EndTurn,
         error: None,
         failure_kind: None,
+        recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: match (Some(500), Some(0), None) {
             (None, None, None) => None,
             (input_tokens, cached_tokens, output_tokens) => Some(tau_proto::ProviderTokenUsage {
@@ -6449,6 +6482,7 @@ fn chained_sub_chunk_cacheable_tokens_does_not_emit_diagnostic() {
         stop_reason: tau_proto::ProviderStopReason::EndTurn,
         error: None,
         failure_kind: None,
+        recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: match (Some(500), Some(0), None) {
             (None, None, None) => None,
             (input_tokens, cached_tokens, output_tokens) => Some(tau_proto::ProviderTokenUsage {
@@ -6513,6 +6547,7 @@ fn model_switch_invalidates_chain_anchor() {
         stop_reason: tau_proto::ProviderStopReason::EndTurn,
         error: None,
         failure_kind: None,
+        recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: match (None, None, None) {
             (None, None, None) => None,
             (input_tokens, cached_tokens, output_tokens) => Some(tau_proto::ProviderTokenUsage {
@@ -6586,6 +6621,7 @@ fn params_drift_invalidates_chain_anchor() {
         stop_reason: tau_proto::ProviderStopReason::EndTurn,
         error: None,
         failure_kind: None,
+        recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: match (None, None, None) {
             (None, None, None) => None,
             (input_tokens, cached_tokens, output_tokens) => Some(tau_proto::ProviderTokenUsage {
@@ -6657,6 +6693,7 @@ fn system_prompt_drift_invalidates_chain_anchor() {
         stop_reason: tau_proto::ProviderStopReason::EndTurn,
         error: None,
         failure_kind: None,
+        recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: match (None, None, None) {
             (None, None, None) => None,
             (input_tokens, cached_tokens, output_tokens) => Some(tau_proto::ProviderTokenUsage {
@@ -6740,6 +6777,7 @@ fn tools_drift_invalidates_chain_anchor() {
         stop_reason: tau_proto::ProviderStopReason::EndTurn,
         error: None,
         failure_kind: None,
+        recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: match (None, None, None) {
             (None, None, None) => None,
             (input_tokens, cached_tokens, output_tokens) => Some(tau_proto::ProviderTokenUsage {
@@ -6823,6 +6861,7 @@ fn stable_params_preserve_chain_anchor() {
         stop_reason: tau_proto::ProviderStopReason::EndTurn,
         error: None,
         failure_kind: None,
+        recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: match (None, None, None) {
             (None, None, None) => None,
             (input_tokens, cached_tokens, output_tokens) => Some(tau_proto::ProviderTokenUsage {
@@ -6885,6 +6924,7 @@ fn missing_response_id_leaves_chain_unset() {
         stop_reason: tau_proto::ProviderStopReason::EndTurn,
         error: None,
         failure_kind: None,
+        recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: match (None, None, None) {
             (None, None, None) => None,
             (input_tokens, cached_tokens, output_tokens) => Some(tau_proto::ProviderTokenUsage {
@@ -6958,6 +6998,7 @@ fn queued_prompt_extends_completed_first_prompt() {
         stop_reason: tau_proto::ProviderStopReason::EndTurn,
         error: None,
         failure_kind: None,
+        recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: match (None, None, None) {
             (None, None, None) => None,
             (input_tokens, cached_tokens, output_tokens) => Some(tau_proto::ProviderTokenUsage {
@@ -7385,6 +7426,9 @@ fn replay_respects_activation_checkpoint_ranges_and_uncertainty() {
             transaction_id: None,
             agent_prompt_id: completed_prompt_id.clone(),
             through: tau_proto::AgentHead::Node(through),
+            model: None,
+            operation: None,
+            activation_cut: None,
         }),
     );
     append_seed_agent_event(
@@ -7579,6 +7623,7 @@ fn resumed_lost_background_tool_gets_error_and_wait_returns() {
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
         failure_kind: None,
+        recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
         originator: tau_proto::PromptOriginator::User,
         compaction_original_input_tokens: None,
@@ -7705,6 +7750,7 @@ fn resumed_completed_background_result_can_be_consumed_by_no_arg_wait() {
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
         failure_kind: None,
+        recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
         originator: tau_proto::PromptOriginator::User,
         compaction_original_input_tokens: None,
@@ -8304,6 +8350,7 @@ fn manual_standalone_compact_installs_one_boundary() {
         stop_reason: tau_proto::ProviderStopReason::EndTurn,
         error: None,
         failure_kind: None,
+        recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         originator: tau_proto::PromptOriginator::User,
         usage: None,
         compaction_original_input_tokens: None,
@@ -8345,6 +8392,1067 @@ fn manual_standalone_compact_installs_one_boundary() {
         })
             if replacement_window.len() == 1
     ));
+    h.shutdown().expect("shutdown");
+}
+
+pub(super) fn context_overflow_response(
+    prompt: &tau_proto::AgentPromptCreated,
+) -> ProviderResponseFinished {
+    ProviderResponseFinished {
+        agent_prompt_id: prompt.agent_prompt_id.clone(),
+        agent_id: prompt.agent_id.clone(),
+        output_items: Vec::new(),
+        stop_reason: tau_proto::ProviderStopReason::Error,
+        error: Some("bounded context rejection".to_owned()),
+        failure_kind: Some(tau_proto::ProviderFailureKind::ContextWindowExceeded),
+        recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
+        originator: prompt.originator.clone(),
+        usage: None,
+        compaction_original_input_tokens: None,
+        compaction_compacted_input_tokens: None,
+        backend: None,
+        provider_response_id: None,
+        ws_pool_delta: None,
+    }
+}
+
+/// A canonical no-output inference rejection commits the harness-authored plan
+/// before one durable claim, dispatches one compact request, and continues the
+/// owed activation exactly once after the accepted replacement boundary.
+#[test]
+fn reactive_context_overflow_recovers_in_durable_order_once() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    enable_remote_compaction_for_test_model(&mut h);
+    let info = h
+        .provider_model_info
+        .get_mut(&"test/model".into())
+        .expect("test model");
+    info.supports_compaction = false;
+    info.supports_standalone_compaction = true;
+    let cid = ensure_test_user_agent(&mut h);
+
+    h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("overflow activation".to_owned()))
+        .expect("dispatch inference");
+    let inference = read_nth_prompt_created(&h, 0);
+    let turn_generation = h.agents[&cid].turn_generation;
+    h.handle_provider_response_finished(context_overflow_response(&inference))
+        .expect("plan reactive recovery");
+    let compact = read_nth_prompt_created(&h, 1);
+    assert_eq!(
+        compact.operation,
+        tau_proto::PromptOperation::StandaloneCompaction
+    );
+
+    let events = event_log_events(&h);
+    let planned_index = events
+        .iter()
+        .position(|event| {
+            matches!(
+                event,
+                Event::ProviderResponseFinished(response)
+                    if response.agent_prompt_id == inference.agent_prompt_id
+                        && response.recovery_disposition
+                            == tau_proto::ContextRecoveryDisposition::ReactiveCompactionPlanned
+            )
+        })
+        .expect("planned terminal response");
+    let (start_index, start) = events
+        .iter()
+        .enumerate()
+        .find_map(|(index, event)| match event {
+            Event::AgentStandaloneCompactionStarted(started) => Some((index, started)),
+            _ => None,
+        })
+        .expect("reactive start");
+    assert!(planned_index < start_index);
+    assert!(matches!(
+        &start.trigger,
+        tau_proto::StandaloneCompactionTrigger::ReactiveContextOverflow {
+            failed_agent_prompt_id
+        } if failed_agent_prompt_id == &inference.agent_prompt_id
+    ));
+    assert_eq!(start.compact_prompt_id, compact.agent_prompt_id);
+    assert_eq!(h.agents[&cid].turn_generation, turn_generation);
+    let agent_id = h.agents[&cid].agent_id.clone().expect("agent id");
+    assert!(matches!(
+        h.agent_watch_provider_status[&agent_id].state,
+        tau_proto::AgentWatchProviderState::RecoveringContext { .. }
+    ));
+
+    h.handle_provider_response_finished(provider_text_response(
+        &compact.agent_prompt_id,
+        compact.agent_id,
+        "replacement",
+    ))
+    .expect("accept compact response");
+    let continuation = read_nth_prompt_created(&h, 2);
+    assert_eq!(
+        continuation.operation,
+        tau_proto::PromptOperation::Inference
+    );
+    assert_eq!(
+        h.agents[&cid].turn_generation, turn_generation,
+        "recovery and continuation remain one logical watched turn"
+    );
+    assert!(
+        !event_log_events(&h)[planned_index..]
+            .iter()
+            .any(|event| matches!(
+                event,
+                Event::AgentState(changed)
+                    if changed.agent_id.as_str() == agent_id
+                        && changed.state == tau_proto::AgentRuntimeState::Idle
+            )),
+        "no turn-stop may be emitted between rejection and continuation"
+    );
+    assert_eq!(
+        event_log_events(&h)
+            .iter()
+            .filter(|event| matches!(
+                event,
+                Event::AgentStandaloneCompactionStarted(started)
+                    if matches!(
+                        started.trigger,
+                        tau_proto::StandaloneCompactionTrigger::ReactiveContextOverflow { .. }
+                    )
+            ))
+            .count(),
+        1
+    );
+    assert_eq!(
+        event_log_events(&h)
+            .iter()
+            .filter(|event| matches!(
+                event,
+                Event::AgentPromptCreated(prompt)
+                    if prompt.operation == tau_proto::PromptOperation::Inference
+            ))
+            .count(),
+        2,
+        "original plus exactly one continuation"
+    );
+
+    h.handle_provider_response_finished(context_overflow_response(&continuation))
+        .expect("post-compaction overflow is terminal");
+    assert_eq!(
+        event_log_events(&h)
+            .iter()
+            .filter(|event| matches!(event, Event::AgentStandaloneCompactionStarted(_)))
+            .count(),
+        1,
+        "post-compaction inference cannot recursively compact"
+    );
+    h.shutdown().expect("shutdown");
+}
+
+/// Provider-authored disposition, semantic streamed output, final output,
+/// disabled policy, unsupported capability, and model mismatch must all fail
+/// closed without publishing a reactive transaction.
+#[test]
+fn reactive_context_overflow_eligibility_fails_closed() {
+    #[derive(Clone, Copy)]
+    enum Case {
+        ForgedDisposition,
+        StreamedOutput,
+        FinalOutput,
+        ToolOutput,
+        Disabled,
+        Unsupported,
+        ModelMismatch,
+        CurrentModelMismatch,
+        BranchMismatch,
+    }
+    for case in [
+        Case::ForgedDisposition,
+        Case::StreamedOutput,
+        Case::FinalOutput,
+        Case::ToolOutput,
+        Case::Disabled,
+        Case::Unsupported,
+        Case::ModelMismatch,
+        Case::CurrentModelMismatch,
+        Case::BranchMismatch,
+    ] {
+        let td = TempDir::new().expect("tempdir");
+        let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+        enable_remote_compaction_for_test_model(&mut h);
+        h.provider_model_info
+            .get_mut(&"test/model".into())
+            .expect("test model")
+            .supports_standalone_compaction =
+            !matches!(case, Case::Unsupported | Case::ForgedDisposition);
+        if matches!(case, Case::Disabled) {
+            let role = h.selected_role.clone();
+            h.available_roles.entry(role).or_default().compaction =
+                Some(tau_config::settings::RoleCompaction::Disabled);
+        }
+        let cid = ensure_test_user_agent(&mut h);
+        h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("overflow".to_owned()))
+            .expect("dispatch inference");
+        let prompt = read_nth_prompt_created(&h, 0);
+        if matches!(case, Case::StreamedOutput) {
+            let provider = h
+                .pending_provider_prompts
+                .get(&prompt.agent_prompt_id)
+                .cloned()
+                .expect("provider owner");
+            h.handle_extension_event(
+                provider.as_str(),
+                TestProtocolItem::Event(Event::ProviderResponseUpdated(ProviderResponseUpdated {
+                    agent_prompt_id: prompt.agent_prompt_id.clone(),
+                    agent_id: prompt.agent_id.clone(),
+                    deltas: vec![tau_proto::ProviderResponseTextDelta::Message {
+                        output_index: 0,
+                        text: "accepted partial output".to_owned(),
+                        phase: None,
+                    }],
+                    compaction: None,
+                    status: None,
+                    response_stats: None,
+                    originator: prompt.originator.clone(),
+                })),
+            )
+            .expect("ingest semantic stream delta");
+        }
+        if matches!(case, Case::ModelMismatch) {
+            h.prompt_models
+                .insert(prompt.agent_prompt_id.clone(), "provider/other".into());
+        }
+        if matches!(case, Case::CurrentModelMismatch) {
+            let mut other = h
+                .provider_model_info
+                .get(&"test/model".into())
+                .expect("test model")
+                .clone();
+            other.id = "provider/other".into();
+            h.provider_model_info.insert(other.id.clone(), other);
+            h.selected_model = Some("provider/other".into());
+        }
+        if matches!(case, Case::BranchMismatch) {
+            h.publish_for_agent(
+                &cid,
+                Event::AgentHeadMoved(tau_proto::AgentHeadMoved {
+                    agent_id: prompt.agent_id.clone(),
+                    head: tau_proto::AgentHead::Root,
+                }),
+            );
+        }
+        let mut response = context_overflow_response(&prompt);
+        if matches!(case, Case::FinalOutput) {
+            response
+                .output_items
+                .push(ContextItem::Message(MessageItem {
+                    role: ContextRole::Assistant,
+                    content: vec![ContentPart::Text {
+                        text: "partial".to_owned(),
+                    }],
+                    phase: None,
+                    responses_raw_json: None,
+                }));
+        }
+        if matches!(case, Case::ToolOutput) {
+            response
+                .output_items
+                .push(ContextItem::ToolCall(ToolCallItem {
+                    call_id: "call-overflow".into(),
+                    name: ToolName::new("ignored"),
+                    tool_type: tau_proto::ToolType::Function,
+                    arguments: CborValue::Map(Vec::new()),
+                    raw_arguments_json: None,
+                    responses_envelope: None,
+                }));
+            response.stop_reason = tau_proto::ProviderStopReason::ToolCalls;
+        }
+        if matches!(case, Case::ForgedDisposition) {
+            response.recovery_disposition =
+                tau_proto::ContextRecoveryDisposition::ReactiveCompactionPlanned;
+        }
+        h.handle_provider_response_finished(response)
+            .expect("terminal handling");
+        assert!(
+            !event_log_events(&h)
+                .iter()
+                .any(|event| matches!(event, Event::AgentStandaloneCompactionStarted(_))),
+            "ineligible case must not compact"
+        );
+        if matches!(case, Case::ForgedDisposition) {
+            assert!(event_log_events(&h).iter().any(|event| matches!(
+                event,
+                Event::ProviderResponseFinished(finished)
+                    if finished.agent_prompt_id == prompt.agent_prompt_id
+                        && finished.recovery_disposition
+                            == tau_proto::ContextRecoveryDisposition::None
+            )));
+        }
+        h.shutdown().expect("shutdown");
+    }
+}
+
+/// Replay after the planned terminal response but before its claim must restore
+/// the runtime route first, publish one claim, and dispatch one compact prompt.
+#[test]
+fn reactive_context_overflow_replay_claims_and_dispatches_once() {
+    let td = TempDir::new().expect("tempdir");
+    let state = td.path().join("state");
+    let mut h = quiet_provider_harness(&state).expect("start");
+    enable_remote_compaction_for_test_model(&mut h);
+    h.provider_model_info
+        .get_mut(&"test/model".into())
+        .expect("test model")
+        .supports_standalone_compaction = true;
+    h.selected_model = Some("provider-b/model".into());
+    let agent_id = tau_proto::AgentId::parse("main").expect("agent id");
+    h.publish_event(
+        None,
+        Event::SessionAgentLoaded(tau_proto::SessionAgentLoaded {
+            session_id: "s1".into(),
+            agent_id: agent_id.clone(),
+            ephemeral: false,
+        }),
+    );
+    let mut store = tau_core::AgentStore::open(state.join("agents")).expect("agent store");
+    append_seed_agent_event(
+        &mut store,
+        Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+            agent_id: agent_id.clone(),
+            inference_activation: true,
+            text: "owed activation".to_owned(),
+            message_class: tau_proto::PromptMessageClass::User,
+            originator: tau_proto::PromptOriginator::User,
+            submission_source: Default::default(),
+            display_name: None,
+            ctx_id: None,
+        }),
+    );
+    let through = tau_proto::AgentHead::Node(
+        store
+            .agent("main")
+            .and_then(tau_core::AgentTree::head)
+            .expect("head"),
+    );
+    let prompt_id = tau_proto::AgentPromptId::from("ap-main-overflow");
+    append_seed_agent_event(
+        &mut store,
+        Event::AgentInferenceDispatchStarted(tau_proto::AgentInferenceDispatchStarted {
+            agent_id: agent_id.clone(),
+            transaction_id: None,
+            agent_prompt_id: prompt_id.clone(),
+            through,
+            model: Some("provider-b/model".into()),
+            operation: Some(tau_proto::PromptOperation::Inference),
+            activation_cut: Some(tau_proto::AgentHead::Root),
+        }),
+    );
+    let planned = ProviderResponseFinished {
+        agent_prompt_id: prompt_id,
+        agent_id,
+        output_items: Vec::new(),
+        stop_reason: tau_proto::ProviderStopReason::Error,
+        error: Some("bounded".to_owned()),
+        failure_kind: Some(tau_proto::ProviderFailureKind::ContextWindowExceeded),
+        recovery_disposition: tau_proto::ContextRecoveryDisposition::ReactiveCompactionPlanned,
+        originator: tau_proto::PromptOriginator::User,
+        usage: None,
+        compaction_original_input_tokens: None,
+        compaction_compacted_input_tokens: None,
+        backend: None,
+        provider_response_id: None,
+        ws_pool_delta: None,
+    };
+    append_seed_agent_event(&mut store, Event::ProviderResponseFinished(planned));
+    drop(store);
+
+    let mut capable = h
+        .provider_model_info
+        .get(&"test/model".into())
+        .expect("test model")
+        .clone();
+    capable.id = "provider-b/model".into();
+    let provider_owner = h.provider_model_routes[&"test/model".into()].to_string();
+    h.rehydrate_agents_from_session();
+    let restored_cid = h.agent_routes["main"].clone();
+    h.agents
+        .get_mut(&restored_cid)
+        .expect("restored agent")
+        .model_override = Some("provider-b/model".into());
+    let mut unrelated = capable.clone();
+    unrelated.id = "provider-a/other".into();
+    h.publish_provider_models_update(
+        "provider-a",
+        tau_proto::ProviderModelsUpdated {
+            models: vec![unrelated],
+        },
+    );
+    assert!(matches!(
+        h.agents[&restored_cid].activation_dispatch,
+        crate::agent::ActivationDispatchState::ContextRecoveryPending { .. }
+    ));
+    assert!(
+        !event_log_events(&h)
+            .iter()
+            .any(|event| matches!(event, Event::AgentStandaloneCompactionStarted(_)))
+    );
+    h.publish_provider_models_update(
+        &provider_owner,
+        tau_proto::ProviderModelsUpdated {
+            models: vec![capable],
+        },
+    );
+    h.drain_publish_idle_dispatches();
+    assert!(
+        matches!(
+            h.agents[&restored_cid].activation_dispatch,
+            crate::agent::ActivationDispatchState::Running { .. }
+        ),
+        "{:?}",
+        h.agents[&restored_cid].activation_dispatch
+    );
+    assert_eq!(
+        event_log_events(&h)
+            .iter()
+            .filter(|event| matches!(
+                event,
+                Event::AgentStandaloneCompactionStarted(started)
+                    if matches!(
+                        started.trigger,
+                        tau_proto::StandaloneCompactionTrigger::ReactiveContextOverflow { .. }
+                    )
+            ))
+            .count(),
+        1
+    );
+    assert_eq!(
+        event_log_events(&h)
+            .iter()
+            .filter(|event| matches!(
+                event,
+                Event::AgentPromptCreated(prompt)
+                    if prompt.operation == tau_proto::PromptOperation::StandaloneCompaction
+            ))
+            .count(),
+        1
+    );
+    h.shutdown().expect("shutdown");
+}
+
+/// Authoritative replay drift terminalizes a real correlated transaction,
+/// exposes blocked status, and leaves explicit manual compaction usable.
+#[test]
+fn reactive_context_overflow_replay_drift_allows_manual_compact() {
+    let td = TempDir::new().expect("tempdir");
+    let state = td.path().join("state");
+    seed_main_agent_loaded(&state);
+    let agent_id = tau_proto::AgentId::parse("main").expect("agent id");
+    let mut store = tau_core::AgentStore::open(state.join("agents")).expect("agent store");
+    append_seed_agent_event(
+        &mut store,
+        Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+            agent_id: agent_id.clone(),
+            inference_activation: true,
+            text: "owed".to_owned(),
+            message_class: tau_proto::PromptMessageClass::User,
+            originator: tau_proto::PromptOriginator::User,
+            submission_source: Default::default(),
+            display_name: None,
+            ctx_id: None,
+        }),
+    );
+    let through = tau_proto::AgentHead::Node(
+        store
+            .agent("main")
+            .and_then(tau_core::AgentTree::head)
+            .expect("head"),
+    );
+    let prompt_id = tau_proto::AgentPromptId::from("ap-main-drift");
+    append_seed_agent_event(
+        &mut store,
+        Event::AgentInferenceDispatchStarted(tau_proto::AgentInferenceDispatchStarted {
+            agent_id: agent_id.clone(),
+            transaction_id: None,
+            agent_prompt_id: prompt_id.clone(),
+            through,
+            model: Some("provider-b/model".into()),
+            operation: Some(tau_proto::PromptOperation::Inference),
+            activation_cut: Some(tau_proto::AgentHead::Root),
+        }),
+    );
+    append_seed_agent_event(
+        &mut store,
+        Event::ProviderResponseFinished(ProviderResponseFinished {
+            agent_prompt_id: prompt_id,
+            agent_id: agent_id.clone(),
+            output_items: Vec::new(),
+            stop_reason: tau_proto::ProviderStopReason::Error,
+            error: Some("bounded".to_owned()),
+            failure_kind: Some(tau_proto::ProviderFailureKind::ContextWindowExceeded),
+            recovery_disposition: tau_proto::ContextRecoveryDisposition::ReactiveCompactionPlanned,
+            originator: tau_proto::PromptOriginator::User,
+            usage: None,
+            compaction_original_input_tokens: None,
+            compaction_compacted_input_tokens: None,
+            backend: None,
+            provider_response_id: None,
+            ws_pool_delta: None,
+        }),
+    );
+    drop(store);
+
+    let mut h =
+        quiet_provider_harness_with_start_reason(&state, tau_proto::SessionStartReason::Resume)
+            .expect("resume");
+    let unsupported = h
+        .provider_model_info
+        .get(&"test/model".into())
+        .expect("test model")
+        .clone();
+    h.publish_provider_models_update(
+        "provider-recovery-owner",
+        tau_proto::ProviderModelsUpdated {
+            models: vec![unsupported],
+        },
+    );
+    assert!(matches!(
+        h.agent_watch_provider_status["main"].state,
+        tau_proto::AgentWatchProviderState::Blocked { .. }
+    ));
+    enable_remote_compaction_for_test_model(&mut h);
+    h.provider_model_info
+        .get_mut(&"test/model".into())
+        .expect("test model")
+        .supports_standalone_compaction = true;
+    h.handle_compact_request("s1".into(), Some("main"));
+    assert_eq!(
+        read_nth_prompt_created(&h, 0).operation,
+        tau_proto::PromptOperation::StandaloneCompaction
+    );
+    h.shutdown().expect("shutdown");
+}
+
+/// UI cancellation during reactive compaction publishes one durable Cancelled
+/// outcome; a late provider terminal and cold replay cannot duplicate it.
+#[test]
+fn reactive_context_overflow_ui_cancel_is_terminal_once() {
+    let td = TempDir::new().expect("tempdir");
+    let state = td.path().join("state");
+    let (agent_id, compact);
+    {
+        let mut h = quiet_provider_harness(&state).expect("start");
+        enable_remote_compaction_for_test_model(&mut h);
+        h.provider_model_info
+            .get_mut(&"test/model".into())
+            .expect("test model")
+            .supports_standalone_compaction = true;
+        let cid = ensure_test_user_agent(&mut h);
+        agent_id = h.agents[&cid].agent_id.clone().expect("agent id");
+        h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("overflow".to_owned()))
+            .expect("dispatch inference");
+        let inference = read_nth_prompt_created(&h, 0);
+        h.handle_provider_response_finished(context_overflow_response(&inference))
+            .expect("start recovery");
+        compact = read_nth_prompt_created(&h, 1);
+        h.handle_cancel_prompt(&tau_proto::UiCancelPrompt {
+            session_id: "s1".into(),
+            target_agent_id: Some(crate::parse_agent_id(&agent_id)),
+            agent_prompt_id: Some(compact.agent_prompt_id.clone()),
+        });
+        h.handle_provider_response_finished(context_overflow_response(&compact))
+            .expect("discard late response");
+        assert_eq!(
+            event_log_events(&h)
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    Event::AgentStandaloneCompactionFailed(failed)
+                        if failed.reason
+                            == tau_proto::StandaloneCompactionFailureReason::Cancelled
+                ))
+                .count(),
+            1
+        );
+        h.shutdown().expect("shutdown");
+    }
+    wait_for_session_unlock(&state, "s1");
+    let mut resumed =
+        quiet_provider_harness_with_start_reason(&state, tau_proto::SessionStartReason::Resume)
+            .expect("resume");
+    assert!(
+        !event_log_events(&resumed).iter().any(|event| matches!(
+            event,
+            Event::AgentPromptCreated(prompt)
+                if prompt.agent_prompt_id == compact.agent_prompt_id
+        )),
+        "terminal cancelled compaction is not replay-dispatched"
+    );
+    assert!(matches!(
+        resumed.agent_watch_provider_status[&agent_id].state,
+        tau_proto::AgentWatchProviderState::Blocked { .. }
+    ));
+    resumed.shutdown().expect("shutdown");
+}
+
+/// A delegated side conversation whose reactive compact fails must return one
+/// safe terminal result and detach instead of leaving `agent_start` pending.
+#[test]
+fn reactive_context_overflow_side_failure_completes_request() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    enable_remote_compaction_for_test_model(&mut h);
+    h.provider_model_info
+        .get_mut(&"test/model".into())
+        .expect("test model")
+        .supports_standalone_compaction = true;
+    h.handle_start_agent_request(HARNESS_CONNECTION_ID, ext_query("q-reactive-failure"))
+        .expect("start side agent");
+    let side_cid = ext_query_cid(&h, "q-reactive-failure").expect("side agent");
+    let inference = read_nth_prompt_created(&h, 0);
+    h.handle_provider_response_finished(context_overflow_response(&inference))
+        .expect("start recovery");
+    let compact = read_nth_prompt_created(&h, 1);
+    h.handle_provider_response_finished(context_overflow_response(&compact))
+        .expect("fail compact");
+
+    assert!(!h.agents.contains_key(&side_cid));
+    let results: Vec<_> = event_log_events(&h)
+        .into_iter()
+        .filter_map(|event| match event {
+            Event::StartAgentResult(result) if result.query_id == "q-reactive-failure" => {
+                Some(result)
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(results.len(), 1);
+    assert_eq!(
+        results[0].error.as_deref(),
+        Some("provider failure: compaction")
+    );
+    assert!(
+        !serde_json::to_string(&results[0])
+            .expect("serialize result")
+            .contains("bounded context rejection")
+    );
+    h.shutdown().expect("shutdown");
+}
+
+/// A crash with the reactive compact claim committed but no terminal result
+/// records Interrupted on replay and never redispatches the ambiguous request.
+#[test]
+fn reactive_context_overflow_claimed_crash_is_not_redispatched() {
+    let td = TempDir::new().expect("tempdir");
+    let state = td.path().join("state");
+    let compact_prompt_id;
+    {
+        let mut h = quiet_provider_harness(&state).expect("start");
+        enable_remote_compaction_for_test_model(&mut h);
+        h.provider_model_info
+            .get_mut(&"test/model".into())
+            .expect("test model")
+            .supports_standalone_compaction = true;
+        let cid = ensure_test_user_agent(&mut h);
+        h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("overflow".to_owned()))
+            .expect("dispatch inference");
+        let inference = read_nth_prompt_created(&h, 0);
+        h.handle_provider_response_finished(context_overflow_response(&inference))
+            .expect("claim recovery");
+        compact_prompt_id = read_nth_prompt_created(&h, 1).agent_prompt_id;
+        h.shutdown().expect("shutdown");
+    }
+    wait_for_session_unlock(&state, "s1");
+    let mut resumed =
+        quiet_provider_harness_with_start_reason(&state, tau_proto::SessionStartReason::Resume)
+            .expect("resume");
+    assert!(
+        !event_log_events(&resumed).iter().any(|event| matches!(
+            event,
+            Event::AgentPromptCreated(prompt)
+                if prompt.agent_prompt_id == compact_prompt_id
+        )),
+        "ambiguous compact request is never replayed"
+    );
+    let tree = resumed.agent_store.agent(
+        resumed
+            .agent_routes
+            .keys()
+            .next()
+            .expect("restored durable agent"),
+    );
+    assert!(matches!(
+        tree.and_then(tau_core::AgentTree::standalone_compaction_recovery),
+        Some(tau_core::StandaloneCompactionRecovery::Blocked { failed, .. })
+            if failed.reason == tau_proto::StandaloneCompactionFailureReason::Interrupted
+    ));
+    resumed.shutdown().expect("shutdown");
+}
+
+/// Replay after compact success but before its continuation checkpoint commits
+/// creates exactly one checkpoint and inference; the next replay treats that
+/// checkpoint as dispatch-uncertain and does not duplicate it.
+#[test]
+fn reactive_context_overflow_compact_success_resumes_one_checkpoint() {
+    let td = TempDir::new().expect("tempdir");
+    let state = td.path().join("state");
+    seed_main_agent_loaded(&state);
+    let agent_id = tau_proto::AgentId::parse("main").expect("agent id");
+    let mut store = tau_core::AgentStore::open(state.join("agents")).expect("agent store");
+    append_seed_agent_event(
+        &mut store,
+        Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+            agent_id: agent_id.clone(),
+            inference_activation: true,
+            text: "owed".to_owned(),
+            message_class: tau_proto::PromptMessageClass::User,
+            originator: tau_proto::PromptOriginator::User,
+            submission_source: Default::default(),
+            display_name: None,
+            ctx_id: None,
+        }),
+    );
+    let through = tau_proto::AgentHead::Node(
+        store
+            .agent("main")
+            .and_then(tau_core::AgentTree::head)
+            .expect("head"),
+    );
+    let failed_prompt_id = tau_proto::AgentPromptId::from("ap-main-overflow-success-cut");
+    append_seed_agent_event(
+        &mut store,
+        Event::AgentInferenceDispatchStarted(tau_proto::AgentInferenceDispatchStarted {
+            agent_id: agent_id.clone(),
+            transaction_id: None,
+            agent_prompt_id: failed_prompt_id.clone(),
+            through,
+            model: Some("provider-b/model".into()),
+            operation: Some(tau_proto::PromptOperation::Inference),
+            activation_cut: Some(tau_proto::AgentHead::Root),
+        }),
+    );
+    append_seed_agent_event(
+        &mut store,
+        Event::ProviderResponseFinished(ProviderResponseFinished {
+            agent_prompt_id: failed_prompt_id.clone(),
+            agent_id: agent_id.clone(),
+            output_items: Vec::new(),
+            stop_reason: tau_proto::ProviderStopReason::Error,
+            error: Some("bounded".to_owned()),
+            failure_kind: Some(tau_proto::ProviderFailureKind::ContextWindowExceeded),
+            recovery_disposition: tau_proto::ContextRecoveryDisposition::ReactiveCompactionPlanned,
+            originator: tau_proto::PromptOriginator::User,
+            usage: None,
+            compaction_original_input_tokens: None,
+            compaction_compacted_input_tokens: None,
+            backend: None,
+            provider_response_id: None,
+            ws_pool_delta: None,
+        }),
+    );
+    let transaction_id =
+        tau_proto::CompactionTransactionId::parse("ct-reactive-success-cut").expect("id");
+    let compact_prompt_id = tau_proto::AgentPromptId::from("ap-main-compact-success-cut");
+    append_seed_agent_event(
+        &mut store,
+        Event::AgentStandaloneCompactionStarted(tau_proto::AgentStandaloneCompactionStarted {
+            agent_id: agent_id.clone(),
+            transaction_id: transaction_id.clone(),
+            compact_prompt_id: compact_prompt_id.clone(),
+            cut: tau_proto::AgentHead::Root,
+            resume_through: Some(through),
+            model: "provider-b/model".into(),
+            operation: tau_proto::PromptOperation::StandaloneCompaction,
+            originator: tau_proto::PromptOriginator::User,
+            supersedes: None,
+            trigger: tau_proto::StandaloneCompactionTrigger::ReactiveContextOverflow {
+                failed_agent_prompt_id: failed_prompt_id,
+            },
+        }),
+    );
+    let suffix_end = tau_proto::AgentHead::Node(
+        store
+            .agent("main")
+            .and_then(tau_core::AgentTree::head)
+            .expect("suffix head"),
+    );
+    append_seed_agent_event(
+        &mut store,
+        Event::AgentCompacted(tau_proto::AgentCompacted {
+            agent_id,
+            transaction_id: Some(transaction_id),
+            cut: Some(tau_proto::AgentHead::Root),
+            suffix_end: Some(suffix_end),
+            compact_prompt_id: Some(compact_prompt_id),
+            model: Some("provider-b/model".into()),
+            operation: Some(tau_proto::PromptOperation::StandaloneCompaction),
+            replacement_window: vec![ContextItem::Message(MessageItem {
+                role: ContextRole::Assistant,
+                content: vec![ContentPart::Text {
+                    text: "summary".to_owned(),
+                }],
+                phase: None,
+                responses_raw_json: None,
+            })],
+        }),
+    );
+    drop(store);
+
+    {
+        let mut h =
+            quiet_provider_harness_with_start_reason(&state, tau_proto::SessionStartReason::Resume)
+                .expect("resume success cut");
+        assert_eq!(
+            h.agent_store
+                .agent_events("main")
+                .expect("agent events")
+                .iter()
+                .filter(|entry| matches!(
+                    entry.event,
+                    Event::AgentInferenceDispatchStarted(
+                        tau_proto::AgentInferenceDispatchStarted {
+                            transaction_id: Some(_),
+                            ..
+                        }
+                    )
+                ))
+                .count(),
+            0,
+            "unrelated provider discovery must not checkpoint provider B work"
+        );
+        let cid = h.agent_routes["main"].clone();
+        h.agents.get_mut(&cid).expect("agent").model_override = Some("provider-b/model".into());
+        let owner = h.provider_model_routes[&"test/model".into()].to_string();
+        let mut model = h.provider_model_info[&"test/model".into()].clone();
+        model.id = "provider-b/model".into();
+        h.publish_provider_models_update(
+            &owner,
+            tau_proto::ProviderModelsUpdated {
+                models: vec![model],
+            },
+        );
+        assert_eq!(
+            h.agent_store
+                .agent_events("main")
+                .expect("agent events")
+                .iter()
+                .filter(|entry| matches!(
+                    entry.event,
+                    Event::AgentInferenceDispatchStarted(
+                        tau_proto::AgentInferenceDispatchStarted {
+                            transaction_id: Some(_),
+                            ..
+                        }
+                    )
+                ))
+                .count(),
+            1
+        );
+        assert_eq!(
+            event_log_events(&h)
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    Event::AgentPromptCreated(prompt)
+                        if prompt.operation == tau_proto::PromptOperation::Inference
+                ))
+                .count(),
+            1
+        );
+        h.shutdown().expect("shutdown");
+    }
+    wait_for_session_unlock(&state, "s1");
+    let mut resumed =
+        quiet_provider_harness_with_start_reason(&state, tau_proto::SessionStartReason::Resume)
+            .expect("second resume");
+    assert!(!event_log_events(&resumed).iter().any(|event| matches!(
+        event,
+        Event::AgentPromptCreated(prompt)
+            if prompt.operation == tau_proto::PromptOperation::Inference
+    )));
+    resumed.shutdown().expect("shutdown");
+}
+
+/// Facts committed while reactive compaction is pending stay in the suffix,
+/// while the durable start retains the original pre-activation cut.
+#[test]
+fn reactive_context_overflow_preserves_earliest_cut_and_suffix() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    enable_remote_compaction_for_test_model(&mut h);
+    h.provider_model_info
+        .get_mut(&"test/model".into())
+        .expect("test model")
+        .supports_standalone_compaction = true;
+    let cid = ensure_test_user_agent(&mut h);
+    h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("activation A".to_owned()))
+        .expect("dispatch inference");
+    let inference = read_nth_prompt_created(&h, 0);
+    h.handle_provider_response_finished(context_overflow_response(&inference))
+        .expect("start recovery");
+    let compact = read_nth_prompt_created(&h, 1);
+    let start = event_log_events(&h)
+        .into_iter()
+        .find_map(|event| match event {
+            Event::AgentStandaloneCompactionStarted(started) => Some(started),
+            _ => None,
+        })
+        .expect("start");
+    assert_eq!(start.cut, tau_proto::AgentHead::Root);
+    let agent_id = h.agents[&cid].agent_id.clone().expect("agent id");
+    h.publish_for_agent(
+        &cid,
+        Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+            agent_id: crate::parse_agent_id(&agent_id),
+            inference_activation: false,
+            text: "suffix B".to_owned(),
+            message_class: tau_proto::PromptMessageClass::User,
+            originator: tau_proto::PromptOriginator::User,
+            submission_source: Default::default(),
+            display_name: None,
+            ctx_id: None,
+        }),
+    );
+    h.handle_provider_response_finished(provider_text_response(
+        &compact.agent_prompt_id,
+        compact.agent_id,
+        "replacement",
+    ))
+    .expect("accept compact");
+    let continuation = read_nth_prompt_created(&h, 2);
+    let context = serde_json::to_string(&continuation.context).expect("context");
+    assert_eq!(context.matches("activation A").count(), 1);
+    assert_eq!(context.matches("suffix B").count(), 1);
+    h.shutdown().expect("shutdown");
+}
+
+/// Incoming user work preempts a non-tool extension's reactive compact through
+/// the production preemption path and durably cancels it exactly once.
+#[test]
+fn reactive_context_overflow_extension_preemption_cancels_once() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    enable_remote_compaction_for_test_model(&mut h);
+    h.provider_model_info
+        .get_mut(&"test/model".into())
+        .expect("test model")
+        .supports_standalone_compaction = true;
+    h.handle_start_agent_request(HARNESS_CONNECTION_ID, ext_query("q-preempt-reactive"))
+        .expect("start extension side agent");
+    let inference = read_nth_prompt_created(&h, 0);
+    h.handle_provider_response_finished(context_overflow_response(&inference))
+        .expect("start recovery");
+    let compact = read_nth_prompt_created(&h, 1);
+    h.submit_user_prompt("s1".into(), "preempt side work".to_owned())
+        .expect("submit user prompt");
+    h.handle_provider_response_finished(context_overflow_response(&compact))
+        .expect("ignore late compact response");
+    assert_eq!(
+        event_log_events(&h)
+            .iter()
+            .filter(|event| matches!(
+                event,
+                Event::AgentStandaloneCompactionFailed(failed)
+                    if failed.reason == tau_proto::StandaloneCompactionFailureReason::Cancelled
+            ))
+            .count(),
+        1
+    );
+    let side_cid = ext_query_cid(&h, "q-preempt-reactive").expect("side agent retained");
+    assert!(h.agents[&side_cid].in_flight_prompt.is_none());
+    assert!(matches!(
+        h.agents[&side_cid].turn_state,
+        AgentTurnState::Idle
+    ));
+    h.shutdown().expect("shutdown");
+}
+
+/// Tool-backed delegate cancellation terminalizes an in-flight reactive
+/// compact once, ignores its late response, and completes the parent request.
+#[test]
+fn reactive_context_overflow_delegate_cancel_is_terminal_once() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    enable_remote_compaction_for_test_model(&mut h);
+    h.provider_model_info
+        .get_mut(&"test/model".into())
+        .expect("test model")
+        .supports_standalone_compaction = true;
+    let call_id = ToolCallId::from("delegate-reactive-call");
+    let mut query = ext_query("q-delegate-reactive");
+    query.tool_call_id = Some(call_id.clone());
+    h.handle_start_agent_request(HARNESS_CONNECTION_ID, query)
+        .expect("start delegated agent");
+    let inference = read_nth_prompt_created(&h, 0);
+    h.handle_provider_response_finished(context_overflow_response(&inference))
+        .expect("start recovery");
+    let compact = read_nth_prompt_created(&h, 1);
+    h.cancel_start_agent_request("q-delegate-reactive", &call_id, false)
+        .expect("cancel delegate");
+    h.handle_provider_response_finished(context_overflow_response(&compact))
+        .expect("ignore late compact response");
+    assert_eq!(
+        event_log_events(&h)
+            .iter()
+            .filter(|event| matches!(
+                event,
+                Event::AgentStandaloneCompactionFailed(failed)
+                    if failed.reason == tau_proto::StandaloneCompactionFailureReason::Cancelled
+            ))
+            .count(),
+        1
+    );
+    assert!(ext_query_cid(&h, "q-delegate-reactive").is_none());
+    assert!(event_log_events(&h).iter().any(|event| matches!(
+        event,
+        Event::StartAgentResult(result)
+            if result.query_id == "q-delegate-reactive" && result.error.is_some()
+    )));
+    h.shutdown().expect("shutdown");
+}
+
+/// Switching sessions terminalizes reactive compaction and clears all
+/// old-session semantic-output, routing, and recovery watcher state.
+#[test]
+fn reactive_context_overflow_session_switch_cancels_and_cleans_state() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    enable_remote_compaction_for_test_model(&mut h);
+    h.provider_model_info
+        .get_mut(&"test/model".into())
+        .expect("test model")
+        .supports_standalone_compaction = true;
+    let cid = ensure_test_user_agent(&mut h);
+    let agent_id = h.agents[&cid].agent_id.clone().expect("agent id");
+    h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("overflow".to_owned()))
+        .expect("dispatch inference");
+    let inference = read_nth_prompt_created(&h, 0);
+    h.handle_provider_response_finished(context_overflow_response(&inference))
+        .expect("start recovery");
+    let compact = read_nth_prompt_created(&h, 1);
+    h.prompt_semantic_output
+        .insert(compact.agent_prompt_id.clone());
+    h.switch_session("s2".into(), tau_proto::SessionStartReason::New)
+        .expect("switch session");
+    assert_eq!(
+        event_log_events(&h)
+            .iter()
+            .filter(|event| matches!(
+                event,
+                Event::AgentStandaloneCompactionFailed(failed)
+                    if failed.reason == tau_proto::StandaloneCompactionFailureReason::Cancelled
+            ))
+            .count(),
+        1
+    );
+    assert!(h.prompt_semantic_output.is_empty());
+    assert!(!h.prompt_agents.contains_key(&compact.agent_prompt_id));
+    assert!(!h.agent_watch_provider_status.contains_key(&agent_id));
+    h.handle_provider_response_finished(context_overflow_response(&compact))
+        .expect("late old-session response is ignored");
+    assert!(
+        !event_log_events(&h)
+            .iter()
+            .any(|event| matches!(event, Event::AgentStandaloneCompactionStarted(started)
+                if started.compact_prompt_id != compact.agent_prompt_id
+                    && matches!(started.trigger, tau_proto::StandaloneCompactionTrigger::ReactiveContextOverflow { .. })))
+    );
     h.shutdown().expect("shutdown");
 }
 
@@ -8427,6 +9535,7 @@ fn standalone_compaction_failure_does_not_retry_automatically() {
         stop_reason: tau_proto::ProviderStopReason::EndTurn,
         error: Some("secret provider detail".to_owned()),
         failure_kind: None,
+        recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         originator: tau_proto::PromptOriginator::User,
         usage: None,
         compaction_original_input_tokens: None,
@@ -8540,6 +9649,7 @@ fn blocked_compaction_replay_preserves_watch_prompt_correlation() {
             stop_reason: tau_proto::ProviderStopReason::Error,
             error: Some("raw compact failure".to_owned()),
             failure_kind: None,
+            recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
             originator: tau_proto::PromptOriginator::User,
             usage: None,
             compaction_original_input_tokens: None,
@@ -8605,6 +9715,7 @@ fn standalone_dispatch_uncertain_replay_projects_compaction_category() {
             stop_reason: tau_proto::ProviderStopReason::EndTurn,
             error: None,
             failure_kind: None,
+            recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
             originator: tau_proto::PromptOriginator::User,
             usage: None,
             compaction_original_input_tokens: None,
@@ -8751,6 +9862,7 @@ fn standalone_auto_compaction_schedules_at_threshold() {
         stop_reason: tau_proto::ProviderStopReason::EndTurn,
         error: None,
         failure_kind: None,
+        recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         originator: tau_proto::PromptOriginator::User,
         usage: None,
         compaction_original_input_tokens: None,
@@ -8917,6 +10029,7 @@ fn start_background_tool_and_finish_placeholder_turn(
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
         failure_kind: None,
+        recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
         originator: tau_proto::PromptOriginator::User,
         compaction_original_input_tokens: None,
@@ -9513,6 +10626,7 @@ fn start_agent_request_dispatches_while_tool_is_running_and_restores_turn() {
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
         failure_kind: None,
+        recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: match (None, None, None) {
             (None, None, None) => None,
             (input_tokens, cached_tokens, output_tokens) => Some(tau_proto::ProviderTokenUsage {
@@ -9596,6 +10710,7 @@ fn start_agent_request_dispatches_while_tool_is_running_and_restores_turn() {
         stop_reason: tau_proto::ProviderStopReason::EndTurn,
         error: None,
         failure_kind: None,
+        recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: match (None, None, None) {
             (None, None, None) => None,
             (input_tokens, cached_tokens, output_tokens) => Some(tau_proto::ProviderTokenUsage {
@@ -9710,6 +10825,7 @@ fn delegated_agent_user_interaction_prevents_auto_suspend() {
         stop_reason: tau_proto::ProviderStopReason::EndTurn,
         error: None,
         failure_kind: None,
+        recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
         originator: tau_proto::PromptOriginator::Extension {
             name: "conn-delegate".into(),
@@ -9798,6 +10914,7 @@ fn side_agent_drains_agent_message_before_extension_teardown() {
         stop_reason: tau_proto::ProviderStopReason::EndTurn,
         error: None,
         failure_kind: None,
+        recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
         originator: tau_proto::PromptOriginator::Extension {
             name: "conn-delegate".into(),
@@ -9853,6 +10970,7 @@ fn side_agent_drains_agent_message_before_extension_teardown() {
         stop_reason: tau_proto::ProviderStopReason::EndTurn,
         error: None,
         failure_kind: None,
+        recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
         originator: tau_proto::PromptOriginator::Extension {
             name: "conn-delegate".into(),
@@ -10005,6 +11123,7 @@ fn start_agent_request_during_tool_call_branches_off_unresolved_tool_use() {
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
         failure_kind: None,
+        recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: match (None, None, None) {
             (None, None, None) => None,
             (input_tokens, cached_tokens, output_tokens) => Some(tau_proto::ProviderTokenUsage {
@@ -10141,6 +11260,7 @@ fn non_tool_start_agent_request_starts_fresh_agent_branch() {
         stop_reason: tau_proto::ProviderStopReason::EndTurn,
         error: None,
         failure_kind: None,
+        recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: match (None, None, None) {
             (None, None, None) => None,
             (input_tokens, cached_tokens, output_tokens) => Some(tau_proto::ProviderTokenUsage {
@@ -10293,6 +11413,7 @@ fn non_tool_start_agent_request_preserves_tool_choice_without_parent_chain_ancho
         stop_reason: tau_proto::ProviderStopReason::EndTurn,
         error: None,
         failure_kind: None,
+        recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: match (None, None, None) {
             (None, None, None) => None,
             (input_tokens, cached_tokens, output_tokens) => Some(tau_proto::ProviderTokenUsage {
@@ -10409,6 +11530,7 @@ fn delegate_start_agent_request_keeps_tool_choice_auto() {
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
         failure_kind: None,
+        recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: match (None, None, None) {
             (None, None, None) => None,
             (input_tokens, cached_tokens, output_tokens) => Some(tau_proto::ProviderTokenUsage {
@@ -10620,6 +11742,7 @@ fn side_conversation_shared_tool_dispatches_through_parent_exclusive_delegate() 
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
         failure_kind: None,
+        recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: match (None, None, None) {
             (None, None, None) => None,
             (input_tokens, cached_tokens, output_tokens) => Some(tau_proto::ProviderTokenUsage {
@@ -10678,6 +11801,7 @@ fn side_conversation_shared_tool_dispatches_through_parent_exclusive_delegate() 
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
         failure_kind: None,
+        recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: match (None, None, None) {
             (None, None, None) => None,
             (input_tokens, cached_tokens, output_tokens) => Some(tau_proto::ProviderTokenUsage {
@@ -10801,6 +11925,7 @@ fn background_completion_from_preserved_delegate_queues_on_delegate() {
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
         failure_kind: None,
+        recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
         originator: tau_proto::PromptOriginator::User,
         compaction_original_input_tokens: None,
@@ -10835,6 +11960,7 @@ fn background_completion_from_preserved_delegate_queues_on_delegate() {
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
         failure_kind: None,
+        recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
         originator: tau_proto::PromptOriginator::Extension {
             name: "core-subagents".into(),
@@ -10880,6 +12006,7 @@ fn background_completion_from_preserved_delegate_queues_on_delegate() {
         stop_reason: tau_proto::ProviderStopReason::EndTurn,
         error: None,
         failure_kind: None,
+        recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
         originator: tau_proto::PromptOriginator::Extension {
             name: "core-subagents".into(),
@@ -11073,6 +12200,7 @@ fn canceled_side_conversation_drops_inner_background_completion() {
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
         failure_kind: None,
+        recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
         originator: tau_proto::PromptOriginator::User,
         compaction_original_input_tokens: None,
@@ -11108,6 +12236,7 @@ fn canceled_side_conversation_drops_inner_background_completion() {
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
         failure_kind: None,
+        recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
         originator: tau_proto::PromptOriginator::Extension {
             name: "core-subagents".into(),
@@ -11223,6 +12352,7 @@ fn background_notification_suppression_keeps_error_event_but_skips_prompt() {
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
         failure_kind: None,
+        recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
         originator: tau_proto::PromptOriginator::User,
         compaction_original_input_tokens: None,
@@ -11450,6 +12580,7 @@ fn backgrounded_tool_progress_is_not_published() {
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
         failure_kind: None,
+        recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
         originator: tau_proto::PromptOriginator::User,
         compaction_original_input_tokens: None,
@@ -11737,6 +12868,7 @@ fn wait_tool_reply_is_folded_into_followup_prompt() {
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
         failure_kind: None,
+        recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
         originator: tau_proto::PromptOriginator::User,
         compaction_original_input_tokens: None,
@@ -11847,6 +12979,7 @@ fn delegate_launcher_does_not_block_same_turn_exclusive_tool() {
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
         failure_kind: None,
+        recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
         originator: tau_proto::PromptOriginator::User,
         compaction_original_input_tokens: None,
@@ -11954,6 +13087,7 @@ fn mutating_tools_in_distinct_side_conversations_dispatch_concurrently() {
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
         failure_kind: None,
+        recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
         originator: tau_proto::PromptOriginator::User,
         compaction_original_input_tokens: None,
@@ -12040,6 +13174,7 @@ fn mutating_tools_in_distinct_side_conversations_dispatch_concurrently() {
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
         failure_kind: None,
+        recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
         originator: tau_proto::PromptOriginator::Extension {
             name: "core-subagents".into(),
@@ -12066,6 +13201,7 @@ fn mutating_tools_in_distinct_side_conversations_dispatch_concurrently() {
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
         failure_kind: None,
+        recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
         originator: tau_proto::PromptOriginator::Extension {
             name: "core-subagents".into(),
@@ -12824,6 +13960,7 @@ fn agent_watch_provider_terminal_ordering_attempt_and_success_cleanup() {
         stop_reason: tau_proto::ProviderStopReason::Error,
         error: Some("secret raw endpoint response".to_owned()),
         failure_kind: Some(tau_proto::ProviderFailureKind::RequestRejected),
+        recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
         originator: tau_proto::PromptOriginator::User,
         compaction_original_input_tokens: None,
@@ -13603,6 +14740,7 @@ fn sibling_side_conv_teardown_does_not_misplace_other_side_conv_tool_result() {
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
         failure_kind: None,
+        recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: match (None, None, None) {
             (None, None, None) => None,
             (input_tokens, cached_tokens, output_tokens) => Some(tau_proto::ProviderTokenUsage {
@@ -13662,6 +14800,7 @@ fn sibling_side_conv_teardown_does_not_misplace_other_side_conv_tool_result() {
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
         failure_kind: None,
+        recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: match (None, None, None) {
             (None, None, None) => None,
             (input_tokens, cached_tokens, output_tokens) => Some(tau_proto::ProviderTokenUsage {
@@ -13729,6 +14868,7 @@ fn sibling_side_conv_teardown_does_not_misplace_other_side_conv_tool_result() {
         stop_reason: tau_proto::ProviderStopReason::EndTurn,
         error: None,
         failure_kind: None,
+        recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: match (None, None, None) {
             (None, None, None) => None,
             (input_tokens, cached_tokens, output_tokens) => Some(tau_proto::ProviderTokenUsage {
@@ -13872,6 +15012,7 @@ fn nested_start_agent_request_branches_from_tool_owner_conversation() {
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
         failure_kind: None,
+        recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: match (None, None, None) {
             (None, None, None) => None,
             (input_tokens, cached_tokens, output_tokens) => Some(tau_proto::ProviderTokenUsage {
@@ -13925,6 +15066,7 @@ fn nested_start_agent_request_branches_from_tool_owner_conversation() {
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
         failure_kind: None,
+        recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: match (None, None, None) {
             (None, None, None) => None,
             (input_tokens, cached_tokens, output_tokens) => Some(tau_proto::ProviderTokenUsage {
@@ -14045,6 +15187,7 @@ fn completed_side_conversation_tool_result_reprompts_parent() {
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
         failure_kind: None,
+        recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: match (None, None, None) {
             (None, None, None) => None,
             (input_tokens, cached_tokens, output_tokens) => Some(tau_proto::ProviderTokenUsage {
@@ -14103,6 +15246,7 @@ fn completed_side_conversation_tool_result_reprompts_parent() {
         stop_reason: tau_proto::ProviderStopReason::EndTurn,
         error: None,
         failure_kind: None,
+        recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: match (None, None, None) {
             (None, None, None) => None,
             (input_tokens, cached_tokens, output_tokens) => Some(tau_proto::ProviderTokenUsage {
@@ -14216,6 +15360,7 @@ fn recursive_delegate_prompt_contains_only_leaf_instruction() {
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
         failure_kind: None,
+        recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: match (None, None, None) {
             (None, None, None) => None,
             (input_tokens, cached_tokens, output_tokens) => Some(tau_proto::ProviderTokenUsage {
@@ -14269,6 +15414,7 @@ fn recursive_delegate_prompt_contains_only_leaf_instruction() {
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
         failure_kind: None,
+        recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: match (None, None, None) {
             (None, None, None) => None,
             (input_tokens, cached_tokens, output_tokens) => Some(tau_proto::ProviderTokenUsage {
@@ -14392,6 +15538,7 @@ fn stale_same_conversation_tool_call_response_is_ignored() {
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
         failure_kind: None,
+        recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
         originator: tau_proto::PromptOriginator::User,
         compaction_original_input_tokens: None,

@@ -1,5 +1,10 @@
 # Providers
 
+Canonical context-window rejection is reported as a typed terminal provider
+failure. The harness, not the adapter, decides whether an ordinary no-output
+inference may receive one standalone-compaction recovery; provider-authored
+recovery-disposition fields are ignored.
+
 A provider is a normal Tau extension that exposes models and executes prompts.
 The harness does not own provider-specific LLM execution; provider extensions are the model executors.
 

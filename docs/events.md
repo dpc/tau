@@ -534,3 +534,7 @@ the UI is the only consumer. Components without a terminal silently no-op.
 ## Watched provider status
 
 `provider.response_updated.status.retry` carries structured retry facts independently of human display text. The harness projects current retry and terminal state as `agent.message_received` with `kind=watch_provider_status`. Its nested `state` is tagged by `phase`; variant-specific required fields prevent retry, recovery, blocked, uncertain, and terminal shapes from being mixed. `recovering_context` is reserved for reactive compaction. Live model notification occurs for the first retry category, category/phase transitions, and terminal failure, not every attempt. Initial late-watch snapshots are client-visible but non-prompt; historical attempts are not replayed.
+
+### Reactive context recovery fields
+
+`agent.inference_dispatch_started` optionally records the provider-qualified `model`, `operation`, and immutable pre-activation `activation_cut`; legacy records omit these and cannot authorize automatic recovery. `provider.response_finished.recovery_disposition` is harness-authored, defaults to `none`, and is `reactive_compaction_planned` only for a canonical no-output ordinary-inference context rejection. `agent.standalone_compaction_started.trigger` defaults to `manual`; `reactive_context_overflow` carries the failed inference prompt id and uniquely claims that planned recovery.

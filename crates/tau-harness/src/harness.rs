@@ -1742,6 +1742,19 @@ pub struct Harness {
     /// attribute the corresponding finished response even if the user
     /// switches models while it is in flight.
     pub(crate) prompt_models: std::collections::HashMap<AgentPromptId, ModelId>,
+    /// Prompts for which streaming exposed semantic output, making automatic
+    /// no-output recovery unsafe.
+    prompt_semantic_output: HashSet<AgentPromptId>,
+    /// Durable compaction starts whose post-commit reaction must not dispatch
+    /// remote work because a correlated terminal failure is already queued.
+    suppressed_compaction_dispatches:
+        HashSet<(tau_proto::AgentId, tau_proto::CompactionTransactionId)>,
+    /// Suppressed queued reactive claims that must terminalize as Cancelled
+    /// immediately after their durable start commits.
+    cancelled_compaction_claims: HashSet<(tau_proto::AgentId, tau_proto::CompactionTransactionId)>,
+    /// Restored compaction checkpoints already enqueued through interception.
+    enqueued_restored_compaction_checkpoints:
+        HashSet<(tau_proto::AgentId, tau_proto::CompactionTransactionId)>,
     /// Explicit provider operation and resume policy for each in-flight prompt.
     pub(crate) prompt_operations:
         std::collections::HashMap<AgentPromptId, (tau_proto::PromptOperation, bool)>,
@@ -1931,6 +1944,7 @@ where
                         stop_reason: ProviderStopReason::EndTurn,
                         error: None,
                         failure_kind: None,
+                        recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
                         originator: prompt.originator.clone(),
                         usage: None,
                         compaction_original_input_tokens: None,
@@ -2000,6 +2014,7 @@ where
                         stop_reason: ProviderStopReason::ToolCalls,
                         error: None,
                         failure_kind: None,
+                        recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
                         originator: prompt.originator.clone(),
                         usage: None,
                         compaction_original_input_tokens: None,
@@ -2311,6 +2326,10 @@ impl Harness {
             selected_model: parts.selected_model,
             current_session_state: CurrentSessionState::default(),
             prompt_models: HashMap::new(),
+            prompt_semantic_output: HashSet::new(),
+            suppressed_compaction_dispatches: HashSet::new(),
+            cancelled_compaction_claims: HashSet::new(),
+            enqueued_restored_compaction_checkpoints: HashSet::new(),
             prompt_operations: HashMap::new(),
             prompt_tool_specs: HashMap::new(),
             prompt_tool_call_prompts: HashMap::new(),
@@ -3794,8 +3813,18 @@ impl Harness {
     /// publish stamped via `publish_event_for_agent`.
     fn react_to_committed_event(&mut self, event: &Event) {
         if let Event::AgentStandaloneCompactionStarted(started) = event {
+            let suppression_key = (started.agent_id.clone(), started.transaction_id.clone());
+            let suppressed = self
+                .suppressed_compaction_dispatches
+                .remove(&suppression_key);
+            if suppressed {
+                self.cancelled_compaction_claims.remove(&suppression_key);
+            }
             let cid = self.runtime_agent_id_for_target_agent(Some(started.agent_id.as_str()));
             if let Some(cid) = cid {
+                if suppressed {
+                    return;
+                }
                 if let Some(agent) = self.agents.get_mut(&cid) {
                     agent.activation_dispatch = crate::agent::ActivationDispatchState::Running {
                         id: started.transaction_id.clone(),
@@ -3805,18 +3834,48 @@ impl Harness {
                         branch_generation: agent.branch_generation,
                         compact_prompt_id: started.compact_prompt_id.clone(),
                     };
+                    agent.in_flight_prompt = Some(started.compact_prompt_id.clone());
                 }
+                self.set_agent_turn_state(
+                    &cid,
+                    AgentTurnState::AgentThinking {
+                        agent_prompt_id: started.compact_prompt_id.clone(),
+                    },
+                );
                 self.dispatch_prompt_after_publish_idle(&cid);
+                if let tau_proto::StandaloneCompactionTrigger::ReactiveContextOverflow {
+                    failed_agent_prompt_id,
+                } = &started.trigger
+                {
+                    self.project_agent_watch_provider_state(
+                        &cid,
+                        failed_agent_prompt_id.clone(),
+                        tau_proto::AgentWatchProviderState::RecoveringContext { attempt: 1 },
+                    );
+                }
             }
+        }
+        if let Event::AgentStandaloneCompactionFailed(failed) = event {
+            let key = (failed.agent_id.clone(), failed.transaction_id.clone());
+            self.suppressed_compaction_dispatches.remove(&key);
+            self.cancelled_compaction_claims.remove(&key);
         }
         if let Event::AgentStandaloneCompactionFailed(failed) = event
             && let Some(cid) =
                 self.runtime_agent_id_for_target_agent(Some(failed.agent_id.as_str()))
         {
-            let failed_prompt_id = self
-                .agents
-                .get(&cid)
-                .and_then(|agent| agent.in_flight_prompt.clone());
+            let failed_prompt_id = self.agents.get(&cid).and_then(|agent| {
+                agent
+                    .in_flight_prompt
+                    .clone()
+                    .or_else(|| match &agent.activation_dispatch {
+                        crate::agent::ActivationDispatchState::ContextRecoveryClaimPending {
+                            checkpoint,
+                            ..
+                        } => Some(checkpoint.agent_prompt_id.clone()),
+                        _ => None,
+                    })
+            });
             if let Some(agent) = self.agents.get_mut(&cid) {
                 agent.activation_dispatch = crate::agent::ActivationDispatchState::Blocked {
                     failed_id: failed.transaction_id.clone(),
@@ -3833,6 +3892,11 @@ impl Harness {
                         category: tau_proto::AgentWatchProviderCategory::Compaction,
                     },
                 );
+            }
+            if failed.reason != tau_proto::StandaloneCompactionFailureReason::Cancelled
+                && self.complete_failed_compaction_side_conversation(&cid)
+            {
+                return;
             }
             self.set_agent_turn_state(&cid, AgentTurnState::Idle);
             self.try_advance_queue();
@@ -3871,7 +3935,6 @@ impl Harness {
             if let Some(agent) = self.agents.get_mut(&cid) {
                 agent.in_flight_prompt = None;
             }
-            self.set_agent_turn_state(&cid, AgentTurnState::Idle);
             if resume.is_some() {
                 let (agent_prompt_id, through) = self
                     .agents
@@ -3898,6 +3961,7 @@ impl Harness {
                             },
                             agent_prompt_id: agent_prompt_id.clone(),
                             through,
+                            model: compacted.model.clone(),
                         };
                 }
                 self.publish_for_agent(
@@ -3908,15 +3972,25 @@ impl Harness {
                             transaction_id: compacted.transaction_id.clone(),
                             agent_prompt_id,
                             through,
+                            model: compacted.model.clone(),
+                            operation: Some(tau_proto::PromptOperation::Inference),
+                            activation_cut: Some(compacted.cut.unwrap_or(through)),
                         },
                     ),
                 );
             } else {
+                self.set_agent_turn_state(&cid, AgentTurnState::Idle);
                 if let Some(agent) = self.agents.get_mut(&cid) {
                     agent.activation_dispatch = crate::agent::ActivationDispatchState::None;
                 }
                 self.try_advance_queue();
             }
+        }
+        if let Event::AgentInferenceDispatchStarted(started) = event
+            && let Some(transaction_id) = started.transaction_id.as_ref()
+        {
+            self.enqueued_restored_compaction_checkpoints
+                .remove(&(started.agent_id.clone(), transaction_id.clone()));
         }
         if let Event::AgentInferenceDispatchStarted(started) = event
             && let Some(cid) =
@@ -5498,6 +5572,69 @@ impl Harness {
             Event::ProviderModelsUpdated(update.clone()),
         );
         self.set_provider_models(source_id, update.models);
+        self.reconcile_pending_context_recoveries(false);
+        self.resume_restored_compaction_checkpoints();
+    }
+
+    /// Commits checkpoints deferred during cold restore until provider model
+    /// discovery is available, then lets the normal post-commit path dispatch.
+    fn resume_restored_compaction_checkpoints(&mut self) {
+        if self.provider_model_info.is_empty() {
+            return;
+        }
+        let pending = self
+            .agents
+            .iter()
+            .filter_map(|(cid, agent)| match &agent.activation_dispatch {
+                crate::agent::ActivationDispatchState::AwaitingCheckpoint {
+                    owner:
+                        crate::agent::InferenceCheckpointOwner::Standalone {
+                            id: transaction_id,
+                        },
+                    agent_prompt_id,
+                    through,
+                    model,
+                } => Some((
+                    cid.clone(),
+                    agent.agent_id.clone()?,
+                    transaction_id.clone(),
+                    agent_prompt_id.clone(),
+                    *through,
+                    model.clone(),
+                )),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        for (cid, agent_id, transaction_id, agent_prompt_id, through, model) in pending {
+            let Some(model) = model else {
+                continue;
+            };
+            if !self.provider_model_info.contains_key(&model)
+                || self
+                    .agents
+                    .get(&cid)
+                    .and_then(|agent| self.model_for_agent_role(agent))
+                    .as_ref()
+                    != Some(&model)
+                || !self
+                    .enqueued_restored_compaction_checkpoints
+                    .insert((crate::parse_agent_id(&agent_id), transaction_id.clone()))
+            {
+                continue;
+            }
+            self.publish_for_agent(
+                &cid,
+                Event::AgentInferenceDispatchStarted(tau_proto::AgentInferenceDispatchStarted {
+                    agent_id: crate::parse_agent_id(&agent_id),
+                    transaction_id: Some(transaction_id),
+                    agent_prompt_id,
+                    through,
+                    model: Some(model),
+                    operation: Some(tau_proto::PromptOperation::Inference),
+                    activation_cut: None,
+                }),
+            );
+        }
     }
 
     fn extension_action_owner(
@@ -6314,6 +6451,10 @@ impl Harness {
                         tau_proto::EventName::PROVIDER_RESPONSE_UPDATED,
                     )
                 {
+                    if !updated.deltas.is_empty() {
+                        self.prompt_semantic_output
+                            .insert(updated.agent_prompt_id.clone());
+                    }
                     if let Some(agent_id) = self.agent_id_for_prompt(&updated.agent_prompt_id) {
                         updated.agent_id = agent_id;
                     }
@@ -7419,6 +7560,7 @@ impl Harness {
         else {
             return;
         };
+        self.cancel_pending_context_claim(&cid);
         let Some(conv) = self.agents.get_mut(&cid) else {
             return;
         };
@@ -7445,6 +7587,45 @@ impl Harness {
             );
         }
         self.apply_pending_cancel_for_agent(&cid);
+    }
+
+    /// Marks an intercepted reactive claim for durable cancellation when its
+    /// start eventually commits, without allowing remote dispatch.
+    fn cancel_pending_context_claim(&mut self, cid: &AgentId) {
+        let pending = self
+            .agents
+            .get(cid)
+            .and_then(|agent| match &agent.activation_dispatch {
+                crate::agent::ActivationDispatchState::ContextRecoveryClaimPending {
+                    checkpoint,
+                    transaction_id,
+                } => Some((
+                    agent.agent_id.clone()?,
+                    checkpoint.clone(),
+                    transaction_id.clone(),
+                )),
+                _ => None,
+            });
+        if let Some((agent_id, checkpoint, transaction_id)) = pending
+            && self
+                .cancelled_compaction_claims
+                .insert((crate::parse_agent_id(&agent_id), transaction_id.clone()))
+        {
+            self.suppressed_compaction_dispatches
+                .insert((crate::parse_agent_id(&agent_id), transaction_id.clone()));
+            self.publish_for_agent(
+                cid,
+                Event::AgentStandaloneCompactionFailed(
+                    tau_proto::AgentStandaloneCompactionFailed {
+                        agent_id: crate::parse_agent_id(&agent_id),
+                        transaction_id,
+                        cut: checkpoint.activation_cut.unwrap_or(checkpoint.through),
+                        reason: tau_proto::StandaloneCompactionFailureReason::Cancelled,
+                        resume_through: Some(checkpoint.through),
+                    },
+                ),
+            );
+        }
     }
 
     fn apply_pending_cancel_for_agent(&mut self, cid: &AgentId) {
@@ -7511,8 +7692,10 @@ impl Harness {
         else {
             return;
         };
+        self.cancel_running_compaction(cid, &agent_prompt_id);
         self.canceled_prompts.insert(agent_prompt_id.clone());
         self.prompt_operations.remove(&agent_prompt_id);
+        self.prompt_semantic_output.remove(&agent_prompt_id);
         self.publish_prompt_terminated(
             session_id,
             agent_prompt_id,
@@ -7525,6 +7708,40 @@ impl Harness {
             conv.in_flight_prompt = None;
         }
         self.set_agent_turn_state(cid, AgentTurnState::Idle);
+    }
+
+    /// Records a durable terminal outcome when cancellation targets an active
+    /// standalone compaction prompt.
+    fn cancel_running_compaction(&mut self, cid: &AgentId, prompt_id: &AgentPromptId) {
+        let transaction = self
+            .agents
+            .get(cid)
+            .and_then(|conv| match &conv.activation_dispatch {
+                crate::agent::ActivationDispatchState::Running {
+                    id,
+                    cut,
+                    resume_through,
+                    compact_prompt_id,
+                    ..
+                } if compact_prompt_id == prompt_id => {
+                    Some((conv.agent_id.clone()?, id.clone(), *cut, *resume_through))
+                }
+                _ => None,
+            });
+        if let Some((agent_id, transaction_id, cut, resume_through)) = transaction {
+            self.publish_for_agent(
+                cid,
+                Event::AgentStandaloneCompactionFailed(
+                    tau_proto::AgentStandaloneCompactionFailed {
+                        agent_id: crate::parse_agent_id(&agent_id),
+                        transaction_id,
+                        cut,
+                        reason: tau_proto::StandaloneCompactionFailureReason::Cancelled,
+                        resume_through,
+                    },
+                ),
+            );
+        }
     }
 
     fn cancel_remaining_tool_calls(
@@ -7777,7 +7994,10 @@ impl Harness {
             "delegate cancel tool",
             BackgroundCompletionPromptMode::DoNotQueue,
         );
+        self.cancel_pending_context_claim(&cid);
         if let Some(spid) = spid {
+            self.cancel_running_compaction(&cid, &spid);
+            self.prompt_semantic_output.remove(&spid);
             self.canceled_prompts.insert(spid.clone());
             self.publish_prompt_terminated(
                 session_id.clone(),
@@ -9623,6 +9843,7 @@ impl Harness {
                         model,
                         originator,
                         supersedes,
+                        trigger: tau_proto::StandaloneCompactionTrigger::Manual,
                     },
                 ),
             );
@@ -9819,6 +10040,7 @@ impl Harness {
                 model,
                 originator,
                 supersedes: None,
+                trigger: tau_proto::StandaloneCompactionTrigger::Manual,
             }),
         );
         true
@@ -10265,34 +10487,45 @@ impl Harness {
     /// agent's retry-sleep wakes and aborts whatever it's currently
     /// processing.
     fn preempt_blocking_ext_side_agents(&mut self, session_id: &SessionId) {
-        let to_cancel: Vec<(AgentId, SessionId, AgentPromptId, PromptOriginator)> = self
-            .agents
-            .iter()
-            .filter_map(|(cid, conv)| {
-                if conv.parent_tool_call_id.is_some() {
-                    return None;
-                }
-                if !matches!(
-                    conv.originator,
-                    tau_proto::PromptOriginator::Extension { .. }
-                ) {
-                    return None;
-                }
-                let in_flight = conv.in_flight_prompt.clone()?;
-                Some((
-                    cid.clone(),
-                    conv.session_id.clone(),
-                    in_flight,
-                    conv.originator.clone(),
-                ))
-            })
-            .collect();
+        let to_cancel: Vec<(AgentId, SessionId, AgentPromptId, PromptOriginator)> =
+            self.agents
+                .iter()
+                .filter_map(|(cid, conv)| {
+                    if conv.parent_tool_call_id.is_some() {
+                        return None;
+                    }
+                    if !matches!(
+                        conv.originator,
+                        tau_proto::PromptOriginator::Extension { .. }
+                    ) {
+                        return None;
+                    }
+                    let in_flight = conv.in_flight_prompt.clone().or_else(|| {
+                        match &conv.activation_dispatch {
+                        crate::agent::ActivationDispatchState::ContextRecoveryClaimPending {
+                            checkpoint,
+                            ..
+                        } => Some(checkpoint.agent_prompt_id.clone()),
+                        _ => None,
+                    }
+                    })?;
+                    Some((
+                        cid.clone(),
+                        conv.session_id.clone(),
+                        in_flight,
+                        conv.originator.clone(),
+                    ))
+                })
+                .collect();
 
         if to_cancel.is_empty() {
             return;
         }
 
         for (cid, prompt_session_id, spid, originator) in &to_cancel {
+            self.cancel_pending_context_claim(cid);
+            self.cancel_running_compaction(cid, spid);
+            self.prompt_semantic_output.remove(spid);
             self.canceled_prompts.insert(spid.clone());
             if let Some(conv) = self.agents.get_mut(cid) {
                 conv.in_flight_prompt = None;
@@ -10495,6 +10728,14 @@ impl Harness {
         self.turn_state = TurnState::Idle;
         let agent_ids = self.agents.keys().cloned().collect::<Vec<_>>();
         for cid in agent_ids {
+            self.cancel_pending_context_claim(&cid);
+            if let Some(prompt_id) = self
+                .agents
+                .get(&cid)
+                .and_then(|agent| agent.in_flight_prompt.clone())
+            {
+                self.cancel_running_compaction(&cid, &prompt_id);
+            }
             if let Some(conv) = self.agents.get_mut(&cid) {
                 conv.pending_prompts.clear();
                 conv.in_flight_prompt = None;
@@ -10519,6 +10760,7 @@ impl Harness {
         self.prompt_agents.clear();
         self.pending_provider_prompts.clear();
         self.prompt_models.clear();
+        self.prompt_semantic_output.clear();
         self.prompt_operations.clear();
         self.prompt_tool_specs.clear();
         self.prompt_tool_call_prompts.clear();
@@ -11280,6 +11522,7 @@ impl Harness {
         if matches!(reason, tau_proto::SessionStartReason::Resume) {
             self.repair_restored_session_tool_state(&session_id);
         }
+        self.reconcile_pending_context_recoveries(true);
         self.request_prompt_prewarm(&session_id);
         self.turn_state = TurnState::Idle;
         self.try_advance_queue();
@@ -11618,6 +11861,8 @@ impl Harness {
                     context_window_for_model(&self.provider_model_info, &model)
                         .map(|window| context_percent_used(input_tokens, window));
             }
+            self.agent_routes
+                .insert(agent_id_string.clone(), cid.clone());
             match restored_compaction.clone() {
                 Some(tau_core::StandaloneCompactionRecovery::Blocked {
                     failed,
@@ -11641,6 +11886,7 @@ impl Harness {
                 Some(tau_core::StandaloneCompactionRecovery::AwaitingCheckpoint {
                     transaction_id,
                     cut: _,
+                    model,
                     through,
                 }) => {
                     let prompt_id = {
@@ -11657,20 +11903,26 @@ impl Harness {
                                 },
                                 agent_prompt_id: prompt_id.clone(),
                                 through,
+                                model: Some(model),
                             };
                         prompt_id
                     };
-                    self.publish_for_agent(
-                        &cid,
-                        Event::AgentInferenceDispatchStarted(
-                            tau_proto::AgentInferenceDispatchStarted {
-                                agent_id: agent_id.clone(),
-                                transaction_id: Some(transaction_id),
-                                agent_prompt_id: prompt_id,
-                                through,
-                            },
-                        ),
-                    );
+                    if !self.provider_model_info.is_empty() {
+                        self.publish_for_agent(
+                            &cid,
+                            Event::AgentInferenceDispatchStarted(
+                                tau_proto::AgentInferenceDispatchStarted {
+                                    agent_id: agent_id.clone(),
+                                    transaction_id: Some(transaction_id),
+                                    agent_prompt_id: prompt_id,
+                                    through,
+                                    model: None,
+                                    operation: Some(tau_proto::PromptOperation::Inference),
+                                    activation_cut: None,
+                                },
+                            ),
+                        );
+                    }
                 }
                 Some(tau_core::StandaloneCompactionRecovery::DispatchUncertain(checkpoint)) => {
                     let status_prompt_id = checkpoint.agent_prompt_id.clone();
@@ -11698,6 +11950,15 @@ impl Harness {
                     ));
                 }
                 Some(tau_core::StandaloneCompactionRecovery::Interrupted(_)) | None => {}
+            }
+            if restored_compaction.is_none()
+                && let Some(tau_core::InferenceDispatchRecovery::ContextRecoveryRequired(
+                    checkpoint,
+                )) = restored_inference.clone()
+                && let Some(conv) = self.agents.get_mut(&cid)
+            {
+                conv.activation_dispatch =
+                    crate::agent::ActivationDispatchState::ContextRecoveryPending { checkpoint };
             }
             if restored_compaction.is_none()
                 && let Some(tau_core::InferenceDispatchRecovery::DispatchUncertain(checkpoint)) =
@@ -11743,6 +12004,9 @@ impl Harness {
                     tau_core::InferenceDispatchRecovery::CompletedThrough(through) => *through,
                     tau_core::InferenceDispatchRecovery::DispatchUncertain(checkpoint) => {
                         checkpoint.through
+                    }
+                    tau_core::InferenceDispatchRecovery::ContextRecoveryRequired(checkpoint) => {
+                        checkpoint.activation_cut.unwrap_or(checkpoint.through)
                     }
                 }),
             };
@@ -11876,8 +12140,6 @@ impl Harness {
                     conv.pending_replay_activation = has_replay_activation;
                 }
             }
-            self.agent_routes
-                .insert(agent_id_string.clone(), cid.clone());
             self.session_loaded_agents.insert(agent_id.clone());
             if let Some(tau_core::StandaloneCompactionRecovery::Interrupted(started)) =
                 restored_compaction
@@ -13194,6 +13456,10 @@ impl Harness {
         source: Option<&str>,
         mut response: ProviderResponseFinished,
     ) -> Result<(), HarnessError> {
+        // Recovery authorization belongs exclusively to the harness. Provider
+        // extensions share this wire type for transport, so discard any value
+        // supplied across that trust boundary before evaluating eligibility.
+        response.recovery_disposition = tau_proto::ContextRecoveryDisposition::None;
         self.clear_malformed_repetition_output(&mut response);
         let mut tool_calls = tool_calls_from_output_items(&response.output_items);
         let assistant_text = assistant_text_from_output_items(&response.output_items);
@@ -13245,6 +13511,11 @@ impl Harness {
         if !active_compaction_response && self.discard_finished_response_if_stale(&cid, &response) {
             return Ok(());
         }
+        if self.try_plan_reactive_context_recovery(&cid, &mut response, source) {
+            return Ok(());
+        }
+        self.prompt_semantic_output
+            .remove(&response.agent_prompt_id);
         let safe_failure_kind = response.failure_kind.or(response
             .error
             .as_ref()
@@ -13376,6 +13647,279 @@ impl Harness {
         }
 
         Ok(())
+    }
+
+    /// Durably claims an eligible no-output context rejection and starts the
+    /// single standalone-compaction transaction that may recover it.
+    fn try_plan_reactive_context_recovery(
+        &mut self,
+        cid: &AgentId,
+        response: &mut ProviderResponseFinished,
+        source: Option<&str>,
+    ) -> bool {
+        if response.failure_kind != Some(tau_proto::ProviderFailureKind::ContextWindowExceeded)
+            || response.stop_reason != ProviderStopReason::Error
+            || !response.output_items.is_empty()
+            || self
+                .prompt_semantic_output
+                .contains(&response.agent_prompt_id)
+            || self
+                .prompt_operations
+                .get(&response.agent_prompt_id)
+                .map(|operation| operation.0)
+                != Some(tau_proto::PromptOperation::Inference)
+        {
+            return false;
+        }
+        let Some(tree) = self
+            .agents
+            .get(cid)
+            .and_then(|agent| agent.agent_id.as_deref())
+            .and_then(|agent_id| self.agent_store.agent(agent_id))
+        else {
+            return false;
+        };
+        let Some(tau_core::InferenceDispatchRecovery::DispatchUncertain(checkpoint)) =
+            tree.inference_dispatch_recovery()
+        else {
+            return false;
+        };
+        let Some(model) = checkpoint.model.clone() else {
+            return false;
+        };
+        if checkpoint.activation_cut.is_none() {
+            return false;
+        }
+        if checkpoint.transaction_id.is_some()
+            || checkpoint.operation != Some(tau_proto::PromptOperation::Inference)
+            || checkpoint.agent_prompt_id != response.agent_prompt_id
+            || self.prompt_models.get(&response.agent_prompt_id) != Some(&model)
+            || self
+                .agents
+                .get(cid)
+                .and_then(|agent| self.model_for_agent_role(agent))
+                .as_ref()
+                != Some(&model)
+            || !tree.is_ancestor_head(
+                checkpoint.through,
+                self.agents
+                    .get(cid)
+                    .and_then(|agent| agent.head)
+                    .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node),
+            )
+            || !self
+                .provider_model_info
+                .get(&model)
+                .is_some_and(|info| info.supports_standalone_compaction)
+        {
+            return false;
+        }
+        let role_name = self.role_name_for_agent_id(cid);
+        if self
+            .available_roles
+            .get(&role_name)
+            .and_then(|role| role.compaction)
+            == Some(tau_config::settings::RoleCompaction::Disabled)
+        {
+            return false;
+        }
+
+        response.recovery_disposition =
+            tau_proto::ContextRecoveryDisposition::ReactiveCompactionPlanned;
+        self.publish_for_agent_from(
+            cid,
+            source,
+            Event::ProviderResponseFinished(response.clone()),
+        );
+        self.discard_finished_response_prompt_tracking(&response.agent_prompt_id);
+        if let Some(agent) = self.agents.get_mut(cid) {
+            agent.in_flight_prompt = None;
+        }
+        self.start_reactive_compaction_for_checkpoint(cid, &checkpoint);
+        true
+    }
+
+    /// Reconciles durable planned recoveries after provider discovery makes
+    /// model capability authoritative.
+    fn reconcile_pending_context_recoveries(&mut self, absence_is_authoritative: bool) {
+        let pending = self
+            .agents
+            .iter()
+            .filter_map(|(cid, agent)| match &agent.activation_dispatch {
+                crate::agent::ActivationDispatchState::ContextRecoveryPending { checkpoint } => {
+                    Some((cid.clone(), checkpoint.clone()))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        for (cid, checkpoint) in pending {
+            let Some(model) = checkpoint.model.as_ref() else {
+                self.terminalize_replay_blocked_context_recovery(&cid, &checkpoint);
+                continue;
+            };
+            if !self.provider_model_info.contains_key(model) && !absence_is_authoritative {
+                continue;
+            }
+            let model_matches = self
+                .agents
+                .get(&cid)
+                .and_then(|agent| self.model_for_agent_role(agent))
+                .as_ref()
+                == Some(model);
+            let capability_matches = self
+                .provider_model_info
+                .get(model)
+                .is_some_and(|info| info.supports_standalone_compaction);
+            let policy_allows = self
+                .available_roles
+                .get(&self.role_name_for_agent_id(&cid))
+                .and_then(|role| role.compaction)
+                != Some(tau_config::settings::RoleCompaction::Disabled);
+            let branch_matches = checkpoint.activation_cut.is_some()
+                && self
+                    .agents
+                    .get(&cid)
+                    .and_then(|agent| agent.agent_id.as_deref())
+                    .and_then(|agent_id| self.agent_store.agent(agent_id))
+                    .is_some_and(|tree| {
+                        tree.is_ancestor_head(
+                            checkpoint.through,
+                            self.agents
+                                .get(&cid)
+                                .and_then(|agent| agent.head)
+                                .map_or(AgentHead::Root, AgentHead::Node),
+                        )
+                    });
+            if model_matches && capability_matches && policy_allows && branch_matches {
+                self.start_reactive_compaction_for_checkpoint(&cid, &checkpoint);
+            } else {
+                self.terminalize_replay_blocked_context_recovery(&cid, &checkpoint);
+            }
+        }
+    }
+
+    /// Claims and categorically fails an unclaimed recovery without dispatching
+    /// remote work when replay-time authority checks no longer match.
+    fn terminalize_replay_blocked_context_recovery(
+        &mut self,
+        cid: &AgentId,
+        checkpoint: &tau_proto::AgentInferenceDispatchStarted,
+    ) {
+        let Some((agent_id, model, cut, originator, next)) =
+            self.agents.get(cid).and_then(|agent| {
+                Some((
+                    agent.agent_id.clone()?,
+                    checkpoint.model.clone()?,
+                    checkpoint.activation_cut?,
+                    agent.originator.clone(),
+                    agent.next_prompt_index,
+                ))
+            })
+        else {
+            return;
+        };
+        let transaction_id = tau_proto::CompactionTransactionId::parse(format!("ct-{next}"))
+            .expect("generated compaction transaction id is valid");
+        let compact_prompt_id = tau_proto::AgentPromptId::from(format!("ap-{agent_id}-{next}"));
+        if let Some(agent) = self.agents.get_mut(cid) {
+            agent.next_prompt_index = agent.next_prompt_index.saturating_add(1);
+        }
+        if let Some(agent) = self.agents.get_mut(cid) {
+            agent.activation_dispatch =
+                crate::agent::ActivationDispatchState::ContextRecoveryClaimPending {
+                    checkpoint: checkpoint.clone(),
+                    transaction_id: transaction_id.clone(),
+                };
+        }
+        self.suppressed_compaction_dispatches
+            .insert((crate::parse_agent_id(&agent_id), transaction_id.clone()));
+        self.publish_for_agent(
+            cid,
+            Event::AgentStandaloneCompactionStarted(tau_proto::AgentStandaloneCompactionStarted {
+                agent_id: crate::parse_agent_id(&agent_id),
+                transaction_id: transaction_id.clone(),
+                compact_prompt_id,
+                cut,
+                resume_through: Some(checkpoint.through),
+                model,
+                operation: tau_proto::PromptOperation::StandaloneCompaction,
+                originator,
+                supersedes: None,
+                trigger: tau_proto::StandaloneCompactionTrigger::ReactiveContextOverflow {
+                    failed_agent_prompt_id: checkpoint.agent_prompt_id.clone(),
+                },
+            }),
+        );
+        self.publish_for_agent(
+            cid,
+            Event::AgentStandaloneCompactionFailed(tau_proto::AgentStandaloneCompactionFailed {
+                agent_id: crate::parse_agent_id(&agent_id),
+                transaction_id,
+                cut,
+                reason: tau_proto::StandaloneCompactionFailureReason::StaleBranch,
+                resume_through: Some(checkpoint.through),
+            }),
+        );
+        self.emit_info_important(&format!(
+            "context recovery for restored agent `{cid}` is blocked by changed model, capability, policy, or branch; retry explicitly"
+        ));
+    }
+
+    /// Publishes the unique durable compaction claim for a planned recovery.
+    fn start_reactive_compaction_for_checkpoint(
+        &mut self,
+        cid: &AgentId,
+        checkpoint: &tau_proto::AgentInferenceDispatchStarted,
+    ) {
+        let Some(model) = checkpoint.model.clone() else {
+            return;
+        };
+        let Some(cut) = checkpoint.activation_cut else {
+            return;
+        };
+        let Some(agent_id) = self
+            .agents
+            .get(cid)
+            .and_then(|agent| agent.agent_id.clone())
+        else {
+            return;
+        };
+        let next = self
+            .agents
+            .get(cid)
+            .map_or(0, |agent| agent.next_prompt_index);
+        let transaction_id = tau_proto::CompactionTransactionId::parse(format!("ct-{next}"))
+            .expect("generated compaction transaction id is valid");
+        let compact_prompt_id = tau_proto::AgentPromptId::from(format!("ap-{agent_id}-{next}"));
+        let originator = self
+            .agents
+            .get(cid)
+            .map_or_else(PromptOriginator::default, |agent| agent.originator.clone());
+        if let Some(agent) = self.agents.get_mut(cid) {
+            agent.next_prompt_index = agent.next_prompt_index.saturating_add(1);
+            agent.activation_dispatch =
+                crate::agent::ActivationDispatchState::ContextRecoveryClaimPending {
+                    checkpoint: checkpoint.clone(),
+                    transaction_id: transaction_id.clone(),
+                };
+        }
+        self.publish_for_agent(
+            cid,
+            Event::AgentStandaloneCompactionStarted(tau_proto::AgentStandaloneCompactionStarted {
+                agent_id: crate::parse_agent_id(&agent_id),
+                transaction_id,
+                compact_prompt_id,
+                cut,
+                resume_through: Some(checkpoint.through),
+                model,
+                operation: tau_proto::PromptOperation::StandaloneCompaction,
+                originator,
+                supersedes: None,
+                trigger: tau_proto::StandaloneCompactionTrigger::ReactiveContextOverflow {
+                    failed_agent_prompt_id: checkpoint.agent_prompt_id.clone(),
+                },
+            }),
+        );
     }
 
     fn accept_standalone_compaction(
@@ -13554,6 +14098,7 @@ impl Harness {
         self.prompt_agents.remove(agent_prompt_id.as_str());
         self.pending_provider_prompts.remove(agent_prompt_id);
         self.prompt_models.remove(agent_prompt_id);
+        self.prompt_semantic_output.remove(agent_prompt_id);
         self.prompt_operations.remove(agent_prompt_id);
         self.clear_prompt_tool_snapshot(agent_prompt_id);
     }
@@ -13970,6 +14515,32 @@ impl Harness {
                 query_id, name
             ));
         }
+    }
+
+    /// Completes extension-originated work after a terminal standalone
+    /// compaction failure, using only a safe categorical error.
+    fn complete_failed_compaction_side_conversation(&mut self, cid: &AgentId) -> bool {
+        let Some((name, query_id)) = self.agents.get(cid).and_then(|agent| {
+            if let PromptOriginator::Extension { name, query_id } = &agent.originator {
+                Some((name.clone(), query_id.clone()))
+            } else {
+                None
+            }
+        }) else {
+            return false;
+        };
+        self.deliver_finished_side_conversation_result(
+            cid,
+            &name,
+            &query_id,
+            tau_proto::StartAgentResult {
+                query_id: query_id.clone(),
+                text: String::new(),
+                error: Some("provider failure: compaction".to_owned()),
+            },
+        );
+        self.complete_finished_side_conversation(cid);
+        true
     }
 
     fn complete_finished_side_conversation(&mut self, cid: &AgentId) {

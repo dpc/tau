@@ -1,5 +1,11 @@
 # Security policy
 
+Reactive context recovery is a harness authority. Provider extensions only
+classify canonical terminal context-window failures; they cannot authorize
+compaction, choose its transcript cut, or claim an inference checkpoint.
+Harness ingress clears recovery disposition before validating durable
+correlation, model capability, policy, branch, and absence of accepted output.
+
 Prompt capability data is sparse. Tool names are only the model-visible,
 policy-authorized, provider-supported names advertised for that prompt; internal
 aliases and registered-but-hidden tools are not exposed. It contains no
