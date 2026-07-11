@@ -25,6 +25,21 @@ extensions:
       listening_scope: mentions_only
       # Optional. If omitted or empty, one allowlisted DM can link with `start`.
       channel_ids: ["C12345678", "C87654321"]
+      # Optional outbound initiation; omission/empty remains reply-only.
+      send_destinations:
+        - alias: team-ops
+          conversation_id: C45678901
+          kind: channel
+          description: Operations channel
+        - alias: incident-thread
+          conversation_id: C45678901
+          kind: channel
+          thread_ts: "1720000000.123456"
+          description: Fixed incident thread
+        - alias: alice-dm
+          conversation_id: D12345678
+          kind: dm
+          description: Existing direct conversation
       max_message_bytes: 16384
 ```
 
@@ -97,6 +112,8 @@ configured channel has independent agent selection, and replies return to the
 source-bound configured channel (or linked DM) and thread selected by the exact
 `reply_to` message id. The model-facing `<tau_message>` advertises `reply="slack_send"` only while that route is live; its `message_id` is passed as `reply_to`. Top-level messages receive top-level replies; thread replies remain in
 their originating thread automatically.
+For initiation use `slack_send(message, destination)`, for example
+`{"message":"report complete","destination":"team-ops"}`.
 Allowed users' reaction additions/removals on recent messages posted through
 `slack_send` are routed back to the owning agent with channel, thread, message,
 reaction, event-kind, and user metadata. Other posts and conversations are
@@ -108,3 +125,18 @@ than treated as new text.
 
 The singular `channel_id` key is intentionally unsupported. Empty, malformed,
 or duplicate ids and duplicate user ids are configuration errors.
+
+### Configured proactive transport sends
+
+Slack initiation is separately authorized by the empty-by-default `send_destinations` list. Each record has `alias`, `conversation_id`, `kind` (`channel`, `mpim`, or `dm`), and optional `description` and fixed `thread_ts`. Inbound `channel_ids` and a runtime-linked DM never imply this outbound right. The `slack_send` tool requires `message` plus exactly one of opaque `reply_to` or configured `destination`; the model sees sorted aliases and trusted descriptions, never native Slack IDs or a raw thread selector. Every enabled agent may use every advertised alias without `slack_register`; normal effective role/tool policy is the agent authorization layer.
+
+Aliases must match `^[a-z][a-z0-9_-]{0,63}$`; at most 64 are accepted.
+`channel` accepts existing `C`/`G` conversations, `mpim` accepts `G`, and
+`dm` accepts an existing `D` conversation—never a `U` user ID. Duplicate aliases
+or exact conversation/thread routes, malformed timestamps, blank/control/overlong
+descriptions, and unknown fields fail configuration. Different fixed threads in
+one conversation are distinct routes.
+Descriptions are limited to 120 Unicode scalars; capability metadata is also
+bounded at the harness boundary. `mpim` routes use existing `G...` conversations.
+
+The extension and harness both fail closed: they revalidate the authenticated connection, current session generation, live call and actual agent/tool, transport, alias, endpoint, native conversation kind/id, and fixed thread. Successful outgoing facts retain the authorization relation and tool call audit. Same-process retries are bounded; transcript replay never posts remotely, and Tau does not claim exactly-once delivery across crashes or ambiguous Slack responses. Prompt injection can still influence a role already granted `slack_send`; isolate ingress roles or keep their destination set minimal. Slack app membership remains required and `chat:write.public` is not needed.

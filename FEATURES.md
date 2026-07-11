@@ -630,18 +630,18 @@ destination.
 Slack `listening_scope` defaults to `mentions_only`; `all_messages` expands only trigger scope in authorized conversations. Verified-human, strict/lax sender policy, bot/self denial, untrusted content, and source-bound reply authorization remain unchanged. Duplicate `message` and `app_mention` delivery of one `(channel, ts)` shares durable dedup identity.
 
 Disabled by default, `std-slack` lets allowlisted Slack users send text to
-explicitly registered Tau agents and lets those agents reply with `slack_send`.
+explicitly registered Tau agents and lets tool-authorized agents reply or send to
+explicitly configured proactive aliases with `slack_send`.
 Incoming creates and owned-post reactions use typed message envelopes with
 durable native ids and gray semi-system provenance; no duplicate legacy prompt
-is created. Replies require the envelope's opaque `reply_to` id and produce a
-durable outgoing fact before terminal tool completion.
+is created. Replies require the envelope's opaque `reply_to` id; proactive sends require a
+configured alias. Both produce a durable outgoing fact before terminal completion.
 It uses Slack Socket Mode with an app-token secret (`xapp-...`), a bot-token
-secret (`xoxb-...`), and a non-empty `allowed_user_ids` allowlist. Outgoing
-messages use only an explicitly configured `channel_ids` entry or a single
-allowlisted DM linked at runtime with `start`. Each channel has independent agent
+secret (`xoxb-...`), and a non-empty `allowed_user_ids` allowlist. Inbound `channel_ids` and a linked DM authorize replies only. Proactive sends use
+the separate empty-by-default `send_destinations` alias list. Each channel has independent agent
 selection, and replies return to the source-bound configured or linked
 conversation selected by `reply_to`, preserving its originating thread
-automatically; the model cannot choose channel, user, or thread destinations.
+automatically; the model chooses only an advertised alias, never a native ID or thread.
 `security_mode` is `strict` by default. Optional `lax` also forwards verified
 human creates, edits, and reactions from authorized conversations, without
 granting bridge commands or destination-selection authority. It materially increases

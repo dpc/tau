@@ -27,8 +27,11 @@ Protocol v8 adds three extension-to-harness RPC families:
 `ExtensionBuilder::on_output_message`; manual runtimes receive them through the
 ordinary manual input queue.
 
-Registration binds a transport and optional reply tool to the authenticated
-connection and active session. Ingress acceptance is returned only after its
+Registration binds a transport, optional send tool, and bounded exact proactive
+aliases to the authenticated connection and active session. Refresh replaces the
+route set; tool unregister, disconnect, and session rollover revoke it. Completion
+validates either live reply authorization or exact configured-destination
+authorization. Ingress acceptance is returned only after its
 protected incoming fact commits; exact committed duplicates preserve the
 canonical id without another model wake. Successful-send completion first
 commits the outgoing fact, then publishes and commits the terminal tool result,

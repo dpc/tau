@@ -105,6 +105,7 @@ impl SlackClient for FakeClient {
             thread_ts: thread_ts.map(str::to_owned),
         });
         Ok(PostedMessage {
+            channel_id: channel_id.to_owned(),
             ts: format!("{}.0", sent.len()),
             thread_ts: None,
         })
@@ -134,8 +135,49 @@ impl SlackClient for FailingAuthClient {
         _thread_ts: Option<&str>,
     ) -> Result<PostedMessage, String> {
         Ok(PostedMessage {
+            channel_id: _channel_id.to_owned(),
             ts: "1.0".to_owned(),
             thread_ts: None,
+        })
+    }
+}
+
+/// Scripted post client used to verify that Slack-accepted response metadata is
+/// checked once and then retained as an idempotent failure.
+struct MismatchedPostClient {
+    /// Number of Slack post attempts.
+    posts: Mutex<usize>,
+    /// Returned conversation id.
+    returned_channel: String,
+    /// Returned thread root.
+    returned_thread: Option<String>,
+}
+
+impl SlackClient for MismatchedPostClient {
+    fn open_socket(&self, _cfg: &RuntimeConfig) -> Result<String, String> {
+        unreachable!("post-only test client")
+    }
+
+    fn auth_test(&self, _cfg: &RuntimeConfig) -> Result<String, String> {
+        unreachable!("post-only test client")
+    }
+
+    fn is_human_user(&self, _cfg: &RuntimeConfig, _user_id: &str) -> Result<bool, String> {
+        unreachable!("post-only test client")
+    }
+
+    fn post_message(
+        &self,
+        _cfg: &RuntimeConfig,
+        _channel_id: &str,
+        _text: &str,
+        _thread_ts: Option<&str>,
+    ) -> Result<PostedMessage, String> {
+        *self.posts.lock().expect("posts") += 1;
+        Ok(PostedMessage {
+            channel_id: self.returned_channel.clone(),
+            ts: "1.0".to_owned(),
+            thread_ts: self.returned_thread.clone(),
         })
     }
 }
@@ -183,6 +225,7 @@ fn cfg() -> RuntimeConfig {
         security_mode: SecurityMode::Strict,
         listening_scope: ListeningScope::MentionsOnly,
         configured_channel_ids: ["C123".to_owned()].into_iter().collect(),
+        send_destinations: BTreeMap::new(),
         api_base: DEFAULT_API_BASE.to_owned(),
         max_message_bytes: DEFAULT_MAX_MESSAGE_BYTES,
     }
@@ -198,6 +241,37 @@ fn dm_cfg() -> RuntimeConfig {
 fn multi_channel_cfg() -> RuntimeConfig {
     RuntimeConfig {
         configured_channel_ids: ["C123".to_owned(), "C456".to_owned()].into_iter().collect(),
+        ..cfg()
+    }
+}
+
+fn proactive_cfg() -> RuntimeConfig {
+    let destinations = [
+        ("team-ops", "C456", SendDestinationKind::Channel, None),
+        (
+            "incident-thread",
+            "G789",
+            SendDestinationKind::Mpim,
+            Some("1720000000.123456"),
+        ),
+        ("alice-dm", "D123", SendDestinationKind::Dm, None),
+    ]
+    .into_iter()
+    .map(|(alias, conversation_id, kind, thread_ts)| {
+        (
+            alias.to_owned(),
+            SendDestination {
+                alias: alias.to_owned(),
+                conversation_id: conversation_id.to_owned(),
+                kind,
+                description: None,
+                thread_ts: thread_ts.map(str::to_owned),
+            },
+        )
+    })
+    .collect();
+    RuntimeConfig {
+        send_destinations: destinations,
         ..cfg()
     }
 }
@@ -253,6 +327,24 @@ fn valid_config_message() -> HarnessOutputMessage {
         state_dir: None,
         secrets,
     })
+}
+
+fn proactive_config_message() -> HarnessOutputMessage {
+    let HarnessOutputMessage::Configure(mut configure) = valid_config_message() else {
+        unreachable!("config helper")
+    };
+    configure.config = tau_proto::json_to_cbor(&serde_json::json!({
+        "app_token_secret": "app",
+        "bot_token_secret": "bot",
+        "allowed_user_ids": ["U123"],
+        "channel_ids": ["C123"],
+        "send_destinations": [{
+            "alias": "team-ops",
+            "conversation_id": "C456",
+            "kind": "channel"
+        }]
+    }));
+    HarnessOutputMessage::Configure(configure)
 }
 
 fn malformed_config_message() -> HarnessOutputMessage {
@@ -835,6 +927,273 @@ fn slack_send_rejects_destination_arguments() {
     assert!(err.message.contains("unknown argument `channel_id`"));
 }
 
+/// Proactive aliases work without agent registration, preserve a configured
+/// fixed thread, and expose no native destination in the model arguments.
+#[test]
+fn proactive_send_uses_exact_configured_route_without_registration() {
+    let (ext, rx, client) = extension();
+    ext.apply_config(proactive_cfg())
+        .expect("configure aliases");
+    let event = ext.handle_send(tool(
+        SEND_TOOL_NAME,
+        "agent-a",
+        tau_proto::json_to_cbor(&serde_json::json!({
+            "message": "update",
+            "destination": "incident-thread"
+        })),
+    ));
+    assert!(event.is_none(), "completion is asynchronous");
+    assert_eq!(
+        client.sent_pairs(),
+        vec![("G789".to_owned(), "[agent-a] update".to_owned())]
+    );
+    assert_eq!(
+        client.sent_thread_ids(),
+        vec![Some("1720000000.123456".to_owned())]
+    );
+    let request = match rx.try_recv().expect("completion request") {
+        HarnessInputMessage::CompleteTransportSend(request) => request,
+        other => panic!("unexpected frame: {other:?}"),
+    };
+    assert!(request.in_reply_to.is_none());
+    assert!(matches!(
+        request.authorization,
+        tau_proto::TransportSendAuthorization::ConfiguredDestination { ref alias }
+            if alias == "incident-thread"
+    ));
+}
+
+/// Proactive calls must not reach Slack until the harness accepts the current
+/// session's exact transport capability.
+#[test]
+fn proactive_send_requires_active_capability_before_posting() {
+    let (ext, _rx, client) = extension();
+    ext.apply_config(proactive_cfg())
+        .expect("configure aliases");
+    ext.state.lock().expect("state").capability_active = false;
+    let event = ext.handle_send(tool(
+        SEND_TOOL_NAME,
+        "agent-a",
+        tau_proto::json_to_cbor(
+            &serde_json::json!({"message": "update", "destination": "team-ops"}),
+        ),
+    ));
+    assert!(matches!(event, Some(Event::ToolError(_))));
+    assert!(client.sent_pairs().is_empty());
+}
+
+/// Identical delivery after Slack acceptance resubmits the typed completion
+/// without posting again or fabricating a terminal tool result.
+#[test]
+fn accepted_proactive_replay_resubmits_completion_without_reposting() {
+    let (ext, rx, client) = extension();
+    ext.apply_config(proactive_cfg())
+        .expect("configure aliases");
+    let invoke = tool(
+        SEND_TOOL_NAME,
+        "agent-a",
+        tau_proto::json_to_cbor(
+            &serde_json::json!({"message": "update", "destination": "team-ops"}),
+        ),
+    );
+    assert!(ext.handle_send(invoke.clone()).is_none());
+    let first = rx.try_recv().expect("first completion");
+    assert!(ext.handle_send(invoke).is_none());
+    let replay = rx.try_recv().expect("replayed completion");
+    assert_eq!(format!("{first:?}"), format!("{replay:?}"));
+    assert_eq!(client.sent_pairs().len(), 1);
+}
+
+/// Exactly-one selector validation and the closed argument set prevent
+/// reply/proactive confusion and native destination or thread injection.
+#[test]
+fn proactive_send_rejects_ambiguous_unknown_and_native_arguments() {
+    let (ext, _rx, client) = extension();
+    ext.apply_config(proactive_cfg())
+        .expect("configure aliases");
+    for arguments in [
+        serde_json::json!({"message": "x"}),
+        serde_json::json!({"message": "x", "reply_to": "msg-x", "destination": "team-ops"}),
+        serde_json::json!({"message": "x", "destination": "TEAM-OPS"}),
+        serde_json::json!({"message": "x", "destination": " team-ops"}),
+        serde_json::json!({"message": "x", "destination": "C456"}),
+        serde_json::json!({"message": "x", "destination": "team-ops", "thread_ts": "1.0"}),
+        serde_json::json!({"message": "x", "destination": "team-ops", "channel_id": "C999"}),
+    ] {
+        assert!(matches!(
+            ext.handle_send(tool(
+                SEND_TOOL_NAME,
+                "agent-a",
+                tau_proto::json_to_cbor(&arguments)
+            )),
+            Some(Event::ToolError(_))
+        ));
+    }
+    assert!(client.sent_pairs().is_empty());
+}
+
+/// Configured aliases are sorted and are the only destination identities
+/// advertised by the refreshed model schema.
+#[test]
+fn proactive_schema_advertises_only_sorted_aliases() {
+    let spec = send_tool_spec_for_destinations(&proactive_cfg().send_destinations);
+    let parameters = spec.parameters.expect("parameters");
+    let schema = parameters.as_object().expect("object schema");
+    let destination = &schema["properties"]["destination"];
+    assert_eq!(
+        destination["enum"],
+        serde_json::json!(["alice-dm", "incident-thread", "team-ops"])
+    );
+    let serialized = serde_json::to_string(&parameters).expect("schema json");
+    for native in ["C456", "G789", "D123", "1720000000.123456"] {
+        assert!(!serialized.contains(native), "schema leaked {native}");
+    }
+}
+
+/// Slack-accepted channel and fixed-thread mismatches become stable failures;
+/// replaying the same call id must neither repost nor leak native identifiers.
+#[test]
+fn accepted_response_route_mismatches_replay_without_reposting() {
+    for (channel, thread, expected) in [
+        ("C999", None, "conflicting destination conversation"),
+        ("G789", Some("9.9"), "conflicting thread metadata"),
+    ] {
+        let client = Arc::new(MismatchedPostClient {
+            posts: Mutex::new(0),
+            returned_channel: channel.to_owned(),
+            returned_thread: thread.map(str::to_owned),
+        });
+        let (tx, _rx) = mpsc::channel();
+        let ext = Extension::new(client.clone(), tx);
+        ext.apply_config(proactive_cfg()).expect("configure");
+        ext.state.lock().expect("state").capability_active = true;
+        let invoke = tool(
+            SEND_TOOL_NAME,
+            "agent-a",
+            tau_proto::json_to_cbor(
+                &serde_json::json!({"message": "update", "destination": "incident-thread"}),
+            ),
+        );
+        for attempt in [invoke.clone(), invoke] {
+            let Some(Event::ToolError(error)) = ext.handle_send(attempt) else {
+                panic!("expected stable mismatch error");
+            };
+            assert!(error.message.contains(expected));
+            assert!(!error.message.contains(channel));
+            assert!(!error.message.contains("9.9"));
+        }
+        assert_eq!(*client.posts.lock().expect("posts"), 1);
+    }
+}
+
+/// Accepted-attempt retention rejects conflicting replay, evicts oldest entries
+/// at its independent bound, and configuration reset clears both indexes.
+#[test]
+fn accepted_send_attempts_conflict_bound_and_reset() {
+    let (ext, _rx, client) = extension();
+    ext.apply_config(proactive_cfg()).expect("configure");
+    let first = tool(
+        SEND_TOOL_NAME,
+        "agent-a",
+        tau_proto::json_to_cbor(
+            &serde_json::json!({"message": "first", "destination": "team-ops"}),
+        ),
+    );
+    assert!(ext.handle_send(first.clone()).is_none());
+    let mut conflict = first;
+    conflict.arguments = tau_proto::json_to_cbor(
+        &serde_json::json!({"message": "changed", "destination": "team-ops"}),
+    );
+    assert!(matches!(
+        ext.handle_send(conflict),
+        Some(Event::ToolError(_))
+    ));
+    assert_eq!(client.sent_pairs().len(), 1);
+
+    let mut state = ext.state.lock().expect("state");
+    state.clear_accepted_send_attempts();
+    for index in 0..=ACCEPTED_SEND_ATTEMPT_LIMIT {
+        let invoke = ToolStarted {
+            call_id: format!("bounded-{index}").into(),
+            ..tool(SEND_TOOL_NAME, "agent-a", CborValue::Null)
+        };
+        state.remember_accepted_send(
+            &invoke,
+            AcceptedSendDisposition::Rejected("accepted".to_owned()),
+        );
+    }
+    assert_eq!(
+        state.accepted_send_attempts.len(),
+        ACCEPTED_SEND_ATTEMPT_LIMIT
+    );
+    assert!(
+        !state
+            .accepted_send_attempts
+            .contains_key(&tau_proto::ToolCallId::from("bounded-0"))
+    );
+    drop(state);
+    let mut reconfigured = proactive_cfg();
+    reconfigured.max_message_bytes -= 1;
+    ext.apply_config(reconfigured).expect("reconfigure");
+    let state = ext.state.lock().expect("state");
+    assert!(state.accepted_send_attempts.is_empty());
+    assert!(state.accepted_send_attempt_order.is_empty());
+}
+
+/// Outbound destination configuration rejects every ambiguous or unsafe shape
+/// while accepting the documented channel, MPIM, DM, and fixed-thread forms.
+#[test]
+fn send_destination_config_validation_matrix() {
+    let mut secrets = BTreeMap::new();
+    secrets.insert("app".to_owned(), tau_proto::SecretValue::new("xapp-test"));
+    secrets.insert("bot".to_owned(), tau_proto::SecretValue::new("xoxb-test"));
+    let validate = |destinations: serde_json::Value| {
+        tau_proto::json_to_cbor(&serde_json::json!({
+            "app_token_secret": "app",
+            "bot_token_secret": "bot",
+            "allowed_user_ids": ["U123"],
+            "send_destinations": destinations,
+        }))
+        .deserialized::<ExtConfig>()
+        .map_err(|error| format!("{error:?}"))
+        .and_then(|config| config.validate(&secrets).map(|_| ()))
+    };
+    assert!(
+        validate(serde_json::json!([
+            {"alias":"chan","conversation_id":"C123","kind":"channel"},
+            {"alias":"private","conversation_id":"G123","kind":"channel","thread_ts":"1.000001"},
+            {"alias":"group","conversation_id":"G456","kind":"mpim"},
+            {"alias":"direct","conversation_id":"D123","kind":"dm","description":"Alice"}
+        ]))
+        .is_ok()
+    );
+    for invalid in [
+        serde_json::json!([{"alias":"Bad","conversation_id":"C123","kind":"channel"}]),
+        serde_json::json!([{"alias":"same","conversation_id":"C123","kind":"channel"},{"alias":"same","conversation_id":"C456","kind":"channel"}]),
+        serde_json::json!([{"alias":"one","conversation_id":"C123","kind":"channel"},{"alias":"two","conversation_id":"C123","kind":"channel"}]),
+        serde_json::json!([{"alias":"dm","conversation_id":"U123","kind":"dm"}]),
+        serde_json::json!([{"alias":"dm","conversation_id":"C123","kind":"dm"}]),
+        serde_json::json!([{"alias":"mpim","conversation_id":"D123","kind":"mpim"}]),
+        serde_json::json!([{"alias":"thread","conversation_id":"C123","kind":"channel","thread_ts":"bad"}]),
+        serde_json::json!([{"alias":"blank","conversation_id":"C123","kind":"channel","description":"  "}]),
+        serde_json::json!([{"alias":"control","conversation_id":"C123","kind":"channel","description":"bad\nline"}]),
+        serde_json::json!([{"alias":"unknown","conversation_id":"C123","kind":"channel","extra":true}]),
+    ] {
+        assert!(validate(invalid).is_err());
+    }
+    let too_many = (0..=SEND_DESTINATION_LIMIT)
+        .map(|index| {
+            serde_json::json!({
+                "alias": format!("route-{index}"),
+                "conversation_id": format!("C{index:03}"),
+                "kind": "channel"
+            })
+        })
+        .collect();
+    assert!(validate(serde_json::Value::Array(too_many)).is_err());
+    assert!(validate(serde_json::json!([])).is_ok());
+}
+
 /// Config validation requires both token secret names, non-empty resolved
 /// secret values, and a non-empty user allowlist before Slack can be contacted.
 #[test]
@@ -1046,6 +1405,7 @@ fn invalid_pre_start_reconfiguration_clears_inactive_state() {
     ext.remember_posted_message(
         slack_conversation("C123", Some("10.0")),
         PostedMessage {
+            channel_id: "C123".to_owned(),
             ts: "1.0".to_owned(),
             thread_ts: None,
         },
@@ -1072,6 +1432,7 @@ fn channel_reconfiguration_clears_post_ownership() {
     ext.remember_posted_message(
         slack_conversation("C123", Some("10.0")),
         PostedMessage {
+            channel_id: "C123".to_owned(),
             ts: "1.0".to_owned(),
             thread_ts: None,
         },
@@ -1130,6 +1491,44 @@ fn run_malformed_pre_start_config_clears_inactive_state() {
     );
     assert_eq!(*client.auth_count.lock().expect("lock"), 0);
     assert_eq!(*client.open_count.lock().expect("lock"), 0);
+}
+
+/// Real protocol handling must refresh the send schema for configured aliases
+/// and replace it with the reply-only schema after malformed reconfiguration,
+/// so a stale prompt can never retain a revoked proactive destination.
+#[test]
+fn run_config_refreshes_and_bad_config_removes_proactive_schema() {
+    let frames = run_protocol_messages(
+        &[proactive_config_message(), malformed_config_message()],
+        FakeClient::new(),
+    );
+    let registrations = frames
+        .iter()
+        .filter_map(|frame| match frame {
+            HarnessInputMessage::Emit(emit) => match emit.event.as_ref() {
+                Event::ToolRegister(register) if register.tool.name.as_str() == SEND_TOOL_NAME => {
+                    Some(&register.tool)
+                }
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert!(registrations.iter().any(|tool| {
+        tool.parameters
+            .as_ref()
+            .and_then(|schema| schema["properties"]["destination"]["enum"].as_array())
+            .is_some_and(|aliases| aliases.as_slice() == [serde_json::json!("team-ops")])
+    }));
+    let final_schema = registrations
+        .last()
+        .and_then(|tool| tool.parameters.as_ref())
+        .expect("reply-only schema refresh");
+    assert!(final_schema["properties"].get("destination").is_none());
+    assert_eq!(
+        final_schema["required"],
+        serde_json::json!(["message", "reply_to"])
+    );
 }
 
 /// Protocol migration regression: once Socket Mode has started, even malformed
@@ -1311,6 +1710,7 @@ fn slack_register_toggles_agent_and_starts_worker() {
     ext.remember_posted_message(
         slack_conversation("C123", None),
         PostedMessage {
+            channel_id: "C123".to_owned(),
             ts: "1.0".to_owned(),
             thread_ts: None,
         },
@@ -1386,14 +1786,9 @@ fn slack_send_preserves_root_and_thread_context() {
     ext.process_slack_message(threaded);
     let threaded = recv_prompt_request(&rx);
     activate_prompt_origin(&ext, &threaded);
-    assert!(
-        ext.handle_send(tool(
-            SEND_TOOL_NAME,
-            "agent-a",
-            message_args("thread reply")
-        ))
-        .is_none()
-    );
+    let mut thread_send = tool(SEND_TOOL_NAME, "agent-a", message_args("thread reply"));
+    thread_send.call_id = tau_proto::ToolCallId::new("call-thread");
+    assert!(ext.handle_send(thread_send).is_none());
 
     assert_eq!(
         client.sent_thread_ids(),
@@ -1600,6 +1995,7 @@ fn allowlisted_non_human_reaction_actor_is_rejected() {
     ext.remember_posted_message(
         slack_conversation("C123", None),
         PostedMessage {
+            channel_id: "C123".to_owned(),
             ts: "1.0".to_owned(),
             thread_ts: None,
         },
@@ -1616,12 +2012,17 @@ fn allowlisted_non_human_reaction_actor_is_rejected() {
 #[test]
 fn posted_message_response_validates_identity_metadata() {
     assert!(posted_message_from_response(&serde_json::json!({})).is_err());
-    assert!(posted_message_from_response(&serde_json::json!({ "ts": "bad" })).is_err());
+    assert!(
+        posted_message_from_response(&serde_json::json!({ "channel": "C123", "ts": "bad" }))
+            .is_err()
+    );
     let post = posted_message_from_response(&serde_json::json!({
+        "channel": "C123",
         "ts": "12.34",
         "message": { "thread_ts": "not-a-ts" }
     }))
     .expect("valid message ts");
+    assert_eq!(post.channel_id, "C123");
     assert_eq!(post.ts, "12.34");
     assert!(post.thread_ts.is_none());
 }
@@ -1777,6 +2178,7 @@ fn reactions_outside_authorized_owned_posts_are_ignored() {
     ext.remember_posted_message(
         slack_conversation("C123", None),
         PostedMessage {
+            channel_id: "C123".to_owned(),
             ts: "1.0".to_owned(),
             thread_ts: None,
         },
@@ -1800,6 +2202,7 @@ fn reaction_routing_uses_cached_authenticated_thread_only() {
     ext.remember_posted_message(
         slack_conversation("C123", Some("10.0")),
         PostedMessage {
+            channel_id: "C123".to_owned(),
             ts: "1.0".to_owned(),
             thread_ts: None,
         },
@@ -1826,6 +2229,7 @@ fn reaction_routing_uses_cached_authenticated_thread_only() {
     ext.remember_posted_message(
         slack_conversation("C123", None),
         PostedMessage {
+            channel_id: "C123".to_owned(),
             ts: "2.0".to_owned(),
             thread_ts: None,
         },
@@ -1838,6 +2242,7 @@ fn reaction_routing_uses_cached_authenticated_thread_only() {
     ext.remember_posted_message(
         slack_conversation("C123", Some("10.0")),
         PostedMessage {
+            channel_id: "C123".to_owned(),
             ts: "3.0".to_owned(),
             thread_ts: Some("10.0".to_owned()),
         },
@@ -1850,6 +2255,7 @@ fn reaction_routing_uses_cached_authenticated_thread_only() {
     ext.remember_posted_message(
         slack_conversation("C123", None),
         PostedMessage {
+            channel_id: "C123".to_owned(),
             ts: "4.0".to_owned(),
             thread_ts: Some("99.0".to_owned()),
         },

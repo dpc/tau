@@ -21,6 +21,7 @@ use tau_proto::{
     RegisterTransportCapabilityRequest, SenderIdentityAssurance, SenderPolicyStatus, TextFormat,
     ToolError, ToolExample, ToolProgress, ToolResult, ToolSpec, ToolStarted, ToolUseState,
     ToolUseStatus, TransportMessageDraft, TransportMessageIngressRequest,
+    TransportSendDestinationCapability,
 };
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
@@ -81,6 +82,8 @@ const POSTED_MESSAGE_CACHE_SIZE: usize = 1024;
 const ROUTE_CORRELATION_LIMIT: usize = 1024;
 const REPLY_ROUTE_LIMIT: usize = 1024;
 const PENDING_SEND_LIMIT: usize = 1024;
+const ACCEPTED_SEND_ATTEMPT_LIMIT: usize = 256;
+const SEND_DESTINATION_LIMIT: usize = 64;
 const TRANSPORT_NAME: &str = "slack";
 const CAPABILITY_REQUEST_PREFIX: &str = "slack-capability-";
 const MAX_DIAGNOSTIC_BYTES: usize = 512;
@@ -128,6 +131,8 @@ trait SlackClient: Send + Sync + 'static {
 /// Stable identity returned by Slack for one successfully posted message.
 #[derive(Clone)]
 struct PostedMessage {
+    /// Conversation id returned by Slack for the accepted post.
+    channel_id: String,
     /// Slack message timestamp used as its stable id.
     ts: String,
     /// Root thread timestamp when Slack reports this post as a reply.
@@ -150,6 +155,8 @@ struct RuntimeConfig {
     listening_scope: ListeningScope,
     /// Explicitly allowed Slack channels for inbound routing.
     configured_channel_ids: HashSet<String>,
+    /// Explicit proactive aliases, independent of ingress authorization.
+    send_destinations: BTreeMap<String, SendDestination>,
     /// Slack Web API base URL.
     api_base: String,
     /// Maximum accepted inbound or outbound text size in bytes.
@@ -173,10 +180,71 @@ struct ExtConfig {
     listening_scope: ListeningScope,
     /// Slack channel ids allowed to route messages to Tau.
     channel_ids: Vec<String>,
+    /// Explicit outbound initiation routes; empty preserves reply-only
+    /// behavior.
+    send_destinations: Vec<RawSendDestination>,
     /// Optional Slack Web API base URL, mostly for tests.
     api_base: Option<String>,
     /// Optional maximum accepted text size in bytes.
     max_message_bytes: Option<usize>,
+}
+
+/// Raw operator-configured proactive Slack destination.
+#[derive(Clone, Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawSendDestination {
+    /// Stable lower-case model-facing name.
+    alias: String,
+    /// Existing Slack conversation id, never a user id.
+    conversation_id: String,
+    /// Expected Slack conversation family.
+    kind: SendDestinationKind,
+    /// Optional safe model-facing operator hint.
+    description: Option<String>,
+    /// Optional immutable root thread timestamp.
+    thread_ts: Option<String>,
+}
+
+/// Supported proactive Slack conversation families.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum SendDestinationKind {
+    /// Public or private Slack channel.
+    Channel,
+    /// Existing multi-person direct conversation.
+    Mpim,
+    /// Existing one-to-one direct conversation.
+    Dm,
+}
+
+/// Fully validated proactive route.
+#[derive(Clone)]
+struct SendDestination {
+    alias: String,
+    conversation_id: String,
+    kind: SendDestinationKind,
+    description: Option<String>,
+    thread_ts: Option<String>,
+}
+
+/// Stable disposition of a Slack-accepted send, retained to prevent reposting.
+#[derive(Clone)]
+enum AcceptedSendDisposition {
+    /// Completion that must be resubmitted to preserve durable ordering.
+    Completion(Box<CompleteTransportSendRequest>),
+    /// Stable post-acceptance validation failure.
+    Rejected(String),
+}
+
+/// Fingerprint and disposition for one Slack-accepted tool call.
+#[derive(Clone)]
+struct AcceptedSendAttempt {
+    /// Agent that owned the accepted call.
+    agent_id: AgentId,
+    /// Exact arguments used by the accepted call.
+    arguments: CborValue,
+    /// Replay behavior after Slack has accepted the post.
+    disposition: AcceptedSendDisposition,
 }
 
 impl ExtConfig {
@@ -214,6 +282,65 @@ impl ExtConfig {
                 ));
             }
         }
+        if self.send_destinations.len() > SEND_DESTINATION_LIMIT {
+            return Err(format!(
+                "slack `send_destinations` supports at most {SEND_DESTINATION_LIMIT} entries"
+            ));
+        }
+        let mut send_destinations = BTreeMap::new();
+        let mut routes = HashSet::new();
+        for raw in self.send_destinations {
+            if !valid_destination_alias(&raw.alias) {
+                return Err(
+                    "slack send destination alias must match ^[a-z][a-z0-9_-]{0,63}$".to_owned(),
+                );
+            }
+            let conversation_id =
+                validate_slack_id("send_destinations.conversation_id", &raw.conversation_id)?;
+            let valid_prefix = match raw.kind {
+                SendDestinationKind::Channel => {
+                    matches!(conversation_id.as_bytes().first(), Some(b'C' | b'G'))
+                }
+                SendDestinationKind::Mpim => conversation_id.starts_with('G'),
+                SendDestinationKind::Dm => conversation_id.starts_with('D'),
+            };
+            if !valid_prefix {
+                return Err("slack send destination kind does not match conversation id".to_owned());
+            }
+            if let Some(thread_ts) = &raw.thread_ts
+                && validate_slack_ts(thread_ts).is_err()
+            {
+                return Err("slack send destination has invalid `thread_ts`".to_owned());
+            }
+            let description = raw
+                .description
+                .map(|value| {
+                    if value.trim().is_empty()
+                        || value.chars().count() > 120
+                        || value.chars().any(char::is_control)
+                    {
+                        Err("slack send destination has invalid `description`".to_owned())
+                    } else {
+                        Ok(value)
+                    }
+                })
+                .transpose()?;
+            if !routes.insert((conversation_id.clone(), raw.thread_ts.clone())) {
+                return Err(
+                    "slack `send_destinations` contains a duplicate native route".to_owned(),
+                );
+            }
+            let destination = SendDestination {
+                alias: raw.alias.clone(),
+                conversation_id,
+                kind: raw.kind,
+                description,
+                thread_ts: raw.thread_ts,
+            };
+            if send_destinations.insert(raw.alias, destination).is_some() {
+                return Err("slack `send_destinations` contains a duplicate alias".to_owned());
+            }
+        }
         let api_base = self
             .api_base
             .unwrap_or_else(|| DEFAULT_API_BASE.to_owned())
@@ -233,10 +360,18 @@ impl ExtConfig {
             security_mode: self.security_mode,
             listening_scope: self.listening_scope,
             configured_channel_ids,
+            send_destinations,
             api_base,
             max_message_bytes,
         })
     }
+}
+
+fn valid_destination_alias(value: &str) -> bool {
+    let mut chars = value.chars();
+    matches!(chars.next(), Some('a'..='z'))
+        && value.len() <= 64
+        && chars.all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || matches!(ch, '_' | '-'))
 }
 
 /// Slack ingress sender policy.
@@ -501,6 +636,11 @@ struct State {
     reply_route_order: VecDeque<MessageId>,
     /// Remote posts waiting for outgoing fact plus terminal result commit.
     pending_posts: HashMap<String, PendingPostedMessage>,
+    /// Bounded same-process record preventing a repeated call id from
+    /// reposting.
+    accepted_send_attempts: HashMap<tau_proto::ToolCallId, AcceptedSendAttempt>,
+    /// Oldest-first bound for accepted send attempts.
+    accepted_send_attempt_order: VecDeque<tau_proto::ToolCallId>,
     /// Recent commit-confirmed incoming creates by native Slack identity.
     incoming_messages: HashMap<PostedMessageKey, IncomingMessageOwner>,
     /// Oldest-first bound for incoming create identities.
@@ -575,12 +715,6 @@ impl State {
         true
     }
 
-    /// Clear all committed incoming native identities.
-    fn clear_incoming_messages(&mut self) {
-        self.incoming_messages.clear();
-        self.incoming_message_order.clear();
-    }
-
     /// Remove all committed incoming identities owned by one agent.
     fn remove_agent_incoming_messages(&mut self, agent_id: &AgentId) {
         self.incoming_messages
@@ -592,6 +726,43 @@ impl State {
             .collect::<HashSet<_>>();
         self.incoming_message_order
             .retain(|key| retained.contains(key));
+    }
+
+    /// Clear all committed incoming native identities.
+    fn clear_incoming_messages(&mut self) {
+        self.incoming_messages.clear();
+        self.incoming_message_order.clear();
+    }
+
+    /// Remember a Slack-accepted call so identical delivery cannot repost it.
+    fn remember_accepted_send(
+        &mut self,
+        invoke: &ToolStarted,
+        disposition: AcceptedSendDisposition,
+    ) {
+        self.accepted_send_attempt_order
+            .retain(|call_id| call_id != &invoke.call_id);
+        self.accepted_send_attempt_order
+            .push_back(invoke.call_id.clone());
+        self.accepted_send_attempts.insert(
+            invoke.call_id.clone(),
+            AcceptedSendAttempt {
+                agent_id: invoke.agent_id.clone(),
+                arguments: invoke.arguments.clone(),
+                disposition,
+            },
+        );
+        while self.accepted_send_attempts.len() > ACCEPTED_SEND_ATTEMPT_LIMIT {
+            if let Some(oldest) = self.accepted_send_attempt_order.pop_front() {
+                self.accepted_send_attempts.remove(&oldest);
+            }
+        }
+    }
+
+    /// Clear all same-process outbound idempotency state.
+    fn clear_accepted_send_attempts(&mut self) {
+        self.accepted_send_attempts.clear();
+        self.accepted_send_attempt_order.clear();
     }
 }
 
@@ -675,6 +846,7 @@ impl Extension {
             state.learned_dm = None;
         }
         state.config = Some(cfg);
+        state.clear_accepted_send_attempts();
         let new_channels = state
             .config
             .as_ref()
@@ -705,6 +877,7 @@ impl Extension {
         state.clear_reply_routes();
         state.clear_incoming_messages();
         state.pending_posts.clear();
+        state.clear_accepted_send_attempts();
         state.capability_active = false;
         state.pending_capability_request = None;
         state.posted_messages.clear();
@@ -723,7 +896,7 @@ impl Extension {
 
     /// Register the typed Slack capability for the current harness session.
     fn request_transport_capability(&self) {
-        let request_id = {
+        let (request_id, send_destinations) = {
             let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
             state.capability_active = false;
             state.next_capability_request = state.next_capability_request.wrapping_add(1);
@@ -732,14 +905,21 @@ impl Extension {
                 state.next_capability_request
             );
             state.pending_capability_request = Some(request_id.clone());
-            request_id
+            let destinations = state.config.as_ref().map_or_else(Vec::new, |cfg| {
+                cfg.send_destinations
+                    .values()
+                    .map(send_destination_capability)
+                    .collect()
+            });
+            (request_id, destinations)
         };
         self.output
             .send(HarnessInputMessage::RegisterTransportCapability(
                 RegisterTransportCapabilityRequest {
                     request_id,
                     transport_name: TRANSPORT_NAME.to_owned(),
-                    reply_tool: Some(tau_proto::ToolName::new(SEND_TOOL_NAME)),
+                    send_tool: Some(tau_proto::ToolName::new(SEND_TOOL_NAME)),
+                    send_destinations,
                 },
             ));
     }
@@ -934,28 +1114,54 @@ impl Extension {
     }
 
     fn handle_send(&self, invoke: ToolStarted) -> Option<Event> {
-        if let Err(message) = validate_object_fields(&invoke.arguments, &["message", "reply_to"]) {
+        {
+            let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            if let Some(attempt) = state.accepted_send_attempts.get(&invoke.call_id) {
+                if attempt.agent_id != invoke.agent_id || attempt.arguments != invoke.arguments {
+                    return Some(tool_error(
+                        invoke,
+                        "slack_send call id was replayed with conflicting arguments".to_owned(),
+                    ));
+                }
+                match &attempt.disposition {
+                    AcceptedSendDisposition::Completion(request) => {
+                        self.output
+                            .send(HarnessInputMessage::CompleteTransportSend(request.clone()));
+                        return None;
+                    }
+                    AcceptedSendDisposition::Rejected(message) => {
+                        return Some(tool_error(invoke, message.clone()));
+                    }
+                }
+            }
+        }
+        if let Err(message) =
+            validate_object_fields(&invoke.arguments, &["message", "reply_to", "destination"])
+        {
             return Some(tool_error(invoke, message));
         }
         let message = match cbor_string_field(&invoke.arguments, "message") {
             Ok(message) => message,
             Err(message) => return Some(tool_error(invoke, message)),
         };
-        let reply_to = match cbor_string_field(&invoke.arguments, "reply_to") {
-            Ok(reply_to) => MessageId::new(reply_to),
-            Err(message) => return Some(tool_error(invoke, message)),
+        let reply_to = cbor_optional_string_field(&invoke.arguments, "reply_to");
+        let destination_alias = cbor_optional_string_field(&invoke.arguments, "destination");
+        let (reply_to, destination_alias) = match (reply_to, destination_alias) {
+            (Ok(Some(reply)), Ok(None)) => (Some(MessageId::new(reply)), None),
+            (Ok(None), Ok(Some(alias))) => (None, Some(alias)),
+            (Ok(Some(_)), Ok(Some(_))) | (Ok(None), Ok(None)) => {
+                return Some(tool_error(
+                    invoke,
+                    "slack_send requires exactly one of `reply_to` or `destination`".to_owned(),
+                ));
+            }
+            (Err(message), _) | (_, Err(message)) => return Some(tool_error(invoke, message)),
         };
         if message.trim().is_empty() {
             return Some(tool_error(invoke, "`message` must not be empty".to_owned()));
         }
-        let (cfg, route) = {
+        let (cfg, route, authorization, endpoint, conversation, policy_status) = {
             let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-            if !state.registered_agents.contains(&invoke.agent_id) {
-                return Some(tool_error(
-                    invoke,
-                    "slack_send requires slack_register(enabled: true) first".to_owned(),
-                ));
-            }
             let Some(cfg) = state.config.clone() else {
                 return Some(tool_error(
                     invoke,
@@ -974,35 +1180,106 @@ impl Extension {
                     "slack_send has too many completions awaiting Tau; try again later".to_owned(),
                 ));
             }
-            let Some(route) = state.reply_routes.get(&reply_to).cloned() else {
+            if !state.capability_active {
                 return Some(tool_error(
                     invoke,
-                    "slack_send reply_to is unknown or stale".to_owned(),
-                ));
-            };
-            if route.agent_id != invoke.agent_id {
-                return Some(tool_error(
-                    invoke,
-                    "slack_send reply_to belongs to another agent".to_owned(),
+                    "slack_send transport capability is not active".to_owned(),
                 ));
             }
-            if !is_authorized_conversation(&state, &cfg, &route.conversation.channel_id) {
-                return Some(tool_error(
-                    invoke,
-                    "slack_send originating conversation is no longer authorized".to_owned(),
-                ));
+            if let Some(reply_to) = &reply_to {
+                if !state.registered_agents.contains(&invoke.agent_id) {
+                    return Some(tool_error(
+                        invoke,
+                        "slack_send reply requires slack_register(enabled: true) first".to_owned(),
+                    ));
+                }
+                let Some(route) = state.reply_routes.get(reply_to).cloned() else {
+                    return Some(tool_error(
+                        invoke,
+                        "slack_send reply_to is unknown or stale".to_owned(),
+                    ));
+                };
+                if route.agent_id != invoke.agent_id {
+                    return Some(tool_error(
+                        invoke,
+                        "slack_send reply_to belongs to another agent".to_owned(),
+                    ));
+                }
+                if !is_authorized_conversation(&state, &cfg, &route.conversation.channel_id) {
+                    return Some(tool_error(
+                        invoke,
+                        "slack_send originating conversation is no longer authorized".to_owned(),
+                    ));
+                }
+                let endpoint = external_endpoint_for_route(&route);
+                let conversation = message_conversation(&route.conversation);
+                let policy = route.policy_status;
+                (
+                    cfg,
+                    route.conversation.clone(),
+                    tau_proto::TransportSendAuthorization::Reply {
+                        message_id: reply_to.clone(),
+                    },
+                    endpoint,
+                    conversation,
+                    policy,
+                )
+            } else {
+                let alias = destination_alias.as_ref().expect("exclusive selector");
+                let Some(destination) = cfg.send_destinations.get(alias) else {
+                    return Some(tool_error(
+                        invoke,
+                        "slack_send destination is unknown or unauthorized".to_owned(),
+                    ));
+                };
+                let route = SlackConversation {
+                    channel_id: destination.conversation_id.clone(),
+                    thread_ts: destination.thread_ts.clone(),
+                    direct: destination.kind == SendDestinationKind::Dm,
+                };
+                (
+                    cfg.clone(),
+                    route,
+                    tau_proto::TransportSendAuthorization::ConfiguredDestination {
+                        alias: alias.clone(),
+                    },
+                    send_destination_endpoint(destination),
+                    send_destination_conversation(destination),
+                    SenderPolicyStatus::Internal,
+                )
             }
-            (cfg, route)
         };
         let text = format!("[{}] {message}", invoke.agent_id.as_ref());
-        match self.client.post_message(
-            &cfg,
-            &route.conversation.channel_id,
-            &text,
-            route.conversation.thread_ts.as_deref(),
-        ) {
+        match self
+            .client
+            .post_message(&cfg, &route.channel_id, &text, route.thread_ts.as_deref())
+        {
             Ok(posted) => {
-                if posted.thread_ts.is_some() && posted.thread_ts != route.conversation.thread_ts {
+                if posted.channel_id != route.channel_id {
+                    self.state
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .remember_accepted_send(
+                            &invoke,
+                            AcceptedSendDisposition::Rejected(
+                                "Slack returned a conflicting destination conversation".to_owned(),
+                            ),
+                        );
+                    return Some(tool_error(
+                        invoke,
+                        "Slack returned a conflicting destination conversation".to_owned(),
+                    ));
+                }
+                if posted.thread_ts.is_some() && posted.thread_ts != route.thread_ts {
+                    self.state
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .remember_accepted_send(
+                            &invoke,
+                            AcceptedSendDisposition::Rejected(
+                                "Slack returned conflicting thread metadata".to_owned(),
+                            ),
+                        );
                     return Some(tool_error(
                         invoke,
                         "Slack returned conflicting thread metadata".to_owned(),
@@ -1016,46 +1293,46 @@ impl Extension {
                     },
                 };
                 let draft = transport_draft(
-                    external_endpoint_for_route(&route),
-                    &route.conversation,
+                    endpoint,
+                    &route,
                     operation,
                     ExternalMessageIdentity {
                         event_id: None,
                         message_id: Some(posted.ts.clone()),
                         revision_id: None,
-                        dedup_key: Some(format!(
-                            "send:{}:{}",
-                            route.conversation.channel_id, posted.ts
-                        )),
+                        dedup_key: Some(format!("send:{}:{}", route.channel_id, posted.ts)),
                     },
-                    route.policy_status,
+                    policy_status,
                 );
+                let mut draft = draft;
+                draft.conversation = Some(conversation);
                 let tool_result = successful_tool_result(&invoke, "sent Slack message");
-                self.state
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .pending_posts
-                    .insert(
-                        request_id.clone(),
-                        PendingPostedMessage {
-                            conversation: route.conversation.clone(),
-                            posted: posted.clone(),
-                            agent_id: invoke.agent_id.clone(),
-                            invoke: invoke.clone(),
-                        },
-                    );
+                let completion = Box::new(CompleteTransportSendRequest {
+                    request_id: request_id.clone(),
+                    call_id: invoke.call_id.clone(),
+                    agent_id: invoke.agent_id.clone(),
+                    in_reply_to: reply_to,
+                    authorization,
+                    draft,
+                    acceptance: MessageTransportAcceptance::SubmittedToTransport,
+                    tool_result,
+                });
+                let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+                state.remember_accepted_send(
+                    &invoke,
+                    AcceptedSendDisposition::Completion(completion.clone()),
+                );
+                state.pending_posts.insert(
+                    request_id.clone(),
+                    PendingPostedMessage {
+                        conversation: route.clone(),
+                        posted: posted.clone(),
+                        agent_id: invoke.agent_id.clone(),
+                        invoke: invoke.clone(),
+                    },
+                );
                 self.output
-                    .send(HarnessInputMessage::CompleteTransportSend(Box::new(
-                        CompleteTransportSendRequest {
-                            request_id,
-                            call_id: invoke.call_id,
-                            agent_id: invoke.agent_id,
-                            in_reply_to: Some(reply_to),
-                            draft,
-                            acceptance: MessageTransportAcceptance::SubmittedToTransport,
-                            tool_result,
-                        },
-                    )));
+                    .send(HarnessInputMessage::CompleteTransportSend(completion));
                 None
             }
             Err(message) => Some(tool_error(invoke, message)),
@@ -1814,6 +2091,47 @@ fn message_conversation(conversation: &SlackConversation) -> MessageConversation
     }
 }
 
+fn send_destination_conversation(destination: &SendDestination) -> MessageConversation {
+    MessageConversation {
+        kind: match destination.kind {
+            SendDestinationKind::Channel => ConversationKind::Channel,
+            SendDestinationKind::Mpim => ConversationKind::Group,
+            SendDestinationKind::Dm => ConversationKind::Direct,
+        },
+        stable_id: Some(destination.conversation_id.clone()),
+        display_name: Some(destination.alias.clone()),
+        thread: destination
+            .thread_ts
+            .as_ref()
+            .map(|thread_ts| MessageThread {
+                stable_id: thread_ts.clone(),
+                root: Some(MessageRef {
+                    message_id: None,
+                    external_message_id: Some(thread_ts.clone()),
+                }),
+            }),
+        reply_to: None,
+    }
+}
+
+fn send_destination_endpoint(destination: &SendDestination) -> MessageEndpoint {
+    MessageEndpoint::External {
+        stable_id: None,
+        display_name: Some(destination.alias.clone()),
+        actor_kind: ExternalActorKind::Unknown,
+    }
+}
+
+fn send_destination_capability(
+    destination: &SendDestination,
+) -> TransportSendDestinationCapability {
+    TransportSendDestinationCapability {
+        alias: destination.alias.clone(),
+        external_endpoint: send_destination_endpoint(destination),
+        conversation: send_destination_conversation(destination),
+    }
+}
+
 /// Build a normalized Slack draft without any model-visible prefix text.
 fn transport_draft(
     external_endpoint: MessageEndpoint,
@@ -1832,7 +2150,7 @@ fn transport_draft(
         external_identity: Some(external_identity),
         ordering: None,
         occurred_at: None,
-        reply_tool: Some(tau_proto::ToolName::new(SEND_TOOL_NAME)),
+        send_tool: Some(tau_proto::ToolName::new(SEND_TOOL_NAME)),
     }
 }
 
@@ -2330,6 +2648,7 @@ fn handle_configure(cx: tau_client::RawConfigureContext<'_, SlackRuntime>) -> Cl
         Ok(cfg) => cfg,
         Err(error) => {
             cx.state.ext.clear_config_after_error();
+            refresh_send_tool(&cx.handle, &BTreeMap::new())?;
             return Err(error);
         }
     };
@@ -2337,15 +2656,31 @@ fn handle_configure(cx: tau_client::RawConfigureContext<'_, SlackRuntime>) -> Cl
         Ok(cfg) => cfg,
         Err(message) => {
             cx.state.ext.clear_config_after_error();
+            refresh_send_tool(&cx.handle, &BTreeMap::new())?;
             return Err(ClientError::handler(message));
         }
     };
-    if let Err(message) = cx.state.ext.apply_config(cfg) {
+    if let Err(message) = cx.state.ext.apply_config(cfg.clone()) {
         cx.state.ext.clear_config_after_error();
+        refresh_send_tool(&cx.handle, &BTreeMap::new())?;
         return Err(ClientError::handler(message));
     }
+    refresh_send_tool(&cx.handle, &cfg.send_destinations)?;
     cx.state.ext.request_transport_capability();
     Ok(())
+}
+
+/// Refresh the model-visible send schema, including fail-closed removal of
+/// destination aliases after invalid configuration.
+fn refresh_send_tool(
+    handle: &ClientHandle,
+    destinations: &BTreeMap<String, SendDestination>,
+) -> ClientResult<()> {
+    handle.emit(Event::ToolRegister(tau_proto::ToolRegister {
+        tool: send_tool_spec_for_destinations(destinations),
+        tool_group: Some(slack_tool_group()),
+        prompt_fragment: None,
+    }))
 }
 
 /// Apply commit-gated ingress/send results and capability registration results.
@@ -2491,6 +2826,7 @@ fn handle_live_event(cx: tau_client::RawEventContext<'_, SlackRuntime>) -> Clien
             state.clear_reply_routes();
             state.clear_incoming_messages();
             state.pending_posts.clear();
+            state.clear_accepted_send_attempts();
             state.capability_active = false;
             state.pending_capability_request = None;
             state.posted_messages.clear();
@@ -2550,40 +2886,79 @@ fn register_tool_spec() -> ToolSpec {
 }
 
 fn send_tool_spec() -> ToolSpec {
+    send_tool_spec_for_destinations(&BTreeMap::new())
+}
+
+fn send_tool_spec_for_destinations(destinations: &BTreeMap<String, SendDestination>) -> ToolSpec {
+    let mut properties = serde_json::json!({
+        "message": { "type": "string" },
+        "reply_to": {
+            "type": "string",
+            "description": "Opaque canonical message id from the Tau message envelope; mutually exclusive with destination"
+        }
+    });
+    let mut examples = vec![ToolExample {
+        id: "send-reply".to_owned(),
+        title: Some("Send a Slack reply".to_owned()),
+        arguments: CborValue::Map(vec![
+            example_field("message", example_text("Thanks, I’ll look into it.")),
+            example_field("reply_to", example_text("msg_01JEXAMPLE")),
+        ]),
+        note: Some(
+            "reply_to is an opaque selector, not a channel or bearer capability.".to_owned(),
+        ),
+        subcommand: None,
+    }];
+    if !destinations.is_empty() {
+        let aliases = destinations.keys().cloned().collect::<Vec<_>>();
+        let hints = destinations
+            .values()
+            .filter_map(|destination| {
+                destination
+                    .description
+                    .as_ref()
+                    .map(|description| format!("{}: {description}", destination.alias))
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
+        properties["destination"] = serde_json::json!({
+            "type": "string",
+            "enum": aliases,
+            "description": format!("Configured Slack destination alias; mutually exclusive with reply_to. {hints}")
+        });
+        let first = destinations.keys().next().expect("nonempty destinations");
+        examples.push(ToolExample {
+            id: "send-proactive".to_owned(),
+            title: Some("Initiate a configured Slack message".to_owned()),
+            arguments: CborValue::Map(vec![
+                example_field("message", example_text("The report is ready.")),
+                example_field("destination", example_text(first)),
+            ]),
+            note: Some(
+                "destination is an operator-configured alias, never a native Slack id.".to_owned(),
+            ),
+            subcommand: None,
+        });
+    }
     ToolSpec {
         name: tau_proto::ToolName::new(SEND_TOOL_NAME),
         model_visible_name: Some(tau_proto::ToolName::new(SEND_TOOL_NAME)),
         description: Some(
-            "Reply to the exact source-bound Slack message named by reply_to. The bridge preserves its configured channel or linked DM and validated thread automatically; neither the model nor message text can choose a destination."
+            "Send to exactly one authenticated Slack reply route or operator-configured destination alias. Native Slack conversation and thread identifiers are never accepted from the model."
                 .to_owned(),
         ),
         tool_type: tau_proto::ToolType::Function,
         parameters: Some(serde_json::json!({
             "type": "object",
-            "properties": {
-                "message": { "type": "string" },
-                "reply_to": {
-                    "type": "string",
-                    "description": "Opaque canonical message id from the Tau message envelope"
-                }
-            },
-            "required": ["message", "reply_to"],
+            "properties": properties,
+            "required": if destinations.is_empty() { serde_json::json!(["message", "reply_to"]) } else { serde_json::json!(["message"]) },
             "additionalProperties": false
         })),
         format: None,
         tags: vec![tau_proto::ToolTag::new(SEND_TOOL_TAG)],
         enabled_by_default: false,
         background_support: None,
-        examples: vec![ToolExample {
-            id: "send-reply".to_owned(),
-            title: Some("Send a Slack reply".to_owned()),
-            arguments: CborValue::Map(vec![
-                example_field("message", example_text("Thanks, I’ll look into it.")),
-                example_field("reply_to", example_text("msg_01JEXAMPLE")),
-            ]),
-            note: Some("reply_to is an opaque selector, not a channel or bearer capability.".to_owned()),
-            subcommand: None,
-        }],
+        examples,
     }
 }
 
@@ -2602,6 +2977,24 @@ fn cbor_bool_field(arguments: &CborValue, field: &str) -> Result<bool, String> {
         }
     }
     Err(format!("missing required argument `{field}`"))
+}
+
+fn cbor_optional_string_field(
+    arguments: &CborValue,
+    field: &str,
+) -> Result<Option<String>, String> {
+    let CborValue::Map(entries) = arguments else {
+        return Err("arguments must be an object".to_owned());
+    };
+    for (key, value) in entries {
+        if matches!(key, CborValue::Text(name) if name == field) {
+            return match value {
+                CborValue::Text(value) => Ok(Some(value.clone())),
+                _ => Err(format!("`{field}` must be a string")),
+            };
+        }
+    }
+    Ok(None)
 }
 
 fn cbor_string_field(arguments: &CborValue, field: &str) -> Result<String, String> {
@@ -2992,6 +3385,9 @@ impl SlackClient for HttpSlackClient {
     ) -> Result<PostedMessage, String> {
         let body = post_message_body(channel_id, text, thread_ts);
         let value = self.post(cfg, "chat.postMessage", &cfg.bot_token, body)?;
+        if value.get("channel").and_then(|value| value.as_str()) != Some(channel_id) {
+            return Err("Slack returned a conflicting conversation".to_owned());
+        }
         posted_message_from_response(&value)
     }
 }
@@ -3019,6 +3415,12 @@ fn human_user_from_response(
 }
 
 fn posted_message_from_response(value: &serde_json::Value) -> Result<PostedMessage, String> {
+    let channel_id = value
+        .get("channel")
+        .and_then(|value| value.as_str())
+        .filter(|channel| validate_slack_id("channel", channel).is_ok())
+        .ok_or_else(|| "Slack chat.postMessage response missing channel".to_owned())?
+        .to_owned();
     let ts = value
         .get("ts")
         .and_then(|value| value.as_str())
@@ -3031,7 +3433,11 @@ fn posted_message_from_response(value: &serde_json::Value) -> Result<PostedMessa
         .and_then(|value| value.as_str())
         .filter(|ts| validate_slack_ts(ts).is_ok())
         .map(str::to_owned);
-    Ok(PostedMessage { ts, thread_ts })
+    Ok(PostedMessage {
+        channel_id,
+        ts,
+        thread_ts,
+    })
 }
 
 fn sanitize_diagnostic(text: &str, cfg: &RuntimeConfig) -> String {

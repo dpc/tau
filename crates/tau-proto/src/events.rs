@@ -1932,6 +1932,12 @@ pub struct AgentMessageOutgoing {
     /// Canonical incoming occurrence whose authorized route selected this send.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub in_reply_to: Option<MessageId>,
+    /// Operator-configured alias when this was an authorized proactive send.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub configured_destination: Option<String>,
+    /// Live tool call whose completion produced this durable fact.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<ToolCallId>,
 }
 
 /// Durable agent branch-state fact: the selected head moved, so the next

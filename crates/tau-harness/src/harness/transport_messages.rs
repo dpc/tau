@@ -9,6 +9,7 @@ use tau_proto::{
     MessageTrust, RegisterTransportCapabilityRequest, RegisterTransportCapabilityResult,
     ReplyPathLifetime, ReplySelector, SenderPolicyStatus, ToolName, TransportMessageDraft,
     TransportMessageIngressOutcome, TransportMessageIngressRequest, TransportMessageIngressResult,
+    TransportSendAuthorization,
 };
 
 use super::{
@@ -20,7 +21,12 @@ use super::{
 const MAX_REQUEST_ID_BYTES: usize = 128;
 const MAX_TRANSPORT_NAME_BYTES: usize = 48;
 const MAX_DRAFT_BYTES: usize = 128 * 1024;
+/// Maximum encoded metadata retained by one proactive capability registration.
+const MAX_SEND_DESTINATIONS_BYTES: usize = 16 * 1024;
+/// Maximum distinct transport capabilities retained for one extension peer.
+const MAX_CAPABILITIES_PER_SOURCE: usize = 16;
 const MAX_DEDUP_KEY_BYTES: usize = 512;
+const MAX_CAPABILITY_FIELD_BYTES: usize = 512;
 const MAX_DEDUP_RECORDS: usize = 4096;
 const MAX_SEND_RESULTS: usize = 4096;
 
@@ -182,24 +188,110 @@ impl Harness {
         if self.transport_source_name(source_id).is_none() {
             return fail("extension_source_required");
         }
-        if let Some(tool) = &request.reply_tool
+        if let Some(tool) = &request.send_tool
             && !self
                 .registry
                 .providers_for(tool.as_str())
                 .iter()
                 .any(|provider| provider.connection_id.as_str() == source_id)
         {
-            return fail("reply_tool_not_owned");
+            return fail("send_tool_not_owned");
+        }
+        if request.send_destinations.len() > 64
+            || (!request.send_destinations.is_empty() && request.send_tool.is_none())
+        {
+            return fail("invalid_send_destinations");
+        }
+        let mut aliases = std::collections::HashSet::new();
+        let mut native_routes = Vec::new();
+        for destination in &request.send_destinations {
+            let alias = destination.alias.as_bytes();
+            if alias.is_empty()
+                || alias.len() > 64
+                || !alias[0].is_ascii_lowercase()
+                || !alias.iter().all(|byte| {
+                    byte.is_ascii_lowercase()
+                        || byte.is_ascii_digit()
+                        || matches!(byte, b'_' | b'-')
+                })
+                || !aliases.insert(destination.alias.as_str())
+            {
+                return fail("invalid_send_destination_alias");
+            }
+            let Some(stable_id) = destination.conversation.stable_id.as_deref() else {
+                return fail("invalid_send_destination_route");
+            };
+            let endpoint_fields_valid = match &destination.external_endpoint {
+                MessageEndpoint::External {
+                    stable_id,
+                    display_name,
+                    ..
+                } => [stable_id.as_deref(), display_name.as_deref()]
+                    .into_iter()
+                    .flatten()
+                    .all(valid_capability_field),
+                _ => false,
+            };
+            if !endpoint_fields_valid
+                || !valid_capability_field(stable_id)
+                || destination
+                    .conversation
+                    .display_name
+                    .as_deref()
+                    .is_some_and(|value| !valid_capability_field(value))
+                || destination
+                    .conversation
+                    .thread
+                    .as_ref()
+                    .is_some_and(|thread| !valid_capability_field(&thread.stable_id))
+                || destination.conversation.reply_to.is_some()
+            {
+                return fail("invalid_send_destination_route");
+            }
+            let native_route = (
+                stable_id,
+                destination
+                    .conversation
+                    .thread
+                    .as_ref()
+                    .map(|thread| thread.stable_id.as_str()),
+            );
+            if native_routes.contains(&native_route) {
+                return fail("invalid_send_destination_route");
+            }
+            native_routes.push(native_route);
+            let encoded = match tau_proto::encode_message_to_vec(destination) {
+                Ok(encoded) => encoded,
+                Err(_) => return fail("invalid_send_destination_metadata"),
+            };
+            if encoded.len() > MAX_DRAFT_BYTES {
+                return fail("send_destination_metadata_too_large");
+            }
+        }
+        let encoded = match tau_proto::encode_message_to_vec(&request.send_destinations) {
+            Ok(encoded) => encoded,
+            Err(_) => return fail("invalid_send_destinations"),
+        };
+        if encoded.len() > MAX_SEND_DESTINATIONS_BYTES {
+            return fail("send_destinations_too_large");
         }
         let capability = TransportCapability {
             transport_name: request.transport_name.clone(),
-            reply_tool: request.reply_tool,
+            send_tool: request.send_tool,
             session_generation: self.current_session_generation,
+            send_destinations: request.send_destinations,
         };
         let capabilities = self
             .transport_capabilities
             .entry(source_id.to_owned())
             .or_default();
+        if capabilities.len() >= MAX_CAPABILITIES_PER_SOURCE
+            && !capabilities
+                .iter()
+                .any(|existing| existing.transport_name == capability.transport_name)
+        {
+            return fail("transport_capability_limit_reached");
+        }
         capabilities.retain(|existing| existing.transport_name != capability.transport_name);
         capabilities.push(capability);
         self.transport_reply_routes.retain(|_, route| {
@@ -212,12 +304,12 @@ impl Harness {
         }
     }
 
-    pub(super) fn revoke_transport_reply_tool(&mut self, source_id: &str, tool_name: &ToolName) {
+    pub(super) fn revoke_transport_send_tool(&mut self, source_id: &str, tool_name: &ToolName) {
         if let Some(capabilities) = self.transport_capabilities.get_mut(source_id) {
-            capabilities.retain(|capability| capability.reply_tool.as_ref() != Some(tool_name));
+            capabilities.retain(|capability| capability.send_tool.as_ref() != Some(tool_name));
         }
         self.transport_reply_routes.retain(|_, route| {
-            route.connection_id != source_id || route.reply_tool.as_ref() != Some(tool_name)
+            route.connection_id != source_id || route.send_tool.as_ref() != Some(tool_name)
         });
     }
 
@@ -291,7 +383,7 @@ impl Harness {
             };
             if existing.committed {
                 if existing.session_id == self.current_session_id
-                    && let Some(reply_tool) = capability.reply_tool
+                    && let Some(send_tool) = capability.send_tool
                 {
                     self.transport_reply_routes.insert(
                         existing.message_id.clone(),
@@ -299,7 +391,7 @@ impl Harness {
                             connection_id: source_id.to_owned(),
                             agent_id: request.target_agent_id.clone(),
                             session_generation: self.current_session_generation,
-                            reply_tool: Some(reply_tool),
+                            send_tool: Some(send_tool),
                             transport_name: request.draft.transport_name.clone(),
                             external_endpoint: request.draft.external_endpoint.clone(),
                             conversation: request.draft.conversation.clone(),
@@ -353,7 +445,7 @@ impl Harness {
                 .insert(message_id.clone(), sequence);
         }
         let reply_path = capability
-            .reply_tool
+            .send_tool
             .clone()
             .map(|tool_name| MessageReplyPath {
                 tool_name,
@@ -450,7 +542,7 @@ impl Harness {
                 record.committed = true;
             }
         }
-        if let Some(reply_tool) = message
+        if let Some(send_tool) = message
             .envelope
             .reply_path
             .as_ref()
@@ -464,7 +556,7 @@ impl Harness {
                     connection_id: first.connection_id.clone(),
                     agent_id: message.recipient_id.clone(),
                     session_generation: self.current_session_generation,
-                    reply_tool: Some(reply_tool),
+                    send_tool: Some(send_tool),
                     transport_name: message.envelope.transport.name.clone(),
                     external_endpoint: message.envelope.source.clone(),
                     conversation: message.envelope.conversation.clone(),
@@ -577,29 +669,47 @@ impl Harness {
         if self.tool_turn.is_backgrounded(&request.call_id) {
             return Err(fail("background_transport_completion_not_supported"));
         }
-        let Some(reply_to) = &request.in_reply_to else {
-            return Err(fail("reply_to_required"));
+        let route_authorized = match &request.authorization {
+            tau_proto::TransportSendAuthorization::Reply { message_id } => {
+                if request.in_reply_to.as_ref() != Some(message_id) {
+                    false
+                } else if let Some(route) = self.transport_reply_routes.get(message_id) {
+                    route.connection_id == source_id
+                        && route.agent_id == request.agent_id
+                        && route.session_generation == self.current_session_generation
+                        && route.send_tool.as_ref() == Some(&request.tool_result.tool_name)
+                        && route.transport_name == request.draft.transport_name
+                        && route.external_endpoint == request.draft.external_endpoint
+                        && route.conversation == request.draft.conversation
+                        && request.draft.send_tool.as_ref() == route.send_tool.as_ref()
+                } else {
+                    false
+                }
+            }
+            tau_proto::TransportSendAuthorization::ConfiguredDestination { alias } => {
+                request.in_reply_to.is_none()
+                    && self
+                        .transport_capabilities
+                        .get(source_id)
+                        .is_some_and(|caps| {
+                            caps.iter().any(|cap| {
+                                cap.session_generation == self.current_session_generation
+                                    && cap.transport_name == request.draft.transport_name
+                                    && cap.send_tool.as_ref()
+                                        == Some(&request.tool_result.tool_name)
+                                    && cap.send_destinations.iter().any(|destination| {
+                                        destination.alias == *alias
+                                            && destination.external_endpoint
+                                                == request.draft.external_endpoint
+                                            && Some(&destination.conversation)
+                                                == request.draft.conversation.as_ref()
+                                    })
+                            })
+                        })
+            }
         };
-        let Some(route) = self.transport_reply_routes.get(reply_to).cloned() else {
-            return Err(fail("unknown_or_stale_reply_route"));
-        };
-        if route.connection_id != source_id
-            || route.agent_id != request.agent_id
-            || route.session_generation != self.current_session_generation
-            || route.reply_tool.as_ref() != Some(&request.tool_result.tool_name)
-            || route.transport_name != request.draft.transport_name
-            || route.external_endpoint != request.draft.external_endpoint
-            || route.conversation != request.draft.conversation
-            || self
-                .transport_capability(source_id, &request.draft)
-                .is_none()
-            || request.draft.reply_tool.as_ref() != route.reply_tool.as_ref()
-            || self
-                .pending_tools
-                .get(&request.call_id)
-                .is_none_or(|tool| Some(&tool.name) != route.reply_tool.as_ref())
-        {
-            return Err(fail("reply_route_not_authorized"));
+        if !route_authorized {
+            return Err(fail("send_route_not_authorized"));
         }
         if validate_draft(&request.draft).is_err() {
             return Err(fail("invalid_outgoing_metadata"));
@@ -656,6 +766,13 @@ impl Harness {
                 envelope,
                 acceptance: request.acceptance,
                 in_reply_to: request.in_reply_to.clone(),
+                configured_destination: match &request.authorization {
+                    TransportSendAuthorization::ConfiguredDestination { alias } => {
+                        Some(alias.clone())
+                    }
+                    TransportSendAuthorization::Reply { .. } => None,
+                },
+                tool_call_id: Some(request.call_id),
             }),
         );
         Ok(())
@@ -712,7 +829,7 @@ impl Harness {
             .find_map(|capability| {
                 (capability.session_generation == self.current_session_generation
                     && capability.transport_name == draft.transport_name
-                    && capability.reply_tool == draft.reply_tool)
+                    && capability.send_tool == draft.send_tool)
                     .then(|| capability.clone())
             })
     }
@@ -852,6 +969,12 @@ fn valid_transport_name(value: &str) -> bool {
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
 }
 
+fn valid_capability_field(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= MAX_CAPABILITY_FIELD_BYTES
+        && !value.chars().any(char::is_control)
+}
+
 fn validate_draft(draft: &TransportMessageDraft) -> Result<(), &'static str> {
     if !valid_transport_name(&draft.transport_name) {
         return Err("invalid_transport_name");
@@ -936,7 +1059,7 @@ fn draft_from_envelope(envelope: &MessageEnvelope) -> TransportMessageDraft {
         external_identity: envelope.external_identity.clone(),
         ordering: envelope.ordering,
         occurred_at: envelope.occurred_at,
-        reply_tool: envelope
+        send_tool: envelope
             .reply_path
             .as_ref()
             .map(|path| path.tool_name.clone()),
@@ -982,7 +1105,8 @@ mod tests {
             RegisterTransportCapabilityRequest {
                 request_id: "register-1".to_owned(),
                 transport_name: "slack".to_owned(),
-                reply_tool: None,
+                send_tool: None,
+                send_destinations: Vec::new(),
             },
         );
         let request = TransportMessageIngressRequest {
@@ -1062,7 +1186,8 @@ mod tests {
             RegisterTransportCapabilityRequest {
                 request_id: "register-capacity".to_owned(),
                 transport_name: "slack".to_owned(),
-                reply_tool: None,
+                send_tool: None,
+                send_destinations: Vec::new(),
             },
         );
         for index in 0..MAX_DEDUP_RECORDS {
@@ -1205,41 +1330,43 @@ mod tests {
             call_id.clone(),
             tau_proto::ConnectionId::from("transport-send"),
         );
+        let endpoint = MessageEndpoint::External {
+            stable_id: None,
+            display_name: Some("team-ops".to_owned()),
+            actor_kind: ExternalActorKind::Unknown,
+        };
+        let conversation = tau_proto::MessageConversation {
+            kind: tau_proto::ConversationKind::Channel,
+            stable_id: Some("C1".to_owned()),
+            display_name: Some("team-ops".to_owned()),
+            thread: None,
+            reply_to: None,
+        };
         harness.transport_capabilities.insert(
             "transport-send".to_owned(),
             vec![TransportCapability {
                 transport_name: "slack".to_owned(),
-                reply_tool: Some(tool_name.clone()),
+                send_tool: Some(tool_name.clone()),
                 session_generation: harness.current_session_generation,
+                send_destinations: vec![tau_proto::TransportSendDestinationCapability {
+                    alias: "team-ops".to_owned(),
+                    external_endpoint: endpoint.clone(),
+                    conversation: conversation.clone(),
+                }],
             }],
-        );
-        let reply_to = MessageId::new("msg-route");
-        let endpoint = MessageEndpoint::External {
-            stable_id: Some("U1".to_owned()),
-            display_name: None,
-            actor_kind: ExternalActorKind::Human,
-        };
-        harness.transport_reply_routes.insert(
-            reply_to.clone(),
-            TransportReplyRoute {
-                connection_id: "transport-send".to_owned(),
-                agent_id: agent_id.clone(),
-                session_generation: harness.current_session_generation,
-                reply_tool: Some(tool_name.clone()),
-                transport_name: "slack".to_owned(),
-                external_endpoint: endpoint.clone(),
-                conversation: None,
-            },
         );
         let request = CompleteTransportSendRequest {
             request_id: "send-1".to_owned(),
             call_id: call_id.clone(),
             agent_id: agent_id.clone(),
-            in_reply_to: Some(reply_to),
+            in_reply_to: None,
+            authorization: tau_proto::TransportSendAuthorization::ConfiguredDestination {
+                alias: "team-ops".to_owned(),
+            },
             draft: TransportMessageDraft {
                 transport_name: "slack".to_owned(),
                 external_endpoint: endpoint,
-                conversation: None,
+                conversation: Some(conversation),
                 operation: MessageOperation::Create {
                     payload: MessagePayload::Text {
                         text: "reply".to_owned(),
@@ -1251,7 +1378,7 @@ mod tests {
                 external_identity: None,
                 ordering: None,
                 occurred_at: None,
-                reply_tool: Some(tool_name.clone()),
+                send_tool: Some(tool_name.clone()),
             },
             acceptance: tau_proto::MessageTransportAcceptance::SubmittedToTransport,
             tool_result: tau_proto::ToolResult {
@@ -1266,6 +1393,16 @@ mod tests {
         };
         harness.handle_complete_transport_send("transport-send", request.clone());
         let committed = harness.event_log.entries_for_test();
+        let outgoing = committed
+            .iter()
+            .find_map(|entry| match &entry.event {
+                Event::AgentMessageOutgoing(outgoing) => Some(outgoing),
+                _ => None,
+            })
+            .expect("outgoing audit fact");
+        assert_eq!(outgoing.configured_destination.as_deref(), Some("team-ops"));
+        assert_eq!(outgoing.tool_call_id.as_ref(), Some(&call_id));
+        assert!(outgoing.in_reply_to.is_none());
         let outgoing_seq = committed
             .iter()
             .find(|entry| matches!(entry.event, Event::AgentMessageOutgoing(_)))
@@ -1371,7 +1508,7 @@ mod tests {
             }),
             ordering: None,
             occurred_at: None,
-            reply_tool: None,
+            send_tool: None,
         }
     }
 
@@ -1420,5 +1557,288 @@ mod tests {
             reply_path: None,
         };
         assert_eq!(draft_from_envelope(&envelope), input);
+    }
+
+    /// Capability metadata uses exact nonempty byte bounds and rejects
+    /// controls, preventing oversized or log-confusing aliases, endpoints,
+    /// and threads.
+    #[test]
+    fn capability_field_validation_boundaries() {
+        assert!(valid_capability_field("x"));
+        assert!(valid_capability_field(
+            &"x".repeat(MAX_CAPABILITY_FIELD_BYTES)
+        ));
+        assert!(!valid_capability_field(""));
+        assert!(!valid_capability_field(
+            &"x".repeat(MAX_CAPABILITY_FIELD_BYTES + 1)
+        ));
+        assert!(!valid_capability_field("route\nspoof"));
+    }
+
+    /// Capability registration is an adversarial RPC boundary, so count,
+    /// aggregate-size, and duplicate-native-route limits must reject through
+    /// the same authenticated handler used by extensions without installing
+    /// state.
+    #[test]
+    fn capability_registration_rpc_rejects_bounded_and_duplicate_routes() {
+        let temp = tempfile::TempDir::new().expect("tempdir");
+        let mut harness =
+            super::super::tests::echo_harness(temp.path()).expect("test harness starts");
+        let frames = super::super::tests::connect_test_tool(&mut harness, "capability-rpc");
+        let tool = ToolName::new("slack_send");
+        harness.registry.register(
+            "capability-rpc",
+            tau_proto::ToolSpec {
+                name: tool.clone(),
+                model_visible_name: None,
+                description: None,
+                parameters: None,
+                tool_type: tau_proto::ToolType::Function,
+                format: None,
+                tags: Vec::new(),
+                enabled_by_default: true,
+                background_support: None,
+                examples: Vec::new(),
+            },
+        );
+        let destination = |alias: String, conversation_id: String, display: String| {
+            tau_proto::TransportSendDestinationCapability {
+                alias,
+                external_endpoint: MessageEndpoint::External {
+                    stable_id: None,
+                    display_name: Some(display.clone()),
+                    actor_kind: ExternalActorKind::Unknown,
+                },
+                conversation: tau_proto::MessageConversation {
+                    kind: tau_proto::ConversationKind::Channel,
+                    stable_id: Some(conversation_id),
+                    display_name: Some(display),
+                    thread: None,
+                    reply_to: None,
+                },
+            }
+        };
+        let cases = [
+            (
+                "too-many",
+                (0..65)
+                    .map(|index| {
+                        destination(
+                            format!("route-{index}"),
+                            format!("C{index}"),
+                            format!("route-{index}"),
+                        )
+                    })
+                    .collect(),
+                "invalid_send_destinations",
+            ),
+            (
+                "duplicate-native",
+                vec![
+                    destination("first".to_owned(), "C1".to_owned(), "first".to_owned()),
+                    destination("second".to_owned(), "C1".to_owned(), "second".to_owned()),
+                ],
+                "invalid_send_destination_route",
+            ),
+            (
+                "aggregate",
+                (0..64)
+                    .map(|index| {
+                        destination(
+                            format!("route-{index}"),
+                            format!("C{index}"),
+                            "x".repeat(MAX_CAPABILITY_FIELD_BYTES),
+                        )
+                    })
+                    .collect(),
+                "send_destinations_too_large",
+            ),
+        ];
+        for (request_id, send_destinations, expected) in cases {
+            harness.handle_register_transport_capability(
+                "capability-rpc",
+                RegisterTransportCapabilityRequest {
+                    request_id: request_id.to_owned(),
+                    transport_name: "slack".to_owned(),
+                    send_tool: Some(tool.clone()),
+                    send_destinations,
+                },
+            );
+            let result = frames
+                .lock()
+                .expect("frames")
+                .iter()
+                .find_map(|frame| match &frame.frame {
+                    HarnessOutputMessage::RegisterTransportCapabilityResult(result)
+                        if result.request_id == request_id =>
+                    {
+                        Some(result.clone())
+                    }
+                    _ => None,
+                })
+                .expect("registration result");
+            assert_eq!(result.error.as_deref(), Some(expected), "{request_id}");
+            assert!(!result.accepted);
+        }
+        assert!(
+            harness
+                .transport_capabilities
+                .get("capability-rpc")
+                .is_none_or(Vec::is_empty)
+        );
+    }
+
+    /// A peer cannot bypass per-registration metadata bounds by accumulating
+    /// arbitrarily many distinct transport names.
+    #[test]
+    fn capability_registration_rpc_bounds_distinct_transports_per_source() {
+        let temp = tempfile::TempDir::new().expect("tempdir");
+        let mut harness =
+            super::super::tests::echo_harness(temp.path()).expect("test harness starts");
+        let frames = super::super::tests::connect_test_tool(&mut harness, "capability-count");
+        let tool = ToolName::new("bounded_send");
+        harness.registry.register(
+            "capability-count",
+            tau_proto::ToolSpec {
+                name: tool.clone(),
+                model_visible_name: None,
+                description: None,
+                parameters: None,
+                tool_type: tau_proto::ToolType::Function,
+                format: None,
+                tags: Vec::new(),
+                enabled_by_default: true,
+                background_support: None,
+                examples: Vec::new(),
+            },
+        );
+        for index in 0..MAX_CAPABILITIES_PER_SOURCE {
+            harness.handle_register_transport_capability(
+                "capability-count",
+                RegisterTransportCapabilityRequest {
+                    request_id: format!("register-{index}"),
+                    transport_name: format!("transport-{index}"),
+                    send_tool: None,
+                    send_destinations: Vec::new(),
+                },
+            );
+        }
+        harness.handle_register_transport_capability(
+            "capability-count",
+            RegisterTransportCapabilityRequest {
+                request_id: "replace-at-limit".to_owned(),
+                transport_name: "transport-0".to_owned(),
+                send_tool: Some(tool.clone()),
+                send_destinations: Vec::new(),
+            },
+        );
+        let snapshot = |capabilities: &[TransportCapability]| {
+            capabilities
+                .iter()
+                .map(|capability| {
+                    (
+                        capability.transport_name.clone(),
+                        capability.send_tool.clone(),
+                        capability.session_generation,
+                        capability.send_destinations.clone(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        let before_rejection = snapshot(&harness.transport_capabilities["capability-count"]);
+        harness.handle_register_transport_capability(
+            "capability-count",
+            RegisterTransportCapabilityRequest {
+                request_id: "register-over-limit".to_owned(),
+                transport_name: "transport-over-limit".to_owned(),
+                send_tool: None,
+                send_destinations: Vec::new(),
+            },
+        );
+        let results = frames
+            .lock()
+            .expect("frames")
+            .iter()
+            .filter_map(|frame| match &frame.frame {
+                HarnessOutputMessage::RegisterTransportCapabilityResult(result) => {
+                    Some(result.clone())
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            results[..=MAX_CAPABILITIES_PER_SOURCE]
+                .iter()
+                .all(|result| result.accepted)
+        );
+        assert_eq!(
+            results[MAX_CAPABILITIES_PER_SOURCE + 1].error.as_deref(),
+            Some("transport_capability_limit_reached")
+        );
+        assert_eq!(
+            harness.transport_capabilities["capability-count"]
+                .iter()
+                .find(|capability| capability.transport_name == "transport-0")
+                .and_then(|capability| capability.send_tool.as_ref()),
+            Some(&tool)
+        );
+        assert_eq!(
+            snapshot(&harness.transport_capabilities["capability-count"]),
+            before_rejection
+        );
+        assert_eq!(
+            harness.transport_capabilities["capability-count"].len(),
+            MAX_CAPABILITIES_PER_SOURCE
+        );
+    }
+
+    /// Tool revocation removes only capabilities and reply routes owned by the
+    /// exact source/tool pair, preserving unrelated transport registrations.
+    #[test]
+    fn transport_send_tool_revocation_cleans_exact_routes() {
+        let temp = tempfile::TempDir::new().expect("tempdir");
+        let mut harness =
+            super::super::tests::echo_harness(temp.path()).expect("test harness starts");
+        let tool = ToolName::new("slack_send");
+        for source in ["source-a", "source-b"] {
+            harness.transport_capabilities.insert(
+                source.to_owned(),
+                vec![TransportCapability {
+                    transport_name: "slack".to_owned(),
+                    send_tool: Some(tool.clone()),
+                    session_generation: harness.current_session_generation,
+                    send_destinations: Vec::new(),
+                }],
+            );
+            harness.transport_reply_routes.insert(
+                MessageId::new(format!("msg-{source}")),
+                TransportReplyRoute {
+                    connection_id: source.to_owned(),
+                    agent_id: tau_proto::AgentId::parse("agent-a").expect("agent"),
+                    session_generation: harness.current_session_generation,
+                    send_tool: Some(tool.clone()),
+                    transport_name: "slack".to_owned(),
+                    external_endpoint: MessageEndpoint::External {
+                        stable_id: Some("U1".to_owned()),
+                        display_name: None,
+                        actor_kind: ExternalActorKind::Human,
+                    },
+                    conversation: None,
+                },
+            );
+        }
+        harness.revoke_transport_send_tool("source-a", &tool);
+        assert!(harness.transport_capabilities["source-a"].is_empty());
+        assert!(
+            !harness
+                .transport_reply_routes
+                .contains_key(&MessageId::new("msg-source-a"))
+        );
+        assert_eq!(harness.transport_capabilities["source-b"].len(), 1);
+        assert!(
+            harness
+                .transport_reply_routes
+                .contains_key(&MessageId::new("msg-source-b"))
+        );
     }
 }

@@ -628,8 +628,9 @@ struct NormalizedFinishedToolCalls {
 #[derive(Clone)]
 struct TransportCapability {
     transport_name: String,
-    reply_tool: Option<ToolName>,
+    send_tool: Option<ToolName>,
     session_generation: u64,
+    send_destinations: Vec<tau_proto::TransportSendDestinationCapability>,
 }
 
 #[derive(Clone)]
@@ -637,13 +638,13 @@ struct TransportReplyRoute {
     connection_id: String,
     agent_id: tau_proto::AgentId,
     session_generation: u64,
-    reply_tool: Option<ToolName>,
+    send_tool: Option<ToolName>,
     transport_name: String,
     external_endpoint: tau_proto::MessageEndpoint,
     conversation: Option<tau_proto::MessageConversation>,
 }
 
-fn live_reply_tools_for_prompt(
+fn live_send_tools_for_prompt(
     routes: &HashMap<tau_proto::MessageId, TransportReplyRoute>,
     effective_tools: &[tau_proto::ToolSpec],
     target_agent: Option<&tau_proto::AgentId>,
@@ -651,7 +652,7 @@ fn live_reply_tools_for_prompt(
     routes
         .iter()
         .filter_map(|(message_id, route)| {
-            let internal_name = route.reply_tool.as_ref()?;
+            let internal_name = route.send_tool.as_ref()?;
             let tool = effective_tools
                 .iter()
                 .find(|spec| spec.name == *internal_name)?;
@@ -5438,7 +5439,7 @@ impl Harness {
         {
             self.mark_tool_unavailable_for_notice(unregister.tool_name.clone(), visible_name);
         }
-        self.revoke_transport_reply_tool(source_id, &unregister.tool_name);
+        self.revoke_transport_send_tool(source_id, &unregister.tool_name);
         self.publish_event(Some(source_id), Event::ToolUnregister(unregister));
     }
 
@@ -11105,13 +11106,13 @@ impl Harness {
             .and_then(|agent_id| self.agent_store.agent(agent_id));
         let tool_specs = self.gather_effective_tool_specs_for_role_model(&role_name, Some(&model));
         let target_agent_id = agent_id_for_tree.as_deref().map(crate::parse_agent_id);
-        let live_reply_tools = live_reply_tools_for_prompt(
+        let live_send_tools = live_send_tools_for_prompt(
             &self.transport_reply_routes,
             &tool_specs,
             target_agent_id.as_ref(),
         );
         let prompt_context = tree
-            .map(|t| assemble_prompt_context_from(t, head, &live_reply_tools))
+            .map(|t| assemble_prompt_context_from(t, head, &live_send_tools))
             .unwrap_or_else(|| crate::prompt::AssembledPromptContext {
                 context: tau_proto::PromptContext::default(),
             });

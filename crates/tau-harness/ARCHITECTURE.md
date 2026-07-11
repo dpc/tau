@@ -2,11 +2,15 @@
 
 ## Canonical transport message boundary
 
-Extensions register a transport family and optional reply tool. Registration is
-bound to the authenticated connection and current session generation. Dedicated
+Extensions register a transport family, send tool, and zero or more exact
+proactive alias capabilities. Registration is bound to the authenticated
+connection and current session generation; refresh replaces the route set, while
+tool unregister, disconnect, and session rollover revoke it. Dedicated
 ingress/send-completion RPCs replace generic event emission; the harness stamps
 instance, agent endpoint, trust class, canonical id, and commit time, then owns
-the protected durable fact.
+the protected durable fact. Per-peer retention is capped at 16 distinct transport
+capabilities, in addition to the route-count and encoded-metadata bounds on each
+registration.
 
 Deduplication precedes publication and a bounded index is lazily rebuilt from
 typed transcript entries. Source sequence checks are scoped by extension,
@@ -15,10 +19,14 @@ Only the live post-commit hook acknowledges ingress, activates the runtime-only
 route, and queues a payload-free wake marker. Replay bypasses those effects.
 
 Remote transport acceptance cannot be transactional with Tau storage.
-Successful-send completion validates the live call and opaque route, then queues
+Successful-send completion validates the live call and either opaque reply route
+or exact alias/endpoint/native conversation/fixed-thread capability, then queues
 the outgoing fact immediately before its terminal tool result and caches exact
 retry results. A crash can still leave remote and local state different; the
 recorded acceptance must not imply delivery or read receipt.
+The durable outgoing fact records authorization and tool-call audit before the
+terminal result. Capability input is bounded and duplicate native
+conversation/thread routes are rejected independently of presentation metadata.
 
 `tau-harness` owns the daemon-side control plane for Tau sessions. It connects
 clients and extensions, sequences events, applies interception, persists durable

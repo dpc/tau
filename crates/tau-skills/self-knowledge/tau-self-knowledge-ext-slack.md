@@ -15,7 +15,11 @@ destinations. Incoming Slack text is always untrusted external content.
 Configure `extensions.std-slack` with an app-level `xapp-...` secret carrying
 `connections:write`, a workspace-installation `xoxb-...` bot secret,
 `allowed_user_ids`, and either configured `channel_ids` or the single linked-DM
-mode. `security_mode` defaults to `strict`; `listening_scope` defaults to
+mode. Optional `send_destinations` separately binds advertised lower-case aliases
+to exact existing Slack conversations and optional fixed threads. Agents may
+choose those aliases but never native channel, user, or thread IDs. See the Slack
+extension README for the validated record schema. `security_mode` defaults to
+`strict`; `listening_scope` defaults to
 `mentions_only`. Configuration is immutable after the worker starts, so restart
 Tau to apply changes.
 
@@ -54,10 +58,13 @@ not required.
 
 ## Routing and lifecycle
 
-An agent first calls `slack_register(enabled: true)`. A top-level Slack message
-gets a top-level reply; a threaded message stays in its source thread.
-`slack_send` requires the opaque canonical `reply_to` from the incoming
-envelope. Reactions route only when they target a recent message successfully
+An agent calls `slack_register(enabled: true)` to receive and reply to Slack.
+Proactive alias sends do not require registration, but require effective role
+policy to enable `slack_send` and an accepted current transport capability.
+A top-level Slack message gets a top-level reply; a threaded message stays in
+its source thread. `slack_send` requires `message` and exactly one of the opaque
+canonical `reply_to` from an incoming envelope or a configured `destination`
+alias. Reactions route only when they target a recent message successfully
 posted by `slack_send`; arbitrary Slack posts are ignored. Edits route only for
 recent committed incoming messages with matching sender, conversation, thread,
 and native identity.
@@ -80,3 +87,9 @@ logged.
   `slack_send`.
 - If Socket Mode works but identity calls fail, ensure the app and bot tokens
   belong to the same app installation/workspace.
+
+### Configured proactive transport sends
+
+Slack initiation is separately authorized by the empty-by-default `send_destinations` list. Each record has `alias`, `conversation_id`, `kind` (`channel`, `mpim`, or `dm`), and optional `description` and fixed `thread_ts`. Inbound `channel_ids` and a runtime-linked DM never imply this outbound right. The `slack_send` tool requires `message` plus exactly one of opaque `reply_to` or configured `destination`; the model sees sorted aliases and trusted descriptions, never native Slack IDs or a raw thread selector. Every enabled agent may use every advertised alias without `slack_register`; normal effective role/tool policy is the agent authorization layer.
+
+The extension and harness both fail closed: they revalidate the authenticated connection, current session generation, live call and actual agent/tool, transport, alias, endpoint, native conversation kind/id, and fixed thread. Successful outgoing facts retain the authorization relation and tool call audit. Same-process retries are bounded; transcript replay never posts remotely, and Tau does not claim exactly-once delivery across crashes or ambiguous Slack responses. Prompt injection can still influence a role already granted `slack_send`; isolate ingress roles or keep their destination set minimal. Slack app membership remains required and `chat:write.public` is not needed.

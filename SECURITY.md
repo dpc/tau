@@ -239,7 +239,7 @@ app-token and bot-token secrets plus a non-empty allowlist of Slack user ids. Th
 model cannot provide arbitrary channel, user, or thread destinations. New
 Slack traffic is an untrusted payload inside a harness-stamped typed envelope,
 not a prefixed user prompt. A commit-gated ingress result binds its opaque
-canonical id to private route state. `slack_send` requires that id as `reply_to`;
+canonical id to private route state. Replies require that id as `reply_to`; proactive sends require an advertised configured alias;
 extension and harness revalidate the live connection/session/agent/tool plus
 exact external actor, configured or linked conversation, and thread. Replay
 never wakes an agent or activates a route.

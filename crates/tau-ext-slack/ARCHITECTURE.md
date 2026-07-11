@@ -41,14 +41,19 @@ mentioning the bot:
 
 Plain text routes when exactly one agent is registered or a selected agent
 exists. Command designators always put the stable `agent_id` first, with display
-name only as context. `slack_send` accepts only envelope text plus the opaque
-canonical `reply_to`; it sends to that selector's private configured channel or
-linked DM and validated thread. Top-level origins remain top-level. Slack-visible
+name only as context. `slack_send` accepts message text plus exactly one opaque
+canonical `reply_to` or configured proactive alias; it never accepts a native
+channel, user, or thread. Top-level reply origins remain top-level. Slack-visible
 agent replies are prefixed with `[agent_id]`.
 
 Outbound authorization uses canonical opaque selectors. Each accepted Slack occurrence is submitted through `transport_message_ingress` with structured user, channel/DM, thread, event, message, operation, reaction, identity-assurance, and sender-policy metadata. The harness stamps trust/source/destination and commits exactly one durable `agent.message_incoming` fact. Only its result binds the returned canonical id to the bridge-private Slack route. Identical retries reach the harness durable dedup index; conflicting metadata fails closed. No formatted prefix, duplicate legacy prompt node, exact-text correlation, or prompt lifecycle subscription is used.
 
-`slack_send` requires that canonical id as `reply_to`; it remains a selector rather than a bearer secret. The bridge checks agent ownership and current conversation authorization, posts to the private channel/thread, then reports returned native identity through `complete_transport_send`. The harness independently checks the connection, session generation, agent, tool call, transport, external actor, conversation, and thread before committing the durable outgoing fact and terminal tool result. Unregister, unload, extension/harness disconnect, shutdown, or reconfiguration clears private routes. Socket Mode websocket reconnects preserve them because the authenticated extension connection and harness session are unchanged. Reply routes and in-flight completions are each capped at 1024 entries. Each new harness session clears routes and renews capability registration under a fresh correlation id; stale results from an earlier session are ignored. Typed messages queued while an agent is busy retain their own ids, so steering/coalescing can never choose a route by arrival order.
+Replies require that canonical id; proactive sends require an advertised alias
+bound to an exact configured conversation and optional fixed thread. The bridge
+and harness independently validate the connection, session, agent, tool call,
+authorization, endpoint, conversation, and thread before committing the durable
+outgoing fact and terminal result. Lifecycle changes revoke runtime routes and
+capabilities. See [README configuration](README.md#configured-proactive-transport-sends).
 
 ## Sender admission and trigger scope
 
@@ -90,3 +95,9 @@ avoid warning spam. API and worker degradation is warning-level, bounded and
 token-redacted. A users.info outage emits one warning per consecutive failure
 episode, rejects each affected occurrence, and rearms only after a successful
 users.info response.
+
+## Configured proactive transport sends
+
+Slack initiation is separately authorized by the empty-by-default `send_destinations` list. Each record has `alias`, `conversation_id`, `kind` (`channel`, `mpim`, or `dm`), and optional `description` and fixed `thread_ts`. Inbound `channel_ids` and a runtime-linked DM never imply this outbound right. The `slack_send` tool requires `message` plus exactly one of opaque `reply_to` or configured `destination`; the model sees sorted aliases and trusted descriptions, never native Slack IDs or a raw thread selector. Every enabled agent may use every advertised alias without `slack_register`; normal effective role/tool policy is the agent authorization layer.
+
+The extension and harness both fail closed: they revalidate the authenticated connection, current session generation, live call and actual agent/tool, transport, alias, endpoint, native conversation kind/id, and fixed thread. Successful outgoing facts retain the authorization relation and tool call audit. Same-process retries are bounded; transcript replay never posts remotely, and Tau does not claim exactly-once delivery across crashes or ambiguous Slack responses. Prompt injection can still influence a role already granted `slack_send`; isolate ingress roles or keep their destination set minimal. Slack app membership remains required and `chat:write.public` is not needed.

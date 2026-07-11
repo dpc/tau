@@ -345,7 +345,7 @@ pub struct MessageModelPresentation {
     /// Prompt-local model-visible reply tool, present only while its route and
     /// effective tool snapshot are both live.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub live_reply_tool: Option<ToolName>,
+    pub live_send_tool: Option<ToolName>,
 }
 
 /// Typed provider-context item for one canonical envelope.
@@ -439,7 +439,7 @@ impl MessageEnvelopeItem {
         if let Some(reaction) = reaction {
             push_xml_attribute(&mut rendered, "reaction", reaction);
         }
-        if include_reply && let Some(tool) = &self.model_presentation.live_reply_tool {
+        if include_reply && let Some(tool) = &self.model_presentation.live_send_tool {
             push_xml_attribute(&mut rendered, "reply", tool.as_str());
         }
         if let Some(payload) = payload {
@@ -590,7 +590,7 @@ pub struct TransportMessageDraft {
     pub occurred_at: Option<UnixMicros>,
     /// Extension-owned reply tool.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reply_tool: Option<ToolName>,
+    pub send_tool: Option<ToolName>,
 }
 
 /// Dedicated request to durably accept one transport ingress occurrence.
@@ -614,7 +614,37 @@ pub struct RegisterTransportCapabilityRequest {
     pub transport_name: String,
     /// Reply tool owned by the same connection, when replies are supported.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reply_tool: Option<ToolName>,
+    pub send_tool: Option<ToolName>,
+    /// Exact operator-configured proactive routes owned by this connection.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub send_destinations: Vec<TransportSendDestinationCapability>,
+}
+
+/// One exact model-facing alias to a transport-private destination.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct TransportSendDestinationCapability {
+    /// Stable model-facing alias.
+    pub alias: String,
+    /// Exact external endpoint expected in a completion.
+    pub external_endpoint: MessageEndpoint,
+    /// Exact native conversation and optional fixed thread.
+    pub conversation: MessageConversation,
+}
+
+/// Authority used for one transport send completion.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum TransportSendAuthorization {
+    /// Live source-bound reply route.
+    Reply {
+        /// Canonical incoming message.
+        message_id: MessageId,
+    },
+    /// Operator-configured proactive route.
+    ConfiguredDestination {
+        /// Stable configured alias.
+        alias: String,
+    },
 }
 
 /// Result of source-bound transport capability registration.
@@ -667,6 +697,8 @@ pub struct CompleteTransportSendRequest {
     /// Canonical incoming message selected as reply route.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub in_reply_to: Option<MessageId>,
+    /// Tagged authority selected for this send.
+    pub authorization: TransportSendAuthorization,
     /// Actual accepted outgoing draft.
     pub draft: TransportMessageDraft,
     /// Transport acceptance strength.

@@ -72,7 +72,7 @@ fn message_envelope_item(
         model_presentation: tau_proto::MessageModelPresentation {
             transport_label: envelope.transport.name.clone(),
             source_label,
-            live_reply_tool: None,
+            live_send_tool: None,
             conversation_label: envelope.conversation.as_ref().and_then(|conversation| {
                 conversation
                     .display_name

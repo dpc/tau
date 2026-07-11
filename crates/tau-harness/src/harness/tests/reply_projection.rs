@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use super::*;
-use crate::harness::{TransportReplyRoute, live_reply_tools_for_prompt};
+use crate::harness::{TransportReplyRoute, live_send_tools_for_prompt};
 
 /// Live reply projection must match source-owned internal tool identity,
 /// target the same agent, and expose only the effective model alias.
@@ -14,7 +14,7 @@ fn live_reply_projection_requires_route_agent_and_effective_internal_tool() {
         connection_id: "slack".to_owned(),
         agent_id: agent.clone(),
         session_generation: 1,
-        reply_tool: Some(ToolName::new("internal_slack_send")),
+        send_tool: Some(ToolName::new("internal_slack_send")),
         transport_name: "slack".to_owned(),
         external_endpoint: tau_proto::MessageEndpoint::User,
         conversation: None,
@@ -34,13 +34,13 @@ fn live_reply_projection_requires_route_agent_and_effective_internal_tool() {
     };
 
     assert_eq!(
-        live_reply_tools_for_prompt(&routes, std::slice::from_ref(&tool), Some(&agent))
+        live_send_tools_for_prompt(&routes, std::slice::from_ref(&tool), Some(&agent))
             .get(&message_id),
         Some(&ToolName::new("slack_send"))
     );
-    assert!(live_reply_tools_for_prompt(&routes, &[], Some(&agent)).is_empty());
+    assert!(live_send_tools_for_prompt(&routes, &[], Some(&agent)).is_empty());
     assert!(
-        live_reply_tools_for_prompt(&routes, std::slice::from_ref(&tool), Some(&other)).is_empty()
+        live_send_tools_for_prompt(&routes, std::slice::from_ref(&tool), Some(&other)).is_empty()
     );
-    assert!(live_reply_tools_for_prompt(&HashMap::new(), &[tool], Some(&agent)).is_empty());
+    assert!(live_send_tools_for_prompt(&HashMap::new(), &[tool], Some(&agent)).is_empty());
 }
