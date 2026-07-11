@@ -7502,7 +7502,9 @@ fn manual_standalone_compact_installs_one_boundary() {
     assert_eq!(compacted, 1);
     assert!(matches!(
         agent_tree_for_conversation(&h, &cid).current_branch().last(),
-        Some(tau_core::AgentEntry::Compaction { replacement_window })
+        Some(tau_core::AgentEntry::Compaction {
+            replacement_window, ..
+        })
             if replacement_window.len() == 1
     ));
     h.shutdown().expect("shutdown");

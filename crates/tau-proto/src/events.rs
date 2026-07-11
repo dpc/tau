@@ -81,6 +81,54 @@ pub enum AgentHead {
     Node(NodeId),
 }
 
+/// Maximum encoded length of a standalone-compaction transaction identifier.
+pub const MAX_COMPACTION_TRANSACTION_ID_LEN: usize = 128;
+
+/// Durable correlation identifier for one standalone-compaction transaction.
+#[derive(Clone, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct CompactionTransactionId(String);
+
+impl CompactionTransactionId {
+    /// Validates and constructs a bounded, non-empty transaction identifier.
+    pub fn parse(value: impl Into<String>) -> Result<Self, &'static str> {
+        let value = value.into();
+        if value.is_empty() {
+            return Err("compaction transaction id must not be empty");
+        }
+        if value.len() > MAX_COMPACTION_TRANSACTION_ID_LEN {
+            return Err("compaction transaction id is too long");
+        }
+        if !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+        {
+            return Err("compaction transaction id contains invalid characters");
+        }
+        Ok(Self(value))
+    }
+}
+
+impl TryFrom<String> for CompactionTransactionId {
+    type Error = &'static str;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        Self::parse(value)
+    }
+}
+
+impl From<CompactionTransactionId> for String {
+    fn from(value: CompactionTransactionId) -> Self {
+        value.0
+    }
+}
+
+impl fmt::Display for CompactionTransactionId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
 impl AgentHead {
     /// Converts this durable target to the in-memory optional head pointer.
     #[must_use]
@@ -2999,6 +3047,75 @@ pub struct AgentCompactionTriggered {
     pub resume_inference: bool,
 }
 
+/// Why a standalone compaction transaction ended without an accepted window.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StandaloneCompactionFailureReason {
+    /// The provider returned a terminal error.
+    ProviderError,
+    /// The provider returned a malformed replacement window.
+    InvalidWindow,
+    /// No matching provider route accepted the request.
+    RouteFailed,
+    /// The operation was explicitly cancelled.
+    Cancelled,
+    /// The selected transcript branch changed while compaction was running.
+    StaleBranch,
+    /// Replay found a started transaction with no durable outcome.
+    Interrupted,
+}
+
+/// Durable start record for one standalone-compaction transaction.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AgentStandaloneCompactionStarted {
+    /// Agent whose transcript is being compacted.
+    pub agent_id: AgentId,
+    /// Unique transaction correlation identifier.
+    pub transaction_id: CompactionTransactionId,
+    /// Immutable last node included in the compact request.
+    pub cut: AgentHead,
+    /// Last already-committed activation owed an inference, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resume_through: Option<AgentHead>,
+    /// Model semantics captured when the transaction started.
+    pub model: ModelId,
+    /// Originator semantics captured when the transaction started.
+    pub originator: PromptOriginator,
+    /// Earlier failed transaction explicitly replaced by this attempt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supersedes: Option<CompactionTransactionId>,
+}
+
+/// Durable terminal failure of one standalone-compaction transaction.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AgentStandaloneCompactionFailed {
+    /// Agent that owned the transaction.
+    pub agent_id: AgentId,
+    /// Transaction that failed.
+    pub transaction_id: CompactionTransactionId,
+    /// Immutable compact request cut.
+    pub cut: AgentHead,
+    /// Safe categorical failure reason.
+    pub reason: StandaloneCompactionFailureReason,
+    /// Last activation still owed an inference, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resume_through: Option<AgentHead>,
+}
+
+/// Durable checkpoint committed before an inference leaves the harness.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AgentInferenceDispatchStarted {
+    /// Agent whose activation snapshot is acknowledged.
+    pub agent_id: AgentId,
+    /// Compaction transaction that enabled this inference, when applicable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transaction_id: Option<CompactionTransactionId>,
+    /// Provider prompt correlation identifier.
+    pub agent_prompt_id: AgentPromptId,
+    /// Immutable transcript head represented by the provider prompt.
+    pub through: AgentHead,
+}
+
 /// The harness accepted one standalone provider compaction result.
 ///
 /// This is the sole transcript boundary for replacement-window compaction.
@@ -3006,6 +3123,15 @@ pub struct AgentCompactionTriggered {
 pub struct AgentCompacted {
     /// Agent transcript receiving the replacement window.
     pub agent_id: AgentId,
+    /// New-format standalone transaction correlation; absent on legacy records.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transaction_id: Option<CompactionTransactionId>,
+    /// Immutable compact-input cut; absent on legacy hard boundaries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cut: Option<AgentHead>,
+    /// Last suffix node immediately before this boundary.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suffix_end: Option<AgentHead>,
     /// Provider-validated ordered context that replaces all older model-visible
     /// history.
     pub replacement_window: Vec<ContextItem>,
@@ -3836,6 +3962,12 @@ pub enum Event {
     AgentCompactionTriggered(AgentCompactionTriggered),
     #[serde(rename = "agent.compacted")]
     AgentCompacted(AgentCompacted),
+    #[serde(rename = "agent.standalone_compaction_started")]
+    AgentStandaloneCompactionStarted(AgentStandaloneCompactionStarted),
+    #[serde(rename = "agent.standalone_compaction_failed")]
+    AgentStandaloneCompactionFailed(AgentStandaloneCompactionFailed),
+    #[serde(rename = "agent.inference_dispatch_started")]
+    AgentInferenceDispatchStarted(AgentInferenceDispatchStarted),
     #[serde(rename = "agent.prompt_created")]
     AgentPromptCreated(AgentPromptCreated),
     #[serde(rename = "agent.prompt_started")]
@@ -4062,6 +4194,13 @@ impl Event {
             Self::AgentPromptSteered(_) => EventName::AGENT_PROMPT_STEERED,
             Self::AgentCompactionTriggered(_) => EventName::AGENT_COMPACTION_TRIGGERED,
             Self::AgentCompacted(_) => EventName::AGENT_COMPACTED,
+            Self::AgentStandaloneCompactionStarted(_) => {
+                EventName::AGENT_STANDALONE_COMPACTION_STARTED
+            }
+            Self::AgentStandaloneCompactionFailed(_) => {
+                EventName::AGENT_STANDALONE_COMPACTION_FAILED
+            }
+            Self::AgentInferenceDispatchStarted(_) => EventName::AGENT_INFERENCE_DISPATCH_STARTED,
             Self::AgentPromptCreated(_) => EventName::AGENT_PROMPT_CREATED,
             Self::AgentPromptStarted(_) => EventName::AGENT_PROMPT_STARTED,
             Self::AgentPromptTerminated(_) => EventName::AGENT_PROMPT_TERMINATED,

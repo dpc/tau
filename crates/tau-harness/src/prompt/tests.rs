@@ -666,6 +666,9 @@ fn assemble_conversation_starts_at_latest_standalone_compaction() {
     tree.apply_event(&user_prompt("old history"));
     tree.apply_event(&Event::AgentCompacted(tau_proto::AgentCompacted {
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
+        transaction_id: None,
+        cut: None,
+        suffix_end: None,
         replacement_window: vec![ContextItem::Message(tau_proto::MessageItem {
             role: tau_proto::ContextRole::Assistant,
             content: vec![tau_proto::ContentPart::Text {
@@ -683,6 +686,47 @@ fn assemble_conversation_starts_at_latest_standalone_compaction() {
     assert!(!rendered.contains("old history"));
     assert!(rendered.contains("compact summary"));
     assert!(rendered.contains("new turn"));
+}
+
+/// New standalone boundaries must retain every post-cut fact exactly once,
+/// including facts committed while the compact provider request was active.
+#[test]
+fn assemble_conversation_preserves_new_compaction_suffix() {
+    let mut tree = tau_core::AgentTree::from_events(crate::parse_agent_id("main"), &[]);
+    tree.apply_event(&user_prompt("old history"));
+    let cut = tau_proto::AgentHead::Node(tree.head().expect("old history node"));
+    tree.apply_event(&user_prompt("activation A"));
+    tree.apply_event(&user_prompt("late fact B"));
+    let suffix_end = tau_proto::AgentHead::Node(tree.head().expect("suffix end"));
+    tree.apply_event(&Event::AgentCompacted(tau_proto::AgentCompacted {
+        agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
+        transaction_id: Some(
+            tau_proto::CompactionTransactionId::parse("ct-1").expect("transaction id"),
+        ),
+        cut: Some(cut),
+        suffix_end: Some(suffix_end),
+        replacement_window: vec![ContextItem::Message(tau_proto::MessageItem {
+            role: tau_proto::ContextRole::Assistant,
+            content: vec![tau_proto::ContentPart::Text {
+                text: "compact summary".to_owned(),
+            }],
+            phase: None,
+            responses_raw_json: None,
+        })],
+    }));
+    tree.apply_event(&user_prompt("after boundary"));
+
+    let rendered = serde_json::to_string(&assemble_conversation_from(&tree, tree.head()))
+        .expect("serialize context");
+    assert!(!rendered.contains("old history"));
+    for expected in [
+        "compact summary",
+        "activation A",
+        "late fact B",
+        "after boundary",
+    ] {
+        assert_eq!(rendered.matches(expected).count(), 1, "{expected}");
+    }
 }
 
 pub(crate) fn assemble_conversation_from(

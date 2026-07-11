@@ -12080,6 +12080,9 @@ impl Harness {
             source,
             Event::AgentCompacted(tau_proto::AgentCompacted {
                 agent_id: response.agent_id.clone(),
+                transaction_id: None,
+                cut: None,
+                suffix_end: None,
                 replacement_window: response.output_items.clone(),
             }),
         );

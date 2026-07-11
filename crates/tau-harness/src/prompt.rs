@@ -656,10 +656,50 @@ pub(crate) fn assemble_prompt_context_from(
     live_send_tools: &std::collections::HashMap<tau_proto::MessageId, tau_proto::ToolName>,
 ) -> AssembledPromptContext {
     let mut blocks: Vec<tau_proto::ContextBlock> = Vec::new();
+    let branch_ids = tree.branch_node_ids_from(head);
+    let branch: Vec<_> = branch_ids
+        .iter()
+        .filter_map(|node_id| tree.node(*node_id).map(|node| &node.entry))
+        .collect();
+    let mut selected: Vec<&AgentEntry> = branch.clone();
+    if let Some((boundary_index, replacement_window, cut)) =
+        branch.iter().enumerate().rev().find_map(|(index, entry)| {
+            let AgentEntry::Compaction {
+                replacement_window,
+                transaction_id: Some(_),
+                cut: Some(cut),
+                suffix_end: Some(_),
+            } = entry
+            else {
+                return None;
+            };
+            Some((index, replacement_window, *cut))
+        })
+    {
+        blocks.push(tau_proto::ContextBlock::UserInput(
+            tau_proto::UserInputBlock {
+                items: replacement_window.clone(),
+            },
+        ));
+        let suffix_start = match cut {
+            tau_proto::AgentHead::Root => 0,
+            tau_proto::AgentHead::Node(cut_node) => branch_ids
+                .iter()
+                .position(|node_id| *node_id == cut_node)
+                .map_or(boundary_index, |index| index.saturating_add(1)),
+        };
+        selected = branch[suffix_start..boundary_index]
+            .iter()
+            .chain(branch[boundary_index.saturating_add(1)..].iter())
+            .copied()
+            .collect();
+    }
 
-    for entry in tree.branch_from(head) {
+    for entry in selected {
         match entry {
-            AgentEntry::Compaction { replacement_window } => {
+            AgentEntry::Compaction {
+                replacement_window, ..
+            } => {
                 blocks.clear();
                 blocks.push(tau_proto::ContextBlock::UserInput(
                     tau_proto::UserInputBlock {

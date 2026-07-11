@@ -346,6 +346,12 @@ impl EventName {
     pub const AGENT_COMPACTION_TRIGGERED: Self =
         Self::from_static(EventCategory::Agent, "compaction_triggered");
     pub const AGENT_COMPACTED: Self = Self::from_static(EventCategory::Agent, "compacted");
+    pub const AGENT_STANDALONE_COMPACTION_STARTED: Self =
+        Self::from_static(EventCategory::Agent, "standalone_compaction_started");
+    pub const AGENT_STANDALONE_COMPACTION_FAILED: Self =
+        Self::from_static(EventCategory::Agent, "standalone_compaction_failed");
+    pub const AGENT_INFERENCE_DISPATCH_STARTED: Self =
+        Self::from_static(EventCategory::Agent, "inference_dispatch_started");
     pub const AGENT_STARTED: Self = Self::from_static(EventCategory::Agent, "started");
     pub const AGENT_DISPLAY_NAME_SET: Self =
         Self::from_static(EventCategory::Agent, "display_name_set");

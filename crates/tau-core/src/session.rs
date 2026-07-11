@@ -226,6 +226,12 @@ pub enum AgentEntry {
     Compaction {
         /// Ordered provider items replacing all preceding prompt context.
         replacement_window: Vec<ContextItem>,
+        /// Transaction correlation for new suffix-preserving boundaries.
+        transaction_id: Option<tau_proto::CompactionTransactionId>,
+        /// Immutable compact-input cut for new boundaries.
+        cut: Option<tau_proto::AgentHead>,
+        /// Last suffix node before the boundary for new boundaries.
+        suffix_end: Option<tau_proto::AgentHead>,
     },
     /// Durable request for either legacy inline or standalone compaction.
     CompactionTrigger {
@@ -625,7 +631,9 @@ impl AgentTree {
         call_ids
     }
 
-    fn branch_node_ids_from(&self, head: Option<NodeId>) -> Vec<NodeId> {
+    /// Returns node identifiers on the selected branch in root-to-head order.
+    #[must_use]
+    pub fn branch_node_ids_from(&self, head: Option<NodeId>) -> Vec<NodeId> {
         let mut path = Vec::new();
         let mut current = head;
         while let Some(id) = current {
@@ -638,6 +646,21 @@ impl AgentTree {
         }
         path.reverse();
         path
+    }
+
+    /// Returns whether `ancestor` is on the branch ending at `descendant`.
+    #[must_use]
+    pub fn is_ancestor_head(
+        &self,
+        ancestor: tau_proto::AgentHead,
+        descendant: tau_proto::AgentHead,
+    ) -> bool {
+        match ancestor {
+            tau_proto::AgentHead::Root => true,
+            tau_proto::AgentHead::Node(ancestor) => self
+                .branch_node_ids_from(descendant.as_option())
+                .contains(&ancestor),
+        }
     }
 
     /// Returns the direct children of a node.
@@ -862,6 +885,9 @@ impl AgentTree {
                 parent,
                 AgentEntry::Compaction {
                     replacement_window: compacted.replacement_window.clone(),
+                    transaction_id: compacted.transaction_id.clone(),
+                    cut: compacted.cut,
+                    suffix_end: compacted.suffix_end,
                 },
             )),
             Event::AgentMessageSent(message) => self
@@ -1177,13 +1203,13 @@ impl AgentTree {
                 Some(Ok(()))
             }
             Event::AgentCompacted(compacted) if compacted.agent_id == self.agent_id => Some(
-                tau_proto::validate_compaction_window(&compacted.replacement_window).map_err(
-                    |error| {
+                tau_proto::validate_compaction_window(&compacted.replacement_window)
+                    .map_err(|error| {
                         AgentEventValidationError::new(format!(
                             "invalid compaction replacement window: {error}"
                         ))
-                    },
-                ),
+                    })
+                    .and_then(|()| self.validate_compaction_boundary(compacted)),
             ),
             Event::AgentHeadMoved(moved) if moved.agent_id == self.agent_id => {
                 Some(self.validate_head_moved(moved))
@@ -1192,6 +1218,35 @@ impl AgentTree {
                 Some(self.validate_provider_response(response))
             }
             _ => None,
+        }
+    }
+
+    fn validate_compaction_boundary(
+        &self,
+        compacted: &tau_proto::AgentCompacted,
+    ) -> Result<(), AgentEventValidationError> {
+        match (
+            &compacted.transaction_id,
+            compacted.cut,
+            compacted.suffix_end,
+        ) {
+            (None, None, None) => Ok(()),
+            (Some(_), Some(cut), Some(suffix_end)) => {
+                if suffix_end.as_option() != self.head {
+                    return Err(AgentEventValidationError::new(
+                        "compaction suffix_end must equal the boundary parent",
+                    ));
+                }
+                if !self.is_ancestor_head(cut, suffix_end) {
+                    return Err(AgentEventValidationError::new(
+                        "compaction cut must be an ancestor of suffix_end",
+                    ));
+                }
+                Ok(())
+            }
+            _ => Err(AgentEventValidationError::new(
+                "new compaction boundary metadata must be complete",
+            )),
         }
     }
 
