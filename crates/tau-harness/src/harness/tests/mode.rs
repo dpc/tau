@@ -208,7 +208,7 @@ fn ephemeral_agent_uses_memory_only_agent_and_membership_stores() {
 
     h.handle_ui_create_agent(tau_proto::UiCreateAgent {
         session_id: "s1".into(),
-        role: "senior-engineer".to_owned(),
+        role: "engineer".to_owned(),
         model_override: None,
         metadata: Vec::new(),
         initial_prompt: None,
@@ -270,7 +270,7 @@ fn ephemeral_agent_create_request_is_suppressed_from_debug_log() {
     let mut h = quiet_provider_harness(&sp).expect("harness");
     let request = tau_proto::UiCreateAgent {
         session_id: "s1".into(),
-        role: "senior-engineer".to_owned(),
+        role: "engineer".to_owned(),
         model_override: None,
         metadata: Vec::new(),
         initial_prompt: Some("debug-log-secret".to_owned()),
@@ -289,7 +289,7 @@ fn ephemeral_agent_create_request_is_suppressed_from_debug_log() {
     });
     h.handle_ui_create_agent(tau_proto::UiCreateAgent {
         session_id: "s1".into(),
-        role: "senior-engineer".to_owned(),
+        role: "engineer".to_owned(),
         model_override: None,
         metadata: Vec::new(),
         initial_prompt: None,
@@ -381,7 +381,7 @@ fn tool_backed_start_agent_request_targets_ephemeral_agent() {
 
     h.handle_ui_create_agent(tau_proto::UiCreateAgent {
         session_id: "s1".into(),
-        role: "senior-engineer".to_owned(),
+        role: "engineer".to_owned(),
         model_override: None,
         metadata: Vec::new(),
         initial_prompt: None,
@@ -412,7 +412,7 @@ fn tool_backed_start_agent_request_targets_ephemeral_agent() {
             &Event::StartAgentRequest(StartAgentRequest {
                 query_id: "ephemeral-tool-delegate".to_owned(),
                 instruction: "delegate without leaking prompt text".to_owned(),
-                role: Some("senior-engineer".to_owned()),
+                role: Some("engineer".to_owned()),
                 input_stats: tau_proto::ToolUseStats::default(),
                 tool_call_id: Some(tool_call_id),
                 task_name: Some("ephemeral delegate".to_owned()),
@@ -434,7 +434,7 @@ fn sync_head_classifies_ephemeral_terminal_tool_events() {
     let mut h = quiet_provider_harness(&sp).expect("harness");
     h.handle_ui_create_agent(tau_proto::UiCreateAgent {
         session_id: "s1".into(),
-        role: "senior-engineer".to_owned(),
+        role: "engineer".to_owned(),
         model_override: None,
         metadata: Vec::new(),
         initial_prompt: None,
@@ -501,7 +501,7 @@ fn ephemeral_parent_start_agent_request_creates_ephemeral_child() {
 
     h.handle_ui_create_agent(tau_proto::UiCreateAgent {
         session_id: "s1".into(),
-        role: "senior-engineer".to_owned(),
+        role: "engineer".to_owned(),
         model_override: None,
         metadata: Vec::new(),
         initial_prompt: None,
@@ -525,7 +525,7 @@ fn ephemeral_parent_start_agent_request_creates_ephemeral_child() {
         tau_proto::StartAgentRequest {
             query_id: "q-ephemeral-child".to_owned(),
             instruction: "delegate without durable transcript".to_owned(),
-            role: Some("senior-engineer".to_owned()),
+            role: Some("engineer".to_owned()),
             input_stats: tau_proto::ToolUseStats::default(),
             tool_call_id: None,
             task_name: None,
@@ -559,7 +559,7 @@ fn ui_create_agent_inherits_ephemeral_parent_persistence() {
 
     h.handle_ui_create_agent(tau_proto::UiCreateAgent {
         session_id: "s1".into(),
-        role: "senior-engineer".to_owned(),
+        role: "engineer".to_owned(),
         model_override: None,
         metadata: Vec::new(),
         initial_prompt: None,
@@ -580,7 +580,7 @@ fn ui_create_agent_inherits_ephemeral_parent_persistence() {
 
     h.handle_ui_create_agent(tau_proto::UiCreateAgent {
         session_id: "s1".into(),
-        role: "senior-engineer".to_owned(),
+        role: "engineer".to_owned(),
         model_override: None,
         metadata: Vec::new(),
         initial_prompt: None,
@@ -693,8 +693,7 @@ fn daemon_mode_renders_system_prompt_for_requested_role() {
 
     wait_for_socket(&sock);
 
-    let prompt =
-        get_daemon_rendered_system_prompt(&sock, "senior-engineer").expect("render prompt");
+    let prompt = get_daemon_rendered_system_prompt(&sock, "engineer").expect("render prompt");
     assert!(prompt.contains("## Your mission"));
     assert!(prompt.contains("## Agent identity"));
     assert!(prompt.contains("Your agent id is `dev-preview-agent`."));
@@ -728,8 +727,8 @@ fn daemon_mode_renders_tool_definitions_for_requested_role() {
 
     wait_for_socket(&sock);
 
-    let tools = get_daemon_rendered_tool_definitions(&sock, "senior-engineer")
-        .expect("render tool definitions");
+    let tools =
+        get_daemon_rendered_tool_definitions(&sock, "engineer").expect("render tool definitions");
     assert!(!tools.is_empty());
     let read_tool = tools
         .iter()

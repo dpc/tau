@@ -667,7 +667,7 @@ fn harness_file_alias_table_normalizes_all_legacy_keys() {
                     "enableTools": [],
                     "requiredSkills": [],
                     "roles": {
-                        "senior-engineer": {
+                        "engineer": {
                             "enabled": true,
                             "thinkingSummary": "auto",
                             "serviceTier": "default",
@@ -720,9 +720,7 @@ fn harness_file_alias_table_normalizes_all_legacy_keys() {
     ] {
         assert!(group.get(key).is_some(), "missing group key {key}");
         assert!(
-            group
-                .pointer(&format!("/roles/senior-engineer/{key}"))
-                .is_some(),
+            group.pointer(&format!("/roles/engineer/{key}")).is_some(),
             "missing role key {key}"
         );
     }
@@ -793,52 +791,52 @@ fn harness_cli_alias_table_normalizes_all_legacy_keys() {
             "agents.role_groups.engineer.required_skills",
         ),
         (
-            "agents.roleGroups.engineer.roles.senior-engineer.enabled",
-            "agents.role_groups.engineer.roles.senior-engineer.enable",
+            "agents.roleGroups.engineer.roles.engineer.enabled",
+            "agents.role_groups.engineer.roles.engineer.enable",
         ),
         (
-            "agents.roleGroups.engineer.roles.senior-engineer.thinkingSummary",
-            "agents.role_groups.engineer.roles.senior-engineer.thinking_summary",
+            "agents.roleGroups.engineer.roles.engineer.thinkingSummary",
+            "agents.role_groups.engineer.roles.engineer.thinking_summary",
         ),
         (
-            "agents.roleGroups.engineer.roles.senior-engineer.serviceTier",
-            "agents.role_groups.engineer.roles.senior-engineer.service_tier",
+            "agents.roleGroups.engineer.roles.engineer.serviceTier",
+            "agents.role_groups.engineer.roles.engineer.service_tier",
         ),
         (
-            "agents.roleGroups.engineer.roles.senior-engineer.promptFragments",
-            "agents.role_groups.engineer.roles.senior-engineer.prompt_fragments",
+            "agents.roleGroups.engineer.roles.engineer.promptFragments",
+            "agents.role_groups.engineer.roles.engineer.prompt_fragments",
         ),
         (
-            "agents.roleGroups.engineer.roles.senior-engineer.promptOverride",
-            "agents.role_groups.engineer.roles.senior-engineer.prompt_override",
+            "agents.roleGroups.engineer.roles.engineer.promptOverride",
+            "agents.role_groups.engineer.roles.engineer.prompt_override",
         ),
         (
-            "agents.roleGroups.engineer.roles.senior-engineer.disableToolTags",
-            "agents.role_groups.engineer.roles.senior-engineer.disable_tool_tags",
+            "agents.roleGroups.engineer.roles.engineer.disableToolTags",
+            "agents.role_groups.engineer.roles.engineer.disable_tool_tags",
         ),
         (
-            "agents.roleGroups.engineer.roles.senior-engineer.enableToolTags",
-            "agents.role_groups.engineer.roles.senior-engineer.enable_tool_tags",
+            "agents.roleGroups.engineer.roles.engineer.enableToolTags",
+            "agents.role_groups.engineer.roles.engineer.enable_tool_tags",
         ),
         (
-            "agents.roleGroups.engineer.roles.senior-engineer.enableToolGroups",
-            "agents.role_groups.engineer.roles.senior-engineer.enable_tool_groups",
+            "agents.roleGroups.engineer.roles.engineer.enableToolGroups",
+            "agents.role_groups.engineer.roles.engineer.enable_tool_groups",
         ),
         (
-            "agents.roleGroups.engineer.roles.senior-engineer.disableToolGroups",
-            "agents.role_groups.engineer.roles.senior-engineer.disable_tool_groups",
+            "agents.roleGroups.engineer.roles.engineer.disableToolGroups",
+            "agents.role_groups.engineer.roles.engineer.disable_tool_groups",
         ),
         (
-            "agents.roleGroups.engineer.roles.senior-engineer.enableTools",
-            "agents.role_groups.engineer.roles.senior-engineer.enable_tools",
+            "agents.roleGroups.engineer.roles.engineer.enableTools",
+            "agents.role_groups.engineer.roles.engineer.enable_tools",
         ),
         (
-            "agents.roleGroups.engineer.roles.senior-engineer.disableTools",
-            "agents.role_groups.engineer.roles.senior-engineer.disable_tools",
+            "agents.roleGroups.engineer.roles.engineer.disableTools",
+            "agents.role_groups.engineer.roles.engineer.disable_tools",
         ),
         (
-            "agents.roleGroups.engineer.roles.senior-engineer.requiredSkills",
-            "agents.role_groups.engineer.roles.senior-engineer.required_skills",
+            "agents.roleGroups.engineer.roles.engineer.requiredSkills",
+            "agents.role_groups.engineer.roles.engineer.required_skills",
         ),
     ];
 
@@ -860,7 +858,7 @@ fn harness_rejects_same_layer_role_alias_conflict() {
           role_groups:
                 engineer:
                   roles:
-                    senior-engineer:
+                    engineer:
                       enabled: false
                       enable: true
         "#,
@@ -872,7 +870,7 @@ fn harness_rejects_same_layer_role_alias_conflict() {
     assert!(
         error.to_string().contains("enabled")
             && error.to_string().contains("enable")
-            && error.to_string().contains("senior-engineer"),
+            && error.to_string().contains("engineer"),
         "unexpected error: {error}"
     );
 }
@@ -1087,7 +1085,7 @@ fn harness_settings_accept_legacy_camel_case_overrides_over_snake_case_builtins(
                     engineer: {
                         promptFragments: [{ name: "legacy.group", priority: 80, text: "group" }],
                         roles: {
-                            "senior-engineer": {
+                            "engineer": {
                                 enableTools: ["web_search"],
                                 promptFragments: [{ name: "legacy.role", priority: 90, text: "role" }],
                             },
@@ -1105,21 +1103,21 @@ fn harness_settings_accept_legacy_camel_case_overrides_over_snake_case_builtins(
         settings.agent_id_template,
         "legacy-{{random_alphanumeric 4}}"
     );
-    let senior = settings.roles.get("senior-engineer").expect("senior role");
+    let engineer = settings.roles.get("engineer").expect("engineer role");
     assert!(
-        senior
+        engineer
             .enable_tools
             .iter()
             .any(|tool| tool.as_str() == "web_search")
     );
     assert!(
-        senior
+        engineer
             .prompt_fragments
             .iter()
             .any(|fragment| fragment.name.as_str() == "legacy.group")
     );
     assert!(
-        senior
+        engineer
             .prompt_fragments
             .iter()
             .any(|fragment| fragment.name.as_str() == "legacy.role")
@@ -1230,17 +1228,14 @@ fn harness_config_cli_overrides_can_update_roles() {
     let td = TempDir::new().expect("tempdir");
     let dir = td.path();
     let overrides = [HarnessConfigCliOverride::from_str(
-        "agents.role_groups.engineer.roles.senior-engineer.effort=low",
+        "agents.role_groups.engineer.roles.engineer.effort=low",
     )
     .expect("override")];
 
     let s = load_harness_settings_with_cli_overrides_in(&dirs_with_config(dir), &[], &overrides)
         .expect("load");
 
-    assert_eq!(
-        s.roles["senior-engineer"].effort,
-        Some(tau_proto::Effort::Low)
-    );
+    assert_eq!(s.roles["engineer"].effort, Some(tau_proto::Effort::Low));
 }
 
 /// Ensures malformed CLI config overrides fail explicitly at parse time.
@@ -1257,7 +1252,7 @@ fn harness_config_cli_overrides_normalize_legacy_role_aliases() {
     let td = TempDir::new().expect("tempdir");
     let dir = td.path();
     let overrides = [HarnessConfigCliOverride::from_str(
-        "agents.role_groups.engineer.roles.senior-engineer.enabled=false",
+        "agents.role_groups.engineer.roles.engineer.enabled=false",
     )
     .expect("override")];
 
@@ -1265,7 +1260,7 @@ fn harness_config_cli_overrides_normalize_legacy_role_aliases() {
         load_harness_settings_with_cli_overrides_in(&dirs_with_config(dir), &[], &overrides)
             .expect("load");
 
-    assert!(!settings.roles.contains_key("senior-engineer"));
+    assert!(!settings.roles.contains_key("engineer"));
 }
 
 /// Ensures CLI overrides using legacy nested `agents.roleGroups` aliases still
@@ -1275,7 +1270,7 @@ fn harness_config_cli_overrides_normalize_legacy_agents_role_aliases() {
     let td = TempDir::new().expect("tempdir");
     let dir = td.path();
     let overrides = [HarnessConfigCliOverride::from_str(
-        "agents.roleGroups.engineer.roles.senior-engineer.effort=low",
+        "agents.roleGroups.engineer.roles.engineer.effort=low",
     )
     .expect("override")];
 
@@ -1284,7 +1279,7 @@ fn harness_config_cli_overrides_normalize_legacy_agents_role_aliases() {
             .expect("load");
 
     assert_eq!(
-        settings.roles["senior-engineer"].effort,
+        settings.roles["engineer"].effort,
         Some(tau_proto::Effort::Low)
     );
 }
@@ -1296,7 +1291,7 @@ fn harness_config_cli_overrides_reject_alias_conflicts() {
     let td = TempDir::new().expect("tempdir");
     let overrides = [
         HarnessConfigCliOverride::from_str("agents.defaultRole=manager").expect("legacy override"),
-        HarnessConfigCliOverride::from_str("agents.default_role=senior-engineer")
+        HarnessConfigCliOverride::from_str("agents.default_role=engineer")
             .expect("canonical override"),
     ];
 
@@ -1317,7 +1312,7 @@ fn harness_config_cli_overrides_normalize_map_value_aliases() {
     let td = TempDir::new().expect("tempdir");
     let dir = td.path();
     let overrides = [HarnessConfigCliOverride::from_str(
-        "agents.role_groups.engineer.roles.senior-engineer={enabled: false}",
+        "agents.role_groups.engineer.roles.engineer={enabled: false}",
     )
     .expect("override")];
 
@@ -1325,7 +1320,7 @@ fn harness_config_cli_overrides_normalize_map_value_aliases() {
         load_harness_settings_with_cli_overrides_in(&dirs_with_config(dir), &[], &overrides)
             .expect("load");
 
-    assert!(!settings.roles.contains_key("senior-engineer"));
+    assert!(!settings.roles.contains_key("engineer"));
 }
 
 /// Ensures YAML map-valued CLI overrides reject alias/canonical conflicts
@@ -1335,7 +1330,7 @@ fn harness_config_cli_overrides_reject_map_value_alias_conflicts() {
     let td = TempDir::new().expect("tempdir");
     let dir = td.path();
     let overrides = [HarnessConfigCliOverride::from_str(
-        "agents.role_groups.engineer.roles.senior-engineer={enabled: false, enable: true}",
+        "agents.role_groups.engineer.roles.engineer={enabled: false, enable: true}",
     )
     .expect("override")];
 
@@ -1346,7 +1341,7 @@ fn harness_config_cli_overrides_reject_map_value_alias_conflicts() {
     assert!(
         error.to_string().contains("enabled")
             && error.to_string().contains("enable")
-            && error.to_string().contains("senior-engineer"),
+            && error.to_string().contains("engineer"),
         "unexpected error: {error}"
     );
 }
@@ -1571,7 +1566,7 @@ fn harness_role_group_defaults_apply_to_existing_roles_when_adding_role() {
     let settings = load_harness_settings_in(&dirs_with_config(dir)).expect("load");
 
     assert_eq!(
-        settings.roles["senior-engineer"].disable_tools,
+        settings.roles["engineer"].disable_tools,
         vec![tau_proto::ToolName::new("shell")]
     );
     assert_eq!(
@@ -1728,7 +1723,7 @@ fn harness_settings_load_role_group_default_tool_overrides_without_relisting_rol
     .expect("write");
 
     let s = load_harness_settings_in(&dirs_with_config(dir)).expect("load");
-    for role_name in ["senior-engineer", "junior-engineer", "staff-engineer"] {
+    for role_name in ["engineer", "engineer-junior", "engineer-senior"] {
         assert_eq!(
             s.roles[role_name].enable_tools,
             vec![tau_proto::ToolName::new("email_list_recent")]
@@ -1783,7 +1778,7 @@ fn harness_settings_rejects_role_in_multiple_groups() {
                 role_groups: {
                 reviewers: {
                     roles: {
-                        senior-engineer: { effort: "high" },
+                        engineer: { effort: "high" },
                     },
                 },
             },
@@ -1797,7 +1792,7 @@ fn harness_settings_rejects_role_in_multiple_groups() {
     assert!(
         error
             .to_string()
-            .contains("role `senior-engineer` appears in multiple role_groups"),
+            .contains("role `engineer` appears in multiple role_groups"),
         "error should mention duplicate role: {error}"
     );
 }
@@ -1900,7 +1895,7 @@ fn harness_settings_rejects_unknown_role_fields() {
                 role_groups: {
                 engineer: {
                     roles: {
-                        senior-engineer: { staleRoleField: true },
+                        engineer: { staleRoleField: true },
                     },
                 },
             },
@@ -2018,7 +2013,7 @@ fn harness_settings_role_cli_disable_all_leaves_no_effective_roles() {
 
     assert!(s.roles.is_empty());
     assert!(s.role_groups.is_empty());
-    assert_eq!(s.default_role.as_deref(), Some("senior-engineer"));
+    assert_eq!(s.default_role.as_deref(), Some("engineer"));
 }
 
 /// Ensures CLI overrides for unknown role paths fail with explicit config
@@ -2216,7 +2211,7 @@ fn harness_global_prompt_fragments_apply_to_all_roles() {
             .count(),
         1
     );
-    for role_name in ["senior-engineer", "micro-manager", "custom"] {
+    for role_name in ["engineer", "micro-manager", "custom"] {
         let role = &s.roles[role_name];
         assert_eq!(
             role.prompt_fragments
@@ -2553,7 +2548,7 @@ fn harness_built_in_roles_load_from_json_with_manager_prompt() {
     // visible orchestration prompt there. Engineer roles share a lightweight
     // instruction prompt.
     let s = HarnessSettings::built_in();
-    assert_eq!(s.default_role.as_deref(), Some("senior-engineer"));
+    assert_eq!(s.default_role.as_deref(), Some("engineer"));
     assert_eq!(
         s.role_groups
             .iter()
@@ -2563,31 +2558,31 @@ fn harness_built_in_roles_load_from_json_with_manager_prompt() {
             (
                 "engineer".to_owned(),
                 vec![
-                    "junior-engineer".to_owned(),
-                    "senior-engineer".to_owned(),
-                    "staff-engineer".to_owned(),
+                    "engineer-junior".to_owned(),
+                    "engineer".to_owned(),
+                    "engineer-senior".to_owned(),
                 ],
             ),
             ("manager".to_owned(), vec!["micro-manager".to_owned()]),
         ]
     );
-    let junior_engineer = &s.roles["junior-engineer"];
-    assert_eq!(junior_engineer.effort, Some(tau_proto::Effort::Low));
-    let senior_engineer = &s.roles["senior-engineer"];
+    let engineer_junior = &s.roles["engineer-junior"];
+    assert_eq!(engineer_junior.effort, Some(tau_proto::Effort::Low));
+    let engineer = &s.roles["engineer"];
     assert_eq!(
-        senior_engineer.prompt_fragments[0].priority,
+        engineer.prompt_fragments[0].priority,
         PromptPriority::new(15)
     );
     assert!(
-        senior_engineer.prompt_fragments[0]
+        engineer.prompt_fragments[0]
             .text
             .contains("Trust the `<instructions>`")
     );
     assert!(!s.roles.contains_key("assistant"));
-    let staff_engineer = &s.roles["staff-engineer"];
-    assert_eq!(staff_engineer.effort, Some(tau_proto::Effort::High));
+    let engineer_senior = &s.roles["engineer-senior"];
+    assert_eq!(engineer_senior.effort, Some(tau_proto::Effort::High));
     assert!(
-        staff_engineer
+        engineer_senior
             .prompt_fragments
             .iter()
             .any(|fragment| fragment.text.contains("Trust the `<instructions>`"))
@@ -2671,9 +2666,9 @@ fn harness_role_groups_load_role_order() {
                 engineer: {
                     order: 40,
                     roles: {
-                        "staff-engineer": { order: null },
-                        "senior-engineer": { order: 20 },
-                        "junior-engineer": {},
+                        "engineer-senior": { order: null },
+                        "engineer": { order: 20 },
+                        "engineer-junior": {},
                         "custom-engineer": {},
                     },
                 },
@@ -2685,9 +2680,9 @@ fn harness_role_groups_load_role_order() {
 
     let s = load_harness_settings_in(&dirs_with_config(dir)).expect("load");
 
-    assert_eq!(s.roles["junior-engineer"].order, Some(40));
-    assert_eq!(s.roles["senior-engineer"].order, Some(20));
-    assert_eq!(s.roles["staff-engineer"].order, None);
+    assert_eq!(s.roles["engineer-junior"].order, Some(40));
+    assert_eq!(s.roles["engineer"].order, Some(20));
+    assert_eq!(s.roles["engineer-senior"].order, None);
     assert_eq!(s.roles["custom-engineer"].order, Some(40));
 }
 
@@ -2797,14 +2792,14 @@ fn missing_user_files_load_the_built_in_baseline() {
     let td = TempDir::new().expect("tempdir");
     let _cli = load_cli_settings_in(&dirs_with_config(td.path())).expect("cli");
     let harness = load_harness_settings_in(&dirs_with_config(td.path())).expect("harness");
-    assert!(harness.roles.contains_key("junior-engineer"));
-    assert!(harness.roles.contains_key("senior-engineer"));
+    assert!(harness.roles.contains_key("engineer-junior"));
+    assert!(harness.roles.contains_key("engineer"));
     assert!(harness.roles.contains_key("micro-manager"));
-    assert_eq!(harness.default_role.as_deref(), Some("senior-engineer"));
+    assert_eq!(harness.default_role.as_deref(), Some("engineer"));
     assert!(!harness.roles.contains_key("assistant"));
-    assert!(harness.roles.contains_key("staff-engineer"));
+    assert!(harness.roles.contains_key("engineer-senior"));
     assert_eq!(
-        harness.roles["staff-engineer"].effort,
+        harness.roles["engineer-senior"].effort,
         Some(tau_proto::Effort::High)
     );
     assert!(!harness.roles.contains_key("smart"));
@@ -2826,13 +2821,13 @@ fn harness_role_enable_false_filters_built_in_roles_after_merging() {
         dir.join("harness.yaml"),
         r#"{
             agents: {
-                default_role: "senior-engineer",
+                default_role: "engineer",
                 role_groups: {
                 engineer: {
                     roles: {
-                        "junior-engineer": { enable: false },
-                        "senior-engineer": { enable: false },
-                        "staff-engineer": { enable: false },
+                        "engineer-junior": { enable: false },
+                        "engineer": { enable: false },
+                        "engineer-senior": { enable: false },
                     },
                 },
             },
@@ -2842,11 +2837,11 @@ fn harness_role_enable_false_filters_built_in_roles_after_merging() {
     .expect("write");
 
     let s = load_harness_settings_in(&dirs_with_config(dir)).expect("load");
-    assert!(!s.roles.contains_key("junior-engineer"));
-    assert!(!s.roles.contains_key("senior-engineer"));
-    assert!(!s.roles.contains_key("staff-engineer"));
+    assert!(!s.roles.contains_key("engineer-junior"));
+    assert!(!s.roles.contains_key("engineer"));
+    assert!(!s.roles.contains_key("engineer-senior"));
     assert!(!s.roles.contains_key("assistant"));
-    assert_eq!(s.default_role.as_deref(), Some("senior-engineer"));
+    assert_eq!(s.default_role.as_deref(), Some("engineer"));
     assert_eq!(
         s.role_groups
             .iter()
@@ -2907,7 +2902,7 @@ fn harness_legacy_enabled_alias_overrides_built_in_enable() {
           role_groups:
             engineer:
               roles:
-                senior-engineer:
+                engineer:
                   enabled: false
         "#,
     )
@@ -2915,7 +2910,7 @@ fn harness_legacy_enabled_alias_overrides_built_in_enable() {
 
     let settings = load_harness_settings_in(&dirs_with_config(dir)).expect("load");
 
-    assert!(!settings.roles.contains_key("senior-engineer"));
+    assert!(!settings.roles.contains_key("engineer"));
 }
 
 /// Regression guard: role filtering happens after all layers so later enables
@@ -2929,22 +2924,20 @@ fn harness_role_enable_can_be_reenabled_by_later_layers() {
     std::fs::create_dir_all(dir.join("harness.d")).expect("mkdir drop-ins");
     std::fs::write(
         dir.join("harness.yaml"),
-        r#"{ agents: { role_groups: { engineer: { roles: { "staff-engineer": { enable: false } } } } } }"#,
+        r#"{ agents: { role_groups: { engineer: { roles: { "engineer-senior": { enable: false } } } } } }"#,
     )
     .expect("write base");
     std::fs::write(
         dir.join("harness.d/10-enable.yaml"),
-        r#"{ agents: { role_groups: { engineer: { roles: { "staff-engineer": { enable: true, effort: "xhigh" } } } } } }"#,
+        r#"{ agents: { role_groups: { engineer: { roles: { "engineer-senior": { enable: true, effort: "xhigh" } } } } } }"#,
     )
     .expect("write drop-in");
 
     let s = load_harness_settings_in(&dirs_with_config(dir)).expect("load");
-    assert!(s.roles.contains_key("staff-engineer"));
-    assert_eq!(s.roles["staff-engineer"].enable, Some(true));
-    assert!(
-        s.role_groups.iter().any(|group| group.name == "engineer"
-            && group.roles.iter().any(|role| role == "staff-engineer"))
-    );
+    assert!(s.roles.contains_key("engineer-senior"));
+    assert_eq!(s.roles["engineer-senior"].enable, Some(true));
+    assert!(s.role_groups.iter().any(|group| group.name == "engineer"
+        && group.roles.iter().any(|role| role == "engineer-senior")));
 }
 
 /// Ensures sample config files shipped for `tau init` keep deserializing.

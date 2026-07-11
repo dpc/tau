@@ -354,7 +354,7 @@ harness/agent.
   the harness to start a side/sub-agent conversation: instruction text,
   correlation `query_id`, optional requested `role`, optional tool-call
   attribution, and human-readable task name (used by the `agent_start` tool).
-  Tool-backed delegate requests default to `senior-engineer` when `role` is
+  Tool-backed delegate requests default to `engineer` when `role` is
   absent; non-tool requests without `role` use the currently selected
   interactive role.
 - **`agent.start_accepted`** — The harness accepted an agent-start request and

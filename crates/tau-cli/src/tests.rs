@@ -467,16 +467,13 @@ fn role_cli_flags_accept_repeated_and_mixed_options() {
         "--enable-role",
         "manager",
         "--disable-role",
-        "senior-engineer",
+        "engineer",
         "--disable-roles-all",
     ]);
 
     assert_eq!(cli.harness.role_overrides.disable_roles_all, 2);
     assert_eq!(cli.harness.role_overrides.enable_role, vec!["manager"]);
-    assert_eq!(
-        cli.harness.role_overrides.disable_role,
-        vec!["senior-engineer"]
-    );
+    assert_eq!(cli.harness.role_overrides.disable_role, vec!["engineer"]);
 }
 
 #[test]
@@ -512,7 +509,7 @@ fn role_cli_overrides_preserve_argument_order() {
         "--disable-roles-all",
         "--enable-role=manager",
         "--enable-role",
-        "senior-engineer",
+        "engineer",
     ]);
 
     assert_eq!(
@@ -521,7 +518,7 @@ fn role_cli_overrides_preserve_argument_order() {
             tau_config::settings::RoleCliOverride::Disable("manager".to_owned()),
             tau_config::settings::RoleCliOverride::DisableAll,
             tau_config::settings::RoleCliOverride::Enable("manager".to_owned()),
-            tau_config::settings::RoleCliOverride::Enable("senior-engineer".to_owned()),
+            tau_config::settings::RoleCliOverride::Enable("engineer".to_owned()),
         ]
     );
 }
@@ -2405,8 +2402,8 @@ fn agent_stats_does_not_overwrite_display_name() {
     renderer.handle(&Event::AgentStarted(tau_proto::AgentStarted {
         parent_agent: None,
         agent_id: agent_id("engineer-Ab12"),
-        role: "senior-engineer".to_owned(),
-        display_name: Some("senior-engineer: look it up".to_owned()),
+        role: "engineer".to_owned(),
+        display_name: Some("engineer: look it up".to_owned()),
         metadata: Vec::new(),
         ephemeral: false,
     }));
@@ -2422,7 +2419,7 @@ fn agent_stats_does_not_overwrite_display_name() {
     let display_names = display_names.lock().expect("display names");
     assert_eq!(
         display_names.get("engineer-Ab12").map(String::as_str),
-        Some("senior-engineer: look it up")
+        Some("engineer: look it up")
     );
 }
 
@@ -4178,8 +4175,8 @@ fn status_agent_chip_keeps_id_primary_and_display_name_secondary() {
     }));
     renderer.handle(&Event::AgentStarted(tau_proto::AgentStarted {
         parent_agent: None,
-        agent_id: agent_id("junior-engineer_b"),
-        role: "junior-engineer".to_owned(),
+        agent_id: agent_id("engineer-junior_b"),
+        role: "engineer-junior".to_owned(),
         display_name: Some("sleep 6".to_owned()),
         metadata: Vec::new(),
         ephemeral: false,
@@ -4187,7 +4184,7 @@ fn status_agent_chip_keeps_id_primary_and_display_name_secondary() {
     renderer.handle(&Event::UiPromptSubmitted(UiPromptSubmitted {
         session_id: "s1".into(),
         text: "hello".into(),
-        agent_id: tau_proto::AgentId::parse("junior-engineer_b").expect("agent id"),
+        agent_id: tau_proto::AgentId::parse("engineer-junior_b").expect("agent id"),
         message_class: tau_proto::PromptMessageClass::User,
         originator: tau_proto::PromptOriginator::User,
         ctx_id: None,
@@ -4199,8 +4196,8 @@ fn status_agent_chip_keeps_id_primary_and_display_name_secondary() {
         .into_iter()
         .find(|row| row.contains("&s1"))
         .expect("status row after agent selection");
-    assert!(status_row.starts_with("&s1 @junior-engineer_b (sleep 6)"));
-    assert!(!status_row.contains("@sleep 6 (junior-engineer_b)"));
+    assert!(status_row.starts_with("&s1 @engineer-junior_b (sleep 6)"));
+    assert!(!status_row.contains("@sleep 6 (engineer-junior_b)"));
 }
 
 #[test]

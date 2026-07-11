@@ -774,7 +774,7 @@ fn minting_agent_ids_renders_role_group_in_configured_template() {
     // roles share an ID prefix while still retaining the exact role name.
     let mut warnings = Vec::new();
     let agent_id = super::mint_available_agent_id_for_role_with(
-        "staff-engineer",
+        "engineer-senior",
         "engineer",
         "{{role_group}}-{{role}}-{{random_alphanumeric 4}}",
         |_| false,
@@ -782,8 +782,8 @@ fn minting_agent_ids_renders_role_group_in_configured_template() {
         |kind, warning| warnings.push((kind, warning)),
     );
 
-    assert!(agent_id.starts_with("engineer-staff-engineer-"));
-    assert_eq!(agent_id.len(), "engineer-staff-engineer-".len() + 4);
+    assert!(agent_id.starts_with("engineer-engineer-senior-"));
+    assert_eq!(agent_id.len(), "engineer-engineer-senior-".len() + 4);
     assert_agent_id_chars(&agent_id);
     assert!(warnings.is_empty());
 }
@@ -818,7 +818,7 @@ fn agent_template_uses_role_when_task_name_is_absent() {
     let mut rng = super::deterministic_agent_id_rng();
     let rendered = super::render_agent_template(
         "{{#if task_name_present}}{{role}}: {{task_name}}{{else}}{{role}}{{/if}}",
-        "staff-engineer",
+        "engineer-senior",
         "engineer",
         "engineer-Ab12",
         None,
@@ -827,7 +827,7 @@ fn agent_template_uses_role_when_task_name_is_absent() {
     )
     .expect("render");
 
-    assert_eq!(rendered, "staff-engineer");
+    assert_eq!(rendered, "engineer-senior");
 }
 
 #[test]
@@ -835,7 +835,7 @@ fn agent_template_renders_display_name_context() {
     let mut rng = super::deterministic_agent_id_rng();
     let rendered = super::render_agent_template(
         "{{role_group}}/{{role}}/{{agent_id}}/{{task_name}}/{{task_name_present}}/{{random_alphanumeric 4}}",
-        "staff-engineer",
+        "engineer-senior",
         "engineer",
         "engineer-Ab12",
         Some("review fix"),
@@ -844,10 +844,10 @@ fn agent_template_renders_display_name_context() {
     )
     .expect("render");
 
-    assert!(rendered.starts_with("engineer/staff-engineer/engineer-Ab12/review fix/true/"));
+    assert!(rendered.starts_with("engineer/engineer-senior/engineer-Ab12/review fix/true/"));
     assert_eq!(
         rendered.len(),
-        "engineer/staff-engineer/engineer-Ab12/review fix/true/".len() + 4
+        "engineer/engineer-senior/engineer-Ab12/review fix/true/".len() + 4
     );
 }
 

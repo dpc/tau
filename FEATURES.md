@@ -216,7 +216,7 @@ agents:
       priority: 65
       text: Keep answers short and plain, using only simple words.
 
-  default_role: senior-engineer
+  default_role: engineer
   role_groups:
     engineer:
       prompt_fragments:
@@ -224,11 +224,11 @@ agents:
           priority: 66
           text: Focus on implementation details.
       roles:
-        junior-engineer:
+        engineer-junior:
           order: 10
           description: Lower-reasoning engineer
           effort: low
-        senior-engineer:
+        engineer:
           order: 20
           description: Balanced coding engineer
           model: chatgpt/gpt-5.6-sol
@@ -237,7 +237,7 @@ agents:
           enable_tool_groups: [calendar, email]
           disable_tools: [email_trash]
           required_skills: [project-review-process]
-        staff-engineer:
+        engineer-senior:
           order: 30
           description: Maximum-reasoning engineer
           effort: xhigh
@@ -575,14 +575,14 @@ responds, plus a `wait` tool for collecting background tool results. Long-runnin
 calls return an immediate placeholder, stay visible in the UI, and deliver their
 real result or error later so the main turn can keep making progress. Unless the
 `agent_start` call supplies `role`, delegated sub-agents default to the
-`senior-engineer` role. The `agent_start` placeholder and final result include
+`engineer` role. The `agent_start` placeholder and final result include
 `self_agent_id` and `sub_agent_id`; sub-agent responses arrive through distinct
 `agent_watch` async response notifications until the caller disables the watch.
 When a watched agent receives a direct user prompt, watchers also receive a
 hidden prompt notification when that prompt becomes the watched agent's active
 turn, so the matching watched response has clear context.
 
-When `role` is supplied, or when the default `senior-engineer` role is used, the
+When `role` is supplied, or when the default `engineer` role is used, the
 sub-agent runs with that role's resolved model, model parameters, system prompt,
 and tool profile/filtering. The sub-agent starts with a *fresh* context — only
 the parent's `prompt`, the selected role's system prompt, and the selected

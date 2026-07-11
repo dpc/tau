@@ -26,7 +26,7 @@
 # `agents.role_groups` order after roles inside that group are sorted by `order` and
 # then role name. If the named role is missing, Tau warns and falls back to that
 # first role.
-#   default_role: senior-engineer
+#   default_role: engineer
 
 # Optional grouped role defaults. Role names are globally unique across all
 # groups. Tab cycles roles within the current group; Shift-Tab cycles to the
@@ -49,10 +49,10 @@
 #           priority: 80
 #           text: You are a careful coding agent.
 #       roles:
-#         junior-engineer:
+#         engineer-junior:
 #           order: 10
 #           effort: low
-#         senior-engineer:
+#         engineer:
 #           order: 20
 #           description: Balanced coding engineer.
 #           model: chatgpt/gpt-5.6-sol
@@ -60,7 +60,7 @@
 #           tools: [read, grep]
 #           disable_tools: [shell]
 #           required_skills: [project-review-process]
-#         staff-engineer:
+#         engineer-senior:
 #           order: 30
 #           effort: xhigh
 #         old-role:

@@ -2638,7 +2638,7 @@ fn prompt_message_class_defaults_to_user_when_omitted() {
 fn ephemeral_agent_fields_default_false_and_skip_serializing() {
     let create: UiCreateAgent = serde_json::from_value(serde_json::json!({
         "session_id": "s1",
-        "role": "senior-engineer"
+        "role": "engineer"
     }))
     .expect("legacy create-agent");
     assert!(!create.ephemeral);
@@ -2646,7 +2646,7 @@ fn ephemeral_agent_fields_default_false_and_skip_serializing() {
     let started = AgentStarted {
         agent_id: AgentId::parse("agent-1").expect("agent id"),
         parent_agent: None,
-        role: "senior-engineer".to_owned(),
+        role: "engineer".to_owned(),
         display_name: None,
         metadata: Vec::new(),
         ephemeral: false,

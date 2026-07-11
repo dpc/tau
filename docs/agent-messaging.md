@@ -55,7 +55,7 @@ Start the other agent with `agent_start`. The child starts with fresh transcript
 
 ```text
 tau_internal: true
-self_agent_id: senior-engineer_a
+self_agent_id: engineer_a
 sub_agent_id: engineer_b
 
 Agent started; responses will arrive through agent_watch notifications.

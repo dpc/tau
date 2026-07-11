@@ -52,19 +52,19 @@ Roles live in `harness.yaml` under globally unique `agents.role_groups`. Each gr
 ```json5
 {
   agents: {
-    default_role: "senior-engineer",
+    default_role: "engineer",
     role_groups: {
       engineer: {
         prompt_fragments: [
           { name: "engineer.workflow", priority: 66, text: "Focus on implementation details." },
         ],
         roles: {
-          "junior-engineer": {
+          "engineer-junior": {
             order: 10,
             description: "Lower-reasoning engineer",
             effort: "low",
           },
-          "senior-engineer": {
+          "engineer": {
             order: 20,
             description: "Balanced coding engineer",
             model: "chatgpt/gpt-5.3-codex",
@@ -75,7 +75,7 @@ Roles live in `harness.yaml` under globally unique `agents.role_groups`. Each gr
             disable_tools: ["email_trash"],
             requiredSkills: ["project-review-process"],
           },
-          "staff-engineer": {
+          "engineer-senior": {
             order: 30,
             description: "Maximum-reasoning engineer",
             effort: "xhigh",
@@ -104,7 +104,7 @@ Missing fields use group defaults first, then provider-published fallback knobs 
 
 Global harness policy is configured under `tool_policy.rules` keyed by stable rule name. Rules default to `enable: true`, can be disabled with `enable: false`, match when all `when.model_tags` patterns match the selected model, then run `disable_tool_tags` before `enable_tool_tags`. Rules sort by `priority` (default `0`, lower runs first) and then by rule name for ties. Tag patterns are exact (`shell:cd`) or terminal prefix wildcards (`shell:*`, `shell:edit:*`). Built-in rule `builtin.chatgpt-shell` matches `shell:chatgpt`, disables `shell:*`, and re-enables `shell:edit:apply_patch`, `shell:exec:shell_command`, `shell:cd`, and `shell:lock`. Rule names may contain dots; for CLI overrides, prefer the whole-map form such as `--harness-config 'tool_policy={rules: {builtin.chatgpt-shell: {enable: false}}}'` rather than dotted paths through the rule name.
 
-Tau ships built-in `junior-engineer`, `senior-engineer`, `staff-engineer`, and `micro-manager` roles, with `agents.default_role: senior-engineer`. `junior-engineer` uses lower reasoning for straightforward engineering work, `senior-engineer` uses balanced individual-contributor defaults, and `staff-engineer` is the maximum-reasoning engineering variant. `micro-manager` is an orchestration role with a built-in delegation prompt. For non-trivial work, the built-in `micro-manager` prompt tells the model to use `agent_start` by default for research/scoping, implementation, and review/validation sub-agent steps, then synthesize the results; tiny or purely clerical work may still be handled directly.
+Tau ships built-in `engineer-junior`, `engineer`, `engineer-senior`, and `micro-manager` roles, with `agents.default_role: engineer`. `engineer-junior` uses lower reasoning for straightforward engineering work, `engineer` uses balanced individual-contributor defaults, and `engineer-senior` is the maximum-reasoning engineering variant. `micro-manager` is an orchestration role with a built-in delegation prompt. For non-trivial work, the built-in `micro-manager` prompt tells the model to use `agent_start` by default for research/scoping, implementation, and review/validation sub-agent steps, then synthesize the results; tiny or purely clerical work may still be handled directly.
 
 
 ## Selecting a role

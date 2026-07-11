@@ -70,7 +70,7 @@ fn user_prompt_mints_first_agent_for_empty_startup() {
     if let Some(existing_agent_id) = existing_agent_id {
         assert_eq!(agent_id, existing_agent_id);
     } else {
-        assert_role_hex_agent_id(agent_id, "senior-engineer");
+        assert_role_hex_agent_id(agent_id, "engineer");
     }
     assert_eq!(h.agent_routes.get(agent_id), Some(&test_user_agent(&h)));
     assert!(event_log_contains_any_source(&h, |event| matches!(
@@ -372,7 +372,7 @@ fn resume_rehydrates_delegated_agent_role_from_agent_log() {
                 parent_agent: None,
                 query_id: "q-role".to_owned(),
                 instruction: "side task".to_owned(),
-                role: Some("staff-engineer".to_owned()),
+                role: Some("engineer-senior".to_owned()),
                 input_stats: tau_proto::ToolUseStats::default(),
                 tool_call_id: Some("delegate-call".into()),
                 task_name: None,
@@ -391,7 +391,7 @@ fn resume_rehydrates_delegated_agent_role_from_agent_log() {
 
     let mut h = echo_harness_with_start_reason("s1", &sp, tau_proto::SessionStartReason::Resume)
         .expect("resume");
-    h.selected_role = "junior-engineer".to_owned();
+    h.selected_role = "engineer-junior".to_owned();
     let cid = h
         .agent_routes
         .get(&agent_id)
@@ -401,7 +401,7 @@ fn resume_rehydrates_delegated_agent_role_from_agent_log() {
         h.agents
             .get(&cid)
             .and_then(|conversation| conversation.role.as_deref()),
-        Some("staff-engineer")
+        Some("engineer-senior")
     );
     h.shutdown().expect("shutdown");
 }
@@ -10658,12 +10658,12 @@ fn delegate_invalid_or_unavailable_role_errors_with_sorted_available_roles() {
     h.shutdown().expect("shutdown");
 }
 
-/// Omitting `role` on the agent_start tool means `senior-engineer`; if that
+/// Omitting `role` on the agent_start tool means `engineer`; if that
 /// role cannot resolve to an available model, the harness reports that
-/// compatibility default as the problem instead of silently falling back to
+/// agent_start default as the problem instead of silently falling back to
 /// another role.
 #[test]
-fn delegate_missing_default_senior_engineer_errors_when_unavailable() {
+fn delegate_missing_default_engineer_errors_when_unavailable() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
@@ -10687,7 +10687,7 @@ fn delegate_missing_default_senior_engineer_errors_when_unavailable() {
     let error = start_agent_request_error(&delegate, "q-default").expect("query error");
     assert!(
         error.contains(
-            "agent_start requires default role `senior-engineer`, but it is not available: `senior-engineer`"
+            "agent_start requires default role `engineer`, but it is not available: `engineer`"
         ),
         "got: {error}"
     );
@@ -11985,7 +11985,7 @@ fn message_tool_to_user_emits_only_sender_projection() {
         .and_then(|conv| conv.agent_id.as_deref())
         .expect("sender agent id");
     assert_eq!(sent[0].sender_id.as_str(), sender_agent_id);
-    assert_role_hex_agent_id(sender_agent_id, "senior-engineer");
+    assert_role_hex_agent_id(sender_agent_id, "engineer");
     assert_eq!(sent[0].recipient, tau_proto::AgentMessageRecipient::User);
     assert_eq!(sent[0].message, "hello user");
     assert!(received.is_empty());
@@ -13116,7 +13116,7 @@ fn agent_id_generation_is_stable_and_cleaned_up() {
     let first = h.ensure_agent_id_for_agent(&cid).expect("agent id");
     let second = h.ensure_agent_id_for_agent(&cid).expect("agent id");
     assert_eq!(first, second);
-    assert_role_hex_agent_id(&first, "senior-engineer");
+    assert_role_hex_agent_id(&first, "engineer");
     assert_eq!(h.agent_routes.get(&first), Some(&cid));
 
     h.remove_agent(&cid);

@@ -1190,10 +1190,10 @@ fn muc_room_template_can_use_identity_without_mandatory_randomness() {
     let mut state = State::default();
     state
         .agent_roles
-        .insert(agent_id("agent-1"), "senior-engineer".to_owned());
+        .insert(agent_id("agent-1"), "engineer".to_owned());
     state
         .role_groups
-        .insert("senior-engineer".to_owned(), "engineering".to_owned());
+        .insert("engineer".to_owned(), "engineering".to_owned());
 
     let localpart =
         room_localpart_for_registration(&state, &cfg, &"session-1".into(), &agent_id("agent-1"))
@@ -1202,7 +1202,7 @@ fn muc_room_template_can_use_identity_without_mandatory_randomness() {
 
     assert_eq!(
         localpart,
-        "session-1-agent-1-senior-engineer-engineering-senior-engineer-engineering"
+        "session-1-agent-1-engineer-engineering-engineer-engineering"
     );
     assert!(!localpart.contains(&muc_room_disambiguator(&agent_id("agent-1"))));
 }
@@ -1351,7 +1351,7 @@ fn replayed_role_metadata_populates_muc_room_template() {
                 Event::AgentStarted(tau_proto::AgentStarted {
                     agent_id: agent_id("agent-1"),
                     parent_agent: None,
-                    role: "senior-engineer".to_owned(),
+                    role: "engineer".to_owned(),
                     display_name: None,
                     metadata: Vec::new(),
                     ephemeral: false,
@@ -1361,14 +1361,14 @@ fn replayed_role_metadata_populates_muc_room_template() {
                 tau_proto::UnixMicros::new(2),
                 Event::HarnessRolesAvailable(tau_proto::HarnessRolesAvailable {
                     roles: vec![tau_proto::HarnessRoleInfo {
-                        name: "senior-engineer".to_owned(),
+                        name: "engineer".to_owned(),
                         description: String::new(),
                         role_description: None,
                         details: None,
                     }],
                     groups: vec![tau_proto::HarnessRoleGroup {
                         name: "engineering".to_owned(),
-                        roles: vec!["senior-engineer".to_owned()],
+                        roles: vec!["engineer".to_owned()],
                     }],
                     custom_prompts: Vec::new(),
                 }),
@@ -1389,7 +1389,7 @@ fn replayed_role_metadata_populates_muc_room_template() {
             .expect("lock")
             .get(&agent_id("agent-1"))
             .map(String::as_str),
-        Some("senior-engineer-engineering-agent-1@conference.example.org")
+        Some("engineer-engineering-agent-1@conference.example.org")
     );
 }
 

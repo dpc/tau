@@ -2043,7 +2043,7 @@ pub struct StartAgentRequest {
     /// conversation's history as a `User` message before dispatch.
     pub instruction: String,
     /// Requested agent role for this side conversation. Tool-backed
-    /// delegate queries default to `senior-engineer`; non-tool queries without
+    /// delegate queries default to `engineer`; non-tool queries without
     /// a role keep using the currently selected interactive role.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role: Option<String>,

@@ -283,7 +283,7 @@ impl RecordedLineHandlers for TestEphemeralCommandHandlers {
         let ephemeral = self.pending.take_ephemeral();
         let event = create_user_agent_prompt(
             "s1",
-            "senior-engineer",
+            "engineer",
             text,
             CreateUserAgentPromptOptions {
                 model_override,
@@ -332,7 +332,7 @@ impl TestNewRoleCommandHandlers {
         Self {
             pending: PendingNewAgentOptions::default(),
             selected_agent: Some("agent-1".to_owned()),
-            current_role: "senior-engineer".to_owned(),
+            current_role: "engineer".to_owned(),
             outputs: Vec::new(),
         }
     }
@@ -530,9 +530,7 @@ fn role_cycle_after_new_role_supersedes_pending_new_role() {
     }
     let event = create_user_agent_prompt(
         "s1",
-        pending
-            .take_role()
-            .unwrap_or_else(|| "senior-engineer".to_owned()),
+        pending.take_role().unwrap_or_else(|| "engineer".to_owned()),
         "please implement",
         CreateUserAgentPromptOptions::default(),
     );

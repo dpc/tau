@@ -957,7 +957,7 @@ fn agent_started() -> Event {
     Event::AgentStarted(tau_proto::AgentStarted {
         agent_id: agent_id(),
         parent_agent: None,
-        role: "senior-engineer".to_owned(),
+        role: "engineer".to_owned(),
         display_name: None,
         metadata: Vec::new(),
         ephemeral: false,

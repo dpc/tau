@@ -129,26 +129,27 @@ fn role_infos_include_configured_role_description() {
 
 /// Ensures role group navigation honors explicit role `order` values before
 /// falling back to role names, so UI cycling can use logical sequences such as
-/// junior -> senior -> staff even when config or map iteration is different.
+/// engineer-junior -> engineer -> engineer-senior even when config or map
+/// iteration is different.
 #[test]
 fn role_groups_sort_roles_by_order_then_name() {
     let roles = std::collections::HashMap::from([
         (
-            "staff-engineer".to_owned(),
+            "engineer-senior".to_owned(),
             tau_config::settings::AgentRole {
                 order: Some(30),
                 ..Default::default()
             },
         ),
         (
-            "junior-engineer".to_owned(),
+            "engineer-junior".to_owned(),
             tau_config::settings::AgentRole {
                 order: Some(10),
                 ..Default::default()
             },
         ),
         (
-            "senior-engineer".to_owned(),
+            "engineer".to_owned(),
             tau_config::settings::AgentRole {
                 order: Some(20),
                 ..Default::default()
@@ -182,11 +183,11 @@ fn role_groups_sort_roles_by_order_then_name() {
         roles: vec![
             "alpha-unordered".to_owned(),
             "omega-explicit-max".to_owned(),
-            "staff-engineer".to_owned(),
-            "senior-engineer".to_owned(),
+            "engineer-senior".to_owned(),
+            "engineer".to_owned(),
             "advisor".to_owned(),
             "alpha-peer".to_owned(),
-            "junior-engineer".to_owned(),
+            "engineer-junior".to_owned(),
         ],
     }];
 
@@ -195,10 +196,10 @@ fn role_groups_sort_roles_by_order_then_name() {
     assert_eq!(
         groups[0].roles,
         vec![
-            "junior-engineer",
+            "engineer-junior",
             "alpha-peer",
-            "senior-engineer",
-            "staff-engineer",
+            "engineer",
+            "engineer-senior",
             "omega-explicit-max",
             "advisor",
             "alpha-unordered",
@@ -667,7 +668,7 @@ fn provider_model_metadata_drives_selection_state() {
     )
     .expect("handle provider snapshot");
 
-    assert_eq!(h.selected_role, "senior-engineer");
+    assert_eq!(h.selected_role, "engineer");
     assert_eq!(h.selected_model.as_ref(), Some(&model_id));
     assert_eq!(h.selected_model_params().effort, Effort::High);
     assert_eq!(h.selected_model_params().verbosity, Verbosity::Low);
@@ -1132,9 +1133,9 @@ fn harness_startup_errors_when_no_roles_are_enabled() {
                 role_groups: {
                 engineer: {
                     roles: {
-                        "senior-engineer": { enable: false },
-                        "junior-engineer": { enable: false },
-                        "staff-engineer": { enable: false },
+                        "engineer": { enable: false },
+                        "engineer-junior": { enable: false },
+                        "engineer-senior": { enable: false },
                     },
                 },
                 manager: {
@@ -1524,11 +1525,11 @@ fn missing_default_role_emits_mandatory_warning_notice_and_falls_back() {
     .expect("write harness config");
 
     let h = echo_harness_with_dirs("s1", state_dir, dirs).expect("harness");
-    assert_eq!(h.selected_role, "junior-engineer");
+    assert_eq!(h.selected_role, "engineer-junior");
     let message = find_mandatory_warning_notice(&h, "default_role `ghost`")
         .expect("expected mandatory warning HarnessNotice about missing default_role");
     assert!(
-        message.contains("selected `junior-engineer` instead"),
+        message.contains("selected `engineer-junior` instead"),
         "message should name the fallback role, got: {message}"
     );
 }

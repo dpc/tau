@@ -706,7 +706,7 @@ fn daemon_message_create_agent(session_id: &str, message: &str, ctx_id: &str) ->
     UiCreateAgent {
         parent_agent: None,
         session_id: session_id.into(),
-        role: "senior-engineer".to_owned(),
+        role: "engineer".to_owned(),
         model_override: None,
         metadata: vec![tau_proto::AgentInitialMetadata {
             key: tau_proto::AgentMetadataKey::new("ext_core-shell_cwd"),

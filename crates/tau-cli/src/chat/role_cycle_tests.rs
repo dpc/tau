@@ -292,9 +292,9 @@ fn groups() -> Vec<tau_proto::HarnessRoleGroup> {
         tau_proto::HarnessRoleGroup {
             name: "engineer".to_owned(),
             roles: vec![
-                "junior-engineer".to_owned(),
-                "senior-engineer".to_owned(),
-                "staff-engineer".to_owned(),
+                "engineer-junior".to_owned(),
+                "engineer".to_owned(),
+                "engineer-senior".to_owned(),
             ],
         },
         tau_proto::HarnessRoleGroup {
@@ -314,11 +314,11 @@ fn group_cycle_returns_to_last_runtime_role_for_group() {
     // role the user last used in that group during this process.
     let groups = groups();
     let mut memory = HashMap::new();
-    memory.insert("engineer".to_owned(), "staff-engineer".to_owned());
+    memory.insert("engineer".to_owned(), "engineer-senior".to_owned());
 
     assert_eq!(
         next_role_in_groups(Some("manager"), &groups, false, &memory).as_deref(),
-        Some("staff-engineer")
+        Some("engineer-senior")
     );
 }
 
@@ -332,6 +332,6 @@ fn group_cycle_ignores_stale_runtime_group_memory() {
 
     assert_eq!(
         next_role_in_groups(Some("manager"), &groups, false, &memory).as_deref(),
-        Some("junior-engineer")
+        Some("engineer-junior")
     );
 }

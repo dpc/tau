@@ -17,7 +17,7 @@ tool_policy:
         - shell:cd
         - shell:lock
 agents:
-  default_role: senior-engineer
+  default_role: engineer
   id_template: "{{random_alphanumeric 6}}"
   display_name_template: "{{#if task_name_present}}{{role}}: {{task_name}}{{else}}{{role}}{{/if}}"
   role_groups:
@@ -40,17 +40,17 @@ agents:
             * prefer straightforward and conservative solutions, as long as they are correct.
 
       roles:
-        junior-engineer:
+        engineer-junior:
           enable: true
           order: 10
           description: Lower-reasoning but fast individual contributor. Best for straightforward coding tasks.
           effort: low
-        senior-engineer:
+        engineer:
           enable: true
           order: 20
           description: Capable individual contributor. Good default for most tasks.
           effort: medium
-        staff-engineer:
+        engineer-senior:
           enable: true
           order: 30
           description: Slow and expensive individual contributor using maximum reasoning. Best used only for hardest engineering problems.

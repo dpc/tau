@@ -6,7 +6,7 @@ use tau_proto::{
 
 /// Default role used when the UI submits a prompt without an explicit selected
 /// role from session state.
-pub(crate) const DEFAULT_AGENT_ROLE: &str = "senior-engineer";
+pub(crate) const DEFAULT_AGENT_ROLE: &str = "engineer";
 
 /// One-shot options applied while building a user-owned agent creation request.
 #[derive(Clone, Debug, Default)]

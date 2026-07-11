@@ -355,7 +355,7 @@ fn validate_event_rejects_blank_display_names() {
             Event::AgentStarted(tau_proto::AgentStarted {
                 agent_id: agent_id.clone(),
                 parent_agent: None,
-                role: "senior-engineer".to_owned(),
+                role: "engineer".to_owned(),
                 display_name: Some("   ".to_owned()),
                 metadata: Vec::new(),
                 ephemeral: false,
