@@ -32,6 +32,17 @@ notifications must be clearly labeled as watch notifications, not as explicit
 - `[tau-internal]: Watched agent <agent-id> emitted a response`
 - `[tau-internal]: Watched agent <agent-id> received a user prompt`
 
+Content-free model-turn initial/start/stop notifications are also allowed. They
+contain only stable watch/session identity, idle/running state, snapshot status,
+and a harness-runtime-scoped watched-agent turn generation. They must never include prompt,
+response, message, tool, or error content.
+
+A turn caused only by lifecycle notifications suppresses both lifecycle edges
+to prevent cyclic watches from self-exciting. If ordinary input joins that
+generation during a tool/provider continuation, the harness first emits the
+delayed start edge, then emits the matching stop normally; it never exposes an
+orphan stop.
+
 The watch path must not forward internal steering prompts, background or
 foreground tool-completion prompts, explicit `message` tool deliveries to the
 watched agent, or other hidden/non-user inputs. A completed `agent_start` result

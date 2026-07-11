@@ -257,7 +257,8 @@ impl Harness {
             return;
         }
         if enable {
-            self.agent_watches
+            let inserted = self
+                .agent_watches
                 .entry(watcher_id.to_owned())
                 .or_default()
                 .insert(watched_agent_id.to_owned());
@@ -265,6 +266,19 @@ impl Harness {
                 .entry(watched_agent_id.to_owned())
                 .or_default()
                 .insert(watcher_id.to_owned());
+            if inserted {
+                let subscription_id = format!(
+                    "watch-{}",
+                    next_agent_message_id(&crate::parse_agent_id(watcher_id)).as_str()
+                );
+                self.agent_watch_subscriptions.insert(
+                    (watcher_id.to_owned(), watched_agent_id.to_owned()),
+                    subscription_id,
+                );
+                self.publish_agent_watches_snapshot(watcher_id, Some(watched_agent_id), cause);
+                self.notify_agent_watcher_turn_state(watcher_id, watched_agent_id, true);
+                return;
+            }
         } else {
             if let Some(watched) = self.agent_watches.get_mut(watcher_id) {
                 watched.remove(watched_agent_id);
@@ -278,6 +292,8 @@ impl Harness {
                     self.agent_watchers.remove(watched_agent_id);
                 }
             }
+            self.agent_watch_subscriptions
+                .remove(&(watcher_id.to_owned(), watched_agent_id.to_owned()));
         }
         self.publish_agent_watches_snapshot(watcher_id, Some(watched_agent_id), cause);
     }
@@ -324,6 +340,62 @@ impl Harness {
                 watched_agent_ids,
                 changed_agent_id: changed_agent_id.map(crate::parse_agent_id),
                 cause,
+            }),
+        );
+    }
+
+    /// Deliver one structured current/transition model-turn state to a watcher.
+    pub(crate) fn notify_agent_watcher_turn_state(
+        &mut self,
+        watcher_id: &str,
+        watched_agent_id: &str,
+        initial: bool,
+    ) {
+        let Some(subscription_id) = self
+            .agent_watch_subscriptions
+            .get(&(watcher_id.to_owned(), watched_agent_id.to_owned()))
+            .cloned()
+        else {
+            return;
+        };
+        let (state, turn_generation) = self
+            .agent_routes
+            .get(watched_agent_id)
+            .and_then(|cid| self.agents.get(cid))
+            .map(|agent| (agent.published_runtime_state, agent.turn_generation))
+            .unwrap_or((tau_proto::AgentRuntimeState::Idle, 0));
+        let sender_id = crate::parse_agent_id(watched_agent_id);
+        let message_id = next_agent_message_id(&sender_id);
+        let message = match (initial, state) {
+            (true, tau_proto::AgentRuntimeState::Running) => format!(
+                "[tau-internal]: Watched agent {watched_agent_id} is currently running a model turn (initial watch state)"
+            ),
+            (true, tau_proto::AgentRuntimeState::Idle) => format!(
+                "[tau-internal]: Watched agent {watched_agent_id} is not currently running a model turn (initial watch state)"
+            ),
+            (false, tau_proto::AgentRuntimeState::Running) => {
+                format!("[tau-internal]: Watched agent {watched_agent_id} started a model turn")
+            }
+            (false, tau_proto::AgentRuntimeState::Idle) => {
+                format!("[tau-internal]: Watched agent {watched_agent_id} stopped its model turn")
+            }
+        };
+        self.publish_event(
+            Some(HARNESS_CONNECTION_ID),
+            Event::AgentMessageReceived(AgentMessageReceived {
+                message_id,
+                sender_id,
+                sender_session_id: None,
+                recipient_id: crate::parse_agent_id(watcher_id),
+                kind: tau_proto::AgentMessageKind::WatchTurnState,
+                watch_turn_state: Some(tau_proto::AgentWatchTurnStateNotification {
+                    session_id: self.current_session_id.clone(),
+                    subscription_id,
+                    state,
+                    initial,
+                    turn_generation,
+                }),
+                message,
             }),
         );
     }
@@ -380,6 +452,7 @@ impl Harness {
                     sender_session_id: None,
                     recipient_id: agent_id,
                     kind,
+                    watch_turn_state: None,
                     message,
                 }),
             );
@@ -574,6 +647,7 @@ impl Harness {
                 sender_session_id: Some(request.sender_session_id),
                 recipient_id: request.recipient_id,
                 kind: request.kind,
+                watch_turn_state: None,
                 message: request.message,
             }),
         );

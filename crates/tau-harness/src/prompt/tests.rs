@@ -823,6 +823,7 @@ fn assemble_conversation_assigns_roles_for_sent_and_received_agent_messages() {
             sender_session_id: None,
             recipient_id: tau_proto::AgentId::parse("main").expect("agent id"),
             kind: tau_proto::AgentMessageKind::Message,
+            watch_turn_state: None,
             message: "please investigate".to_owned(),
         },
     ));
@@ -860,6 +861,7 @@ fn assemble_conversation_replays_watch_response_as_notification_only() {
             sender_session_id: None,
             recipient_id: main,
             kind: tau_proto::AgentMessageKind::WatchResponse,
+            watch_turn_state: None,
             message: "done <response>&</response>".to_owned(),
         },
     ));
@@ -890,6 +892,43 @@ fn assemble_conversation_replays_watch_response_as_notification_only() {
 
     let watched_items = assemble_conversation_from(&watched_tree, watched_tree.head());
     assert!(watched_items.is_empty());
+}
+
+/// A durable lifecycle watch projection must replay as exactly the
+/// receiver-side internal notification that was rendered live, without
+/// inventing sender text.
+#[test]
+fn assemble_conversation_replays_watch_turn_state_as_notification_only() {
+    let watcher = tau_proto::AgentId::parse("watcher").expect("agent id");
+    let watched = tau_proto::AgentId::parse("watched").expect("agent id");
+    let text = "[tau-internal]: Watched agent watched started a model turn";
+    let mut tree = tau_core::AgentTree::from_events(watcher.clone(), &[]);
+    tree.apply_event(&Event::AgentMessageReceived(
+        tau_proto::AgentMessageReceived {
+            message_id: "msg-watch-state".into(),
+            sender_id: watched,
+            sender_session_id: None,
+            recipient_id: watcher,
+            kind: tau_proto::AgentMessageKind::WatchTurnState,
+            watch_turn_state: Some(tau_proto::AgentWatchTurnStateNotification {
+                session_id: "session-1".into(),
+                subscription_id: "watch-subscription-1".to_owned(),
+                state: tau_proto::AgentRuntimeState::Running,
+                initial: false,
+                turn_generation: 1,
+            }),
+            message: text.to_owned(),
+        },
+    ));
+
+    let items = assemble_conversation_from(&tree, tree.head());
+    assert_eq!(items.len(), 1);
+    assert!(matches!(
+        &items[0],
+        ContextItem::Message(MessageItem { role, content, .. })
+            if *role == ContextRole::User
+                && matches!(&content[0], ContentPart::Text { text: replayed } if replayed == text)
+    ));
 }
 
 /// Encrypted-reasoning replay: when `ProviderResponseFinished` carries

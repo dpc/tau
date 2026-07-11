@@ -100,6 +100,14 @@ agent's final responses and received user prompts:
 agent_watch({"agent_id":"engineer_b","enable":true})
 ```
 
+Successful enable first reports whether the watched agent is currently running
+a model turn. Later `Idle → Running` and `Running → Idle` transitions arrive as
+separate “started a model turn” and “stopped its model turn” notifications.
+One turn remains running across provider/tool continuation rounds. The durable
+notification carries a watch-subscription id, an initial-snapshot marker, and a
+harness-runtime-scoped watched-agent turn generation so consumers can correlate
+and reject stale state.
+
 `agent_start` automatically enables watching for the sub-agent it creates. A
 watch response notification is delivered to the watching agent as a hidden
 internal prompt that is distinct from an explicit `message` tool delivery:

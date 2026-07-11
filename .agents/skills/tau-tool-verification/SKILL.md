@@ -757,6 +757,13 @@ Report concise but complete findings:
 
 Use this plan when asked to verify the `agent_watch` tool. The goal is to prove that watch subscriptions deliver only the watched agent's final response notifications and received user-prompt notifications, that `agent_start` auto-watches its child, and that disabling a watch stops delivery without hiding errors.
 
+Enabling a watch also delivers one content-free current model-turn state
+notification, followed by separate started/stopped notifications for whole
+turns. Tool execution and its provider continuation remain one turn. Verify
+that these state notices do not expose prompt, message, tool, response, or error
+content, and that notification-only turns do not recursively amplify cyclic
+watches.
+
 Watch notifications must be distinguishable from explicit `message` tool deliveries in the model-visible prompt. Explicit messages use a “received a message from ...” wrapper with a `<message>` block. Watch response notifications use this exact shape:
 
 ```text

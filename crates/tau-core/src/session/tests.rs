@@ -26,6 +26,39 @@ fn validation_error(tree: &AgentTree, event: Event) -> String {
         .to_string()
 }
 
+/// Watch-turn messages must carry their structured payload, while ordinary
+/// messages must not smuggle one into the durable agent transcript.
+#[test]
+fn validate_event_enforces_watch_turn_state_payload_discriminator() {
+    let id = agent_id();
+    let tree = AgentTree::from_events(id.clone(), &[]);
+    let payload = tau_proto::AgentWatchTurnStateNotification {
+        session_id: "session-1".into(),
+        subscription_id: "watch-1".to_owned(),
+        state: tau_proto::AgentRuntimeState::Running,
+        initial: false,
+        turn_generation: 1,
+    };
+    for (kind, watch_turn_state) in [
+        (AgentMessageKind::WatchTurnState, None),
+        (AgentMessageKind::Message, Some(payload)),
+    ] {
+        let event = Event::AgentMessageReceived(AgentMessageReceived {
+            message_id: "msg-invalid-watch-state".into(),
+            sender_id: other_agent_id(),
+            sender_session_id: None,
+            recipient_id: id.clone(),
+            kind,
+            watch_turn_state,
+            message: String::new(),
+        });
+        assert!(
+            validation_error(&tree, event).contains("payload must be present exactly"),
+            "mismatched discriminator and payload must fail closed"
+        );
+    }
+}
+
 fn incoming_message(agent_id: AgentId) -> Event {
     Event::AgentMessageIncoming(tau_proto::AgentMessageIncoming {
         recipient_id: agent_id.clone(),

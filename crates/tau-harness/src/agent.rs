@@ -106,6 +106,16 @@ pub(crate) struct Agent {
     /// when that exact prompt is dispatched.
     pub(crate) next_ctx_id: Option<String>,
     pub(crate) turn_state: AgentTurnState,
+    /// Last externally published runtime state, independent of internal
+    /// continuation bookkeeping that may temporarily use `Idle`.
+    pub(crate) published_runtime_state: tau_proto::AgentRuntimeState,
+    /// Runtime-scoped whole-turn generation used by watch state notifications.
+    pub(crate) turn_generation: u64,
+    /// Whether the current turn was caused only by lifecycle notifications.
+    pub(crate) lifecycle_notification_only_turn: bool,
+    /// Watch subscription ids present when a notification-only turn suppressed
+    /// its start and therefore eligible for a delayed start on promotion.
+    pub(crate) suppressed_start_subscriptions: Vec<String>,
     /// For side agents spawned by a tool-implementing extension
     /// (currently just `agent_start`): the parent agent's tool call id
     /// that this conversation is fulfilling. Kept for teardown/routing of
@@ -175,6 +185,8 @@ pub(crate) enum PendingPromptSource {
     WatchNotifiedUser,
     /// A prompt created from an `agent.message_received` delivery.
     AgentMessageReceived,
+    /// A model-turn watch notification; isolated to prevent cyclic watches.
+    WatchTurnState,
     /// Internal loop-guard pivot prompt.
     LoopGuard,
     /// A passive background-completion notice that should be folded into the
@@ -271,6 +283,17 @@ impl PendingPrompt {
         }
     }
 
+    /// Create a hidden lifecycle notification prompt.
+    pub(crate) fn watch_turn_state(text: String) -> Self {
+        Self {
+            text,
+            message_class: PromptMessageClass::Internal,
+            source: PendingPromptSource::WatchTurnState,
+            ctx_id: None,
+            submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
+        }
+    }
+
     /// Create a hidden queued prompt from an `agent.message_received` delivery.
     pub(crate) fn agent_message_received(text: String) -> Self {
         Self {
@@ -320,7 +343,16 @@ impl PendingPrompt {
     /// Whether this prompt came from an `agent.message_received` delivery.
     #[must_use]
     pub(crate) fn is_agent_message_received(&self) -> bool {
-        self.source == PendingPromptSource::AgentMessageReceived
+        matches!(
+            self.source,
+            PendingPromptSource::AgentMessageReceived | PendingPromptSource::WatchTurnState
+        )
+    }
+
+    /// Whether this prompt is a content-free watch lifecycle notification.
+    #[must_use]
+    pub(crate) fn is_watch_turn_state(&self) -> bool {
+        self.source == PendingPromptSource::WatchTurnState
     }
 
     /// Whether this user prompt should produce a watcher context notification.
@@ -365,6 +397,10 @@ impl Agent {
             prompt_index_initialized: false,
             next_ctx_id: None,
             turn_state: AgentTurnState::Idle,
+            published_runtime_state: tau_proto::AgentRuntimeState::Idle,
+            turn_generation: 0,
+            lifecycle_notification_only_turn: false,
+            suppressed_start_subscriptions: Vec::new(),
             parent_tool_call_id: None,
             parent_agent_id: None,
             display_name: None,

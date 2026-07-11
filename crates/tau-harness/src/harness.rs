@@ -1582,6 +1582,8 @@ pub struct Harness {
     pub(crate) agent_watches: HashMap<String, BTreeSet<String>>,
     /// Reverse session-local watch index keyed by watched public agent id.
     pub(crate) agent_watchers: HashMap<String, BTreeSet<String>>,
+    /// Subscription identity for each directed session-local watch relation.
+    pub(crate) agent_watch_subscriptions: HashMap<(String, String), String>,
     /// Agent ids that were once known but can no longer receive messages.
     pub(crate) stopped_agent_ids: HashSet<String>,
     /// Global harness state. Currently only tracks per-session init
@@ -2196,6 +2198,7 @@ impl Harness {
             session_loaded_agents: HashSet::new(),
             agent_watches: HashMap::new(),
             agent_watchers: HashMap::new(),
+            agent_watch_subscriptions: HashMap::new(),
             stopped_agent_ids: HashSet::new(),
             turn_state: TurnState::Idle,
             debug_log: None,
@@ -3735,6 +3738,7 @@ impl Harness {
                 "[tau-internal]: Watched agent {} received a user prompt\n\n<prompt>\n{}\n</prompt>",
                 sender_label, escaped_message
             ),
+            tau_proto::AgentMessageKind::WatchTurnState => message.message.clone(),
         };
         if let Some(cid) = self
             .agent_routes
@@ -3742,8 +3746,12 @@ impl Harness {
             .cloned()
         {
             if let Some(conv) = self.agents.get_mut(&cid) {
-                conv.pending_prompts
-                    .push_back(PendingPrompt::agent_message_received(text));
+                let prompt = if message.kind == tau_proto::AgentMessageKind::WatchTurnState {
+                    PendingPrompt::watch_turn_state(text)
+                } else {
+                    PendingPrompt::agent_message_received(text)
+                };
+                conv.pending_prompts.push_back(prompt);
             }
             self.interrupt_active_waits_for(&cid);
             self.preempt_queued_tool_calls_for_message_received(&cid);
@@ -9760,6 +9768,7 @@ impl Harness {
         self.agent_routes.clear();
         self.agent_watches.clear();
         self.agent_watchers.clear();
+        self.agent_watch_subscriptions.clear();
         self.stopped_agent_ids.clear();
 
         self.current_session_id = new_session_id.clone();
@@ -10564,7 +10573,7 @@ impl Harness {
     fn set_agent_turn_state(&mut self, cid: &AgentId, state: AgentTurnState) {
         let new_state = agent_runtime_state_for_turn(&state);
         let changed_agent_id = self.agents.get(cid).and_then(|agent| {
-            let old_state = agent_runtime_state_for_turn(&agent.turn_state);
+            let old_state = agent.published_runtime_state;
             if old_state == new_state {
                 return None;
             }
@@ -10573,6 +10582,12 @@ impl Harness {
 
         if let Some(agent) = self.agents.get_mut(cid) {
             agent.turn_state = state;
+            if changed_agent_id.is_some() {
+                agent.published_runtime_state = new_state;
+                if new_state == tau_proto::AgentRuntimeState::Running {
+                    agent.turn_generation = agent.turn_generation.saturating_add(1);
+                }
+            }
         }
 
         let Some(agent_id) = changed_agent_id else {
@@ -10586,6 +10601,63 @@ impl Harness {
             }),
         );
         self.emit_agent_stats_updated(cid);
+        let suppress = self
+            .agents
+            .get(cid)
+            .is_some_and(|agent| agent.lifecycle_notification_only_turn);
+        if suppress && new_state == tau_proto::AgentRuntimeState::Running {
+            let subscriptions = self
+                .watchers_for_agent(&agent_id)
+                .into_iter()
+                .filter_map(|watcher_id| {
+                    self.agent_watch_subscriptions
+                        .get(&(watcher_id, agent_id.clone()))
+                        .cloned()
+                })
+                .collect();
+            if let Some(agent) = self.agents.get_mut(cid) {
+                agent.suppressed_start_subscriptions = subscriptions;
+            }
+        }
+        if !suppress {
+            for watcher_id in self.watchers_for_agent(&agent_id) {
+                self.notify_agent_watcher_turn_state(&watcher_id, &agent_id, false);
+            }
+        }
+        if new_state == tau_proto::AgentRuntimeState::Idle
+            && let Some(agent) = self.agents.get_mut(cid)
+        {
+            agent.lifecycle_notification_only_turn = false;
+            agent.suppressed_start_subscriptions.clear();
+        }
+    }
+
+    /// Convert a notification-only running generation into an observable mixed
+    /// turn by emitting its delayed start before any eventual stop.
+    fn promote_lifecycle_notification_turn(&mut self, cid: &AgentId) {
+        let promoted = self.agents.get_mut(cid).and_then(|agent| {
+            if !agent.lifecycle_notification_only_turn
+                || agent.published_runtime_state != tau_proto::AgentRuntimeState::Running
+            {
+                return None;
+            }
+            agent.lifecycle_notification_only_turn = false;
+            Some((
+                agent.agent_id.clone()?,
+                std::mem::take(&mut agent.suppressed_start_subscriptions),
+            ))
+        });
+        let Some((agent_id, owed_subscriptions)) = promoted else {
+            return;
+        };
+        for watcher_id in self.watchers_for_agent(&agent_id) {
+            let subscription = self
+                .agent_watch_subscriptions
+                .get(&(watcher_id.clone(), agent_id.clone()));
+            if subscription.is_some_and(|id| owed_subscriptions.contains(id)) {
+                self.notify_agent_watcher_turn_state(&watcher_id, &agent_id, false);
+            }
+        }
     }
 
     fn remove_agent(&mut self, cid: &AgentId) -> Option<Agent> {
@@ -13007,6 +13079,9 @@ impl Harness {
 
     fn publish_prompts_as_steered(&mut self, cid: &AgentId, prompts: Vec<PendingPrompt>) {
         for prompt in prompts {
+            if !prompt.is_watch_turn_state() {
+                self.promote_lifecycle_notification_turn(cid);
+            }
             let agent_id = self
                 .agents
                 .get(cid)

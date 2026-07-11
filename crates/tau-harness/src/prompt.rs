@@ -750,6 +750,22 @@ pub(crate) fn assemble_prompt_context_from(
                         ));
                     }
                 }
+                tau_proto::AgentMessageKind::WatchTurnState => {
+                    if *direction == tau_core::AgentMessageDirection::Inbound {
+                        blocks.push(tau_proto::ContextBlock::UserInput(
+                            tau_proto::UserInputBlock {
+                                items: vec![ContextItem::Message(tau_proto::MessageItem {
+                                    role: tau_proto::ContextRole::User,
+                                    content: vec![tau_proto::ContentPart::Text {
+                                        text: message.clone(),
+                                    }],
+                                    phase: None,
+                                    responses_raw_json: None,
+                                })],
+                            },
+                        ));
+                    }
+                }
             },
             AgentEntry::MessageEnvelope { item } => {
                 let mut item = item.clone();

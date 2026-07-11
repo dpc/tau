@@ -7642,6 +7642,7 @@ fn agent_message_interrupts_recipient_active_wait() {
             sender_session_id: None,
             recipient_id: crate::parse_agent_id(&recipient_id),
             kind: tau_proto::AgentMessageKind::Message,
+            watch_turn_state: None,
             message: "please stop waiting".to_owned(),
         }),
     );
@@ -7880,6 +7881,7 @@ fn cross_owner_exact_wait_is_rejected_without_active_wait_state() {
             sender_session_id: None,
             recipient_id: crate::parse_agent_id(&target_agent_id),
             kind: tau_proto::AgentMessageKind::Message,
+            watch_turn_state: None,
             message: "target owner only".to_owned(),
         }),
     );
@@ -7899,6 +7901,7 @@ fn cross_owner_exact_wait_is_rejected_without_active_wait_state() {
             sender_session_id: None,
             recipient_id: crate::parse_agent_id(&waiter_agent_id),
             kind: tau_proto::AgentMessageKind::Message,
+            watch_turn_state: None,
             message: "waiter should resume".to_owned(),
         }),
     );
@@ -8237,6 +8240,7 @@ fn side_agent_drains_agent_message_before_extension_teardown() {
             sender_session_id: None,
             recipient_id: crate::parse_agent_id(&recipient_id),
             kind: tau_proto::AgentMessageKind::Message,
+            watch_turn_state: None,
             message: "please include this".to_owned(),
         }),
     );
@@ -10822,6 +10826,286 @@ fn disabling_agent_watch_removes_response_fanout_route() {
     h.shutdown().expect("shutdown");
 }
 
+/// A watch must receive one structured initial snapshot and one start/stop pair
+/// per whole model turn, while provider/tool continuations retain one
+/// generation.
+#[test]
+fn agent_watch_reports_structured_whole_turn_state() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    let watched_cid = ensure_test_user_agent(&mut h);
+    let watcher_cid =
+        h.create_durable_user_agent(h.current_session_id.clone(), &h.selected_role.clone());
+    let watched_id = durable_agent_id_for_conversation(&h, &watched_cid).to_string();
+    let watcher_id = durable_agent_id_for_conversation(&h, &watcher_cid).to_string();
+    h.agents.get_mut(&watcher_cid).expect("watcher").turn_state = AgentTurnState::AgentThinking {
+        agent_prompt_id: "watcher-busy".into(),
+    };
+
+    h.set_agent_watch(
+        &watcher_id,
+        &watched_id,
+        true,
+        tau_proto::AgentWatchUpdateCause::AgentWatchEnable,
+    );
+    h.set_agent_watch(
+        &watcher_id,
+        &watched_id,
+        true,
+        tau_proto::AgentWatchUpdateCause::AgentWatchEnable,
+    );
+    h.set_agent_turn_state(
+        &watched_cid,
+        AgentTurnState::AgentThinking {
+            agent_prompt_id: "watched-turn".into(),
+        },
+    );
+    h.set_agent_turn_state(
+        &watched_cid,
+        AgentTurnState::ToolsRunning {
+            remaining_calls: vec!["call-1".into()],
+        },
+    );
+    // Internal tool-result continuation bookkeeping may temporarily use Idle,
+    // but the published whole-turn state remains running.
+    h.agents.get_mut(&watched_cid).expect("watched").turn_state = AgentTurnState::Idle;
+    h.set_agent_turn_state(
+        &watched_cid,
+        AgentTurnState::AgentThinking {
+            agent_prompt_id: "watched-continuation".into(),
+        },
+    );
+    h.set_agent_turn_state(&watched_cid, AgentTurnState::Idle);
+
+    let notifications: Vec<_> = session_agent_message_received_events(&h)
+        .into_iter()
+        .filter(|message| message.kind == tau_proto::AgentMessageKind::WatchTurnState)
+        .collect();
+    assert_eq!(notifications.len(), 3);
+    let initial = notifications[0]
+        .watch_turn_state
+        .as_ref()
+        .expect("initial payload");
+    assert!(initial.initial);
+    assert_eq!(initial.state, tau_proto::AgentRuntimeState::Idle);
+    assert_eq!(initial.turn_generation, 0);
+    let started = notifications[1]
+        .watch_turn_state
+        .as_ref()
+        .expect("start payload");
+    assert!(!started.initial);
+    assert_eq!(started.state, tau_proto::AgentRuntimeState::Running);
+    assert_eq!(started.turn_generation, 1);
+    let stopped = notifications[2]
+        .watch_turn_state
+        .as_ref()
+        .expect("stop payload");
+    assert_eq!(stopped.state, tau_proto::AgentRuntimeState::Idle);
+    assert_eq!(stopped.turn_generation, 1);
+    assert_eq!(initial.subscription_id, started.subscription_id);
+    assert_eq!(started.subscription_id, stopped.subscription_id);
+    assert!(durable_agent_message_sent_events(&h).is_empty());
+    assert_eq!(
+        durable_agent_message_received_events(&h)
+            .into_iter()
+            .filter(|message| message.kind == tau_proto::AgentMessageKind::WatchTurnState)
+            .count(),
+        3
+    );
+
+    h.set_agent_watch(
+        &watcher_id,
+        &watched_id,
+        false,
+        tau_proto::AgentWatchUpdateCause::AgentWatchDisable,
+    );
+    h.set_agent_turn_state(
+        &watched_cid,
+        AgentTurnState::AgentThinking {
+            agent_prompt_id: "already-running-on-reenable".into(),
+        },
+    );
+    h.set_agent_watch(
+        &watcher_id,
+        &watched_id,
+        true,
+        tau_proto::AgentWatchUpdateCause::AgentWatchEnable,
+    );
+    let reenabled = session_agent_message_received_events(&h)
+        .into_iter()
+        .rev()
+        .find(|message| message.kind == tau_proto::AgentMessageKind::WatchTurnState)
+        .expect("re-enabled initial state");
+    let reenabled_state = reenabled
+        .watch_turn_state
+        .as_ref()
+        .expect("re-enabled payload");
+    assert!(reenabled_state.initial);
+    assert_eq!(reenabled_state.state, tau_proto::AgentRuntimeState::Running);
+    assert_eq!(reenabled_state.turn_generation, 2);
+    assert_ne!(reenabled_state.subscription_id, initial.subscription_id);
+    h.set_agent_turn_state(&watched_cid, AgentTurnState::Idle);
+
+    let before_notification_only_turn = session_agent_message_received_events(&h)
+        .into_iter()
+        .filter(|message| message.kind == tau_proto::AgentMessageKind::WatchTurnState)
+        .count();
+    h.agents
+        .get_mut(&watched_cid)
+        .expect("watched")
+        .lifecycle_notification_only_turn = true;
+    h.set_agent_turn_state(
+        &watched_cid,
+        AgentTurnState::AgentThinking {
+            agent_prompt_id: "notification-only-turn".into(),
+        },
+    );
+    h.set_agent_turn_state(&watched_cid, AgentTurnState::Idle);
+    let after_notification_only_turn = session_agent_message_received_events(&h)
+        .into_iter()
+        .filter(|message| message.kind == tau_proto::AgentMessageKind::WatchTurnState)
+        .count();
+    assert_eq!(
+        after_notification_only_turn, before_notification_only_turn,
+        "notification-only turns must not recursively fan out lifecycle state"
+    );
+
+    h.shutdown().expect("shutdown");
+}
+
+/// Mutual watches must not self-excite on lifecycle-only turns, while ordinary
+/// input added during a tool continuation promotes the generation with a
+/// delayed start so its eventual stop remains paired.
+#[test]
+fn mutual_watch_mixed_lifecycle_turn_emits_paired_state() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    h.selected_model = Some("test/model".into());
+    let a_cid = ensure_test_user_agent(&mut h);
+    let b_cid = h.create_durable_user_agent(h.current_session_id.clone(), &h.selected_role.clone());
+    let a_id = durable_agent_id_for_conversation(&h, &a_cid).to_string();
+    let b_id = durable_agent_id_for_conversation(&h, &b_cid).to_string();
+    for cid in [&a_cid, &b_cid] {
+        h.agents.get_mut(cid).expect("agent").turn_state = AgentTurnState::AgentThinking {
+            agent_prompt_id: format!("busy-{cid}").into(),
+        };
+    }
+    h.set_agent_watch(
+        &a_id,
+        &b_id,
+        true,
+        tau_proto::AgentWatchUpdateCause::AgentWatchEnable,
+    );
+    h.set_agent_watch(
+        &b_id,
+        &a_id,
+        true,
+        tau_proto::AgentWatchUpdateCause::AgentWatchEnable,
+    );
+
+    h.agents.get_mut(&b_cid).expect("agent b").turn_state = AgentTurnState::Idle;
+    let lifecycle_prompt = h
+        .agents
+        .get_mut(&b_cid)
+        .expect("agent b")
+        .pending_prompts
+        .pop_front()
+        .expect("initial lifecycle prompt");
+    assert!(lifecycle_prompt.is_watch_turn_state());
+    h.dispatch_prompt_for_agent(&b_cid, lifecycle_prompt)
+        .expect("dispatch lifecycle turn");
+    h.set_agent_turn_state(
+        &b_cid,
+        AgentTurnState::ToolsRunning {
+            remaining_calls: vec!["mixed-call".into()],
+        },
+    );
+    let fresh_cid =
+        h.create_durable_user_agent(h.current_session_id.clone(), &h.selected_role.clone());
+    let fresh_id = durable_agent_id_for_conversation(&h, &fresh_cid).to_string();
+    h.agents
+        .get_mut(&fresh_cid)
+        .expect("fresh watcher")
+        .turn_state = AgentTurnState::AgentThinking {
+        agent_prompt_id: "fresh-watcher-busy".into(),
+    };
+    h.set_agent_watch(
+        &fresh_id,
+        &b_id,
+        true,
+        tau_proto::AgentWatchUpdateCause::AgentWatchEnable,
+    );
+    let before_promotion = session_agent_message_received_events(&h)
+        .into_iter()
+        .filter(|message| {
+            message.kind == tau_proto::AgentMessageKind::WatchTurnState
+                && message.sender_id.as_str() == b_id
+                && message.recipient_id.as_str() == a_id
+                && !message
+                    .watch_turn_state
+                    .as_ref()
+                    .is_some_and(|state| state.initial)
+        })
+        .count();
+    assert_eq!(before_promotion, 0);
+
+    h.agents
+        .get_mut(&b_cid)
+        .expect("agent b")
+        .pending_prompts
+        .push_back(PendingPrompt::internal(
+            "ordinary continuation input".to_owned(),
+        ));
+    h.fold_pending_prompts_as_steered(&b_cid);
+    h.set_agent_turn_state(&b_cid, AgentTurnState::Idle);
+
+    let mixed_edges: Vec<_> = session_agent_message_received_events(&h)
+        .into_iter()
+        .filter(|message| {
+            message.kind == tau_proto::AgentMessageKind::WatchTurnState
+                && message.sender_id.as_str() == b_id
+                && message.recipient_id.as_str() == a_id
+                && !message
+                    .watch_turn_state
+                    .as_ref()
+                    .is_some_and(|state| state.initial)
+        })
+        .collect();
+    assert_eq!(mixed_edges.len(), 2);
+    let start = mixed_edges[0].watch_turn_state.as_ref().expect("start");
+    let stop = mixed_edges[1].watch_turn_state.as_ref().expect("stop");
+    assert_eq!(start.state, tau_proto::AgentRuntimeState::Running);
+    assert_eq!(stop.state, tau_proto::AgentRuntimeState::Idle);
+    assert_eq!(start.turn_generation, stop.turn_generation);
+    let fresh_states: Vec<_> = session_agent_message_received_events(&h)
+        .into_iter()
+        .filter(|message| {
+            message.kind == tau_proto::AgentMessageKind::WatchTurnState
+                && message.sender_id.as_str() == b_id
+                && message.recipient_id.as_str() == fresh_id
+        })
+        .collect();
+    assert_eq!(
+        fresh_states.len(),
+        2,
+        "initial running plus one stop: {fresh_states:?}"
+    );
+    assert!(
+        fresh_states[0].watch_turn_state.as_ref().is_some_and(
+            |state| state.initial && state.state == tau_proto::AgentRuntimeState::Running
+        )
+    );
+    assert!(
+        fresh_states[1].watch_turn_state.as_ref().is_some_and(
+            |state| !state.initial && state.state == tau_proto::AgentRuntimeState::Idle
+        )
+    );
+
+    h.shutdown().expect("shutdown");
+}
+
 #[test]
 fn agent_stats_snapshots_cover_tool_and_context_transitions_and_replay() {
     let td = TempDir::new().expect("tempdir");
@@ -12959,14 +13243,21 @@ fn user_prompt_to_watched_agent_notifies_watchers_with_prompt_markup() {
     .expect("prompt submitted");
 
     assert!(session_agent_message_sent_events(&h).is_empty());
-    let received = session_agent_message_received_events(&h);
+    let received: Vec<_> = session_agent_message_received_events(&h)
+        .into_iter()
+        .filter(|message| message.kind == tau_proto::AgentMessageKind::WatchPrompt)
+        .collect();
     assert_eq!(received.len(), 1);
     assert_eq!(received[0].kind, tau_proto::AgentMessageKind::WatchPrompt);
     assert_eq!(received[0].sender_id, crate::parse_agent_id(&watched_id));
     assert_eq!(received[0].recipient_id, crate::parse_agent_id(&watcher_id));
 
     let watcher = h.agents.get(&watcher_cid).expect("watcher conversation");
-    let queued = watcher.pending_prompts.back().expect("queued notification");
+    let queued = watcher
+        .pending_prompts
+        .iter()
+        .find(|prompt| prompt.text.contains("received a user prompt"))
+        .expect("queued prompt notification");
     assert_eq!(
         queued.message_class,
         tau_proto::PromptMessageClass::Internal
@@ -13025,7 +13316,9 @@ fn internal_prompt_to_watched_agent_does_not_notify_watchers() {
     .expect("internal prompt submitted");
 
     assert!(
-        session_agent_message_received_events(&h).is_empty(),
+        !session_agent_message_received_events(&h)
+            .iter()
+            .any(|message| message.kind == tau_proto::AgentMessageKind::WatchPrompt),
         "internal prompts to watched agents must not be forwarded to watchers"
     );
 
@@ -13086,7 +13379,9 @@ fn queued_user_prompt_notifies_watchers_when_dispatched_not_when_queued() {
     .expect("prompt queued");
 
     assert!(
-        session_agent_message_received_events(&h).is_empty(),
+        !session_agent_message_received_events(&h)
+            .iter()
+            .any(|message| message.kind == tau_proto::AgentMessageKind::WatchPrompt),
         "queued prompt must not notify watchers before it becomes active"
     );
 
@@ -13096,7 +13391,10 @@ fn queued_user_prompt_notifies_watchers_when_dispatched_not_when_queued() {
         .turn_state = AgentTurnState::Idle;
     h.try_advance_queue();
 
-    let received = session_agent_message_received_events(&h);
+    let received: Vec<_> = session_agent_message_received_events(&h)
+        .into_iter()
+        .filter(|message| message.kind == tau_proto::AgentMessageKind::WatchPrompt)
+        .collect();
     assert_eq!(received.len(), 1);
     assert_eq!(received[0].kind, tau_proto::AgentMessageKind::WatchPrompt);
     assert_eq!(received[0].message, "queued follow-up");
@@ -13146,6 +13444,7 @@ fn inbound_agent_message_events_are_ignored() {
         sender_session_id: Some("other-session".into()),
         recipient_id: crate::parse_agent_id("victim"),
         kind: tau_proto::AgentMessageKind::Message,
+        watch_turn_state: None,
         message: "forged received".to_owned(),
     });
     for forged in [forged_sent, forged_received] {

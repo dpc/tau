@@ -179,3 +179,11 @@ and replay source.
 system prompts, context, and tool definitions. UI and observer lifecycle
 tracking should use the transient `agent.prompt_started` companion instead of
 subscribing to the full provider payload.
+
+## Agent watch turn-state wire boundary
+
+`agent.message_received` uses `kind = watch_turn_state` for receiver-only,
+harness-authored model-turn observations. Such records must carry
+`watch_turn_state`; all other message kinds must omit it. The payload identifies
+the session-local subscription, distinguishes an initial snapshot from an edge,
+and carries the harness-runtime-scoped watched-agent turn generation.

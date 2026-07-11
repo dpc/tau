@@ -105,6 +105,12 @@ other hidden inputs must not be forwarded as watch notifications. A terminal
 `agent_start` result remains the started agent's final response to its direct
 delegating watcher, even when that watcher is itself a side agent.
 
+In addition to those two content-bearing kinds, watches receive content-free
+whole-model-turn state notifications. The canonical `AgentTurnState` mapping
+emits one initial snapshot and subsequent idle/running edges; tool continuation
+rounds remain one generation. Lifecycle-only notification turns do not fan out
+more lifecycle notifications, preventing mutual-watch feedback loops.
+
 ## Provider response stats boundary
 
 Providers own response-throughput sampling. A provider starts prompt-local response stats when it dispatches the backend request, counts backend response bytes at the transport receive boundary before semantic parsing, batches counters in memory, emits the first non-empty previous/current `response_stats` sample promptly, emits later samples at most once per second on `provider.response_updated`, and may flush once immediately before the prompt closes. `previous` is the last sample that provider actually emitted, not an internal calculation.

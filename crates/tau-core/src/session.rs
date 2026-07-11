@@ -1125,7 +1125,15 @@ impl AgentTree {
             Event::AgentMessageReceived(message)
                 if self.agent_message_entry_from_received(message).is_some() =>
             {
-                Some(Ok(()))
+                let payload_matches_kind = (message.kind == AgentMessageKind::WatchTurnState)
+                    == message.watch_turn_state.is_some();
+                Some(if payload_matches_kind {
+                    Ok(())
+                } else {
+                    Err(AgentEventValidationError::new(
+                        "watch_turn_state payload must be present exactly for watch_turn_state messages",
+                    ))
+                })
             }
             Event::AgentMessageIncoming(message) if message.recipient_id == self.agent_id => {
                 Some(Ok(()))

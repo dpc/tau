@@ -2526,6 +2526,7 @@ fn accepted_message_reactivates_suspended_agent_before_delegate_completion() {
             sender_session_id: None,
             recipient_id: agent_id("worker-1"),
             kind: tau_proto::AgentMessageKind::Message,
+            watch_turn_state: None,
             message: "follow up".to_owned(),
         },
     ));
@@ -3729,6 +3730,7 @@ fn external_agent_messages_render_session_agent_labels() {
             sender_session_id: Some("session-3".into()),
             recipient_id: agent_id("manager_11111111"),
             kind: tau_proto::AgentMessageKind::Message,
+            watch_turn_state: None,
             message: "hello back".to_owned(),
         },
     ));

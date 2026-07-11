@@ -59,6 +59,9 @@ impl Harness {
         prompt: impl Into<PendingPrompt>,
     ) -> Result<(), HarnessError> {
         let prompt = prompt.into();
+        if !prompt.is_watch_turn_state() {
+            self.promote_lifecycle_notification_turn(agent_id);
+        }
         if !prompt.is_internal() {
             self.reset_loop_guard_for_progress(agent_id);
         }
@@ -118,6 +121,9 @@ impl Harness {
         prompt: impl Into<PendingPrompt>,
     ) -> Result<(), HarnessError> {
         let prompt = prompt.into();
+        if let Some(agent) = self.agents.get_mut(agent_id) {
+            agent.lifecycle_notification_only_turn = prompt.is_watch_turn_state();
+        }
         if !prompt.is_internal() {
             self.reset_loop_guard_for_progress(agent_id);
             let passive_background_prompts =

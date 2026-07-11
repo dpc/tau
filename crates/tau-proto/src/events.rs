@@ -1854,6 +1854,8 @@ pub enum AgentMessageKind {
     WatchResponse,
     /// An automatic `agent_watch` user-prompt notification.
     WatchPrompt,
+    /// An automatic structured `agent_watch` model-turn state notification.
+    WatchTurnState,
 }
 
 impl AgentMessageKind {
@@ -1907,8 +1909,31 @@ pub struct AgentMessageReceived {
     /// Delivery source semantics.
     #[serde(default, skip_serializing_if = "AgentMessageKind::is_default")]
     pub kind: AgentMessageKind,
+    /// Structured model-turn state carried by
+    /// [`AgentMessageKind::WatchTurnState`].
+    ///
+    /// This must be present exactly when `kind` is
+    /// [`AgentMessageKind::WatchTurnState`] and absent for every other kind.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub watch_turn_state: Option<AgentWatchTurnStateNotification>,
     /// Message body.
     pub message: String,
+}
+
+/// Structured state delivered to one watcher for a watched agent's model turn.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct AgentWatchTurnStateNotification {
+    /// Session in which the session-local watch relation exists.
+    pub session_id: SessionId,
+    /// Fresh identity minted when this directed watch relation is enabled.
+    pub subscription_id: String,
+    /// Current two-state model-turn state.
+    pub state: AgentRuntimeState,
+    /// Whether this is the snapshot sent when the watch was enabled.
+    pub initial: bool,
+    /// Harness-runtime-scoped watched-agent generation, incremented only when
+    /// an idle agent starts a whole turn.
+    pub turn_generation: u64,
 }
 
 /// Harness-owned durable incoming v2 message fact.

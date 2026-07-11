@@ -179,3 +179,16 @@ Ad-hoc string surgery for prompt variables such as `agent_id` is forbidden both
 before and after template rendering. Exceptions are only for clearly documented
 transport concerns that are not system-prompt content. This keeps custom
 templates in control of placement and wording for dynamic values.
+
+## Agent watch whole-turn lifecycle
+
+Status: confirmed, 2026-07-10, dpc.
+
+`agent_watch` observes the canonical two-state whole model turn: idle versus
+running across provider and tool continuation rounds. A new watch receives one
+initial snapshot; genuine transitions are receiver-only durable notifications
+with subscription identity and watched-agent runtime generation. Content
+forwarding remains limited to direct user prompts and final responses.
+Lifecycle-notification-only turns suppress both state edges to prevent cyclic
+watch amplification. If ordinary input joins such a running generation, a
+delayed start is emitted before the eventual matching stop.
