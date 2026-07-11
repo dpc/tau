@@ -894,9 +894,8 @@ fn assemble_conversation_replays_watch_response_as_notification_only() {
     assert!(watched_items.is_empty());
 }
 
-/// A durable lifecycle watch projection must replay as exactly the
-/// receiver-side internal notification that was rendered live, without
-/// inventing sender text.
+/// A durable lifecycle transition must replay from its typed state rather than
+/// its compatibility message text, preventing attribution or wording drift.
 #[test]
 fn assemble_conversation_replays_watch_turn_state_as_notification_only() {
     let watcher = tau_proto::AgentId::parse("watcher").expect("agent id");
@@ -917,7 +916,7 @@ fn assemble_conversation_replays_watch_turn_state_as_notification_only() {
                 initial: false,
                 turn_generation: 1,
             }),
-            message: text.to_owned(),
+            message: "untrusted stale presentation".to_owned(),
         },
     ));
 
@@ -929,6 +928,35 @@ fn assemble_conversation_replays_watch_turn_state_as_notification_only() {
             if *role == ContextRole::User
                 && matches!(&content[0], ContentPart::Text { text: replayed } if replayed == text)
     ));
+}
+
+/// An initial watch snapshot is client-visible state, not new activity for the
+/// watching model, and therefore must not be injected during transcript replay.
+#[test]
+fn assemble_conversation_omits_initial_watch_turn_state() {
+    let watcher = tau_proto::AgentId::parse("watcher").expect("agent id");
+    let watched = tau_proto::AgentId::parse("watched").expect("agent id");
+    let mut tree = tau_core::AgentTree::from_events(watcher.clone(), &[]);
+    tree.apply_event(&Event::AgentMessageReceived(
+        tau_proto::AgentMessageReceived {
+            message_id: "msg-initial-watch-state".into(),
+            sender_id: watched,
+            sender_session_id: None,
+            recipient_id: watcher,
+            kind: tau_proto::AgentMessageKind::WatchTurnState,
+            watch_turn_state: Some(tau_proto::AgentWatchTurnStateNotification {
+                session_id: "session-1".into(),
+                subscription_id: "watch-subscription-1".to_owned(),
+                state: tau_proto::AgentRuntimeState::Idle,
+                initial: true,
+                turn_generation: 0,
+            }),
+            message: "[tau-internal]: Watched agent watched is not currently running a model turn"
+                .to_owned(),
+        },
+    ));
+
+    assert!(assemble_conversation_from(&tree, tree.head()).is_empty());
 }
 
 /// Encrypted-reasoning replay: when `ProviderResponseFinished` carries

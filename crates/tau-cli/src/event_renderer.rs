@@ -3959,6 +3959,9 @@ impl EventRenderer {
     }
 
     fn render_agent_message_block(&self, event: &Event) -> tau_cli_term::StyledBlock {
+        if let Some(summary) = Self::watch_turn_state_summary(event) {
+            return self.submitted_plain_block(tau_themes::names::SYSTEM_INFO, summary);
+        }
         match Self::message_render_mode(self.show_messages, event) {
             MessageRenderMode::Hidden => Self::empty_block(),
             MessageRenderMode::Summary => self.submitted_plain_block(
@@ -3974,6 +3977,30 @@ impl EventRenderer {
                 ),
             ),
         }
+    }
+
+    /// Render structured watch lifecycle state as a compact status rather than
+    /// attributing the harness-authored event as a message from the watched
+    /// agent.
+    fn watch_turn_state_summary(event: &Event) -> Option<String> {
+        let Event::AgentMessageReceived(message) = event else {
+            return None;
+        };
+        let state = message.watch_turn_state.as_ref()?;
+        let watched = Self::agent_message_received_sender_label(message);
+        Some(if state.initial {
+            let state_label = match state.state {
+                tau_proto::AgentRuntimeState::Running => "running",
+                tau_proto::AgentRuntimeState::Idle => "idle",
+            };
+            format!("Watching {watched} · {state_label}")
+        } else {
+            let transition = match state.state {
+                tau_proto::AgentRuntimeState::Running => "turn started",
+                tau_proto::AgentRuntimeState::Idle => "turn stopped",
+            };
+            format!("{watched} · {transition}")
+        })
     }
 
     fn agent_message_summary(event: &Event) -> String {

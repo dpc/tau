@@ -10849,6 +10849,14 @@ fn agent_watch_reports_structured_whole_turn_state() {
         true,
         tau_proto::AgentWatchUpdateCause::AgentWatchEnable,
     );
+    assert!(
+        h.agents
+            .get(&watcher_cid)
+            .expect("watcher")
+            .pending_prompts
+            .is_empty(),
+        "initial state is durable client status, not a prompt for the watcher"
+    );
     h.set_agent_watch(
         &watcher_id,
         &watched_id,
@@ -11006,14 +11014,17 @@ fn mutual_watch_mixed_lifecycle_turn_emits_paired_state() {
     );
 
     h.agents.get_mut(&b_cid).expect("agent b").turn_state = AgentTurnState::Idle;
-    let lifecycle_prompt = h
-        .agents
-        .get_mut(&b_cid)
-        .expect("agent b")
-        .pending_prompts
-        .pop_front()
-        .expect("initial lifecycle prompt");
-    assert!(lifecycle_prompt.is_watch_turn_state());
+    assert!(
+        h.agents
+            .get(&b_cid)
+            .expect("agent b")
+            .pending_prompts
+            .is_empty(),
+        "initial watch snapshots must not create lifecycle turns"
+    );
+    let lifecycle_prompt = PendingPrompt::watch_turn_state(
+        "[tau-internal]: Watched agent peer started a model turn".to_owned(),
+    );
     h.dispatch_prompt_for_agent(&b_cid, lifecycle_prompt)
         .expect("dispatch lifecycle turn");
     h.set_agent_turn_state(

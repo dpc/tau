@@ -110,6 +110,10 @@ whole-model-turn state notifications. The canonical `AgentTurnState` mapping
 emits one initial snapshot and subsequent idle/running edges; tool continuation
 rounds remain one generation. Lifecycle-only notification turns do not fan out
 more lifecycle notifications, preventing mutual-watch feedback loops.
+The initial snapshot remains durable client-visible state but is not injected
+into the watching model's context. Later transition prompts are derived from
+the structured payload rather than treating their compatibility text as an
+agent-authored message.
 
 ## Provider response stats boundary
 

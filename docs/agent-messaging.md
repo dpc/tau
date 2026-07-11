@@ -106,7 +106,14 @@ separate “started a model turn” and “stopped its model turn” notificatio
 One turn remains running across provider/tool continuation rounds. The durable
 notification carries a watch-subscription id, an initial-snapshot marker, and a
 harness-runtime-scoped watched-agent turn generation so consumers can correlate
-and reject stale state.
+and reject stale state. The initial snapshot is client-visible status only and
+is not injected into the watching agent's model context; later genuine
+transitions are injected as content-free internal notifications.
+
+The CLI presents lifecycle records as compact status lines such as
+`Watching engineer_b · idle` and `engineer_b · turn started`. These statuses are
+not agent-authored messages and remain visible independently of the
+`show-messages` content setting.
 
 `agent_start` automatically enables watching for the sub-agent it creates. A
 watch response notification is delivered to the watching agent as a hidden

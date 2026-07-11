@@ -461,6 +461,26 @@ fn xml_escape(text: &str) -> String {
     escaped
 }
 
+/// Build model-visible text for a genuine watched-agent turn transition.
+///
+/// Initial watch snapshots are durable state for clients, not new activity the
+/// watching model needs to act on, so they deliberately produce no prompt.
+pub(crate) fn watch_turn_transition_text(
+    sender_label: &str,
+    state: &tau_proto::AgentWatchTurnStateNotification,
+) -> Option<String> {
+    if state.initial {
+        return None;
+    }
+    let transition = match state.state {
+        tau_proto::AgentRuntimeState::Running => "started a model turn",
+        tau_proto::AgentRuntimeState::Idle => "stopped its model turn",
+    };
+    Some(format!(
+        "[tau-internal]: Watched agent {sender_label} {transition}"
+    ))
+}
+
 struct SortHelper;
 
 impl handlebars::HelperDef for SortHelper {
@@ -673,6 +693,7 @@ pub(crate) fn assemble_prompt_context_from(
                 sender_id,
                 sender_session_id,
                 kind,
+                watch_turn_state,
                 message,
                 ..
             } => match kind {
@@ -751,14 +772,21 @@ pub(crate) fn assemble_prompt_context_from(
                     }
                 }
                 tau_proto::AgentMessageKind::WatchTurnState => {
-                    if *direction == tau_core::AgentMessageDirection::Inbound {
+                    if let (tau_core::AgentMessageDirection::Inbound, Some(text)) = (
+                        direction,
+                        watch_turn_state.as_ref().and_then(|state| {
+                            let sender_label = sender_session_id
+                                .as_ref()
+                                .map(|session_id| format!("{session_id}/{sender_id}"))
+                                .unwrap_or_else(|| sender_id.to_string());
+                            watch_turn_transition_text(&sender_label, state)
+                        }),
+                    ) {
                         blocks.push(tau_proto::ContextBlock::UserInput(
                             tau_proto::UserInputBlock {
                                 items: vec![ContextItem::Message(tau_proto::MessageItem {
                                     role: tau_proto::ContextRole::User,
-                                    content: vec![tau_proto::ContentPart::Text {
-                                        text: message.clone(),
-                                    }],
+                                    content: vec![tau_proto::ContentPart::Text { text }],
                                     phase: None,
                                     responses_raw_json: None,
                                 })],

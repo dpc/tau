@@ -3746,6 +3746,49 @@ fn external_agent_messages_render_session_agent_labels() {
     ));
 }
 
+/// Watched-turn lifecycle records are harness-authored status events, not
+/// messages authored by the watched agent, and must stay compact in the UI.
+#[test]
+fn watched_turn_transition_renders_as_compact_status() {
+    let (_term, handle, vt) = setup(80, 8);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        cli_test_theme(),
+    );
+
+    renderer.handle(&Event::AgentMessageReceived(
+        tau_proto::AgentMessageReceived {
+            message_id: "msg-watch-turn-start".into(),
+            sender_id: agent_id("researcher"),
+            sender_session_id: None,
+            recipient_id: agent_id("manager"),
+            kind: tau_proto::AgentMessageKind::WatchTurnState,
+            watch_turn_state: Some(tau_proto::AgentWatchTurnStateNotification {
+                session_id: "session-1".into(),
+                subscription_id: "subscription-1".to_owned(),
+                state: tau_proto::AgentRuntimeState::Running,
+                initial: false,
+                turn_generation: 1,
+            }),
+            message: "[tau-internal]: compatibility presentation".to_owned(),
+        },
+    ));
+    sync(&handle);
+
+    assert!(vt.screen_contains(80, "researcher · turn started"));
+    assert!(!vt.screen_contains(80, "Message from researcher"));
+    assert!(!vt.screen_contains(80, "compatibility presentation"));
+
+    for setting in ["none", "all-full", "none"] {
+        renderer.apply_setting("show-messages", setting);
+        sync(&handle);
+        assert!(vt.screen_contains(80, "researcher · turn started"));
+        assert!(!vt.screen_contains(80, "Message from researcher"));
+        assert!(!vt.screen_contains(80, "compatibility presentation"));
+    }
+}
+
 #[test]
 fn show_messages_none_leaves_no_visible_message_output() {
     let (_term, handle, vt) = setup(80, 8);

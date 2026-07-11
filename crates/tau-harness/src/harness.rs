@@ -3738,7 +3738,14 @@ impl Harness {
                 "[tau-internal]: Watched agent {} received a user prompt\n\n<prompt>\n{}\n</prompt>",
                 sender_label, escaped_message
             ),
-            tau_proto::AgentMessageKind::WatchTurnState => message.message.clone(),
+            tau_proto::AgentMessageKind::WatchTurnState => {
+                let Some(text) = message.watch_turn_state.as_ref().and_then(|state| {
+                    crate::prompt::watch_turn_transition_text(&sender_label, state)
+                }) else {
+                    return;
+                };
+                text
+            }
         };
         if let Some(cid) = self
             .agent_routes
@@ -3763,9 +3770,12 @@ impl Harness {
             .iter_mut()
             .find(|pending| pending.agent_id == message.recipient_id.as_str())
         {
-            pending
-                .pending_agent_messages
-                .push_back(PendingPrompt::agent_message_received(text));
+            let prompt = if message.kind == tau_proto::AgentMessageKind::WatchTurnState {
+                PendingPrompt::watch_turn_state(text)
+            } else {
+                PendingPrompt::agent_message_received(text)
+            };
+            pending.pending_agent_messages.push_back(prompt);
         }
     }
 

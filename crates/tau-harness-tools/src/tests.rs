@@ -942,3 +942,16 @@ fn skill_query_rejects_whitespace_without_echoing_raw_input() {
     assert!(!err.contains('\n'));
     assert!(!err.contains('\t'));
 }
+
+/// The model-visible watch contract must distinguish client-only initial state
+/// from later transition prompts so agents do not act on the enable snapshot.
+#[test]
+fn agent_watch_spec_documents_initial_and_transition_context_semantics() {
+    let description = agent_watch_tool_spec()
+        .description
+        .expect("agent_watch description");
+
+    assert!(description.contains("client-visible current model-turn state"));
+    assert!(description.contains("initial status is not injected"));
+    assert!(description.contains("later transitions are delivered separately"));
+}

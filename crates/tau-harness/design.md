@@ -182,7 +182,7 @@ templates in control of placement and wording for dynamic values.
 
 ## Agent watch whole-turn lifecycle
 
-Status: confirmed, 2026-07-10, dpc.
+Status: confirmed, 2026-07-10, dpc
 
 `agent_watch` observes the canonical two-state whole model turn: idle versus
 running across provider and tool continuation rounds. A new watch receives one
@@ -192,3 +192,9 @@ forwarding remains limited to direct user prompts and final responses.
 Lifecycle-notification-only turns suppress both state edges to prevent cyclic
 watch amplification. If ordinary input joins such a running generation, a
 delayed start is emitted before the eventual matching stop.
+
+The initial snapshot remains a durable client-visible fact but is not queued or
+replayed into the watching model's context. Live delivery and transcript replay
+derive later model-visible transition wording from the structured watched-turn
+payload and watched-agent identity. The durable compatibility `message` text is
+not authoritative presentation or model input.

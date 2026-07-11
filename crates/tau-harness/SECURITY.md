@@ -36,6 +36,9 @@ Content-free model-turn initial/start/stop notifications are also allowed. They
 contain only stable watch/session identity, idle/running state, snapshot status,
 and a harness-runtime-scoped watched-agent turn generation. They must never include prompt,
 response, message, tool, or error content.
+Initial snapshots are not model input. Later model-visible transition wording
+is reconstructed from the typed state and watched identity, never trusted from
+the event's compatibility message field.
 
 A turn caused only by lifecycle notifications suppresses both lifecycle edges
 to prevent cyclic watches from self-exciting. If ordinary input joins that

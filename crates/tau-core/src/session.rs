@@ -211,6 +211,8 @@ pub enum AgentEntry {
         recipient: AgentMessageRecipient,
         /// Delivery source semantics.
         kind: AgentMessageKind,
+        /// Typed watched-turn state for receiver-only lifecycle projections.
+        watch_turn_state: Option<tau_proto::AgentWatchTurnStateNotification>,
         /// Message body.
         message: String,
     },
@@ -1011,6 +1013,7 @@ impl AgentTree {
             sender_session_id: None,
             recipient: message.recipient.clone(),
             kind: message.kind,
+            watch_turn_state: None,
             message: message.message.clone(),
         })
     }
@@ -1028,6 +1031,7 @@ impl AgentTree {
                 agent_id: message.recipient_id.clone(),
             },
             kind: message.kind,
+            watch_turn_state: message.watch_turn_state.clone(),
             message: message.message.clone(),
         })
     }

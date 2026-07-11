@@ -314,6 +314,65 @@ fn agent_message_summary_excludes_body() {
     assert!(!summary.contains("secret payload"));
 }
 
+/// Watch lifecycle records are harness-authored statuses, so the renderer must
+/// use their typed payload and never label their body as an agent message.
+#[test]
+fn watch_turn_state_renders_as_compact_typed_status() {
+    let mut event = tau_proto::Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
+        message_id: "watch-state-1".into(),
+        sender_id: agent_id("researcher"),
+        sender_session_id: None,
+        recipient_id: agent_id("manager"),
+        kind: tau_proto::AgentMessageKind::WatchTurnState,
+        watch_turn_state: Some(tau_proto::AgentWatchTurnStateNotification {
+            session_id: "session-1".into(),
+            subscription_id: "subscription-1".to_owned(),
+            state: tau_proto::AgentRuntimeState::Running,
+            initial: false,
+            turn_generation: 1,
+        }),
+        message: "[tau-internal]: stale presentation".to_owned(),
+    });
+
+    assert_eq!(
+        super::EventRenderer::watch_turn_state_summary(&event).as_deref(),
+        Some("researcher · turn started")
+    );
+
+    let tau_proto::Event::AgentMessageReceived(message) = &mut event else {
+        unreachable!()
+    };
+    let state = message.watch_turn_state.as_mut().expect("watch state");
+    state.state = tau_proto::AgentRuntimeState::Idle;
+    assert_eq!(
+        super::EventRenderer::watch_turn_state_summary(&event).as_deref(),
+        Some("researcher · turn stopped")
+    );
+
+    let tau_proto::Event::AgentMessageReceived(message) = &mut event else {
+        unreachable!()
+    };
+    let state = message.watch_turn_state.as_mut().expect("watch state");
+    state.initial = true;
+    assert_eq!(
+        super::EventRenderer::watch_turn_state_summary(&event).as_deref(),
+        Some("Watching researcher · idle")
+    );
+
+    let tau_proto::Event::AgentMessageReceived(message) = &mut event else {
+        unreachable!()
+    };
+    message
+        .watch_turn_state
+        .as_mut()
+        .expect("watch state")
+        .state = tau_proto::AgentRuntimeState::Running;
+    assert_eq!(
+        super::EventRenderer::watch_turn_state_summary(&event).as_deref(),
+        Some("Watching researcher · running")
+    );
+}
+
 fn tool_call(call_id: &str) -> tau_proto::ContextItem {
     tau_proto::ContextItem::ToolCall(tau_proto::ToolCallItem {
         call_id: call_id.into(),
