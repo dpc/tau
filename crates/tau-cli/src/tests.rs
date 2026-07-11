@@ -8499,6 +8499,26 @@ fn format_turn_stats_line_uses_previous_turn_for_hit_percent() {
     assert_eq!(line, "Δ95% 19k/20k ↑100 ↓0 Σ↑19k/40.1k ↓0");
 }
 
+/// Ensures a provider chain reset cannot show more cacheable tokens than the
+/// current full-replay request contains.
+#[test]
+fn format_turn_stats_line_caps_cache_possible_after_chain_reset() {
+    let usage = tau_proto::ProviderTokenUsage {
+        prompt_sent_tokens: 13_659,
+        prompt_cached_tokens: 3_840,
+        response_received_tokens: 116,
+        ..Default::default()
+    };
+    let previous_usage = tau_proto::ProviderTokenUsage {
+        prompt_sent_tokens: 157_101,
+        response_received_tokens: 31,
+        ..Default::default()
+    };
+    let line = format_turn_stats_line(&usage, Some(&previous_usage), None, None);
+
+    assert_eq!(line, "Δ28% 3.8k/13.6k ↑0 ↓116 Σ↑0/0 ↓0");
+}
+
 #[test]
 fn format_turn_stats_line_shows_zero_hit_when_nothing_could_be_cached() {
     let usage = tau_proto::ProviderTokenUsage {

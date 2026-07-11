@@ -71,7 +71,9 @@ fn turn_stats_parts(
 
     let previous_sent_tokens = previous_usage.map_or(0, |usage| usage.prompt_sent_tokens);
     let previous_received_tokens = previous_usage.map_or(0, |usage| usage.response_received_tokens);
-    let turn_cache_possible = previous_sent_tokens.saturating_add(previous_received_tokens);
+    let turn_cache_possible = previous_sent_tokens
+        .saturating_add(previous_received_tokens)
+        .min(usage.prompt_sent_tokens);
     let new_prompt_tokens = usage.prompt_sent_tokens.saturating_sub(turn_cache_possible);
     let mut parts = Vec::new();
 
