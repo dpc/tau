@@ -18,6 +18,7 @@ fn assistant_message(text: &str) -> ContextItem {
 
 fn user_prompt(text: &str) -> Event {
     Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+        inference_activation: false,
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         text: text.to_owned(),
         message_class: tau_proto::PromptMessageClass::User,
@@ -665,6 +666,9 @@ fn assemble_conversation_starts_at_latest_standalone_compaction() {
     let mut tree = tau_core::AgentTree::from_events(crate::parse_agent_id("main"), &[]);
     tree.apply_event(&user_prompt("old history"));
     tree.apply_event(&Event::AgentCompacted(tau_proto::AgentCompacted {
+        compact_prompt_id: None,
+        model: None,
+        operation: None,
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         transaction_id: None,
         cut: None,
@@ -699,6 +703,9 @@ fn assemble_conversation_preserves_new_compaction_suffix() {
     tree.apply_event(&user_prompt("late fact B"));
     let suffix_end = tau_proto::AgentHead::Node(tree.head().expect("suffix end"));
     tree.apply_event(&Event::AgentCompacted(tau_proto::AgentCompacted {
+        compact_prompt_id: None,
+        model: None,
+        operation: None,
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         transaction_id: Some(
             tau_proto::CompactionTransactionId::parse("ct-1").expect("transaction id"),

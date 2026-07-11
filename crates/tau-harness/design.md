@@ -12,6 +12,32 @@ Providers own prompt-local response byte counting and rate limiting because they
 
 The harness must not account, sample, remap, strip, or project provider response throughput. Its role for `provider.response_updated.response_stats` is only the normal provider-event boundary: validate provider prompt ownership/cancellation, rewrite routing identity from prompt ownership, enrich unrelated compaction metadata when applicable, and broadcast the provider-owned sample unchanged to subscribers. UI clients render live response throughput directly from provider events.
 
+## Durable compaction and activation binding
+
+Status: confirmed, 2026-07-11, user
+
+Standalone compaction binds durable Started and Compacted facts with the exact
+transaction, cut, suffix end, pre-minted prompt id, provider-qualified model,
+and standalone operation. New boundaries require all six fields: the
+transaction resolves its Started fact; cut, prompt id, model, and operation
+match Started; operation is standalone; `suffix_end` equals the boundary
+parent; and cut is its ancestor. Legacy boundaries have all six absent. The
+provider connection id is runtime-only and must not be persisted.
+
+Canonical submitted, injected, and steered facts contain a harness-owned,
+default-false `inference_activation` marker. Typed harness provenance marks
+passive background/restore context false and actual activators true; neither
+prompt text, peers, nor interceptors control it. Completed checkpoints consume
+true activations through their branch head. A checkpoint without a durable
+terminal response restores as dispatch-uncertain and is not resent.
+
+The cross-crate test strategy fixes these boundaries at their owning layer:
+`tau-proto` covers missing/false/true serde behavior; `tau-core` covers the
+all-six group, exact mismatches, duplicate/unknown outcomes, and legacy
+boundaries; and `tau-harness` covers Started-before-dispatch and terminal
+correlation, interception/peer ownership, typed passive replay, crash restart,
+checkpoint ranges, and dispatch uncertainty.
+
 ## Daemon listener shutdown is reactive and path-independent
 
 Status: unconfirmed

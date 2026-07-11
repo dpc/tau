@@ -98,3 +98,16 @@ latent prompt-surface failures.
 Testing strategy: cover schema rejection, selector path/value rejection,
 compactness budgets, deterministic generic/subcommand fallback, bounded rendering,
 and allowed-value diagnostics for missing or invalid selectors.
+## Durable standalone-compaction replay
+
+Status: confirmed, 2026-07-11, user
+
+New-format compaction boundaries carry one all-present metadata group:
+transaction id, cut, suffix end, compact prompt id, provider-qualified model,
+and operation. Replay resolves the transaction's Started fact; requires exact
+cut/prompt/model/operation correlation and standalone operation; requires
+`suffix_end` to equal the boundary parent with cut as its ancestor; and rejects
+partial groups, unknown transactions, mismatches, and duplicate outcomes.
+Live validation and replay use the same fail-closed rules. Historical
+all-six-absent boundaries remain valid hard boundaries but cannot participate
+in new transaction recovery.

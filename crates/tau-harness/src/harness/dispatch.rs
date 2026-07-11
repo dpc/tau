@@ -87,9 +87,11 @@ impl Harness {
         }
         let notify_watchers = prompt.should_notify_watchers();
         let notification_text = notify_watchers.then(|| prompt.text.clone());
+        let inference_activation = prompt.creates_inference_activation();
         self.publish_for_agent(
             agent_id,
             Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+                inference_activation,
                 agent_id: target_agent_id,
                 text: prompt.text,
                 message_class: prompt.message_class,
@@ -121,6 +123,15 @@ impl Harness {
         prompt: impl Into<PendingPrompt>,
     ) -> Result<(), HarnessError> {
         let prompt = prompt.into();
+        if self
+            .agents
+            .get(agent_id)
+            .is_none_or(|agent| agent.terminating)
+        {
+            return Err(HarnessError::Participant(format!(
+                "agent `{agent_id}` is terminating"
+            )));
+        }
         if let Some(agent) = self.agents.get_mut(agent_id) {
             agent.lifecycle_notification_only_turn = prompt.is_watch_turn_state();
         }
@@ -186,18 +197,64 @@ impl Harness {
                 return;
             }
 
-            let has_message_wake = self
-                .agents
-                .get(&agent_id)
-                .is_some_and(|agent| !agent.pending_message_wakes.is_empty());
-            if has_message_wake {
+            let has_durable_activation = self.agents.get(&agent_id).is_some_and(|agent| {
+                agent.pending_replay_activation
+                    || (!agent.pending_message_wakes.is_empty()
+                        && agent
+                            .pending_message_wakes
+                            .iter()
+                            .all(|wake| wake.node_id.is_some()))
+            });
+            if has_durable_activation {
+                let _ = self.ensure_agent_id_for_agent(&agent_id);
+                if self
+                    .agents
+                    .get(&agent_id)
+                    .is_some_and(|agent| agent.pending_replay_activation)
+                {
+                    let restore_prompts =
+                        self.take_pending_restore_prompts_for_user_prompt(&agent_id);
+                    if let Some(agent) = self.agents.get_mut(&agent_id) {
+                        agent.pending_prompts.extend(restore_prompts);
+                    }
+                    self.fold_pending_prompts_as_steered(&agent_id);
+                }
                 if self.schedule_standalone_auto_compaction(&agent_id) {
                     continue;
                 }
-                if let Some(agent) = self.agents.get_mut(&agent_id) {
-                    agent.pending_message_wakes.clear();
-                }
-                self.dispatch_prompt_after_publish_idle(&agent_id);
+                let Some((durable_agent_id, prompt_id, through)) =
+                    self.agents.get_mut(&agent_id).and_then(|agent| {
+                        let durable_agent_id = agent.agent_id.clone()?;
+                        let prompt_id = tau_proto::AgentPromptId::from(format!(
+                            "ap-{durable_agent_id}-{}",
+                            agent.next_prompt_index
+                        ));
+                        agent.next_prompt_index = agent.next_prompt_index.saturating_add(1);
+                        let through = agent
+                            .head
+                            .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node);
+                        agent.activation_dispatch =
+                            crate::agent::ActivationDispatchState::AwaitingCheckpoint {
+                                owner: crate::agent::InferenceCheckpointOwner::Inference,
+                                agent_prompt_id: prompt_id.clone(),
+                                through,
+                            };
+                        Some((durable_agent_id, prompt_id, through))
+                    })
+                else {
+                    continue;
+                };
+                self.publish_for_agent(
+                    &agent_id,
+                    tau_proto::Event::AgentInferenceDispatchStarted(
+                        tau_proto::AgentInferenceDispatchStarted {
+                            agent_id: crate::parse_agent_id(&durable_agent_id),
+                            transaction_id: None,
+                            agent_prompt_id: prompt_id,
+                            through,
+                        },
+                    ),
+                );
                 continue;
             }
 
@@ -224,10 +281,18 @@ impl Harness {
                     .pending_prompts
                     .iter()
                     .any(|prompt| !prompt.is_passive_background_completion())
-                    || !conv.pending_message_wakes.is_empty())
+                    || (!conv.pending_message_wakes.is_empty()
+                        && conv
+                            .pending_message_wakes
+                            .iter()
+                            .all(|wake| wake.node_id.is_some()))
+                    || conv.pending_replay_activation)
                     && matches!(conv.turn_state, AgentTurnState::Idle)
                     && !conv.terminating
-                    && conv.standalone_compaction.blocked_recovery().is_none()
+                    && matches!(
+                        conv.activation_dispatch,
+                        crate::agent::ActivationDispatchState::None
+                    )
                     && !self.has_deferred_prompt_dispatch_for(agent_id)
             })
             .map(|(agent_id, _)| agent_id.clone())
@@ -258,7 +323,12 @@ impl Harness {
         }
         match self.agents.get(agent_id) {
             Some(conv) => {
-                !matches!(conv.turn_state, AgentTurnState::Idle)
+                conv.terminating
+                    || !matches!(
+                        conv.activation_dispatch,
+                        crate::agent::ActivationDispatchState::None
+                    )
+                    || !matches!(conv.turn_state, AgentTurnState::Idle)
                     || self.has_deferred_prompt_dispatch_for(agent_id)
             }
             None => true,

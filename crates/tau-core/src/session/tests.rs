@@ -10,6 +10,7 @@ fn other_agent_id() -> AgentId {
 
 fn prompt_event(agent_id: AgentId) -> Event {
     Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+        inference_activation: false,
         agent_id,
         text: "hello".to_owned(),
         message_class: tau_proto::PromptMessageClass::User,
@@ -24,6 +25,215 @@ fn validation_error(tree: &AgentTree, event: Event) -> String {
     tree.validate_event(&event)
         .expect_err("event should be rejected")
         .to_string()
+}
+
+fn compaction_start(id: &str) -> tau_proto::AgentStandaloneCompactionStarted {
+    tau_proto::AgentStandaloneCompactionStarted {
+        compact_prompt_id: "ap-agent-metadata-test-0".into(),
+        operation: tau_proto::PromptOperation::StandaloneCompaction,
+        agent_id: agent_id(),
+        transaction_id: tau_proto::CompactionTransactionId::parse(id).expect("valid id"),
+        cut: AgentHead::Root,
+        resume_through: Some(AgentHead::Root),
+        model: tau_proto::ModelId::from("provider/model"),
+        originator: PromptOriginator::User,
+        supersedes: None,
+    }
+}
+
+/// Transaction ids and terminal outcomes are durable uniqueness boundaries;
+/// replay must reject duplicates rather than silently replacing folded state.
+#[test]
+fn compaction_fold_rejects_duplicate_start_and_outcome() {
+    let started = compaction_start("ct-one");
+    let mut tree = AgentTree::from_events(agent_id(), &[]);
+    tree.validate_event(&Event::AgentStandaloneCompactionStarted(started.clone()))
+        .expect("first start is valid");
+    tree.apply_event(&Event::AgentStandaloneCompactionStarted(started.clone()));
+    assert!(
+        validation_error(
+            &tree,
+            Event::AgentStandaloneCompactionStarted(started.clone())
+        )
+        .contains("duplicate")
+    );
+
+    let failed = tau_proto::AgentStandaloneCompactionFailed {
+        agent_id: agent_id(),
+        transaction_id: started.transaction_id,
+        cut: AgentHead::Root,
+        reason: tau_proto::StandaloneCompactionFailureReason::ProviderError,
+        resume_through: Some(AgentHead::Root),
+    };
+    tree.validate_event(&Event::AgentStandaloneCompactionFailed(failed.clone()))
+        .expect("first outcome is valid");
+    tree.apply_event(&Event::AgentStandaloneCompactionFailed(failed.clone()));
+    assert!(
+        validation_error(&tree, Event::AgentStandaloneCompactionFailed(failed))
+            .contains("duplicate outcome")
+    );
+}
+
+/// Checkpoints may acknowledge only one validated successful transaction and
+/// must not be accepted before its compact outcome exists.
+#[test]
+fn compaction_fold_rejects_premature_and_unknown_checkpoints() {
+    let started = compaction_start("ct-checkpoint");
+    let mut tree = AgentTree::from_events(agent_id(), &[]);
+    let mut wrong_operation = started.clone();
+    wrong_operation.operation = tau_proto::PromptOperation::Inference;
+    assert!(
+        validation_error(
+            &tree,
+            Event::AgentStandaloneCompactionStarted(wrong_operation)
+        )
+        .contains("non-standalone")
+    );
+    tree.validate_event(&Event::AgentStandaloneCompactionStarted(started.clone()))
+        .expect("start is valid");
+    tree.apply_event(&Event::AgentStandaloneCompactionStarted(started.clone()));
+    let checkpoint = tau_proto::AgentInferenceDispatchStarted {
+        agent_id: agent_id(),
+        transaction_id: Some(started.transaction_id),
+        agent_prompt_id: "ap-agent-metadata-test-1".into(),
+        through: AgentHead::Root,
+    };
+    assert!(
+        validation_error(
+            &tree,
+            Event::AgentInferenceDispatchStarted(checkpoint.clone())
+        )
+        .contains("requires one successful")
+    );
+
+    let unknown = tau_proto::AgentInferenceDispatchStarted {
+        transaction_id: Some(tau_proto::CompactionTransactionId::parse("ct-unknown").expect("id")),
+        ..checkpoint
+    };
+    assert!(
+        validation_error(&tree, Event::AgentInferenceDispatchStarted(unknown))
+            .contains("unknown compaction transaction")
+    );
+}
+
+/// Explicit-parent validation must compare suffix_end with the selected branch
+/// parent, not the tree's unrelated global write cursor.
+#[test]
+fn compaction_boundary_validates_explicit_parent() {
+    let mut tree = AgentTree::from_events(agent_id(), &[]);
+    tree.apply_event(&prompt_event(agent_id()));
+    let first = tree.head().expect("prompt node");
+    tree.apply_event(&prompt_event(agent_id()));
+    let started = tau_proto::AgentStandaloneCompactionStarted {
+        cut: AgentHead::Node(first),
+        resume_through: Some(AgentHead::Node(first)),
+        ..compaction_start("ct-parent")
+    };
+    tree.validate_event_at(
+        AgentEventParent::Under(first),
+        &Event::AgentStandaloneCompactionStarted(started.clone()),
+    )
+    .expect("start on selected branch");
+    tree.apply_event_at(
+        AgentEventParent::Under(first),
+        &Event::AgentStandaloneCompactionStarted(started.clone()),
+    );
+    let boundary = Event::AgentCompacted(tau_proto::AgentCompacted {
+        compact_prompt_id: Some(started.compact_prompt_id.clone()),
+        model: Some(started.model.clone()),
+        operation: Some(started.operation),
+        agent_id: agent_id(),
+        transaction_id: Some(started.transaction_id),
+        cut: Some(AgentHead::Node(first)),
+        suffix_end: Some(AgentHead::Node(first)),
+        replacement_window: vec![tau_proto::ContextItem::Message(tau_proto::MessageItem {
+            role: tau_proto::ContextRole::User,
+            content: vec![tau_proto::ContentPart::Text {
+                text: "summary".to_owned(),
+            }],
+            phase: None,
+            responses_raw_json: None,
+        })],
+    });
+    tree.validate_event_at(AgentEventParent::Under(first), &boundary)
+        .expect("explicit boundary parent, not global head, is authoritative");
+
+    for case in 0..10 {
+        let mut invalid = boundary.clone();
+        let Event::AgentCompacted(compacted) = &mut invalid else {
+            unreachable!()
+        };
+        match case {
+            0 => compacted.transaction_id = None,
+            1 => compacted.cut = None,
+            2 => compacted.suffix_end = None,
+            3 => compacted.compact_prompt_id = None,
+            4 => compacted.model = None,
+            5 => compacted.operation = None,
+            6 => compacted.cut = Some(AgentHead::Root),
+            7 => compacted.compact_prompt_id = Some("ap-wrong".into()),
+            8 => compacted.model = Some("other/model".into()),
+            9 => compacted.operation = Some(tau_proto::PromptOperation::Inference),
+            _ => unreachable!(),
+        }
+        assert!(
+            tree.validate_event_at(AgentEventParent::Under(first), &invalid)
+                .is_err()
+        );
+    }
+
+    let mut unknown = boundary.clone();
+    let Event::AgentCompacted(compacted) = &mut unknown else {
+        unreachable!()
+    };
+    compacted.transaction_id =
+        Some(tau_proto::CompactionTransactionId::parse("ct-unknown").expect("transaction id"));
+    assert!(
+        tree.validate_event_at(AgentEventParent::Under(first), &unknown)
+            .expect_err("unknown transaction must fail")
+            .to_string()
+            .contains("unknown")
+    );
+
+    tree.apply_event_at(AgentEventParent::Under(first), &boundary);
+    assert!(
+        tree.validate_event_at(AgentEventParent::Under(first), &boundary)
+            .expect_err("duplicate successful boundary must fail")
+            .to_string()
+            .contains("duplicate outcome")
+    );
+}
+
+/// Legacy all-absent compaction boundaries remain valid hard boundaries even
+/// though they cannot participate in new transaction recovery.
+#[test]
+fn legacy_compaction_boundary_without_transaction_metadata_replays() {
+    let mut tree = AgentTree::from_events(agent_id(), &[]);
+    let boundary = Event::AgentCompacted(tau_proto::AgentCompacted {
+        agent_id: agent_id(),
+        transaction_id: None,
+        cut: None,
+        suffix_end: None,
+        compact_prompt_id: None,
+        model: None,
+        operation: None,
+        replacement_window: vec![tau_proto::ContextItem::Message(tau_proto::MessageItem {
+            role: tau_proto::ContextRole::Assistant,
+            content: vec![tau_proto::ContentPart::Text {
+                text: "legacy summary".to_owned(),
+            }],
+            phase: None,
+            responses_raw_json: None,
+        })],
+    });
+
+    tree.validate_event(&boundary)
+        .expect("legacy all-absent boundary");
+    tree.apply_event(&boundary);
+    assert!(matches!(
+        tree.current_branch().last(),
+        Some(AgentEntry::Compaction { .. })
+    ));
 }
 
 /// Watch-turn messages must carry their structured payload, while ordinary

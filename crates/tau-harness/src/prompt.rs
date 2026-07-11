@@ -714,7 +714,7 @@ pub(crate) fn assemble_prompt_context_from(
                     },
                 ));
             }
-            AgentEntry::UserInput { items } => {
+            AgentEntry::UserInput { items, .. } => {
                 blocks.push(tau_proto::ContextBlock::UserInput(
                     tau_proto::UserInputBlock {
                         items: items.clone(),

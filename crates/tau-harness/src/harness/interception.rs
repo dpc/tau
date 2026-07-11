@@ -35,6 +35,14 @@ enum PromptDispatchGate {
     PublishIdle,
 }
 
+/// One publish-idle dispatch with its immutable earliest activation cut.
+pub(crate) struct DeferredPromptDispatch {
+    /// Agent whose inference remains pending.
+    pub(crate) cid: AgentId,
+    /// Cut immediately before the earliest committed activation in this batch.
+    pub(crate) activation_cut: Option<tau_proto::AgentHead>,
+}
+
 /// Snapshot of a publish that's currently waiting on an interceptor's
 /// reply. The harness stops draining further publishes while one of
 /// these is alive so the persisted log order matches publish order.
@@ -205,6 +213,7 @@ fn mutable_prompt_routing_identity_was_modified(original: &Event, replacement: &
     match (original, replacement) {
         (Event::AgentPromptSubmitted(original), Event::AgentPromptSubmitted(replacement)) => {
             original.agent_id != replacement.agent_id
+                || original.inference_activation != replacement.inference_activation
                 || original.message_class != replacement.message_class
                 || original.originator != replacement.originator
                 || original.submission_source != replacement.submission_source
@@ -214,10 +223,12 @@ fn mutable_prompt_routing_identity_was_modified(original: &Event, replacement: &
             Event::AgentUserMessageInjected(replacement),
         ) => {
             original.agent_id != replacement.agent_id
+                || original.inference_activation != replacement.inference_activation
                 || original.message_class != replacement.message_class
         }
         (Event::AgentPromptSteered(original), Event::AgentPromptSteered(replacement)) => {
             original.agent_id != replacement.agent_id
+                || original.inference_activation != replacement.inference_activation
                 || original.message_class != replacement.message_class
         }
         _ => false,
@@ -397,7 +408,7 @@ impl Harness {
             || self
                 .pending_publish_idle_dispatches
                 .iter()
-                .any(|queued| queued == cid)
+                .any(|queued| &queued.cid == cid)
     }
 
     /// Send `cid`'s prompt now if the just-published user-message event
@@ -417,16 +428,88 @@ impl Harness {
             self.defer_prompt_dispatch(cid.clone(), gate);
             return;
         }
-        if !self.agent_context_ready_for(cid) {
-            self.defer_prompt_dispatch(cid.clone(), PromptDispatchGate::PublishIdle);
-            return;
-        }
         if gate == PromptDispatchGate::UserMessageCommit
-            && self.schedule_standalone_auto_compaction_for_activation(cid, true)
+            && self.schedule_standalone_auto_compaction_for_activation(cid, true, None)
         {
             return;
         }
-        let _ = self.send_prompt_to_agent_for(cid);
+        if !self.agent_context_ready_for(cid) {
+            if gate == PromptDispatchGate::UserMessageCommit {
+                let activation_cut = self.activation_cut_before_current_head(cid);
+                if let Some(existing) = self
+                    .pending_publish_idle_dispatches
+                    .iter_mut()
+                    .find(|queued| &queued.cid == cid)
+                {
+                    existing.activation_cut = existing.activation_cut.or(activation_cut);
+                    return;
+                }
+                self.pending_publish_idle_dispatches
+                    .push_back(DeferredPromptDispatch {
+                        cid: cid.clone(),
+                        activation_cut,
+                    });
+                return;
+            }
+            self.defer_prompt_dispatch(cid.clone(), PromptDispatchGate::PublishIdle);
+            return;
+        }
+        self.checkpoint_or_send_prompt(cid);
+    }
+
+    /// Commit an immutable inference watermark before transient dispatch.
+    ///
+    /// Standalone compact operations already have their own durable start and
+    /// are sent directly. Ordinary inference first enters
+    /// `AwaitingCheckpoint`; only the checkpoint's post-commit reaction sends
+    /// the exact reserved prompt id and head.
+    fn checkpoint_or_send_prompt(&mut self, cid: &AgentId) {
+        let _ = self.ensure_agent_id_for_agent(cid);
+        let state = self
+            .agents
+            .get(cid)
+            .map(|agent| agent.activation_dispatch.clone());
+        if matches!(
+            state,
+            Some(crate::agent::ActivationDispatchState::Running { .. })
+        ) {
+            let _ = self.send_prompt_to_agent_for(cid);
+            return;
+        }
+        if !matches!(state, Some(crate::agent::ActivationDispatchState::None)) {
+            return;
+        }
+        let Some((durable_agent_id, prompt_id, through)) =
+            self.agents.get_mut(cid).and_then(|agent| {
+                let durable_agent_id = agent.agent_id.clone()?;
+                let prompt_id = tau_proto::AgentPromptId::from(format!(
+                    "ap-{durable_agent_id}-{}",
+                    agent.next_prompt_index
+                ));
+                agent.next_prompt_index = agent.next_prompt_index.saturating_add(1);
+                let through = agent
+                    .head
+                    .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node);
+                agent.activation_dispatch =
+                    crate::agent::ActivationDispatchState::AwaitingCheckpoint {
+                        owner: crate::agent::InferenceCheckpointOwner::Inference,
+                        agent_prompt_id: prompt_id.clone(),
+                        through,
+                    };
+                Some((durable_agent_id, prompt_id, through))
+            })
+        else {
+            return;
+        };
+        self.publish_for_agent(
+            cid,
+            Event::AgentInferenceDispatchStarted(tau_proto::AgentInferenceDispatchStarted {
+                agent_id: crate::parse_agent_id(&durable_agent_id),
+                transaction_id: None,
+                agent_prompt_id: prompt_id,
+                through,
+            }),
+        );
     }
 
     fn defer_prompt_dispatch(&mut self, cid: AgentId, gate: PromptDispatchGate) {
@@ -444,9 +527,24 @@ impl Harness {
                 self.pending_user_prompt_dispatches.push_back(cid);
             }
             PromptDispatchGate::PublishIdle => {
-                self.pending_publish_idle_dispatches.push_back(cid);
+                self.pending_publish_idle_dispatches
+                    .push_back(DeferredPromptDispatch {
+                        cid,
+                        activation_cut: None,
+                    });
             }
         }
+    }
+
+    fn activation_cut_before_current_head(&self, cid: &AgentId) -> Option<tau_proto::AgentHead> {
+        let agent = self.agents.get(cid)?;
+        let head = agent.head?;
+        let tree = self.agent_store.agent(agent.agent_id.as_deref()?)?;
+        Some(
+            tree.node(head)
+                .and_then(|node| node.parent_id)
+                .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node),
+        )
     }
 
     /// Entry point for any publish call. Defers if interception is
@@ -732,17 +830,38 @@ impl Harness {
 
     pub(crate) fn drain_publish_idle_dispatches(&mut self) {
         while self.publish_chain_is_idle() {
-            let Some(cid) = self.pending_publish_idle_dispatches.pop_front() else {
+            let Some(deferred) = self.pending_publish_idle_dispatches.pop_front() else {
                 break;
             };
+            let cid = deferred.cid.clone();
             if !self.agents.contains_key(&cid) {
                 continue;
             }
+            if self.agents.get(&cid).is_some_and(|agent| {
+                agent.terminating
+                    || matches!(
+                        agent.activation_dispatch,
+                        crate::agent::ActivationDispatchState::AwaitingCheckpoint { .. }
+                            | crate::agent::ActivationDispatchState::Blocked { .. }
+                            | crate::agent::ActivationDispatchState::DispatchUncertain { .. }
+                    )
+            }) {
+                continue;
+            }
             if !self.agent_context_ready_for(&cid) {
-                self.pending_publish_idle_dispatches.push_front(cid);
+                self.pending_publish_idle_dispatches.push_front(deferred);
                 break;
             }
-            let _ = self.send_prompt_to_agent_for(&cid);
+            if deferred.activation_cut.is_some()
+                && self.schedule_standalone_auto_compaction_for_activation(
+                    &cid,
+                    true,
+                    deferred.activation_cut,
+                )
+            {
+                continue;
+            }
+            self.checkpoint_or_send_prompt(&cid);
         }
     }
 }

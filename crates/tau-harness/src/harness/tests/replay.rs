@@ -99,6 +99,7 @@ fn seed_restored_tool_round(state_dir: &Path, call_ids: &[&str], completed_call_
             "main",
             None,
             Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+                inference_activation: false,
                 agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
                 text: "before restart".to_owned(),
                 message_class: tau_proto::PromptMessageClass::User,
@@ -168,6 +169,7 @@ fn seed_restored_tool_round_for_agent(
             agent_id,
             None,
             Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+                inference_activation: false,
                 agent_id: crate::parse_agent_id(agent_id),
                 text: format!("before restart for {agent_id}"),
                 message_class: tau_proto::PromptMessageClass::User,
@@ -698,6 +700,7 @@ fn live_agent_load_replays_existing_agent_history_to_subscribers() {
             agent_id.as_str(),
             None,
             Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+                inference_activation: false,
                 agent_id: agent_id.clone(),
                 text: "history before load".to_owned(),
                 message_class: tau_proto::PromptMessageClass::User,

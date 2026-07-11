@@ -130,6 +130,7 @@ fn append_partial_record_header(path: &std::path::Path) {
 
 fn agent_prompt(agent_id: &str, text: &str) -> Event {
     Event::AgentPromptSubmitted(AgentPromptSubmitted {
+        inference_activation: false,
         agent_id: AgentId::parse(agent_id).expect("agent id"),
         text: text.to_owned(),
         message_class: PromptMessageClass::User,

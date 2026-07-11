@@ -127,6 +127,7 @@ fn renderer_auto_select_retargets_pending_prompt_draft() {
 
     renderer.handle_recorded_at(
         &tau_proto::Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+            inference_activation: false,
             agent_id: agent_id("agent-a"),
             text: "submitted".to_owned(),
             message_class: tau_proto::PromptMessageClass::User,

@@ -24,9 +24,9 @@ use tau_proto::{
 
 use crate::dedup::ResultDedupMap;
 
-/// Runtime ownership state for standalone compaction.
+/// Runtime ownership state for durable activation dispatch.
 #[derive(Clone, Debug, Default)]
-pub(crate) enum StandaloneCompactionState {
+pub(crate) enum ActivationDispatchState {
     /// No standalone transaction is active or recovery-blocked.
     #[default]
     None,
@@ -38,8 +38,32 @@ pub(crate) enum StandaloneCompactionState {
         cut: tau_proto::AgentHead,
         /// Activation still owed inference.
         resume_through: Option<tau_proto::AgentHead>,
-        /// Provider prompt id after materialization.
-        compact_prompt_id: Option<AgentPromptId>,
+        /// Model operation identity captured by the durable start.
+        model: ModelId,
+        /// Explicit branch-navigation generation captured by the start.
+        branch_generation: u64,
+        /// Provider prompt id pre-minted before the durable start commits.
+        compact_prompt_id: AgentPromptId,
+    },
+    /// Compaction succeeded and the durable inference checkpoint is not
+    /// committed yet.
+    AwaitingCheckpoint {
+        /// Durable owner of the inference checkpoint.
+        owner: InferenceCheckpointOwner,
+        /// Exact provider prompt id reserved by the checkpoint.
+        agent_prompt_id: AgentPromptId,
+        /// Immutable inference snapshot covered by the checkpoint.
+        through: tau_proto::AgentHead,
+    },
+    /// The checkpoint committed; remote inference completion is not durable
+    /// yet.
+    DispatchUncertain {
+        /// Durable owner of the uncertain inference dispatch.
+        owner: InferenceCheckpointOwner,
+        /// Exact provider prompt id committed in the checkpoint.
+        agent_prompt_id: AgentPromptId,
+        /// Immutable inference snapshot sent to the provider.
+        through: tau_proto::AgentHead,
     },
     /// Terminal failure retained its recovery obligation.
     Blocked {
@@ -52,7 +76,29 @@ pub(crate) enum StandaloneCompactionState {
     },
 }
 
-impl StandaloneCompactionState {
+/// Durable inference checkpoint ownership.
+#[derive(Clone, Debug)]
+pub(crate) enum InferenceCheckpointOwner {
+    /// Ordinary inference activation unrelated to standalone compaction.
+    Inference,
+    /// Inference owed by one successful standalone compaction.
+    Standalone {
+        /// Successful transaction id.
+        id: tau_proto::CompactionTransactionId,
+    },
+}
+
+impl InferenceCheckpointOwner {
+    /// Returns standalone transaction ownership, if this checkpoint has it.
+    pub(crate) fn transaction_id(&self) -> Option<&tau_proto::CompactionTransactionId> {
+        match self {
+            Self::Inference => None,
+            Self::Standalone { id } => Some(id),
+        }
+    }
+}
+
+impl ActivationDispatchState {
     /// Returns the durable recovery details when inference is blocked.
     pub(crate) fn blocked_recovery(
         &self,
@@ -67,9 +113,23 @@ impl StandaloneCompactionState {
                 cut,
                 resume_through,
             } => Some((failed_id, *cut, *resume_through)),
-            Self::None | Self::Running { .. } => None,
+            Self::None
+            | Self::Running { .. }
+            | Self::AwaitingCheckpoint { .. }
+            | Self::DispatchUncertain { .. } => None,
         }
     }
+}
+
+/// One canonical typed-message activation and its durable transcript watermark.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct PendingMessageWake {
+    /// Canonical message identity.
+    pub(crate) message_id: tau_proto::MessageId,
+    /// Sequence of the durable incoming event in the per-agent log.
+    pub(crate) durable_event_seq: u64,
+    /// Transcript node once tool-round adjacency permits materialization.
+    pub(crate) node_id: Option<NodeId>,
 }
 
 /// Per-agent turn state. There is no global execution slot — each loaded agent
@@ -115,6 +175,8 @@ pub(crate) struct Agent {
     /// `publish_for_agent` snaps the tree head back to before
     /// emitting an event for this agent.
     pub(crate) head: Option<NodeId>,
+    /// Increments on every explicit head move to invalidate asynchronous work.
+    pub(crate) branch_generation: u64,
     /// For [`PromptOriginator::Extension`] agents: the
     /// connection id of the extension that issued the
     /// [`tau_proto::StartAgentRequest`], so the harness knows where to
@@ -129,11 +191,13 @@ pub(crate) struct Agent {
     /// serializes its own consumption of `AgentPromptCreated`.
     pub(crate) pending_prompts: VecDeque<PendingPrompt>,
     /// Canonical incoming facts waiting to activate one coalesced model turn.
-    pub(crate) pending_message_wakes: VecDeque<tau_proto::MessageId>,
+    pub(crate) pending_message_wakes: VecDeque<PendingMessageWake>,
+    /// Replay found a committed activation after the latest completed dispatch.
+    pub(crate) pending_replay_activation: bool,
     /// Whether terminal teardown has begun and new work must be rejected.
     pub(crate) terminating: bool,
     /// Durable standalone-compaction runtime projection.
-    pub(crate) standalone_compaction: StandaloneCompactionState,
+    pub(crate) activation_dispatch: ActivationDispatchState,
     /// Pending user/control-plane request to stop this conversation at
     /// the next stable turn boundary. Stored like queued prompts so
     /// races between provider responses and UI cancel events are
@@ -247,6 +311,8 @@ pub(crate) enum PendingPromptSource {
     /// next real user prompt, but must not make an idle agent runnable by
     /// itself.
     PassiveBackgroundCompletion,
+    /// A harness-authored restore notice that waits for a separate activation.
+    PassiveRestoreNotice,
 }
 
 /// A queued prompt plus its user/internal classification.
@@ -382,6 +448,17 @@ impl PendingPrompt {
         }
     }
 
+    /// Create a hidden restore notice that waits for a separate activation.
+    pub(crate) fn passive_restore_notice(text: String) -> Self {
+        Self {
+            text,
+            message_class: PromptMessageClass::Internal,
+            source: PendingPromptSource::PassiveRestoreNotice,
+            submission_source: tau_proto::PromptSubmissionSource::HarnessInternal,
+            ctx_id: None,
+        }
+    }
+
     /// Attach a caller correlation id to this exact queued prompt.
     pub(crate) fn with_ctx_id(mut self, ctx_id: Option<String>) -> Self {
         self.ctx_id = ctx_id;
@@ -426,6 +503,16 @@ impl PendingPrompt {
     pub(crate) fn is_passive_background_completion(&self) -> bool {
         self.source == PendingPromptSource::PassiveBackgroundCompletion
     }
+
+    /// Whether committing this prompt creates checkpoint-governed inference.
+    #[must_use]
+    pub(crate) fn creates_inference_activation(&self) -> bool {
+        !matches!(
+            self.source,
+            PendingPromptSource::PassiveBackgroundCompletion
+                | PendingPromptSource::PassiveRestoreNotice
+        )
+    }
 }
 
 impl Agent {
@@ -441,12 +528,14 @@ impl Agent {
             session_id,
             originator,
             head,
+            branch_generation: 0,
             source_connection,
             in_flight_prompt: None,
             pending_prompts: VecDeque::new(),
             pending_message_wakes: VecDeque::new(),
+            pending_replay_activation: false,
             terminating: false,
-            standalone_compaction: StandaloneCompactionState::None,
+            activation_dispatch: ActivationDispatchState::None,
             pending_cancel: None,
             last_prompt_id: None,
             next_prompt_index: 0,

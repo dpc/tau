@@ -15,8 +15,11 @@ registration.
 Deduplication precedes publication and a bounded index is lazily rebuilt from
 typed transcript entries. Source sequence checks are scoped by extension,
 transport, conversation, and thread; durable append order remains authoritative.
-Only the live post-commit hook acknowledges ingress, activates the runtime-only
-route, and queues a payload-free wake marker. Replay bypasses those effects.
+Only the live post-commit hook acknowledges ingress and activates the runtime
+route. It queues message identity, durable sequence, and an optional transcript
+node; tool-adjacent messages remain unresolved until tool closure. Replay
+reconstructs unacknowledged typed wakes from their durable identities and
+inference watermarks rather than replaying live acknowledgements.
 
 Remote transport acceptance cannot be transactional with Tau storage.
 Successful-send completion validates the live call and either opaque reply route
@@ -427,10 +430,34 @@ schemas are not sent over UI/control channels unnecessarily.
 
 Durable envelopes retain source-owned `reply_path` for audit. Prompt assembly does not mutate that fact; it separately projects `reply` only when the route belongs to the target agent and the internally identified tool remains in the effective prompt snapshot, then uses its model-visible alias.
 Standalone compaction is transaction-driven rather than inferred from a
-transcript-tail trigger. A durable start captures an immutable branch cut;
-only its post-commit reaction sends one cut-local compact request with a
-synthetic trigger. Success installs a cut/suffix-bearing boundary so facts
+transcript-tail trigger. A durable start captures an immutable branch cut plus
+the pre-minted compact prompt id, provider-qualified model, and standalone
+operation. The successful boundary repeats this harness-stamped tuple; core
+accepts new boundaries only when all six transaction/cut/suffix/prompt/model/
+operation fields are present, the transaction resolves its start,
+cut/prompt/model/operation match it, operation is standalone, `suffix_end`
+equals the boundary parent, and cut is its ancestor. Legacy boundaries have
+all six absent. Runtime connection ids are deliberately not persisted:
+they identify a daemon incarnation rather than durable provider work.
+Only the start's post-commit reaction sends one cut-local compact request with
+that exact prompt id and synthetic trigger. Success installs a
+cut/suffix-bearing boundary so facts
 committed during compaction survive after the replacement window. Terminal
 failure records a safe durable category, blocks the owed activation from
 automatic retry, and leaves the agent addressable for explicit recovery.
 Inference resumes only after a durable dispatch watermark commits.
+While that checkpoint is interceptable or waiting to persist, an explicit
+`AwaitingCheckpoint` runtime state blocks every ordinary dispatch path. The
+post-commit continuation sends the exact checkpointed prompt id and transcript
+head, and acknowledges only materialized typed-message wakes on that branch
+through the watermark. Replay folds transaction outcomes and inference
+responses in core; an uncompleted checkpoint restores as dispatch-uncertain
+rather than being silently duplicated.
+
+Canonical submitted, injected, and steered transcript facts carry a
+harness-owned `inference_activation` bit. Typed pending-prompt provenance—not
+prompt text or peer input—decides the bit: active work is true, while passive
+background and restore context is false. Interceptors may rewrite sanctioned
+text but cannot change the bit. Missing legacy fields deserialize false.
+Replay considers only true facts after the last completed checkpoint; an
+uncompleted checkpoint remains uncertain and is never automatically resent.

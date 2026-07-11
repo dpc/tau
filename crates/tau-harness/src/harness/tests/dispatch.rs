@@ -313,6 +313,7 @@ fn resume_ignores_later_side_queued_or_steered_default_agent_candidates() {
                 "engineer_default",
                 None,
                 Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+                    inference_activation: false,
                     agent_id: tau_proto::AgentId::parse("engineer_default").expect("agent id"),
                     text: "default prompt".to_owned(),
                     message_class: tau_proto::PromptMessageClass::User,
@@ -328,6 +329,7 @@ fn resume_ignores_later_side_queued_or_steered_default_agent_candidates() {
                 "worker_steered",
                 None,
                 Event::AgentPromptSteered(AgentPromptSteered {
+                    inference_activation: false,
                     agent_id: tau_proto::AgentId::parse("worker_steered").expect("agent id"),
                     text: "side steered".to_owned(),
                     message_class: tau_proto::PromptMessageClass::User,
@@ -474,7 +476,7 @@ fn cbor_map_text<'a>(value: &'a CborValue, key: &str) -> Option<&'a str> {
     })
 }
 
-fn provider_text_response(
+pub(super) fn provider_text_response(
     spid: &AgentPromptId,
     agent_id: tau_proto::AgentId,
     text: &str,
@@ -536,6 +538,7 @@ fn seed_prior_user_message_at(state_dir: &Path, text: &str, recorded_at: tau_pro
             None,
             tau_core::AgentEventParent::InheritHead,
             Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+                inference_activation: false,
                 agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
                 text: text.to_owned(),
                 message_class: tau_proto::PromptMessageClass::User,
@@ -547,6 +550,33 @@ fn seed_prior_user_message_at(state_dir: &Path, text: &str, recorded_at: tau_pro
             recorded_at,
         )
         .expect("seed prior user message");
+}
+
+fn seed_inference_activation_event(state_dir: &Path, event: Event) {
+    seed_main_agent_loaded(state_dir);
+    let mut agent_store =
+        tau_core::AgentStore::open(state_dir.join("agents")).expect("agent store");
+    agent_store
+        .append_agent_event_at(
+            "main",
+            None,
+            tau_core::AgentEventParent::InheritHead,
+            event,
+            tau_proto::UnixMicros::now(),
+        )
+        .expect("seed pending activation");
+}
+
+fn append_seed_agent_event(store: &mut tau_core::AgentStore, event: Event) {
+    store
+        .append_agent_event_at(
+            "main",
+            None,
+            tau_core::AgentEventParent::InheritHead,
+            event,
+            tau_proto::UnixMicros::now(),
+        )
+        .expect("append seed event");
 }
 
 fn seed_main_agent_loaded(state_dir: &Path) {
@@ -638,6 +668,7 @@ fn seed_background_placeholder_for_agent(
             agent_id,
             None,
             Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+                inference_activation: false,
                 agent_id: parsed_agent_id.clone(),
                 text: format!("run {tool_name}"),
                 message_class: tau_proto::PromptMessageClass::User,
@@ -5419,6 +5450,7 @@ fn ui_tree_prompt_anchor_rewinds_before_later_prompt() {
     h.publish_for_agent(
         &cid,
         Event::AgentUserMessageInjected(tau_proto::AgentUserMessageInjected {
+            inference_activation: false,
             agent_id: agent_id.clone(),
             text: "synthetic injected input should not be listed".to_owned(),
             message_class: tau_proto::PromptMessageClass::User,
@@ -5435,6 +5467,7 @@ fn ui_tree_prompt_anchor_rewinds_before_later_prompt() {
     h.publish_for_agent(
         &cid,
         Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+            inference_activation: false,
             agent_id: agent_id.clone(),
             text: "internal prompt should not be listed".to_owned(),
             message_class: tau_proto::PromptMessageClass::Internal,
@@ -6967,6 +7000,226 @@ fn resumed_startup_folds_restore_notice_before_first_user_prompt() {
     h.shutdown().expect("shutdown");
 }
 
+/// Each new canonical activation committed before its first checkpoint is
+/// replay-woken once.
+#[test]
+fn resume_dispatches_true_activation_without_first_checkpoint() {
+    let agent_id = tau_proto::AgentId::parse("main").expect("agent id");
+    let cases = [
+        (
+            "submitted activation",
+            Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+                inference_activation: true,
+                agent_id: agent_id.clone(),
+                text: "submitted activation".to_owned(),
+                message_class: tau_proto::PromptMessageClass::User,
+                originator: tau_proto::PromptOriginator::User,
+                submission_source: Default::default(),
+                display_name: None,
+                ctx_id: None,
+            }),
+        ),
+        (
+            "injected activation",
+            Event::AgentUserMessageInjected(tau_proto::AgentUserMessageInjected {
+                inference_activation: true,
+                agent_id: agent_id.clone(),
+                text: "injected activation".to_owned(),
+                message_class: tau_proto::PromptMessageClass::Internal,
+            }),
+        ),
+        (
+            "steered activation",
+            Event::AgentPromptSteered(tau_proto::AgentPromptSteered {
+                inference_activation: true,
+                agent_id,
+                text: "steered activation".to_owned(),
+                message_class: tau_proto::PromptMessageClass::User,
+                ctx_id: Some("ctx-1".to_owned()),
+            }),
+        ),
+    ];
+
+    for (text, event) in cases {
+        let td = TempDir::new().expect("tempdir");
+        let state = td.path().join("state");
+        seed_inference_activation_event(&state, event);
+
+        let mut h =
+            quiet_provider_harness_with_start_reason(&state, tau_proto::SessionStartReason::Resume)
+                .expect("resume");
+        let prompt = read_nth_prompt_created(&h, 0);
+        let context = serde_json::to_string(&prompt.context).expect("context");
+        assert_eq!(context.matches(text).count(), 1);
+        assert_eq!(
+            event_log_events(&h)
+                .into_iter()
+                .filter(|event| matches!(event, Event::AgentInferenceDispatchStarted(_)))
+                .count(),
+            1
+        );
+        h.shutdown().expect("shutdown");
+    }
+}
+
+/// Explicit-false canonical facts are passive transcript context and must not
+/// independently wake inference during cold replay.
+#[test]
+fn resume_does_not_dispatch_false_canonical_facts() {
+    let agent_id = tau_proto::AgentId::parse("main").expect("agent id");
+    let cases = [
+        Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+            inference_activation: false,
+            agent_id: agent_id.clone(),
+            text: "passive submitted".to_owned(),
+            message_class: tau_proto::PromptMessageClass::Internal,
+            originator: tau_proto::PromptOriginator::User,
+            submission_source: Default::default(),
+            display_name: None,
+            ctx_id: None,
+        }),
+        Event::AgentUserMessageInjected(tau_proto::AgentUserMessageInjected {
+            inference_activation: false,
+            agent_id: agent_id.clone(),
+            text: "passive injected".to_owned(),
+            message_class: tau_proto::PromptMessageClass::Internal,
+        }),
+        Event::AgentPromptSteered(tau_proto::AgentPromptSteered {
+            inference_activation: false,
+            agent_id,
+            text: "passive steered".to_owned(),
+            message_class: tau_proto::PromptMessageClass::Internal,
+            ctx_id: None,
+        }),
+    ];
+
+    for event in cases {
+        let td = TempDir::new().expect("tempdir");
+        let state = td.path().join("state");
+        seed_inference_activation_event(&state, event);
+
+        let mut h =
+            quiet_provider_harness_with_start_reason(&state, tau_proto::SessionStartReason::Resume)
+                .expect("resume");
+        assert!(!event_log_contains_any_source(&h, |event| matches!(
+            event,
+            Event::AgentPromptCreated(_) | Event::AgentInferenceDispatchStarted(_)
+        )));
+        h.shutdown().expect("shutdown");
+    }
+}
+
+/// Model-visible text cannot spoof harness-owned passive provenance: a normal
+/// activating prompt remains active even when its bytes resemble a restore
+/// notice.
+#[test]
+fn restore_looking_user_text_remains_an_activation() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path()).expect("harness");
+    let cid = ensure_test_user_agent(&mut h);
+    let text = crate::harness::restore_notice_prompt_for_elapsed(None);
+
+    h.dispatch_prompt_for_agent(&cid, PendingPrompt::human_ui(text.clone()))
+        .expect("dispatch spoof-shaped user text");
+
+    assert!(event_log_events(&h).into_iter().any(|event| matches!(
+        event,
+        Event::AgentPromptSubmitted(submitted)
+            if submitted.text == text && submitted.inference_activation
+    )));
+    h.shutdown().expect("shutdown");
+}
+
+/// A completed checkpoint consumes every true activation through its head,
+/// leaves a later true node pending once, and an uncompleted replacement
+/// checkpoint restores as uncertain without redispatch.
+#[test]
+fn replay_respects_activation_checkpoint_ranges_and_uncertainty() {
+    let td = TempDir::new().expect("tempdir");
+    let state = td.path().join("state");
+    seed_main_agent_loaded(&state);
+    let agent_id = tau_proto::AgentId::parse("main").expect("agent id");
+    let mut store = tau_core::AgentStore::open(state.join("agents")).expect("agent store");
+    for text in ["activation A", "activation B"] {
+        append_seed_agent_event(
+            &mut store,
+            Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+                inference_activation: true,
+                agent_id: agent_id.clone(),
+                text: text.to_owned(),
+                message_class: tau_proto::PromptMessageClass::User,
+                originator: tau_proto::PromptOriginator::User,
+                submission_source: Default::default(),
+                display_name: None,
+                ctx_id: None,
+            }),
+        );
+    }
+    let through = store
+        .agent("main")
+        .and_then(tau_core::AgentTree::head)
+        .expect("second activation head");
+    let completed_prompt_id = tau_proto::AgentPromptId::from("ap-main-completed");
+    append_seed_agent_event(
+        &mut store,
+        Event::AgentInferenceDispatchStarted(tau_proto::AgentInferenceDispatchStarted {
+            agent_id: agent_id.clone(),
+            transaction_id: None,
+            agent_prompt_id: completed_prompt_id.clone(),
+            through: tau_proto::AgentHead::Node(through),
+        }),
+    );
+    append_seed_agent_event(
+        &mut store,
+        Event::ProviderResponseFinished(provider_text_response(
+            &completed_prompt_id,
+            agent_id.clone(),
+            "completed response",
+        )),
+    );
+    append_seed_agent_event(
+        &mut store,
+        Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+            inference_activation: true,
+            agent_id,
+            text: "activation C".to_owned(),
+            message_class: tau_proto::PromptMessageClass::User,
+            originator: tau_proto::PromptOriginator::User,
+            submission_source: Default::default(),
+            display_name: None,
+            ctx_id: None,
+        }),
+    );
+    drop(store);
+
+    {
+        let mut h =
+            quiet_provider_harness_with_start_reason(&state, tau_proto::SessionStartReason::Resume)
+                .expect("first resume");
+        let prompt = read_nth_prompt_created(&h, 0);
+        let context = serde_json::to_string(&prompt.context).expect("context");
+        assert_eq!(context.matches("activation C").count(), 1);
+        assert_eq!(
+            event_log_events(&h)
+                .into_iter()
+                .filter(|event| matches!(event, Event::AgentInferenceDispatchStarted(_)))
+                .count(),
+            1,
+            "later activation should be checkpointed exactly once"
+        );
+        h.shutdown().expect("shutdown");
+    }
+
+    let mut h =
+        quiet_provider_harness_with_start_reason(&state, tau_proto::SessionStartReason::Resume)
+            .expect("uncertain resume");
+    assert!(!event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::AgentPromptCreated(_) | Event::AgentInferenceDispatchStarted(_)
+    )));
+    h.shutdown().expect("shutdown");
+}
+
 /// The restore notice is a one-shot durable fact. Follow-up prompts and later
 /// cold resumes may replay the original notice in history, but must not append
 /// another copy.
@@ -7002,6 +7255,12 @@ fn restore_notice_is_not_duplicated_by_followups_or_later_resumes() {
         assert_eq!(context_text_count(&second_prompt, notice.as_str()), 1);
         assert_eq!(restore_notice_context_count(&second_prompt), 1);
         assert_eq!(restore_notice_event_count(&h), 1);
+        h.handle_provider_response_finished(provider_text_response(
+            &second_prompt.agent_prompt_id,
+            second_prompt.agent_id.clone(),
+            "second answer",
+        ))
+        .expect("finish second prompt before cold resume");
 
         h.shutdown().expect("shutdown");
         notice
@@ -7452,7 +7711,7 @@ fn manual_compact_appends_trigger_and_dispatches_normal_prompt() {
 #[test]
 fn manual_standalone_compact_installs_one_boundary() {
     let td = TempDir::new().expect("tempdir");
-    let mut h = quiet_provider_harness(&td.path().join("state")).expect("start");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
     enable_remote_compaction_for_test_model(&mut h);
     let info = h
         .provider_model_info
@@ -7470,6 +7729,32 @@ fn manual_standalone_compact_installs_one_boundary() {
         prompt.operation,
         tau_proto::PromptOperation::StandaloneCompaction
     );
+    let events = event_log_events(&h);
+    let (started_index, started) = events
+        .iter()
+        .enumerate()
+        .find_map(|(index, event)| match event {
+            Event::AgentStandaloneCompactionStarted(started) => Some((index, started.clone())),
+            _ => None,
+        })
+        .expect("durable start");
+    let prompt_index = events
+        .iter()
+        .position(|event| {
+            matches!(
+                event,
+                Event::AgentPromptCreated(created)
+                    if created.agent_prompt_id == prompt.agent_prompt_id
+            )
+        })
+        .expect("provider prompt");
+    assert!(
+        started_index < prompt_index,
+        "durable start must commit before provider dispatch"
+    );
+    assert_eq!(started.compact_prompt_id, prompt.agent_prompt_id);
+    assert_eq!(started.model, prompt.model);
+    assert_eq!(started.operation, prompt.operation);
     let response = ProviderResponseFinished {
         agent_prompt_id: prompt.agent_prompt_id,
         agent_id: crate::parse_agent_id(&agent_id),
@@ -7496,13 +7781,27 @@ fn manual_standalone_compact_installs_one_boundary() {
     h.handle_provider_response_finished(response)
         .expect("ignore duplicate compact response");
 
-    let mut compacted = 0;
-    let mut cursor = crate::event_log::EventLogSeq::new(0);
-    while let Some(entry) = h.event_log.get_next_from(cursor) {
-        cursor = entry.seq.next();
-        compacted += usize::from(matches!(entry.event, Event::AgentCompacted(_)));
-    }
-    assert_eq!(compacted, 1);
+    let compacted: Vec<_> = event_log_events(&h)
+        .into_iter()
+        .filter_map(|event| match event {
+            Event::AgentCompacted(compacted) => Some(compacted),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(compacted.len(), 1);
+    assert_eq!(
+        (
+            compacted[0].compact_prompt_id.as_ref(),
+            compacted[0].model.as_ref(),
+            compacted[0].operation,
+        ),
+        (
+            Some(&started.compact_prompt_id),
+            Some(&started.model),
+            Some(started.operation),
+        ),
+        "terminal correlation must be copied from the durable start"
+    );
     assert!(matches!(
         agent_tree_for_conversation(&h, &cid).current_branch().last(),
         Some(tau_core::AgentEntry::Compaction {
@@ -7513,12 +7812,66 @@ fn manual_standalone_compact_installs_one_boundary() {
     h.shutdown().expect("shutdown");
 }
 
+/// Explicit navigation invalidates an in-flight compact response even if the
+/// selected head value is unchanged and the cut remains an ancestor.
+#[test]
+fn standalone_compaction_rejects_response_after_head_navigation() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    enable_remote_compaction_for_test_model(&mut h);
+    let info = h
+        .provider_model_info
+        .get_mut(&"test/model".into())
+        .expect("test model");
+    info.supports_compaction = false;
+    info.supports_standalone_compaction = true;
+    let cid = ensure_test_user_agent(&mut h);
+    let agent_id = h.agents[&cid].agent_id.clone().expect("durable agent");
+
+    h.handle_compact_request("s1".into(), Some(&agent_id));
+    let compact = read_nth_prompt_created(&h, 0);
+    h.publish_for_agent(
+        &cid,
+        Event::AgentHeadMoved(tau_proto::AgentHeadMoved {
+            agent_id: crate::parse_agent_id(&agent_id),
+            head: h.agents[&cid]
+                .head
+                .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node),
+        }),
+    );
+    h.handle_provider_response_finished(provider_text_response(
+        &compact.agent_prompt_id,
+        compact.agent_id,
+        "stale summary",
+    ))
+    .expect("handle stale response");
+
+    assert_eq!(
+        event_log_events(&h)
+            .into_iter()
+            .filter(|event| matches!(
+                event,
+                Event::AgentStandaloneCompactionFailed(failed)
+                    if failed.reason
+                        == tau_proto::StandaloneCompactionFailureReason::StaleBranch
+            ))
+            .count(),
+        1
+    );
+    assert!(
+        !event_log_events(&h)
+            .into_iter()
+            .any(|event| matches!(event, Event::AgentCompacted(_)))
+    );
+    h.shutdown().expect("shutdown");
+}
+
 /// A terminal standalone failure must become one durable blocked outcome and
 /// must not redispatch compaction merely because queue advancement repeats.
 #[test]
 fn standalone_compaction_failure_does_not_retry_automatically() {
     let td = TempDir::new().expect("tempdir");
-    let mut h = quiet_provider_harness(&td.path().join("state")).expect("start");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
     enable_remote_compaction_for_test_model(&mut h);
     let info = h
         .provider_model_info
@@ -7550,8 +7903,8 @@ fn standalone_compaction_failure_does_not_retry_automatically() {
     h.try_advance_queue();
 
     assert!(matches!(
-        h.agents[&cid].standalone_compaction,
-        crate::agent::StandaloneCompactionState::Blocked { .. }
+        h.agents[&cid].activation_dispatch,
+        crate::agent::ActivationDispatchState::Blocked { .. }
     ));
     assert_eq!(
         event_log_events(&h)
@@ -7571,6 +7924,91 @@ fn standalone_compaction_failure_does_not_retry_automatically() {
         matches!(event, Event::AgentStandaloneCompactionFailed(failed)
             if serde_json::to_string(&failed).expect("serialize failure").contains("secret provider detail"))
     }));
+    h.handle_compact_request("s1".into(), Some(&agent_id));
+    let starts: Vec<_> = event_log_events(&h)
+        .into_iter()
+        .filter_map(|event| match event {
+            Event::AgentStandaloneCompactionStarted(started) => Some(started),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(starts.len(), 2);
+    assert_eq!(
+        starts[1].supersedes.as_ref(),
+        Some(&starts[0].transaction_id)
+    );
+    assert_ne!(starts[1].transaction_id, starts[0].transaction_id);
+}
+
+/// A failed automatic transaction retains A across an explicit retry, while B
+/// committed during recovery joins the one eventual inference exactly once.
+#[test]
+fn standalone_compaction_retry_preserves_owed_and_later_activations() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    enable_remote_compaction_for_test_model(&mut h);
+    let info = h
+        .provider_model_info
+        .get_mut(&"test/model".into())
+        .expect("test model");
+    info.supports_compaction = false;
+    info.supports_standalone_compaction = true;
+    info.standalone_compaction_threshold = Some(900);
+    let cid = ensure_test_user_agent(&mut h);
+    let agent_id = h.agents[&cid].agent_id.clone().expect("durable agent");
+    h.agents.get_mut(&cid).expect("agent").context_input_tokens = Some(900);
+
+    h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("activation A".to_owned()))
+        .expect("start automatic compact");
+    let first_compact = read_nth_prompt_created(&h, 0);
+    let mut failed = provider_text_response(
+        &first_compact.agent_prompt_id,
+        first_compact.agent_id,
+        "ignored",
+    );
+    failed.output_items.clear();
+    failed.error = Some("provider failed".to_owned());
+    h.handle_provider_response_finished(failed)
+        .expect("record failure");
+
+    h.publish_for_agent(
+        &cid,
+        Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+            inference_activation: false,
+            agent_id: crate::parse_agent_id(&agent_id),
+            text: "activation B".to_owned(),
+            message_class: tau_proto::PromptMessageClass::User,
+            originator: tau_proto::PromptOriginator::User,
+            submission_source: Default::default(),
+            display_name: None,
+            ctx_id: None,
+        }),
+    );
+    h.handle_compact_request("s1".into(), Some(&agent_id));
+    let retry_compact = read_nth_prompt_created(&h, 1);
+    h.handle_provider_response_finished(provider_text_response(
+        &retry_compact.agent_prompt_id,
+        retry_compact.agent_id,
+        "replacement",
+    ))
+    .expect("accept retry");
+
+    let inference = read_nth_prompt_created(&h, 2);
+    let context = serde_json::to_string(&inference.context).expect("context");
+    assert_eq!(context.matches("activation A").count(), 1);
+    assert_eq!(context.matches("activation B").count(), 1);
+    assert_eq!(
+        event_log_events(&h)
+            .into_iter()
+            .filter(|event| matches!(
+                event,
+                Event::AgentPromptCreated(prompt)
+                    if prompt.operation == tau_proto::PromptOperation::Inference
+            ))
+            .count(),
+        1
+    );
+    h.shutdown().expect("shutdown");
 }
 
 /// Provider-default standalone auto-compaction runs before a submitted turn,
@@ -7579,7 +8017,7 @@ fn standalone_compaction_failure_does_not_retry_automatically() {
 #[test]
 fn standalone_auto_compaction_schedules_at_threshold() {
     let td = TempDir::new().expect("tempdir");
-    let mut h = quiet_provider_harness(&td.path().join("state")).expect("start");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
     enable_remote_compaction_for_test_model(&mut h);
     let info = h
         .provider_model_info
@@ -7635,6 +8073,65 @@ fn standalone_auto_compaction_schedules_at_threshold() {
     assert!(event_log_contains_any_source(&h, |event| matches!(
         event,
         Event::AgentStandaloneCompactionStarted(started) if started.resume_through.is_some()
+    )));
+    h.shutdown().expect("shutdown");
+}
+
+/// A readiness-deferred activation must re-project usage at the actual dispatch
+/// boundary so growth committed while parked cannot bypass compaction.
+#[test]
+fn readiness_deferred_activation_rechecks_projected_compaction() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path().join("state")).expect("start");
+    enable_remote_compaction_for_test_model(&mut h);
+    let info = h
+        .provider_model_info
+        .get_mut(&"test/model".into())
+        .expect("test model");
+    info.supports_compaction = false;
+    info.supports_standalone_compaction = true;
+    info.standalone_compaction_threshold = Some(8_000);
+    let cid = ensure_test_user_agent(&mut h);
+    let agent_id = h.agents[&cid].agent_id.clone().expect("durable agent");
+    h.agents.get_mut(&cid).expect("agent").context_input_tokens = Some(100);
+    h.pending_agent_context_ready.insert(
+        crate::parse_agent_id(&agent_id),
+        std::collections::HashSet::from([tau_proto::ConnectionId::from("context-provider")]),
+    );
+
+    h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("activation A".to_owned()))
+        .expect("park activation");
+    assert!(
+        !event_log_events(&h)
+            .into_iter()
+            .any(|event| matches!(event, Event::AgentPromptCreated(_)))
+    );
+    h.publish_for_agent(
+        &cid,
+        Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+            inference_activation: false,
+            agent_id: crate::parse_agent_id(&agent_id),
+            text: "B".repeat(6_000),
+            message_class: tau_proto::PromptMessageClass::User,
+            originator: tau_proto::PromptOriginator::User,
+            submission_source: Default::default(),
+            display_name: None,
+            ctx_id: None,
+        }),
+    );
+
+    h.pending_agent_context_ready
+        .remove(&crate::parse_agent_id(&agent_id));
+    h.drain_publish_idle_dispatches();
+    let prompt = read_nth_prompt_created(&h, 0);
+    assert_eq!(
+        prompt.operation,
+        tau_proto::PromptOperation::StandaloneCompaction
+    );
+    assert!(!event_log_events(&h).into_iter().any(|event| matches!(
+        event,
+        Event::AgentPromptCreated(prompt)
+            if prompt.operation == tau_proto::PromptOperation::Inference
     )));
     h.shutdown().expect("shutdown");
 }
@@ -7695,6 +8192,7 @@ fn start_background_tool_and_finish_placeholder_turn(
     h.publish_for_agent(
         cid,
         Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+            inference_activation: false,
             agent_id: crate::parse_agent_id(&agent_id),
             text: format!("run {tool_name}"),
             message_class: tau_proto::PromptMessageClass::User,
@@ -13439,6 +13937,45 @@ fn message_tool_stopped_recipient_errors_without_agent_message() {
     h.shutdown().expect("shutdown");
 }
 
+/// Terminal teardown keeps routes until unload commits but must reject every
+/// direct message and prompt entry point during that interval.
+#[test]
+fn terminating_agent_route_rejects_direct_work() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path().join("state")).expect("start");
+    let cid = ensure_test_user_agent(&mut h);
+    let recipient_id = h.agents[&cid].agent_id.clone().expect("durable agent");
+    h.agents.get_mut(&cid).expect("agent").terminating = true;
+
+    assert_ne!(
+        h.agent_message_recipient_status(&recipient_id),
+        crate::harness::AgentMessageRecipientStatus::Live
+    );
+    h.deliver_agent_message(&tau_proto::AgentMessageReceived {
+        message_id: "msg-during-termination".into(),
+        sender_id: tau_proto::AgentId::parse("sender").expect("agent id"),
+        sender_session_id: None,
+        recipient_id: tau_proto::AgentId::parse(&recipient_id).expect("agent id"),
+        kind: tau_proto::AgentMessageKind::Message,
+        watch_turn_state: None,
+        message: "must be rejected".to_owned(),
+    });
+    assert!(h.agents[&cid].pending_prompts.is_empty());
+    assert!(
+        h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("rejected".to_owned()))
+            .is_err()
+    );
+    assert!(matches!(
+        h.submit_prompt_to_agent(
+            "s1".into(),
+            &recipient_id,
+            PendingPrompt::user("also rejected".to_owned())
+        )
+        .expect("rejection is in-band"),
+        crate::harness::PromptSubmission::Rejected { .. }
+    ));
+}
+
 /// Agent-directed messages are displayed in the UI like every message
 /// projection, and the recipient agent receives an internal queued prompt with
 /// stable markup.
@@ -13882,6 +14419,29 @@ fn inbound_non_extension_owned_fallback_events_are_ignored() {
             cacheable_input_tokens: 1,
             corrected_cache_efficiency: 0.0,
         }),
+        Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+            inference_activation: true,
+            agent_id: crate::parse_agent_id("forged-agent"),
+            text: "forged submitted".to_owned(),
+            message_class: tau_proto::PromptMessageClass::User,
+            originator: tau_proto::PromptOriginator::User,
+            submission_source: tau_proto::PromptSubmissionSource::HumanUi,
+            display_name: None,
+            ctx_id: None,
+        }),
+        Event::AgentUserMessageInjected(tau_proto::AgentUserMessageInjected {
+            inference_activation: false,
+            agent_id: crate::parse_agent_id("forged-agent"),
+            text: "forged injected".to_owned(),
+            message_class: tau_proto::PromptMessageClass::Internal,
+        }),
+        Event::AgentPromptSteered(tau_proto::AgentPromptSteered {
+            inference_activation: true,
+            agent_id: crate::parse_agent_id("forged-agent"),
+            text: "forged steered".to_owned(),
+            message_class: tau_proto::PromptMessageClass::User,
+            ctx_id: None,
+        }),
     ] {
         let baseline_seq = h.event_log.next_seq();
         h.handle_extension_message(
@@ -13907,6 +14467,65 @@ fn inbound_non_extension_owned_fallback_events_are_ignored() {
             .is_empty()
     );
 
+    h.shutdown().expect("shutdown");
+}
+
+/// UI and extension peers cannot author canonical transcript facts or their
+/// harness-owned activation bits through direct or generic-emit intake.
+#[test]
+fn inbound_canonical_activation_forgery_is_ignored() {
+    let td = TempDir::new().expect("tempdir");
+    let state = td.path().join("state");
+    let mut h = echo_harness(&state).expect("start");
+    let agent_id = crate::parse_agent_id("forged-agent");
+    let forged = [
+        Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+            inference_activation: true,
+            agent_id: agent_id.clone(),
+            text: "forged submitted".to_owned(),
+            message_class: tau_proto::PromptMessageClass::User,
+            originator: tau_proto::PromptOriginator::User,
+            submission_source: tau_proto::PromptSubmissionSource::HumanUi,
+            display_name: None,
+            ctx_id: None,
+        }),
+        Event::AgentUserMessageInjected(tau_proto::AgentUserMessageInjected {
+            inference_activation: true,
+            agent_id: agent_id.clone(),
+            text: "forged injected".to_owned(),
+            message_class: tau_proto::PromptMessageClass::Internal,
+        }),
+        Event::AgentPromptSteered(tau_proto::AgentPromptSteered {
+            inference_activation: true,
+            agent_id,
+            text: "forged steered".to_owned(),
+            message_class: tau_proto::PromptMessageClass::User,
+            ctx_id: None,
+        }),
+    ];
+
+    for event in forged {
+        let baseline_seq = h.event_log.next_seq();
+        h.handle_client_event_inner("ui", event.clone())
+            .expect("ui event ignored");
+        h.handle_extension_event_inner("extension", event.clone())
+            .expect("extension event ignored");
+        h.handle_extension_message(
+            "extension",
+            TestMessage::Emit(tau_proto::Emit {
+                event: Box::new(event),
+                transient: false,
+            }),
+        )
+        .expect("extension emit ignored");
+        assert!(h.event_log.get_next_from(baseline_seq).is_none());
+    }
+    assert!(
+        h.agent_store
+            .agent_events("forged-agent")
+            .expect("agent events")
+            .is_empty()
+    );
     h.shutdown().expect("shutdown");
 }
 
@@ -14249,10 +14868,13 @@ fn queued_extension_prompt_submit_requests_preserve_individual_ctx_ids() {
             if created.agent_id == agent_id && created.ctx_id.as_deref() == Some("ctx-1")
     )));
 
-    if let Some(agent) = h.agents.get_mut(&cid) {
-        agent.in_flight_prompt = None;
-    }
-    h.set_agent_turn_state(&cid, AgentTurnState::Idle);
+    let first = read_nth_prompt_created(&h, 0);
+    h.handle_provider_response_finished(provider_text_response(
+        &first.agent_prompt_id,
+        first.agent_id,
+        "first done",
+    ))
+    .expect("durably finish first checkpointed dispatch");
     h.try_advance_queue();
     assert!(event_log_contains_any_source(&h, |event| matches!(
         event,

@@ -2985,6 +2985,11 @@ pub struct TermBell {}
 pub struct AgentPromptSubmitted {
     /// Agent transcript receiving the prompt.
     pub agent_id: AgentId,
+    /// Harness-owned immutable activation marker. True creates
+    /// checkpoint-governed inference work; false is passive or legacy context
+    /// and cannot independently wake inference during replay.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub inference_activation: bool,
     /// Prompt text.
     pub text: String,
     /// Whether this prompt text is user-authored or hidden internal control
@@ -3072,6 +3077,8 @@ pub struct AgentStandaloneCompactionStarted {
     pub agent_id: AgentId,
     /// Unique transaction correlation identifier.
     pub transaction_id: CompactionTransactionId,
+    /// Provider prompt id pre-minted before the durable start commits.
+    pub compact_prompt_id: AgentPromptId,
     /// Immutable last node included in the compact request.
     pub cut: AgentHead,
     /// Last already-committed activation owed an inference, if any.
@@ -3079,6 +3086,8 @@ pub struct AgentStandaloneCompactionStarted {
     pub resume_through: Option<AgentHead>,
     /// Model semantics captured when the transaction started.
     pub model: ModelId,
+    /// Provider operation captured for this transaction.
+    pub operation: PromptOperation,
     /// Originator semantics captured when the transaction started.
     pub originator: PromptOriginator,
     /// Earlier failed transaction explicitly replaced by this attempt.
@@ -3123,7 +3132,8 @@ pub struct AgentInferenceDispatchStarted {
 pub struct AgentCompacted {
     /// Agent transcript receiving the replacement window.
     pub agent_id: AgentId,
-    /// New-format standalone transaction correlation; absent on legacy records.
+    /// New-format standalone transaction correlation; absent with all five
+    /// other correlation fields on legacy records.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transaction_id: Option<CompactionTransactionId>,
     /// Immutable compact-input cut; absent on legacy hard boundaries.
@@ -3132,6 +3142,15 @@ pub struct AgentCompacted {
     /// Last suffix node immediately before this boundary.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub suffix_end: Option<AgentHead>,
+    /// Compact provider prompt correlation; absent on legacy boundaries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compact_prompt_id: Option<AgentPromptId>,
+    /// Captured provider-qualified model; absent on legacy boundaries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<ModelId>,
+    /// Captured provider operation; absent on legacy boundaries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation: Option<PromptOperation>,
     /// Provider-validated ordered context that replaces all older model-visible
     /// history.
     pub replacement_window: Vec<ContextItem>,
@@ -3145,6 +3164,11 @@ pub struct AgentCompacted {
 pub struct AgentPromptSteered {
     /// Agent whose in-flight turn received the prompt.
     pub agent_id: AgentId,
+    /// Harness-owned immutable activation marker. True creates
+    /// checkpoint-governed inference work; false is passive or legacy context
+    /// and cannot independently wake inference during replay.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub inference_activation: bool,
     /// Prompt text appended to the in-flight turn.
     pub text: String,
     /// Whether this prompt text is user-authored or hidden internal control
@@ -3163,6 +3187,11 @@ pub struct AgentPromptSteered {
 pub struct AgentUserMessageInjected {
     /// Agent transcript receiving the injected message.
     pub agent_id: AgentId,
+    /// Harness-owned immutable activation marker. True creates
+    /// checkpoint-governed inference work; false is passive or legacy context
+    /// and cannot independently wake inference during replay.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub inference_activation: bool,
     pub text: String,
     /// Whether this prompt text is user-authored or hidden internal control
     /// text.

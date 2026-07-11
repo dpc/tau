@@ -2439,6 +2439,12 @@ fn reregister_after_notice_delivery_queues_available_again_notice() {
         .expect("dispatch unavailable prompt");
     let first_prompt = read_nth_prompt_created(&h, 0);
     assert_eq!(context_text_count(&first_prompt, &unavailable), 1);
+    h.handle_provider_response_finished(super::dispatch::provider_text_response(
+        &first_prompt.agent_prompt_id,
+        first_prompt.agent_id.clone(),
+        "acknowledged",
+    ))
+    .expect("finish first checkpointed prompt");
 
     reregister_shell(&mut h, spec);
     h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("after reregister".to_owned()))
@@ -3061,6 +3067,38 @@ fn targetless_shell_output_injects_into_default_agent() {
     assert!(injected.text.contains("hello"));
 }
 
+/// Late shell completion must not append new durable work after terminal
+/// teardown has begun, whether explicitly or implicitly targeted.
+#[test]
+fn terminating_agent_rejects_late_shell_output() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path().join("state")).expect("start");
+    let cid = ensure_test_user_agent(&mut h);
+    let agent_id = durable_agent_id_for_conversation(&h, &cid);
+    h.agents.get_mut(&cid).expect("agent").terminating = true;
+
+    for target_agent_id in [Some(agent_id.clone()), None] {
+        h.inject_user_shell_output(&tau_proto::ShellCommandFinished {
+            command_id: "late-shell".into(),
+            session_id: "s1".into(),
+            command: "printf late".to_owned(),
+            include_in_context: true,
+            target_agent_id,
+            output: "late".to_owned(),
+            exit_code: Some(0),
+            cancelled: false,
+        });
+    }
+    assert!(
+        !loaded_agent_events(&h, "s1")
+            .into_iter()
+            .any(|event| matches!(
+                event,
+                Event::AgentUserMessageInjected(injected) if injected.text.contains("printf late")
+            ))
+    );
+}
+
 /// Ensures stale or malformed shell finish events cannot inject output into the
 /// wrong session when an explicit target agent belongs to another session.
 #[test]
@@ -3181,6 +3219,7 @@ fn resumed_session_init_does_not_reinject_agents_context() {
         &cid,
         None,
         Event::AgentUserMessageInjected(tau_proto::AgentUserMessageInjected {
+            inference_activation: false,
             agent_id: crate::parse_agent_id(&agent_id),
             text: format!("# AGENTS.md instructions\n{marker}"),
             message_class: tau_proto::PromptMessageClass::User,

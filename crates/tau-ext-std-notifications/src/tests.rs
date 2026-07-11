@@ -337,6 +337,7 @@ fn user_prompt_submitted_for_agent(
     originator: tau_proto::PromptOriginator,
 ) -> Event {
     Event::AgentPromptSubmitted(AgentPromptSubmitted {
+        inference_activation: false,
         agent_id: tau_proto::AgentId::parse(agent_id).expect("agent id"),
         text: text.into(),
         message_class: tau_proto::PromptMessageClass::User,
@@ -644,6 +645,7 @@ fn agent_start_hook_renders_multiple_configured_actions() {
         .expect("write config");
     writer
         .write_event(&Event::AgentPromptSubmitted(AgentPromptSubmitted {
+            inference_activation: false,
             agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
             text: "hello".to_owned(),
             message_class: tau_proto::PromptMessageClass::User,
@@ -702,6 +704,7 @@ fn agent_start_hook_uses_display_name_set_with_id_fallback_for_blank_prompt_name
         .expect("write name");
     writer
         .write_event(&Event::AgentPromptSubmitted(AgentPromptSubmitted {
+            inference_activation: false,
             agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
             text: "hello".to_owned(),
             message_class: tau_proto::PromptMessageClass::User,
@@ -2565,6 +2568,7 @@ fn runtime_invalid_osc1337_key_is_skipped() {
         .expect("write config");
     writer
         .write_event(&Event::AgentPromptSubmitted(AgentPromptSubmitted {
+            inference_activation: false,
             agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
             text: "hello".to_owned(),
             message_class: tau_proto::PromptMessageClass::User,

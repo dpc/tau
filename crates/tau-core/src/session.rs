@@ -178,6 +178,9 @@ pub enum AgentEntry {
     UserInput {
         /// Context items appended by the user or harness.
         items: Vec<ContextItem>,
+        /// Whether this node creates checkpoint-governed inference work.
+        #[serde(default)]
+        inference_activation: bool,
     },
     /// Assistant output accepted from a provider.
     AssistantResponse {
@@ -357,6 +360,62 @@ pub struct AgentTree {
     /// Globally unique tool calls that already have one real background
     /// completion event.
     background_completed_tool_calls: HashSet<ToolCallId>,
+    /// Durable standalone-compaction transactions folded from control facts.
+    compaction_transactions: HashMap<tau_proto::CompactionTransactionId, CompactionTransactionFold>,
+    /// Durable insertion order for deterministic recovery projection.
+    compaction_transaction_order: Vec<tau_proto::CompactionTransactionId>,
+    /// All durable inference checkpoints keyed by their provider prompt id.
+    inference_dispatches:
+        HashMap<tau_proto::AgentPromptId, (tau_proto::AgentInferenceDispatchStarted, bool)>,
+    /// Durable inference checkpoint insertion order.
+    inference_dispatch_order: Vec<tau_proto::AgentPromptId>,
+}
+
+/// Validated durable state for one standalone compaction transaction.
+#[derive(Clone, Debug, PartialEq)]
+struct CompactionTransactionFold {
+    started: tau_proto::AgentStandaloneCompactionStarted,
+    outcome: Option<CompactionTransactionOutcome>,
+    checkpoint: Option<tau_proto::AgentInferenceDispatchStarted>,
+    inference_finished: bool,
+}
+
+/// Exactly one terminal compact outcome.
+#[derive(Clone, Debug, PartialEq)]
+enum CompactionTransactionOutcome {
+    Succeeded(tau_proto::AgentCompacted),
+    Failed(tau_proto::AgentStandaloneCompactionFailed),
+}
+
+/// Durable standalone-compaction state reconstructed by the core fold.
+#[derive(Clone, Debug, PartialEq)]
+pub enum StandaloneCompactionRecovery {
+    /// A start has no terminal outcome and must be repaired as interrupted.
+    Interrupted(tau_proto::AgentStandaloneCompactionStarted),
+    /// A terminal failure retains an explicit recovery obligation.
+    Blocked(tau_proto::AgentStandaloneCompactionFailed),
+    /// Success still owes a durable inference-dispatch checkpoint.
+    AwaitingCheckpoint {
+        /// Successful transaction id.
+        transaction_id: tau_proto::CompactionTransactionId,
+        /// Immutable compact cut.
+        cut: tau_proto::AgentHead,
+        /// Snapshot through which inference remains owed.
+        through: tau_proto::AgentHead,
+    },
+    /// A checkpoint exists without a matching durable provider terminal
+    /// response.
+    DispatchUncertain(tau_proto::AgentInferenceDispatchStarted),
+}
+
+/// Recovery projection for the latest durable inference checkpoint.
+#[derive(Clone, Debug, PartialEq)]
+pub enum InferenceDispatchRecovery {
+    /// A terminal provider response durably completed this snapshot.
+    CompletedThrough(tau_proto::AgentHead),
+    /// Dispatch may have reached the provider but has no durable terminal
+    /// response.
+    DispatchUncertain(tau_proto::AgentInferenceDispatchStarted),
 }
 
 /// Latest durable value for one per-agent metadata key.
@@ -375,6 +434,62 @@ fn normalize_display_name(value: Option<&str>) -> Option<String> {
 }
 
 impl AgentTree {
+    /// Returns the latest validated standalone transaction's recovery
+    /// projection.
+    #[must_use]
+    pub fn standalone_compaction_recovery(&self) -> Option<StandaloneCompactionRecovery> {
+        let id = self.compaction_transaction_order.last()?;
+        let transaction = self.compaction_transactions.get(id)?;
+        match (&transaction.outcome, &transaction.checkpoint) {
+            (None, _) => Some(StandaloneCompactionRecovery::Interrupted(
+                transaction.started.clone(),
+            )),
+            (Some(CompactionTransactionOutcome::Failed(failed)), _) => {
+                Some(StandaloneCompactionRecovery::Blocked(failed.clone()))
+            }
+            (Some(CompactionTransactionOutcome::Succeeded(_)), None) => {
+                transaction.started.resume_through.map(|resume| {
+                    let current = self
+                        .head
+                        .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node);
+                    StandaloneCompactionRecovery::AwaitingCheckpoint {
+                        transaction_id: id.clone(),
+                        cut: transaction.started.cut,
+                        through: if self.is_ancestor_head(resume, current) {
+                            current
+                        } else {
+                            resume
+                        },
+                    }
+                })
+            }
+            (Some(CompactionTransactionOutcome::Succeeded(_)), Some(checkpoint))
+                if !transaction.inference_finished =>
+            {
+                Some(StandaloneCompactionRecovery::DispatchUncertain(
+                    checkpoint.clone(),
+                ))
+            }
+            (Some(CompactionTransactionOutcome::Succeeded(_)), Some(_)) => None,
+        }
+    }
+
+    /// Returns recovery state for the latest durable inference checkpoint.
+    #[must_use]
+    pub fn inference_dispatch_recovery(&self) -> Option<InferenceDispatchRecovery> {
+        let prompt_id = self.inference_dispatch_order.last()?;
+        let (checkpoint, finished) = self.inference_dispatches.get(prompt_id)?;
+        if *finished {
+            Some(InferenceDispatchRecovery::CompletedThrough(
+                checkpoint.through,
+            ))
+        } else {
+            Some(InferenceDispatchRecovery::DispatchUncertain(
+                checkpoint.clone(),
+            ))
+        }
+    }
+
     /// Returns the agent identifier.
     #[must_use]
     pub fn agent_id(&self) -> &str {
@@ -733,6 +848,10 @@ impl AgentTree {
             tool_call_rounds: HashMap::new(),
             pending_message_envelopes: Vec::new(),
             background_completed_tool_calls: HashSet::new(),
+            compaction_transactions: HashMap::new(),
+            compaction_transaction_order: Vec::new(),
+            inference_dispatches: HashMap::new(),
+            inference_dispatch_order: Vec::new(),
         };
         for entry in events {
             tree.validate_event_at(entry.parent, &entry.event)?;
@@ -790,10 +909,73 @@ impl AgentTree {
     /// conversation's node the cursor last visited.
     pub fn apply_event_at(&mut self, parent: AgentEventParent, event: &Event) -> Option<NodeId> {
         self.count_materialized_prompt(event);
+        self.apply_compaction_control_event(event);
         if self.apply_side_state_event(event) {
             return None;
         }
         self.apply_transcript_event(parent.resolve(self.head), event)
+    }
+
+    fn apply_compaction_control_event(&mut self, event: &Event) {
+        match event {
+            Event::AgentStandaloneCompactionStarted(started) => {
+                self.compaction_transaction_order
+                    .push(started.transaction_id.clone());
+                self.compaction_transactions.insert(
+                    started.transaction_id.clone(),
+                    CompactionTransactionFold {
+                        started: started.clone(),
+                        outcome: None,
+                        checkpoint: None,
+                        inference_finished: false,
+                    },
+                );
+            }
+            Event::AgentStandaloneCompactionFailed(failed) => {
+                if let Some(transaction) =
+                    self.compaction_transactions.get_mut(&failed.transaction_id)
+                {
+                    transaction.outcome =
+                        Some(CompactionTransactionOutcome::Failed(failed.clone()));
+                }
+            }
+            Event::AgentCompacted(compacted) => {
+                if let Some(transaction_id) = &compacted.transaction_id
+                    && let Some(transaction) = self.compaction_transactions.get_mut(transaction_id)
+                {
+                    transaction.outcome =
+                        Some(CompactionTransactionOutcome::Succeeded(compacted.clone()));
+                }
+            }
+            Event::AgentInferenceDispatchStarted(checkpoint) => {
+                self.inference_dispatch_order
+                    .push(checkpoint.agent_prompt_id.clone());
+                self.inference_dispatches.insert(
+                    checkpoint.agent_prompt_id.clone(),
+                    (checkpoint.clone(), false),
+                );
+                if let Some(transaction_id) = &checkpoint.transaction_id
+                    && let Some(transaction) = self.compaction_transactions.get_mut(transaction_id)
+                {
+                    transaction.checkpoint = Some(checkpoint.clone());
+                }
+            }
+            Event::ProviderResponseFinished(response) => {
+                if let Some((_, finished)) =
+                    self.inference_dispatches.get_mut(&response.agent_prompt_id)
+                {
+                    *finished = true;
+                }
+                for transaction in self.compaction_transactions.values_mut() {
+                    if transaction.checkpoint.as_ref().is_some_and(|checkpoint| {
+                        checkpoint.agent_prompt_id == response.agent_prompt_id
+                    }) {
+                        transaction.inference_finished = true;
+                    }
+                }
+            }
+            _ => {}
+        }
     }
 
     fn count_materialized_prompt(&mut self, event: &Event) {
@@ -866,15 +1048,21 @@ impl AgentTree {
 
     fn apply_transcript_event(&mut self, parent: Option<NodeId>, event: &Event) -> Option<NodeId> {
         match event {
-            Event::AgentPromptSubmitted(prompt) => {
-                Some(self.append_user_text_input(parent, prompt.text.clone()))
-            }
-            Event::AgentUserMessageInjected(injected) => {
-                Some(self.append_user_text_input(parent, injected.text.clone()))
-            }
-            Event::AgentPromptSteered(steered) => {
-                Some(self.append_user_text_input(parent, steered.text.clone()))
-            }
+            Event::AgentPromptSubmitted(prompt) => Some(self.append_user_text_input(
+                parent,
+                prompt.text.clone(),
+                prompt.inference_activation,
+            )),
+            Event::AgentUserMessageInjected(injected) => Some(self.append_user_text_input(
+                parent,
+                injected.text.clone(),
+                injected.inference_activation,
+            )),
+            Event::AgentPromptSteered(steered) => Some(self.append_user_text_input(
+                parent,
+                steered.text.clone(),
+                steered.inference_activation,
+            )),
             Event::AgentCompactionTriggered(triggered) => Some(self.append_node_at(
                 parent,
                 AgentEntry::CompactionTrigger {
@@ -922,7 +1110,12 @@ impl AgentTree {
         }
     }
 
-    fn append_user_text_input(&mut self, parent: Option<NodeId>, text: String) -> NodeId {
+    fn append_user_text_input(
+        &mut self,
+        parent: Option<NodeId>,
+        text: String,
+        inference_activation: bool,
+    ) -> NodeId {
         self.append_node_at(
             parent,
             AgentEntry::UserInput {
@@ -932,6 +1125,7 @@ impl AgentTree {
                     phase: None,
                     responses_raw_json: None,
                 })],
+                inference_activation,
             },
         )
     }
@@ -1123,7 +1317,7 @@ impl AgentTree {
         if let Some(result) = self.validate_agent_message_event(event) {
             return result;
         }
-        if let Some(result) = self.validate_agent_fold_event(event) {
+        if let Some(result) = self.validate_agent_fold_event(head, event) {
             return result;
         }
         if let Some(result) = self.validate_tool_completion_event(head, event) {
@@ -1191,6 +1385,7 @@ impl AgentTree {
 
     fn validate_agent_fold_event(
         &self,
+        head: Option<NodeId>,
         event: &Event,
     ) -> Option<Result<(), AgentEventValidationError>> {
         match event {
@@ -1205,13 +1400,13 @@ impl AgentTree {
             Event::AgentStandaloneCompactionStarted(started)
                 if started.agent_id == self.agent_id =>
             {
-                Some(Ok(()))
+                Some(self.validate_compaction_started(started))
             }
             Event::AgentStandaloneCompactionFailed(failed) if failed.agent_id == self.agent_id => {
-                Some(Ok(()))
+                Some(self.validate_compaction_failed(failed))
             }
             Event::AgentInferenceDispatchStarted(started) if started.agent_id == self.agent_id => {
-                Some(Ok(()))
+                Some(self.validate_inference_checkpoint(started))
             }
             Event::AgentCompacted(compacted) if compacted.agent_id == self.agent_id => Some(
                 tau_proto::validate_compaction_window(&compacted.replacement_window)
@@ -1220,7 +1415,7 @@ impl AgentTree {
                             "invalid compaction replacement window: {error}"
                         ))
                     })
-                    .and_then(|()| self.validate_compaction_boundary(compacted)),
+                    .and_then(|()| self.validate_compaction_boundary(head, compacted)),
             ),
             Event::AgentHeadMoved(moved) if moved.agent_id == self.agent_id => {
                 Some(self.validate_head_moved(moved))
@@ -1232,18 +1427,169 @@ impl AgentTree {
         }
     }
 
+    fn validate_compaction_started(
+        &self,
+        started: &tau_proto::AgentStandaloneCompactionStarted,
+    ) -> Result<(), AgentEventValidationError> {
+        if started.operation != tau_proto::PromptOperation::StandaloneCompaction {
+            return Err(AgentEventValidationError::new(
+                "standalone compaction start has non-standalone operation",
+            ));
+        }
+        if self
+            .compaction_transactions
+            .contains_key(&started.transaction_id)
+        {
+            return Err(AgentEventValidationError::new(
+                "duplicate standalone compaction transaction id",
+            ));
+        }
+        if !self.is_ancestor_head(started.cut, started.resume_through.unwrap_or(started.cut)) {
+            return Err(AgentEventValidationError::new(
+                "standalone compaction cut must be an ancestor of resume_through",
+            ));
+        }
+        if self
+            .compaction_transactions
+            .values()
+            .any(|transaction| transaction.outcome.is_none())
+        {
+            return Err(AgentEventValidationError::new(
+                "another standalone compaction transaction is active",
+            ));
+        }
+        if let Some(id) = &started.supersedes {
+            let Some(previous) = self.compaction_transactions.get(id) else {
+                return Err(AgentEventValidationError::new(
+                    "standalone compaction supersedes unknown transaction",
+                ));
+            };
+            if !matches!(
+                previous.outcome,
+                Some(CompactionTransactionOutcome::Failed(_))
+            ) {
+                return Err(AgentEventValidationError::new(
+                    "standalone compaction may supersede only a failed transaction",
+                ));
+            }
+            if previous.started.cut != started.cut
+                || previous.started.resume_through.is_some() && started.resume_through.is_none()
+            {
+                return Err(AgentEventValidationError::new(
+                    "superseding compaction must preserve cut and resume obligation",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_compaction_failed(
+        &self,
+        failed: &tau_proto::AgentStandaloneCompactionFailed,
+    ) -> Result<(), AgentEventValidationError> {
+        let transaction = self
+            .compaction_transactions
+            .get(&failed.transaction_id)
+            .ok_or_else(|| {
+                AgentEventValidationError::new(
+                    "standalone compaction failure references unknown transaction",
+                )
+            })?;
+        if transaction.outcome.is_some()
+            || transaction.started.cut != failed.cut
+            || transaction.started.resume_through != failed.resume_through
+        {
+            return Err(AgentEventValidationError::new(
+                "standalone compaction failure mismatched transaction or duplicate outcome",
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate_inference_checkpoint(
+        &self,
+        checkpoint: &tau_proto::AgentInferenceDispatchStarted,
+    ) -> Result<(), AgentEventValidationError> {
+        let Some(transaction_id) = &checkpoint.transaction_id else {
+            return self.validate_inference_prompt_id_unique(checkpoint);
+        };
+        let transaction = self
+            .compaction_transactions
+            .get(transaction_id)
+            .ok_or_else(|| {
+                AgentEventValidationError::new(
+                    "inference checkpoint references unknown compaction transaction",
+                )
+            })?;
+        if !matches!(
+            transaction.outcome,
+            Some(CompactionTransactionOutcome::Succeeded(_))
+        ) || transaction.checkpoint.is_some()
+        {
+            return Err(AgentEventValidationError::new(
+                "inference checkpoint requires one successful uncheckpointed transaction",
+            ));
+        }
+        if !self.is_ancestor_head(transaction.started.cut, checkpoint.through) {
+            return Err(AgentEventValidationError::new(
+                "inference checkpoint is not on the compacted branch",
+            ));
+        }
+        if transaction
+            .started
+            .resume_through
+            .is_some_and(|resume| !self.is_ancestor_head(resume, checkpoint.through))
+        {
+            return Err(AgentEventValidationError::new(
+                "inference checkpoint does not cover the owed activation",
+            ));
+        }
+        self.validate_inference_prompt_id_unique(checkpoint)
+    }
+
+    fn validate_inference_prompt_id_unique(
+        &self,
+        checkpoint: &tau_proto::AgentInferenceDispatchStarted,
+    ) -> Result<(), AgentEventValidationError> {
+        if self
+            .inference_dispatches
+            .contains_key(&checkpoint.agent_prompt_id)
+        {
+            return Err(AgentEventValidationError::new(
+                "inference checkpoint reused an agent prompt id",
+            ));
+        }
+        Ok(())
+    }
+
     fn validate_compaction_boundary(
         &self,
+        parent: Option<NodeId>,
         compacted: &tau_proto::AgentCompacted,
     ) -> Result<(), AgentEventValidationError> {
         match (
             &compacted.transaction_id,
             compacted.cut,
             compacted.suffix_end,
+            &compacted.compact_prompt_id,
+            &compacted.model,
+            compacted.operation,
         ) {
-            (None, None, None) => Ok(()),
-            (Some(_), Some(cut), Some(suffix_end)) => {
-                if suffix_end.as_option() != self.head {
+            (None, None, None, None, None, None) => Ok(()),
+            (
+                Some(transaction_id),
+                Some(cut),
+                Some(suffix_end),
+                Some(compact_prompt_id),
+                Some(model),
+                Some(operation),
+            ) => {
+                if operation != tau_proto::PromptOperation::StandaloneCompaction {
+                    return Err(AgentEventValidationError::new(
+                        "compaction boundary has non-standalone operation",
+                    ));
+                }
+                if suffix_end.as_option() != parent {
                     return Err(AgentEventValidationError::new(
                         "compaction suffix_end must equal the boundary parent",
                     ));
@@ -1251,6 +1597,24 @@ impl AgentTree {
                 if !self.is_ancestor_head(cut, suffix_end) {
                     return Err(AgentEventValidationError::new(
                         "compaction cut must be an ancestor of suffix_end",
+                    ));
+                }
+                let transaction = self
+                    .compaction_transactions
+                    .get(transaction_id)
+                    .ok_or_else(|| {
+                        AgentEventValidationError::new(
+                            "compaction boundary references unknown transaction",
+                        )
+                    })?;
+                if transaction.outcome.is_some()
+                    || transaction.started.cut != cut
+                    || &transaction.started.compact_prompt_id != compact_prompt_id
+                    || &transaction.started.model != model
+                    || transaction.started.operation != operation
+                {
+                    return Err(AgentEventValidationError::new(
+                        "compaction boundary mismatched transaction or duplicate outcome",
                     ));
                 }
                 Ok(())

@@ -622,6 +622,7 @@ fn handle_replay_prompt_steered(
     cx: tau_client::EventContext<'_, TimerRuntime, AgentPromptSteered>,
 ) -> ClientResult<()> {
     let submitted = AgentPromptSubmitted {
+        inference_activation: false,
         agent_id: cx.event.agent_id.clone(),
         text: cx.event.text.clone(),
         message_class: cx.event.message_class,
@@ -1022,6 +1023,7 @@ mod tests {
         .expect("schedule");
         rt.handle_prompt_replay(
             &AgentPromptSubmitted {
+                inference_activation: false,
                 agent_id: agent.clone(),
                 text: "Timer `once` fired: wake".to_owned(),
                 message_class: PromptMessageClass::Internal,
@@ -1131,12 +1133,14 @@ mod tests {
         )
         .expect("schedule");
         let steered = AgentPromptSteered {
+            inference_activation: false,
             agent_id: agent.clone(),
             text: "Timer `busy` fired: wake".to_owned(),
             message_class: PromptMessageClass::Internal,
             ctx_id: Some("timer:busy:1".to_owned()),
         };
         let submitted = AgentPromptSubmitted {
+            inference_activation: false,
             agent_id: steered.agent_id.clone(),
             text: steered.text,
             message_class: steered.message_class,

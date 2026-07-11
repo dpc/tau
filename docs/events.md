@@ -132,15 +132,22 @@ but keep it in memory only; `agent.started.ephemeral` marks that boundary.
 
 - **`agent.prompt_submitted`** — A `ui.prompt_submitted` request was accepted
   into a concrete agent transcript. Carries `agent_id`, text, originator, and
-  user/internal message class.
+  user/internal message class. Its harness-owned `inference_activation` flag
+  distinguishes checkpoint-governed work from passive or legacy history;
+  steered and injected facts use the same default-false marker.
 - **`agent.prompt_queued`** — A prompt arrived while the agent was busy and was
   queued instead of dispatched. Runtime UI state; not durable transcript truth.
+- **`agent.prompt_steered`** — A previously queued prompt folded into an
+  in-flight continuation as a steering user message rather than a fresh turn.
+  Its immutable harness-owned `inference_activation` marker is true for
+  checkpoint-governed work; missing/default-false values are passive or legacy
+  and cannot independently wake replay.
+- **`agent.user_message_injected`** — Synthetic transcript context inserted by
+  the harness (for example shell output or an AGENTS.md preamble) and folded
+  like user input. It uses the same immutable harness-owned, default-false
+  activation marker: false is passive/legacy context and cannot independently
+  wake replay.
 - **`agent.prompt_recalled`** — A queued prompt was recalled for editing.
-- **`agent.prompt_steered`** — A previously queued prompt is folded into an
-  in-flight turn as a steering user message rather than starting a fresh turn.
-- **`agent.user_message_injected`** — A synthetic user message inserted by the
-  harness (e.g. `!`-shell command output, AGENTS.md preamble). Folds into the
-  agent tree like a real user prompt.
 - **`agent.prompt_created`** — The harness assembled a provider prompt and
   assigned it an `agent_prompt_id`; payload carries `agent_id`, `session_id`,
   `system_prompt`, materialized `context`, tools or `tools_ref`, model, model
@@ -172,11 +179,17 @@ but keep it in memory only; `agent.started.ephemeral` marks that boundary.
 - **`agent.prompt_prewarm_requested`** — Best-effort provider cache prewarm for
   the next prompt prefix. Runtime/provider optimization state.
 - **`agent.compaction_triggered`** — Durable manual or harness-scheduled
-  compaction request. Legacy providers fold it into inline context management;
-  standalone-capable providers dispatch an explicit compact operation.
+  inline compaction request. Providers fold it into inline context management;
+  standalone compaction instead begins with
+  `agent.standalone_compaction_started`.
 - **`agent.compacted`** — Durable standalone compaction boundary. Its validated
-  ordered replacement window becomes the complete model-visible history and
-  invalidates any previous-response chain.
+  ordered replacement window replaces history through its recorded cut while
+  the model-visible suffix through `suffix_end` and later branch nodes survive
+  exactly once. New boundaries require the transaction id, cut, suffix end,
+  compact prompt id, provider-qualified model, and standalone operation as one
+  all-present group matching the durable start. Legacy records have all six
+  absent and remain hard boundaries. Connection ids are intentionally not
+  durable. Either form invalidates any previous-response chain.
 - **`agent.display_name_set`** — Durable fact that changes an agent's
   human-friendly display name. Carries `agent_id` and the new non-empty display
   name; UIs use it when rendering agent chips and history.
@@ -495,15 +508,22 @@ the UI is the only consumer. Components without a terminal silently no-op.
   notification, or no-op.
 
 
-## Provider repetition stop reason
+## Standalone compaction control
 
-`provider.response_finished.stop_reason` may be `repetition_detected` when a provider aborts a tight exact streaming loop. Such responses have no tool request, use empty `output_items`, and carry a bounded display-only `error`; clients should treat prior transient deltas as cleared when the preceding status update has `clear_response: true`.
 - **`agent.standalone_compaction_started`** — Harness-owned durable transaction
-  start capturing the immutable branch cut, optional resume watermark, model,
-  originator, and explicit retry predecessor.
+  start capturing the immutable branch cut, optional resume watermark, pre-minted
+  compact prompt id, provider-qualified model, standalone operation, originator,
+  and explicit retry predecessor. New successful boundaries repeat the
+  prompt/model/operation tuple for replay validation.
 - **`agent.standalone_compaction_failed`** — Harness-owned terminal transaction
   failure with a safe categorical reason and retained resume obligation. Raw
   provider diagnostics are deliberately excluded.
 - **`agent.inference_dispatch_started`** — Durable checkpoint committed before
   provider inference dispatch. Its `through` head acknowledges only activation
-  nodes represented by that immutable prompt snapshot.
+  nodes represented by that immutable prompt snapshot. A checkpoint without a
+  matching durable terminal provider response restores as dispatch-uncertain;
+  it is not automatically resent.
+
+## Provider repetition stop reason
+
+`provider.response_finished.stop_reason` may be `repetition_detected` when a provider aborts a tight exact streaming loop. Such responses have no tool request, use empty `output_items`, and carry a bounded display-only `error`; clients should treat prior transient deltas as cleared when the preceding status update has `clear_response: true`.

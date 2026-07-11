@@ -1186,6 +1186,7 @@ fn replayed_durable_first_user_prompt_selects_live_agent() {
         reason: SessionStartReason::Initial,
     }));
     renderer.handle(&Event::AgentPromptSubmitted(AgentPromptSubmitted {
+        inference_activation: false,
         agent_id: agent_id("engineer_abc12345"),
         text: "hello".to_owned(),
         message_class: tau_proto::PromptMessageClass::User,
@@ -1231,6 +1232,7 @@ fn timer_wakeup_prompt_submitted_renders_visible_marker() {
         reason: SessionStartReason::Initial,
     }));
     renderer.handle(&Event::AgentPromptSubmitted(AgentPromptSubmitted {
+        inference_activation: false,
         agent_id: agent_id("engineer_abc12345"),
         text: "Timer `wake` fired: stand up".to_owned(),
         message_class: tau_proto::PromptMessageClass::Internal,
@@ -1261,6 +1263,7 @@ fn timer_wakeup_prompt_steered_renders_visible_marker() {
         reason: SessionStartReason::Initial,
     }));
     renderer.handle(&Event::AgentPromptSteered(AgentPromptSteered {
+        inference_activation: false,
         agent_id: agent_id("engineer_abc12345"),
         text: "Timer `wake` fired: stand up".to_owned(),
         message_class: tau_proto::PromptMessageClass::Internal,
@@ -3072,6 +3075,7 @@ fn replay_learns_side_agent_from_durable_agent_prompt_submission() {
     };
     renderer.handle(&Event::AgentPromptSubmitted(
         tau_proto::AgentPromptSubmitted {
+            inference_activation: false,
             agent_id: agent_id("worker-1"),
             text: "side task".to_owned(),
             message_class: tau_proto::PromptMessageClass::User,
@@ -5791,6 +5795,7 @@ fn queued_prompt_steered_promotes_without_duplicate() {
     );
 
     renderer.handle(&Event::AgentPromptSteered(AgentPromptSteered {
+        inference_activation: false,
         text: "folded queued prompt".into(),
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         message_class: tau_proto::PromptMessageClass::User,
@@ -5844,6 +5849,7 @@ fn internal_prompt_events_are_hidden() {
         message_class: tau_proto::PromptMessageClass::Internal,
     }));
     renderer.handle(&Event::AgentPromptSteered(AgentPromptSteered {
+        inference_activation: false,
         text: "[tau-internal] Tool call `steered` is complete.".into(),
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         message_class: tau_proto::PromptMessageClass::Internal,

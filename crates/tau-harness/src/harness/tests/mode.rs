@@ -638,7 +638,7 @@ fn daemon_mode_accepts_later_clients() {
         .iter()
         .flat_map(|branch| branch.iter())
         .filter_map(|entry| match entry {
-            AgentEntry::UserInput { items } => items.iter().find_map(|item| match item {
+            AgentEntry::UserInput { items, .. } => items.iter().find_map(|item| match item {
                 ContextItem::Message(message) if message.role == ContextRole::User => {
                     message.content.first().map(|part| match part {
                         ContentPart::Text { text } => text.as_str(),

@@ -182,7 +182,7 @@ pub fn policy_lines(path: impl AsRef<Path>) -> Result<Vec<String>, InspectError>
 #[must_use]
 pub fn format_session_entry(entry: &AgentEntry) -> String {
     match entry {
-        AgentEntry::UserInput { items } => {
+        AgentEntry::UserInput { items, .. } => {
             format!("user: {}", first_message_text(items).unwrap_or_default())
         }
         AgentEntry::AssistantResponse { output_items, .. } => {

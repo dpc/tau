@@ -13,6 +13,90 @@ fn prompt_created_count(h: &Harness) -> u64 {
     count
 }
 
+/// Real interception replies cannot flip the harness-owned activation bit in
+/// either direction on any canonical transcript fact.
+#[test]
+fn interception_rejects_activation_bit_forgery_for_all_canonical_facts() {
+    for inference_activation in [false, true] {
+        let agent_id = tau_proto::AgentId::parse("main").expect("agent id");
+        let cases = [
+            (
+                tau_proto::EventName::AGENT_PROMPT_SUBMITTED,
+                Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+                    inference_activation,
+                    agent_id: agent_id.clone(),
+                    text: "submitted".to_owned(),
+                    message_class: tau_proto::PromptMessageClass::User,
+                    originator: tau_proto::PromptOriginator::User,
+                    submission_source: tau_proto::PromptSubmissionSource::HumanUi,
+                    display_name: None,
+                    ctx_id: None,
+                }),
+            ),
+            (
+                tau_proto::EventName::AGENT_USER_MESSAGE_INJECTED,
+                Event::AgentUserMessageInjected(tau_proto::AgentUserMessageInjected {
+                    inference_activation,
+                    agent_id: agent_id.clone(),
+                    text: "injected".to_owned(),
+                    message_class: tau_proto::PromptMessageClass::Internal,
+                }),
+            ),
+            (
+                tau_proto::EventName::AGENT_PROMPT_STEERED,
+                Event::AgentPromptSteered(tau_proto::AgentPromptSteered {
+                    inference_activation,
+                    agent_id,
+                    text: "steered".to_owned(),
+                    message_class: tau_proto::PromptMessageClass::User,
+                    ctx_id: None,
+                }),
+            ),
+        ];
+
+        for (event_name, original) in cases {
+            let tmp = TempDir::new().expect("tempdir");
+            let mut h = echo_harness(tmp.path()).expect("harness");
+            let cid = ensure_test_user_agent(&mut h);
+            let _interceptor = connect_test_tool(&mut h, "activation-rewriter");
+            h.handle_extension_event(
+                "activation-rewriter",
+                TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+                    selectors: vec![EventSelector::Exact(event_name)],
+                    priority: InterceptionPriority::new(0),
+                })),
+            )
+            .expect("intercept registration");
+
+            h.publish_for_agent(&cid, original.clone());
+            let mut replacement = original.clone();
+            match &mut replacement {
+                Event::AgentPromptSubmitted(prompt) => {
+                    prompt.inference_activation = !inference_activation;
+                }
+                Event::AgentUserMessageInjected(prompt) => {
+                    prompt.inference_activation = !inference_activation;
+                }
+                Event::AgentPromptSteered(prompt) => {
+                    prompt.inference_activation = !inference_activation;
+                }
+                _ => unreachable!(),
+            }
+            h.handle_extension_event(
+                "activation-rewriter",
+                TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+                    action: InterceptAction::Pass(Some(Box::new(replacement.clone()))),
+                })),
+            )
+            .expect("intercept reply");
+
+            let events = event_log_events(&h);
+            assert!(events.contains(&original));
+            assert!(!events.contains(&replacement));
+        }
+    }
+}
+
 /// Sink that rejects intercepted frames to exercise failed-delivery recovery.
 struct FailingInterceptSink;
 
@@ -762,6 +846,7 @@ fn interception_drop_of_must_pass_event_is_overridden() {
     let baseline_seq = h.event_log.next_seq();
 
     let prompt = Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+        inference_activation: true,
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         text: "hello".to_owned(),
         message_class: tau_proto::PromptMessageClass::User,
@@ -1391,7 +1476,7 @@ fn interception_user_prompt_dispatch_waits_for_commit() {
     assert!(
         matches!(
             &entry.entry,
-            AgentEntry::UserInput { items }
+            AgentEntry::UserInput { items, .. }
                 if matches!(
                     items.as_slice(),
                     [ContextItem::Message(MessageItem {
@@ -1475,21 +1560,21 @@ fn passive_background_notice_and_user_prompt_dispatch_as_one_intercepted_batch()
 
     assert_eq!(h.pending_publish_idle_dispatches.len(), 0);
     assert_eq!(prompt_created_count(&h), prompts_before + 1);
-    let submitted: Vec<String> = event_log_events(&h)
+    let submitted: Vec<(String, bool)> = event_log_events(&h)
         .into_iter()
         .filter_map(|event| match event {
             Event::AgentPromptSubmitted(submitted)
                 if submitted.text == passive_text || submitted.text == "real follow-up" =>
             {
-                Some(submitted.text)
+                Some((submitted.text, submitted.inference_activation))
             }
             _ => None,
         })
         .collect();
     assert_eq!(
         submitted,
-        vec![passive_text, "real follow-up".to_owned()],
-        "passive notice should commit immediately before the user prompt"
+        vec![(passive_text, false), ("real follow-up".to_owned(), true)],
+        "passive notice should commit false immediately before the active user prompt"
     );
 }
 
@@ -1531,6 +1616,7 @@ fn interception_mutating_prompt_reaches_agent() {
         .expect("prompt publish assigned an agent id")
         .clone();
     let mutated = Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+        inference_activation: true,
         agent_id: crate::parse_agent_id(&agent_id),
         text: "I love Tau".to_owned(),
         message_class: tau_proto::PromptMessageClass::User,
@@ -1559,7 +1645,7 @@ fn interception_mutating_prompt_reaches_agent() {
     assert!(
         matches!(
             &entry.entry,
-            AgentEntry::UserInput { items }
+            AgentEntry::UserInput { items, .. }
                 if matches!(
                     items.as_slice(),
                     [ContextItem::Message(MessageItem {

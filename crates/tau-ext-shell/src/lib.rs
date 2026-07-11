@@ -1820,6 +1820,7 @@ fn cwd_context_event(agent_id: tau_proto::AgentId, cwd: &Path) -> Event {
 
 fn cwd_notice_event(agent_id: tau_proto::AgentId, cwd: &Path) -> Event {
     Event::AgentUserMessageInjected(tau_proto::AgentUserMessageInjected {
+        inference_activation: false,
         agent_id,
         text: format!("Your working directory changed to {}.", cwd.display()),
         message_class: tau_proto::PromptMessageClass::Internal,

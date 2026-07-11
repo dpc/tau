@@ -458,6 +458,7 @@ fn representative_events() -> Vec<Event> {
             error: None,
         }),
         Event::AgentPromptSubmitted(AgentPromptSubmitted {
+            inference_activation: false,
             agent_id: agent_id("engineer_abcd1234"),
             text: "hello".to_owned(),
             message_class: PromptMessageClass::User,
@@ -476,6 +477,7 @@ fn representative_events() -> Vec<Event> {
             text: "queued".to_owned(),
         }),
         Event::AgentPromptSteered(AgentPromptSteered {
+            inference_activation: false,
             agent_id: agent_id("engineer_abcd1234"),
             text: "steer".to_owned(),
             message_class: PromptMessageClass::User,
@@ -487,6 +489,9 @@ fn representative_events() -> Vec<Event> {
             resume_inference: false,
         }),
         Event::AgentCompacted(AgentCompacted {
+            compact_prompt_id: None,
+            model: None,
+            operation: None,
             agent_id: agent_id("engineer_abcd1234"),
             transaction_id: None,
             cut: None,
@@ -494,6 +499,8 @@ fn representative_events() -> Vec<Event> {
             replacement_window: vec![user_text_item("summary")],
         }),
         Event::AgentStandaloneCompactionStarted(AgentStandaloneCompactionStarted {
+            compact_prompt_id: "ap-legacy-default".into(),
+            operation: PromptOperation::StandaloneCompaction,
             agent_id: agent_id("engineer_abcd1234"),
             transaction_id: CompactionTransactionId::parse("ct-1").expect("transaction id"),
             cut: AgentHead::Root,
@@ -570,6 +577,7 @@ fn representative_events() -> Vec<Event> {
             share_user_cache_key: false,
         }),
         Event::AgentUserMessageInjected(AgentUserMessageInjected {
+            inference_activation: false,
             agent_id: agent_id("engineer_abcd1234"),
             text: "injected".to_owned(),
             message_class: PromptMessageClass::Internal,
@@ -1764,6 +1772,109 @@ fn typed_message_facts_and_rpcs_round_trip() {
     );
 }
 
+/// Canonical activation markers must default false for legacy payloads and
+/// round-trip true without changing model-visible text.
+#[test]
+fn canonical_inference_activation_defaults_and_round_trips() {
+    let active_submitted = AgentPromptSubmitted {
+        inference_activation: true,
+        agent_id: AgentId::parse("agent-1").expect("agent id"),
+        text: "hello".to_owned(),
+        message_class: PromptMessageClass::User,
+        originator: PromptOriginator::User,
+        submission_source: Default::default(),
+        display_name: None,
+        ctx_id: None,
+    };
+    let mut legacy = serde_json::to_value(&active_submitted).expect("encode legacy base");
+    legacy
+        .as_object_mut()
+        .expect("object")
+        .remove("inference_activation");
+    let decoded: AgentPromptSubmitted =
+        serde_json::from_value(legacy).expect("legacy prompt decodes");
+    assert!(!decoded.inference_activation);
+
+    let encoded = serde_json::to_value(&active_submitted).expect("encode");
+    assert_eq!(encoded["inference_activation"], true);
+    assert_eq!(
+        serde_json::from_value::<AgentPromptSubmitted>(encoded).expect("decode"),
+        active_submitted
+    );
+    let mut passive_submitted = active_submitted.clone();
+    passive_submitted.inference_activation = false;
+    let encoded = serde_json::to_value(&passive_submitted).expect("encode false");
+    assert!(encoded.get("inference_activation").is_none());
+    assert!(
+        !serde_json::from_value::<AgentPromptSubmitted>(encoded)
+            .expect("decode false")
+            .inference_activation
+    );
+
+    let active_injected = AgentUserMessageInjected {
+        inference_activation: true,
+        agent_id: AgentId::parse("agent-1").expect("agent id"),
+        text: "injected".to_owned(),
+        message_class: PromptMessageClass::Internal,
+    };
+    let mut legacy = serde_json::to_value(&active_injected).expect("encode legacy base");
+    legacy
+        .as_object_mut()
+        .expect("object")
+        .remove("inference_activation");
+    let decoded: AgentUserMessageInjected =
+        serde_json::from_value(legacy).expect("legacy injection decodes");
+    assert!(!decoded.inference_activation);
+
+    let encoded = serde_json::to_value(&active_injected).expect("encode");
+    assert_eq!(encoded["inference_activation"], true);
+    assert_eq!(
+        serde_json::from_value::<AgentUserMessageInjected>(encoded).expect("decode"),
+        active_injected
+    );
+    let mut passive_injected = active_injected.clone();
+    passive_injected.inference_activation = false;
+    let encoded = serde_json::to_value(&passive_injected).expect("encode false");
+    assert!(encoded.get("inference_activation").is_none());
+    assert!(
+        !serde_json::from_value::<AgentUserMessageInjected>(encoded)
+            .expect("decode false")
+            .inference_activation
+    );
+
+    let active_steered = AgentPromptSteered {
+        inference_activation: true,
+        agent_id: AgentId::parse("agent-1").expect("agent id"),
+        text: "steered".to_owned(),
+        message_class: PromptMessageClass::User,
+        ctx_id: Some("ctx-1".to_owned()),
+    };
+    let mut legacy = serde_json::to_value(&active_steered).expect("encode legacy base");
+    legacy
+        .as_object_mut()
+        .expect("object")
+        .remove("inference_activation");
+    let decoded: AgentPromptSteered =
+        serde_json::from_value(legacy).expect("legacy steering decodes");
+    assert!(!decoded.inference_activation);
+
+    let encoded = serde_json::to_value(&active_steered).expect("encode");
+    assert_eq!(encoded["inference_activation"], true);
+    assert_eq!(
+        serde_json::from_value::<AgentPromptSteered>(encoded).expect("decode"),
+        active_steered
+    );
+    let mut passive_steered = active_steered.clone();
+    passive_steered.inference_activation = false;
+    let encoded = serde_json::to_value(&passive_steered).expect("encode false");
+    assert!(encoded.get("inference_activation").is_none());
+    assert!(
+        !serde_json::from_value::<AgentPromptSteered>(encoded)
+            .expect("decode false")
+            .inference_activation
+    );
+}
+
 /// Ensures extension-data path wrappers keep the existing string wire shape
 /// while giving Rust callers semantic path fields.
 #[test]
@@ -2603,6 +2714,7 @@ fn event_defaults_to_transient_marks_progress_kinds() {
             reason: SessionStartReason::Initial,
         }),
         Event::AgentPromptSubmitted(AgentPromptSubmitted {
+            inference_activation: false,
             agent_id: agent_id("worker"),
             text: "hi".to_owned(),
             message_class: PromptMessageClass::User,
@@ -2681,6 +2793,7 @@ fn prompt_message_class_defaults_to_user_when_omitted() {
     assert_eq!(queued.message_class, PromptMessageClass::User);
 
     let internal = serde_json::to_value(AgentPromptSteered {
+        inference_activation: false,
         agent_id: agent_id("worker"),
         text: "[tau-internal] Tool call `bg` is complete.".into(),
         message_class: PromptMessageClass::Internal,

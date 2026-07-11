@@ -504,3 +504,10 @@ must-pass facts. Extensions and UIs cannot forge or suppress their cut,
 transaction, failure, or inference watermark identities. Persisted failure
 records contain only categorical reasons; raw provider error text is never
 inserted into future model context.
+Inference activation is acknowledged only after its immutable prompt id and
+branch watermark commit. Checkpoint continuations consume only on-branch,
+materialized wakes through that watermark; unresolved or later facts remain
+pending, and crash-time dispatch uncertainty fails closed.
+The harness-owned `inference_activation` bit on canonical prompt facts is
+protected from interceptor mutation, and compact successes repeat only
+harness-stamped prompt/model/operation correlation rather than provider input.

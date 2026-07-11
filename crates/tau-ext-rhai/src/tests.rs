@@ -86,6 +86,7 @@ fn configure_with_script_and_extra(
 
 fn prompt_event(text: &str) -> Event {
     Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+        inference_activation: false,
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         text: text.to_owned(),
         message_class: tau_proto::PromptMessageClass::User,
