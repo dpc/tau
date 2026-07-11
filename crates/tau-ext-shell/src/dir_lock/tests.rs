@@ -935,9 +935,9 @@ fn filesystem_backend_blocked_waiter_does_not_block_later_independent_request() 
         }
     });
     second_rx
-        .recv_timeout(Duration::from_millis(50))
-        .expect("later independent waiter should not be blocked globally")
-        .expect("later waiter result");
+        .recv()
+        .expect("later independent waiter result")
+        .expect("later independent waiter should not be blocked globally");
     assert_eq!(
         registry_waiter_count(tempdir.path()).expect("registry"),
         1,
@@ -948,8 +948,8 @@ fn filesystem_backend_blocked_waiter_does_not_block_later_independent_request() 
         .unlock_manual(&agent_id("agent-a"), Path::new("/repo/a"))
         .expect("unlock blocker");
     first_rx
-        .recv_timeout(Duration::from_millis(50))
-        .expect("overlapping waiter should acquire after blocker is gone")
+        .recv()
+        .expect("overlapping waiter result")
         .expect("overlapping waiter result");
     manager
         .unlock_manual(&agent_id("agent-b"), Path::new("/repo/a/child"))
@@ -1002,29 +1002,31 @@ fn filesystem_backend_overlapping_waiter_stays_behind_earlier_overlapping_waiter
         }
     });
     wait_until(|| registry_waiter_count(tempdir.path()).expect("registry") == 2);
-    assert!(
-        second_rx.recv_timeout(Duration::from_millis(50)).is_err(),
-        "later overlapping filesystem waiter must stay queued"
+    assert_eq!(
+        registry_waiter_count(tempdir.path()).expect("registry"),
+        2,
+        "both overlapping filesystem waiters must remain queued"
     );
 
     manager
         .unlock_manual(&agent_id("agent-a"), Path::new("/repo/a"))
         .expect("unlock blocker");
     first_rx
-        .recv_timeout(Duration::from_millis(50))
-        .expect("earlier overlapping waiter should acquire")
+        .recv()
+        .expect("earlier overlapping waiter result")
         .expect("earlier overlapping waiter result");
-    assert!(
-        second_rx.recv_timeout(Duration::from_millis(50)).is_err(),
-        "later overlapping filesystem waiter must wait for earlier waiter unlock"
+    assert_eq!(
+        registry_waiter_count(tempdir.path()).expect("registry"),
+        1,
+        "later overlapping filesystem waiter must remain queued behind the acquired root lock"
     );
 
     manager
         .unlock_manual(&agent_id("agent-b"), Path::new("/repo"))
         .expect("unlock root");
     second_rx
-        .recv_timeout(Duration::from_millis(50))
-        .expect("later overlapping waiter should acquire after root unlock")
+        .recv()
+        .expect("later overlapping waiter result")
         .expect("later overlapping waiter result");
     manager
         .unlock_manual(&agent_id("agent-c"), Path::new("/repo/b"))
@@ -1082,13 +1084,11 @@ fn filesystem_backend_queued_same_owner_manual_waiter_errors_instead_of_duplicat
         .unlock_manual(&agent_id("agent-x"), Path::new("/repo"))
         .expect("unlock blocker");
     first_rx
-        .recv_timeout(Duration::from_millis(50))
-        .expect("first same-owner waiter should acquire")
+        .recv()
+        .expect("first same-owner waiter result")
         .expect("first same-owner waiter result");
     assert_eq!(
-        second_rx
-            .recv_timeout(Duration::from_millis(50))
-            .expect("second same-owner waiter should fail"),
+        second_rx.recv().expect("second same-owner waiter result"),
         Err(ManualLockAcquireError::AlreadyHeld {
             dir: path("/repo/a")
         })
@@ -1680,23 +1680,14 @@ fn filesystem_backend_error_after_enqueue_cleans_up_waiter() {
     );
 
     let manager_c = filesystem_lock_manager(tempdir.path());
-    let later = std::thread::spawn({
-        let manager_c = manager_c.clone();
-        move || {
-            manager_c.acquire_manual(
-                "manual-c".into(),
-                agent_id("agent-c"),
-                path("/other"),
-                || {},
-            )
-        }
-    });
-    std::thread::sleep(Duration::from_millis(150));
-    assert!(
-        later.is_finished(),
-        "unrelated later acquisition must not be FIFO-blocked by stale waiter"
-    );
-    later.join().expect("later").expect("later acquired");
+    manager_c
+        .acquire_manual(
+            "manual-c".into(),
+            agent_id("agent-c"),
+            path("/other"),
+            || panic!("unrelated later acquisition must not wait behind a stale waiter"),
+        )
+        .expect("unrelated later acquisition must not be FIFO-blocked by stale waiter");
 }
 
 /// Ensures a queued filesystem automatic waiter cannot become an invisible old
