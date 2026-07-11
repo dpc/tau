@@ -4,7 +4,7 @@
 //! they must be folded into the next real user prompt so the model sees them in
 //! context without an extra standalone turn.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use tau_proto::{AgentId, SessionId, ToolName};
 
@@ -22,6 +22,9 @@ pub(crate) struct PendingPromptNoticeState {
     /// before the owning agent's next real user prompt, not dispatched as
     /// standalone turns.
     pub(crate) restore_background_notices: HashMap<(SessionId, AgentId), Vec<String>>,
+    /// Existing agents newly loaded into another session that still need a
+    /// one-shot warning about session-scoped tool and extension state.
+    pub(crate) changed_session_agents: HashSet<(SessionId, AgentId)>,
     /// Tool availability notices waiting to be folded before the next real user
     /// prompt on the target user agent, keyed by internal tool name for
     /// deterministic delivery.

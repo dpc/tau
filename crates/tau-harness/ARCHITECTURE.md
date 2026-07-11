@@ -136,6 +136,16 @@ inheritable entries are copied to child agents when an explicit or derived
 parent is known. Tests should assert durable stores, not only runtime delivery,
 when changing durable facts.
 
+Loading an existing durable agent into a session that has not previously
+contained it queues a one-shot hidden notice for that agent's next user prompt.
+The notice warns that session-scoped tool and extension state can differ and
+calls out timers as setup that may need recreation. Cold session resume uses the
+same guidance in its restore notice because runtime can stop before the
+agent-specific notice is folded into a durable prompt. The harness caches
+ever-loaded membership for the bound session, including memory-only ephemeral
+membership, so repeated prompt routing does not rescan journals and same-session
+unload/reload does not produce a false warning.
+
 Ephemeral session mode (`tau --ephemeral`) replaces the session membership store
 with an in-memory store for the current harness process and suppresses
 session-owned disk artifacts: membership logs, metadata/locks, debug

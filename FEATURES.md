@@ -987,6 +987,11 @@ recent sessions in the current `cwd` (showing lock status and the latest user
 prompt), `tau -r <id>` picks a specific one. Session membership and loaded agent
 trees, including abandoned branches, are preserved across restarts.
 
+The first user turn after a cold session resume receives hidden context warning
+that outside and session-scoped tool/extension state may have changed. Loading
+an existing durable agent into a different session similarly warns that timers
+and other session-scoped setup may need recreation.
+
 Use `tau --ephemeral` for a non-resumable live session that does not leave
 session directories or session logs behind. Agent histories are still durable,
 so use a separate agent mode (not this flag) if you need non-persistent agents.

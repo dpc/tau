@@ -6775,6 +6775,135 @@ fn restore_notice_elapsed_format_uses_minutes_hours_and_days() {
         restore_notice_prompt_for_elapsed(Some(Duration::from_secs(3 * 24 * 60 * 60)))
             .contains("3 days have passed since the last recorded session event")
     );
+    assert!(
+        restore_notice_prompt_for_elapsed(None)
+            .contains("recreate timers or other session-scoped setup if still needed")
+    );
+}
+
+/// Loading an existing transcript into a different session must warn the agent
+/// once that operational extension state, especially timers, may not follow it.
+#[test]
+fn existing_agent_loaded_into_different_session_gets_session_state_notice() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path()).expect("harness");
+    let agent_id = tau_proto::AgentId::parse("existing-agent").expect("agent id");
+    h.agent_store
+        .append_agent_event(
+            agent_id.as_str(),
+            None,
+            Event::AgentStarted(tau_proto::AgentStarted {
+                parent_agent: None,
+                agent_id: agent_id.clone(),
+                role: "engineer".to_owned(),
+                display_name: None,
+                metadata: Vec::new(),
+                ephemeral: false,
+            }),
+        )
+        .expect("seed existing agent");
+
+    let cid = crate::parse_agent_id(agent_id.as_str());
+    let mut agent = Agent::new(
+        cid.clone(),
+        h.current_session_id.clone(),
+        tau_proto::PromptOriginator::User,
+        None,
+        None,
+    );
+    agent.role = Some("engineer".to_owned());
+    agent.agent_id = Some(agent_id.to_string());
+    h.agents.insert(cid.clone(), agent);
+    h.ensure_loaded_agent_for_agent(&cid, agent_id.as_str());
+
+    assert!(
+        !event_log_contains_any_source(&h, |event| matches!(event, Event::AgentPromptCreated(_))),
+        "loading must not create a standalone notice turn"
+    );
+    h.submit_prompt_to_agent(
+        h.current_session_id.clone(),
+        agent_id.as_str(),
+        "continue in this session".to_owned(),
+    )
+    .expect("submit user prompt");
+    let prompt = read_nth_prompt_created(&h, 0);
+    let context = prompt.context.flatten();
+    let notice = context
+        .iter()
+        .filter_map(text_part)
+        .find(|text| text.contains("loaded into a different session"))
+        .expect("changed-session notice in user turn");
+    assert!(notice.contains("recreate timers"));
+    assert!(
+        h.take_pending_restore_prompts_for_user_prompt(&cid)
+            .is_empty(),
+        "changed-session notice must be one-shot"
+    );
+
+    h.shutdown().expect("shutdown");
+}
+
+/// Reloading an agent within the same durable session must not mislabel that
+/// ordinary lifecycle transition as a move to another session.
+#[test]
+fn same_session_agent_reload_does_not_repeat_changed_session_notice() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path()).expect("harness");
+    let cid = ensure_test_user_agent(&mut h);
+    let agent_id = durable_agent_id_for_conversation(&h, &cid);
+
+    h.unload_agent_from_session_if_loaded(&h.current_session_id.clone(), agent_id.as_str());
+    h.ensure_loaded_agent_for_agent(&cid, agent_id.as_str());
+
+    assert!(
+        h.take_pending_restore_prompts_for_user_prompt(&cid)
+            .is_empty()
+    );
+    h.shutdown().expect("shutdown");
+}
+
+/// Ephemeral session journals intentionally have no durable events, so runtime
+/// membership history must still prevent false changed-session warnings.
+#[test]
+fn ephemeral_same_session_agent_reload_does_not_warn() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness_ephemeral(td.path()).expect("harness");
+    let cid = ensure_test_user_agent(&mut h);
+    let agent_id = durable_agent_id_for_conversation(&h, &cid);
+
+    h.unload_agent_from_session_if_loaded(&h.current_session_id.clone(), agent_id.as_str());
+    h.ensure_loaded_agent_for_agent(&cid, agent_id.as_str());
+
+    assert!(
+        h.take_pending_restore_prompts_for_user_prompt(&cid)
+            .is_empty()
+    );
+    h.shutdown().expect("shutdown");
+}
+
+/// Repeated ensure calls for an already-loaded agent are a hot-path no-op and
+/// must not deserialize historical journals again.
+#[test]
+fn repeated_loaded_agent_ensure_does_not_rescan_history() {
+    let td = TempDir::new().expect("tempdir");
+    let state_dir = td.path().join("state");
+    let mut h = quiet_provider_harness(&state_dir).expect("harness");
+    let cid = ensure_test_user_agent(&mut h);
+    let agent_id = durable_agent_id_for_conversation(&h, &cid);
+    let notice_count = h.replayable_harness_notices.len();
+
+    std::fs::write(
+        state_dir
+            .join("agents")
+            .join(agent_id.as_str())
+            .join("events.cbor"),
+        b"corrupt after initial load",
+    )
+    .expect("corrupt journal");
+    h.ensure_loaded_agent_for_agent(&cid, agent_id.as_str());
+
+    assert_eq!(h.replayable_harness_notices.len(), notice_count);
+    h.shutdown().expect("shutdown");
 }
 
 /// Regression: a cold-resumed session needs one hidden restore notice in the
@@ -6831,6 +6960,7 @@ fn resumed_startup_folds_restore_notice_before_first_user_prompt() {
     assert!(notice.contains("Previous session was interrupted and restored."));
     assert!(notice.contains("2 hours have passed since the last recorded session event"));
     assert!(notice.contains("state of the world might have changed"));
+    assert!(notice.contains("recreate timers"));
     assert_eq!(restore_notice_context_count(&prompt), 1);
     assert_eq!(restore_notice_event_count(&h), 1);
 

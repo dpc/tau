@@ -143,6 +143,7 @@ enum RuntimeEventWait {
 }
 
 const RESTORE_NOTICE_BODY_PREFIX: &str = "Previous session was interrupted and restored.";
+const CHANGED_SESSION_NOTICE_BODY: &str = "This existing agent was loaded into a different session. Session-scoped tool and extension state may have changed or may not carry over; inspect current tool state and recreate timers or other session-scoped setup if still needed.";
 
 fn agent_runtime_state_for_turn(state: &AgentTurnState) -> tau_proto::AgentRuntimeState {
     match state {
@@ -186,9 +187,13 @@ fn restore_notice_prompt_for_elapsed_inner(elapsed: Option<Duration>) -> String 
         },
     );
     format!(
-        "{} {RESTORE_NOTICE_BODY_PREFIX} {timing}",
+        "{} {RESTORE_NOTICE_BODY_PREFIX} {timing} Session-scoped tool and extension state may also have changed; inspect current tool state and recreate timers or other session-scoped setup if still needed.",
         crate::INTERNAL_MARKER
     )
+}
+
+fn changed_session_notice_prompt() -> String {
+    format!("{} {CHANGED_SESSION_NOTICE_BODY}", crate::INTERNAL_MARKER)
 }
 
 fn restore_notice_elapsed(
@@ -1577,6 +1582,9 @@ pub struct Harness {
     /// for the current session. This closes the race where interception parks
     /// `session.agent_loaded` before the durable session store can fold it.
     pub(crate) session_loaded_agents: HashSet<AgentId>,
+    /// Agents that have appeared in the current session's membership history,
+    /// including agents that are presently unloaded.
+    pub(crate) session_ever_loaded_agents: HashSet<tau_proto::AgentId>,
     /// Harness-owned lifecycle state for current-session agents.
     /// Session-local watch sets keyed by watcher public agent id.
     pub(crate) agent_watches: HashMap<String, BTreeSet<String>>,
@@ -2201,6 +2209,7 @@ impl Harness {
             agents: HashMap::new(),
             agent_routes: HashMap::new(),
             session_loaded_agents: HashSet::new(),
+            session_ever_loaded_agents: HashSet::new(),
             agent_watches: HashMap::new(),
             agent_watchers: HashMap::new(),
             agent_watch_subscriptions: HashMap::new(),
@@ -9830,6 +9839,7 @@ impl Harness {
         self.canceled_prompts.clear();
         self.pending_notices.restore_sessions.clear();
         self.pending_notices.restore_background_notices.clear();
+        self.pending_notices.changed_session_agents.clear();
         self.pending_notices.tool_availability.clear();
         self.pending_notices.unavailable_tools_delivered.clear();
         self.pending_start_agent_requests.clear();
@@ -9846,6 +9856,8 @@ impl Harness {
         // created explicitly by `UiCreateAgent`/first prompt in the new session.
         self.agents.clear();
         self.agent_routes.clear();
+        self.session_loaded_agents.clear();
+        self.session_ever_loaded_agents.clear();
         self.agent_watches.clear();
         self.agent_watchers.clear();
         self.agent_watch_subscriptions.clear();
@@ -10147,6 +10159,13 @@ impl Harness {
                     prompts.push(PendingPrompt::internal(notice));
                 }
             }
+        }
+        if self
+            .pending_notices
+            .changed_session_agents
+            .remove(&(session_id, agent_id))
+        {
+            prompts.push(PendingPrompt::internal(changed_session_notice_prompt()));
         }
         prompts.extend(self.take_pending_tool_availability_prompts_for_user_prompt());
         prompts
@@ -10783,6 +10802,20 @@ impl Harness {
     }
 
     fn rehydrate_agents_from_session(&mut self) {
+        match self.store.session_events(self.current_session_id.as_str()) {
+            Ok(events) => {
+                self.session_ever_loaded_agents
+                    .extend(events.into_iter().filter_map(|entry| match entry.event {
+                        Event::SessionAgentLoaded(loaded) => Some(loaded.agent_id),
+                        _ => None,
+                    }));
+            }
+            Err(error) => {
+                self.emit_harness_failure(&format!(
+                    "failed to load session membership history during restore: {error}"
+                ));
+            }
+        }
         let loaded_agents: Vec<tau_proto::AgentId> =
             match self.store.load_session(self.current_session_id.as_str()) {
                 Ok(Some(membership)) => membership.loaded_agents().into_iter().cloned().collect(),
@@ -11072,6 +11105,23 @@ impl Harness {
         self.ensure_loaded_agent_for_agent_with_metadata(cid, agent_id, Vec::new());
     }
 
+    /// Returns whether an existing agent is being introduced to the current
+    /// session for the first time.
+    fn existing_agent_is_new_to_current_session(&mut self, agent_id: &tau_proto::AgentId) -> bool {
+        if self.session_ever_loaded_agents.contains(agent_id) {
+            return false;
+        }
+        match self.agent_store.agent_events(agent_id) {
+            Ok(events) => !events.is_empty(),
+            Err(error) => {
+                self.emit_harness_failure(&format!(
+                    "failed to inspect agent `{agent_id}` history before loading: {error}"
+                ));
+                false
+            }
+        }
+    }
+
     fn ensure_loaded_agent_for_agent_with_metadata(
         &mut self,
         cid: &AgentId,
@@ -11123,6 +11173,15 @@ impl Harness {
                 }
             };
         if !already_loaded {
+            let warn_about_changed_session =
+                self.existing_agent_is_new_to_current_session(&agent_id_proto);
+            if warn_about_changed_session {
+                self.pending_notices
+                    .changed_session_agents
+                    .insert((self.current_session_id.clone(), agent_id_proto.clone()));
+            }
+            self.session_ever_loaded_agents
+                .insert(agent_id_proto.clone());
             self.session_loaded_agents.insert(agent_id_proto.clone());
             let waiting_on = self.agent_context_provider_ids(agent_id_proto.clone());
             if !waiting_on.is_empty() {
