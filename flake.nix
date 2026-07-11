@@ -195,7 +195,7 @@
 
             tests = craneLib.cargoNextest {
               cargoArtifacts = workspace;
-              cargoNextestExtraArgs = "--workspace --show-progress none";
+              cargoNextestExtraArgs = "--workspace --show-progress none --status-level=none";
               nativeBuildInputs = [ pkgs.ripgrep ];
             };
 
@@ -232,7 +232,7 @@
               cargoArtifacts = workspaceCcov;
               buildPhaseCargoCommand = ''
                 source <(cargo llvm-cov show-env --export-prefix)
-                cargo nextest run --locked --workspace --all-targets --cargo-profile $CARGO_PROFILE --show-progress none
+                cargo nextest run --locked --workspace --all-targets --cargo-profile $CARGO_PROFILE --show-progress none --status-level=none
                 mkdir -p $out
                 cargo llvm-cov report --profile $CARGO_PROFILE --lcov --output-path $out/lcov.info
                 test -s $out/lcov.info
@@ -476,6 +476,7 @@
             "rustc-codegen-cranelift-preview"
           ];
           NEXTEST_SHOW_PROGRESS = "none";
+          NEXTEST_STATUS_LEVEL = "none";
           TAU_LOG = "tau_ext_shell=debug,tau_harness=debug,info";
           packages = [
             cargoCrap
