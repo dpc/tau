@@ -1658,6 +1658,91 @@ fn dir_lock_releases_delegate_locks_on_start_agent_result() {
     writer.flush().expect("flush");
 }
 
+/// Ensures committed session unload is ext-shell's general agent cleanup
+/// authority: it releases the unloaded agent's manual lock before a queued
+/// waiter is granted ownership.
+#[test]
+fn dir_lock_releases_agent_locks_on_session_agent_unloaded() {
+    let tempdir = TempDir::new().expect("tempdir");
+    let lock_dir = tempdir.path().to_path_buf();
+    let (mut reader, mut writer) = spawn_extension();
+    drain_startup(&mut reader);
+    send_dir_lock_config(&mut writer, true);
+
+    writer
+        .write_event(&tool_started(
+            "lock-before-unload",
+            DIR_LOCK_TOOL_NAME,
+            cbor_text_map(vec![
+                ("command", "update"),
+                ("directory", &lock_dir.display().to_string()),
+            ]),
+            "agent-unloaded",
+        ))
+        .expect("dir_lock update");
+    writer.flush().expect("flush owner lock");
+    loop {
+        match reader.read_event().expect("read") {
+            Some(Event::ToolResult(result)) if result.call_id.as_str() == "lock-before-unload" => {
+                break;
+            }
+            Some(_) => continue,
+            None => panic!("extension closed before owner lock result"),
+        }
+    }
+
+    writer
+        .write_event(&tool_started(
+            "lock-after-unload",
+            DIR_LOCK_TOOL_NAME,
+            cbor_text_map(vec![
+                ("command", "update"),
+                ("directory", &lock_dir.display().to_string()),
+            ]),
+            "agent-waiter",
+        ))
+        .expect("queued dir_lock update");
+    writer.flush().expect("flush queued lock");
+    loop {
+        match reader.read_event().expect("read") {
+            Some(Event::ToolProgress(progress))
+                if progress.call_id.as_str() == "lock-after-unload" =>
+            {
+                break;
+            }
+            Some(Event::ToolResult(result)) if result.call_id.as_str() == "lock-after-unload" => {
+                panic!("waiter acquired lock before unload: {result:?}");
+            }
+            Some(_) => continue,
+            None => panic!("extension closed before queued lock progress"),
+        }
+    }
+
+    writer
+        .write_event(&Event::SessionAgentUnloaded(
+            tau_proto::SessionAgentUnloaded {
+                session_id: tau_proto::SessionId::new("session-unload-lock"),
+                agent_id: tau_proto::AgentId::parse("agent-unloaded").expect("agent id"),
+            },
+        ))
+        .expect("session agent unloaded");
+    writer.flush().expect("flush unload");
+    loop {
+        match reader.read_event().expect("read") {
+            Some(Event::ToolResult(result)) if result.call_id.as_str() == "lock-after-unload" => {
+                break;
+            }
+            Some(_) => continue,
+            None => panic!("extension closed before waiter lock result"),
+        }
+    }
+
+    writer
+        .write_frame(&disconnect_frame(None))
+        .expect("disconnect");
+    writer.flush().expect("flush");
+}
+
 #[test]
 fn dir_lock_unlock_can_target_another_owner() {
     let tempdir = TempDir::new().expect("tempdir");
