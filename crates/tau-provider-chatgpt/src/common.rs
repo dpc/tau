@@ -1,7 +1,7 @@
 //! Types shared by the ChatGPT/Codex Responses transports.
 
 use std::collections::BTreeMap;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime};
 
 use tau_proto::{
     CborValue, ContentPart, ContextItem, ContextRole, MessageItem, OpaqueProviderItem,
@@ -9,6 +9,9 @@ use tau_proto::{
     ProviderResponseCompactionUpdate, ProviderResponseTextDelta, ProviderTokenUsage,
     ReasoningTextItem, ReasoningTextKind, ResponsesToolCallEnvelope, SessionId, ToolCallItem,
     ToolDefinition,
+};
+use tau_provider::retry_policy::{
+    RetryClass, RetryDecision, classify_error_code, parse_json_error_code, parse_json_reset_hint,
 };
 use tau_provider::{StreamRepetitionGuard, StreamRepetitionKey};
 use uuid::Uuid;
@@ -74,6 +77,13 @@ impl PromptPayload<'_> {
 pub enum LlmError {
     Http(Box<ureq::Error>),
     HttpStatus(u16, String),
+    /// HTTP status preserving a trusted transport-level retry hint.
+    HttpStatusHinted(u16, String, Duration),
+    /// Prompt cancellation observed from Tau's trusted local abort source.
+    Canceled,
+    /// Mutable URL, credential, or account configuration could not build a
+    /// request.
+    ReloadableConfig(String),
     Io(std::io::Error),
     Json(serde_json::Error),
     Vcr(tau_vcr::VcrError),
@@ -85,6 +95,9 @@ impl std::fmt::Display for LlmError {
         match self {
             Self::Http(e) => write!(f, "HTTP error: {e}"),
             Self::HttpStatus(code, body) => write!(f, "HTTP {code}: {body}"),
+            Self::HttpStatusHinted(code, body, _) => write!(f, "HTTP {code}: {body}"),
+            Self::Canceled => write!(f, "cancelled by harness"),
+            Self::ReloadableConfig(error) => write!(f, "local request construction: {error}"),
             Self::Io(e) => write!(f, "I/O error: {e}"),
             Self::Json(e) => write!(f, "JSON error: {e}"),
             Self::Vcr(e) => write!(f, "VCR error: {e}"),
@@ -100,13 +113,34 @@ impl std::error::Error for LlmError {
             Self::Io(e) => Some(e),
             Self::Json(e) => Some(e),
             Self::Vcr(e) => Some(e),
-            Self::RepetitionDetected(_) => None,
-            Self::HttpStatus(_, _) => None,
+            Self::RepetitionDetected(_)
+            | Self::Canceled
+            | Self::ReloadableConfig(_)
+            | Self::HttpStatus(_, _)
+            | Self::HttpStatusHinted(_, _, _) => None,
         }
     }
 }
 
 impl LlmError {
+    /// Classify whether and how the logical prompt should be retried.
+    ///
+    /// Unknown remote failures deliberately retry. Only errors with positive
+    /// evidence that repeating the unchanged operation is futile are terminal.
+    #[must_use]
+    pub fn retry_decision(&self) -> Option<RetryDecision> {
+        match self {
+            Self::Http(_) | Self::Io(_) => Some(RetryDecision::new(RetryClass::Transport)),
+            Self::Json(_) => Some(RetryDecision::new(RetryClass::Unknown)),
+            Self::Vcr(_) | Self::RepetitionDetected(_) | Self::Canceled => None,
+            Self::ReloadableConfig(_) => Some(RetryDecision::new(RetryClass::Auth)),
+            Self::HttpStatus(code, body) => classify_http_status(*code, body, None),
+            Self::HttpStatusHinted(code, body, hint) => {
+                classify_http_status(*code, body, Some(*hint))
+            }
+        }
+    }
+
     /// Whether this error is plausibly transient and worth retrying.
     ///
     /// We treat transport hiccups, mid-stream IO breaks, and
@@ -116,41 +150,39 @@ impl LlmError {
     /// deterministic request-level rejection — retrying just burns
     /// quota.
     pub fn retry_after(&self) -> Option<Duration> {
-        match self {
-            Self::Http(_) => Some(Duration::ZERO),
-            Self::Io(_) => Some(Duration::ZERO),
-            Self::Json(_) | Self::Vcr(_) | Self::RepetitionDetected(_) => None,
-            Self::HttpStatus(code, body) => match *code {
-                408 | 425 => Some(Duration::ZERO),
-                429 => usage_limit_retry_after(body),
-                500..=599 => Some(Duration::ZERO),
-                // Code 0 is synthesized by the Responses backend for
-                // SSE-level events: the body is prefixed with
-                // "stream error:" (mid-stream provider hiccup —
-                // overload, upstream timeout, gateway reset),
-                // "response failed:" (deterministic model error),
-                // or "response incomplete:" (request-level cap).
-                // Only the first class is worth retrying — and even
-                // then, account-level caps (usage_limit_reached,
-                // rate_limit_exceeded, quota_exceeded) arrive
-                // through this path as "stream error: …" and are
-                // *not* transient. Local provider-stream idle watchdog
-                // timeouts also use the same prefix but are terminal
-                // for the current turn so queued prompts unblock
-                // promptly instead of waiting through another full
-                // idle window. Upstream error types are tagged in the
-                // body suffix by `responses::apply_event`.
-                0 if body.starts_with("stream error:") => {
-                    if is_account_limit_body(body) || is_provider_stream_idle_timeout_body(body) {
-                        None
-                    } else {
-                        Some(Duration::ZERO)
-                    }
-                }
-                _ => None,
-            },
-        }
+        self.retry_decision()
+            .map(|decision| decision.retry_after.unwrap_or(Duration::ZERO))
     }
+}
+
+fn classify_http_status(
+    code: u16,
+    body: &str,
+    transport_hint: Option<Duration>,
+) -> Option<RetryDecision> {
+    let provider_code = parse_json_error_code(body).or_else(|| {
+        body.split("(type=")
+            .nth(1)
+            .and_then(|suffix| suffix.split(')').next())
+            .map(ToOwned::to_owned)
+    });
+    let class = provider_code
+        .as_deref()
+        .map(classify_error_code)
+        .filter(|class| *class != RetryClass::Unknown)
+        .unwrap_or_else(|| match code {
+            408 | 425 => RetryClass::Transport,
+            429 => RetryClass::Throttle,
+            500..=599 => RetryClass::Overload,
+            401 | 403 => RetryClass::Auth,
+            0 if is_provider_stream_idle_timeout_body(body) => RetryClass::Transport,
+            _ => RetryClass::Unknown,
+        });
+    let body_hint = parse_json_reset_hint(body, SystemTime::now());
+    Some(
+        RetryDecision::new(class)
+            .with_retry_after(transport_hint.into_iter().chain(body_hint).max()),
+    )
 }
 
 /// Account-level limits that won't clear with any reasonable backoff —
@@ -177,23 +209,6 @@ pub fn is_account_limit_body(body: &str) -> bool {
 /// error.
 pub fn is_provider_stream_idle_timeout_body(body: &str) -> bool {
     body.contains("provider stream idle timeout")
-}
-
-fn usage_limit_retry_after(body: &str) -> Option<Duration> {
-    let value: serde_json::Value = serde_json::from_str(body).ok()?;
-    let error = value.get("error")?;
-    if error.get("type")?.as_str()? != "usage_limit_reached" {
-        return None;
-    }
-    if let Some(seconds) = error
-        .get("resets_in_seconds")
-        .and_then(serde_json::Value::as_u64)
-    {
-        return Some(Duration::from_secs(seconds));
-    }
-    let resets_at = error.get("resets_at")?.as_u64()?;
-    let now = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs();
-    Some(Duration::from_secs(resets_at.saturating_sub(now)))
 }
 
 /// One provider output item as it is incrementally assembled from a

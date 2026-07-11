@@ -18,8 +18,8 @@ ChatGPT/Codex model matrix owned by `tau-provider-chatgpt`; `chat_completions`
 profiles publish their configured model list; and `openrouter` profiles convert
 to Chat Completions configuration and publish their configured or fetched model
 list. Prompt dispatch resolves exact configured model IDs for the selected
-provider namespace; missing credentials or unknown models finish with a provider
-error rather than leaving the harness waiting.
+provider namespace. Missing or invalid mutable profile/model/auth state remains
+visibly pending and is re-resolved before later attempts.
 
 ## Prompt execution uses bounded workers with cooperative cancellation
 
@@ -59,15 +59,29 @@ response stats are accumulated until the rate-limited emitter samples them,
 except for the first non-empty sample and for a terminal flush immediately before
 the provider prompt closes.
 
-## Provider retry sleeps are capped per attempt
+## Required provider work retries outside the worker pool
 
-Status: unconfirmed
+Status: confirmed by approved product policy for `tau-agent-jbkk`
 
-Transient ChatGPT/Codex errors use this crate's retry loop. Main-agent turns get
-the normal retry count and extension-originated side turns get a smaller retry
-cap. Each individual sleep is capped by `LLM_MAX_RETRY_DELAY` so provider
-`Retry-After` and account-reset metadata cannot monopolize a prompt worker for
-hours.
+A logical prompt remains pending across retryable provider attempts until it
+succeeds, is canceled, the process/session shuts down, or the unchanged request
+is positively proven deterministic and invalid. Unknown remote failures retry;
+classification selects cadence, shared cooldown, visible explanation, and
+profile reload behavior rather than default termination.
+
+Workers execute one finite attempt. Retryable outcomes return the logical job to
+one process-lifetime delayed scheduler, releasing the bounded execution slot
+before any wait. Jittered Fibonacci cadence reaches about one minute for
+transport/overload/throttle and at most thirty minutes for persistent usage,
+account, auth, and unknown failures. Trusted `Retry-After` or structured reset
+hints are lower bounds and may be later than that generated ceiling. Prompts
+using one provider profile share limit cooldowns, while cancellation remains
+prompt-scoped. Mutable profiles and credentials are reloaded when delayed work
+becomes due.
+
+Retry state is memory-only. Cold restart intentionally does not replay an
+ambiguously accepted request because doing so can duplicate output, cost, tools,
+or side effects.
 
 ## Provider diagnostics require an existing durable session directory
 

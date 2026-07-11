@@ -11,8 +11,7 @@ ChatGPT/Codex WebSocket turns run from synchronous prompt workers while socket I
 is owned by background Tokio reader/writer tasks. A turn waiting for upstream
 events registers a `TurnAbortWaker`; cancellation sends an `AbortWake` hint into
 the same inbound event queue as transport events. The turn then re-checks
-`TurnAbort::is_aborted()` and returns the standard 499 harness cancellation error
-only when the abort source confirms cancellation.
+`TurnAbort::is_aborted()` and returns typed `LlmError::Canceled` only when the abort source confirms cancellation. Remote HTTP 499/body text remains retryable.
 
 This keeps cancellation prompt without shortening the provider-stream watchdog.
 The default five-minute timeout is an idle timeout meaning "no upstream SSE
@@ -24,8 +23,7 @@ timeout for ChatGPT/Codex streams.
 The shared WebSocket pool uses the same cancellation seam when a prompt turn is
 queued behind an active same-key reservation. Checkout waits on the pool
 condition variable until the busy key clears or a registered abort waker bumps
-the pool's abort-wake generation. A canceled waiter must return the standard 499
-path instead of starting a stale network turn after the earlier same-key turn
+the pool's abort-wake generation. A canceled waiter must return typed `LlmError::Canceled` instead of starting a stale network turn after the earlier same-key turn
 releases.
 
 ## Backend transport behavior is covered by focused local tests
@@ -47,7 +45,7 @@ HTTP/SSE.
 
 WebSocket changes should cover observable turn/pool contracts such as pool-key
 identity, reservation/release behavior, reconnect behavior, provider-stream
-idle timeouts, cancellation returning the standard 499 harness path, and abort
+idle timeouts, cancellation returning typed `LlmError::Canceled`, and abort
 wakers waking blocked turn waits without relying on short receive polling.
 Parser and streaming changes should keep using focused event/delta/snapshot
 regression tests, with broader provider response streaming guidance in
@@ -80,3 +78,9 @@ Typed Tau fields remain authoritative. Tool routing uses parsed `ToolCallItem`
 fields, assistant message replay rebases text and phase from `MessageItem`, and
 raw assistant message sidecars are used only after validating that they are
 Responses assistant `message` items.
+
+## Mutable request configuration retries
+
+Status: confirmed, 2026-07-08
+
+WebSocket URL, credential, account, and header construction failures derived from mutable provider profiles return `LlmError::ReloadableConfig`. The outer scheduler retries them at auth/config cadence and reloads profile state before the next attempt. Provider HTTP status/body strings, including 499 and cancellation-looking prose, never impersonate typed local cancellation.

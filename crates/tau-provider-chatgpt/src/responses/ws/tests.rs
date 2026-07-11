@@ -78,6 +78,46 @@ fn test_responses_config() -> ResponsesConfig {
     }
 }
 
+/// Mutable credential/account header failures retry as auth/config and a
+/// corrected profile builds successfully on the next attempt.
+#[test]
+fn mutable_ws_header_configuration_can_be_repaired() {
+    for invalid_account in [false, true] {
+        let mut config = test_responses_config();
+        if invalid_account {
+            config.account_id = Some("bad\naccount".to_owned());
+        } else {
+            config.api_key = "bad\ntoken".to_owned();
+        }
+        let error = build_request(&config, "thread-id").expect_err("invalid mutable header");
+        assert!(matches!(error, LlmError::ReloadableConfig(_)));
+        assert_eq!(
+            error.retry_decision().map(|decision| decision.class),
+            Some(tau_provider::retry_policy::RetryClass::Auth)
+        );
+
+        config.api_key = "repaired-token".to_owned();
+        config.account_id = Some("repaired-account".to_owned());
+        build_request(&config, "thread-id").expect("repaired profile request");
+    }
+}
+
+/// Unsupported configured schemes remain retryable because profile reload can
+/// repair the endpoint before a later attempt.
+#[test]
+fn unsupported_ws_scheme_is_reloadable() {
+    let mut config = test_responses_config();
+    config.base_url = "file:///tmp/provider".to_owned();
+    let error = build_request(&config, "thread-id").expect_err("unsupported WS scheme");
+    assert!(matches!(error, LlmError::ReloadableConfig(_)));
+    assert_eq!(
+        error.retry_decision().map(|decision| decision.class),
+        Some(tau_provider::retry_policy::RetryClass::Auth)
+    );
+    config.base_url = "https://chatgpt.com/backend-api".to_owned();
+    build_request(&config, "thread-id").expect("repaired WS URL");
+}
+
 struct PromptFixture {
     context: tau_proto::PromptContext,
     session_id: tau_proto::SessionId,
@@ -115,7 +155,7 @@ impl PromptFixture {
 /// Ensure WebSocket turns wake promptly from registered cancellation rather
 /// than waiting for the five-minute provider-stream idle timeout.
 #[test]
-fn ws_turn_abort_waker_returns_499_promptly() {
+fn ws_turn_abort_waker_returns_typed_cancellation_promptly() {
     let (mut conn, _inbound_tx, _outbound_rx) = test_ws_conn();
     let config = test_responses_config();
     let fixture = PromptFixture::new();
@@ -160,10 +200,7 @@ fn ws_turn_abort_waker_returns_499_promptly() {
             .recv_timeout(Duration::from_secs(1))
             .expect("prompt cancellation result");
         assert!(start.elapsed() < Duration::from_secs(1));
-        assert!(matches!(
-            result,
-            Err(LlmError::HttpStatus(499, ref body)) if body == "cancelled by harness"
-        ));
+        assert!(matches!(result, Err(LlmError::Canceled)));
     });
 }
 

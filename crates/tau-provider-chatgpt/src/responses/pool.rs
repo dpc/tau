@@ -376,7 +376,7 @@ pub enum WsTurnError {
 impl WsTurnError {
     pub fn into_llm_error(self) -> LlmError {
         match self {
-            Self::Canceled => LlmError::HttpStatus(499, "cancelled by harness".to_owned()),
+            Self::Canceled => LlmError::Canceled,
             Self::Other(error) => error,
         }
     }

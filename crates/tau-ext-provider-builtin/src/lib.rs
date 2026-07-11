@@ -4,16 +4,17 @@
 //! storage scan, model publication, and dispatch across built-in provider
 //! backends. Individual backend crates own provider-specific wire formats.
 
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::cmp::Ordering;
+use std::collections::{BTreeMap, BinaryHeap, HashMap, HashSet, VecDeque};
 use std::error::Error;
 use std::io::{BufWriter, Cursor, Read, Write};
 use std::marker::PhantomData;
+use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use backon::BackoffBuilder;
 use dialoguer::Input;
 use serde::{Deserialize, Serialize};
 use tau_client::{
@@ -28,11 +29,12 @@ use tau_proto::{
     ProviderPromptSubmitted, ProviderResponseFinished, ProviderResponseStats,
     ProviderResponseStatusUpdate, ProviderResponseUpdated, ProviderStopReason,
 };
+use tau_provider::retry_policy::{RetryClass, RetryDecision};
 use tau_provider::storage::{AuthFile, ProviderStore};
 use tau_provider_chat_completions::openrouter::{OpenRouterProfile, fetch_openrouter_models};
 use tau_provider_chat_completions::{
-    ChatCompletionsModel, ChatCompletionsProvider, models_for_provider as chat_models_for_provider,
-    run_prompt_for_provider as run_chat_completions_prompt,
+    ChatCompletionsModel, ChatCompletionsProvider, PromptAttemptOutcome,
+    models_for_provider as chat_models_for_provider, run_prompt_attempt_for_provider,
 };
 use tau_provider_chatgpt::{
     ChatGptRuntime, ChatGptTurnState, TurnAbort, TurnAbortWaker, common, responses,
@@ -93,23 +95,11 @@ fn is_zero(value: &u64) -> bool {
     *value == 0
 }
 
-/// Maximum number of retry attempts before giving up on a transient provider
-/// error.
-const LLM_MAX_RETRIES: usize = 8;
-
-/// Tighter cap for extension-originated turns (delegate sub-agents,
-/// notifications, etc.). These are best-effort from the user's perspective, and
-/// should not block the provider extension's single prompt slot for minutes.
-const LLM_MAX_RETRIES_EXTENSION: usize = 2;
-/// Maximum delay accepted from either Tau's retry schedule or provider-supplied
-/// `Retry-After` style limits.
-///
-/// Provider prompts run on a bounded worker pool. Upstream APIs can report
-/// account reset windows measured in hours, but sleeping a worker that long is
-/// indistinguishable from a stuck provider process from the harness's point of
-/// view. Keep retries useful for transient overload while guaranteeing a prompt
-/// slot returns in human-scale time.
-const LLM_MAX_RETRY_DELAY: Duration = Duration::from_secs(60);
+#[cfg(not(test))]
+const RETRY_BASE_DELAY: Duration = Duration::from_secs(10);
+#[cfg(test)]
+const RETRY_BASE_DELAY: Duration = Duration::from_millis(10);
+const RESET_BOUNDARY_JITTER_MAX: Duration = Duration::from_secs(5);
 const PROVIDER_RESPONSE_UPDATE_MIN_INTERVAL: Duration = Duration::from_secs(1);
 
 /// Default number of provider prompts allowed to execute concurrently.
@@ -117,8 +107,6 @@ const DEFAULT_PROMPT_CONCURRENCY: usize = 4;
 
 /// Environment override for prompt execution concurrency.
 const PROMPT_CONCURRENCY_ENV: &str = "TAU_BUILTIN_PROVIDER_PROMPT_CONCURRENCY";
-const CANCELED_BY_HARNESS_STATUS: u16 = 499;
-const CANCELED_BY_HARNESS_BODY: &str = "cancelled by harness";
 
 /// Runs setup commands for registered built-in provider profiles.
 pub fn run_provider_cli(args: &[String]) -> Result<(), Box<dyn Error>> {
@@ -509,12 +497,15 @@ where
         worker_tx,
         worker_rx,
         worker_waker: None,
+        retry_scheduler: None,
+        shared_cooldowns: BTreeMap::new(),
         chatgpt_runtime: Arc::new(ChatGptRuntime::new()),
         cancellation: Arc::new(CancellationState::default()),
         prompt_queue: VecDeque::new(),
         session_debug_allowed: BTreeMap::new(),
         active_prompts: 0,
         input_closed: false,
+        cancel_generation: 0,
     };
     let mut runtime = TauExtensionRunner::new(ProviderExtension::<F>::new(startup_profiles))
         .start_manual_loop(reader, writer, runtime)?;
@@ -625,6 +616,7 @@ where
                                 return Ok(());
                             }
                             DispatchOutcome::StopRequested => {
+                                runtime.state_mut().begin_input_shutdown();
                                 runtime.finish()?;
                                 return Ok(());
                             }
@@ -632,14 +624,14 @@ where
                     }
                     Ok(ManualRuntimePoll::InputClosed) => {
                         handled_input = true;
-                        runtime.state_mut().input_closed = true;
+                        runtime.state_mut().begin_input_shutdown();
                         break;
                     }
                     Ok(ManualRuntimePoll::Empty) => break,
                     Err(error) => {
                         handled_input = true;
                         tracing::warn!(target: LOG_TARGET, "provider input reader failed: {error}");
-                        runtime.state_mut().input_closed = true;
+                        runtime.state_mut().begin_input_shutdown();
                         break;
                     }
                 }
@@ -666,6 +658,10 @@ struct ProviderRuntime<F> {
     worker_rx: Receiver<WorkerMessage>,
     /// Wake handle signaled after workers enqueue output or completion.
     worker_waker: Option<ManualRuntimeWaker>,
+    /// Single timer scheduler shared by every delayed logical prompt.
+    retry_scheduler: Option<RetryScheduler>,
+    /// Account/profile cooldowns, keyed without credentials or account ids.
+    shared_cooldowns: BTreeMap<ProviderName, SharedCooldown>,
     /// Shared ChatGPT backend runtime for prewarm and prompt execution.
     chatgpt_runtime: Arc<ChatGptRuntime>,
     /// Cooperative cancellation state shared with prompt workers.
@@ -678,6 +674,8 @@ struct ProviderRuntime<F> {
     active_prompts: usize,
     /// True after the harness input stream disconnects or reaches EOF.
     input_closed: bool,
+    /// Generation used to reject retry outcomes created before global cancel.
+    cancel_generation: u64,
 }
 
 impl<F> ProviderRuntime<F>
@@ -685,11 +683,15 @@ where
     F: FnMut() -> BuiltinProviderProfiles + 'static,
 {
     fn set_worker_waker(&mut self, waker: ManualRuntimeWaker) {
+        self.retry_scheduler = Some(RetryScheduler::start(self.worker_tx.clone(), waker.clone()));
         self.worker_waker = Some(waker);
     }
 
     fn drain_workers_and_start_prompts(&mut self, handle: &ClientHandle) -> ClientResult<()> {
-        drain_worker_messages(&self.worker_rx, handle, &mut self.active_prompts)?;
+        self.drain_worker_messages(handle)?;
+        if !self.input_closed {
+            self.park_cooled_queued_prompts(handle)?;
+        }
         let prompt_worker_context = self.prompt_worker_context();
         start_queued_prompts(
             &mut self.prompt_queue,
@@ -701,7 +703,21 @@ where
     }
 
     fn is_finished(&self) -> bool {
-        self.input_closed && self.active_prompts == 0 && self.prompt_queue.is_empty()
+        self.input_closed
+            && self.active_prompts == 0
+            && self.prompt_queue.is_empty()
+            && self
+                .retry_scheduler
+                .as_ref()
+                .is_none_or(RetryScheduler::is_empty)
+    }
+
+    fn begin_input_shutdown(&mut self) {
+        self.input_closed = true;
+        self.cancellation.shutdown();
+        if let Some(scheduler) = &self.retry_scheduler {
+            scheduler.cancel_all();
+        }
     }
 
     fn handle_event(&mut self, event: Event, handle: &ClientHandle) -> ClientResult<()> {
@@ -764,10 +780,12 @@ where
         handle: &ClientHandle,
     ) -> ClientResult<()> {
         let mut profiles = (self.load_prompt_profiles)();
-        let Some(backend) = resolve_prompt_backend(&prompt.model, &mut profiles) else {
-            return self.finish_prompt_with_missing_backend(&prompt, &agent_prompt_id, handle);
-        };
-        self.enqueue_or_start_prompt(PromptJob {
+        let backend = resolve_prompt_backend(&prompt.model, &mut profiles)
+            .unwrap_or(PromptBackend::Unavailable);
+        let mut frame_writer = handle_frame_writer(handle);
+        write_prompt_submitted(&agent_prompt_id, &prompt.originator, &mut frame_writer)
+            .map_err(|error| ClientError::handler(error.to_string()))?;
+        let job = PromptJob {
             agent_prompt_id,
             debug_provider_requests: debug_provider_requests_for(
                 &prompt.session_id,
@@ -775,21 +793,25 @@ where
             ),
             prompt,
             backend,
-        });
+            retry_state: PromptRetryState::default(),
+            cancel_generation: self.cancel_generation,
+        };
+        if let Some(cooldown) = self
+            .shared_cooldowns
+            .get(&job.prompt.model.provider)
+            .copied()
+            .filter(|cooldown| cooldown.not_before > Instant::now())
+        {
+            let due = cooldown_due_for_job(cooldown.not_before, &job);
+            emit_retry_status(&job, cooldown.class, due, handle)?;
+            self.retry_scheduler
+                .as_ref()
+                .expect("retry scheduler starts with the runtime waker")
+                .schedule(job, due);
+        } else {
+            self.enqueue_or_start_prompt(job);
+        }
         Ok(())
-    }
-
-    fn finish_prompt_with_missing_backend(
-        &mut self,
-        prompt: &tau_proto::AgentPromptCreated,
-        agent_prompt_id: &tau_proto::AgentPromptId,
-        handle: &ClientHandle,
-    ) -> ClientResult<()> {
-        let mut frame_writer = handle_frame_writer(handle);
-        write_prompt_submitted(agent_prompt_id, &prompt.originator, &mut frame_writer)
-            .map_err(|error| ClientError::handler(error.to_string()))?;
-        finish_missing_backend(prompt, agent_prompt_id, &mut frame_writer)
-            .map_err(|error| ClientError::handler(error.to_string()))
     }
 
     fn enqueue_or_start_prompt(&mut self, job: PromptJob) {
@@ -808,10 +830,159 @@ where
     ) -> ClientResult<()> {
         let Some(apid) = cancel.agent_prompt_id else {
             self.cancellation.cancel_retry_sleeps();
+            self.cancel_generation = self.cancel_generation.saturating_add(1);
+            if let Some(scheduler) = &self.retry_scheduler {
+                scheduler.cancel_all();
+            }
+            while let Some(job) = self.prompt_queue.pop_front() {
+                self.finish_canceled_prompt(&job.agent_prompt_id, &job.prompt, handle)?;
+            }
             return Ok(());
         };
         self.cancellation.cancel(apid.clone());
-        finish_queued_canceled(&apid, &mut self.prompt_queue, handle)
+        if let Some(scheduler) = &self.retry_scheduler {
+            scheduler.cancel(apid.clone());
+        }
+        if finish_queued_canceled(&apid, &mut self.prompt_queue, handle)? {
+            self.cancellation.take_canceled(&apid);
+        }
+        Ok(())
+    }
+
+    fn drain_worker_messages(&mut self, handle: &ClientHandle) -> ClientResult<()> {
+        loop {
+            match self.worker_rx.try_recv() {
+                Ok(WorkerMessage::Output {
+                    message,
+                    cancel_generation,
+                    agent_prompt_id,
+                }) => {
+                    if let Some(message) = validate_worker_output_for_commit(
+                        message,
+                        cancel_generation,
+                        self.cancel_generation,
+                        self.input_closed,
+                        &agent_prompt_id,
+                        &self.cancellation,
+                    ) {
+                        handle.send(message)?;
+                    }
+                }
+                Ok(WorkerMessage::PromptDone) => {
+                    self.active_prompts = self.active_prompts.saturating_sub(1);
+                }
+                Ok(WorkerMessage::Retry { mut job, decision }) => {
+                    if self.input_closed
+                        || job.cancel_generation != self.cancel_generation
+                        || self.cancellation.is_canceled(&job.agent_prompt_id)
+                    {
+                        self.cancellation.take_canceled(&job.agent_prompt_id);
+                        self.finish_canceled_prompt(&job.agent_prompt_id, &job.prompt, handle)?;
+                        continue;
+                    }
+                    let policy_delay = job
+                        .retry_state
+                        .next_delay(decision.class, job.agent_prompt_id.as_str());
+                    let hint_delay = decision.retry_after.unwrap_or(Duration::ZERO);
+                    let hint_jitter = if decision.retry_after.is_some() {
+                        Duration::from_secs(
+                            1 + stable_retry_hash(
+                                job.agent_prompt_id.as_str(),
+                                job.retry_state.attempts,
+                            ) % RESET_BOUNDARY_JITTER_MAX.as_secs(),
+                        )
+                    } else {
+                        Duration::ZERO
+                    };
+                    let now = Instant::now();
+                    let common_due = now
+                        .checked_add(policy_delay.max(hint_delay))
+                        // An overflowing hint is nonsensical. Fall back to the
+                        // class cadence rather than retrying immediately.
+                        .unwrap_or_else(|| now.checked_add(policy_delay).unwrap_or(now));
+                    let mut due = common_due.checked_add(hint_jitter).unwrap_or(common_due);
+                    let provider = job.prompt.model.provider.clone();
+                    if decision.class.shares_cooldown() {
+                        let shared =
+                            self.shared_cooldowns
+                                .entry(provider)
+                                .or_insert(SharedCooldown {
+                                    not_before: common_due,
+                                    class: decision.class,
+                                });
+                        if shared.not_before < common_due {
+                            shared.not_before = common_due;
+                            shared.class = decision.class;
+                        } else {
+                            due = cooldown_due_for_job(shared.not_before, &job);
+                        }
+                        self.retry_scheduler
+                            .as_ref()
+                            .expect("retry scheduler starts with the runtime waker")
+                            .extend_cooldown(job.prompt.model.provider.clone(), shared.not_before);
+                    }
+                    emit_retry_status(&job, decision.class, due, handle)?;
+                    self.retry_scheduler
+                        .as_ref()
+                        .expect("retry scheduler starts with the runtime waker")
+                        .schedule(job, due);
+                }
+                Ok(WorkerMessage::RetryDue(mut job)) => {
+                    if let Some(scheduler) = &self.retry_scheduler {
+                        scheduler
+                            .delayed_count
+                            .fetch_sub(1, AtomicOrdering::Relaxed);
+                    }
+                    if self.input_closed
+                        || job.cancel_generation != self.cancel_generation
+                        || self.cancellation.take_canceled(&job.agent_prompt_id)
+                    {
+                        self.finish_canceled_prompt(&job.agent_prompt_id, &job.prompt, handle)?;
+                        continue;
+                    }
+                    let mut profiles = (self.load_prompt_profiles)();
+                    job.backend = resolve_prompt_backend(&job.prompt.model, &mut profiles)
+                        .unwrap_or(PromptBackend::Unavailable);
+                    self.prompt_queue.push_back(job);
+                }
+                Ok(WorkerMessage::DelayedCanceled(job)) => {
+                    if let Some(scheduler) = &self.retry_scheduler {
+                        scheduler
+                            .delayed_count
+                            .fetch_sub(1, AtomicOrdering::Relaxed);
+                    }
+                    self.cancellation.take_canceled(&job.agent_prompt_id);
+                    self.finish_canceled_prompt(&job.agent_prompt_id, &job.prompt, handle)?;
+                }
+                Err(TryRecvError::Empty | TryRecvError::Disconnected) => return Ok(()),
+            }
+        }
+    }
+
+    fn park_cooled_queued_prompts(&mut self, handle: &ClientHandle) -> ClientResult<()> {
+        let mut index = 0;
+        while index < self.prompt_queue.len() {
+            let Some(cooldown) = self
+                .prompt_queue
+                .get(index)
+                .and_then(|job| self.shared_cooldowns.get(&job.prompt.model.provider))
+                .copied()
+                .filter(|cooldown| cooldown.not_before > Instant::now())
+            else {
+                index += 1;
+                continue;
+            };
+            let Some(job) = self.prompt_queue.remove(index) else {
+                continue;
+            };
+            let due = cooldown_due_for_job(cooldown.not_before, &job);
+            emit_retry_status(&job, cooldown.class, due, handle)?;
+            self.retry_scheduler
+                .as_ref()
+                .expect("retry scheduler starts with the runtime waker")
+                .schedule(job, due);
+        }
+        Ok(())
     }
 
     fn prompt_worker_context(&self) -> PromptWorkerContext {
@@ -829,6 +1000,40 @@ where
     }
 }
 
+/// Revalidates queued worker output at the main-loop serialization boundary.
+///
+/// Targeted/global cancellation may race after transport output is enqueued.
+/// Tentative output is dropped, while a queued successful terminal is replaced
+/// with exactly one canceled terminal and consumes the targeted marker.
+fn validate_worker_output_for_commit(
+    message: Box<HarnessInputMessage>,
+    dispatch_generation: u64,
+    current_generation: u64,
+    input_closed: bool,
+    agent_prompt_id: &tau_proto::AgentPromptId,
+    cancellation: &CancellationState,
+) -> Option<HarnessInputMessage> {
+    let targeted = cancellation.is_canceled(agent_prompt_id);
+    if dispatch_generation == current_generation && !input_closed && !targeted {
+        return Some(*message);
+    }
+    let HarnessInputMessage::Emit(emit) = message.as_ref() else {
+        return None;
+    };
+    let Event::ProviderResponseFinished(finished) = emit.event.as_ref() else {
+        return None;
+    };
+    cancellation.take_canceled(agent_prompt_id);
+    Some(HarnessInputMessage::emit(Event::ProviderResponseFinished(
+        simple_finished(
+            finished.agent_prompt_id.clone(),
+            finished.agent_id.clone(),
+            finished.originator.clone(),
+            "(cancelled by harness)",
+        ),
+    )))
+}
+
 type PromptExecutor = Arc<dyn Fn(PromptExecution) + Send + Sync + 'static>;
 
 struct PromptJob {
@@ -836,10 +1041,340 @@ struct PromptJob {
     debug_provider_requests: bool,
     prompt: tau_proto::AgentPromptCreated,
     backend: PromptBackend,
+    retry_state: PromptRetryState,
+    /// Runtime global-cancel generation at logical prompt creation.
+    cancel_generation: u64,
+}
+
+/// Shared provider-profile lower bound and its visible normalized reason.
+#[derive(Clone, Copy, Debug)]
+struct SharedCooldown {
+    /// Common earliest provider-contact instant before prompt-local jitter.
+    not_before: Instant,
+    /// Failure class that established the current lower bound.
+    class: RetryClass,
+}
+
+fn cooldown_due_for_job(not_before: Instant, job: &PromptJob) -> Instant {
+    let jitter = cooldown_jitter(
+        job.agent_prompt_id.as_str(),
+        job.retry_state.attempts.saturating_add(1),
+    );
+    not_before.checked_add(jitter).unwrap_or(not_before)
+}
+
+fn cooldown_jitter(prompt_id: &str, attempt: u64) -> Duration {
+    let max_millis: u64 = RESET_BOUNDARY_JITTER_MAX
+        .as_millis()
+        .try_into()
+        .unwrap_or(u64::MAX);
+    Duration::from_millis(1 + stable_retry_hash(prompt_id, attempt) % max_millis)
+}
+
+/// Saturating Fibonacci state retained with a logical prompt across attempts.
+#[derive(Clone, Debug, Default)]
+struct PromptRetryState {
+    /// Number of failed provider attempts observed so far.
+    attempts: u64,
+    /// Previous Fibonacci value in milliseconds.
+    previous: u64,
+    /// Current Fibonacci value in milliseconds.
+    current: u64,
+}
+
+impl PromptRetryState {
+    fn next_delay(&mut self, class: RetryClass, prompt_id: &str) -> Duration {
+        self.attempts = self.attempts.saturating_add(1);
+        let base_millis: u64 = RETRY_BASE_DELAY.as_millis().try_into().unwrap_or(u64::MAX);
+        let fibonacci = if self.current == 0 {
+            self.previous = base_millis;
+            self.current = base_millis;
+            self.current
+        } else {
+            let value = self.previous;
+            let next = self.previous.saturating_add(self.current);
+            self.previous = self.current;
+            self.current = next;
+            value
+        };
+        let ceiling: u64 = class
+            .generated_delay_ceiling()
+            .as_millis()
+            .try_into()
+            .unwrap_or(u64::MAX);
+        let base_ceiling = ceiling.saturating_mul(5) / 6;
+        let base = fibonacci.min(base_ceiling).max(base_millis);
+        let jitter_range = (base / 5).max(1);
+        let jitter = stable_retry_hash(prompt_id, self.attempts) % (jitter_range + 1);
+        Duration::from_millis(base.saturating_add(jitter).min(ceiling))
+    }
+}
+
+fn stable_retry_hash(prompt_id: &str, attempt: u64) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64 ^ attempt;
+    for byte in prompt_id.bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x100_0000_01b3);
+    }
+    hash
+}
+
+struct ScheduledPrompt {
+    due: Instant,
+    sequence: u64,
+    job: PromptJob,
+}
+
+/// Deterministic delayed-prompt queue owned by the single retry scheduler.
+///
+/// Time is supplied to [`Self::pop_due`] by the caller so scheduling and
+/// cooldown behavior can be acceptance-tested without wall-clock sleeps.
+#[derive(Default)]
+struct RetryScheduleQueue {
+    /// Min-heap of delayed logical prompts.
+    prompts: BinaryHeap<ScheduledPrompt>,
+    /// Stable FIFO tie-breaker for equal deadlines.
+    sequence: u64,
+}
+
+impl RetryScheduleQueue {
+    /// Adds one logical prompt at its current eligible deadline.
+    fn schedule(&mut self, due: Instant, job: PromptJob) {
+        self.sequence = self.sequence.saturating_add(1);
+        self.prompts.push(ScheduledPrompt {
+            due,
+            sequence: self.sequence,
+            job,
+        });
+    }
+
+    /// Removes and returns the next prompt when its deadline has arrived.
+    fn pop_due(&mut self, now: Instant) -> Option<PromptJob> {
+        if self
+            .prompts
+            .peek()
+            .is_none_or(|scheduled| scheduled.due > now)
+        {
+            return None;
+        }
+        self.prompts.pop().map(|scheduled| scheduled.job)
+    }
+
+    /// Returns the earliest deadline, if any.
+    fn next_due(&self) -> Option<Instant> {
+        self.prompts.peek().map(|scheduled| scheduled.due)
+    }
+
+    /// Removes all delayed instances of one logical prompt.
+    fn cancel(&mut self, prompt_id: &tau_proto::AgentPromptId) -> Vec<PromptJob> {
+        self.remove_matching(|scheduled| scheduled.job.agent_prompt_id == *prompt_id)
+    }
+
+    /// Removes every delayed logical prompt.
+    fn cancel_all(&mut self) -> Vec<PromptJob> {
+        self.prompts
+            .drain()
+            .map(|scheduled| scheduled.job)
+            .collect()
+    }
+
+    /// Monotonically moves same-provider prompts beyond a shared cooldown.
+    fn extend_cooldown(&mut self, provider: &ProviderName, due: Instant) {
+        let mut updated = BinaryHeap::new();
+        while let Some(mut scheduled) = self.prompts.pop() {
+            if scheduled.job.prompt.model.provider == *provider && scheduled.due < due {
+                scheduled.due = cooldown_due_for_job(due, &scheduled.job);
+            }
+            updated.push(scheduled);
+        }
+        self.prompts = updated;
+    }
+
+    /// Number of logical prompts currently parked outside the worker pool.
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.prompts.len()
+    }
+
+    /// Snapshot of prompt IDs and deadlines for deterministic acceptance tests.
+    #[cfg(test)]
+    fn deadlines(&self) -> Vec<(tau_proto::AgentPromptId, ProviderName, Instant)> {
+        self.prompts
+            .iter()
+            .map(|scheduled| {
+                (
+                    scheduled.job.agent_prompt_id.clone(),
+                    scheduled.job.prompt.model.provider.clone(),
+                    scheduled.due,
+                )
+            })
+            .collect()
+    }
+
+    /// Removes entries matching a scheduler command while retaining heap order.
+    fn remove_matching(
+        &mut self,
+        mut predicate: impl FnMut(&ScheduledPrompt) -> bool,
+    ) -> Vec<PromptJob> {
+        let mut removed = Vec::new();
+        let mut retained = BinaryHeap::new();
+        while let Some(scheduled) = self.prompts.pop() {
+            if predicate(&scheduled) {
+                removed.push(scheduled.job);
+            } else {
+                retained.push(scheduled);
+            }
+        }
+        self.prompts = retained;
+        removed
+    }
+}
+
+impl PartialEq for ScheduledPrompt {
+    fn eq(&self, other: &Self) -> bool {
+        self.due == other.due && self.sequence == other.sequence
+    }
+}
+
+impl Eq for ScheduledPrompt {}
+
+impl PartialOrd for ScheduledPrompt {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for ScheduledPrompt {
+    fn cmp(&self, other: &Self) -> Ordering {
+        other
+            .due
+            .cmp(&self.due)
+            .then_with(|| other.sequence.cmp(&self.sequence))
+    }
+}
+
+enum SchedulerCommand {
+    Schedule {
+        due: Instant,
+        job: Box<PromptJob>,
+    },
+    Cancel(tau_proto::AgentPromptId),
+    CancelAll,
+    ExtendCooldown {
+        provider: ProviderName,
+        due: Instant,
+    },
+}
+
+struct RetryScheduler {
+    commands: Sender<SchedulerCommand>,
+    delayed_count: Arc<AtomicUsize>,
+}
+
+impl RetryScheduler {
+    fn start(worker_tx: Sender<WorkerMessage>, worker_waker: ManualRuntimeWaker) -> Self {
+        let (commands, receiver) = mpsc::channel();
+        let delayed_count = Arc::new(AtomicUsize::new(0));
+        thread::spawn(move || {
+            run_retry_scheduler(receiver, worker_tx, worker_waker);
+        });
+        Self {
+            commands,
+            delayed_count,
+        }
+    }
+
+    fn schedule(&self, job: PromptJob, due: Instant) {
+        self.delayed_count.fetch_add(1, AtomicOrdering::Relaxed);
+        if self
+            .commands
+            .send(SchedulerCommand::Schedule {
+                due,
+                job: Box::new(job),
+            })
+            .is_err()
+        {
+            self.delayed_count.fetch_sub(1, AtomicOrdering::Relaxed);
+        }
+    }
+
+    fn cancel(&self, prompt_id: tau_proto::AgentPromptId) {
+        let _ = self.commands.send(SchedulerCommand::Cancel(prompt_id));
+    }
+
+    fn cancel_all(&self) {
+        let _ = self.commands.send(SchedulerCommand::CancelAll);
+    }
+
+    fn extend_cooldown(&self, provider: ProviderName, due: Instant) {
+        let _ = self
+            .commands
+            .send(SchedulerCommand::ExtendCooldown { provider, due });
+    }
+
+    fn is_empty(&self) -> bool {
+        self.delayed_count.load(AtomicOrdering::Relaxed) == 0
+    }
+}
+
+fn run_retry_scheduler(
+    commands: Receiver<SchedulerCommand>,
+    worker_tx: Sender<WorkerMessage>,
+    worker_waker: ManualRuntimeWaker,
+) {
+    let mut queue = RetryScheduleQueue::default();
+    loop {
+        while let Some(job) = queue.pop_due(Instant::now()) {
+            if send_worker_message(&worker_tx, &worker_waker, WorkerMessage::RetryDue(job)).is_err()
+            {
+                return;
+            }
+        }
+        let command = match queue.next_due() {
+            Some(next_due) => commands.recv_timeout(
+                next_due
+                    .checked_duration_since(Instant::now())
+                    .unwrap_or(Duration::ZERO),
+            ),
+            None => commands
+                .recv()
+                .map_err(|_| mpsc::RecvTimeoutError::Disconnected),
+        };
+        match command {
+            Ok(SchedulerCommand::Schedule { due, job }) => {
+                queue.schedule(due, *job);
+            }
+            Ok(SchedulerCommand::Cancel(prompt_id)) => {
+                for job in queue.cancel(&prompt_id) {
+                    let _ = send_worker_message(
+                        &worker_tx,
+                        &worker_waker,
+                        WorkerMessage::DelayedCanceled(job),
+                    );
+                }
+            }
+            Ok(SchedulerCommand::CancelAll) => {
+                for job in queue.cancel_all() {
+                    let _ = send_worker_message(
+                        &worker_tx,
+                        &worker_waker,
+                        WorkerMessage::DelayedCanceled(job),
+                    );
+                }
+            }
+            Ok(SchedulerCommand::ExtendCooldown { provider, due }) => {
+                queue.extend_cooldown(&provider, due);
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => return,
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+        }
+    }
 }
 
 #[derive(Clone)]
 enum PromptBackend {
+    /// Mutable provider profile/model state was unavailable at this attempt.
+    Unavailable,
     Responses(responses::ResponsesConfig),
     ChatCompletions {
         provider: ChatCompletionsProvider,
@@ -868,6 +1403,8 @@ impl PromptExecution {
         PeerOutputWriter::new(BufWriter::new(HarnessInputMessageWrite::worker(
             self.output_tx.clone(),
             self.output_waker.clone(),
+            self.job.cancel_generation,
+            self.job.agent_prompt_id.clone(),
         )))
     }
 }
@@ -875,9 +1412,25 @@ impl PromptExecution {
 enum WorkerMessage {
     /// One typed provider frame produced by a prompt worker and awaiting main
     /// loop serialization.
-    Output(Box<HarnessInputMessage>),
+    Output {
+        message: Box<HarnessInputMessage>,
+        cancel_generation: u64,
+        agent_prompt_id: tau_proto::AgentPromptId,
+    },
     /// Marker that one prompt worker finished and freed a concurrency slot.
     PromptDone,
+    /// Retryable attempt outcome returned with the still-pending logical
+    /// prompt.
+    Retry {
+        /// Logical prompt state to park outside the worker pool.
+        job: PromptJob,
+        /// Structured cadence and hint decision.
+        decision: RetryDecision,
+    },
+    /// A delayed logical prompt whose retry deadline has arrived.
+    RetryDue(PromptJob),
+    /// A delayed prompt removed by targeted or global cancellation.
+    DelayedCanceled(PromptJob),
 }
 
 /// Destination for decoded provider output frames.
@@ -890,6 +1443,10 @@ enum HarnessInputMessageTarget {
         tx: Sender<WorkerMessage>,
         /// Wake handle signaled after the worker message is queued.
         waker: ManualRuntimeWaker,
+        /// Global-cancel generation captured synchronously at dispatch.
+        cancel_generation: u64,
+        /// Prompt identity used for targeted-cancel commit validation.
+        agent_prompt_id: tau_proto::AgentPromptId,
     },
 }
 
@@ -914,9 +1471,19 @@ impl HarnessInputMessageWrite {
         }
     }
 
-    fn worker(tx: Sender<WorkerMessage>, waker: ManualRuntimeWaker) -> Self {
+    fn worker(
+        tx: Sender<WorkerMessage>,
+        waker: ManualRuntimeWaker,
+        cancel_generation: u64,
+        agent_prompt_id: tau_proto::AgentPromptId,
+    ) -> Self {
         Self {
-            target: HarnessInputMessageTarget::Worker { tx, waker },
+            target: HarnessInputMessageTarget::Worker {
+                tx,
+                waker,
+                cancel_generation,
+                agent_prompt_id,
+            },
             buf: Vec::new(),
         }
     }
@@ -926,11 +1493,21 @@ impl HarnessInputMessageWrite {
             HarnessInputMessageTarget::Handle(handle) => handle
                 .send(message)
                 .map_err(|error| std::io::Error::new(std::io::ErrorKind::BrokenPipe, error)),
-            HarnessInputMessageTarget::Worker { tx, waker } => {
-                send_worker_message(tx, waker, WorkerMessage::Output(Box::new(message))).map_err(
-                    |_| std::io::Error::new(std::io::ErrorKind::BrokenPipe, "writer closed"),
-                )
-            }
+            HarnessInputMessageTarget::Worker {
+                tx,
+                waker,
+                cancel_generation,
+                agent_prompt_id,
+            } => send_worker_message(
+                tx,
+                waker,
+                WorkerMessage::Output {
+                    message: Box::new(message),
+                    cancel_generation: *cancel_generation,
+                    agent_prompt_id: agent_prompt_id.clone(),
+                },
+            )
+            .map_err(|_| std::io::Error::new(std::io::ErrorKind::BrokenPipe, "writer closed")),
         }
     }
 }
@@ -1031,39 +1608,18 @@ impl CancellationState {
             .unwrap_or(true)
     }
 
-    fn sleep_or_abort(&self, delay: Duration, current_apid: &str) -> SleepOutcome {
-        let Some(deadline) = Instant::now().checked_add(delay) else {
-            return SleepOutcome::Aborted;
-        };
-        let mut inner = match self.inner.lock() {
-            Ok(inner) => inner,
-            Err(_) => return SleepOutcome::Aborted,
-        };
-        let generation = inner.retry_cancel_generation;
-        loop {
-            if inner.shutdown
-                || inner.retry_cancel_generation != generation
-                || inner
-                    .canceled_apids
-                    .iter()
-                    .any(|apid| apid.as_str() == current_apid)
-            {
-                return SleepOutcome::Aborted;
-            }
-            let now = Instant::now();
-            let Some(remaining) = deadline.checked_duration_since(now) else {
-                return SleepOutcome::Elapsed;
-            };
-            match self.changed.wait_timeout(inner, remaining) {
-                Ok((guard, result)) => {
-                    inner = guard;
-                    if result.timed_out() {
-                        return SleepOutcome::Elapsed;
-                    }
-                }
-                Err(_) => return SleepOutcome::Aborted,
-            }
-        }
+    fn is_canceled(&self, apid: &tau_proto::AgentPromptId) -> bool {
+        self.inner
+            .lock()
+            .map(|inner| inner.shutdown || inner.canceled_apids.contains(apid))
+            .unwrap_or(true)
+    }
+
+    fn retry_generation(&self) -> u64 {
+        self.inner
+            .lock()
+            .map(|inner| inner.retry_cancel_generation)
+            .unwrap_or(u64::MAX)
     }
 
     fn register_abort_waker(
@@ -1147,26 +1703,42 @@ fn debug_provider_requests_for(
 fn production_prompt_executor() -> PromptExecutor {
     Arc::new(|execution| {
         let agent_prompt_id = execution.job.agent_prompt_id.clone();
-        let mut writer = execution.frame_writer();
-        let mut retry_ctx = SharedRetryContext {
-            cancellation: execution.cancellation.clone(),
-            current_apid: agent_prompt_id.clone(),
+        let result = {
+            let mut writer = execution.frame_writer();
+            let mut retry_ctx = SharedRetryContext {
+                cancellation: execution.cancellation.clone(),
+                current_apid: agent_prompt_id.clone(),
+                cancel_generation: execution.job.cancel_generation,
+            };
+            handle_prompt_backend(
+                &agent_prompt_id,
+                &execution.job.backend,
+                &execution.job.prompt,
+                execution.job.debug_provider_requests,
+                &mut writer,
+                &mut retry_ctx,
+                &execution.chatgpt_runtime,
+            )
         };
-        let result = handle_prompt_backend(
-            &agent_prompt_id,
-            &execution.job.backend,
-            &execution.job.prompt,
-            execution.job.debug_provider_requests,
-            &mut writer,
-            &mut retry_ctx,
-            &execution.chatgpt_runtime,
-        );
-        if let Err(error) = result {
-            tracing::warn!(
-                target: LOG_TARGET,
-                agent_prompt_id = %agent_prompt_id,
-                "prompt worker failed to emit provider response: {error}"
-            );
+        match result {
+            Ok(Some(decision)) => {
+                let _ = send_worker_message(
+                    &execution.output_tx,
+                    &execution.output_waker,
+                    WorkerMessage::Retry {
+                        job: execution.job,
+                        decision,
+                    },
+                );
+            }
+            Ok(None) => {}
+            Err(error) => {
+                tracing::warn!(
+                    target: LOG_TARGET,
+                    agent_prompt_id = %agent_prompt_id,
+                    "prompt worker failed to emit provider response: {error}"
+                );
+            }
         }
     })
 }
@@ -1228,39 +1800,51 @@ fn finish_queued_canceled(
     apid: &tau_proto::AgentPromptId,
     prompt_queue: &mut VecDeque<PromptJob>,
     handle: &ClientHandle,
-) -> ClientResult<()> {
+) -> ClientResult<bool> {
     let Some(index) = prompt_queue
         .iter()
         .position(|job| job.agent_prompt_id.as_str() == apid.as_str())
     else {
-        return Ok(());
+        return Ok(false);
     };
     let Some(job) = prompt_queue.remove(index) else {
-        return Ok(());
+        return Ok(false);
     };
     let mut frame_writer = handle_frame_writer(handle);
     finish_canceled(&job.agent_prompt_id, &job.prompt, &mut frame_writer)
         .map_err(|error| ClientError::handler(error.to_string()))?;
-    Ok(())
+    Ok(true)
 }
 
-fn drain_worker_messages(
-    worker_rx: &Receiver<WorkerMessage>,
+fn emit_retry_status(
+    job: &PromptJob,
+    class: RetryClass,
+    due: Instant,
     handle: &ClientHandle,
-    active_prompts: &mut usize,
 ) -> ClientResult<()> {
-    loop {
-        match worker_rx.try_recv() {
-            Ok(WorkerMessage::Output(message)) => {
-                handle.send(*message)?;
-            }
-            Ok(WorkerMessage::PromptDone) => {
-                *active_prompts = active_prompts.saturating_sub(1);
-            }
-            Err(TryRecvError::Empty) => return Ok(()),
-            Err(TryRecvError::Disconnected) => return Ok(()),
-        }
-    }
+    let delay = due
+        .checked_duration_since(Instant::now())
+        .unwrap_or(Duration::ZERO);
+    let text = format!(
+        "{}; next attempt in about {}s (attempt {}). Tau will keep trying; cancel the prompt to stop.",
+        class.public_reason(),
+        delay.as_secs(),
+        job.retry_state.attempts,
+    );
+    handle.send(HarnessInputMessage::emit(Event::ProviderResponseUpdated(
+        ProviderResponseUpdated {
+            agent_prompt_id: job.agent_prompt_id.clone(),
+            agent_id: job.prompt.agent_id.clone(),
+            deltas: Vec::new(),
+            compaction: None,
+            status: Some(ProviderResponseStatusUpdate {
+                text,
+                clear_response: true,
+            }),
+            response_stats: None,
+            originator: job.prompt.originator.clone(),
+        },
+    )))
 }
 
 fn materialize_prompt(prompt: &tau_proto::AgentPromptCreated) -> tau_proto::AgentPromptCreated {
@@ -1324,24 +1908,6 @@ fn finish_canceled<W: Write>(
     Ok(())
 }
 
-fn finish_missing_backend<W: Write>(
-    prompt: &tau_proto::AgentPromptCreated,
-    agent_prompt_id: &str,
-    writer: &mut PeerOutputWriter<W>,
-) -> Result<(), Box<dyn Error>> {
-    let msg = format!("cannot resolve provider backend for: {}", prompt.model);
-    writer.write_message(&HarnessInputMessage::emit(Event::ProviderResponseFinished(
-        simple_finished(
-            agent_prompt_id.into(),
-            prompt.agent_id.clone(),
-            prompt.originator.clone(),
-            msg,
-        ),
-    )))?;
-    writer.flush()?;
-    Ok(())
-}
-
 fn simple_finished(
     agent_prompt_id: tau_proto::AgentPromptId,
     agent_id: tau_proto::AgentId,
@@ -1375,38 +1941,16 @@ fn stop_reason_from_output_items(output_items: &[ContextItem]) -> ProviderStopRe
     }
 }
 
-trait RetrySleeper {
-    fn sleep_or_abort(&mut self, delay: Duration, current_apid: &str) -> SleepOutcome;
-
-    fn is_aborted(&mut self, current_apid: &str) -> bool {
-        matches!(
-            self.sleep_or_abort(Duration::ZERO, current_apid),
-            SleepOutcome::Aborted,
-        )
-    }
-}
-
 struct SharedRetryContext {
     cancellation: Arc<CancellationState>,
     current_apid: tau_proto::AgentPromptId,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum SleepOutcome {
-    Elapsed,
-    Aborted,
-}
-
-impl RetrySleeper for SharedRetryContext {
-    fn sleep_or_abort(&mut self, delay: Duration, current_apid: &str) -> SleepOutcome {
-        self.cancellation.sleep_or_abort(delay, current_apid)
-    }
+    cancel_generation: u64,
 }
 
 impl TurnAbort for SharedRetryContext {
     fn is_aborted(&mut self) -> bool {
-        let current_apid = self.current_apid.clone();
-        RetrySleeper::is_aborted(self, current_apid.as_str())
+        self.cancellation.retry_generation() != self.cancel_generation
+            || self.cancellation.is_canceled(&self.current_apid)
     }
 
     fn register_waker(
@@ -1560,77 +2104,7 @@ fn jwt_issued_at_ms(jwt: &str) -> Option<u64> {
     claims.get("iat")?.as_u64().map(|secs| secs * 1000)
 }
 
-fn max_retries_for(originator: &tau_proto::PromptOriginator) -> usize {
-    match originator {
-        tau_proto::PromptOriginator::User => LLM_MAX_RETRIES,
-        tau_proto::PromptOriginator::Extension { .. } => LLM_MAX_RETRIES_EXTENSION,
-    }
-}
-
-fn llm_retry_schedule(max_attempts: usize) -> backon::FibonacciBackoff {
-    backon::FibonacciBuilder::default()
-        .with_min_delay(Duration::from_secs(10))
-        .with_max_times(max_attempts)
-        .with_jitter()
-        .build()
-}
-
-fn with_llm_retry<F, R, W: Write, T>(
-    agent_prompt_id: &str,
-    agent_id: &tau_proto::AgentId,
-    originator: &tau_proto::PromptOriginator,
-    writer: &mut PeerOutputWriter<W>,
-    retry_ctx: &mut R,
-    mut call: F,
-) -> Result<T, common::LlmError>
-where
-    F: FnMut(&mut PeerOutputWriter<W>, &mut R) -> Result<T, common::LlmError>,
-    R: RetrySleeper,
-{
-    let max_attempts = max_retries_for(originator);
-    let mut backoff = llm_retry_schedule(max_attempts);
-    let mut attempt = 0_usize;
-    loop {
-        let error = match call(writer, retry_ctx) {
-            Ok(state) => return Ok(state),
-            Err(error) => error,
-        };
-        let Some(retry_after) = error.retry_after() else {
-            return Err(error);
-        };
-        let Some(backoff_delay) = backoff.next() else {
-            return Err(error);
-        };
-        let delay = retry_after.max(backoff_delay).min(LLM_MAX_RETRY_DELAY);
-        attempt += 1;
-        tracing::warn!(
-            target: LOG_TARGET,
-            agent_prompt_id,
-            "provider error, retrying in {delay:?} (attempt {attempt}/{max_attempts}): {error}",
-        );
-        emit_retry_banner(
-            agent_prompt_id,
-            agent_id,
-            originator,
-            writer,
-            &error,
-            delay,
-            attempt,
-        );
-        if matches!(
-            retry_ctx.sleep_or_abort(delay, agent_prompt_id),
-            SleepOutcome::Aborted,
-        ) {
-            tracing::info!(
-                target: LOG_TARGET,
-                agent_prompt_id,
-                "retry aborted by disconnect/cancel",
-            );
-            return Err(error);
-        }
-    }
-}
-
+#[cfg(test)]
 fn emit_retry_banner<W: Write>(
     agent_prompt_id: &str,
     agent_id: &tau_proto::AgentId,
@@ -1640,12 +2114,10 @@ fn emit_retry_banner<W: Write>(
     delay: Duration,
     attempt: usize,
 ) {
-    let max_attempts = max_retries_for(originator);
     let banner = format!(
-        "provider error — retrying in {}s (attempt {}/{})\n\n> {}",
+        "provider error — retrying in {}s (attempt {}). Tau will keep trying; cancel to stop.\n\n> {}",
         delay.as_secs(),
         attempt,
-        max_attempts,
         error,
     );
     let _ = writer.write_message(&HarnessInputMessage::emit(Event::ProviderResponseUpdated(
@@ -1666,11 +2138,7 @@ fn emit_retry_banner<W: Write>(
 }
 
 fn is_canceled_by_harness(error: &common::LlmError) -> bool {
-    matches!(
-        error,
-        common::LlmError::HttpStatus(CANCELED_BY_HARNESS_STATUS, body)
-            if body == CANCELED_BY_HARNESS_BODY
-    )
+    matches!(error, common::LlmError::Canceled)
 }
 
 fn handle_prewarm(
@@ -1734,11 +2202,12 @@ fn handle_prompt_backend<R, W: Write>(
     writer: &mut PeerOutputWriter<W>,
     retry_ctx: &mut R,
     chatgpt_runtime: &ChatGptRuntime,
-) -> Result<(), Box<dyn Error>>
+) -> Result<Option<RetryDecision>, Box<dyn Error>>
 where
-    R: RetrySleeper + TurnAbort,
+    R: TurnAbort,
 {
     match backend {
+        PromptBackend::Unavailable => Ok(Some(RetryDecision::new(RetryClass::Auth))),
         PromptBackend::Responses(config) => handle_prompt(
             agent_prompt_id.as_str(),
             config,
@@ -1749,20 +2218,33 @@ where
             chatgpt_runtime,
         ),
         PromptBackend::ChatCompletions { provider, model } => {
-            write_prompt_submitted(agent_prompt_id, &prompt.originator, writer)?;
-            let finished = run_chat_completions_prompt(
+            let outcome = run_prompt_attempt_for_provider(
                 agent_prompt_id,
                 prompt,
                 provider,
                 model,
                 debug_provider_requests,
                 writer,
+                &mut || TurnAbort::is_aborted(retry_ctx),
             );
-            writer.write_message(&HarnessInputMessage::emit(Event::ProviderResponseFinished(
-                finished,
-            )))?;
-            writer.flush()?;
-            Ok(())
+            match outcome {
+                PromptAttemptOutcome::Finished(finished) => {
+                    if TurnAbort::is_aborted(retry_ctx) {
+                        finish_canceled(agent_prompt_id, prompt, writer)?;
+                        return Ok(None);
+                    }
+                    writer.write_message(&HarnessInputMessage::emit(
+                        Event::ProviderResponseFinished(*finished),
+                    ))?;
+                    writer.flush()?;
+                    Ok(None)
+                }
+                PromptAttemptOutcome::Retry(decision) => Ok(Some(decision)),
+                PromptAttemptOutcome::Canceled => {
+                    finish_canceled(agent_prompt_id, prompt, writer)?;
+                    Ok(None)
+                }
+            }
         }
     }
 }
@@ -1775,11 +2257,10 @@ fn handle_prompt<R, W: Write>(
     writer: &mut PeerOutputWriter<W>,
     retry_ctx: &mut R,
     chatgpt_runtime: &ChatGptRuntime,
-) -> Result<(), Box<dyn Error>>
+) -> Result<Option<RetryDecision>, Box<dyn Error>>
 where
-    R: RetrySleeper + TurnAbort,
+    R: TurnAbort,
 {
-    write_prompt_submitted(agent_prompt_id, &prompt.originator, writer)?;
     let request = common::PromptPayload {
         system_prompt: &prompt.system_prompt,
         context: &prompt.context,
@@ -1795,50 +2276,44 @@ where
     };
 
     let originator = prompt.originator.clone();
-    let mut chatgpt_turn_state = ChatGptTurnState::new(max_retries_for(&originator));
+    let mut chatgpt_turn_state = ChatGptTurnState::new(usize::MAX);
     let mut transport_taken = if config.supports_websocket {
         ProviderBackendTransport::Websocket
     } else {
         ProviderBackendTransport::HttpSse
     };
     let mut ws_pool_delta = None;
-    let result = with_llm_retry(
+    let mut response_update_emitter = RateLimitedResponseUpdateEmitter::new();
+    let mut on_update = |state: &common::StreamState| {
+        response_update_emitter.emit_if_due(
+            agent_prompt_id,
+            &prompt.agent_id,
+            &originator,
+            state,
+            writer,
+        );
+    };
+    let result = chatgpt_runtime.stream(
         agent_prompt_id,
-        &prompt.agent_id,
-        &originator,
-        writer,
+        config,
+        &request,
+        &mut chatgpt_turn_state,
         retry_ctx,
-        |writer, retry_ctx| {
-            let mut response_update_emitter = RateLimitedResponseUpdateEmitter::new();
-            let mut on_update = |state: &common::StreamState| {
-                response_update_emitter.emit_if_due(
-                    agent_prompt_id,
-                    &prompt.agent_id,
-                    &originator,
-                    state,
-                    writer,
-                );
-            };
-            let result = chatgpt_runtime.stream(
-                agent_prompt_id,
-                config,
-                &request,
-                &mut chatgpt_turn_state,
-                retry_ctx,
-                &mut on_update,
-            );
-            if let Ok(dispatch) = &result {
-                response_update_emitter.emit_terminal_flush(
-                    agent_prompt_id,
-                    &prompt.agent_id,
-                    &originator,
-                    &dispatch.state,
-                    writer,
-                );
-            }
-            result
-        },
+        &mut on_update,
     );
+    if TurnAbort::is_aborted(retry_ctx) {
+        finish_canceled(agent_prompt_id, prompt, writer)?;
+        return Ok(None);
+    }
+    if let Ok(dispatch) = &result {
+        response_update_emitter.emit_terminal_flush(
+            agent_prompt_id,
+            &prompt.agent_id,
+            &originator,
+            &dispatch.state,
+            writer,
+        );
+    }
     match result {
         Ok(dispatch) => {
             transport_taken = dispatch.transport;
@@ -1882,6 +2357,9 @@ where
                 writer,
             )?
         }
+        Err(error) if error.retry_decision().is_some() => {
+            return Ok(error.retry_decision());
+        }
         Err(error) => {
             let backend = backend_descriptor(config, transport_taken, false);
             finish_error(
@@ -1895,7 +2373,7 @@ where
             )?
         }
     }
-    Ok(())
+    Ok(None)
 }
 
 struct RateLimitedResponseUpdateEmitter {

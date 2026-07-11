@@ -61,6 +61,7 @@ todo = "deny"
 unwrap_used = "deny"
 
 [workspace.dependencies]
+httpdate = "1.0.3"
 # Internal crates
 tau-actions = { path = "crates/tau-actions" }
 tau-blocking-notify-channel = { path = "crates/tau-blocking-notify-channel" }
@@ -168,6 +169,9 @@ rand = { version = "0.8", default-features = false, features = [
 regex = { version = "1", default-features = false, features = [
   "std",
   "unicode-perl",
+] }
+reqwest = { version = "0.12", default-features = false, features = [
+  "rustls-tls",
 ] }
 rhai = { version = "1", default-features = false, features = ["serde", "std"] }
 rrule = { version = "0.14", default-features = false }

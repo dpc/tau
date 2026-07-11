@@ -112,7 +112,7 @@ impl ChatGptRuntime {
     /// `abort` source is checked before starting WS work and is also registered
     /// as a wake source while a WS turn is blocked waiting for a same-key pool
     /// reservation or provider events; canceled turns return
-    /// `LlmError::HttpStatus(499, "cancelled by harness")`.
+    /// [`common::LlmError::Canceled`].
     pub fn stream(
         &self,
         agent_prompt_id: &str,

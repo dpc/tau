@@ -8,7 +8,7 @@ diagnostics as crossing an external-provider trust boundary.
 
 WebSocket cancellation is cooperative. `TurnAbortWaker` wakes the synchronous
 turn loop so it can observe the caller's authoritative `is_aborted()` state and
-return the normal 499 harness cancellation result. `InboundEvent::AbortWake` is
+return typed `LlmError::Canceled`. Remote HTTP 499/body text is provider-authored and cannot prove cancellation. `InboundEvent::AbortWake` is
 not itself proof of cancellation; it must remain a wake hint only, because stale
 or delayed hints can arrive on pooled connections after a previous turn's guard
 has been dropped.

@@ -3,7 +3,9 @@
 pub mod openrouter;
 
 use std::collections::{BTreeMap, HashMap};
-use std::io::{Read, Write};
+#[cfg(test)]
+use std::io::Read;
+use std::io::Write;
 use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -17,6 +19,10 @@ use tau_proto::{
     ReasoningTextItem, ReasoningTextKind, ThinkingSummary, ToolCallItem, ToolChoice,
     ToolDefinition, ToolResponseHeader, ToolResultStatus, ToolType,
 };
+use tau_provider::retry_policy::{
+    RetryClass, RetryDecision, classify_error_code, parse_json_error_code, parse_json_reset_hint,
+    parse_retry_after,
+};
 use tau_provider::{StreamRepetitionGuard, StreamRepetitionKey};
 
 const DEFAULT_CONTEXT_WINDOW: u64 = 128_000;
@@ -26,6 +32,13 @@ const LOG_TARGET: &str = "provider-chat-completions";
 pub const DEFAULT_MAX_OUTPUT_TOKENS: u32 = 8192;
 const EMPTY_RESPONSE_MAX_RETRIES: usize = 10;
 const PROVIDER_RESPONSE_UPDATE_MIN_INTERVAL: Duration = Duration::from_secs(1);
+const STREAM_READ_POLL_TIMEOUT: Duration = Duration::from_secs(1);
+const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+const ATTEMPT_PHASE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+const MAX_SSE_LINE_BYTES: usize = 1024 * 1024;
+const MAX_DEBUG_EVENTS: usize = 4096;
+const MAX_HTTP_ERROR_BODY_BYTES: u64 = 64 * 1024;
+const MAX_RESPONSE_BYTES: u64 = 64 * 1024 * 1024;
 
 /// One Chat Completions-compatible provider entry.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -176,6 +189,7 @@ fn run_prompt<W: Write>(
                 prompt,
                 debug_provider_requests,
                 &mut on_update,
+                &mut || false,
             )
         };
         match result {
@@ -487,23 +501,136 @@ fn model_efforts(compat: ChatCompletionsCompat) -> Vec<tau_proto::Effort> {
 #[derive(Debug)]
 enum LlmError {
     EmptyResponse,
-    Http(Box<ureq::Error>),
+    Reqwest(reqwest::Error),
     HttpStatus(u16, String),
+    HttpStatusHinted(u16, String, Duration),
     Io(std::io::Error),
     Json(serde_json::Error),
     RepetitionDetected(tau_provider::StreamRepetition),
+    Canceled,
 }
 
 impl std::fmt::Display for LlmError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::EmptyResponse => write!(f, "provider returned an empty response"),
-            Self::Http(error) => write!(f, "HTTP error: {error}"),
+            Self::Reqwest(error) => write!(f, "HTTP error: {error}"),
             Self::HttpStatus(code, body) => write!(f, "HTTP {code}: {body}"),
+            Self::HttpStatusHinted(code, body, _) => write!(f, "HTTP {code}: {body}"),
             Self::Io(error) => write!(f, "I/O error: {error}"),
             Self::Json(error) => write!(f, "JSON error: {error}"),
             Self::RepetitionDetected(repetition) => write!(f, "{repetition}"),
+            Self::Canceled => write!(f, "cancelled by harness"),
         }
+    }
+}
+
+impl LlmError {
+    fn retry_decision(&self) -> Option<RetryDecision> {
+        match self {
+            Self::RepetitionDetected(_) | Self::Canceled => None,
+            Self::Reqwest(_) | Self::Io(_) => Some(RetryDecision::new(RetryClass::Transport)),
+            Self::EmptyResponse | Self::Json(_) => Some(RetryDecision::new(RetryClass::Unknown)),
+            Self::HttpStatus(code, body) => retry_decision_for_http_error(*code, body, None),
+            Self::HttpStatusHinted(code, body, hint) => {
+                retry_decision_for_http_error(*code, body, Some(*hint))
+            }
+        }
+    }
+}
+
+/// Classifies provider-authored HTTP failures for retry cadence.
+///
+/// Provider codes are never sufficient proof of an immutable local invariant.
+fn retry_decision_for_http_error(
+    status: u16,
+    body: &str,
+    header_hint: Option<Duration>,
+) -> Option<RetryDecision> {
+    let provider_code = parse_json_error_code(body);
+    let class = provider_code
+        .as_deref()
+        .map(classify_error_code)
+        .filter(|class| *class != RetryClass::Unknown)
+        .unwrap_or(match status {
+            408 | 425 => RetryClass::Transport,
+            429 => RetryClass::Throttle,
+            500..=599 => RetryClass::Overload,
+            401 | 403 => RetryClass::Auth,
+            _ => RetryClass::Unknown,
+        });
+    let body_hint = parse_json_reset_hint(body, SystemTime::now());
+    Some(RetryDecision::new(class).with_retry_after(header_hint.into_iter().chain(body_hint).max()))
+}
+
+/// One fallible Chat Completions attempt for the outer logical-prompt
+/// scheduler.
+pub enum PromptAttemptOutcome {
+    /// The logical prompt reached a terminal success or proven deterministic
+    /// error.
+    Finished(Box<ProviderResponseFinished>),
+    /// The logical prompt remains pending and should be parked before another
+    /// attempt.
+    Retry(RetryDecision),
+    /// The harness canceled this logical prompt during the active attempt.
+    Canceled,
+}
+
+/// Run exactly one provider attempt without sleeping or closing a retryable
+/// prompt.
+pub fn run_prompt_attempt_for_provider<W: Write>(
+    agent_prompt_id: &AgentPromptId,
+    prompt: &tau_proto::AgentPromptCreated,
+    provider: &ChatCompletionsProvider,
+    model: &ChatCompletionsModel,
+    debug_provider_requests: bool,
+    writer: &mut PeerOutputWriter<W>,
+    is_canceled: &mut impl FnMut() -> bool,
+) -> PromptAttemptOutcome {
+    let mut resolved = ResolvedProvider {
+        base_url: provider.base_url.clone(),
+        api_key: provider.api_key.clone(),
+        max_output_tokens: provider.max_output_tokens,
+        extra_body: provider.extra_body.clone(),
+        compat: provider.compat,
+    };
+    if let Some(model_compat) = model.compat {
+        resolved.compat = model_compat;
+    }
+    let mut response_update_emitter = RateLimitedResponseUpdateEmitter::new();
+    let result = {
+        let mut on_update = |state: &StreamState| {
+            response_update_emitter.emit_if_due(agent_prompt_id, prompt, state, writer);
+        };
+        chat_completions_stream(
+            &resolved,
+            model,
+            prompt,
+            debug_provider_requests,
+            &mut on_update,
+            is_canceled,
+        )
+    };
+    match result {
+        Ok(state) => {
+            response_update_emitter.emit_terminal_flush(agent_prompt_id, prompt, &state, writer);
+            PromptAttemptOutcome::Finished(Box::new(finish_success(
+                agent_prompt_id,
+                prompt,
+                &resolved,
+                state,
+            )))
+        }
+        Err(LlmError::Canceled) => PromptAttemptOutcome::Canceled,
+        Err(error) => match error.retry_decision() {
+            Some(decision) => PromptAttemptOutcome::Retry(decision),
+            None => PromptAttemptOutcome::Finished(Box::new(finish_error(
+                agent_prompt_id,
+                prompt,
+                &resolved,
+                error,
+            ))),
+        },
     }
 }
 
@@ -796,15 +923,21 @@ impl ToolCallAccumulator {
     }
 }
 
+#[cfg(test)]
 fn read_chat_stream_body(
     mut reader: impl Read,
     state: &mut StreamState,
     raw_events: &mut Vec<serde_json::Value>,
     on_update: &mut impl FnMut(&StreamState),
+    is_canceled: &mut impl FnMut() -> bool,
 ) -> Result<(), LlmError> {
     let mut buffer = [0; 8192];
     let mut pending = Vec::new();
+    let mut last_event_at = Instant::now();
     loop {
+        if is_canceled() {
+            return Err(LlmError::Canceled);
+        }
         match reader.read(&mut buffer) {
             Ok(0) => {
                 if !pending.is_empty() {
@@ -814,18 +947,74 @@ fn read_chat_stream_body(
                 return Ok(());
             }
             Ok(bytes) => {
-                state.record_transport_response_bytes(bytes);
-                pending.extend_from_slice(&buffer[..bytes]);
-                let lines = drain_complete_lines(&mut pending);
-                let done = apply_chat_stream_lines(lines, state, raw_events, on_update)?;
-                on_update(state);
+                let (done, progress) = process_stream_chunk(
+                    &buffer[..bytes],
+                    &mut pending,
+                    state,
+                    raw_events,
+                    on_update,
+                )?;
+                if progress {
+                    last_event_at = Instant::now();
+                }
                 if done {
                     return Ok(());
+                }
+                if last_event_at.elapsed() >= STREAM_IDLE_TIMEOUT {
+                    return Err(LlmError::Io(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "provider stream idle timeout",
+                    )));
+                }
+            }
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+                ) =>
+            {
+                if last_event_at.elapsed() >= STREAM_IDLE_TIMEOUT {
+                    return Err(LlmError::Io(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "provider stream idle timeout",
+                    )));
                 }
             }
             Err(error) => return Err(LlmError::Io(error)),
         }
     }
+}
+
+fn process_stream_chunk(
+    bytes: &[u8],
+    pending: &mut Vec<u8>,
+    state: &mut StreamState,
+    raw_events: &mut Vec<serde_json::Value>,
+    on_update: &mut impl FnMut(&StreamState),
+) -> Result<(bool, bool), LlmError> {
+    state.record_transport_response_bytes(bytes.len());
+    if state.transport_response_bytes > MAX_RESPONSE_BYTES {
+        return Err(LlmError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "provider response exceeds byte limit",
+        )));
+    }
+    pending.extend_from_slice(bytes);
+    if pending.len() > MAX_SSE_LINE_BYTES {
+        return Err(LlmError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "provider SSE line exceeds limit",
+        )));
+    }
+    let lines = drain_complete_lines(pending);
+    let progress = sse_lines_have_provider_event(&lines);
+    let done = apply_chat_stream_lines(lines, state, raw_events, on_update)?;
+    on_update(state);
+    Ok((done, progress))
+}
+
+fn sse_lines_have_provider_event(lines: &[String]) -> bool {
+    lines.iter().any(|line| line.starts_with("data: "))
 }
 
 fn drain_complete_lines(pending: &mut Vec<u8>) -> Vec<String> {
@@ -864,7 +1053,9 @@ fn apply_chat_stream_lines(
             Ok(event) => event,
             Err(_) => continue,
         };
-        raw_events.push(event.clone());
+        if raw_events.len() < MAX_DEBUG_EVENTS {
+            raw_events.push(event.clone());
+        }
         apply_event(state, &event, on_update)?;
     }
     Ok(false)
@@ -876,7 +1067,11 @@ fn chat_completions_stream(
     prompt: &tau_proto::AgentPromptCreated,
     debug_provider_requests: bool,
     on_update: &mut impl FnMut(&StreamState),
+    is_canceled: &mut impl FnMut() -> bool,
 ) -> Result<StreamState, LlmError> {
+    if is_canceled() {
+        return Err(LlmError::Canceled);
+    }
     let url = format!(
         "{}/chat/completions",
         provider.base_url.trim_end_matches('/')
@@ -884,31 +1079,22 @@ fn chat_completions_stream(
     let body = build_request(provider, model, prompt);
     let body_str = serde_json::to_string(&body).map_err(LlmError::Json)?;
     maybe_debug_write_provider_request(prompt, model, debug_provider_requests, &body);
-    let mut request = tau_provider::oauth::proxy_agent()
-        .post(&url)
-        .content_type("application/json")
-        .header("Accept", "text/event-stream");
-    if !provider.api_key.trim().is_empty() {
-        request = request.header("Authorization", format!("Bearer {}", provider.api_key));
-    }
-    let mut response = request
-        .send(&body_str)
-        .map_err(|error| LlmError::Http(Box::new(error)))?;
-    if !response.status().is_success() {
-        let code = response.status().as_u16();
-        let body = response.body_mut().read_to_string().unwrap_or_default();
-        maybe_debug_write_provider_http_error(prompt, model, debug_provider_requests, code, &body);
-        return Err(LlmError::HttpStatus(code, body));
-    }
-
-    let mut state = StreamState::new();
-    let mut raw_events = Vec::new();
-    read_chat_stream_body(
-        response.body_mut().as_reader(),
-        &mut state,
-        &mut raw_events,
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(LlmError::Io)?;
+    let (mut state, raw_events) = runtime.block_on(chat_completions_stream_async(
+        AsyncAttemptContext {
+            url: &url,
+            provider,
+            body: &body_str,
+            prompt,
+            model,
+            debug_provider_requests,
+        },
         on_update,
-    )?;
+        is_canceled,
+    ))?;
     flush_pending_content(&mut state, on_update)?;
     maybe_debug_write_provider_response(
         prompt,
@@ -918,6 +1104,133 @@ fn chat_completions_stream(
         &raw_events,
     );
     ensure_non_empty_end_turn(state)
+}
+
+struct AsyncAttemptContext<'a> {
+    /// Fully resolved Chat Completions endpoint.
+    url: &'a str,
+    /// Mutable-profile values resolved for this attempt.
+    provider: &'a ResolvedProvider,
+    /// Serialized request body owned by the synchronous caller.
+    body: &'a str,
+    /// Logical prompt used for diagnostics.
+    prompt: &'a tau_proto::AgentPromptCreated,
+    /// Selected model used for diagnostics.
+    model: &'a ChatCompletionsModel,
+    /// Whether durable-session private diagnostics are allowed.
+    debug_provider_requests: bool,
+}
+
+async fn chat_completions_stream_async(
+    context: AsyncAttemptContext<'_>,
+    on_update: &mut impl FnMut(&StreamState),
+    is_canceled: &mut impl FnMut() -> bool,
+) -> Result<(StreamState, Vec<serde_json::Value>), LlmError> {
+    let client = reqwest::Client::builder()
+        .build()
+        .map_err(LlmError::Reqwest)?;
+    let mut request = client
+        .post(context.url)
+        .header("content-type", "application/json")
+        .header("accept", "text/event-stream")
+        .body(context.body.to_owned());
+    if !context.provider.api_key.trim().is_empty() {
+        request = request.bearer_auth(&context.provider.api_key);
+    }
+    let mut send = Box::pin(request.send());
+    let header_started_at = Instant::now();
+    let mut response = loop {
+        if is_canceled() {
+            return Err(LlmError::Canceled);
+        }
+        if let Ok(result) = tokio::time::timeout(STREAM_READ_POLL_TIMEOUT, &mut send).await {
+            break result.map_err(LlmError::Reqwest)?;
+        }
+        if header_started_at.elapsed() >= ATTEMPT_PHASE_TIMEOUT {
+            return Err(LlmError::Io(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "provider response header timeout",
+            )));
+        }
+    };
+    if !response.status().is_success() {
+        let code = response.status().as_u16();
+        let retry_after = response
+            .headers()
+            .get("retry-after")
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| parse_retry_after(value, SystemTime::now()));
+        let mut bytes = Vec::new();
+        let mut last_body_progress = Instant::now();
+        while bytes.len() < MAX_HTTP_ERROR_BODY_BYTES as usize {
+            if is_canceled() {
+                return Err(LlmError::Canceled);
+            }
+            match tokio::time::timeout(STREAM_READ_POLL_TIMEOUT, response.chunk()).await {
+                Ok(Ok(Some(chunk))) => {
+                    last_body_progress = Instant::now();
+                    let remaining = MAX_HTTP_ERROR_BODY_BYTES as usize - bytes.len();
+                    bytes.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
+                }
+                Ok(Ok(None)) => break,
+                Ok(Err(error)) => return Err(LlmError::Reqwest(error)),
+                Err(_) => {}
+            }
+            if last_body_progress.elapsed() >= ATTEMPT_PHASE_TIMEOUT {
+                return Err(LlmError::Io(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "provider error body idle timeout",
+                )));
+            }
+        }
+        let body = String::from_utf8_lossy(&bytes).into_owned();
+        maybe_debug_write_provider_http_error(
+            context.prompt,
+            context.model,
+            context.debug_provider_requests,
+            code,
+            &body,
+        );
+        return Err(match retry_after {
+            Some(delay) => LlmError::HttpStatusHinted(code, body, delay),
+            None => LlmError::HttpStatus(code, body),
+        });
+    }
+    let mut state = StreamState::new();
+    let mut raw_events = Vec::new();
+    let mut pending = Vec::new();
+    let mut last_event_at = Instant::now();
+    loop {
+        if is_canceled() {
+            return Err(LlmError::Canceled);
+        }
+        match tokio::time::timeout(STREAM_READ_POLL_TIMEOUT, response.chunk()).await {
+            Ok(Ok(Some(chunk))) => {
+                let (done, progress) = process_stream_chunk(
+                    &chunk,
+                    &mut pending,
+                    &mut state,
+                    &mut raw_events,
+                    on_update,
+                )?;
+                if progress {
+                    last_event_at = Instant::now();
+                }
+                if done {
+                    return Ok((state, raw_events));
+                }
+            }
+            Ok(Ok(None)) => return Ok((state, raw_events)),
+            Ok(Err(error)) => return Err(LlmError::Reqwest(error)),
+            Err(_) => {}
+        }
+        if last_event_at.elapsed() >= STREAM_IDLE_TIMEOUT {
+            return Err(LlmError::Io(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "provider stream idle timeout",
+            )));
+        }
+    }
 }
 
 fn ensure_non_empty_end_turn(state: StreamState) -> Result<StreamState, LlmError> {

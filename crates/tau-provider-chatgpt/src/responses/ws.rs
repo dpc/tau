@@ -310,7 +310,7 @@ impl WsConn {
         };
         loop {
             if abort.is_aborted() {
-                return Err(LlmError::HttpStatus(499, "cancelled by harness".to_owned()));
+                return Err(LlmError::Canceled);
             }
             let remaining = idle_timeout.saturating_sub(last_event_at.elapsed());
             let wait = remaining.min(Duration::from_secs(1));
@@ -462,7 +462,7 @@ fn build_request(config: &ResponsesConfig, thread_id: &str) -> Result<Request, L
     let mut request: Request = url
         .as_str()
         .into_client_request()
-        .map_err(|e| LlmError::HttpStatus(0, format!("ws request build: {e}")))?;
+        .map_err(|error| LlmError::ReloadableConfig(format!("WebSocket request: {error}")))?;
     set_header(
         request.headers_mut(),
         "Authorization",
@@ -616,10 +616,9 @@ fn build_ws_url(base_url: &str) -> Result<String, LlmError> {
     } else if let Some(rest) = base.strip_prefix("http://") {
         rest
     } else {
-        return Err(LlmError::HttpStatus(
-            0,
-            format!("ws scheme unsupported in base_url: {base_url}"),
-        ));
+        return Err(LlmError::ReloadableConfig(format!(
+            "WebSocket scheme unsupported in base_url: {base_url}"
+        )));
     };
     Ok(format!("ws://{rest}/codex/responses"))
 }
@@ -631,7 +630,7 @@ fn set_header(
 ) -> Result<(), LlmError> {
     let header_value = value
         .parse()
-        .map_err(|e| LlmError::HttpStatus(0, format!("ws header {name}: {e}")))?;
+        .map_err(|error| LlmError::ReloadableConfig(format!("WebSocket header {name}: {error}")))?;
     headers.insert(name, header_value);
     Ok(())
 }

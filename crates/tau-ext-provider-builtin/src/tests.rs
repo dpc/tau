@@ -2,16 +2,7 @@ use tau_provider_chat_completions::openrouter::OpenRouterProfile;
 
 use super::*;
 
-struct RecordingRetrySleeper {
-    delays: Vec<std::time::Duration>,
-}
-
-impl RetrySleeper for RecordingRetrySleeper {
-    fn sleep_or_abort(&mut self, delay: std::time::Duration, _current_apid: &str) -> SleepOutcome {
-        self.delays.push(delay);
-        SleepOutcome::Aborted
-    }
-}
+struct RecordingRetrySleeper;
 
 struct NoopAbortWaker;
 
@@ -159,12 +150,12 @@ fn chatgpt_websocket_terminal_error_reports_websocket_backend() {
     };
     let mut prompt = minimal_prompt();
     prompt.model = "chatgpt/gpt-5.3-codex".parse().expect("model id");
-    let mut retry = RecordingRetrySleeper { delays: Vec::new() };
+    let mut retry = RecordingRetrySleeper;
     let runtime = ChatGptRuntime::new();
     let mut bytes = Vec::new();
     let mut writer = PeerOutputWriter::new(&mut bytes);
 
-    handle_prompt(
+    let outcome = handle_prompt(
         "ap-ws-terminal",
         &config,
         &prompt,
@@ -173,7 +164,11 @@ fn chatgpt_websocket_terminal_error_reports_websocket_backend() {
         &mut retry,
         &runtime,
     )
-    .expect("prompt handler should emit terminal provider error");
+    .expect("prompt handler should classify provider error");
+    assert!(
+        outcome.is_some(),
+        "ambiguous WebSocket failures keep the logical prompt pending"
+    );
 
     assert_eq!(
         counts
@@ -182,20 +177,17 @@ fn chatgpt_websocket_terminal_error_reports_websocket_backend() {
         0,
         "terminal WS error must not be produced by HTTP/SSE fallback"
     );
-    let frames = decode_frames(&bytes);
-    let finished = frames.iter().find_map(|frame| match frame {
-        tau_proto::HarnessInputMessage::Emit(emit) => match emit.event.as_ref() {
-            tau_proto::Event::ProviderResponseFinished(finished) => Some(finished),
-            _ => None,
-        },
-        _ => None,
-    });
-    let finished = finished.expect("provider response finished frame");
-    assert_eq!(
-        finished.backend.as_ref().map(|backend| backend.transport),
-        Some(tau_proto::ProviderBackendTransport::Websocket)
+    assert!(
+        decode_frames(&bytes).iter().all(|frame| !matches!(
+            frame,
+            tau_proto::HarnessInputMessage::Emit(emit)
+                if matches!(
+                    emit.event.as_ref(),
+                    tau_proto::Event::ProviderResponseFinished(_)
+                )
+        )),
+        "retryable attempts must not close the logical prompt"
     );
-    assert_eq!(finished.stop_reason, tau_proto::ProviderStopReason::Error);
 }
 
 #[test]
@@ -362,48 +354,41 @@ fn openrouter_profiles_publish_and_route_only_configured_models() {
 }
 
 #[test]
-fn provider_retry_after_delay_is_clamped_before_sleeping() {
-    // Upstream account-limit responses can advertise reset windows measured in
-    // hours. Prompt workers must clamp such delays before entering the sleeper
-    // so one provider response cannot monopolize a worker indefinitely.
-    let mut bytes = Vec::new();
-    let mut writer = PeerOutputWriter::new(&mut bytes);
-    let mut sleeper = RecordingRetrySleeper { delays: Vec::new() };
-    let body = serde_json::json!({
-        "error": {
-            "type": "usage_limit_reached",
-            "resets_in_seconds": u64::MAX,
-        },
-    })
-    .to_string();
-
-    let error = with_llm_retry(
-        "sp-huge-retry",
-        &tau_proto::AgentId::parse("agent").expect("agent id"),
-        &tau_proto::PromptOriginator::User,
-        &mut writer,
-        &mut sleeper,
-        |_writer, _sleeper| -> Result<(), common::LlmError> {
-            Err(common::LlmError::HttpStatus(429, body.clone()))
-        },
-    )
-    .expect_err("aborted retry should return original provider error");
-
-    assert!(matches!(error, common::LlmError::HttpStatus(429, _)));
-    assert_eq!(sleeper.delays, vec![LLM_MAX_RETRY_DELAY]);
+fn generated_retry_delay_caps_without_exhausting_attempts() {
+    // Persistent failures continue indefinitely while policy-generated cadence
+    // reaches, but never exceeds, the approved thirty-minute ceiling.
+    let mut state = PromptRetryState::default();
+    for _ in 0..10_000 {
+        let delay = state.next_delay(RetryClass::Unknown, "ap-persistent");
+        assert!(delay <= Duration::from_secs(30 * 60));
+    }
+    assert_eq!(state.attempts, 10_000);
 }
 
+/// Ensures prompts sharing one reset lower bound receive positive stable
+/// prompt-local jitter instead of stampeding at one identical instant.
 #[test]
-fn cancellation_sleep_aborts_when_deadline_would_overflow() {
-    // `CancellationState` is the last line of defense for retry sleeping. Even
-    // if a future caller forgets to clamp, impossible deadlines should abort
-    // rather than panic on `Instant` arithmetic.
-    let cancellation = CancellationState::default();
+fn shared_cooldown_jitter_is_positive_stable_and_prompt_local() {
+    let first = cooldown_jitter("ap-first", 7);
+    let first_again = cooldown_jitter("ap-first", 7);
+    let second = cooldown_jitter("ap-second", 7);
+    assert!(first > Duration::ZERO);
+    assert!(first <= RESET_BOUNDARY_JITTER_MAX);
+    assert_eq!(first, first_again);
+    assert_ne!(first, second);
+}
 
-    assert_eq!(
-        cancellation.sleep_or_abort(std::time::Duration::MAX, "sp-overflow"),
-        SleepOutcome::Aborted
-    );
+/// Ensures a targeted cancellation remains observable until a late worker
+/// retry outcome is rejected rather than resurrecting delayed work.
+#[test]
+fn cancellation_state_reports_pending_target_without_consuming_it() {
+    let cancellation = CancellationState::default();
+    let prompt_id = tau_proto::AgentPromptId::new("ap-late-retry");
+    cancellation.cancel(prompt_id.clone());
+    assert!(cancellation.is_canceled(&prompt_id));
+    assert!(cancellation.is_canceled(&prompt_id));
+    assert!(cancellation.take_canceled(&prompt_id));
+    assert!(!cancellation.is_canceled(&prompt_id));
 }
 
 #[test]

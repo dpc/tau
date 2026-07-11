@@ -112,6 +112,53 @@ fn resolved_provider(provider: &ChatCompletionsProvider) -> ResolvedProvider {
     }
 }
 
+/// Ensures the production reqwest transport consumes an actual local HTTP/SSE
+/// response and returns a successful one-attempt outcome.
+#[test]
+fn reqwest_transport_streams_local_success_response() {
+    use std::io::{Read as _, Write as _};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind server");
+    let address = listener.local_addr().expect("server address");
+    let server = std::thread::spawn(move || {
+        let (mut socket, _) = listener.accept().expect("accept request");
+        let mut request = [0_u8; 8192];
+        let _ = socket.read(&mut request).expect("read request");
+        let body = concat!(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"hello\"},",
+            "\"finish_reason\":\"stop\"}]}\n\n",
+            "data: [DONE]\n\n"
+        );
+        write!(
+            socket,
+            "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        )
+        .expect("write response");
+    });
+    let mut configured = provider();
+    configured.base_url = format!("http://{address}");
+    let model = configured.models[0].clone();
+    let prompt = prompt();
+    let mut bytes = Vec::new();
+    let mut writer = PeerOutputWriter::new(&mut bytes);
+    let outcome = run_prompt_attempt_for_provider(
+        &prompt.agent_prompt_id,
+        &prompt,
+        &configured,
+        &model,
+        false,
+        &mut writer,
+        &mut || false,
+    );
+    let PromptAttemptOutcome::Finished(finished) = outcome else {
+        panic!("local success must finish");
+    };
+    assert_eq!(finished.stop_reason, ProviderStopReason::EndTurn);
+    assert!(!finished.output_items.is_empty());
+    server.join().expect("server join");
+}
+
 /// Ensures Chat Completions streaming updates emit append deltas rather than
 /// full accumulated assistant/reasoning snapshots.
 #[test]
@@ -188,6 +235,7 @@ fn chat_stream_body_counts_transport_bytes_before_complete_sse_line() {
         &mut state,
         &mut raw_events,
         &mut |state| observed.push(state.response_bytes_received()),
+        &mut || false,
     )
     .expect("partial stream read");
 
@@ -224,6 +272,7 @@ fn chat_stream_body_stops_after_done_without_waiting_for_eof() {
         &mut state,
         &mut raw_events,
         &mut |_| updates += 1,
+        &mut || false,
     )
     .expect("done stream read");
 
@@ -233,6 +282,176 @@ fn chat_stream_body_stops_after_done_without_waiting_for_eof() {
         b"data: [DONE]\n\n".len() as u64
     );
     assert!(raw_events.is_empty());
+}
+
+/// Ensures active Chat Completions stream cancellation closes the attempt
+/// before any additional provider bytes can become durable output.
+#[test]
+fn chat_stream_body_observes_prompt_cancellation() {
+    let mut state = StreamState::new();
+    let mut raw_events = Vec::new();
+    let error = read_chat_stream_body(
+        std::io::Cursor::new(b"data: never read\n\n"),
+        &mut state,
+        &mut raw_events,
+        &mut |_| {},
+        &mut || true,
+    )
+    .expect_err("canceled stream must stop");
+    assert!(matches!(error, LlmError::Canceled));
+    assert!(state.output_items.is_empty());
+}
+
+/// Runs a real reqwest attempt against a local peer that deliberately stalls
+/// either before response headers or after successful SSE headers.
+fn assert_reqwest_stall_is_canceled(after_headers: bool) {
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("bind cancellation server");
+    let address = listener.local_addr().expect("cancellation server address");
+    let (accepted_tx, accepted_rx) = std::sync::mpsc::sync_channel(1);
+    let (dropped_tx, dropped_rx) = std::sync::mpsc::sync_channel(1);
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept cancellation request");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("set server read timeout");
+        let mut request = [0_u8; 8192];
+        let read = stream.read(&mut request).expect("read request bytes");
+        assert!(read > 0, "client must send a request before cancellation");
+        if after_headers {
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\
+                      transfer-encoding: chunked\r\n\r\n",
+                )
+                .expect("write stalled response headers");
+            stream.flush().expect("flush stalled response headers");
+        }
+        accepted_tx.send(()).expect("report accepted request");
+        loop {
+            match stream.read(&mut request) {
+                Ok(0) => break,
+                Ok(_) => {}
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::ConnectionReset
+                            | std::io::ErrorKind::BrokenPipe
+                            | std::io::ErrorKind::UnexpectedEof
+                    ) =>
+                {
+                    break;
+                }
+                Err(error) => panic!("client connection was not dropped promptly: {error}"),
+            }
+        }
+        dropped_tx.send(()).expect("report dropped connection");
+    });
+
+    let canceled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let attempt_canceled = std::sync::Arc::clone(&canceled);
+    let (result_tx, result_rx) = std::sync::mpsc::sync_channel(1);
+    let attempt = std::thread::spawn(move || {
+        let mut configured = provider();
+        configured.base_url = format!("http://{address}/v1");
+        let model = configured.models[0].clone();
+        let prompt = prompt();
+        let mut bytes = Vec::new();
+        let mut writer = tau_proto::PeerOutputWriter::new(&mut bytes);
+        let outcome = run_prompt_attempt_for_provider(
+            &"ap-cancel".into(),
+            &prompt,
+            &configured,
+            &model,
+            false,
+            &mut writer,
+            &mut || attempt_canceled.load(std::sync::atomic::Ordering::SeqCst),
+        );
+        result_tx.send(outcome).expect("report attempt outcome");
+    });
+    accepted_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("reqwest request did not reach local peer");
+    canceled.store(true, std::sync::atomic::Ordering::SeqCst);
+    assert!(matches!(
+        result_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("canceled reqwest attempt stayed blocked"),
+        PromptAttemptOutcome::Canceled
+    ));
+    dropped_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("canceled reqwest future retained its TCP connection");
+    attempt.join().expect("attempt thread");
+    server.join().expect("server thread");
+}
+
+/// Cancellation while awaiting HTTP headers drops the reqwest future/socket.
+#[test]
+fn reqwest_awaiting_headers_is_prompt_cancelable() {
+    assert_reqwest_stall_is_canceled(false);
+}
+
+/// Cancellation while a successful SSE body is stalled drops future/socket.
+#[test]
+fn reqwest_stalled_success_body_is_prompt_cancelable() {
+    assert_reqwest_stall_is_canceled(true);
+}
+
+/// Ensures a malicious provider cannot grow the pending SSE-line buffer
+/// without bound by streaming bytes forever without a newline.
+#[test]
+fn chat_stream_body_rejects_oversized_partial_line() {
+    let bytes = vec![b'x'; MAX_SSE_LINE_BYTES + 1];
+    let mut state = StreamState::new();
+    let mut raw_events = Vec::new();
+    let error = read_chat_stream_body(
+        std::io::Cursor::new(bytes),
+        &mut state,
+        &mut raw_events,
+        &mut |_| {},
+        &mut || false,
+    )
+    .expect_err("oversized SSE line must be bounded");
+    assert!(matches!(
+        error,
+        LlmError::Io(error) if error.kind() == std::io::ErrorKind::InvalidData
+    ));
+}
+
+/// Ensures debug event retention is bounded even when an upstream emits many
+/// syntactically valid SSE events before completion.
+#[test]
+fn chat_stream_body_bounds_debug_event_retention() {
+    let mut bytes = Vec::new();
+    for _ in 0..(MAX_DEBUG_EVENTS + 10) {
+        bytes.extend_from_slice(b"data: {}\n");
+    }
+    bytes.extend_from_slice(b"data: [DONE]\n");
+    let mut state = StreamState::new();
+    let mut raw_events = Vec::new();
+    read_chat_stream_body(
+        std::io::Cursor::new(bytes),
+        &mut state,
+        &mut raw_events,
+        &mut |_| {},
+        &mut || false,
+    )
+    .expect("bounded event stream");
+    assert_eq!(raw_events.len(), MAX_DEBUG_EVENTS);
+}
+
+/// Ensures SSE comments and blank heartbeat lines do not reset the semantic
+/// idle watchdog while actual `data:` provider events do.
+#[test]
+fn stream_idle_progress_requires_data_event() {
+    assert!(!sse_lines_have_provider_event(&[
+        ": keepalive".to_owned(),
+        String::new(),
+    ]));
+    assert!(sse_lines_have_provider_event(&[
+        ": keepalive".to_owned(),
+        "data: {}".to_owned(),
+    ]));
 }
 
 /// Ensures the provider emission boundary does not suppress public stats-only
@@ -1258,6 +1477,22 @@ fn non_empty_end_turn_is_accepted() {
         .expect("stream event should apply");
 
     assert!(ensure_non_empty_end_turn(state).is_ok());
+}
+
+/// Provider codes, recursive echoes, and prose are cadence hints rather than
+/// proof that immutable Tau-owned request state cannot be repaired.
+#[test]
+fn terminal_looking_http_content_remains_retryable() {
+    for body in [
+        r#"{"error":{"code":"unsupported_parameter"}}"#,
+        r#"{"error":{"message":"temporary upstream failure"},"echo":{"code":"unsupported_parameter"}}"#,
+        r#"{"error":{"message":"temporary (type=content_policy_violation)"}}"#,
+    ] {
+        assert!(
+            retry_decision_for_http_error(400, body, None).is_some(),
+            "provider-authored terminal-looking content must retry: {body}"
+        );
+    }
 }
 
 #[test]

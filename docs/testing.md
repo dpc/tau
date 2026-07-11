@@ -61,6 +61,15 @@ Provider streaming tests must also assert response/progress rate-limit boundarie
 
 Harness tests for provider response stats should assert only validation and pass-through: wrong-owner provider updates are rejected, accepted stats-only `provider.response_updated` events are broadcast to subscribers, `agent_id` is rewritten from prompt ownership, and no harness-owned response-throughput projection is emitted.
 
+Provider retry scheduler tests should use injected/fake time and deterministic
+jitter rather than real multi-minute sleeps. Cover retry-to-park handoff,
+released worker capacity, due/fresh fairness, shared-cooldown extension,
+prompt-scoped and global cancellation in queued/delayed/active states,
+profile reload before a later success, and exactly one submitted/terminal
+lifecycle. Backend fixtures should cover Responses HTTP/SSE/WebSocket, generic
+Chat Completions, and OpenRouter retry-then-success paths, including tentative
+output clearing and trusted hint lower bounds.
+
 ## Provider stream repetition guard
 
 When changing provider streaming parsers, add focused tests for assistant text, reasoning text, and tool-argument deltas. Tests should include high-volume exact loops that abort and negative cases for short repeated words, repeated prefixes with changing payloads, and line blocks below threshold.

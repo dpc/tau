@@ -171,9 +171,24 @@ The built-in provider extension currently covers three profile kinds:
 It lives in `crates/tau-ext-provider-builtin` and is spawned as the built-in `provider-builtin` extension.
 It publishes hardcoded ChatGPT/Codex metadata and configured Chat Completions/OpenRouter model metadata before `Ready` during extension startup.
 It owns execution for those namespaces and preserves the existing provider execution event semantics for streaming, tool calls, usage, and retries.
+
+Required LLM work has no attempt-count or elapsed-time retry limit during the
+running session. Transport/server failures, throttling, usage windows,
+billing/quota/credits, reloadable auth/configuration, and unknown remote
+failures remain pending until success or cancellation. Only a narrowly proven
+deterministic unchanged-request failure closes immediately.
+
+Retry delays do not occupy one of the bounded provider workers. One in-memory
+scheduler parks logical prompts, applies jittered class-specific Fibonacci
+cadence (up to about thirty minutes for persistent failures), honors later
+trusted reset/`Retry-After` hints, and shares cooldowns by configured provider
+profile. Retry status is visible and says how to cancel. Profiles and
+credentials are resolved again when delayed work becomes due. This state lasts
+only for the process/session lifetime; Tau deliberately does not replay
+ambiguous in-flight requests after a cold restart.
 It publishes `chatgpt/*` only from auth named `chatgpt`; there is no `openai-codex` compatibility alias.
 WebSocket-capable ChatGPT/Codex Responses models remain on WebSocket: retryable
-WS failures follow the bounded retry/backoff policy, and terminal WS errors are
+WS failures return to the shared logical-prompt scheduler, and terminal WS errors are
 surfaced instead of silently falling back to HTTP/SSE.
 The ChatGPT GPT-5.6 Sol, Terra, and Luna models publish a 353,400-token
 effective context window and include `max` among their reasoning choices. They do
@@ -183,7 +198,7 @@ ChatGPT/Codex live streams use a five-minute idle watchdog on both HTTP/SSE and
 WebSocket transports. The watchdog resets on each SSE `data:` event or
 WebSocket provider frame, not on SSE comments/heartbeats or partial-line byte
 trickles, and is not an absolute turn-duration cap. If upstream goes quiet, Tau
-aborts the turn and emits a terminal provider error with transport, prompt id,
+aborts the attempt and schedules the still-required logical prompt with transport, prompt id,
 elapsed/idle timing, configured idle timeout, whether partial output had already
 arrived, and read-source details where available.
 

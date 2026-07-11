@@ -141,6 +141,20 @@ fn decode_frames(bytes: &[u8]) -> Vec<HarnessInputMessage> {
     frames
 }
 
+/// Decodes a concurrent writer snapshot, returning `None` when it ends midway
+/// through a frame and the caller should retry after the next synchronization.
+fn try_decode_frames(bytes: &[u8]) -> Option<Vec<HarnessInputMessage>> {
+    let mut reader = HarnessInputReader::new(BufReader::new(bytes));
+    let mut frames = Vec::new();
+    loop {
+        match reader.read_message() {
+            Ok(Some(frame)) => frames.push(frame),
+            Ok(None) => return Some(frames),
+            Err(_) => return None,
+        }
+    }
+}
+
 fn encode_frames(frames: &[HarnessOutputMessage]) -> Vec<u8> {
     let mut bytes = Vec::new();
     {
@@ -240,6 +254,234 @@ fn prompt() -> tau_proto::AgentPromptCreated {
         ctx_id: None,
         compaction: None,
     }
+}
+
+/// Builds scheduler-owned logical state without starting a provider worker.
+fn scheduled_job(prompt_id: &str, provider: &str) -> PromptJob {
+    let mut prompt = prompt();
+    prompt.agent_prompt_id = prompt_id.into();
+    prompt.model.provider = ProviderName::new(provider);
+    PromptJob {
+        agent_prompt_id: prompt.agent_prompt_id.clone(),
+        debug_provider_requests: false,
+        prompt,
+        backend: PromptBackend::Unavailable,
+        retry_state: PromptRetryState::default(),
+        cancel_generation: 0,
+    }
+}
+
+/// Minimal configured Chat Completions model for runtime routing fixtures.
+fn chat_model(id: &str) -> ChatCompletionsModel {
+    ChatCompletionsModel {
+        id: ModelName::new(id),
+        display_name: None,
+        context_window: 128_000,
+        compat: None,
+        tags: Vec::new(),
+    }
+}
+
+/// Verifies shared cooldown extension, anti-herd jitter, scope isolation, and
+/// fake-clock eligibility in the exact queue used by the scheduler thread.
+#[test]
+fn retry_schedule_queue_enforces_shared_cooldown_without_cross_provider_herd() {
+    let epoch = Instant::now();
+    let initial_due = epoch + Duration::from_secs(10);
+    let extended_boundary = epoch + Duration::from_secs(60);
+    let unaffected_due = epoch + Duration::from_secs(12);
+    let mut queue = RetryScheduleQueue::default();
+    for id in ["same-1", "same-2", "same-3", "same-4"] {
+        queue.schedule(initial_due, scheduled_job(id, "limited"));
+    }
+    queue.schedule(unaffected_due, scheduled_job("peer", "healthy"));
+
+    queue.extend_cooldown(&ProviderName::new("limited"), extended_boundary);
+
+    let deadlines = queue.deadlines();
+    assert_eq!(queue.len(), 5);
+    let limited = deadlines
+        .iter()
+        .filter(|(_, provider, _)| provider.as_str() == "limited")
+        .map(|(_, _, due)| *due)
+        .collect::<Vec<_>>();
+    assert!(
+        limited.iter().all(|due| *due > extended_boundary),
+        "same-scope prompts need positive jitter after the common boundary: {limited:?}"
+    );
+    assert_eq!(
+        limited
+            .iter()
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len(),
+        limited.len(),
+        "stable prompt-local jitter must prevent an exact reset-boundary herd"
+    );
+    assert!(
+        deadlines
+            .iter()
+            .any(|(id, provider, due)| id.as_str() == "peer"
+                && provider.as_str() == "healthy"
+                && *due == unaffected_due)
+    );
+
+    assert!(
+        queue.pop_due(epoch + Duration::from_secs(11)).is_none(),
+        "fake time before all deadlines must not execute an attempt"
+    );
+    assert_eq!(
+        queue
+            .pop_due(unaffected_due)
+            .expect("different provider is independently due")
+            .agent_prompt_id
+            .as_str(),
+        "peer"
+    );
+    assert_eq!(queue.len(), 4);
+}
+
+/// Verifies targeted and global delayed cancellation remove only the intended
+/// logical prompts and never wait for their far-future deadlines.
+#[test]
+fn retry_schedule_queue_cancellation_is_prompt_scoped_and_immediate() {
+    let due = Instant::now() + Duration::from_secs(86_400);
+    let mut queue = RetryScheduleQueue::default();
+    queue.schedule(due, scheduled_job("target", "limited"));
+    queue.schedule(due, scheduled_job("peer", "limited"));
+
+    let canceled = queue.cancel(&"target".into());
+    assert_eq!(canceled.len(), 1);
+    assert_eq!(canceled[0].agent_prompt_id.as_str(), "target");
+    assert_eq!(queue.len(), 1, "same-cooldown peer must remain delayed");
+    assert_eq!(
+        queue.cancel_all()[0].agent_prompt_id.as_str(),
+        "peer",
+        "global cancellation must synchronously drain the remaining queue"
+    );
+    assert_eq!(queue.len(), 0);
+}
+
+/// Exercises the exact worker-channel commit handoff: output is queued first,
+/// targeted cancellation wins before main-loop drain, a peer still commits,
+/// and the consumed marker permits later prompt-ID reuse.
+#[test]
+fn targeted_cancel_between_output_enqueue_and_main_drain_is_terminal_once() {
+    let (tx, rx) = mpsc::channel();
+    let target: tau_proto::AgentPromptId = "target".into();
+    let peer: tau_proto::AgentPromptId = "peer".into();
+    let agent_id = tau_proto::AgentId::parse("agent-1").expect("agent id");
+    let originator = tau_proto::PromptOriginator::User;
+    tx.send(WorkerMessage::Output {
+        message: Box::new(HarnessInputMessage::emit(Event::ProviderResponseUpdated(
+            ProviderResponseUpdated {
+                agent_prompt_id: target.clone(),
+                agent_id: agent_id.clone(),
+                deltas: vec![tau_proto::ProviderResponseTextDelta::Message {
+                    output_index: 0,
+                    text: "must not commit".to_owned(),
+                    phase: None,
+                }],
+                compaction: None,
+                status: None,
+                response_stats: None,
+                originator: originator.clone(),
+            },
+        ))),
+        cancel_generation: 0,
+        agent_prompt_id: target.clone(),
+    })
+    .expect("queue target delta");
+    for (id, text) in [(&target, "stale success"), (&peer, "peer success")] {
+        tx.send(WorkerMessage::Output {
+            message: Box::new(HarnessInputMessage::emit(Event::ProviderResponseFinished(
+                simple_finished(id.clone(), agent_id.clone(), originator.clone(), text),
+            ))),
+            cancel_generation: 0,
+            agent_prompt_id: id.clone(),
+        })
+        .expect("queue terminal");
+    }
+
+    let cancellation = CancellationState::default();
+    cancellation.cancel(target.clone());
+    let mut committed = Vec::new();
+    while let Ok(WorkerMessage::Output {
+        message,
+        cancel_generation,
+        agent_prompt_id,
+    }) = rx.try_recv()
+    {
+        if let Some(message) = validate_worker_output_for_commit(
+            message,
+            cancel_generation,
+            0,
+            false,
+            &agent_prompt_id,
+            &cancellation,
+        ) {
+            committed.push(message);
+        }
+    }
+
+    assert_eq!(
+        committed
+            .iter()
+            .filter(|message| matches!(
+                input_event(message),
+                Some(Event::ProviderResponseUpdated(update))
+                    if update.agent_prompt_id == target
+            ))
+            .count(),
+        0,
+        "queued tentative target delta must be discarded"
+    );
+    assert_eq!(
+        committed
+            .iter()
+            .filter(|message| matches!(
+                input_event(message),
+                Some(Event::ProviderResponseFinished(finished))
+                    if finished.agent_prompt_id == target
+                        && finished.error.as_deref() == Some("(cancelled by harness)")
+            ))
+            .count(),
+        1,
+        "target lifecycle must close exactly once as canceled"
+    );
+    assert!(committed.iter().any(|message| matches!(
+        input_event(message),
+        Some(Event::ProviderResponseFinished(finished))
+            if finished.agent_prompt_id == peer
+                && finished.error.as_deref() == Some("peer success")
+    )));
+    assert!(
+        !cancellation.is_canceled(&target),
+        "targeted marker is consumed only by terminal commit"
+    );
+
+    let reused = validate_worker_output_for_commit(
+        Box::new(HarnessInputMessage::emit(Event::ProviderResponseFinished(
+            simple_finished(
+                target.clone(),
+                agent_id,
+                originator,
+                "reused prompt success",
+            ),
+        ))),
+        0,
+        0,
+        false,
+        &target,
+        &cancellation,
+    )
+    .expect("reused prompt ID may commit");
+    assert!(matches!(
+        input_event(&reused),
+        Some(Event::ProviderResponseFinished(finished))
+            if finished.agent_prompt_id == target
+                && finished.error.as_deref() == Some("reused prompt success")
+    ));
 }
 
 #[test]
@@ -446,6 +688,1300 @@ fn prompt_workers_start_concurrently() {
         .filter(|frame| matches!(input_event(frame), Some(Event::ProviderResponseFinished(_))))
         .count();
     assert_eq!(finished_count, 2);
+}
+
+/// Ensures a retryable attempt is parked outside the worker pool and later
+/// succeeds without duplicating the logical prompt lifecycle.
+#[test]
+fn retryable_attempt_is_rescheduled_then_finishes_once() {
+    let input = BlockingInput::default();
+    input.push(encode_frames(&[live_event(
+        11,
+        Event::AgentPromptCreated(prompt()),
+    )]));
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let executor_attempts = Arc::clone(&attempts);
+    let executor: PromptExecutor = Arc::new(move |execution| {
+        if executor_attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+            send_worker_message(
+                &execution.output_tx,
+                &execution.output_waker,
+                WorkerMessage::Retry {
+                    job: execution.job,
+                    decision: RetryDecision::new(RetryClass::Transport),
+                },
+            )
+            .expect("return retry outcome");
+            return;
+        }
+        let mut writer = execution.frame_writer();
+        writer
+            .write_message(&HarnessInputMessage::emit(Event::ProviderResponseFinished(
+                simple_finished(
+                    execution.job.agent_prompt_id,
+                    execution.job.prompt.agent_id,
+                    execution.job.prompt.originator,
+                    "done",
+                ),
+            )))
+            .expect("finished frame");
+        writer.flush().expect("flush finished frame");
+    });
+    let profiles = profiles_with_chatgpt_auth(chatgpt_auth());
+    let prompt_profiles = profiles.clone();
+    let writer = SharedWriter::default();
+    let output = writer.clone();
+    let runtime_input = input.clone();
+    let runtime = thread::spawn(move || {
+        run_inner_with_prompt_executor(
+            runtime_input,
+            writer,
+            profiles,
+            move || prompt_profiles.clone(),
+            1,
+            executor,
+        )
+        .expect("run provider");
+    });
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let frames = decode_frames(&output.bytes());
+        if frames.iter().any(|frame| {
+            matches!(
+                input_event(frame),
+                Some(Event::ProviderResponseFinished(finished))
+                    if finished.agent_prompt_id.as_str() == "sp-1"
+            )
+        }) {
+            let submitted = frames
+                .iter()
+                .filter(|frame| {
+                    matches!(
+                        input_event(frame),
+                        Some(Event::ProviderPromptSubmitted(submitted))
+                            if submitted.agent_prompt_id.as_str() == "sp-1"
+                    )
+                })
+                .count();
+            let finished = frames
+                .iter()
+                .filter(|frame| {
+                    matches!(
+                        input_event(frame),
+                        Some(Event::ProviderResponseFinished(finished))
+                            if finished.agent_prompt_id.as_str() == "sp-1"
+                    )
+                })
+                .count();
+            assert_eq!(submitted, 1);
+            assert_eq!(finished, 1);
+            break;
+        }
+        assert!(Instant::now() < deadline, "retry did not become due");
+        thread::sleep(Duration::from_millis(5));
+    }
+    input.push(encode_frames(&[HarnessOutputMessage::Disconnect(
+        tau_proto::Disconnect {
+            reason: Some("done".to_owned()),
+        },
+    )]));
+    input.close();
+    runtime.join().expect("runtime join");
+    assert_eq!(attempts.load(Ordering::SeqCst), 2);
+}
+
+/// Proves four far-future retries release all four bounded worker permits so an
+/// unrelated provider can run immediately, with no attempt before fake repair.
+#[test]
+fn four_delayed_prompts_release_capacity_for_an_unrelated_provider() {
+    let input = BlockingInput::default();
+    let mut frames = Vec::new();
+    for index in 1..=4 {
+        let mut limited = prompt();
+        limited.agent_prompt_id = format!("limited-{index}").into();
+        limited.model.provider = ProviderName::new("limited");
+        frames.push(live_event(10 + index, Event::AgentPromptCreated(limited)));
+    }
+    let mut healthy = prompt();
+    healthy.agent_prompt_id = "healthy".into();
+    healthy.model.provider = ProviderName::new("healthy");
+    frames.push(live_event(20, Event::AgentPromptCreated(healthy)));
+    input.push(encode_frames(&frames));
+
+    let attempts = Arc::new(Mutex::new(
+        std::collections::BTreeMap::<String, usize>::new(),
+    ));
+    let limited_barrier = Arc::new((Mutex::new(0_usize), Condvar::new()));
+    let executor_barrier = Arc::clone(&limited_barrier);
+    let (healthy_tx, healthy_rx) = mpsc::sync_channel(1);
+    let executor_attempts = Arc::clone(&attempts);
+    let executor: PromptExecutor = Arc::new(move |execution| {
+        *executor_attempts
+            .lock()
+            .expect("attempt map")
+            .entry(execution.job.agent_prompt_id.to_string())
+            .or_default() += 1;
+        if execution
+            .job
+            .agent_prompt_id
+            .as_str()
+            .starts_with("limited-")
+        {
+            let (lock, cv) = &*executor_barrier;
+            let mut started = lock.lock().expect("limited barrier");
+            *started += 1;
+            cv.notify_all();
+            while *started < 4 {
+                started = cv.wait(started).expect("wait for four limited workers");
+            }
+            drop(started);
+            send_worker_message(
+                &execution.output_tx,
+                &execution.output_waker,
+                WorkerMessage::Retry {
+                    job: execution.job,
+                    decision: RetryDecision::new(RetryClass::UsageWindow)
+                        .with_retry_after(Some(Duration::from_secs(86_400))),
+                },
+            )
+            .expect("park limited prompt");
+            return;
+        }
+        let mut writer = execution.frame_writer();
+        writer
+            .write_message(&HarnessInputMessage::emit(Event::ProviderResponseFinished(
+                simple_finished(
+                    execution.job.agent_prompt_id,
+                    execution.job.prompt.agent_id,
+                    execution.job.prompt.originator,
+                    "healthy done",
+                ),
+            )))
+            .expect("healthy finished");
+        writer.flush().expect("flush healthy finish");
+        healthy_tx.send(()).expect("report healthy completion");
+    });
+    let profiles = profiles_with_chatgpt_auth(chatgpt_auth());
+    let prompt_profiles = profiles.clone();
+    let writer = SharedWriter::default();
+    let output = writer.clone();
+    let runtime_input = input.clone();
+    let runtime = thread::spawn(move || {
+        run_inner_with_prompt_executor(
+            runtime_input,
+            writer,
+            profiles,
+            move || prompt_profiles.clone(),
+            4,
+            executor,
+        )
+        .expect("run provider");
+    });
+
+    healthy_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("unrelated fifth prompt was wedged behind delayed work");
+    let observed = attempts.lock().expect("attempt map");
+    for index in 1..=4 {
+        assert_eq!(
+            observed.get(&format!("limited-{index}")),
+            Some(&1),
+            "far-future delayed prompt must not execute another attempt"
+        );
+    }
+    assert_eq!(observed.get("healthy"), Some(&1));
+    drop(observed);
+
+    input.push(encode_frames(&[HarnessOutputMessage::Disconnect(
+        tau_proto::Disconnect {
+            reason: Some("done".to_owned()),
+        },
+    )]));
+    input.close();
+    runtime.join().expect("runtime join");
+    let decoded = decode_frames(&output.bytes());
+    assert_eq!(
+        decoded
+            .iter()
+            .filter(|frame| matches!(
+                input_event(frame),
+                Some(Event::ProviderPromptSubmitted(submitted))
+                    if submitted.agent_prompt_id.as_str() == "healthy"
+            ))
+            .count(),
+        1
+    );
+    assert_eq!(
+        decoded
+            .iter()
+            .filter(|frame| matches!(
+                input_event(frame),
+                Some(Event::ProviderResponseFinished(finished))
+                    if finished.agent_prompt_id.as_str() == "healthy"
+            ))
+            .count(),
+        1
+    );
+}
+
+/// Verifies every due attempt re-resolves mutable profile state: repaired
+/// credentials replace stale captures, and later deletion becomes Unavailable.
+#[test]
+fn delayed_retry_reloads_repaired_and_deleted_profile_state() {
+    let input = BlockingInput::default();
+    input.push(encode_frames(&[live_event(
+        11,
+        Event::AgentPromptCreated(prompt()),
+    )]));
+    let old = OpenAiAuth {
+        access_token: "old-token".to_owned(),
+        ..chatgpt_auth()
+    };
+    let fresh = OpenAiAuth {
+        access_token: "fresh-token".to_owned(),
+        account_id: Some("fresh-account".to_owned()),
+        ..chatgpt_auth()
+    };
+    let mutable_profiles = Arc::new(Mutex::new(profiles_with_chatgpt_auth(old.clone())));
+    let profiles_for_loader = Arc::clone(&mutable_profiles);
+    let profiles_for_executor = Arc::clone(&mutable_profiles);
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let executor_attempts = Arc::clone(&attempts);
+    let (finished_tx, finished_rx) = mpsc::sync_channel(1);
+    let executor: PromptExecutor = Arc::new(move |execution| {
+        let attempt = executor_attempts.fetch_add(1, Ordering::SeqCst);
+        match (attempt, &execution.job.backend) {
+            (0, PromptBackend::Responses(config)) => {
+                assert_eq!(config.api_key, "old-token");
+                *profiles_for_executor.lock().expect("mutable profiles") =
+                    profiles_with_chatgpt_auth(fresh.clone());
+            }
+            (1, PromptBackend::Responses(config)) => {
+                assert_eq!(config.api_key, "fresh-token");
+                assert_eq!(config.account_id.as_deref(), Some("fresh-account"));
+                *profiles_for_executor.lock().expect("mutable profiles") =
+                    BuiltinProviderProfiles::default();
+            }
+            (2, PromptBackend::Unavailable) => {
+                let mut writer = execution.frame_writer();
+                writer
+                    .write_message(&HarnessInputMessage::emit(Event::ProviderResponseFinished(
+                        simple_finished(
+                            execution.job.agent_prompt_id,
+                            execution.job.prompt.agent_id,
+                            execution.job.prompt.originator,
+                            "observed unavailable",
+                        ),
+                    )))
+                    .expect("finish after deletion");
+                writer.flush().expect("flush deletion finish");
+                finished_tx.send(()).expect("report finish");
+                return;
+            }
+            _ => panic!("unexpected attempt/backend combination: {attempt}"),
+        }
+        send_worker_message(
+            &execution.output_tx,
+            &execution.output_waker,
+            WorkerMessage::Retry {
+                job: execution.job,
+                decision: RetryDecision::new(RetryClass::Transport),
+            },
+        )
+        .expect("schedule profile reload");
+    });
+    let startup_profiles = profiles_with_chatgpt_auth(old);
+    let writer = SharedWriter::default();
+    let output = writer.clone();
+    let runtime_input = input.clone();
+    let runtime = thread::spawn(move || {
+        run_inner_with_prompt_executor(
+            runtime_input,
+            writer,
+            startup_profiles,
+            move || profiles_for_loader.lock().expect("profile loader").clone(),
+            1,
+            executor,
+        )
+        .expect("run provider");
+    });
+
+    finished_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("profile reload sequence did not finish");
+    input.push(encode_frames(&[HarnessOutputMessage::Disconnect(
+        tau_proto::Disconnect {
+            reason: Some("done".to_owned()),
+        },
+    )]));
+    input.close();
+    runtime.join().expect("runtime join");
+    assert_eq!(attempts.load(Ordering::SeqCst), 3);
+    let frames = decode_frames(&output.bytes());
+    assert_eq!(
+        frames
+            .iter()
+            .filter(|frame| matches!(
+                input_event(frame),
+                Some(Event::ProviderPromptSubmitted(submitted))
+                    if submitted.agent_prompt_id.as_str() == "sp-1"
+            ))
+            .count(),
+        1
+    );
+    assert_eq!(
+        frames
+            .iter()
+            .filter(|frame| matches!(
+                input_event(frame),
+                Some(Event::ProviderResponseFinished(finished))
+                    if finished.agent_prompt_id.as_str() == "sp-1"
+            ))
+            .count(),
+        1
+    );
+}
+
+/// Ensures tentative output from a failed attempt is visibly cleared and never
+/// appears in the single durable response produced by the successful attempt.
+#[test]
+fn retry_clears_failed_attempt_output_before_durable_success() {
+    let input = BlockingInput::default();
+    input.push(encode_frames(&[live_event(
+        11,
+        Event::AgentPromptCreated(prompt()),
+    )]));
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let executor_attempts = Arc::clone(&attempts);
+    let (finished_tx, finished_rx) = mpsc::sync_channel(1);
+    let executor: PromptExecutor = Arc::new(move |execution| {
+        if executor_attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+            let mut writer = execution.frame_writer();
+            writer
+                .write_message(&HarnessInputMessage::emit(Event::ProviderResponseUpdated(
+                    ProviderResponseUpdated {
+                        agent_prompt_id: execution.job.agent_prompt_id.clone(),
+                        agent_id: execution.job.prompt.agent_id.clone(),
+                        deltas: vec![tau_proto::ProviderResponseTextDelta::Message {
+                            output_index: 0,
+                            text: "attempt-one-tentative".to_owned(),
+                            phase: None,
+                        }],
+                        compaction: None,
+                        status: None,
+                        response_stats: None,
+                        originator: execution.job.prompt.originator.clone(),
+                    },
+                )))
+                .expect("tentative update");
+            writer.flush().expect("flush tentative update");
+            send_worker_message(
+                &execution.output_tx,
+                &execution.output_waker,
+                WorkerMessage::Retry {
+                    job: execution.job,
+                    decision: RetryDecision::new(RetryClass::Transport),
+                },
+            )
+            .expect("schedule retry after partial output");
+            return;
+        }
+        let mut finished = simple_finished(
+            execution.job.agent_prompt_id.clone(),
+            execution.job.prompt.agent_id.clone(),
+            execution.job.prompt.originator.clone(),
+            "unused",
+        );
+        finished.error = None;
+        finished.stop_reason = tau_proto::ProviderStopReason::EndTurn;
+        finished.output_items = vec![ContextItem::Message(tau_proto::MessageItem {
+            role: tau_proto::ContextRole::Assistant,
+            content: vec![tau_proto::ContentPart::Text {
+                text: "attempt-two-durable".to_owned(),
+            }],
+            phase: None,
+            responses_raw_json: None,
+        })];
+        let mut writer = execution.frame_writer();
+        writer
+            .write_message(&HarnessInputMessage::emit(Event::ProviderResponseFinished(
+                finished,
+            )))
+            .expect("durable finish");
+        writer.flush().expect("flush durable finish");
+        finished_tx.send(()).expect("report durable finish");
+    });
+    let profiles = profiles_with_chatgpt_auth(chatgpt_auth());
+    let prompt_profiles = profiles.clone();
+    let writer = SharedWriter::default();
+    let output = writer.clone();
+    let runtime_input = input.clone();
+    let runtime = thread::spawn(move || {
+        run_inner_with_prompt_executor(
+            runtime_input,
+            writer,
+            profiles,
+            move || prompt_profiles.clone(),
+            1,
+            executor,
+        )
+        .expect("run provider");
+    });
+
+    finished_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("retry did not reach durable success");
+    input.push(encode_frames(&[HarnessOutputMessage::Disconnect(
+        tau_proto::Disconnect {
+            reason: Some("done".to_owned()),
+        },
+    )]));
+    input.close();
+    runtime.join().expect("runtime join");
+    assert_eq!(attempts.load(Ordering::SeqCst), 2);
+    let frames = decode_frames(&output.bytes());
+    assert!(frames.iter().any(|frame| matches!(
+        input_event(frame),
+        Some(Event::ProviderResponseUpdated(update))
+            if update.deltas.iter().any(|delta| matches!(
+                delta,
+                tau_proto::ProviderResponseTextDelta::Message { text, .. }
+                    if text == "attempt-one-tentative"
+            ))
+    )));
+    assert!(frames.iter().any(|frame| matches!(
+        input_event(frame),
+        Some(Event::ProviderResponseUpdated(update))
+            if update.status.as_ref().is_some_and(|status| status.clear_response)
+    )));
+    let finished = frames
+        .iter()
+        .filter_map(|frame| match input_event(frame) {
+            Some(Event::ProviderResponseFinished(finished)) => Some(finished),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(finished.len(), 1);
+    let durable = serde_json::to_string(finished[0]).expect("serialize durable response");
+    assert!(durable.contains("attempt-two-durable"));
+    assert!(!durable.contains("attempt-one-tentative"));
+}
+
+/// Covers the shared scheduler boundary for ChatGPT Responses, generic Chat
+/// Completions, and OpenRouter while asserting each retry keeps its routing
+/// kind.
+#[test]
+fn all_builtin_provider_families_retry_then_finish_on_the_shared_scheduler() {
+    let input = BlockingInput::default();
+    let mut chatgpt_prompt = prompt();
+    chatgpt_prompt.agent_prompt_id = "chatgpt-retry".into();
+    let mut generic_prompt = prompt();
+    generic_prompt.agent_prompt_id = "generic-retry".into();
+    generic_prompt.model = model_id("generic", "generic-model");
+    let mut router_prompt = prompt();
+    router_prompt.agent_prompt_id = "router-retry".into();
+    router_prompt.model = model_id("router", "router-model");
+    input.push(encode_frames(&[
+        live_event(11, Event::AgentPromptCreated(chatgpt_prompt)),
+        live_event(12, Event::AgentPromptCreated(generic_prompt)),
+        live_event(13, Event::AgentPromptCreated(router_prompt)),
+    ]));
+
+    let mut startup_profiles = profiles_with_chatgpt_auth(chatgpt_auth());
+    startup_profiles.providers.insert(
+        ProviderName::new("generic"),
+        BuiltinProviderProfile::ChatCompletions(ChatCompletionsProvider {
+            base_url: "https://generic.invalid/v1".to_owned(),
+            api_key: "generic-key".to_owned(),
+            models: vec![chat_model("generic-model")],
+            ..ChatCompletionsProvider::default()
+        }),
+    );
+    startup_profiles.providers.insert(
+        ProviderName::new("router"),
+        BuiltinProviderProfile::OpenRouter(OpenRouterProfile {
+            api_key: "router-key".to_owned(),
+            models: vec![chat_model("router-model")],
+        }),
+    );
+    let prompt_profiles = startup_profiles.clone();
+    let attempts = Arc::new(Mutex::new(
+        std::collections::BTreeMap::<String, usize>::new(),
+    ));
+    let executor_attempts = Arc::clone(&attempts);
+    let (finished_tx, finished_rx) = mpsc::channel();
+    let executor: PromptExecutor = Arc::new(move |execution| {
+        let id = execution.job.agent_prompt_id.to_string();
+        match (id.as_str(), &execution.job.backend) {
+            ("chatgpt-retry", PromptBackend::Responses(config)) => {
+                assert_eq!(config.api_key, "access");
+            }
+            (
+                "generic-retry",
+                PromptBackend::ChatCompletions {
+                    provider, model, ..
+                },
+            ) => {
+                assert_eq!(provider.base_url, "https://generic.invalid/v1");
+                assert_eq!(model.id.as_str(), "generic-model");
+            }
+            (
+                "router-retry",
+                PromptBackend::ChatCompletions {
+                    provider, model, ..
+                },
+            ) => {
+                assert_eq!(provider.base_url, "https://openrouter.ai/api/v1");
+                assert_eq!(provider.api_key, "router-key");
+                assert_eq!(model.id.as_str(), "router-model");
+            }
+            _ => panic!("provider family changed routing backend for {id}"),
+        }
+        let attempt = {
+            let mut attempts = executor_attempts.lock().expect("family attempts");
+            let attempt = attempts.entry(id.clone()).or_default();
+            *attempt += 1;
+            *attempt
+        };
+        if attempt == 1 {
+            let class = match id.as_str() {
+                "chatgpt-retry" => RetryClass::Transport,
+                "generic-retry" => RetryClass::Overload,
+                "router-retry" => RetryClass::Unknown,
+                _ => unreachable!(),
+            };
+            send_worker_message(
+                &execution.output_tx,
+                &execution.output_waker,
+                WorkerMessage::Retry {
+                    job: execution.job,
+                    decision: RetryDecision::new(class),
+                },
+            )
+            .expect("schedule family retry");
+            return;
+        }
+        let mut writer = execution.frame_writer();
+        writer
+            .write_message(&HarnessInputMessage::emit(Event::ProviderResponseFinished(
+                simple_finished(
+                    execution.job.agent_prompt_id,
+                    execution.job.prompt.agent_id,
+                    execution.job.prompt.originator,
+                    "family done",
+                ),
+            )))
+            .expect("family finish");
+        writer.flush().expect("flush family finish");
+        finished_tx.send(id).expect("report family finish");
+    });
+    let writer = SharedWriter::default();
+    let output = writer.clone();
+    let runtime_input = input.clone();
+    let runtime = thread::spawn(move || {
+        run_inner_with_prompt_executor(
+            runtime_input,
+            writer,
+            startup_profiles,
+            move || prompt_profiles.clone(),
+            3,
+            executor,
+        )
+        .expect("run provider");
+    });
+
+    let mut completed = std::collections::BTreeSet::new();
+    for _ in 0..3 {
+        completed.insert(
+            finished_rx
+                .recv_timeout(Duration::from_secs(2))
+                .expect("provider family did not retry to completion"),
+        );
+    }
+    assert_eq!(
+        completed,
+        ["chatgpt-retry", "generic-retry", "router-retry"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
+    );
+    input.push(encode_frames(&[HarnessOutputMessage::Disconnect(
+        tau_proto::Disconnect {
+            reason: Some("done".to_owned()),
+        },
+    )]));
+    input.close();
+    runtime.join().expect("runtime join");
+    assert!(
+        attempts
+            .lock()
+            .expect("family attempts")
+            .values()
+            .all(|count| *count == 2)
+    );
+    let frames = decode_frames(&output.bytes());
+    for id in ["chatgpt-retry", "generic-retry", "router-retry"] {
+        assert_eq!(
+            frames
+                .iter()
+                .filter(|frame| matches!(
+                    input_event(frame),
+                    Some(Event::ProviderPromptSubmitted(submitted))
+                        if submitted.agent_prompt_id.as_str() == id
+                ))
+                .count(),
+            1
+        );
+        assert_eq!(
+            frames
+                .iter()
+                .filter(|frame| matches!(
+                    input_event(frame),
+                    Some(Event::ProviderResponseFinished(finished))
+                        if finished.agent_prompt_id.as_str() == id
+                ))
+                .count(),
+            1
+        );
+    }
+}
+
+/// Runs the mixed delayed/active/queued lifecycle fixture for global cancel or
+/// input EOF, both of which must close every accepted prompt exactly once.
+fn assert_mixed_state_shutdown(global_cancel: bool) {
+    let input = BlockingInput::default();
+    let mut delayed = prompt();
+    delayed.agent_prompt_id = "mixed-delayed".into();
+    let mut active = prompt();
+    active.agent_prompt_id = "mixed-active".into();
+    let mut queued = prompt();
+    queued.agent_prompt_id = "mixed-queued".into();
+    input.push(encode_frames(&[
+        live_event(11, Event::AgentPromptCreated(delayed)),
+        live_event(12, Event::AgentPromptCreated(active)),
+        live_event(13, Event::AgentPromptCreated(queued)),
+    ]));
+    let (delayed_tx, delayed_rx) = mpsc::sync_channel(1);
+    let (active_tx, active_rx) = mpsc::sync_channel(1);
+    let (release_tx, release_rx) = mpsc::sync_channel(1);
+    let release_rx = Mutex::new(release_rx);
+    let calls = Arc::new(Mutex::new(Vec::<String>::new()));
+    let executor_calls = Arc::clone(&calls);
+    let executor: PromptExecutor = Arc::new(move |execution| {
+        let id = execution.job.agent_prompt_id.to_string();
+        executor_calls.lock().expect("mixed calls").push(id.clone());
+        match id.as_str() {
+            "mixed-delayed" => {
+                send_worker_message(
+                    &execution.output_tx,
+                    &execution.output_waker,
+                    WorkerMessage::Retry {
+                        job: execution.job,
+                        decision: RetryDecision::new(RetryClass::Transport)
+                            .with_retry_after(Some(Duration::from_secs(86_400))),
+                    },
+                )
+                .expect("park delayed prompt");
+                delayed_tx.send(()).expect("report delayed state");
+            }
+            "mixed-active" => {
+                active_tx.send(()).expect("report active state");
+                if !global_cancel {
+                    while !execution
+                        .cancellation
+                        .is_canceled(&execution.job.agent_prompt_id)
+                    {
+                        thread::yield_now();
+                    }
+                }
+                release_rx
+                    .lock()
+                    .expect("release receiver")
+                    .recv()
+                    .expect("release active prompt");
+                let mut writer = execution.frame_writer();
+                writer
+                    .write_message(&HarnessInputMessage::emit(Event::ProviderResponseFinished(
+                        simple_finished(
+                            execution.job.agent_prompt_id,
+                            execution.job.prompt.agent_id,
+                            execution.job.prompt.originator,
+                            "late success must become canceled",
+                        ),
+                    )))
+                    .expect("late active terminal");
+                writer.flush().expect("flush late active terminal");
+            }
+            other => panic!("queued prompt unexpectedly executed: {other}"),
+        }
+    });
+    let profiles = profiles_with_chatgpt_auth(chatgpt_auth());
+    let prompt_profiles = profiles.clone();
+    let writer = SharedWriter::default();
+    let output = writer.clone();
+    let runtime_input = input.clone();
+    let runtime = thread::spawn(move || {
+        run_inner_with_prompt_executor(
+            runtime_input,
+            writer,
+            profiles,
+            move || prompt_profiles.clone(),
+            1,
+            executor,
+        )
+        .expect("run provider");
+    });
+
+    delayed_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("delayed state");
+    active_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("active state");
+    if global_cancel {
+        input.push(encode_frames(&[live_event(
+            20,
+            Event::UiCancelPrompt(tau_proto::UiCancelPrompt {
+                session_id: tau_proto::SessionId::new("test-session"),
+                target_agent_id: None,
+                agent_prompt_id: None,
+            }),
+        )]));
+        input.wait_for_reader_waiting(Duration::from_secs(1));
+    } else {
+        input.close();
+    }
+    release_tx.send(()).expect("release active");
+
+    if global_cancel {
+        let deadline = Instant::now() + Duration::from_secs(1);
+        loop {
+            let frames = try_decode_frames(&output.bytes()).unwrap_or_default();
+            let canceled = frames
+                .iter()
+                .filter(|frame| {
+                    matches!(
+                        input_event(frame),
+                        Some(Event::ProviderResponseFinished(finished))
+                            if finished.error.as_deref() == Some("(cancelled by harness)")
+                    )
+                })
+                .count();
+            if canceled == 3 {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "global cancel did not close all mixed states"
+            );
+            thread::yield_now();
+        }
+        input.push(encode_frames(&[HarnessOutputMessage::Disconnect(
+            tau_proto::Disconnect {
+                reason: Some("done".to_owned()),
+            },
+        )]));
+        input.close();
+    }
+    runtime.join().expect("mixed runtime join");
+
+    let frames = decode_frames(&output.bytes());
+    for id in ["mixed-delayed", "mixed-active", "mixed-queued"] {
+        assert_eq!(
+            frames
+                .iter()
+                .filter(|frame| matches!(
+                    input_event(frame),
+                    Some(Event::ProviderPromptSubmitted(submitted))
+                        if submitted.agent_prompt_id.as_str() == id
+                ))
+                .count(),
+            1
+        );
+        assert_eq!(
+            frames
+                .iter()
+                .filter(|frame| matches!(
+                    input_event(frame),
+                    Some(Event::ProviderResponseFinished(finished))
+                        if finished.agent_prompt_id.as_str() == id
+                            && finished.error.as_deref() == Some("(cancelled by harness)")
+                ))
+                .count(),
+            1
+        );
+    }
+    assert_eq!(
+        *calls.lock().expect("mixed calls"),
+        vec!["mixed-delayed".to_owned(), "mixed-active".to_owned()],
+        "queued work must close without provider execution"
+    );
+}
+
+/// Global cancellation closes delayed, active-late-success, and queued work
+/// once.
+#[test]
+fn global_cancel_closes_mixed_prompt_states_exactly_once() {
+    assert_mixed_state_shutdown(true);
+}
+
+/// Harness EOF closes delayed, active-late-success, and queued work once.
+#[test]
+fn eof_closes_mixed_prompt_states_exactly_once() {
+    assert_mixed_state_shutdown(false);
+}
+
+/// A real Chat Completions transport repetition reaches the production
+/// executor/runtime as one local deterministic terminal with no reschedule.
+#[test]
+fn real_repetition_failure_finishes_once_without_scheduler_retry() {
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("bind repetition server");
+    let address = listener.local_addr().expect("repetition server address");
+    let server = thread::spawn(move || {
+        let (mut socket, _) = listener.accept().expect("accept repetition request");
+        let mut request = [0_u8; 8192];
+        let _ = socket.read(&mut request).expect("read repetition request");
+        let event = serde_json::json!({
+            "choices": [{
+                "delta": { "content": ".".repeat(1024) },
+                "finish_reason": null
+            }]
+        });
+        let body = format!("data: {event}\n\n");
+        write!(
+            socket,
+            "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        )
+        .expect("write repetition response");
+    });
+    let input = BlockingInput::default();
+    let mut created = prompt();
+    created.agent_prompt_id = "real-terminal".into();
+    created.model = model_id("generic", "generic-model");
+    input.push(encode_frames(&[live_event(
+        11,
+        Event::AgentPromptCreated(created),
+    )]));
+    let mut profiles = BuiltinProviderProfiles::default();
+    profiles.providers.insert(
+        ProviderName::new("generic"),
+        BuiltinProviderProfile::ChatCompletions(ChatCompletionsProvider {
+            base_url: format!("http://{address}"),
+            api_key: "key".to_owned(),
+            models: vec![chat_model("generic-model")],
+            ..ChatCompletionsProvider::default()
+        }),
+    );
+    let prompt_profiles = profiles.clone();
+    let writer = SharedWriter::default();
+    let output = writer.clone();
+    let runtime_input = input.clone();
+    let runtime = thread::spawn(move || {
+        run_inner_with_prompt_executor(
+            runtime_input,
+            writer,
+            profiles,
+            move || prompt_profiles.clone(),
+            1,
+            production_prompt_executor(),
+        )
+        .expect("run production provider");
+    });
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        let frames = try_decode_frames(&output.bytes()).unwrap_or_default();
+        if frames.iter().any(|frame| {
+            matches!(
+                input_event(frame),
+                Some(Event::ProviderResponseFinished(finished))
+                    if finished.agent_prompt_id.as_str() == "real-terminal"
+            )
+        }) {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "real deterministic terminal did not finish"
+        );
+        thread::yield_now();
+    }
+    input.push(encode_frames(&[HarnessOutputMessage::Disconnect(
+        tau_proto::Disconnect {
+            reason: Some("done".to_owned()),
+        },
+    )]));
+    input.close();
+    runtime.join().expect("production runtime join");
+    server.join().expect("repetition server join");
+    let frames = decode_frames(&output.bytes());
+    let finished = frames
+        .iter()
+        .filter_map(|frame| match input_event(frame) {
+            Some(Event::ProviderResponseFinished(finished))
+                if finished.agent_prompt_id.as_str() == "real-terminal" =>
+            {
+                Some(finished)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(finished.len(), 1);
+    assert_eq!(
+        finished[0].stop_reason,
+        tau_proto::ProviderStopReason::RepetitionDetected
+    );
+    assert!(frames.iter().all(|frame| !matches!(
+        input_event(frame),
+        Some(Event::ProviderResponseUpdated(update))
+            if update.agent_prompt_id.as_str() == "real-terminal"
+                && update.status.as_ref().is_some_and(|status|
+                    status.text.contains("next attempt"))
+    )));
+}
+
+/// Retry statuses are one-per-attempt, bounded, provider-content-free, and the
+/// final terminal event closes the transient status lifecycle.
+#[test]
+fn retry_status_is_bounded_safe_and_attempt_rate_limited() {
+    let input = BlockingInput::default();
+    input.push(encode_frames(&[live_event(
+        11,
+        Event::AgentPromptCreated(prompt()),
+    )]));
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let executor_attempts = Arc::clone(&attempts);
+    let secret = "provider-secret-body\n\u{1b}[31m account=acct-123";
+    let executor: PromptExecutor = Arc::new(move |execution| {
+        let attempt = executor_attempts.fetch_add(1, Ordering::SeqCst);
+        if attempt < 2 {
+            send_worker_message(
+                &execution.output_tx,
+                &execution.output_waker,
+                WorkerMessage::Retry {
+                    job: execution.job,
+                    decision: RetryDecision::new(if attempt == 0 {
+                        RetryClass::Transport
+                    } else {
+                        RetryClass::Unknown
+                    }),
+                },
+            )
+            .expect("schedule status fixture retry");
+            return;
+        }
+        let mut writer = execution.frame_writer();
+        writer
+            .write_message(&HarnessInputMessage::emit(Event::ProviderResponseFinished(
+                simple_finished(
+                    execution.job.agent_prompt_id,
+                    execution.job.prompt.agent_id,
+                    execution.job.prompt.originator,
+                    "done",
+                ),
+            )))
+            .expect("status fixture finish");
+        writer.flush().expect("flush status fixture");
+    });
+    let profiles = profiles_with_chatgpt_auth(chatgpt_auth());
+    let prompt_profiles = profiles.clone();
+    let writer = SharedWriter::default();
+    let output = writer.clone();
+    let runtime_input = input.clone();
+    let runtime = thread::spawn(move || {
+        run_inner_with_prompt_executor(
+            runtime_input,
+            writer,
+            profiles,
+            move || prompt_profiles.clone(),
+            1,
+            executor,
+        )
+        .expect("run provider");
+    });
+    let deadline = Instant::now() + Duration::from_secs(1);
+    loop {
+        let frames = try_decode_frames(&output.bytes()).unwrap_or_default();
+        if frames.iter().any(|frame| {
+            matches!(
+                input_event(frame),
+                Some(Event::ProviderResponseFinished(finished))
+                    if finished.agent_prompt_id.as_str() == "sp-1"
+            )
+        }) {
+            break;
+        }
+        assert!(Instant::now() < deadline, "status fixture did not finish");
+        thread::yield_now();
+    }
+    input.push(encode_frames(&[HarnessOutputMessage::Disconnect(
+        tau_proto::Disconnect {
+            reason: Some("done".to_owned()),
+        },
+    )]));
+    input.close();
+    runtime.join().expect("status runtime join");
+    assert_eq!(attempts.load(Ordering::SeqCst), 3);
+    let frames = decode_frames(&output.bytes());
+    let statuses = frames
+        .iter()
+        .filter_map(|frame| match input_event(frame) {
+            Some(Event::ProviderResponseUpdated(update)) => update.status.as_ref(),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(statuses.len(), 2, "one status per failed real attempt");
+    for status in statuses {
+        assert!(status.clear_response);
+        assert!(status.text.len() <= 256);
+        assert!(!status.text.contains(secret));
+        assert!(!status.text.contains("provider-secret-body"));
+        assert!(!status.text.chars().any(char::is_control));
+        assert!(status.text.contains("cancel the prompt to stop"));
+    }
+    assert!(matches!(
+        frames.last().and_then(input_event),
+        Some(Event::ProviderResponseFinished(finished))
+            if finished.agent_prompt_id.as_str() == "sp-1"
+    ));
+}
+
+/// A queued targeted cancel consumes its marker after terminal commit so the
+/// same prompt ID can be accepted again without inheriting stale cancellation.
+#[test]
+fn queued_targeted_cancel_allows_prompt_id_reuse() {
+    let input = BlockingInput::default();
+    let mut active = prompt();
+    active.agent_prompt_id = "occupying".into();
+    let mut queued = prompt();
+    queued.agent_prompt_id = "reused".into();
+    input.push(encode_frames(&[
+        live_event(11, Event::AgentPromptCreated(active)),
+        live_event(12, Event::AgentPromptCreated(queued)),
+    ]));
+    let (active_tx, active_rx) = mpsc::sync_channel(1);
+    let (release_tx, release_rx) = mpsc::sync_channel(1);
+    let release_rx = Mutex::new(release_rx);
+    let (reused_tx, reused_rx) = mpsc::sync_channel(1);
+    let executor: PromptExecutor = Arc::new(move |execution| {
+        if execution.job.agent_prompt_id.as_str() == "occupying" {
+            active_tx.send(()).expect("report occupying prompt");
+            release_rx
+                .lock()
+                .expect("release receiver")
+                .recv()
+                .expect("release occupying prompt");
+        } else {
+            reused_tx.send(()).expect("report reused prompt execution");
+        }
+        let mut writer = execution.frame_writer();
+        writer
+            .write_message(&HarnessInputMessage::emit(Event::ProviderResponseFinished(
+                simple_finished(
+                    execution.job.agent_prompt_id,
+                    execution.job.prompt.agent_id,
+                    execution.job.prompt.originator,
+                    "done",
+                ),
+            )))
+            .expect("reuse fixture finish");
+        writer.flush().expect("flush reuse fixture");
+    });
+    let profiles = profiles_with_chatgpt_auth(chatgpt_auth());
+    let prompt_profiles = profiles.clone();
+    let writer = SharedWriter::default();
+    let output = writer.clone();
+    let runtime_input = input.clone();
+    let runtime = thread::spawn(move || {
+        run_inner_with_prompt_executor(
+            runtime_input,
+            writer,
+            profiles,
+            move || prompt_profiles.clone(),
+            1,
+            executor,
+        )
+        .expect("run provider");
+    });
+    active_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("occupying prompt start");
+    input.push(encode_frames(&[live_event(
+        13,
+        Event::UiCancelPrompt(tau_proto::UiCancelPrompt {
+            session_id: tau_proto::SessionId::new("test-session"),
+            target_agent_id: None,
+            agent_prompt_id: Some("reused".into()),
+        }),
+    )]));
+    input.wait_for_reader_waiting(Duration::from_secs(1));
+    let mut reused_prompt = prompt();
+    reused_prompt.agent_prompt_id = "reused".into();
+    input.push(encode_frames(&[live_event(
+        14,
+        Event::AgentPromptCreated(reused_prompt),
+    )]));
+    input.wait_for_reader_waiting(Duration::from_secs(1));
+    release_tx.send(()).expect("release occupying prompt");
+    reused_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("reused prompt ID inherited stale cancellation");
+    let deadline = Instant::now() + Duration::from_secs(1);
+    loop {
+        let frames = try_decode_frames(&output.bytes()).unwrap_or_default();
+        if frames
+            .iter()
+            .filter(|frame| {
+                matches!(
+                    input_event(frame),
+                    Some(Event::ProviderResponseFinished(finished))
+                        if finished.agent_prompt_id.as_str() == "reused"
+                )
+            })
+            .count()
+            == 2
+        {
+            break;
+        }
+        assert!(Instant::now() < deadline, "reused lifecycle did not close");
+        thread::yield_now();
+    }
+    input.push(encode_frames(&[HarnessOutputMessage::Disconnect(
+        tau_proto::Disconnect {
+            reason: Some("done".to_owned()),
+        },
+    )]));
+    input.close();
+    runtime.join().expect("reuse runtime join");
+    let frames = decode_frames(&output.bytes());
+    let reused_finishes = frames
+        .iter()
+        .filter_map(|frame| match input_event(frame) {
+            Some(Event::ProviderResponseFinished(finished))
+                if finished.agent_prompt_id.as_str() == "reused" =>
+            {
+                Some(finished)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(reused_finishes.len(), 2);
+    assert_eq!(
+        reused_finishes
+            .iter()
+            .filter(|finished| finished.error.as_deref() == Some("(cancelled by harness)"))
+            .count(),
+        1
+    );
+    assert_eq!(
+        reused_finishes
+            .iter()
+            .filter(|finished| finished.error.as_deref() == Some("done"))
+            .count(),
+        1
+    );
+}
+
+/// Ensures a retry outcome arriving after targeted cancellation is completed as
+/// canceled instead of being scheduled and resurrecting the logical prompt.
+#[test]
+fn late_retry_after_targeted_cancel_is_not_rescheduled() {
+    let input = BlockingInput::default();
+    input.push(encode_frames(&[live_event(
+        11,
+        Event::AgentPromptCreated(prompt()),
+    )]));
+    let (started_tx, started_rx) = mpsc::sync_channel(1);
+    let (release_tx, release_rx) = mpsc::sync_channel(1);
+    let release_rx = Mutex::new(release_rx);
+    let executor: PromptExecutor = Arc::new(move |execution| {
+        started_tx.send(()).expect("report worker start");
+        release_rx
+            .lock()
+            .expect("release receiver lock")
+            .recv()
+            .expect("release worker");
+        send_worker_message(
+            &execution.output_tx,
+            &execution.output_waker,
+            WorkerMessage::Retry {
+                job: execution.job,
+                decision: RetryDecision::new(RetryClass::Transport),
+            },
+        )
+        .expect("return late retry");
+    });
+    let profiles = profiles_with_chatgpt_auth(chatgpt_auth());
+    let prompt_profiles = profiles.clone();
+    let writer = SharedWriter::default();
+    let output = writer.clone();
+    let runtime_input = input.clone();
+    let runtime = thread::spawn(move || {
+        run_inner_with_prompt_executor(
+            runtime_input,
+            writer,
+            profiles,
+            move || prompt_profiles.clone(),
+            1,
+            executor,
+        )
+        .expect("run provider");
+    });
+    started_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("worker start");
+    input.push(encode_frames(&[live_event(
+        12,
+        Event::UiCancelPrompt(tau_proto::UiCancelPrompt {
+            session_id: tau_proto::SessionId::new("test-session"),
+            target_agent_id: None,
+            agent_prompt_id: Some("sp-1".into()),
+        }),
+    )]));
+    input.wait_for_reader_waiting(Duration::from_secs(1));
+    release_tx.send(()).expect("release retry outcome");
+
+    let deadline = Instant::now() + Duration::from_secs(1);
+    loop {
+        let frames = decode_frames(&output.bytes());
+        if frames.iter().any(|frame| {
+            matches!(
+                input_event(frame),
+                Some(Event::ProviderResponseFinished(finished))
+                    if finished.agent_prompt_id.as_str() == "sp-1"
+                        && finished.error.as_deref() == Some("(cancelled by harness)")
+            )
+        }) {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "late retry did not finish canceled"
+        );
+        thread::sleep(Duration::from_millis(5));
+    }
+    let frames = decode_frames(&output.bytes());
+    let canceled = frames
+        .iter()
+        .filter(|frame| {
+            matches!(
+                input_event(frame),
+                Some(Event::ProviderResponseFinished(finished))
+                    if finished.agent_prompt_id.as_str() == "sp-1"
+                        && finished.error.as_deref() == Some("(cancelled by harness)")
+            )
+        })
+        .count();
+    assert_eq!(canceled, 1, "targeted cancel must finish exactly once");
+    input.push(encode_frames(&[HarnessOutputMessage::Disconnect(
+        tau_proto::Disconnect {
+            reason: Some("done".to_owned()),
+        },
+    )]));
+    input.close();
+    runtime.join().expect("runtime join");
 }
 
 /// Ensures worker output wakes the provider loop without waiting for worker
@@ -711,9 +2247,9 @@ fn provider_startup_declares_exact_subscriptions_and_models_before_ready() {
 }
 
 #[test]
-fn direct_prompt_request_with_missing_backend_is_closed_with_error() {
-    // Direct provider routing must never leave the harness waiting forever,
-    // even if a prompt reaches this extension without usable credentials.
+fn direct_prompt_request_with_missing_backend_remains_pending_until_disconnect() {
+    // Missing credentials/profile state can be repaired externally, so it is not
+    // a proven terminal request failure. Process disconnect still ends retries.
     let input = encode_frames(&[
         live_event(11, Event::AgentPromptCreated(prompt())),
         HarnessOutputMessage::Disconnect(tau_proto::Disconnect {
@@ -733,18 +2269,13 @@ fn direct_prompt_request_with_missing_backend_is_closed_with_error() {
                 if submitted.agent_prompt_id.as_str() == "sp-1"
         )
     });
-    let finished = frames.iter().position(|frame| {
-        matches!(
+    submitted.expect("prompt submitted event");
+    assert!(
+        frames.iter().all(|frame| !matches!(
             input_event(frame),
             Some(Event::ProviderResponseFinished(finished))
                 if finished.agent_prompt_id.as_str() == "sp-1"
-                    && finished.stop_reason == ProviderStopReason::Error
-                    && finished.output_items.is_empty()
-                    && finished.error.as_deref()
-                        == Some("cannot resolve provider backend for: chatgpt/gpt-5.6-sol")
-        )
-    });
-    let submitted = submitted.expect("prompt submitted event");
-    let finished = finished.expect("missing-backend response finished event");
-    assert!(submitted < finished, "submission should precede finish");
+        )),
+        "reloadable missing backend must not be reported as terminal"
+    );
 }

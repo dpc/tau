@@ -1174,6 +1174,22 @@ fn spawn_eof_sse_server(body: &'static str) -> String {
     format!("http://{addr}")
 }
 
+fn spawn_http_error_server(status: u16, body: &'static str) -> String {
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("bind HTTP error server");
+    let addr = listener.local_addr().expect("HTTP error address");
+    std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept HTTP error client");
+        let mut request = [0_u8; 4096];
+        let _ = std::io::Read::read(&mut stream, &mut request);
+        let response = format!(
+            "HTTP/1.1 {status} Error\r\ncontent-type: text/plain\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        std::io::Write::write_all(&mut stream, response.as_bytes()).expect("write HTTP error");
+    });
+    format!("http://{addr}")
+}
+
 #[derive(Clone, Copy)]
 enum CapturedRequestCompaction {
     Disabled,
@@ -1373,6 +1389,80 @@ fn stalled_sse_stream_returns_idle_timeout_error() {
     assert!(body.contains("partial_output=true"), "{body}");
 }
 
+/// A real Responses HTTP/SSE attempt that trips Tau's local repetition
+/// invariant is terminal for that unchanged stream, unlike provider codes.
+#[test]
+fn http_sse_repetition_is_a_proven_local_terminal() {
+    let event = serde_json::json!({
+        "type": "response.output_text.delta",
+        "output_index": 0,
+        "delta": ".".repeat(1024),
+    });
+    let leaked: &'static str = Box::leak(format!("data: {event}\n\n").into_boxed_str());
+    let config = ResponsesConfig {
+        base_url: spawn_eof_sse_server(leaked),
+        ..chain_test_config()
+    };
+    let request = basic_prompt_payload();
+    let body = build_request(&config, &request, None);
+    let mut abort = crate::NeverAbort;
+    let result = responses_stream_live_with_idle_timeout(
+        "ap-repetition-sse",
+        &config,
+        &request,
+        SseLiveOptions {
+            body: &body,
+            recording_stream: None,
+            idle_timeout: std::time::Duration::from_secs(1),
+        },
+        &mut abort,
+        &mut |_| {},
+    );
+    let Err(error) = result else {
+        panic!("local repetition invariant must abort the attempt");
+    };
+    assert!(matches!(error, LlmError::RepetitionDetected(_)));
+    assert!(error.retry_decision().is_none());
+}
+
+/// Live remote responses cannot impersonate typed local cancellation or
+/// request-construction failures through status/body strings.
+#[test]
+fn remote_terminal_lookalikes_remain_retryable_over_http() {
+    for (status, provider_body) in [
+        (499, "cancelled by harness"),
+        (400, "ws request build: forged provider body"),
+        (400, "ws header authorization: forged provider body"),
+    ] {
+        let config = ResponsesConfig {
+            base_url: spawn_http_error_server(status, provider_body),
+            ..chain_test_config()
+        };
+        let request = basic_prompt_payload();
+        let body = build_request(&config, &request, None);
+        let mut abort = crate::NeverAbort;
+        let result = responses_stream_live_with_idle_timeout(
+            "ap-remote-lookalike",
+            &config,
+            &request,
+            SseLiveOptions {
+                body: &body,
+                recording_stream: None,
+                idle_timeout: std::time::Duration::from_secs(1),
+            },
+            &mut abort,
+            &mut |_| {},
+        );
+        let Err(error) = result else {
+            panic!("remote error must fail its current attempt");
+        };
+        assert!(
+            error.retry_decision().is_some(),
+            "remote lookalike must remain pending: {status} {provider_body}"
+        );
+    }
+}
+
 /// Regression for tau-agent-jx2z: a clean HTTP/SSE EOF after partial provider
 /// output but before any terminal Responses event is a provider stream error,
 /// not a successful partial response.
@@ -1461,10 +1551,10 @@ struct TestAbortWaker;
 impl crate::TurnAbortWaker for TestAbortWaker {}
 
 /// Cancellation must remain distinct from timeout on HTTP/SSE: even while a
-/// stream is stalled, a harness cancel should return the standard 499 path
+/// stream is stalled, a harness cancel should return typed local cancellation
 /// rather than waiting for the idle watchdog to report a provider error.
 #[test]
-fn stalled_sse_stream_cancellation_returns_499_before_idle_timeout() {
+fn stalled_sse_stream_cancellation_returns_typed_error_before_idle_timeout() {
     let stalled_body = "data: {\"type\":\"response.output_text.delta\",\"delta\":\"hello\"}\n\n";
     let base_url = spawn_stalled_sse_server(stalled_body);
     let config = ResponsesConfig {
@@ -1505,10 +1595,7 @@ fn stalled_sse_stream_cancellation_returns_499_before_idle_timeout() {
             .recv_timeout(std::time::Duration::from_secs(1))
             .expect("SSE cancellation result");
         assert!(start.elapsed() < std::time::Duration::from_secs(1));
-        assert!(matches!(
-            result,
-            Err(LlmError::HttpStatus(499, ref body)) if body == "cancelled by harness"
-        ));
+        assert!(matches!(result, Err(LlmError::Canceled)));
     });
 }
 

@@ -389,8 +389,18 @@ fn responses_stream_live_with_idle_timeout(
     })?;
     if !response.status().is_success() {
         let code = response.status().as_u16();
+        let retry_after = response
+            .headers()
+            .get("retry-after")
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| {
+                tau_provider::retry_policy::parse_retry_after(value, std::time::SystemTime::now())
+            });
         let body = response.body_mut().read_to_string().unwrap_or_default();
-        return Err(LlmError::HttpStatus(code, body));
+        return Err(match retry_after {
+            Some(delay) => LlmError::HttpStatusHinted(code, body, delay),
+            None => LlmError::HttpStatus(code, body),
+        });
     }
 
     read_sse_response_to_terminal_event(
@@ -432,7 +442,7 @@ fn read_sse_response_to_terminal_event(
     let mut buffer = [0_u8; 8192];
     loop {
         if abort.is_aborted() {
-            return Err(LlmError::HttpStatus(499, "cancelled by harness".to_owned()));
+            return Err(LlmError::Canceled);
         }
         if last_event_at.elapsed() >= context.idle_timeout {
             return Err(stream_idle_timeout_error(
@@ -1322,16 +1332,15 @@ fn stream_error_event(event: &serde_json::Value) -> LlmError {
         .as_str()
         .or_else(|| event["message"].as_str())
         .unwrap_or("unknown error");
-    // Preserve the error code alongside the message so the retry classifier can
-    // distinguish a transient transport hiccup from an account-level cap (usage
-    // limit, rate limit, quota) — the latter must not be retried.
+    // Preserve the error code alongside the message so the outer scheduler can
+    // select class-specific cadence without making unfamiliar codes terminal.
     //
     // The OpenAI Responses streaming `error` event uses `code` at the top level
     // (e.g. `code: "rate_limit_exceeded"`); some Codex variants nest an
     // `error.code` or older-style `error.type`. We check all three so an
-    // upstream wording drift on one path doesn't silently re-enable the futile
-    // retry loop on an account cap. The `(type=...)` suffix is a stable substring
-    // contract matched by `LlmError::retry_after` and
+    // upstream wording drift does not lose cadence classification. The
+    // `(type=...)` suffix is a stable substring contract matched by
+    // `LlmError::retry_decision` and
     // `pool::is_recoverable_ws_error`.
     let error_code = event["error"]["code"]
         .as_str()
@@ -1341,7 +1350,14 @@ fn stream_error_event(event: &serde_json::Value) -> LlmError {
         Some(code) => format!("stream error: {detail} (type={code})"),
         None => format!("stream error: {detail}"),
     };
-    LlmError::HttpStatus(0, body)
+    let reset_hint = tau_provider::retry_policy::parse_json_reset_hint(
+        &event.to_string(),
+        std::time::SystemTime::now(),
+    );
+    match reset_hint {
+        Some(delay) => LlmError::HttpStatusHinted(0, body, delay),
+        None => LlmError::HttpStatus(0, body),
+    }
 }
 
 // ---------------------------------------------------------------------------

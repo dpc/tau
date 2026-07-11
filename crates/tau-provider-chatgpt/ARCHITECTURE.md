@@ -8,8 +8,8 @@ This crate contains the ChatGPT/Codex provider transport implementation shared b
 Responses transport routing. When it is true, Tau treats WebSocket as the
 required transport for that model/configuration, not as a speculative
 optimization before HTTP/SSE. Capability or limit failures from the WebSocket
-path, and retryable WebSocket failures after the bounded outer retry/backoff
-policy is exhausted, must surface as provider errors for the turn rather than
+path, and retryable WebSocket failures must surface to the outer logical-prompt
+scheduler rather than
 silently replaying the same prompt over HTTP/SSE.
 
 HTTP/SSE remains the Responses transport for configs that do not advertise
@@ -123,9 +123,7 @@ separate absolute turn-duration timeout for ChatGPT/Codex streams.
 
 `AbortWake` is only a wake hint. The loop always calls `TurnAbort::is_aborted()`
 after waking, and that check remains authoritative so stale or coalesced wake
-hints cannot cancel the wrong turn. When cancellation is confirmed, the turn
-returns `LlmError::HttpStatus(499, "cancelled by harness")`, matching the rest of
-the provider cancellation path. The waker guard unregisters on drop so completed
+hints cannot cancel the wrong turn. When cancellation is confirmed, the turn returns typed `LlmError::Canceled`; remote HTTP 499 responses and provider-authored body text remain retryable. Mutable URL, credential, account, or header construction failures return `LlmError::ReloadableConfig` and retry after profile reload. The waker guard unregisters on drop so completed
 turns do not leave callbacks that could enqueue stale wake hints into a pooled
 socket's later turn.
 

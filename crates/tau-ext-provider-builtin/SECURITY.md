@@ -39,6 +39,11 @@ ready, so the main loop must drain both harness input and worker messages before
 blocking in `wait_for_wake()`. Regression tests should cover worker output that
 wakes the loop before the worker sends its completion marker.
 
+Delayed retries use one scheduler thread and never retain a worker permit.
+Cooldown keys contain only configured provider namespaces, never account ids,
+tokens, headers, prompts, or response bodies. Retry status uses normalized,
+bounded provider-independent reasons rather than provider-authored prose.
+
 ## Cancellation, EOF, and disconnect
 
 Prompt cancellation is cooperative. Queued prompts can be removed immediately,

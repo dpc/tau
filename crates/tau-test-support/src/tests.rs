@@ -262,9 +262,18 @@ fn deterministic_provider_and_tool_complete_one_vertical_slice() {
         None,
         HarnessOutputMessage::deliver(Event::AgentPromptCreated(prompt)),
     );
+    let _ = bus.send_to(
+        &provider_id,
+        None,
+        HarnessOutputMessage::deliver(Event::UiCancelPrompt(tau_proto::UiCancelPrompt {
+            session_id: "session-1".into(),
+            target_agent_id: None,
+            agent_prompt_id: Some("sp-1".into()),
+        })),
+    );
 
-    // Without a configured backend for the requested model, the provider should
-    // close the turn without network I/O.
+    // Without a configured backend, the logical prompt remains pending rather
+    // than being dropped. Explicit cancellation closes it without network I/O.
     let response = loop {
         let message = provider_reader
             .read_message()
@@ -277,10 +286,7 @@ fn deterministic_provider_and_tool_complete_one_vertical_slice() {
         }
     };
     assert_eq!(response.stop_reason, tau_proto::ProviderStopReason::Error);
-    assert_eq!(
-        response.error.as_deref(),
-        Some("cannot resolve provider backend for: test/model")
-    );
+    assert_eq!(response.error.as_deref(), Some("(cancelled by harness)"));
     assert!(response.output_items.is_empty());
     assert!(
         response

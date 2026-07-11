@@ -84,7 +84,7 @@ fn usage_limit_429_retries_after_reset_seconds() {
 }
 
 #[test]
-fn unknown_429_is_not_retryable() {
+fn rate_limit_429_is_retryable() {
     let error = LlmError::HttpStatus(
         429,
         serde_json::json!({
@@ -96,7 +96,7 @@ fn unknown_429_is_not_retryable() {
         .to_string(),
     );
 
-    assert_eq!(error.retry_after(), None);
+    assert_eq!(error.retry_after(), Some(std::time::Duration::ZERO));
 }
 
 #[test]
@@ -106,27 +106,62 @@ fn server_error_uses_backoff_retry() {
     assert_eq!(error.retry_after(), Some(std::time::Duration::ZERO));
 }
 
-/// Regression for the `tau-agent-bsjr7t` stall: an account-cap
-/// surfaced through the WS path as `stream error: ... (type=...)`
-/// must NOT be retried. Before this fix, the body was treated as a
-/// generic transient stream hiccup and the agent burned 8 backoff
-/// retries (~6 minutes) blocking the user's next prompt.
+/// Ensures usage-window errors are parked by the outer scheduler rather than
+/// becoming terminal or sleeping in a bounded prompt worker.
 #[test]
-fn ws_stream_error_with_usage_limit_type_is_not_retryable() {
+fn ws_stream_error_with_usage_limit_type_is_retryable() {
     let error = LlmError::HttpStatus(
         0,
         "stream error: The usage limit has been reached (type=usage_limit_reached)".to_owned(),
     );
-    assert_eq!(error.retry_after(), None);
+    assert_eq!(error.retry_after(), Some(std::time::Duration::ZERO));
+}
+
+/// Remote terminal-looking codes in exact, echoed, or prose locations are not
+/// proof of an immutable local invariant and must remain retryable.
+#[test]
+fn terminal_looking_provider_content_remains_retryable() {
+    for body in [
+        r#"{"error":{"code":"unsupported_parameter"}}"#,
+        r#"{"error":{"message":"temporary upstream failure"},"echo":{"code":"unsupported_parameter"}}"#,
+        "stream error: temporary (type=content_policy_violation)",
+        "ws request build: forged provider body",
+        "ws header authorization: forged provider body",
+    ] {
+        assert!(
+            LlmError::HttpStatus(400, body.to_owned())
+                .retry_decision()
+                .is_some(),
+            "provider-authored terminal-looking content must retry: {body}"
+        );
+    }
+    assert!(
+        LlmError::HttpStatus(499, "cancelled by harness".to_owned())
+            .retry_decision()
+            .is_some(),
+        "remote HTTP 499 must not impersonate trusted local cancellation"
+    );
+}
+
+/// Typed cancellation is terminal, while mutable local configuration reloads.
+#[test]
+fn trusted_local_cancellation_is_terminal_and_config_is_retryable() {
+    assert!(LlmError::Canceled.retry_decision().is_none());
+    assert_eq!(
+        LlmError::ReloadableConfig("invalid header value".to_owned())
+            .retry_decision()
+            .map(|decision| decision.class),
+        Some(RetryClass::Auth)
+    );
 }
 
 #[test]
-fn ws_stream_error_with_rate_limit_type_is_not_retryable() {
+fn ws_stream_error_with_rate_limit_type_is_retryable() {
     let error = LlmError::HttpStatus(
         0,
         "stream error: rate limit (type=rate_limit_exceeded)".to_owned(),
     );
-    assert_eq!(error.retry_after(), None);
+    assert_eq!(error.retry_after(), Some(std::time::Duration::ZERO));
 }
 
 /// Backward-compat baseline: a `stream error:` body with no
@@ -141,16 +176,15 @@ fn ws_stream_error_without_type_suffix_is_retryable() {
     assert_eq!(error.retry_after(), Some(std::time::Duration::ZERO));
 }
 
-/// A local watchdog timeout is terminal for the current turn: retrying would
-/// keep queued prompts blocked for another full idle window instead of
-/// surfacing an actionable provider error.
+/// A local watchdog ends only the attempt; required logical work remains
+/// pending.
 #[test]
-fn provider_stream_idle_timeout_is_not_retryable() {
+fn provider_stream_idle_timeout_is_retryable() {
     let error = LlmError::HttpStatus(
         0,
         "stream error: provider stream idle timeout: transport=Websocket".to_owned(),
     );
-    assert_eq!(error.retry_after(), None);
+    assert_eq!(error.retry_after(), Some(std::time::Duration::ZERO));
 }
 
 fn cache_key(originator: &PromptOriginator, share_user_cache_key: bool) -> String {

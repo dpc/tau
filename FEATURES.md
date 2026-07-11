@@ -544,7 +544,7 @@ when sub-agent delegations are interleaved with the parent. Connections age out
 before the upstream's 60-minute hard cap, and refreshed OAuth tokens invalidate
 stale sockets on next use.
 WebSocket-capable ChatGPT/Codex models stay on the WebSocket transport:
-retryable WebSocket failures use Tau's bounded retry/backoff policy, and
+retryable WebSocket failures return to Tau's in-memory logical-prompt scheduler, and
 terminal WebSocket errors are surfaced instead of silently falling back to
 HTTP/SSE.
 
@@ -552,7 +552,7 @@ Live ChatGPT/Codex streams have a default five-minute idle watchdog for both
 HTTP/SSE and WebSocket transports. The timer resets on each SSE `data:` event or
 WebSocket provider frame, so long responses can continue while active; SSE
 comments, heartbeats, and partial-line byte trickles do not count as provider
-progress. A quiet stalled stream is aborted and surfaced as a provider error
+progress. A quiet stalled stream aborts the finite attempt and returns the logical prompt to retry scheduling
 with transport, prompt id, elapsed, idle, configured idle-timeout, and
 partial-output diagnostics (plus read-source details where available). There is
 no separate absolute turn duration cap for this backend today.

@@ -8,6 +8,7 @@
 
 pub mod oauth;
 pub mod repetition_guard;
+pub mod retry_policy;
 pub mod storage;
 
 pub use repetition_guard::{

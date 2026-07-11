@@ -56,3 +56,22 @@ part of the shared Chat Completions transcript contract in Tau. Add an opaque
 sidecar only when a concrete provider proves that a specific field is necessary
 for replay, cache identity, or correctness; until then, typed semantic transcript
 items remain the source of truth.
+
+## Logical retry ownership
+
+This crate executes one finite attempt for `tau-ext-provider-builtin`; it does
+not own logical-prompt retry sleeps or attempt limits. Retryable and unknown
+remote failures return a structured decision to the built-in provider runtime.
+That runtime clears tentative output, releases its bounded worker slot, parks
+the logical prompt in the process-lifetime scheduler, and reloads the mutable
+profile before a later attempt. Proven deterministic request failures remain
+terminal. Cold restart does not replay ambiguous in-flight requests.
+
+Cancellation is prompt-scoped. Active request and stream waits must observe the
+caller's cancellation source; delayed cancellation belongs to the scheduler.
+
+Chat Completions prompt traffic uses async `reqwest` on an attempt-local Tokio
+runtime. Header and body futures are polled with the prompt cancellation source;
+dropping a canceled future aborts its connection without detaching work outside
+the provider concurrency permit. The existing synchronous transport remains
+only for profile/model discovery, which is not a logical prompt attempt.
