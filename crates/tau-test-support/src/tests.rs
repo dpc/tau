@@ -262,6 +262,32 @@ fn deterministic_provider_and_tool_complete_one_vertical_slice() {
         None,
         HarnessOutputMessage::deliver(Event::AgentPromptCreated(prompt)),
     );
+
+    // Wait for the provider to acknowledge the prompt before canceling it. Sending
+    // both frames back-to-back makes the asserted winner depend on whether the
+    // provider thread processes the prompt before the harness sends cancellation.
+    loop {
+        let message = provider_reader
+            .read_message()
+            .expect("read")
+            .expect("provider prompt acknowledgement should arrive");
+        if let HarnessInputMessage::Emit(emit) = message {
+            match *emit.event {
+                Event::ProviderPromptSubmitted(submitted) => {
+                    assert_eq!(submitted.agent_prompt_id.as_str(), "sp-1");
+                    break;
+                }
+                Event::ProviderResponseFinished(finished) => {
+                    panic!(
+                        "missing backend closed before cancellation: {:?}",
+                        finished.error
+                    );
+                }
+                _ => {}
+            }
+        }
+    }
+
     let _ = bus.send_to(
         &provider_id,
         None,
