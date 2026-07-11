@@ -2272,6 +2272,12 @@ pub struct ProviderModelInfo {
     /// Provider-published model capability tags used by harness-owned policy.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<ModelTag>,
+    /// Tool definition kinds this model's provider can deliver upstream.
+    ///
+    /// An empty list preserves compatibility with older providers and means
+    /// function tools only; custom tools require explicit publication.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub supported_tool_types: Vec<ToolType>,
     /// Provider-published preference for becoming the implicit default model
     /// when the selected role does not name one. Higher values win; ties are
     /// broken by model id for deterministic behavior. Zero means neutral.

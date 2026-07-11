@@ -1043,6 +1043,30 @@ fn chat_request_lowers_message_envelopes_without_wrappers() {
     }
 }
 
+/// Chat Completions must reject Custom tools visibly rather than silently
+/// dropping a definition that escaped harness filtering.
+#[test]
+fn chat_request_rejects_custom_tool_definition() {
+    let mut created = prompt();
+    created.tools.push(tau_proto::ToolDefinition {
+        name: tau_proto::ToolName::new("custom_text"),
+        model_visible_name: None,
+        description: None,
+        tool_type: tau_proto::ToolType::Custom,
+        parameters: None,
+        format: None,
+    });
+    let result = try_build_request(
+        &resolved_provider(&provider()),
+        &provider().models[0],
+        &created,
+    );
+    assert!(matches!(
+        result,
+        Err(LlmError::UnsupportedToolType(tau_proto::ToolType::Custom))
+    ));
+}
+
 #[test]
 fn publishes_configured_models_for_registered_provider() {
     // Built-in provider profiles derive the Tau provider namespace from the

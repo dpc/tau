@@ -224,3 +224,16 @@ replayed into the watching model's context. Live delivery and transcript replay
 derive later model-visible transition wording from the structured watched-turn
 payload and watched-agent identity. The durable compatibility `message` text is
 not authoritative presentation or model input.
+## Prompt capability truth
+
+Status: unconfirmed
+
+Prompt templates receive sparse capability data owned by the harness. For each
+turn the harness resolves the concrete agent role/model and one effective tool
+snapshot after policy and provider-supported-type filtering. That snapshot is
+the source for tool definitions, authorization, tool fragments, and
+`capabilities.tools.available`; non-tool extension side queries intentionally
+receive an empty available list because local authorization forbids calls even
+though wire definitions remain cache-compatible. Extension enabled/Ready state
+is captured at render time. Render failures are explicit and prevent provider
+dispatch; capability state is not persisted separately.

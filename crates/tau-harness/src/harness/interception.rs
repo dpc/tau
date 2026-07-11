@@ -501,6 +501,9 @@ impl Harness {
         if !matches!(state, Some(crate::agent::ActivationDispatchState::None)) {
             return;
         }
+        if !self.validate_prompt_render_for_dispatch(cid) {
+            return;
+        }
         let Some((durable_agent_id, prompt_id, through)) =
             self.agents.get_mut(cid).and_then(|agent| {
                 let durable_agent_id = agent.agent_id.clone()?;

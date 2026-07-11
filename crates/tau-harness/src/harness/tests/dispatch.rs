@@ -148,6 +148,96 @@ fn prompt_override_template_can_place_agent_id_without_default_duplication() {
     h.shutdown().expect("shutdown");
 }
 
+/// A malformed selected template blocks before the durable dispatch checkpoint,
+/// publishes a mandatory replayable diagnostic, and remains retryable after the
+/// template is repaired.
+#[test]
+fn malformed_prompt_template_blocks_then_retries_after_repair() {
+    let td = TempDir::new().expect("tempdir");
+    let sp = td.path().join("state");
+    let mut h = echo_harness(&sp).expect("start");
+    h.selected_model = Some("test/model".into());
+    h.enabled_extension_names.insert("optional-ext".to_owned());
+    let aliased = ToolSpec {
+        name: ToolName::new("internal_alias"),
+        model_visible_name: Some(ToolName::new("visible_alias")),
+        description: None,
+        tool_type: tau_proto::ToolType::Function,
+        parameters: None,
+        format: None,
+        tags: Vec::new(),
+        enabled_by_default: true,
+        background_support: None,
+        examples: Vec::new(),
+    };
+    let mut unsupported = aliased.clone();
+    unsupported.name = ToolName::new("hidden_custom");
+    unsupported.model_visible_name = None;
+    unsupported.tool_type = tau_proto::ToolType::Custom;
+    h.registry.register("capability-test", aliased);
+    h.registry.register("capability-test", unsupported);
+    let selected_role = h.selected_role.clone();
+    h.system_prompt_templates.insert(
+        "conditional-template".to_owned(),
+        "{{tool_available capabilities.tools}}".to_owned(),
+    );
+    h.available_roles
+        .entry(selected_role.clone())
+        .or_default()
+        .prompt_override = Some("conditional-template".to_owned());
+
+    let cid = ensure_test_user_agent(&mut h);
+    h.agents
+        .get_mut(&cid)
+        .expect("user agent")
+        .pending_replay_activation = true;
+    h.try_advance_queue();
+    let prompt_count = |h: &Harness| {
+        let mut cursor = crate::event_log::EventLogSeq::new(0);
+        let mut count = 0;
+        while let Some(record) = h.event_log.get_next_from(cursor) {
+            cursor = record.seq.next();
+            count += usize::from(matches!(record.event, Event::AgentPromptCreated(_)));
+        }
+        count
+    };
+    assert_eq!(prompt_count(&h), 0);
+    assert!(h.replayable_harness_notices.iter().any(|notice| {
+        notice.always_show && notice.message.contains("until its template is repaired")
+    }));
+    assert_eq!(
+        h.replayable_harness_notices
+            .iter()
+            .filter(|notice| notice.message.contains("until its template is repaired"))
+            .count(),
+        1
+    );
+    assert!(matches!(
+        h.agents[&cid].activation_dispatch,
+        crate::agent::ActivationDispatchState::None
+    ));
+
+    h.system_prompt_templates.insert(
+        "conditional-template".to_owned(),
+        concat!(
+            "READY alias={{tool_available capabilities.tools \"visible_alias\"}} ",
+            "internal={{tool_available capabilities.tools \"internal_alias\"}} ",
+            "unsupported={{tool_available capabilities.tools \"hidden_custom\"}} ",
+            "enabled={{extension_enabled capabilities.extensions \"optional-ext\"}} ",
+            "active={{extension_active capabilities.extensions \"optional-ext\"}}"
+        )
+        .to_owned(),
+    );
+    h.try_advance_queue();
+    let prompt = read_nth_prompt_created(&h, 0);
+    assert_eq!(
+        prompt.system_prompt,
+        "READY alias=true internal=false unsupported=false enabled=true active=false"
+    );
+    assert_eq!(prompt_count(&h), 1);
+    h.shutdown().expect("shutdown");
+}
+
 #[test]
 fn queued_first_user_prompt_publishes_replayable_agent_target() {
     // Regression: if the first prompt queues before the provider/model is ready,
@@ -2724,6 +2814,7 @@ fn provider_model_info(
         id,
         display_name: None,
         tags: Vec::new(),
+        supported_tool_types: vec![],
         default_affinity: 0,
         context_window,
         efforts: vec![tau_proto::Effort::Off, tau_proto::Effort::High],
@@ -4741,6 +4832,7 @@ fn provider_model_prompt_routes_directly_to_provider_owner() {
                     id: model_id.clone(),
                     display_name: None,
                     tags: Vec::new(),
+                    supported_tool_types: vec![],
                     default_affinity: 0,
                     context_window: 200_000,
                     efforts: vec![tau_proto::Effort::Medium],
@@ -4760,6 +4852,7 @@ fn provider_model_prompt_routes_directly_to_provider_owner() {
             id: model_id.clone(),
             display_name: None,
             tags: Vec::new(),
+            supported_tool_types: vec![],
             default_affinity: 0,
             context_window: 200_000,
             efforts: vec![tau_proto::Effort::Medium],
@@ -4847,6 +4940,7 @@ fn provider_execution_events_must_come_from_prompt_owner() {
                     id: model_id.clone(),
                     display_name: None,
                     tags: Vec::new(),
+                    supported_tool_types: vec![],
                     default_affinity: 0,
                     context_window: 200_000,
                     efforts: vec![tau_proto::Effort::Medium],
@@ -4866,6 +4960,7 @@ fn provider_execution_events_must_come_from_prompt_owner() {
             id: model_id.clone(),
             display_name: None,
             tags: Vec::new(),
+            supported_tool_types: vec![],
             default_affinity: 0,
             context_window: 200_000,
             efforts: vec![tau_proto::Effort::Medium],
@@ -8481,6 +8576,7 @@ fn enable_remote_compaction_for_test_model(h: &mut Harness) {
             id: "test/model".into(),
             display_name: None,
             tags: Vec::new(),
+            supported_tool_types: vec![],
             default_affinity: 0,
             context_window: 1_000,
             efforts: vec![tau_proto::Effort::Medium],

@@ -42,6 +42,7 @@ fn model_info(model: &ModelId, tags: &[&str]) -> ProviderModelInfo {
         id: model.clone(),
         display_name: None,
         tags: tags.iter().map(|tag| ModelTag::new(*tag)).collect(),
+        supported_tool_types: vec![],
         default_affinity: 0,
         context_window: 128_000,
         efforts: vec![Effort::Off],
@@ -121,6 +122,43 @@ fn effective_tool_names(harness: &Harness) -> Vec<String> {
         .map(|spec| spec.name.into_string())
         .filter(|name| relevant.contains(&name.as_str()))
         .collect()
+}
+
+/// Provider tool-type support is a final, non-overridable filter so capability
+/// prose and prompt authorization cannot claim a tool the adapter will omit.
+#[test]
+fn provider_supported_tool_types_filter_effective_snapshot() {
+    let mut policy = policy_harness(&[], AgentRole::default());
+    let mut custom = tagged_tool("custom_text", true, &[]);
+    custom.tool_type = ToolType::Custom;
+    policy.harness.registry.register_with_prompt_fragment(
+        "tools",
+        ToolRegister {
+            tool: custom,
+            tool_group: None,
+            prompt_fragment: None,
+        },
+    );
+    let model = policy
+        .harness
+        .selected_model
+        .clone()
+        .expect("selected model");
+    let specs = policy
+        .harness
+        .gather_effective_tool_specs_for_role_model(ROLE, Some(&model));
+    assert!(!specs.iter().any(|spec| spec.name.as_str() == "custom_text"));
+
+    policy
+        .harness
+        .provider_model_info
+        .get_mut(&model)
+        .expect("model info")
+        .supported_tool_types = vec![ToolType::Function, ToolType::Custom];
+    let specs = policy
+        .harness
+        .gather_effective_tool_specs_for_role_model(ROLE, Some(&model));
+    assert!(specs.iter().any(|spec| spec.name.as_str() == "custom_text"));
 }
 
 /// Ensures untagged models keep generic edit/shell defaults and do not see the

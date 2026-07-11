@@ -197,3 +197,10 @@ harness-authored model-turn observations. Such records must carry
 `watch_turn_state`; all other message kinds must omit it. The payload identifies
 the session-local subscription, distinguishes an initial snapshot from an edge,
 and carries the harness-runtime-scoped watched-agent turn generation.
+## Provider tool-type metadata
+
+`ProviderModelInfo.supported_tool_types` is provider-published capability
+metadata. Omitted or empty metadata is legacy-compatible Function-only support;
+Custom tools require explicit publication. The harness may narrow this set with
+policy but must not widen it. Changes require coordinated provider, harness,
+wire-compatibility, and serialization tests.

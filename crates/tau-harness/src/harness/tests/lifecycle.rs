@@ -132,6 +132,7 @@ fn staged_provider_model(id: &str) -> tau_proto::ProviderModelInfo {
         id: id.into(),
         display_name: Some("Staged".to_owned()),
         tags: Vec::new(),
+        supported_tool_types: vec![],
         default_affinity: 100,
         context_window: 4_096,
         efforts: vec![tau_proto::Effort::Medium],
@@ -1586,8 +1587,9 @@ fn skill_agent_context_and_fragment_are_staged_until_ready() {
 
     assert!(!h.discovered_skills.contains_key("staged-skill"));
     let prompt_agent_id = tau_proto::AgentId::parse(&agent_id).expect("agent id");
-    let before_prompt =
-        h.build_system_prompt_for_role_and_agent(&h.selected_role, Some(&prompt_agent_id));
+    let before_prompt = h
+        .try_build_system_prompt_for_role_and_agent(&h.selected_role, Some(&prompt_agent_id), &[])
+        .expect("prompt renders");
     assert!(!before_prompt.contains("STAGED SKILL DESCRIPTION"));
     assert!(!before_prompt.contains("STAGED CONTEXT VALUE"));
 
@@ -1600,8 +1602,9 @@ fn skill_agent_context_and_fragment_are_staged_until_ready() {
     .expect("ready");
 
     assert!(h.discovered_skills.contains_key("staged-skill"));
-    let after_prompt =
-        h.build_system_prompt_for_role_and_agent(&h.selected_role, Some(&prompt_agent_id));
+    let after_prompt = h
+        .try_build_system_prompt_for_role_and_agent(&h.selected_role, Some(&prompt_agent_id), &[])
+        .expect("prompt renders");
     assert!(after_prompt.contains("STAGED SKILL DESCRIPTION"));
     assert!(after_prompt.contains("STAGED CONTEXT VALUE"));
     assert!(

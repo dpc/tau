@@ -222,6 +222,9 @@ impl Harness {
                 if self.schedule_standalone_auto_compaction(&agent_id) {
                     continue;
                 }
+                if !self.validate_prompt_render_for_dispatch(&agent_id) {
+                    return;
+                }
                 let Some((durable_agent_id, prompt_id, through)) =
                     self.agents.get_mut(&agent_id).and_then(|agent| {
                         let durable_agent_id = agent.agent_id.clone()?;

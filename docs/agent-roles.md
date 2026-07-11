@@ -31,6 +31,22 @@ word `{{agent_id}}` however they want. `tau dev print-prompt` and
 `tau dev print-system-prompt` use the stable fake `dev-preview-agent` id so
 role previews show the full template.
 
+Templates also receive sparse, deterministic runtime capabilities:
+
+```handlebars
+{{#if (tool_available capabilities.tools "web_search")}}Use web search.{{/if}}
+{{#if (extension_enabled capabilities.extensions "std-pim")}}PIM is enabled.{{/if}}
+{{#if (extension_active capabilities.extensions "std-pim")}}PIM is ready.{{/if}}
+```
+
+`capabilities.tools.available` contains only sorted model-visible tool names
+authorized for the concrete agent, role, model, provider tool types, and turn.
+`capabilities.extensions.enabled` includes final startup-enabled names even when
+an optional extension failed to start; `active` contains only Ready runtimes.
+A valid absent name returns false. Invalid names, argument types/arity, missing
+structured paths, unknown selected templates, and render failures are errors.
+Each new turn uses current state; role previews use the role-resolved model.
+
 `agents.prompt_fragments` in `harness.yaml` apply to every role in every
 role group. Use them for global style, policy, or run-wide instructions that
 should not be duplicated under each group or role:

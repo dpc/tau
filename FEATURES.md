@@ -1,5 +1,11 @@
 # Features
 
+## Capability-conditional prompts
+
+Prompt templates can conditionally include instructions using strict per-turn
+tool availability and extension enabled/active state without enumerating hidden
+or unauthorized tools.
+
 ## Typed external-message foundation
 
 Tau's bridge foundation supports a transport-neutral durable envelope and

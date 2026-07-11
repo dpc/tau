@@ -75,3 +75,8 @@ runtime. Header and body futures are polled with the prompt cancellation source;
 dropping a canceled future aborts its connection without detaching work outside
 the provider concurrency permit. The existing synchronous transport remains
 only for profile/model discovery, which is not a logical prompt attempt.
+## Tool definitions
+
+Chat Completions publishes Function-only model tool support. Request conversion
+is fallible and rejects any non-Function definition as an invariant violation;
+it must never silently omit one.

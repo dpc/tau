@@ -140,3 +140,8 @@ the active turn releases.
 ## Message-envelope chaining
 
 When a cached Responses anchor has a message envelope in its server-owned prefix, request construction fully resends context without `previous_response_id`, because reply presentation is transient. Envelopes after the anchor remain in the normal delta.
+## Tool definitions
+
+The Responses adapter publishes and serializes both Function and Custom tool
+types. Model metadata must continue to advertise both so harness prompt
+capability truth matches the upstream request.

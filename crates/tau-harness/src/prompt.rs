@@ -56,6 +56,57 @@ pub(crate) struct RolePromptTemplateContext<'a> {
     pub(crate) agent_id: Option<&'a tau_proto::AgentId>,
 }
 
+/// Harness-owned capabilities visible to one prompt render.
+#[derive(Clone, Debug, Default, serde::Serialize)]
+pub(crate) struct PromptCapabilities {
+    /// Model-visible tools authorized for this turn.
+    pub(crate) tools: PromptToolCapabilities,
+    /// Configured and currently ready extensions.
+    pub(crate) extensions: PromptExtensionCapabilities,
+}
+
+/// Tool capability context for one prompt render.
+#[derive(Clone, Debug, Default, serde::Serialize)]
+pub(crate) struct PromptToolCapabilities {
+    /// Sorted, deduplicated model-visible tool names.
+    pub(crate) available: Vec<String>,
+}
+
+/// Extension capability context for one prompt render.
+#[derive(Clone, Debug, Default, serde::Serialize)]
+pub(crate) struct PromptExtensionCapabilities {
+    /// Sorted, deduplicated names enabled by final startup configuration.
+    pub(crate) enabled: Vec<String>,
+    /// Sorted, deduplicated names whose runtime is currently ready.
+    pub(crate) active: Vec<String>,
+}
+
+impl PromptCapabilities {
+    /// Build deterministic capability data for a turn.
+    pub(crate) fn new(
+        available_tools: impl IntoIterator<Item = String>,
+        enabled_extensions: impl IntoIterator<Item = String>,
+        active_extensions: impl IntoIterator<Item = String>,
+    ) -> Self {
+        Self {
+            tools: PromptToolCapabilities {
+                available: sorted_unique(available_tools),
+            },
+            extensions: PromptExtensionCapabilities {
+                enabled: sorted_unique(enabled_extensions),
+                active: sorted_unique(active_extensions),
+            },
+        }
+    }
+}
+
+fn sorted_unique(values: impl IntoIterator<Item = String>) -> Vec<String> {
+    let mut values = values.into_iter().collect::<Vec<_>>();
+    values.sort();
+    values.dedup();
+    values
+}
+
 impl<'a> RolePromptTemplateContext<'a> {
     /// Build template context for a role-only render.
     pub(crate) fn for_role(role_name: &'a str) -> Self {
@@ -113,11 +164,13 @@ pub(crate) fn build_system_prompt_with_template_context(
         &[],
         agent_context,
         template_context,
+        PromptCapabilities::default(),
     )
 }
 
 /// Builds the system prompt with ordinary prompt fragments and tool-scoped
 /// prompt fragments rendered into separate template sections.
+#[cfg(test)]
 pub(crate) fn build_system_prompt_with_tool_template_context(
     system_template: &str,
     skills: &std::collections::HashMap<tau_proto::SkillName, DiscoveredSkill>,
@@ -125,7 +178,30 @@ pub(crate) fn build_system_prompt_with_tool_template_context(
     tool_prompt_fragments: &[ToolPromptFragment],
     agent_context: serde_json::Value,
     template_context: RolePromptTemplateContext<'_>,
+    capabilities: PromptCapabilities,
 ) -> String {
+    try_build_system_prompt_with_tool_template_context(
+        system_template,
+        skills,
+        prompt_fragments,
+        tool_prompt_fragments,
+        agent_context,
+        template_context,
+        capabilities,
+    )
+    .expect("test prompt template should render")
+}
+
+/// Render a complete system prompt, returning any template error to the caller.
+pub(crate) fn try_build_system_prompt_with_tool_template_context(
+    system_template: &str,
+    skills: &std::collections::HashMap<tau_proto::SkillName, DiscoveredSkill>,
+    prompt_fragments: &[PromptFragment],
+    tool_prompt_fragments: &[ToolPromptFragment],
+    agent_context: serde_json::Value,
+    template_context: RolePromptTemplateContext<'_>,
+    capabilities: PromptCapabilities,
+) -> Result<String, handlebars::RenderError> {
     // Tool definitions are delivered out-of-band via the provider's
     // tool-use channel, so the built-in system template doesn't restate them.
     let fragments: Vec<_> = prompt_fragments.to_vec();
@@ -137,6 +213,7 @@ pub(crate) fn build_system_prompt_with_tool_template_context(
         &fragments,
         &tool_fragments,
         agent_context,
+        capabilities,
     )
 }
 
@@ -147,43 +224,34 @@ fn render_system_prompt_template(
     prompt_fragments: &[PromptFragment],
     tool_prompt_fragments: &[ToolPromptFragment],
     agent_context: serde_json::Value,
-) -> String {
+    capabilities: PromptCapabilities,
+) -> Result<String, handlebars::RenderError> {
     let data = system_prompt_template_data(
         context,
         skills,
         prompt_fragments,
         tool_prompt_fragments,
         agent_context,
-    );
+        capabilities,
+    )?;
     let handlebars = prompt_template_renderer();
-    match handlebars.render_template(system_template, &data) {
-        Ok(rendered) => rendered,
-        Err(error) => {
-            tracing::warn!(
-                role = context.role_name,
-                error = %error,
-                "failed to render system prompt handlebars template"
-            );
-            match handlebars.render_template(BUILT_IN_SYSTEM_PROMPT_TEMPLATE, &data) {
-                Ok(rendered) => rendered,
-                Err(error) => {
-                    tracing::warn!(
-                        role = context.role_name,
-                        error = %error,
-                        "failed to render built-in system prompt handlebars template; using unrendered template"
-                    );
-                    BUILT_IN_SYSTEM_PROMPT_TEMPLATE.to_owned()
-                }
-            }
-        }
-    }
+    handlebars.render_template(system_template, &data)
 }
 
 fn prompt_template_data(
     context: RolePromptTemplateContext<'_>,
     skills: &std::collections::HashMap<tau_proto::SkillName, DiscoveredSkill>,
-    agent_context: serde_json::Value,
+    mut agent_context: serde_json::Value,
+    capabilities: PromptCapabilities,
 ) -> serde_json::Value {
+    if let Some(object) = agent_context.as_object_mut() {
+        // The built-in shell fragment intentionally renders before discovery
+        // has published cwd context. Preserve that documented optional context
+        // as an empty list while keeping all other missing paths strict.
+        object
+            .entry("cwd")
+            .or_insert_with(|| serde_json::Value::Array(Vec::new()));
+    }
     serde_json::json!({
         "role": {
             "name": context.role_name,
@@ -191,6 +259,7 @@ fn prompt_template_data(
         "agent_id": context.agent_id.map(ToString::to_string),
         "skills": prompt_template_skills(skills),
         "agent_context": agent_context,
+        "capabilities": capabilities,
     })
 }
 
@@ -200,25 +269,26 @@ fn system_prompt_template_data(
     prompt_fragments: &[PromptFragment],
     tool_prompt_fragments: &[ToolPromptFragment],
     agent_context: serde_json::Value,
-) -> serde_json::Value {
-    let mut data = prompt_template_data(context, skills, agent_context);
-    let rendered_fragments = rendered_prompt_fragment_template_parts(prompt_fragments, &data);
+    capabilities: PromptCapabilities,
+) -> Result<serde_json::Value, handlebars::RenderError> {
+    let mut data = prompt_template_data(context, skills, agent_context, capabilities);
+    let rendered_fragments = rendered_prompt_fragment_template_parts(prompt_fragments, &data)?;
     let rendered_tool_fragments =
-        rendered_tool_prompt_fragment_template_parts(tool_prompt_fragments, &data);
+        rendered_tool_prompt_fragment_template_parts(tool_prompt_fragments, &data)?;
     let object = data
         .as_object_mut()
         .expect("system prompt template data is an object");
     object.insert("prompt_fragments".to_owned(), rendered_fragments);
     object.insert("tool_prompt_fragments".to_owned(), rendered_tool_fragments);
-    data
+    Ok(data)
 }
 
 fn rendered_prompt_fragment_template_parts(
     fragments: &[PromptFragment],
     data: &serde_json::Value,
-) -> serde_json::Value {
+) -> Result<serde_json::Value, handlebars::RenderError> {
     let handlebars = prompt_template_renderer();
-    serde_json::Value::Array(
+    Ok(serde_json::Value::Array(
         {
             let mut ordered = fragments.iter().collect::<Vec<_>>();
             // Preserve the caller's deterministic source/name tie-break within
@@ -232,35 +302,29 @@ fn rendered_prompt_fragment_template_parts(
             if fragment.template.is_empty() {
                 return None;
             }
-            let content = match handlebars.render_template(fragment.template.as_str(), data) {
-                Ok(rendered) => rendered,
-                Err(error) => {
-                    tracing::warn!(
-                        fragment_name = fragment.name,
-                        priority = fragment.priority.get(),
-                        error = %error,
-                        "failed to render prompt fragment template; skipping fragment"
-                    );
-                    return None;
-                }
-            };
-            Some(serde_json::json!({
-                "name": fragment.name,
-                "priority": fragment.priority.get(),
-                "content": content,
-                "early": fragment.priority.get() < 100,
-            }))
+            Some(
+                handlebars
+                    .render_template(fragment.template.as_str(), data)
+                    .map(|content| {
+                        serde_json::json!({
+                            "name": fragment.name,
+                            "priority": fragment.priority.get(),
+                            "content": content,
+                            "early": fragment.priority.get() < 100,
+                        })
+                    }),
+            )
         })
-        .collect(),
-    )
+        .collect::<Result<Vec<_>, _>>()?,
+    ))
 }
 
 fn rendered_tool_prompt_fragment_template_parts(
     fragments: &[ToolPromptFragment],
     data: &serde_json::Value,
-) -> serde_json::Value {
+) -> Result<serde_json::Value, handlebars::RenderError> {
     let handlebars = prompt_template_renderer();
-    serde_json::Value::Array(
+    Ok(serde_json::Value::Array(
         {
             let mut ordered = fragments.iter().collect::<Vec<_>>();
             // Preserve the caller's deterministic source/name tie-break within
@@ -277,30 +341,22 @@ fn rendered_tool_prompt_fragment_template_parts(
             }
             let rendered = match handlebars.render_template(fragment.template.as_str(), data) {
                 Ok(rendered) => rendered,
-                Err(error) => {
-                    tracing::warn!(
-                        fragment_name = fragment.name,
-                        priority = fragment.priority.get(),
-                        error = %error,
-                        "failed to render tool prompt fragment template; skipping fragment"
-                    );
-                    return None;
-                }
+                Err(error) => return Some(Err(error)),
             };
             let rendered = rendered.trim();
             if rendered.is_empty() {
                 return None;
             }
-            Some(serde_json::json!({
+            Some(Ok(serde_json::json!({
                 "name": fragment.name,
                 "priority": fragment.priority.get(),
                 "tool_name": item.tool_name,
                 "content": rendered,
                 "early": fragment.priority.get() < 100,
-            }))
+            })))
         })
-        .collect(),
-    )
+        .collect::<Result<Vec<_>, _>>()?,
+    ))
 }
 fn prompt_template_renderer() -> handlebars::Handlebars<'static> {
     let mut handlebars = handlebars::Handlebars::new();
@@ -311,7 +367,101 @@ fn prompt_template_renderer() -> handlebars::Handlebars<'static> {
     handlebars.register_helper("starts_with", Box::new(StartsWithHelper));
     handlebars.register_helper("trim", Box::new(TrimHelper));
     handlebars.register_helper("xml_escape", Box::new(XmlEscapeHelper));
+    handlebars.register_helper(
+        "tool_available",
+        Box::new(CapabilityMembershipHelper::tool()),
+    );
+    handlebars.register_helper(
+        "extension_enabled",
+        Box::new(CapabilityMembershipHelper::extension("enabled")),
+    );
+    handlebars.register_helper(
+        "extension_active",
+        Box::new(CapabilityMembershipHelper::extension("active")),
+    );
     handlebars
+}
+
+struct CapabilityMembershipHelper {
+    field: &'static str,
+    tool_name: bool,
+}
+
+impl CapabilityMembershipHelper {
+    const fn tool() -> Self {
+        Self {
+            field: "available",
+            tool_name: true,
+        }
+    }
+
+    const fn extension(field: &'static str) -> Self {
+        Self {
+            field,
+            tool_name: false,
+        }
+    }
+}
+
+impl handlebars::HelperDef for CapabilityMembershipHelper {
+    fn call_inner<'reg: 'rc, 'rc>(
+        &self,
+        h: &handlebars::Helper<'rc>,
+        _: &'reg handlebars::Handlebars<'reg>,
+        _: &'rc handlebars::Context,
+        _: &mut handlebars::RenderContext<'reg, 'rc>,
+    ) -> Result<handlebars::ScopedJson<'rc>, handlebars::RenderError> {
+        if h.params().len() != 2 {
+            return Err(handlebars::RenderErrorReason::Other(
+                "capability helper requires exactly two arguments".to_owned(),
+            )
+            .into());
+        }
+        let capabilities = h.param(0).expect("arity checked").value();
+        let name = h
+            .param(1)
+            .expect("arity checked")
+            .value()
+            .as_str()
+            .ok_or_else(|| {
+                handlebars::RenderError::from(handlebars::RenderErrorReason::Other(
+                    "capability name must be a string".to_owned(),
+                ))
+            })?;
+        if self.tool_name {
+            ToolName::try_new(name).ok_or_else(|| {
+                handlebars::RenderError::from(handlebars::RenderErrorReason::Other(
+                    "invalid tool capability name".to_owned(),
+                ))
+            })?;
+        } else {
+            tau_config::settings::validate_extension_name(name).map_err(|error| {
+                handlebars::RenderError::from(handlebars::RenderErrorReason::Other(format!(
+                    "invalid extension capability name: {error}"
+                )))
+            })?;
+        }
+        let values = capabilities
+            .as_object()
+            .and_then(|object| object.get(self.field))
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| {
+                handlebars::RenderError::from(handlebars::RenderErrorReason::Other(format!(
+                    "capability object must contain an array field `{}`",
+                    self.field
+                )))
+            })?;
+        if !values.iter().all(serde_json::Value::is_string) {
+            return Err(handlebars::RenderErrorReason::Other(format!(
+                "capability field `{}` must contain only strings",
+                self.field
+            ))
+            .into());
+        }
+        Ok(handlebars::ScopedJson::Derived(serde_json::Value::Bool(
+            values.iter().any(|value| value.as_str() == Some(name)),
+        )))
+    }
 }
 
 fn prompt_template_skills(

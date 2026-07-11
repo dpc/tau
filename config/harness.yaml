@@ -39,6 +39,10 @@
 # 200000 }` for an explicit token threshold.
 # Per-role `prompt_fragments` add instructions only for that role.
 # `prompt_override` selects a system prompt template. `tools` and `disable_tools`
+# Prompt fragments may use strict capability helpers, for example:
+# `{{#if (tool_available capabilities.tools "web_search")}}Use web search.{{/if}}`
+# `extension_enabled` tests final startup intent and `extension_active` tests
+# current Ready state. Valid absent names are false; malformed inputs are errors.
 # customize internal tool availability for the role. `required_skills` /
 # `requiredSkills` declares exact skills that must be model-loadable or the role
 # is disabled with a configuration notice.

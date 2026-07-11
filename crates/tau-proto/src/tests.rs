@@ -759,6 +759,7 @@ fn representative_events() -> Vec<Event> {
                 id: "openai/gpt-4.1".parse().expect("model id"),
                 display_name: Some("GPT-4.1".to_owned()),
                 tags: Vec::new(),
+                supported_tool_types: vec![],
                 default_affinity: 0,
                 context_window: 128_000,
                 efforts: vec![Effort::Off, Effort::Low, Effort::Medium, Effort::High],
@@ -3404,4 +3405,34 @@ fn tool_spec_examples_round_trip() {
     let decoded: ToolSpec = serde_json::from_value(encoded).expect("deserialize");
 
     assert_eq!(decoded, spec);
+}
+/// Provider tool-type metadata remains backward compatible when omitted while
+/// preserving explicit Function+Custom publication.
+#[test]
+fn provider_model_supported_tool_types_json_roundtrip() {
+    let mut value = serde_json::json!({
+        "id": "openai/model",
+        "context_window": 1000,
+        "efforts": [],
+        "verbosities": [],
+        "thinking_summaries": [],
+        "supports_compaction": false,
+        "supports_standalone_compaction": false
+    });
+    let legacy: ProviderModelInfo =
+        serde_json::from_value(value.clone()).expect("legacy model metadata");
+    assert!(legacy.supported_tool_types.is_empty());
+
+    value["supported_tool_types"] = serde_json::json!(["function", "custom"]);
+    let explicit: ProviderModelInfo =
+        serde_json::from_value(value).expect("explicit model metadata");
+    assert_eq!(
+        explicit.supported_tool_types,
+        [ToolType::Function, ToolType::Custom]
+    );
+    let encoded = serde_json::to_value(explicit).expect("serialize model metadata");
+    assert_eq!(
+        encoded["supported_tool_types"],
+        serde_json::json!(["function", "custom"])
+    );
 }

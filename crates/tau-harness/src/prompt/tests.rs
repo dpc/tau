@@ -146,6 +146,7 @@ fn build_system_prompt_encourages_parallel_tool_calls() {
         )],
         serde_json::json!({}),
         RolePromptTemplateContext::for_role(""),
+        PromptCapabilities::default(),
     );
     assert!(prompt.contains("## Tool calling"));
     assert!(prompt.contains("shell tool docs"));
@@ -380,7 +381,9 @@ fn prompt_fragments_order_by_priority_name_and_expose_priority() {
         &fragments,
         &[],
         serde_json::json!({}),
-    );
+        PromptCapabilities::default(),
+    )
+    .expect("prompt data renders");
     let rendered = data["prompt_fragments"].as_array().expect("fragments");
     assert_eq!(rendered[0]["name"], serde_json::json!("a"));
     assert_eq!(rendered[0]["priority"], serde_json::json!(10));
@@ -450,6 +453,7 @@ fn tool_prompt_fragments_render_in_dedicated_section() {
         )],
         serde_json::json!({}),
         RolePromptTemplateContext::for_role("engineer"),
+        PromptCapabilities::default(),
     );
 
     let tool_heading = prompt
@@ -484,16 +488,77 @@ fn rendered_empty_tool_prompt_fragment_skips_automatic_heading() {
         )],
         serde_json::json!({}),
         RolePromptTemplateContext::for_role(""),
+        PromptCapabilities::default(),
     );
 
     assert!(!prompt.contains("### `conditional_tool` instructions"));
     assert!(!prompt.contains("conditional docs"));
 }
 
-/// Bad fragment templates are skipped rather than leaking raw unrendered
-/// Handlebars syntax into the model prompt.
+/// Capability helpers expose only sparse, turn-local membership and return
+/// false for a syntactically valid absent name.
 #[test]
-fn failed_prompt_fragment_is_skipped() {
+fn capability_helpers_render_membership_without_absence_errors() {
+    let renderer = prompt_template_renderer();
+    let data = serde_json::json!({
+        "capabilities": PromptCapabilities::new(
+            ["web_search".to_owned()],
+            ["std-websearch".to_owned()],
+            ["std-websearch".to_owned()],
+        ),
+    });
+    let rendered = renderer
+        .render_template(
+            "{{tool_available capabilities.tools \"web_search\"}} \
+             {{tool_available capabilities.tools \"shell_command\"}} \
+             {{extension_enabled capabilities.extensions \"std-websearch\"}} \
+             {{extension_active capabilities.extensions \"std-pim\"}}",
+            &data,
+        )
+        .expect("valid capability helpers render");
+    assert_eq!(rendered, "true false true false");
+}
+
+/// Capability helpers reject malformed identifiers, bad types, missing
+/// structured paths, and incorrect arity rather than silently evaluating false.
+#[test]
+fn capability_helpers_reject_invalid_inputs() {
+    let renderer = prompt_template_renderer();
+    let data = serde_json::json!({
+        "capabilities": PromptCapabilities::default(),
+    });
+    for template in [
+        "{{tool_available capabilities.tools}}",
+        "{{tool_available capabilities.tools 42}}",
+        "{{tool_available capabilities.tools \"bad-name\"}}",
+        "{{extension_enabled capabilities.extensions \"bad/name\"}}",
+        "{{extension_active capabilities.missing \"std-pim\"}}",
+    ] {
+        assert!(
+            renderer.render_template(template, &data).is_err(),
+            "template unexpectedly rendered: {template}"
+        );
+    }
+}
+
+/// Capability construction sorts and deduplicates all arrays so stable runtime
+/// state produces byte-identical prompt inputs.
+#[test]
+fn prompt_capabilities_are_deterministic() {
+    let capabilities = PromptCapabilities::new(
+        ["z".to_owned(), "a".to_owned(), "a".to_owned()],
+        ["z-ext".to_owned(), "a-ext".to_owned()],
+        ["z-ext".to_owned(), "z-ext".to_owned()],
+    );
+    assert_eq!(capabilities.tools.available, ["a", "z"]);
+    assert_eq!(capabilities.extensions.enabled, ["a-ext", "z-ext"]);
+    assert_eq!(capabilities.extensions.active, ["z-ext"]);
+}
+
+/// Bad fragment templates fail the complete render rather than silently
+/// omitting capability-gated instructions.
+#[test]
+fn failed_prompt_fragment_is_an_explicit_error() {
     let fragments = vec![
         tau_proto::PromptFragment::new(
             "bad",
@@ -503,10 +568,16 @@ fn failed_prompt_fragment_is_skipped() {
         tau_proto::PromptFragment::new("good", tau_proto::PromptPriority::new(20), "GOOD"),
     ];
 
-    let prompt = build_system_prompt(&std::collections::HashMap::new(), &fragments);
-
-    assert!(prompt.contains("GOOD"));
-    assert!(!prompt.contains("BAD {{missing.value}}"));
+    let result = try_build_system_prompt_with_tool_template_context(
+        BUILT_IN_SYSTEM_PROMPT_TEMPLATE,
+        &std::collections::HashMap::new(),
+        &fragments,
+        &[],
+        serde_json::json!({}),
+        RolePromptTemplateContext::for_role("engineer"),
+        PromptCapabilities::default(),
+    );
+    assert!(result.is_err());
 }
 
 /// Prompt priorities are split into coarse bands by the system template:

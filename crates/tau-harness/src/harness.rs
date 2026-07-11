@@ -88,9 +88,8 @@ use crate::model::{
 };
 use crate::prompt::{
     BUILT_IN_SYSTEM_TEMPLATE_NAME, RolePromptTemplateContext, ToolPromptFragment,
-    assemble_prompt_context_from, build_system_prompt_with_tool_template_context,
-    built_in_system_prompt_templates, render_agents_context_message,
-    render_effective_prompt_message,
+    assemble_prompt_context_from, built_in_system_prompt_templates, render_agents_context_message,
+    render_effective_prompt_message, try_build_system_prompt_with_tool_template_context,
 };
 use crate::secrets::{ResolvedExtensionSecrets, load_secret_sources, resolve_extension_secrets};
 use crate::settings::{Config, ExtensionStartupDiagnostic, load_harness_settings_or_warn};
@@ -1566,6 +1565,9 @@ pub struct Harness {
     pub(crate) replayable_harness_notices: Vec<tau_proto::HarnessNotice>,
     /// Extension process lifecycle and pre-`Ready` activation state.
     pub(crate) extensions: ExtensionRuntimeState,
+    /// Names enabled by final startup resolution, including optional extensions
+    /// that could not be started.
+    pub(crate) enabled_extension_names: BTreeSet<String>,
     /// Maps agent_prompt_id → owning agent for in-flight
     /// prompts. The conversation knows its `session_id`, so older
     /// `prompt_sessions[spid]` lookups become two hops:
@@ -1801,6 +1803,7 @@ where
                 id: "echo/model".into(),
                 display_name: Some("Echo".to_owned()),
                 tags: Vec::new(),
+                supported_tool_types: vec![],
                 default_affinity: 0,
                 context_window: 128_000,
                 efforts: vec![Effort::Off],
@@ -2205,6 +2208,7 @@ impl Harness {
             lifecycle_messages: Vec::new(),
             replayable_harness_notices: Vec::new(),
             extensions: ExtensionRuntimeState::default(),
+            enabled_extension_names: BTreeSet::new(),
             prompt_agents: HashMap::new(),
             agents: HashMap::new(),
             agent_routes: HashMap::new(),
@@ -2638,6 +2642,17 @@ impl Harness {
             harness_settings,
             roles,
         })?;
+        harness.enabled_extension_names = config
+            .extensions
+            .keys()
+            .cloned()
+            .chain(
+                config
+                    .extension_startup_diagnostics
+                    .iter()
+                    .map(|diagnostic| diagnostic.extension.clone()),
+            )
+            .collect();
         harness.prepare_initial_session_storage(
             &sessions_dir,
             eager_session_id,
@@ -4897,10 +4912,13 @@ impl Harness {
         let (prompt, error) = if !self.available_roles.contains_key(&request.role) {
             (None, Some(format!("unknown role: {}", request.role)))
         } else {
-            (
-                Some(self.build_system_prompt_for_role_preview(&request.role)),
-                None,
-            )
+            match self.build_system_prompt_for_role_preview(&request.role) {
+                Ok(prompt) => (Some(prompt), None),
+                Err(error) => (
+                    None,
+                    Some(format!("failed to render system prompt: {error}")),
+                ),
+            }
         };
         let _ = self.bus.send_to(
             connection_id,
@@ -4923,7 +4941,22 @@ impl Harness {
         let (prompt, error) = if !self.available_roles.contains_key(&request.role) {
             (None, Some(format!("unknown role: {}", request.role)))
         } else {
-            let system_prompt = self.build_system_prompt_for_role_preview(&request.role);
+            let system_prompt = match self.build_system_prompt_for_role_preview(&request.role) {
+                Ok(prompt) => prompt,
+                Err(error) => {
+                    let result = tau_proto::RenderedPromptResult {
+                        request_id: request.request_id,
+                        prompt: None,
+                        error: Some(format!("failed to render system prompt: {error}")),
+                    };
+                    let _ = self.bus.send_to(
+                        connection_id,
+                        None,
+                        HarnessOutputMessage::RenderedPromptResult(Box::new(result)),
+                    );
+                    return;
+                }
+            };
             let agents_context =
                 if request.enable_agents_md && !self.discovered_agents_files.is_empty() {
                     Some(render_agents_context_message(
@@ -12253,8 +12286,36 @@ impl Harness {
             });
         let tools = self.tool_definitions_from_specs(&tool_specs);
         let durable_agent_id = agent_id_for_tree.as_deref().map(crate::parse_agent_id);
-        let system_prompt =
-            self.build_system_prompt_for_role_and_agent(&role_name, durable_agent_id.as_ref());
+        let prompt_capability_specs = if is_non_tool_ext_query {
+            &[][..]
+        } else {
+            tool_specs.as_slice()
+        };
+        let system_prompt = match self.try_build_system_prompt_for_role_and_agent(
+            &role_name,
+            durable_agent_id.as_ref(),
+            prompt_capability_specs,
+        ) {
+            Ok(prompt) => prompt,
+            Err(error) => {
+                self.emit_harness_failure(&format!(
+                    "failed to render system prompt for role `{role_name}`: {error}"
+                ));
+                if self.agents.get(cid).is_some_and(|agent| {
+                    matches!(
+                        agent.activation_dispatch,
+                        crate::agent::ActivationDispatchState::DispatchUncertain {
+                            owner: crate::agent::InferenceCheckpointOwner::Inference,
+                            ..
+                        }
+                    )
+                }) && let Some(agent) = self.agents.get_mut(cid)
+                {
+                    agent.activation_dispatch = crate::agent::ActivationDispatchState::None;
+                }
+                return None;
+            }
+        };
         let durable_agent_id = agent_id_for_tree.as_deref().unwrap_or(cid.as_ref());
         let agent_prompt_id = reserved_compact_prompt_id
             .or_else(|| checkpointed_inference.map(|(prompt_id, _)| prompt_id))
@@ -12326,6 +12387,42 @@ impl Harness {
         })
     }
 
+    /// Validate the current prompt surface before committing the durable
+    /// inference-dispatch checkpoint.
+    pub(super) fn validate_prompt_render_for_dispatch(&mut self, cid: &AgentId) -> bool {
+        let Some(conv) = self.agents.get(cid) else {
+            return false;
+        };
+        let role_name = self.role_name_for_agent(conv);
+        let Some(model) = self.model_for_agent_role(conv) else {
+            return true;
+        };
+        let is_non_tool_ext_query = matches!(
+            conv.originator,
+            tau_proto::PromptOriginator::Extension { .. }
+        ) && conv.parent_tool_call_id.is_none();
+        let specs = self.gather_effective_tool_specs_for_role_model(&role_name, Some(&model));
+        let capability_specs = if is_non_tool_ext_query {
+            &[][..]
+        } else {
+            specs.as_slice()
+        };
+        let durable_agent_id = conv.agent_id.as_deref().map(crate::parse_agent_id);
+        match self.try_build_system_prompt_for_role_and_agent(
+            &role_name,
+            durable_agent_id.as_ref(),
+            capability_specs,
+        ) {
+            Ok(_) => true,
+            Err(error) => {
+                self.emit_harness_failure(&format!(
+                    "cannot dispatch prompt for role `{role_name}` until its template is repaired: {error}"
+                ));
+                false
+            }
+        }
+    }
+
     fn role_name_for_agent(&self, conv: &Agent) -> String {
         conv.role
             .clone()
@@ -12367,37 +12464,62 @@ impl Harness {
 
     #[cfg(test)]
     fn build_system_prompt_for_role(&self, role_name: &str) -> String {
-        self.build_system_prompt_for_role_and_agent(role_name, None)
+        let model = model_for_role(&self.provider_model_info, &self.available_roles, role_name);
+        let specs = self.gather_effective_tool_specs_for_role_model(role_name, model.as_ref());
+        self.try_build_system_prompt_for_role_and_agent(role_name, None, &specs)
+            .expect("configured role prompt should render")
     }
 
-    fn build_system_prompt_for_role_preview(&self, role_name: &str) -> String {
+    fn build_system_prompt_for_role_preview(
+        &self,
+        role_name: &str,
+    ) -> Result<String, handlebars::RenderError> {
         let preview_agent_id = crate::parse_agent_id(RENDERED_PROMPT_PREVIEW_AGENT_ID);
-        self.build_system_prompt_for_role_and_agent(role_name, Some(&preview_agent_id))
+        let model = model_for_role(&self.provider_model_info, &self.available_roles, role_name);
+        let specs = self.gather_effective_tool_specs_for_role_model(role_name, model.as_ref());
+        self.try_build_system_prompt_for_role_and_agent(role_name, Some(&preview_agent_id), &specs)
     }
 
-    fn build_system_prompt_for_role_and_agent(
+    fn try_build_system_prompt_for_role_and_agent(
         &self,
         role_name: &str,
         agent_id: Option<&tau_proto::AgentId>,
-    ) -> String {
+        tool_specs: &[tau_proto::ToolSpec],
+    ) -> Result<String, handlebars::RenderError> {
         let (prompt_fragments, tool_prompt_fragments) =
-            self.gather_prompt_fragment_groups_for_role(role_name);
-        let system_template = self.system_template_for_role(role_name);
+            self.gather_prompt_fragment_groups_for_role_specs(role_name, tool_specs);
+        let system_template = self.system_template_for_role(role_name)?;
         let template_context = match agent_id {
             Some(agent_id) => RolePromptTemplateContext::for_agent(role_name, agent_id),
             None => RolePromptTemplateContext::for_role(role_name),
         };
-        build_system_prompt_with_tool_template_context(
+        try_build_system_prompt_with_tool_template_context(
             system_template,
             &self.discovered_skills,
             &prompt_fragments,
             &tool_prompt_fragments,
             self.agent_context.template_value(agent_id),
             template_context,
+            crate::prompt::PromptCapabilities::new(
+                tool_specs
+                    .iter()
+                    .map(|spec| self.tool_model_visible_name(spec).to_string()),
+                self.enabled_extension_names.iter().cloned().chain(
+                    self.extensions
+                        .entries
+                        .values()
+                        .map(|entry| entry.name.clone()),
+                ),
+                self.extensions
+                    .entries
+                    .values()
+                    .filter(|entry| entry.state == crate::extension::ExtensionState::Ready)
+                    .map(|entry| entry.name.clone()),
+            ),
         )
     }
 
-    fn system_template_for_role(&self, role_name: &str) -> &str {
+    fn system_template_for_role(&self, role_name: &str) -> Result<&str, handlebars::RenderError> {
         let template_name = self
             .available_roles
             .get(role_name)
@@ -12405,12 +12527,12 @@ impl Harness {
             .unwrap_or(BUILT_IN_SYSTEM_TEMPLATE_NAME);
         self.system_prompt_templates
             .get(template_name)
-            .or_else(|| {
-                self.system_prompt_templates
-                    .get(BUILT_IN_SYSTEM_TEMPLATE_NAME)
-            })
             .map(String::as_str)
-            .unwrap_or("")
+            .ok_or_else(|| {
+                handlebars::RenderError::from(handlebars::RenderErrorReason::Other(format!(
+                    "unknown system prompt template `{template_name}`"
+                )))
+            })
     }
 
     #[cfg(test)]
@@ -12429,20 +12551,31 @@ impl Harness {
         )))
     }
 
-    fn gather_prompt_fragment_groups_for_role(
+    fn gather_prompt_fragment_groups_for_role_specs(
         &self,
         role_name: &str,
+        tool_specs: &[tau_proto::ToolSpec],
     ) -> (Vec<PromptFragment>, Vec<ToolPromptFragment>) {
-        let (fragments, tool_fragments) = self.gather_sourced_prompt_fragment_groups(role_name);
+        let (fragments, tool_fragments) =
+            self.gather_sourced_prompt_fragment_groups_for_specs(role_name, Some(tool_specs));
         (
             sorted_prompt_fragments(fragments),
             sorted_tool_prompt_fragments(tool_fragments),
         )
     }
 
+    #[cfg(test)]
     fn gather_sourced_prompt_fragment_groups(
         &self,
         role_name: &str,
+    ) -> (Vec<SourcedPromptFragment>, Vec<SourcedToolPromptFragment>) {
+        self.gather_sourced_prompt_fragment_groups_for_specs(role_name, None)
+    }
+
+    fn gather_sourced_prompt_fragment_groups_for_specs(
+        &self,
+        role_name: &str,
+        effective_specs: Option<&[tau_proto::ToolSpec]>,
     ) -> (Vec<SourcedPromptFragment>, Vec<SourcedToolPromptFragment>) {
         let mut fragments: Vec<_> = self
             .extension_prompt_fragments
@@ -12475,9 +12608,15 @@ impl Harness {
             );
         }
         let providers = self.registry.all_tool_providers();
+        let provider_enabled = |provider: &tau_core::ToolProvider| {
+            effective_specs.map_or_else(
+                || self.is_tool_provider_enabled_for_role(provider, role_name),
+                |specs| specs.iter().any(|spec| spec.name == provider.tool.name),
+            )
+        };
         let enabled_group_keys = providers
             .iter()
-            .filter(|provider| self.is_tool_provider_enabled_for_role(provider, role_name))
+            .filter(|provider| provider_enabled(provider))
             .filter_map(|provider| {
                 provider
                     .tool_group
@@ -12499,7 +12638,7 @@ impl Harness {
                         .is_some_and(|tool_fragment| tool_fragment.name == group_fragment.name)
                 });
             if !tool_prompt_repeated_by_group
-                && self.is_tool_provider_enabled_for_role(provider, role_name)
+                && provider_enabled(provider)
                 && let Some(fragment) = &provider.prompt_fragment
             {
                 let visible_name = self.tool_model_visible_name(&provider.tool);
@@ -12558,16 +12697,29 @@ impl Harness {
         role_name: &str,
         model: Option<&ModelId>,
     ) -> Vec<tau_proto::ToolSpec> {
+        let supported_tool_types = model.and_then(|model| {
+            self.provider_model_info
+                .get(model)
+                .map(|info| info.supported_tool_types.as_slice())
+        });
         self.registry
             .all_tool_providers()
             .into_iter()
             .filter(|provider| {
-                self.is_tool_enabled_for_role_model(
-                    &provider.tool,
-                    provider.tool_group.as_ref(),
-                    role_name,
-                    model,
-                )
+                let provider_supports_type = supported_tool_types.is_none_or(|supported| {
+                    if supported.is_empty() {
+                        provider.tool.tool_type == tau_proto::ToolType::Function
+                    } else {
+                        supported.contains(&provider.tool.tool_type)
+                    }
+                });
+                provider_supports_type
+                    && self.is_tool_enabled_for_role_model(
+                        &provider.tool,
+                        provider.tool_group.as_ref(),
+                        role_name,
+                        model,
+                    )
             })
             .map(|provider| provider.tool.clone())
             .collect()

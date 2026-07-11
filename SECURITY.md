@@ -1,5 +1,11 @@
 # Security policy
 
+Prompt capability data is sparse. Tool names are only the model-visible,
+policy-authorized, provider-supported names advertised for that prompt; internal
+aliases and registered-but-hidden tools are not exposed. It contains no
+commands, secrets, failure text, or disabled extension catalog. Extension
+`active` means protocol Ready, not feature health or sandboxing.
+
 `TAU_ENABLE_EXTENSIONS` is trusted startup configuration: enabling an extension
 may execute its configured program and expose configured local or external
 boundaries. It accepts extension names only, not arguments, configuration, or

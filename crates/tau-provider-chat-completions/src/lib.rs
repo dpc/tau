@@ -463,6 +463,7 @@ pub fn models_for_provider(
             id: ModelId::new(provider_name.clone(), model.id.clone()),
             display_name: model.display_name.clone(),
             tags: merged_model_tags(&provider.tags, &model.tags),
+            supported_tool_types: vec![tau_proto::ToolType::Function],
             default_affinity: 0,
             context_window: model.context_window,
             efforts: model_efforts(model.compat.unwrap_or(provider.compat)),
@@ -510,6 +511,7 @@ enum LlmError {
     Json(serde_json::Error),
     RepetitionDetected(tau_provider::StreamRepetition),
     Canceled,
+    UnsupportedToolType(ToolType),
 }
 
 impl std::fmt::Display for LlmError {
@@ -523,6 +525,9 @@ impl std::fmt::Display for LlmError {
             Self::Json(error) => write!(f, "JSON error: {error}"),
             Self::RepetitionDetected(repetition) => write!(f, "{repetition}"),
             Self::Canceled => write!(f, "cancelled by harness"),
+            Self::UnsupportedToolType(tool_type) => {
+                write!(f, "Chat Completions does not support {tool_type:?} tools")
+            }
         }
     }
 }
@@ -530,7 +535,7 @@ impl std::fmt::Display for LlmError {
 impl LlmError {
     fn retry_decision(&self) -> Option<RetryDecision> {
         match self {
-            Self::RepetitionDetected(_) | Self::Canceled => None,
+            Self::RepetitionDetected(_) | Self::Canceled | Self::UnsupportedToolType(_) => None,
             Self::Reqwest(_) | Self::Io(_) => Some(RetryDecision::new(RetryClass::Transport)),
             Self::EmptyResponse | Self::Json(_) => Some(RetryDecision::new(RetryClass::Unknown)),
             Self::HttpStatus(code, body) => retry_decision_for_http_error(*code, body, None),
@@ -1078,7 +1083,7 @@ fn chat_completions_stream(
         "{}/chat/completions",
         provider.base_url.trim_end_matches('/')
     );
-    let body = build_request(provider, model, prompt);
+    let body = try_build_request(provider, model, prompt)?;
     let body_str = serde_json::to_string(&body).map_err(LlmError::Json)?;
     maybe_debug_write_provider_request(prompt, model, debug_provider_requests, &body);
     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -1273,11 +1278,11 @@ struct StreamOptions {
     include_usage: bool,
 }
 
-fn build_request(
+fn try_build_request(
     provider: &ResolvedProvider,
     model: &ChatCompletionsModel,
     prompt: &tau_proto::AgentPromptCreated,
-) -> ChatRequest {
+) -> Result<ChatRequest, LlmError> {
     let mut messages = Vec::new();
     if !prompt.system_prompt.trim().is_empty() {
         messages.push(serde_json::json!({
@@ -1291,15 +1296,15 @@ fn build_request(
     let tools = prompt
         .tools
         .iter()
-        .filter_map(convert_tool_definition)
-        .collect::<Vec<_>>();
+        .map(convert_tool_definition)
+        .collect::<Result<Vec<_>, _>>()?;
     let tool_choice = match (prompt.tool_choice, tools.is_empty()) {
         (ToolChoice::None, _) => Some("none"),
         (ToolChoice::Auto, false) => Some("auto"),
         (ToolChoice::Auto, true) => None,
     };
     let (max_tokens, max_completion_tokens) = output_token_cap_fields(provider);
-    ChatRequest {
+    Ok(ChatRequest {
         model: model.id.as_str().to_owned(),
         messages,
         stream: true,
@@ -1321,7 +1326,16 @@ fn build_request(
         extra_body: provider.extra_body.clone(),
         tools,
         tool_choice,
-    }
+    })
+}
+
+#[cfg(test)]
+fn build_request(
+    provider: &ResolvedProvider,
+    model: &ChatCompletionsModel,
+    prompt: &tau_proto::AgentPromptCreated,
+) -> ChatRequest {
+    try_build_request(provider, model, prompt).expect("test request tools must be supported")
 }
 
 fn debug_provider_request_dir(session_id: &str, debug_provider_requests: bool) -> Option<PathBuf> {
@@ -1649,11 +1663,11 @@ fn tool_result_text(status: ToolResultStatus, output: &tau_proto::ToolResponse) 
     }
 }
 
-fn convert_tool_definition(tool: &ToolDefinition) -> Option<serde_json::Value> {
+fn convert_tool_definition(tool: &ToolDefinition) -> Result<serde_json::Value, LlmError> {
     if tool.tool_type != ToolType::Function {
-        return None;
+        return Err(LlmError::UnsupportedToolType(tool.tool_type));
     }
-    Some(serde_json::json!({
+    Ok(serde_json::json!({
         "type": "function",
         "function": {
             "name": tool.model_visible_name.as_ref().unwrap_or(&tool.name),

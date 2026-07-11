@@ -318,6 +318,7 @@ fn model_info(provider: &ProviderName, model: &str) -> ProviderModelInfo {
             ModelTag::new("shell:chatgpt"),
             ModelTag::new("tools:custom-text"),
         ],
+        supported_tool_types: vec![tau_proto::ToolType::Function, tau_proto::ToolType::Custom],
         default_affinity: default_affinity_for_model(model),
         context_window: effective_context_window_for_model(model),
         efforts: efforts_for_model(model),

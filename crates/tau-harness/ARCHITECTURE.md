@@ -1,5 +1,17 @@
 # tau-harness architecture
 
+## Prompt capability snapshot
+
+Prompt capability conditionals use one turn-local snapshot. Tau resolves the
+actual agent model, filters provider-supported and policy-effective tool specs,
+and uses those same specs for provider definitions, authorization, fragments,
+and template capabilities. Enabled configuration and Ready extension runtimes
+are captured at that boundary. Later registration/restart changes affect only
+later turns; raw capability context is not persisted. Non-tool extension side
+queries are the intentional exception: provider definitions remain unchanged
+for cache compatibility, while locally unauthorized tool capabilities and tool
+fragments are empty.
+
 ## Canonical transport message boundary
 
 Extensions register a transport family, send tool, and zero or more exact
