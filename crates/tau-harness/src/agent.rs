@@ -273,6 +273,8 @@ pub(crate) struct Agent {
     pub(crate) context_input_tokens: Option<u64>,
     /// Transcript head represented by `context_input_tokens`.
     pub(crate) context_usage_head: Option<NodeId>,
+    /// Provider-qualified model that produced `context_input_tokens`.
+    pub(crate) context_usage_model: Option<ModelId>,
     /// Most recent cached input-token count this agent's provider reported on
     /// a finished response.
     pub(crate) context_cached_tokens: Option<u64>,
@@ -559,6 +561,7 @@ impl Agent {
             tools_total: 0,
             context_input_tokens: None,
             context_usage_head: None,
+            context_usage_model: None,
             context_cached_tokens: None,
             context_percent_used: None,
             result_dedup: ResultDedupMap::new(),

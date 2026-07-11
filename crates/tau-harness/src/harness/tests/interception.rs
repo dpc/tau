@@ -1500,7 +1500,14 @@ fn passive_background_notice_and_user_prompt_dispatch_as_one_intercepted_batch()
     let mut h = echo_harness(tmp.path()).expect("harness");
     let session_id = h.current_session_id.clone();
     h.initialized_sessions.insert(session_id);
-    h.selected_model = Some("test/model".into());
+    h.selected_model = Some("echo/model".into());
+    let info = h
+        .provider_model_info
+        .get_mut(&"echo/model".into())
+        .expect("echo model");
+    info.supports_compaction = false;
+    info.supports_standalone_compaction = true;
+    info.standalone_compaction_threshold = Some(900);
 
     let _interceptor = connect_test_tool(&mut h, "interceptor-passive-batch");
     h.handle_extension_event(
@@ -1515,6 +1522,13 @@ fn passive_background_notice_and_user_prompt_dispatch_as_one_intercepted_batch()
     .expect("intercept registration");
 
     let cid = ensure_test_user_agent(&mut h);
+    {
+        let conv = h.agents.get_mut(&cid).expect("conversation");
+        conv.context_input_tokens = Some(900);
+        conv.context_usage_head = conv.head;
+        conv.context_usage_model = Some("echo/model".into());
+        conv.context_cached_tokens = Some(450);
+    }
     let passive_text = background_completion_prompt(&"passive-intercept-bg".into());
     h.agents
         .get_mut(&cid)
@@ -1560,6 +1574,25 @@ fn passive_background_notice_and_user_prompt_dispatch_as_one_intercepted_batch()
 
     assert_eq!(h.pending_publish_idle_dispatches.len(), 0);
     assert_eq!(prompt_created_count(&h), prompts_before + 1);
+    let compact = read_nth_prompt_created(&h, prompts_before as usize);
+    assert_eq!(
+        compact.operation,
+        tau_proto::PromptOperation::StandaloneCompaction
+    );
+    assert!(
+        !event_log_events(&h)
+            .into_iter()
+            .any(|event| matches!(event, Event::AgentInferenceDispatchStarted(_)))
+    );
+    let active_head = h.agents[&cid].head.expect("active prompt head");
+    let active_parent = default_agent_node(&h, active_head)
+        .parent_id
+        .expect("passive fact is active parent");
+    assert!(event_log_events(&h).into_iter().any(|event| matches!(
+        event,
+        Event::AgentStandaloneCompactionStarted(started)
+            if started.cut == tau_proto::AgentHead::Node(active_parent)
+    )));
     let submitted: Vec<(String, bool)> = event_log_events(&h)
         .into_iter()
         .filter_map(|event| match event {

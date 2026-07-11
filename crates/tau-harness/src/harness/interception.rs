@@ -41,6 +41,8 @@ pub(crate) struct DeferredPromptDispatch {
     pub(crate) cid: AgentId,
     /// Cut immediately before the earliest committed activation in this batch.
     pub(crate) activation_cut: Option<tau_proto::AgentHead>,
+    /// Whether the drained batch contains a committed inference activation.
+    pub(crate) committed_activation: bool,
 }
 
 /// Snapshot of a publish that's currently waiting on an interceptor's
@@ -423,6 +425,24 @@ impl Harness {
         self.dispatch_or_defer_prompt(cid, PromptDispatchGate::PublishIdle);
     }
 
+    /// Wait for the whole publish batch, then run activation compaction before
+    /// inference using the final active fact's parent as the immutable cut.
+    pub(crate) fn dispatch_activation_after_publish_idle(&mut self, cid: &AgentId) {
+        if self.publish_chain_is_idle() {
+            let activation_cut = self.activation_cut_before_current_head(cid);
+            if !self.schedule_standalone_auto_compaction_for_activation(cid, true, activation_cut) {
+                self.dispatch_prompt_after_publish_idle(cid);
+            }
+            return;
+        }
+        self.pending_publish_idle_dispatches
+            .push_back(DeferredPromptDispatch {
+                cid: cid.clone(),
+                activation_cut: None,
+                committed_activation: true,
+            });
+    }
+
     fn dispatch_or_defer_prompt(&mut self, cid: &AgentId, gate: PromptDispatchGate) {
         if !self.publish_chain_is_idle() {
             self.defer_prompt_dispatch(cid.clone(), gate);
@@ -442,12 +462,14 @@ impl Harness {
                     .find(|queued| &queued.cid == cid)
                 {
                     existing.activation_cut = existing.activation_cut.or(activation_cut);
+                    existing.committed_activation = true;
                     return;
                 }
                 self.pending_publish_idle_dispatches
                     .push_back(DeferredPromptDispatch {
                         cid: cid.clone(),
                         activation_cut,
+                        committed_activation: true,
                     });
                 return;
             }
@@ -531,6 +553,7 @@ impl Harness {
                     .push_back(DeferredPromptDispatch {
                         cid,
                         activation_cut: None,
+                        committed_activation: false,
                     });
             }
         }
@@ -852,11 +875,13 @@ impl Harness {
                 self.pending_publish_idle_dispatches.push_front(deferred);
                 break;
             }
-            if deferred.activation_cut.is_some()
+            if deferred.committed_activation
                 && self.schedule_standalone_auto_compaction_for_activation(
                     &cid,
                     true,
-                    deferred.activation_cut,
+                    deferred
+                        .activation_cut
+                        .or_else(|| self.activation_cut_before_current_head(&cid)),
                 )
             {
                 continue;

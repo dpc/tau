@@ -511,3 +511,12 @@ pending, and crash-time dispatch uncertainty fails closed.
 The harness-owned `inference_activation` bit on canonical prompt facts is
 protected from interceptor mutation, and compact successes repeat only
 harness-stamped prompt/model/operation correlation rather than provider input.
+Cold-resumed context usage is accepted only when its durable response names the
+provider-qualified model that the agent currently resolves to. Rehydration,
+provider discovery, role/model changes, and compaction clear the complete usage
+baseline on mismatch; the automatic compaction scheduler also checks exact
+model equality and fails closed rather than applying one model's token count to
+another model's threshold or context window.
+Provider discovery may be staggered, so an as-yet-undiscovered qualified model
+is retained as unresolved rather than treated as a mismatch. It remains
+unusable at the scheduler until exact resolution succeeds.

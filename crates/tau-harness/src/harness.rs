@@ -3741,6 +3741,12 @@ impl Harness {
             self.try_advance_queue();
         }
         if let Event::AgentCompacted(compacted) = event
+            && let Some(cid) =
+                self.runtime_agent_id_for_target_agent(Some(compacted.agent_id.as_str()))
+        {
+            self.clear_agent_context_usage(&cid);
+        }
+        if let Event::AgentCompacted(compacted) = event
             && let Some(transaction_id) = compacted.transaction_id.as_ref()
             && let Some(cid) =
                 self.runtime_agent_id_for_target_agent(Some(compacted.agent_id.as_str()))
@@ -3767,9 +3773,6 @@ impl Harness {
             };
             if let Some(agent) = self.agents.get_mut(&cid) {
                 agent.in_flight_prompt = None;
-                agent.context_input_tokens = None;
-                agent.context_cached_tokens = None;
-                agent.context_percent_used = None;
             }
             self.set_agent_turn_state(&cid, AgentTurnState::Idle);
             if resume.is_some() {
@@ -6608,6 +6611,7 @@ impl Harness {
         let was_empty = self.selected_model.is_none();
         self.selected_role = select.role.clone();
         self.reconcile_selected_model_with_available();
+        self.reconcile_agent_context_usage_models();
         if self.selected_model.is_none() {
             self.publish_event(
                 None,
@@ -6654,6 +6658,10 @@ impl Harness {
             self.emit_info("/model: no selected agent to update");
             return Ok(true);
         };
+        let previous_usage_model = self
+            .agents
+            .get(&cid)
+            .and_then(|conv| conv.context_usage_model.clone());
         let Some(conv) = self.agents.get_mut(&cid) else {
             self.emit_info("/model: selected agent is not loaded");
             return Ok(true);
@@ -6668,6 +6676,9 @@ impl Harness {
             .clone()
             .or_else(|| conv.agent_id.clone())
             .unwrap_or_else(|| cid.to_string());
+        if previous_usage_model.as_ref() != Some(&select.model) {
+            self.clear_agent_context_usage(&cid);
+        }
         self.emit_info(&format!(
             "agent `{agent_name}` model set to {}",
             select.model
@@ -6700,6 +6711,7 @@ impl Harness {
                 }
             }
         }
+        self.reconcile_agent_context_usage_models();
         if selected_role_changed {
             self.reconcile_selected_model_with_available();
             self.publish_current_model_state();
@@ -9532,6 +9544,9 @@ impl Harness {
         let Some(model) = self.model_for_agent_role(conv) else {
             return false;
         };
+        if conv.context_usage_model.as_ref() != Some(&model) {
+            return false;
+        }
         let Some(info) = self.provider_model_info.get(&model) else {
             return false;
         };
@@ -9753,6 +9768,7 @@ impl Harness {
             .is_some_and(|model| self.provider_model_routes.contains_key(model));
         self.refresh_available_models();
         self.reconcile_selected_model_with_available();
+        self.reconcile_agent_context_usage_models();
         self.publish_available_model_state();
         let has_provider_models = !self.provider_model_info.is_empty();
         let has_routable_model = self
@@ -9764,6 +9780,42 @@ impl Harness {
                 || (!had_provider_models && has_provider_models))
         {
             self.try_advance_queue();
+        }
+    }
+
+    fn reconcile_agent_context_usage_models(&mut self) {
+        let resolutions: Vec<_> = self
+            .agents
+            .iter()
+            .filter_map(|(cid, conv)| {
+                conv.context_usage_model.as_ref().map(|usage_model| {
+                    (
+                        cid.clone(),
+                        usage_model.clone(),
+                        self.model_for_agent_role(conv),
+                    )
+                })
+            })
+            .collect();
+        for (cid, usage_model, current_model) in resolutions {
+            if current_model.is_none() && !self.provider_model_info.contains_key(&usage_model) {
+                // Provider discovery is staggered. Absence is not yet evidence
+                // that another model owns this agent, so keep the qualified
+                // baseline until its provider either appears or resolution
+                // becomes a confirmed mismatch.
+                continue;
+            }
+            if current_model.as_ref() != Some(&usage_model) {
+                self.clear_agent_context_usage(&cid);
+                continue;
+            }
+            let context_window = context_window_for_model(&self.provider_model_info, &usage_model);
+            if let Some(conv) = self.agents.get_mut(&cid) {
+                conv.context_percent_used = match (context_window, conv.context_input_tokens) {
+                    (Some(window), Some(tokens)) => Some(context_percent_used(tokens, window)),
+                    _ => None,
+                };
+            }
         }
     }
 
@@ -11378,6 +11430,19 @@ impl Harness {
                 conv.next_prompt_index = restored_next_prompt_index;
                 conv.prompt_index_initialized = true;
             }
+            self.clear_agent_context_usage(&cid);
+            let restored_context_usage = self.restored_agent_context_usage(agent_id.as_str());
+            if let Some((model, input_tokens, cached_tokens, usage_head)) = restored_context_usage
+                && let Some(conv) = self.agents.get_mut(&cid)
+            {
+                conv.context_input_tokens = Some(input_tokens);
+                conv.context_cached_tokens = Some(cached_tokens);
+                conv.context_usage_head = usage_head;
+                conv.context_usage_model = Some(model.clone());
+                conv.context_percent_used =
+                    context_window_for_model(&self.provider_model_info, &model)
+                        .map(|window| context_percent_used(input_tokens, window));
+            }
             match restored_compaction.clone() {
                 Some(tau_core::StandaloneCompactionRecovery::Blocked(failed)) => {
                     if let Some(conv) = self.agents.get_mut(&cid) {
@@ -11628,6 +11693,9 @@ impl Harness {
                 );
             }
         }
+        if !self.provider_model_info.is_empty() {
+            self.reconcile_agent_context_usage_models();
+        }
     }
 
     fn agent_originator_from_log(&self, agent_id: &str) -> tau_proto::PromptOriginator {
@@ -11651,6 +11719,32 @@ impl Harness {
                 name: HARNESS_CONNECTION_ID.into(),
                 query_id: format!("restored-{agent_id}"),
             })
+    }
+
+    fn restored_agent_context_usage(
+        &self,
+        agent_id: &str,
+    ) -> Option<(ModelId, u64, u64, Option<tau_proto::NodeId>)> {
+        let tree = self.agent_store.agent(agent_id)?;
+        for node_id in tree.branch_node_ids_from(tree.head()).into_iter().rev() {
+            let node = tree.node(node_id)?;
+            match &node.entry {
+                tau_core::AgentEntry::Compaction { .. } => return None,
+                tau_core::AgentEntry::AssistantResponse {
+                    usage: Some(usage), ..
+                } => {
+                    let model = usage.model.as_ref()?;
+                    return Some((
+                        model.clone(),
+                        usage.prompt_sent_tokens,
+                        usage.prompt_cached_tokens,
+                        node.parent_id,
+                    ));
+                }
+                _ => {}
+            }
+        }
+        None
     }
 
     fn agent_role_from_log(&self, agent_id: &str) -> Option<String> {
@@ -13658,6 +13752,7 @@ impl Harness {
             if input_tokens.is_some() {
                 conv.context_input_tokens = input_tokens;
                 conv.context_usage_head = conv.head;
+                conv.context_usage_model = model.cloned();
             }
             if cached_tokens.is_some() {
                 conv.context_cached_tokens = cached_tokens;
@@ -13886,6 +13981,16 @@ impl Harness {
             error,
             BackgroundCompletionPromptMode::QueueAndAdvance,
         );
+    }
+
+    fn clear_agent_context_usage(&mut self, cid: &AgentId) {
+        if let Some(conv) = self.agents.get_mut(cid) {
+            conv.context_input_tokens = None;
+            conv.context_usage_head = None;
+            conv.context_usage_model = None;
+            conv.context_cached_tokens = None;
+            conv.context_percent_used = None;
+        }
     }
 
     fn handle_background_tool_cancelled(&mut self, source_id: &str, cancelled: ToolCancelled) {

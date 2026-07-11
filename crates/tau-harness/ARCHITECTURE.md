@@ -461,3 +461,15 @@ background and restore context is false. Interceptors may rewrite sanctioned
 text but cannot change the bit. Missing legacy fields deserialize false.
 Replay considers only true facts after the last completed checkpoint; an
 uncompleted checkpoint remains uncertain and is never automatically resent.
+
+Cold agent rehydration restores context usage only from the latest
+model-qualified durable assistant response on the selected branch and never
+across a later compaction boundary. The producing model travels with the
+runtime usage until provider model discovery can validate it against the
+agent's resolved model. A qualified model that has not been discovered yet is
+unresolved, not mismatched, so staggered provider startup retains it until its
+provider appears; only a confirmed different resolution clears it. Accepted
+compaction and explicit agent model changes also clear the usage, head, model,
+cached-token, and percentage baseline. Consequently the first post-resume
+activation runs the same projected standalone-compaction decision as a live
+agent.

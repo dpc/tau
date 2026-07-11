@@ -148,7 +148,7 @@ impl Harness {
                     self.publish_pending_prompt_for_agent(agent_id, restore_prompt)?;
                 }
                 self.publish_pending_prompt_for_agent(agent_id, prompt)?;
-                self.dispatch_prompt_after_publish_idle(agent_id);
+                self.dispatch_activation_after_publish_idle(agent_id);
                 return Ok(());
             }
         }

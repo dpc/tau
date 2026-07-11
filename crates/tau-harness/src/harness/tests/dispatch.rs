@@ -579,6 +579,38 @@ fn append_seed_agent_event(store: &mut tau_core::AgentStore, event: Event) {
         .expect("append seed event");
 }
 
+fn seed_agent_context_usage(state_dir: &Path, model: Option<&str>, input_tokens: u64) {
+    seed_main_agent_loaded(state_dir);
+    let mut store = tau_core::AgentStore::open(state_dir.join("agents")).expect("agent store");
+    append_seed_agent_event(
+        &mut store,
+        Event::AgentPromptSubmitted(tau_proto::AgentPromptSubmitted {
+            inference_activation: false,
+            agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
+            text: "usage prompt".to_owned(),
+            message_class: tau_proto::PromptMessageClass::User,
+            originator: tau_proto::PromptOriginator::User,
+            submission_source: Default::default(),
+            display_name: None,
+            ctx_id: None,
+        }),
+    );
+    let prompt_id = tau_proto::AgentPromptId::from("ap-main-usage");
+    let mut response = provider_text_response(
+        &prompt_id,
+        tau_proto::AgentId::parse("main").expect("agent id"),
+        "usage response",
+    );
+    response.usage = Some(tau_proto::ProviderTokenUsage {
+        model: model.map(Into::into),
+        prompt_sent_tokens: input_tokens,
+        prompt_cached_tokens: input_tokens / 2,
+        response_received_tokens: 10,
+        stats: Default::default(),
+    });
+    append_seed_agent_event(&mut store, Event::ProviderResponseFinished(response));
+}
+
 fn seed_main_agent_loaded(state_dir: &Path) {
     seed_agent_loaded(state_dir, "s1", "main");
 }
@@ -7706,6 +7738,308 @@ fn manual_compact_appends_trigger_and_dispatches_normal_prompt() {
     h.shutdown().expect("shutdown");
 }
 
+/// Model-qualified durable usage must restore before the first cold-resumed
+/// activation so it runs the same compaction projection as live work.
+#[test]
+fn cold_resume_restores_usage_for_first_activation_compaction_projection() {
+    let td = TempDir::new().expect("tempdir");
+    let state = td.path().join("state");
+    seed_agent_context_usage(&state, Some("test/model"), 900);
+
+    let mut h =
+        quiet_provider_harness_with_start_reason(&state, tau_proto::SessionStartReason::Resume)
+            .expect("resume");
+    enable_remote_compaction_for_test_model(&mut h);
+    let info = h
+        .provider_model_info
+        .get_mut(&"test/model".into())
+        .expect("test model");
+    info.supports_compaction = false;
+    info.supports_standalone_compaction = true;
+    info.standalone_compaction_threshold = Some(900);
+    let cid = ensure_test_user_agent(&mut h);
+    assert_eq!(h.agents[&cid].context_input_tokens, Some(900));
+    assert_eq!(h.agents[&cid].context_cached_tokens, Some(450));
+    assert!(h.agents[&cid].context_usage_head.is_some());
+    assert_eq!(
+        h.agents[&cid].context_usage_model.as_ref(),
+        Some(&tau_proto::ModelId::from("test/model"))
+    );
+    assert_eq!(
+        h.model_for_agent_role(&h.agents[&cid]),
+        Some("test/model".into())
+    );
+    h.agents.get_mut(&cid).expect("agent").context_usage_model = Some("other/model".into());
+    assert!(
+        !h.schedule_standalone_auto_compaction_for_activation(&cid, true, None),
+        "scheduler must fail closed on a stale usage model"
+    );
+    h.agents.get_mut(&cid).expect("agent").context_usage_model = Some("test/model".into());
+
+    h.dispatch_prompt_for_agent(
+        &cid,
+        PendingPrompt::user("first resumed activation".to_owned()),
+    )
+    .expect("dispatch resumed activation");
+
+    assert_eq!(
+        read_nth_prompt_created(&h, 0).operation,
+        tau_proto::PromptOperation::StandaloneCompaction
+    );
+    h.shutdown().expect("shutdown");
+}
+
+/// Staggered provider discovery must preserve a qualified baseline while its
+/// model is unresolved, validate it when that provider appears, and use it for
+/// the first resumed activation's compaction projection.
+#[test]
+fn restored_usage_survives_staggered_provider_discovery() {
+    let td = TempDir::new().expect("tempdir");
+    let state = td.path().join("state");
+    let model_b: tau_proto::ModelId = "provider-b/model".into();
+    seed_agent_context_usage(&state, Some("provider-b/model"), 900);
+    let mut h =
+        quiet_provider_harness_with_start_reason(&state, tau_proto::SessionStartReason::Resume)
+            .expect("resume");
+    let role = h.selected_role.clone();
+    h.available_roles
+        .get_mut(&role)
+        .expect("selected role")
+        .model = Some(model_b.clone());
+    h.rehydrate_agents_from_session();
+    let cid = ensure_test_user_agent(&mut h);
+    assert_eq!(h.agents[&cid].context_input_tokens, Some(900));
+    assert_eq!(h.agents[&cid].context_usage_model.as_ref(), Some(&model_b));
+
+    let base_info = h
+        .provider_model_info
+        .get(&"test/model".into())
+        .expect("test model info")
+        .clone();
+    let mut model_a_info = base_info.clone();
+    model_a_info.id = "provider-a/model".into();
+    h.set_provider_models("provider-a", vec![model_a_info]);
+    assert_eq!(
+        h.agents[&cid].context_input_tokens,
+        Some(900),
+        "unresolved model B must survive provider A discovery"
+    );
+
+    let mut model_b_info = base_info;
+    model_b_info.id = model_b.clone();
+    model_b_info.supports_compaction = false;
+    model_b_info.supports_standalone_compaction = true;
+    model_b_info.standalone_compaction_threshold = Some(900);
+    h.set_provider_models("provider-b", vec![model_b_info]);
+    assert_eq!(h.agents[&cid].context_input_tokens, Some(900));
+    assert_eq!(
+        h.model_for_agent_role(&h.agents[&cid]),
+        Some(model_b.clone())
+    );
+
+    h.dispatch_prompt_for_agent(
+        &cid,
+        PendingPrompt::user("first activation after provider B".to_owned()),
+    )
+    .expect("dispatch first activation");
+    assert_eq!(
+        read_nth_prompt_created(&h, 0).operation,
+        tau_proto::PromptOperation::StandaloneCompaction
+    );
+    h.shutdown().expect("shutdown");
+}
+
+/// Cold replay must not apply usage from an unqualified or different model,
+/// and a live per-agent model change clears already-restored usage.
+#[test]
+fn restored_context_usage_requires_current_model_and_resets_on_model_change() {
+    for model in [None, Some("other/model")] {
+        let td = TempDir::new().expect("tempdir");
+        let state = td.path().join("state");
+        seed_agent_context_usage(&state, model, 900);
+        let mut h =
+            quiet_provider_harness_with_start_reason(&state, tau_proto::SessionStartReason::Resume)
+                .expect("resume");
+        let cid = ensure_test_user_agent(&mut h);
+        assert_eq!(h.agents[&cid].context_input_tokens, None);
+        h.shutdown().expect("shutdown");
+    }
+
+    let td = TempDir::new().expect("tempdir");
+    let state = td.path().join("state");
+    seed_agent_context_usage(&state, Some("test/model"), 900);
+    let mut h =
+        quiet_provider_harness_with_start_reason(&state, tau_proto::SessionStartReason::Resume)
+            .expect("resume");
+    let cid = ensure_test_user_agent(&mut h);
+    assert_eq!(h.agents[&cid].context_input_tokens, Some(900));
+    let alternate: tau_proto::ModelId = "test/alternate".into();
+    let route = h
+        .provider_model_routes
+        .get(&"test/model".into())
+        .expect("test model route")
+        .clone();
+    let mut info = h
+        .provider_model_info
+        .get(&"test/model".into())
+        .expect("test model info")
+        .clone();
+    info.id = alternate.clone();
+    info.default_affinity = -1;
+    h.available_models.push(alternate.clone());
+    h.provider_model_routes.insert(alternate.clone(), route);
+    h.provider_model_info.insert(alternate.clone(), info);
+    h.handle_ui_agent_model_select(tau_proto::UiAgentModelSelect {
+        session_id: h.current_session_id.clone(),
+        target_agent_id: h.agents[&cid]
+            .agent_id
+            .as_deref()
+            .map(crate::parse_agent_id),
+        model: alternate,
+    })
+    .expect("select alternate model");
+    assert_eq!(h.agents[&cid].context_input_tokens, None);
+    assert_eq!(h.agents[&cid].context_usage_head, None);
+    assert_eq!(h.agents[&cid].context_cached_tokens, None);
+    assert_eq!(h.agents[&cid].context_percent_used, None);
+    h.shutdown().expect("shutdown");
+}
+
+/// Role model overrides and fallback deletion must invalidate usage from the
+/// previous resolved model, while an explicit per-agent override remains
+/// authoritative.
+#[test]
+fn role_model_updates_reconcile_loaded_agent_context_usage() {
+    let td = TempDir::new().expect("tempdir");
+    let state = td.path().join("state");
+    seed_agent_context_usage(&state, Some("test/model"), 900);
+    let mut h =
+        quiet_provider_harness_with_start_reason(&state, tau_proto::SessionStartReason::Resume)
+            .expect("resume");
+    let cid = ensure_test_user_agent(&mut h);
+    let role = h.selected_role.clone();
+    let alternate: tau_proto::ModelId = "test/alternate".into();
+    let route = h
+        .provider_model_routes
+        .get(&"test/model".into())
+        .expect("test model route")
+        .clone();
+    let mut info = h
+        .provider_model_info
+        .get(&"test/model".into())
+        .expect("test model info")
+        .clone();
+    info.id = alternate.clone();
+    info.default_affinity = -1;
+    h.available_models.push(alternate.clone());
+    h.provider_model_routes.insert(alternate.clone(), route);
+    h.provider_model_info.insert(alternate.clone(), info);
+
+    h.handle_ui_role_update(tau_proto::UiRoleUpdate {
+        role: role.clone(),
+        action: tau_proto::UiRoleUpdateAction::SetModel {
+            model: Some(alternate.clone()),
+        },
+    })
+    .expect("set role model");
+    assert_eq!(h.agents[&cid].context_input_tokens, None);
+    assert_eq!(h.agents[&cid].context_usage_head, None);
+    assert_eq!(h.agents[&cid].context_usage_model, None);
+    assert_eq!(h.agents[&cid].context_cached_tokens, None);
+    assert_eq!(h.agents[&cid].context_percent_used, None);
+    h.rehydrate_agents_from_session();
+    assert_eq!(
+        h.agents[&cid].context_input_tokens, None,
+        "same-daemon rehydrate must not revive usage from the prior model"
+    );
+
+    {
+        let conv = h.agents.get_mut(&cid).expect("agent");
+        conv.context_input_tokens = Some(800);
+        conv.context_usage_head = conv.head;
+        conv.context_usage_model = Some(alternate.clone());
+        conv.context_cached_tokens = Some(400);
+        conv.context_percent_used = Some(80);
+    }
+    h.handle_ui_role_update(tau_proto::UiRoleUpdate {
+        role: role.clone(),
+        action: tau_proto::UiRoleUpdateAction::Delete,
+    })
+    .expect("delete role override");
+    assert_eq!(h.agents[&cid].context_input_tokens, None);
+
+    {
+        let conv = h.agents.get_mut(&cid).expect("agent");
+        conv.model_override = Some("test/model".into());
+        conv.context_input_tokens = Some(700);
+        conv.context_usage_head = conv.head;
+        conv.context_usage_model = Some("test/model".into());
+        conv.context_cached_tokens = Some(350);
+        conv.context_percent_used = Some(70);
+    }
+    h.handle_ui_role_update(tau_proto::UiRoleUpdate {
+        role,
+        action: tau_proto::UiRoleUpdateAction::SetModel {
+            model: Some(alternate),
+        },
+    })
+    .expect("set role model under explicit agent override");
+    assert_eq!(h.agents[&cid].context_input_tokens, Some(700));
+    assert_eq!(
+        h.agents[&cid].context_usage_model.as_ref(),
+        Some(&tau_proto::ModelId::from("test/model"))
+    );
+    h.shutdown().expect("shutdown");
+}
+
+/// Any accepted compaction boundary invalidates prior usage both live and on
+/// the next cold replay because the replacement has a new token baseline.
+#[test]
+fn agent_compacted_resets_live_and_restored_context_usage() {
+    let td = TempDir::new().expect("tempdir");
+    let state = td.path().join("state");
+    seed_agent_context_usage(&state, Some("test/model"), 900);
+    {
+        let mut h =
+            quiet_provider_harness_with_start_reason(&state, tau_proto::SessionStartReason::Resume)
+                .expect("resume");
+        let cid = ensure_test_user_agent(&mut h);
+        assert_eq!(h.agents[&cid].context_input_tokens, Some(900));
+        h.publish_for_agent(
+            &cid,
+            Event::AgentCompacted(tau_proto::AgentCompacted {
+                agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
+                transaction_id: None,
+                cut: None,
+                suffix_end: None,
+                compact_prompt_id: None,
+                model: None,
+                operation: None,
+                replacement_window: vec![ContextItem::Message(MessageItem {
+                    role: ContextRole::Assistant,
+                    content: vec![ContentPart::Text {
+                        text: "replacement".to_owned(),
+                    }],
+                    phase: None,
+                    responses_raw_json: None,
+                })],
+            }),
+        );
+        assert_eq!(h.agents[&cid].context_input_tokens, None);
+        assert_eq!(h.agents[&cid].context_usage_head, None);
+        h.shutdown().expect("shutdown");
+    }
+    wait_for_session_unlock(&state, "s1");
+
+    let mut h =
+        quiet_provider_harness_with_start_reason(&state, tau_proto::SessionStartReason::Resume)
+            .expect("resume after compact");
+    let cid = ensure_test_user_agent(&mut h);
+    assert_eq!(h.agents[&cid].context_input_tokens, None);
+    assert_eq!(h.agents[&cid].context_cached_tokens, None);
+    h.shutdown().expect("shutdown");
+}
+
 /// A standalone-capable model must dispatch an explicit compact operation and
 /// accept its validated output as exactly one replacement-window boundary.
 #[test]
@@ -7957,6 +8291,7 @@ fn standalone_compaction_retry_preserves_owed_and_later_activations() {
     let cid = ensure_test_user_agent(&mut h);
     let agent_id = h.agents[&cid].agent_id.clone().expect("durable agent");
     h.agents.get_mut(&cid).expect("agent").context_input_tokens = Some(900);
+    h.agents.get_mut(&cid).expect("agent").context_usage_model = Some("test/model".into());
 
     h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("activation A".to_owned()))
         .expect("start automatic compact");
@@ -8028,6 +8363,7 @@ fn standalone_auto_compaction_schedules_at_threshold() {
     info.standalone_compaction_threshold = Some(900);
     let cid = ensure_test_user_agent(&mut h);
     h.agents.get_mut(&cid).expect("agent").context_input_tokens = Some(900);
+    h.agents.get_mut(&cid).expect("agent").context_usage_model = Some("test/model".into());
     h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("queued once".to_owned()))
         .expect("schedule compact before user turn");
     let compact = read_nth_prompt_created(&h, 0);
@@ -8094,6 +8430,7 @@ fn readiness_deferred_activation_rechecks_projected_compaction() {
     let cid = ensure_test_user_agent(&mut h);
     let agent_id = h.agents[&cid].agent_id.clone().expect("durable agent");
     h.agents.get_mut(&cid).expect("agent").context_input_tokens = Some(100);
+    h.agents.get_mut(&cid).expect("agent").context_usage_model = Some("test/model".into());
     h.pending_agent_context_ready.insert(
         crate::parse_agent_id(&agent_id),
         std::collections::HashSet::from([tau_proto::ConnectionId::from("context-provider")]),
