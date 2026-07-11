@@ -498,3 +498,12 @@ the UI is the only consumer. Components without a terminal silently no-op.
 ## Provider repetition stop reason
 
 `provider.response_finished.stop_reason` may be `repetition_detected` when a provider aborts a tight exact streaming loop. Such responses have no tool request, use empty `output_items`, and carry a bounded display-only `error`; clients should treat prior transient deltas as cleared when the preceding status update has `clear_response: true`.
+- **`agent.standalone_compaction_started`** — Harness-owned durable transaction
+  start capturing the immutable branch cut, optional resume watermark, model,
+  originator, and explicit retry predecessor.
+- **`agent.standalone_compaction_failed`** — Harness-owned terminal transaction
+  failure with a safe categorical reason and retained resume obligation. Raw
+  provider diagnostics are deliberately excluded.
+- **`agent.inference_dispatch_started`** — Durable checkpoint committed before
+  provider inference dispatch. Its `through` head acknowledges only activation
+  nodes represented by that immutable prompt snapshot.

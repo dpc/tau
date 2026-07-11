@@ -426,3 +426,11 @@ schemas are not sent over UI/control channels unnecessarily.
 ## Transient reply presentation
 
 Durable envelopes retain source-owned `reply_path` for audit. Prompt assembly does not mutate that fact; it separately projects `reply` only when the route belongs to the target agent and the internally identified tool remains in the effective prompt snapshot, then uses its model-visible alias.
+Standalone compaction is transaction-driven rather than inferred from a
+transcript-tail trigger. A durable start captures an immutable branch cut;
+only its post-commit reaction sends one cut-local compact request with a
+synthetic trigger. Success installs a cut/suffix-bearing boundary so facts
+committed during compaction survive after the replacement window. Terminal
+failure records a safe durable category, blocks the owed activation from
+automatic retry, and leaves the agent addressable for explicit recovery.
+Inference resumes only after a durable dispatch watermark commits.

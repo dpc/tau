@@ -1202,6 +1202,17 @@ impl AgentTree {
             Event::AgentCompactionTriggered(triggered) if triggered.agent_id == self.agent_id => {
                 Some(Ok(()))
             }
+            Event::AgentStandaloneCompactionStarted(started)
+                if started.agent_id == self.agent_id =>
+            {
+                Some(Ok(()))
+            }
+            Event::AgentStandaloneCompactionFailed(failed) if failed.agent_id == self.agent_id => {
+                Some(Ok(()))
+            }
+            Event::AgentInferenceDispatchStarted(started) if started.agent_id == self.agent_id => {
+                Some(Ok(()))
+            }
             Event::AgentCompacted(compacted) if compacted.agent_id == self.agent_id => Some(
                 tau_proto::validate_compaction_window(&compacted.replacement_window)
                     .map_err(|error| {

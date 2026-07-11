@@ -24,6 +24,54 @@ use tau_proto::{
 
 use crate::dedup::ResultDedupMap;
 
+/// Runtime ownership state for standalone compaction.
+#[derive(Clone, Debug, Default)]
+pub(crate) enum StandaloneCompactionState {
+    /// No standalone transaction is active or recovery-blocked.
+    #[default]
+    None,
+    /// One durable transaction owns the compact provider request.
+    Running {
+        /// Durable transaction id.
+        id: tau_proto::CompactionTransactionId,
+        /// Immutable compact request cut.
+        cut: tau_proto::AgentHead,
+        /// Activation still owed inference.
+        resume_through: Option<tau_proto::AgentHead>,
+        /// Provider prompt id after materialization.
+        compact_prompt_id: Option<AgentPromptId>,
+    },
+    /// Terminal failure retained its recovery obligation.
+    Blocked {
+        /// Failed transaction id.
+        failed_id: tau_proto::CompactionTransactionId,
+        /// Failed transaction cut.
+        cut: tau_proto::AgentHead,
+        /// Activation still owed inference.
+        resume_through: Option<tau_proto::AgentHead>,
+    },
+}
+
+impl StandaloneCompactionState {
+    /// Returns the durable recovery details when inference is blocked.
+    pub(crate) fn blocked_recovery(
+        &self,
+    ) -> Option<(
+        &tau_proto::CompactionTransactionId,
+        tau_proto::AgentHead,
+        Option<tau_proto::AgentHead>,
+    )> {
+        match self {
+            Self::Blocked {
+                failed_id,
+                cut,
+                resume_through,
+            } => Some((failed_id, *cut, *resume_through)),
+            Self::None | Self::Running { .. } => None,
+        }
+    }
+}
+
 /// Per-agent turn state. There is no global execution slot — each loaded agent
 /// tracks whether its next prompt can be dispatched.
 #[derive(Clone, Debug, Default)]
@@ -82,6 +130,10 @@ pub(crate) struct Agent {
     pub(crate) pending_prompts: VecDeque<PendingPrompt>,
     /// Canonical incoming facts waiting to activate one coalesced model turn.
     pub(crate) pending_message_wakes: VecDeque<tau_proto::MessageId>,
+    /// Whether terminal teardown has begun and new work must be rejected.
+    pub(crate) terminating: bool,
+    /// Durable standalone-compaction runtime projection.
+    pub(crate) standalone_compaction: StandaloneCompactionState,
     /// Pending user/control-plane request to stop this conversation at
     /// the next stable turn boundary. Stored like queued prompts so
     /// races between provider responses and UI cancel events are
@@ -155,6 +207,8 @@ pub(crate) struct Agent {
     /// Most recent input-token count this agent's agent
     /// reported on a finished response. Used for generic agent stats snapshots.
     pub(crate) context_input_tokens: Option<u64>,
+    /// Transcript head represented by `context_input_tokens`.
+    pub(crate) context_usage_head: Option<NodeId>,
     /// Most recent cached input-token count this agent's provider reported on
     /// a finished response.
     pub(crate) context_cached_tokens: Option<u64>,
@@ -391,6 +445,8 @@ impl Agent {
             in_flight_prompt: None,
             pending_prompts: VecDeque::new(),
             pending_message_wakes: VecDeque::new(),
+            terminating: false,
+            standalone_compaction: StandaloneCompactionState::None,
             pending_cancel: None,
             last_prompt_id: None,
             next_prompt_index: 0,
@@ -413,6 +469,7 @@ impl Agent {
             tools_in_flight: 0,
             tools_total: 0,
             context_input_tokens: None,
+            context_usage_head: None,
             context_cached_tokens: None,
             context_percent_used: None,
             result_dedup: ResultDedupMap::new(),

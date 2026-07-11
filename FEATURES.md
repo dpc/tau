@@ -268,6 +268,11 @@ that must be discoverable and model-loadable for a role; `agents`, group, and ro
 requirements are additive. Missing required skills emit a mandatory configuration
 notice and disable the affected role. If the startup/default role is disabled by
 missing required skills, startup fails instead of silently choosing another role.
+
+Standalone-capable models use durable compaction transactions with immutable
+branch cuts. Replacement windows preserve facts committed while compaction is
+running, terminal failures remain explicitly recoverable without automatic retry,
+and resumed inference is checkpointed before provider dispatch.
 Tools start from extension defaults, matching `tool_policy.rules` apply by tag,
 then role overrides run broad-to-specific: disable tags, enable tags, disable
 groups, enable groups, disable tools, enable tools. `tools` remains an explicit

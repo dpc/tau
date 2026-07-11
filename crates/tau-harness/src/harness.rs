@@ -3432,6 +3432,21 @@ impl Harness {
         };
         let agent_prompt_id = prompt.agent_prompt_id.clone();
         let cid = self.prompt_agents.get(&agent_prompt_id).cloned();
+        let failed_compaction = cid.as_ref().and_then(|cid| {
+            self.agents
+                .get(cid)
+                .and_then(|agent| match &agent.standalone_compaction {
+                    crate::agent::StandaloneCompactionState::Running {
+                        id,
+                        cut,
+                        resume_through,
+                        compact_prompt_id: Some(prompt_id),
+                    } if prompt_id == &agent_prompt_id => {
+                        Some((cid.clone(), id.clone(), *cut, *resume_through))
+                    }
+                    _ => None,
+                })
+        });
         if let Some(cid) = cid.as_ref() {
             let prompt_context = self.agents.get(cid).map(|conv| {
                 (
@@ -3484,6 +3499,21 @@ impl Harness {
         self.emit_harness_failure(&format!(
             "provider prompt route failed for `{agent_prompt_id}` via `{provider_connection_id}`: {reason}"
         ));
+        if let Some((cid, transaction_id, cut, resume_through)) = failed_compaction {
+            self.publish_for_agent(
+                &cid,
+                Event::AgentStandaloneCompactionFailed(
+                    tau_proto::AgentStandaloneCompactionFailed {
+                        agent_id: prompt.agent_id.clone(),
+                        transaction_id,
+                        cut,
+                        reason: tau_proto::StandaloneCompactionFailureReason::RouteFailed,
+                        resume_through,
+                    },
+                ),
+            );
+            return;
+        }
         self.try_advance_queue();
     }
 
@@ -3677,6 +3707,115 @@ impl Harness {
     /// dispatch depends on is handled inside `commit_event` for any
     /// publish stamped via `publish_event_for_agent`.
     fn react_to_committed_event(&mut self, event: &Event) {
+        if let Event::AgentStandaloneCompactionStarted(started) = event {
+            let cid = self.runtime_agent_id_for_target_agent(Some(started.agent_id.as_str()));
+            if let Some(cid) = cid {
+                if let Some(agent) = self.agents.get_mut(&cid) {
+                    agent.standalone_compaction =
+                        crate::agent::StandaloneCompactionState::Running {
+                            id: started.transaction_id.clone(),
+                            cut: started.cut,
+                            resume_through: started.resume_through,
+                            compact_prompt_id: None,
+                        };
+                }
+                self.dispatch_prompt_after_publish_idle(&cid);
+            }
+        }
+        if let Event::AgentStandaloneCompactionFailed(failed) = event
+            && let Some(cid) =
+                self.runtime_agent_id_for_target_agent(Some(failed.agent_id.as_str()))
+        {
+            if let Some(agent) = self.agents.get_mut(&cid) {
+                agent.standalone_compaction = crate::agent::StandaloneCompactionState::Blocked {
+                    failed_id: failed.transaction_id.clone(),
+                    cut: failed.cut,
+                    resume_through: failed.resume_through,
+                };
+                agent.in_flight_prompt = None;
+            }
+            self.set_agent_turn_state(&cid, AgentTurnState::Idle);
+            self.try_advance_queue();
+        }
+        if let Event::AgentCompacted(compacted) = event
+            && compacted.transaction_id.is_some()
+            && let Some(cid) =
+                self.runtime_agent_id_for_target_agent(Some(compacted.agent_id.as_str()))
+        {
+            let resume =
+                self.agents
+                    .get(&cid)
+                    .and_then(|agent| match &agent.standalone_compaction {
+                        crate::agent::StandaloneCompactionState::Running {
+                            resume_through, ..
+                        } => *resume_through,
+                        _ => None,
+                    });
+            if let Some(agent) = self.agents.get_mut(&cid) {
+                agent.standalone_compaction = crate::agent::StandaloneCompactionState::None;
+                agent.in_flight_prompt = None;
+                agent.context_input_tokens = None;
+                agent.context_cached_tokens = None;
+                agent.context_percent_used = None;
+            }
+            self.set_agent_turn_state(&cid, AgentTurnState::Idle);
+            if resume.is_some() {
+                let (agent_prompt_id, through) = self
+                    .agents
+                    .get(&cid)
+                    .map(|agent| {
+                        let durable_agent_id = agent.agent_id.as_deref().unwrap_or(cid.as_ref());
+                        (
+                            tau_proto::AgentPromptId::from(format!(
+                                "ap-{durable_agent_id}-{}",
+                                agent.next_prompt_index
+                            )),
+                            agent
+                                .head
+                                .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node),
+                        )
+                    })
+                    .expect("compacted agent still exists");
+                self.publish_for_agent(
+                    &cid,
+                    Event::AgentInferenceDispatchStarted(
+                        tau_proto::AgentInferenceDispatchStarted {
+                            agent_id: compacted.agent_id.clone(),
+                            transaction_id: compacted.transaction_id.clone(),
+                            agent_prompt_id,
+                            through,
+                        },
+                    ),
+                );
+            } else {
+                self.try_advance_queue();
+            }
+        }
+        if let Event::AgentInferenceDispatchStarted(started) = event
+            && let Some(cid) =
+                self.runtime_agent_id_for_target_agent(Some(started.agent_id.as_str()))
+        {
+            if let Some(agent) = self.agents.get_mut(&cid) {
+                agent.pending_message_wakes.clear();
+            }
+            self.dispatch_prompt_after_publish_idle(&cid);
+        }
+        if let Event::SessionAgentUnloaded(unloaded) = event
+            && let Some(cid) = self
+                .agents
+                .iter()
+                .find(|(_, agent)| {
+                    agent.agent_id.as_deref() == Some(unloaded.agent_id.as_str())
+                        && agent.session_id == unloaded.session_id
+                })
+                .map(|(cid, _)| cid.clone())
+        {
+            self.shown_tool_failure_examples
+                .retain(|(agent_id, _, _)| agent_id != &cid);
+            self.agent_routes.remove(unloaded.agent_id.as_str());
+            self.stopped_agent_ids.insert(unloaded.agent_id.to_string());
+            self.agents.remove(&cid);
+        }
         if let Event::AgentMessageReceived(message) = event {
             self.deliver_agent_message(message);
         }
@@ -4126,6 +4265,9 @@ impl Harness {
             Event::AgentPromptStarted(prompt) => Some(prompt.agent_id.clone()),
             Event::AgentCompactionTriggered(triggered) => Some(triggered.agent_id.clone()),
             Event::AgentCompacted(compacted) => Some(compacted.agent_id.clone()),
+            Event::AgentStandaloneCompactionStarted(started) => Some(started.agent_id.clone()),
+            Event::AgentStandaloneCompactionFailed(failed) => Some(failed.agent_id.clone()),
+            Event::AgentInferenceDispatchStarted(started) => Some(started.agent_id.clone()),
             Event::AgentUserMessageInjected(injected) => Some(injected.agent_id.clone()),
             Event::AgentMessageSent(message) => Some(message.sender_id.clone()),
             Event::AgentMessageReceived(message) => Some(message.recipient_id.clone()),
@@ -9063,6 +9205,36 @@ impl Harness {
             self.emit_info("nothing to compact yet");
             return;
         };
+        let standalone_model = self.model_for_agent_role(conv).filter(|model| {
+            self.provider_model_info
+                .get(model)
+                .is_some_and(|info| info.supports_standalone_compaction)
+        });
+        if let Some(model) = standalone_model {
+            let transaction_id =
+                tau_proto::CompactionTransactionId::parse(format!("ct-{}", conv.next_prompt_index))
+                    .expect("generated compaction transaction id is valid");
+            self.publish_for_agent(
+                &cid,
+                Event::AgentStandaloneCompactionStarted(
+                    tau_proto::AgentStandaloneCompactionStarted {
+                        agent_id: crate::parse_agent_id(&agent_id),
+                        transaction_id,
+                        cut: conv
+                            .head
+                            .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node),
+                        resume_through: None,
+                        model,
+                        originator: conv.originator.clone(),
+                        supersedes: conv
+                            .standalone_compaction
+                            .blocked_recovery()
+                            .map(|(failed_id, _, _)| failed_id.clone()),
+                    },
+                ),
+            );
+            return;
+        }
         self.publish_for_agent(
             &cid,
             Event::AgentCompactionTriggered(tau_proto::AgentCompactionTriggered {
@@ -9123,6 +9295,14 @@ impl Harness {
     /// Inserts one automatic standalone compaction boundary before inference
     /// when the last accepted context usage reaches the role/model threshold.
     pub(crate) fn schedule_standalone_auto_compaction(&mut self, cid: &AgentId) -> bool {
+        self.schedule_standalone_auto_compaction_for_activation(cid, false)
+    }
+
+    fn schedule_standalone_auto_compaction_for_activation(
+        &mut self,
+        cid: &AgentId,
+        committed_activation: bool,
+    ) -> bool {
         let Some(conv) = self.agents.get(cid) else {
             return false;
         };
@@ -9151,27 +9331,85 @@ impl Harness {
             tau_config::settings::RoleCompaction::Threshold(threshold) => Some(threshold),
             tau_config::settings::RoleCompaction::Disabled => None,
         };
-        if threshold.is_none_or(|threshold| input_tokens < threshold) {
+        if !matches!(
+            conv.standalone_compaction,
+            crate::agent::StandaloneCompactionState::None
+        ) {
             return false;
         }
         let Some(agent_id) = conv.agent_id.clone() else {
             return false;
         };
-        let already_triggered = self
-            .agent_store
-            .agent(&agent_id)
-            .and_then(|tree| tree.branch_from(conv.head).last().copied())
-            .is_some_and(|entry| matches!(entry, tau_core::AgentEntry::CompactionTrigger { .. }));
-        if already_triggered {
+        let delta_bytes = self.agent_store.agent(&agent_id).map_or(0, |tree| {
+            let branch_ids = tree.branch_node_ids_from(conv.head);
+            conv.context_usage_head
+                .and_then(|usage_head| branch_ids.iter().position(|node_id| *node_id == usage_head))
+                .map_or(0, |usage_index| {
+                    branch_ids[usage_index.saturating_add(1)..]
+                        .iter()
+                        .filter_map(|node_id| tree.node(*node_id))
+                        .map(|node| {
+                            serde_json::to_vec(&node.entry)
+                                .map_or(u64::MAX, |rendered| rendered.len() as u64)
+                        })
+                        .fold(0_u64, u64::saturating_add)
+                })
+        });
+        let control_reserve = (info.context_window / 100).max(4096);
+        let projected_tokens = input_tokens
+            .saturating_add(delta_bytes)
+            .saturating_add(control_reserve);
+        if threshold.is_none_or(|threshold| projected_tokens < threshold) {
             return false;
         }
+        let resume_through = (committed_activation || !conv.pending_message_wakes.is_empty())
+            .then_some(
+                conv.head
+                    .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node),
+            );
+        let cut = resume_through.map_or_else(
+            || {
+                conv.head
+                    .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node)
+            },
+            |_| {
+                self.agent_store
+                    .agent(&agent_id)
+                    .and_then(|tree| {
+                        let wake_ids: std::collections::HashSet<_> =
+                            conv.pending_message_wakes.iter().collect();
+                        tree.branch_node_ids_from(conv.head)
+                            .into_iter()
+                            .find(|node_id| {
+                                tree.node(*node_id).is_some_and(|node| {
+                                    matches!(
+                                        &node.entry,
+                                        tau_core::AgentEntry::MessageEnvelope { item }
+                                            if wake_ids.contains(&item.envelope.message_id)
+                                    )
+                                })
+                            })
+                            .or(conv.head)
+                            .and_then(|node_id| tree.node(node_id))
+                            .and_then(|node| node.parent_id)
+                    })
+                    .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node)
+            },
+        );
         let originator = conv.originator.clone();
+        let transaction_id =
+            tau_proto::CompactionTransactionId::parse(format!("ct-{}", conv.next_prompt_index))
+                .expect("generated compaction transaction id is valid");
         self.publish_for_agent(
             cid,
-            Event::AgentCompactionTriggered(tau_proto::AgentCompactionTriggered {
+            Event::AgentStandaloneCompactionStarted(tau_proto::AgentStandaloneCompactionStarted {
                 agent_id: crate::parse_agent_id(&agent_id),
+                transaction_id,
+                cut,
+                resume_through,
+                model,
                 originator,
-                resume_inference: true,
+                supersedes: None,
             }),
         );
         true
@@ -10759,23 +10997,35 @@ impl Harness {
         }
     }
 
-    fn remove_agent(&mut self, cid: &AgentId) -> Option<Agent> {
-        self.shown_tool_failure_examples
-            .retain(|(agent_id, _, _)| agent_id != cid);
-        if let Some(conv) = self.agents.get(cid)
-            && let Some(agent_id) = conv.agent_id.clone()
-        {
-            let session_id = conv.session_id.clone();
-            self.unload_agent_from_session_if_loaded(&session_id, &agent_id);
+    fn remove_agent(&mut self, cid: &AgentId) {
+        let Some((session_id, agent_id)) = self.agents.get_mut(cid).and_then(|conv| {
+            if conv.terminating {
+                return None;
+            }
+            conv.terminating = true;
+            conv.pending_prompts.clear();
+            conv.pending_message_wakes.clear();
+            conv.standalone_compaction = crate::agent::StandaloneCompactionState::None;
+            conv.agent_id
+                .clone()
+                .map(|agent_id| (conv.session_id.clone(), agent_id))
+        }) else {
+            return;
+        };
+        if !self.unload_agent_from_session_if_loaded(&session_id, &agent_id) {
             self.agent_routes.remove(&agent_id);
             self.stopped_agent_ids.insert(agent_id);
+            self.agents.remove(cid);
         }
-        self.agents.remove(cid)
     }
 
-    fn unload_agent_from_session_if_loaded(&mut self, session_id: &SessionId, agent_id: &str) {
+    fn unload_agent_from_session_if_loaded(
+        &mut self,
+        session_id: &SessionId,
+        agent_id: &str,
+    ) -> bool {
         if session_id != &self.current_session_id {
-            return;
+            return false;
         }
         let agent_id_proto: tau_proto::AgentId = crate::parse_agent_id(agent_id);
         let already_loaded = self.session_loaded_agents.contains(&agent_id_proto)
@@ -10798,6 +11048,9 @@ impl Harness {
                 }),
             );
             self.session_loaded_agents.remove(&agent_id_proto);
+            true
+        } else {
+            false
         }
     }
 
@@ -10853,12 +11106,71 @@ impl Harness {
             let role = self.agent_role_from_log(agent_id.as_str());
             let originator = self.agent_originator_from_log(agent_id.as_str());
             let persistence = self.agent_store.agent_persistence(agent_id.as_str());
+            let restored_compaction = self
+                .agent_store
+                .agent_events(agent_id.as_str())
+                .ok()
+                .map(|events| {
+                    let mut running = None;
+                    let mut blocked = None;
+                    let mut last_success_cut = None;
+                    for record in events {
+                        match record.event {
+                            Event::AgentStandaloneCompactionStarted(started) => {
+                                running = Some(started);
+                                blocked = None;
+                            }
+                            Event::AgentStandaloneCompactionFailed(failed) => {
+                                if running.as_ref().is_some_and(|started| {
+                                    started.transaction_id == failed.transaction_id
+                                }) {
+                                    running = None;
+                                }
+                                blocked = Some((
+                                    failed.transaction_id,
+                                    failed.cut,
+                                    failed.resume_through,
+                                ));
+                            }
+                            Event::AgentCompacted(compacted) => {
+                                last_success_cut = compacted.cut;
+                                if compacted.transaction_id.as_ref().is_some_and(|id| {
+                                    running
+                                        .as_ref()
+                                        .is_some_and(|started| &started.transaction_id == id)
+                                }) {
+                                    running = None;
+                                    blocked = None;
+                                }
+                            }
+                            Event::AgentInferenceDispatchStarted(checkpoint) => {
+                                if let Some(transaction_id) = checkpoint.transaction_id {
+                                    blocked = Some((
+                                        transaction_id,
+                                        last_success_cut.unwrap_or(tau_proto::AgentHead::Root),
+                                        Some(checkpoint.through),
+                                    ));
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    (running, blocked)
+                })
+                .unwrap_or_default();
             if let Some(conv) = self.agents.get_mut(&cid) {
                 conv.agent_id = Some(agent_id_string.clone());
                 conv.head = head;
                 conv.role = role.clone();
                 conv.display_name = display_name.clone();
                 conv.persistence = persistence;
+                if let Some((failed_id, cut, resume_through)) = restored_compaction.1.clone() {
+                    conv.standalone_compaction = crate::agent::StandaloneCompactionState::Blocked {
+                        failed_id,
+                        cut,
+                        resume_through,
+                    };
+                }
             } else {
                 let mut conv = Agent::new(
                     cid.clone(),
@@ -10871,10 +11183,32 @@ impl Harness {
                 conv.role = role.clone();
                 conv.display_name = display_name.clone();
                 conv.persistence = persistence;
+                if let Some((failed_id, cut, resume_through)) = restored_compaction.1.clone() {
+                    conv.standalone_compaction = crate::agent::StandaloneCompactionState::Blocked {
+                        failed_id,
+                        cut,
+                        resume_through,
+                    };
+                }
                 self.agents.insert(cid.clone(), conv);
             }
-            self.agent_routes.insert(agent_id_string.clone(), cid);
+            self.agent_routes
+                .insert(agent_id_string.clone(), cid.clone());
             self.session_loaded_agents.insert(agent_id.clone());
+            if let Some(started) = restored_compaction.0 {
+                self.publish_for_agent(
+                    &cid,
+                    Event::AgentStandaloneCompactionFailed(
+                        tau_proto::AgentStandaloneCompactionFailed {
+                            agent_id: started.agent_id,
+                            transaction_id: started.transaction_id,
+                            cut: started.cut,
+                            reason: tau_proto::StandaloneCompactionFailureReason::Interrupted,
+                            resume_through: started.resume_through,
+                        },
+                    ),
+                );
+            }
         }
     }
 
@@ -11309,7 +11643,18 @@ impl Harness {
         // conversation lives". Reading from `conv.head` keeps the
         // assembled prompt scoped to this agent's history and
         // prevents orphan ToolUse blocks from cross-branch state.
-        let head = conv.head;
+        let compaction_transaction = match &conv.standalone_compaction {
+            crate::agent::StandaloneCompactionState::Running {
+                id,
+                cut,
+                resume_through,
+                ..
+            } => Some((id.clone(), *cut, *resume_through)),
+            _ => None,
+        };
+        let head = compaction_transaction
+            .as_ref()
+            .map_or(conv.head, |(_, cut, _)| cut.as_option());
 
         let agent_id_for_tree = conv.agent_id.clone();
         let tree = agent_id_for_tree
@@ -11327,23 +11672,19 @@ impl Harness {
             .unwrap_or_else(|| crate::prompt::AssembledPromptContext {
                 context: tau_proto::PromptContext::default(),
             });
-        let context = prompt_context.context;
-        let standalone_trigger = tree
-            .and_then(|tree| tree.branch_from(head).last().copied())
-            .and_then(|entry| match entry {
-                tau_core::AgentEntry::CompactionTrigger { resume_inference } => {
-                    Some(*resume_inference)
-                }
-                _ => None,
-            })
-            .filter(|_| {
-                self.provider_model_info
-                    .get(&model)
-                    .is_some_and(|info| info.supports_standalone_compaction)
+        let mut context = prompt_context.context;
+        if compaction_transaction.is_some() {
+            context.blocks.push(tau_proto::ContextBlock::UserInput(
+                tau_proto::UserInputBlock {
+                    items: vec![ContextItem::CompactionTrigger],
+                },
+            ));
+        }
+        let operation = compaction_transaction
+            .as_ref()
+            .map_or(tau_proto::PromptOperation::Inference, |_| {
+                tau_proto::PromptOperation::StandaloneCompaction
             });
-        let operation = standalone_trigger.map_or(tau_proto::PromptOperation::Inference, |_| {
-            tau_proto::PromptOperation::StandaloneCompaction
-        });
         let tools = self.tool_definitions_from_specs(&tool_specs);
         let durable_agent_id = agent_id_for_tree.as_deref().map(crate::parse_agent_id);
         let system_prompt =
@@ -11363,6 +11704,12 @@ impl Harness {
         let ctx_id = self.agents.get_mut(cid).and_then(|c| c.next_ctx_id.take());
         if let Some(c) = self.agents.get_mut(cid) {
             c.in_flight_prompt = Some(agent_prompt_id.clone());
+            if let crate::agent::StandaloneCompactionState::Running {
+                compact_prompt_id, ..
+            } = &mut c.standalone_compaction
+            {
+                *compact_prompt_id = Some(agent_prompt_id.clone());
+            }
         }
         self.set_agent_turn_state(
             cid,
@@ -11376,7 +11723,12 @@ impl Harness {
             .insert(agent_prompt_id.clone(), model.clone());
         self.prompt_operations.insert(
             agent_prompt_id.clone(),
-            (operation, standalone_trigger.unwrap_or(false)),
+            (
+                operation,
+                compaction_transaction
+                    .as_ref()
+                    .is_some_and(|(_, _, resume)| resume.is_some()),
+            ),
         );
         self.prompt_tool_specs
             .insert(agent_prompt_id.clone(), tool_specs);
@@ -11995,7 +12347,16 @@ impl Harness {
             return Ok(());
         };
         self.assign_finished_response_agent_id(&cid, &mut response);
-        if self.discard_finished_response_if_stale(&cid, &response) {
+        let active_compaction_response = self.agents.get(&cid).is_some_and(|agent| {
+            matches!(
+                &agent.standalone_compaction,
+                crate::agent::StandaloneCompactionState::Running {
+                    compact_prompt_id: Some(prompt_id),
+                    ..
+                } if prompt_id == &response.agent_prompt_id
+            )
+        });
+        if !active_compaction_response && self.discard_finished_response_if_stale(&cid, &response) {
             return Ok(());
         }
 
@@ -12009,7 +12370,18 @@ impl Harness {
             .prompt_operations
             .remove(&response.agent_prompt_id)
             .unwrap_or_default();
-        if prompt_operation.0 == tau_proto::PromptOperation::StandaloneCompaction {
+        let runtime_standalone = self.agents.get(&cid).is_some_and(|agent| {
+            matches!(
+                &agent.standalone_compaction,
+                crate::agent::StandaloneCompactionState::Running {
+                    compact_prompt_id: Some(prompt_id),
+                    ..
+                } if prompt_id == &response.agent_prompt_id
+            )
+        });
+        if prompt_operation.0 == tau_proto::PromptOperation::StandaloneCompaction
+            || runtime_standalone
+        {
             let valid = response.error.is_none()
                 && response.stop_reason == ProviderStopReason::EndTurn
                 && tau_proto::validate_compaction_window(&response.output_items).is_ok();
@@ -12075,27 +12447,46 @@ impl Harness {
         response: &ProviderResponseFinished,
         source: Option<&str>,
     ) {
+        let Some((transaction_id, cut, compact_prompt_id)) =
+            self.agents
+                .get(cid)
+                .and_then(|agent| match &agent.standalone_compaction {
+                    crate::agent::StandaloneCompactionState::Running {
+                        id,
+                        cut,
+                        compact_prompt_id,
+                        ..
+                    } => Some((id.clone(), *cut, compact_prompt_id.clone())),
+                    _ => None,
+                })
+        else {
+            self.emit_info("ignoring standalone compaction response without an active transaction");
+            return;
+        };
+        if compact_prompt_id.as_ref() != Some(&response.agent_prompt_id) {
+            self.emit_info(
+                "ignoring standalone compaction response with mismatched transaction prompt",
+            );
+            return;
+        }
+        let suffix_end = self
+            .agents
+            .get(cid)
+            .and_then(|agent| agent.head)
+            .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node);
         self.publish_for_agent_from(
             cid,
             source,
             Event::AgentCompacted(tau_proto::AgentCompacted {
                 agent_id: response.agent_id.clone(),
-                transaction_id: None,
-                cut: None,
-                suffix_end: None,
+                transaction_id: Some(transaction_id),
+                cut: Some(cut),
+                suffix_end: Some(suffix_end),
                 replacement_window: response.output_items.clone(),
             }),
         );
         self.clear_finished_response_prompt_route(&response.agent_prompt_id);
         self.clear_prompt_tool_snapshot(&response.agent_prompt_id);
-        if let Some(conv) = self.agents.get_mut(cid) {
-            conv.in_flight_prompt = None;
-            conv.context_input_tokens = None;
-            conv.context_cached_tokens = None;
-            conv.context_percent_used = None;
-        }
-        self.set_agent_turn_state(cid, AgentTurnState::Idle);
-        self.try_advance_queue();
     }
 
     fn reject_standalone_compaction(&mut self, cid: &AgentId, response: &ProviderResponseFinished) {
@@ -12103,13 +12494,43 @@ impl Harness {
             "provider returned an invalid standalone compaction window for agent_prompt_id={}",
             response.agent_prompt_id
         ));
+        let transaction =
+            self.agents
+                .get(cid)
+                .and_then(|agent| match &agent.standalone_compaction {
+                    crate::agent::StandaloneCompactionState::Running {
+                        id,
+                        cut,
+                        resume_through,
+                        compact_prompt_id,
+                    } if compact_prompt_id.as_ref() == Some(&response.agent_prompt_id) => {
+                        Some((id.clone(), *cut, *resume_through))
+                    }
+                    _ => None,
+                });
+        let Some((transaction_id, cut, resume_through)) = transaction else {
+            return;
+        };
         self.clear_finished_response_prompt_route(&response.agent_prompt_id);
         self.clear_prompt_tool_snapshot(&response.agent_prompt_id);
-        if let Some(conv) = self.agents.get_mut(cid) {
-            conv.in_flight_prompt = None;
-        }
-        self.set_agent_turn_state(cid, AgentTurnState::Idle);
-        self.try_advance_queue();
+        let reason = if response.error.is_some() {
+            tau_proto::StandaloneCompactionFailureReason::ProviderError
+        } else {
+            tau_proto::StandaloneCompactionFailureReason::InvalidWindow
+        };
+        self.emit_info_important(&format!(
+            "standalone compaction failed for agent `{cid}` ({reason:?}); retry with /compact, switch model/role, or rewind"
+        ));
+        self.publish_for_agent(
+            cid,
+            Event::AgentStandaloneCompactionFailed(tau_proto::AgentStandaloneCompactionFailed {
+                agent_id: response.agent_id.clone(),
+                transaction_id,
+                cut,
+                reason,
+                resume_through,
+            }),
+        );
     }
 
     fn clear_malformed_repetition_output(&mut self, response: &mut ProviderResponseFinished) {
@@ -12706,6 +13127,7 @@ impl Harness {
         if let Some(conv) = self.agents.get_mut(cid) {
             if input_tokens.is_some() {
                 conv.context_input_tokens = input_tokens;
+                conv.context_usage_head = conv.head;
             }
             if cached_tokens.is_some() {
                 conv.context_cached_tokens = cached_tokens;

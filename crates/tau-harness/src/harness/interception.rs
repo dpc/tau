@@ -106,6 +106,10 @@ const MUST_PASS_BY_DEFAULT: &[EventName] = &[
     EventName::AGENT_USER_MESSAGE_INJECTED,
     EventName::AGENT_PROMPT_STEERED,
     EventName::AGENT_COMPACTION_TRIGGERED,
+    EventName::AGENT_STANDALONE_COMPACTION_STARTED,
+    EventName::AGENT_STANDALONE_COMPACTION_FAILED,
+    EventName::AGENT_INFERENCE_DISPATCH_STARTED,
+    EventName::AGENT_COMPACTED,
     // Session lifecycle facts drive extension/context-provider setup and
     // teardown. Dropping one can wedge startup or leave stale per-session state.
     EventName::SESSION_STARTED,
@@ -181,6 +185,9 @@ fn immutable_protected_fact_was_modified(original: &Event, replacement: &Event) 
             | Event::SessionAgentUnloaded(_)
             | Event::AgentCompactionTriggered(_)
             | Event::AgentCompacted(_)
+            | Event::AgentStandaloneCompactionStarted(_)
+            | Event::AgentStandaloneCompactionFailed(_)
+            | Event::AgentInferenceDispatchStarted(_)
             | Event::AgentPromptCreated(_)
             | Event::AgentPromptStarted(_)
             | Event::ProviderResponseFinished(_)
@@ -412,6 +419,11 @@ impl Harness {
         }
         if !self.agent_context_ready_for(cid) {
             self.defer_prompt_dispatch(cid.clone(), PromptDispatchGate::PublishIdle);
+            return;
+        }
+        if gate == PromptDispatchGate::UserMessageCommit
+            && self.schedule_standalone_auto_compaction_for_activation(cid, true)
+        {
             return;
         }
         let _ = self.send_prompt_to_agent_for(cid);

@@ -121,15 +121,6 @@ impl Harness {
         prompt: impl Into<PendingPrompt>,
     ) -> Result<(), HarnessError> {
         let prompt = prompt.into();
-        if self.schedule_standalone_auto_compaction(agent_id) {
-            self.agents
-                .get_mut(agent_id)
-                .expect("auto-compaction target exists")
-                .pending_prompts
-                .push_front(prompt);
-            self.dispatch_prompt_after_publish_idle(agent_id);
-            return Ok(());
-        }
         if let Some(agent) = self.agents.get_mut(agent_id) {
             agent.lifecycle_notification_only_turn = prompt.is_watch_turn_state();
         }
@@ -200,6 +191,9 @@ impl Harness {
                 .get(&agent_id)
                 .is_some_and(|agent| !agent.pending_message_wakes.is_empty());
             if has_message_wake {
+                if self.schedule_standalone_auto_compaction(&agent_id) {
+                    continue;
+                }
                 if let Some(agent) = self.agents.get_mut(&agent_id) {
                     agent.pending_message_wakes.clear();
                 }
@@ -232,6 +226,8 @@ impl Harness {
                     .any(|prompt| !prompt.is_passive_background_completion())
                     || !conv.pending_message_wakes.is_empty())
                     && matches!(conv.turn_state, AgentTurnState::Idle)
+                    && !conv.terminating
+                    && conv.standalone_compaction.blocked_recovery().is_none()
                     && !self.has_deferred_prompt_dispatch_for(agent_id)
             })
             .map(|(agent_id, _)| agent_id.clone())

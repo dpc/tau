@@ -55,6 +55,11 @@ records.
 
 `OpaqueProviderItem.value` is the parsed CBOR form of provider-owned output
 items such as Responses reasoning, compaction, and unknown future provider items.
+
+Standalone compaction control uses bounded transaction identifiers and
+harness-owned started, failed, and inference-dispatch checkpoint facts. New
+`agent.compacted` records carry immutable cut and suffix metadata; metadata-free
+historical records retain legacy hard-boundary replay semantics.
 It exists for semantic inspection and compatibility with protocol consumers that
 need structured data.
 

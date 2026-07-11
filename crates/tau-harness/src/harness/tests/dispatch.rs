@@ -7470,7 +7470,7 @@ fn manual_standalone_compact_installs_one_boundary() {
         prompt.operation,
         tau_proto::PromptOperation::StandaloneCompaction
     );
-    h.handle_provider_response_finished(ProviderResponseFinished {
+    let response = ProviderResponseFinished {
         agent_prompt_id: prompt.agent_prompt_id,
         agent_id: crate::parse_agent_id(&agent_id),
         output_items: vec![ContextItem::Message(tau_proto::MessageItem {
@@ -7490,8 +7490,11 @@ fn manual_standalone_compact_installs_one_boundary() {
         backend: None,
         provider_response_id: None,
         ws_pool_delta: None,
-    })
-    .expect("accept compact response");
+    };
+    h.handle_provider_response_finished(response.clone())
+        .expect("accept compact response");
+    h.handle_provider_response_finished(response)
+        .expect("ignore duplicate compact response");
 
     let mut compacted = 0;
     let mut cursor = crate::event_log::EventLogSeq::new(0);
@@ -7508,6 +7511,66 @@ fn manual_standalone_compact_installs_one_boundary() {
             if replacement_window.len() == 1
     ));
     h.shutdown().expect("shutdown");
+}
+
+/// A terminal standalone failure must become one durable blocked outcome and
+/// must not redispatch compaction merely because queue advancement repeats.
+#[test]
+fn standalone_compaction_failure_does_not_retry_automatically() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(&td.path().join("state")).expect("start");
+    enable_remote_compaction_for_test_model(&mut h);
+    let info = h
+        .provider_model_info
+        .get_mut(&"test/model".into())
+        .expect("test model");
+    info.supports_compaction = false;
+    info.supports_standalone_compaction = true;
+    let cid = ensure_test_user_agent(&mut h);
+    let agent_id = h.agents[&cid].agent_id.clone().expect("durable agent");
+
+    h.handle_compact_request("s1".into(), Some(&agent_id));
+    let compact = read_nth_prompt_created(&h, 0);
+    h.handle_provider_response_finished(ProviderResponseFinished {
+        agent_prompt_id: compact.agent_prompt_id,
+        agent_id: crate::parse_agent_id(&agent_id),
+        output_items: Vec::new(),
+        stop_reason: tau_proto::ProviderStopReason::EndTurn,
+        error: Some("secret provider detail".to_owned()),
+        originator: tau_proto::PromptOriginator::User,
+        usage: None,
+        compaction_original_input_tokens: None,
+        compaction_compacted_input_tokens: None,
+        backend: None,
+        provider_response_id: None,
+        ws_pool_delta: None,
+    })
+    .expect("record terminal compact failure");
+    h.try_advance_queue();
+    h.try_advance_queue();
+
+    assert!(matches!(
+        h.agents[&cid].standalone_compaction,
+        crate::agent::StandaloneCompactionState::Blocked { .. }
+    ));
+    assert_eq!(
+        event_log_events(&h)
+            .into_iter()
+            .filter(|event| matches!(event, Event::AgentStandaloneCompactionFailed(_)))
+            .count(),
+        1
+    );
+    assert_eq!(
+        event_log_events(&h)
+            .into_iter()
+            .filter(|event| matches!(event, Event::AgentPromptCreated(_)))
+            .count(),
+        1
+    );
+    assert!(!event_log_events(&h).into_iter().any(|event| {
+        matches!(event, Event::AgentStandaloneCompactionFailed(failed)
+            if serde_json::to_string(&failed).expect("serialize failure").contains("secret provider detail"))
+    }));
 }
 
 /// Provider-default standalone auto-compaction runs before a submitted turn,
@@ -7571,7 +7634,7 @@ fn standalone_auto_compaction_schedules_at_threshold() {
 
     assert!(event_log_contains_any_source(&h, |event| matches!(
         event,
-        Event::AgentCompactionTriggered(triggered) if triggered.resume_inference
+        Event::AgentStandaloneCompactionStarted(started) if started.resume_through.is_some()
     )));
     h.shutdown().expect("shutdown");
 }

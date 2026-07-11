@@ -499,3 +499,8 @@ diagnostics with model-authored transcript content; durable truth remains the
 final response event.
 
 First-party providers also run a bounded exact streaming repetition guard before accepting assistant text, reasoning summaries, or tool-argument deltas. This is a resource-safety guard for tight provider/model loops, not a semantic quality filter: it only checks substantial exact suffix repetitions inside one stream component and clears transient output before publishing a `repetition_detected` final response.
+Standalone compaction transaction controls are harness-owned, immutable,
+must-pass facts. Extensions and UIs cannot forge or suppress their cut,
+transaction, failure, or inference watermark identities. Persisted failure
+records contain only categorical reasons; raw provider error text is never
+inserted into future model context.
