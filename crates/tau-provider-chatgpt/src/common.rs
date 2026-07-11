@@ -84,6 +84,8 @@ pub enum LlmError {
     /// Mutable URL, credential, or account configuration could not build a
     /// request.
     ReloadableConfig(String),
+    /// Provider response was syntactically readable but unsafe to accept.
+    InvalidResponse(String),
     Io(std::io::Error),
     Json(serde_json::Error),
     Vcr(tau_vcr::VcrError),
@@ -98,6 +100,7 @@ impl std::fmt::Display for LlmError {
             Self::HttpStatusHinted(code, body, _) => write!(f, "HTTP {code}: {body}"),
             Self::Canceled => write!(f, "cancelled by harness"),
             Self::ReloadableConfig(error) => write!(f, "local request construction: {error}"),
+            Self::InvalidResponse(error) => write!(f, "invalid provider response: {error}"),
             Self::Io(e) => write!(f, "I/O error: {e}"),
             Self::Json(e) => write!(f, "JSON error: {e}"),
             Self::Vcr(e) => write!(f, "VCR error: {e}"),
@@ -115,6 +118,7 @@ impl std::error::Error for LlmError {
             Self::Vcr(e) => Some(e),
             Self::RepetitionDetected(_)
             | Self::Canceled
+            | Self::InvalidResponse(_)
             | Self::ReloadableConfig(_)
             | Self::HttpStatus(_, _)
             | Self::HttpStatusHinted(_, _, _) => None,
@@ -134,6 +138,7 @@ impl LlmError {
             Self::Json(_) => Some(RetryDecision::new(RetryClass::Unknown)),
             Self::Vcr(_) | Self::RepetitionDetected(_) | Self::Canceled => None,
             Self::ReloadableConfig(_) => Some(RetryDecision::new(RetryClass::Auth)),
+            Self::InvalidResponse(_) => None,
             Self::HttpStatus(code, body) => classify_http_status(*code, body, None),
             Self::HttpStatusHinted(code, body, hint) => {
                 classify_http_status(*code, body, Some(*hint))

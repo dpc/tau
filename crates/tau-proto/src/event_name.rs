@@ -345,6 +345,7 @@ impl EventName {
         Self::from_static(EventCategory::Agent, "prompt_steered");
     pub const AGENT_COMPACTION_TRIGGERED: Self =
         Self::from_static(EventCategory::Agent, "compaction_triggered");
+    pub const AGENT_COMPACTED: Self = Self::from_static(EventCategory::Agent, "compacted");
     pub const AGENT_STARTED: Self = Self::from_static(EventCategory::Agent, "started");
     pub const AGENT_DISPLAY_NAME_SET: Self =
         Self::from_static(EventCategory::Agent, "display_name_set");

@@ -1667,6 +1667,9 @@ pub struct Harness {
     /// attribute the corresponding finished response even if the user
     /// switches models while it is in flight.
     pub(crate) prompt_models: std::collections::HashMap<AgentPromptId, ModelId>,
+    /// Explicit provider operation and resume policy for each in-flight prompt.
+    pub(crate) prompt_operations:
+        std::collections::HashMap<AgentPromptId, (tau_proto::PromptOperation, bool)>,
     /// Effective tool specs advertised for each in-flight prompt. Tool-call
     /// validation uses this snapshot so mid-turn role/model switches cannot
     /// change which tools the provider was allowed to call.
@@ -1796,6 +1799,8 @@ where
                 verbosities: vec![Verbosity::Low],
                 thinking_summaries: vec![ThinkingSummary::Off],
                 supports_compaction: true,
+                supports_standalone_compaction: false,
+                standalone_compaction_threshold: None,
             }],
         },
     )))?;
@@ -2224,6 +2229,7 @@ impl Harness {
             selected_model: parts.selected_model,
             current_session_state: CurrentSessionState::default(),
             prompt_models: HashMap::new(),
+            prompt_operations: HashMap::new(),
             prompt_tool_specs: HashMap::new(),
             prompt_tool_call_prompts: HashMap::new(),
             shown_tool_failure_examples: HashSet::new(),
@@ -3437,6 +3443,7 @@ impl Harness {
 
         self.prompt_agents.remove(agent_prompt_id.as_str());
         self.pending_provider_prompts.remove(&agent_prompt_id);
+        self.prompt_operations.remove(&agent_prompt_id);
         self.clear_prompt_tool_snapshot(&agent_prompt_id);
         if let Some(model) = self.prompt_models.remove(&agent_prompt_id) {
             self.current_session_state.token_usage.total.requests = self
@@ -4109,6 +4116,7 @@ impl Harness {
             Event::AgentPromptSteered(prompt) => Some(prompt.agent_id.clone()),
             Event::AgentPromptStarted(prompt) => Some(prompt.agent_id.clone()),
             Event::AgentCompactionTriggered(triggered) => Some(triggered.agent_id.clone()),
+            Event::AgentCompacted(compacted) => Some(compacted.agent_id.clone()),
             Event::AgentUserMessageInjected(injected) => Some(injected.agent_id.clone()),
             Event::AgentMessageSent(message) => Some(message.sender_id.clone()),
             Event::AgentMessageReceived(message) => Some(message.recipient_id.clone()),
@@ -6995,6 +7003,7 @@ impl Harness {
             return;
         };
         self.canceled_prompts.insert(agent_prompt_id.clone());
+        self.prompt_operations.remove(&agent_prompt_id);
         self.publish_prompt_terminated(
             session_id,
             agent_prompt_id,
@@ -7268,6 +7277,7 @@ impl Harness {
                 originator,
             );
             self.prompt_agents.remove(&spid);
+            self.prompt_operations.remove(&spid);
             self.publish_event(
                 None,
                 Event::UiCancelPrompt(UiCancelPrompt {
@@ -9049,6 +9059,7 @@ impl Harness {
             Event::AgentCompactionTriggered(tau_proto::AgentCompactionTriggered {
                 agent_id: crate::parse_agent_id(&agent_id),
                 originator: conv.originator.clone(),
+                resume_inference: false,
             }),
         );
         self.dispatch_prompt_after_publish_idle(&cid);
@@ -9097,7 +9108,64 @@ impl Harness {
         };
         self.provider_model_info
             .get(&model)
-            .is_some_and(|info| info.supports_compaction)
+            .is_some_and(|info| info.supports_compaction || info.supports_standalone_compaction)
+    }
+
+    /// Inserts one automatic standalone compaction boundary before inference
+    /// when the last accepted context usage reaches the role/model threshold.
+    pub(crate) fn schedule_standalone_auto_compaction(&mut self, cid: &AgentId) -> bool {
+        let Some(conv) = self.agents.get(cid) else {
+            return false;
+        };
+        let Some(input_tokens) = conv.context_input_tokens else {
+            return false;
+        };
+        let Some(model) = self.model_for_agent_role(conv) else {
+            return false;
+        };
+        let Some(info) = self.provider_model_info.get(&model) else {
+            return false;
+        };
+        if !info.supports_standalone_compaction {
+            return false;
+        }
+        let role_name = self.role_name_for_agent_id(cid);
+        let role_policy = self
+            .available_roles
+            .get(&role_name)
+            .and_then(|role| role.compaction)
+            .unwrap_or(tau_config::settings::RoleCompaction::ProviderDefault);
+        let threshold = match role_policy {
+            tau_config::settings::RoleCompaction::ProviderDefault => {
+                info.standalone_compaction_threshold
+            }
+            tau_config::settings::RoleCompaction::Threshold(threshold) => Some(threshold),
+            tau_config::settings::RoleCompaction::Disabled => None,
+        };
+        if threshold.is_none_or(|threshold| input_tokens < threshold) {
+            return false;
+        }
+        let Some(agent_id) = conv.agent_id.clone() else {
+            return false;
+        };
+        let already_triggered = self
+            .agent_store
+            .agent(&agent_id)
+            .and_then(|tree| tree.branch_from(conv.head).last().copied())
+            .is_some_and(|entry| matches!(entry, tau_core::AgentEntry::CompactionTrigger { .. }));
+        if already_triggered {
+            return false;
+        }
+        let originator = conv.originator.clone();
+        self.publish_for_agent(
+            cid,
+            Event::AgentCompactionTriggered(tau_proto::AgentCompactionTriggered {
+                agent_id: crate::parse_agent_id(&agent_id),
+                originator,
+                resume_inference: true,
+            }),
+        );
+        true
     }
 
     fn refresh_provider_model_info(&mut self) {
@@ -9541,6 +9609,7 @@ impl Harness {
                 originator.clone(),
             );
             self.prompt_agents.remove(spid);
+            self.prompt_operations.remove(spid);
             self.emit_info(&format!(
                 "preempting side conv `{cid}` ({spid}) for incoming user prompt",
             ));
@@ -9752,6 +9821,7 @@ impl Harness {
         self.prompt_agents.clear();
         self.pending_provider_prompts.clear();
         self.prompt_models.clear();
+        self.prompt_operations.clear();
         self.prompt_tool_specs.clear();
         self.prompt_tool_call_prompts.clear();
         self.shown_tool_failure_examples.clear();
@@ -11199,6 +11269,22 @@ impl Harness {
                 context: tau_proto::PromptContext::default(),
             });
         let context = prompt_context.context;
+        let standalone_trigger = tree
+            .and_then(|tree| tree.branch_from(head).last().copied())
+            .and_then(|entry| match entry {
+                tau_core::AgentEntry::CompactionTrigger { resume_inference } => {
+                    Some(*resume_inference)
+                }
+                _ => None,
+            })
+            .filter(|_| {
+                self.provider_model_info
+                    .get(&model)
+                    .is_some_and(|info| info.supports_standalone_compaction)
+            });
+        let operation = standalone_trigger.map_or(tau_proto::PromptOperation::Inference, |_| {
+            tau_proto::PromptOperation::StandaloneCompaction
+        });
         let tools = self.tool_definitions_from_specs(&tool_specs);
         let durable_agent_id = agent_id_for_tree.as_deref().map(crate::parse_agent_id);
         let system_prompt =
@@ -11229,6 +11315,10 @@ impl Harness {
         self.current_session_state.token_usage.start_request(&model);
         self.prompt_models
             .insert(agent_prompt_id.clone(), model.clone());
+        self.prompt_operations.insert(
+            agent_prompt_id.clone(),
+            (operation, standalone_trigger.unwrap_or(false)),
+        );
         self.prompt_tool_specs
             .insert(agent_prompt_id.clone(), tool_specs);
         let session_id = self
@@ -11257,6 +11347,7 @@ impl Harness {
             share_user_cache_key,
             ctx_id,
             compaction,
+            operation,
         })
     }
 
@@ -11855,6 +11946,21 @@ impl Harness {
             cached_tokens,
             output_tokens,
         );
+        let prompt_operation = self
+            .prompt_operations
+            .remove(&response.agent_prompt_id)
+            .unwrap_or_default();
+        if prompt_operation.0 == tau_proto::PromptOperation::StandaloneCompaction {
+            let valid = response.error.is_none()
+                && response.stop_reason == ProviderStopReason::EndTurn
+                && tau_proto::validate_compaction_window(&response.output_items).is_ok();
+            if valid {
+                self.accept_standalone_compaction(&cid, &response, source);
+            } else {
+                self.reject_standalone_compaction(&cid, &response);
+            }
+            return Ok(());
+        }
         if response_contains_compaction {
             self.attach_finished_response_compaction_usage(
                 &mut response,
@@ -11904,6 +12010,46 @@ impl Harness {
         Ok(())
     }
 
+    fn accept_standalone_compaction(
+        &mut self,
+        cid: &AgentId,
+        response: &ProviderResponseFinished,
+        source: Option<&str>,
+    ) {
+        self.publish_for_agent_from(
+            cid,
+            source,
+            Event::AgentCompacted(tau_proto::AgentCompacted {
+                agent_id: response.agent_id.clone(),
+                replacement_window: response.output_items.clone(),
+            }),
+        );
+        self.clear_finished_response_prompt_route(&response.agent_prompt_id);
+        self.clear_prompt_tool_snapshot(&response.agent_prompt_id);
+        if let Some(conv) = self.agents.get_mut(cid) {
+            conv.in_flight_prompt = None;
+            conv.context_input_tokens = None;
+            conv.context_cached_tokens = None;
+            conv.context_percent_used = None;
+        }
+        self.set_agent_turn_state(cid, AgentTurnState::Idle);
+        self.try_advance_queue();
+    }
+
+    fn reject_standalone_compaction(&mut self, cid: &AgentId, response: &ProviderResponseFinished) {
+        self.emit_info(&format!(
+            "provider returned an invalid standalone compaction window for agent_prompt_id={}",
+            response.agent_prompt_id
+        ));
+        self.clear_finished_response_prompt_route(&response.agent_prompt_id);
+        self.clear_prompt_tool_snapshot(&response.agent_prompt_id);
+        if let Some(conv) = self.agents.get_mut(cid) {
+            conv.in_flight_prompt = None;
+        }
+        self.set_agent_turn_state(cid, AgentTurnState::Idle);
+        self.try_advance_queue();
+    }
+
     fn clear_malformed_repetition_output(&mut self, response: &mut ProviderResponseFinished) {
         if response.stop_reason == ProviderStopReason::RepetitionDetected
             && !response.output_items.is_empty()
@@ -11928,6 +12074,7 @@ impl Harness {
         self.prompt_agents.remove(agent_prompt_id.as_str());
         self.pending_provider_prompts.remove(agent_prompt_id);
         self.prompt_models.remove(agent_prompt_id);
+        self.prompt_operations.remove(agent_prompt_id);
         self.clear_prompt_tool_snapshot(agent_prompt_id);
     }
 

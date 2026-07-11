@@ -121,6 +121,15 @@ impl Harness {
         prompt: impl Into<PendingPrompt>,
     ) -> Result<(), HarnessError> {
         let prompt = prompt.into();
+        if self.schedule_standalone_auto_compaction(agent_id) {
+            self.agents
+                .get_mut(agent_id)
+                .expect("auto-compaction target exists")
+                .pending_prompts
+                .push_front(prompt);
+            self.dispatch_prompt_after_publish_idle(agent_id);
+            return Ok(());
+        }
         if let Some(agent) = self.agents.get_mut(agent_id) {
             agent.lifecycle_notification_only_turn = prompt.is_watch_turn_state();
         }

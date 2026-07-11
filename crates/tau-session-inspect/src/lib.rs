@@ -210,6 +210,10 @@ pub fn format_session_entry(entry: &AgentEntry) -> String {
             format!("{event_name}: {message}")
         }
         AgentEntry::MessageEnvelope { item } => item.render_provider_text(),
+        AgentEntry::Compaction { replacement_window } => {
+            format!("[compacted context: {} items]", replacement_window.len())
+        }
+        AgentEntry::CompactionTrigger { .. } => "[compaction requested]".to_owned(),
     }
 }
 

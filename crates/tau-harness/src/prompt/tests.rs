@@ -657,6 +657,34 @@ fn cbor_to_text_puts_line_numbered_content_on_next_line() {
     assert_eq!(text, "1 only");
 }
 
+/// A standalone compaction event is a hard prompt boundary: older transcript
+/// items and response anchors must disappear while later turns extend the
+/// replacement window.
+#[test]
+fn assemble_conversation_starts_at_latest_standalone_compaction() {
+    let mut tree = tau_core::AgentTree::from_events(crate::parse_agent_id("main"), &[]);
+    tree.apply_event(&user_prompt("old history"));
+    tree.apply_event(&Event::AgentCompacted(tau_proto::AgentCompacted {
+        agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
+        replacement_window: vec![ContextItem::Message(tau_proto::MessageItem {
+            role: tau_proto::ContextRole::Assistant,
+            content: vec![tau_proto::ContentPart::Text {
+                text: "compact summary".to_owned(),
+            }],
+            phase: None,
+            responses_raw_json: None,
+        })],
+    }));
+    tree.apply_event(&user_prompt("new turn"));
+
+    let items = assemble_conversation_from(&tree, tree.head());
+    assert_eq!(items.len(), 2);
+    let rendered = serde_json::to_string(&items).expect("serialize context");
+    assert!(!rendered.contains("old history"));
+    assert!(rendered.contains("compact summary"));
+    assert!(rendered.contains("new turn"));
+}
+
 pub(crate) fn assemble_conversation_from(
     tree: &tau_core::AgentTree,
     head: Option<tau_core::NodeId>,

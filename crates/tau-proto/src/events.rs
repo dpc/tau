@@ -2246,6 +2246,14 @@ pub struct ProviderModelInfo {
     /// Whether this model can use provider/server-side context compaction.
     #[serde(default)]
     pub supports_compaction: bool,
+    /// Whether this model supports a standalone replacement-window compaction
+    /// operation, independently of inline context management.
+    #[serde(default)]
+    pub supports_standalone_compaction: bool,
+    /// Provider-recommended token threshold for harness-scheduled standalone
+    /// compaction. `None` means no provider default is published.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub standalone_compaction_threshold: Option<u64>,
 }
 
 /// Provider extension snapshot of its currently available models.
@@ -2971,13 +2979,13 @@ pub struct AgentPromptRecalled {
     pub text: String,
 }
 
-/// A durable provider-visible manual compaction trigger was inserted into
-/// an agent transcript.
+/// A durable provider-visible manual or automatic compaction request was
+/// inserted into an agent transcript.
 ///
 /// This records the user-facing fact that compaction was requested. It is not
 /// a lifecycle/status event: providers translate the folded
-/// [`ContextItem::CompactionTrigger`] into their server-side compaction
-/// mechanism during normal prompt handling.
+/// [`ContextItem::CompactionTrigger`] into inline context management, while
+/// standalone-capable providers receive an explicit compact operation.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct AgentCompactionTriggered {
     /// Agent transcript receiving the compaction trigger.
@@ -2985,6 +2993,22 @@ pub struct AgentCompactionTriggered {
     /// Who requested the trigger.
     #[serde(default)]
     pub originator: PromptOriginator,
+    /// Whether the harness scheduled this boundary before an already-published
+    /// user turn and must resume inference after successful compaction.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub resume_inference: bool,
+}
+
+/// The harness accepted one standalone provider compaction result.
+///
+/// This is the sole transcript boundary for replacement-window compaction.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AgentCompacted {
+    /// Agent transcript receiving the replacement window.
+    pub agent_id: AgentId,
+    /// Provider-validated ordered context that replaces all older model-visible
+    /// history.
+    pub replacement_window: Vec<ContextItem>,
 }
 
 /// A previously queued user prompt that the harness folded into the
@@ -3161,6 +3185,28 @@ pub struct AgentPromptCreated {
     /// should opt in to its server default behavior.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compaction: Option<PromptCompactionContext>,
+    /// Provider operation requested for this prompt.
+    #[serde(default, skip_serializing_if = "PromptOperation::is_inference")]
+    pub operation: PromptOperation,
+}
+
+/// Provider operation represented by an [`AgentPromptCreated`] work request.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PromptOperation {
+    /// Produce a normal assistant response.
+    #[default]
+    Inference,
+    /// Replace the model-visible transcript through a unary compact endpoint.
+    StandaloneCompaction,
+}
+
+impl PromptOperation {
+    /// Returns whether this is the default inference operation.
+    #[must_use]
+    pub const fn is_inference(&self) -> bool {
+        matches!(self, Self::Inference)
+    }
 }
 
 /// Lightweight prompt lifecycle fact for UIs and observers.
@@ -3788,6 +3834,8 @@ pub enum Event {
     AgentPromptSteered(AgentPromptSteered),
     #[serde(rename = "agent.compaction_triggered")]
     AgentCompactionTriggered(AgentCompactionTriggered),
+    #[serde(rename = "agent.compacted")]
+    AgentCompacted(AgentCompacted),
     #[serde(rename = "agent.prompt_created")]
     AgentPromptCreated(AgentPromptCreated),
     #[serde(rename = "agent.prompt_started")]
@@ -4013,6 +4061,7 @@ impl Event {
             Self::AgentPromptRecalled(_) => EventName::AGENT_PROMPT_RECALLED,
             Self::AgentPromptSteered(_) => EventName::AGENT_PROMPT_STEERED,
             Self::AgentCompactionTriggered(_) => EventName::AGENT_COMPACTION_TRIGGERED,
+            Self::AgentCompacted(_) => EventName::AGENT_COMPACTED,
             Self::AgentPromptCreated(_) => EventName::AGENT_PROMPT_CREATED,
             Self::AgentPromptStarted(_) => EventName::AGENT_PROMPT_STARTED,
             Self::AgentPromptTerminated(_) => EventName::AGENT_PROMPT_TERMINATED,

@@ -145,7 +145,8 @@ but keep it in memory only; `agent.started.ephemeral` marks that boundary.
   assigned it an `agent_prompt_id`; payload carries `agent_id`, `session_id`,
   `system_prompt`, materialized `context`, tools or `tools_ref`, model, model
   params, tool choice, originator/provenance, legacy cache-sharing flag,
-  optional UI correlation id, and optional compaction summary. First-party
+  optional UI correlation id, optional inline compaction summary, and an explicit
+  inference or standalone-compaction operation. First-party
   ChatGPT/Codex cache routing is stable per target agent and does not split on
   those provenance fields. This is
   operational delivery state for the provider; transcript truth is still the
@@ -170,9 +171,12 @@ but keep it in memory only; `agent.started.ephemeral` marks that boundary.
   `provider.response_finished` (stale or canceled). Runtime lifecycle state.
 - **`agent.prompt_prewarm_requested`** — Best-effort provider cache prewarm for
   the next prompt prefix. Runtime/provider optimization state.
-- **`agent.compaction_triggered`** — Durable manual compaction trigger inserted
-  into an agent transcript. Prompt assembly folds it into provider-side
-  compaction input; it is not a separate compaction lifecycle event.
+- **`agent.compaction_triggered`** — Durable manual or harness-scheduled
+  compaction request. Legacy providers fold it into inline context management;
+  standalone-capable providers dispatch an explicit compact operation.
+- **`agent.compacted`** — Durable standalone compaction boundary. Its validated
+  ordered replacement window becomes the complete model-visible history and
+  invalidates any previous-response chain.
 - **`agent.display_name_set`** — Durable fact that changes an agent's
   human-friendly display name. Carries `agent_id` and the new non-empty display
   name; UIs use it when rendering agent chips and history.

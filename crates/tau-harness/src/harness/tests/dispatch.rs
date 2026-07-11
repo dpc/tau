@@ -2670,6 +2670,8 @@ fn provider_model_info(
             tau_proto::ThinkingSummary::Auto,
         ],
         supports_compaction: false,
+        supports_standalone_compaction: false,
+        standalone_compaction_threshold: None,
     }
 }
 
@@ -4682,6 +4684,8 @@ fn provider_model_prompt_routes_directly_to_provider_owner() {
                     verbosities: vec![tau_proto::Verbosity::Medium],
                     thinking_summaries: vec![tau_proto::ThinkingSummary::Auto],
                     supports_compaction: false,
+                    supports_standalone_compaction: false,
+                    standalone_compaction_threshold: None,
                 }],
             },
         )),
@@ -4699,6 +4703,8 @@ fn provider_model_prompt_routes_directly_to_provider_owner() {
             verbosities: vec![tau_proto::Verbosity::Medium],
             thinking_summaries: vec![tau_proto::ThinkingSummary::Auto],
             supports_compaction: false,
+            supports_standalone_compaction: false,
+            standalone_compaction_threshold: None,
         },
     );
     h.provider_model_routes
@@ -4784,6 +4790,8 @@ fn provider_execution_events_must_come_from_prompt_owner() {
                     verbosities: vec![tau_proto::Verbosity::Medium],
                     thinking_summaries: vec![tau_proto::ThinkingSummary::Auto],
                     supports_compaction: false,
+                    supports_standalone_compaction: false,
+                    standalone_compaction_threshold: None,
                 }],
             },
         )),
@@ -4801,6 +4809,8 @@ fn provider_execution_events_must_come_from_prompt_owner() {
             verbosities: vec![tau_proto::Verbosity::Medium],
             thinking_summaries: vec![tau_proto::ThinkingSummary::Auto],
             supports_compaction: false,
+            supports_standalone_compaction: false,
+            standalone_compaction_threshold: None,
         },
     );
     h.provider_model_routes
@@ -5419,6 +5429,7 @@ fn ui_tree_prompt_anchor_rewinds_before_later_prompt() {
         Event::AgentCompactionTriggered(tau_proto::AgentCompactionTriggered {
             agent_id: agent_id.clone(),
             originator: tau_proto::PromptOriginator::User,
+            resume_inference: false,
         }),
     );
     h.publish_for_agent(
@@ -7306,6 +7317,133 @@ fn manual_compact_appends_trigger_and_dispatches_normal_prompt() {
     h.shutdown().expect("shutdown");
 }
 
+/// A standalone-capable model must dispatch an explicit compact operation and
+/// accept its validated output as exactly one replacement-window boundary.
+#[test]
+fn manual_standalone_compact_installs_one_boundary() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(&td.path().join("state")).expect("start");
+    enable_remote_compaction_for_test_model(&mut h);
+    let info = h
+        .provider_model_info
+        .get_mut(&"test/model".into())
+        .expect("test model");
+    info.supports_compaction = false;
+    info.supports_standalone_compaction = true;
+    info.standalone_compaction_threshold = Some(900);
+    let cid = ensure_test_user_agent(&mut h);
+    let agent_id = h.agents[&cid].agent_id.clone().expect("durable agent");
+
+    h.handle_compact_request("s1".into(), Some(&agent_id));
+    let prompt = read_nth_prompt_created(&h, 0);
+    assert_eq!(
+        prompt.operation,
+        tau_proto::PromptOperation::StandaloneCompaction
+    );
+    h.handle_provider_response_finished(ProviderResponseFinished {
+        agent_prompt_id: prompt.agent_prompt_id,
+        agent_id: crate::parse_agent_id(&agent_id),
+        output_items: vec![ContextItem::Message(tau_proto::MessageItem {
+            role: tau_proto::ContextRole::Assistant,
+            content: vec![tau_proto::ContentPart::Text {
+                text: "summary".to_owned(),
+            }],
+            phase: None,
+            responses_raw_json: None,
+        })],
+        stop_reason: tau_proto::ProviderStopReason::EndTurn,
+        error: None,
+        originator: tau_proto::PromptOriginator::User,
+        usage: None,
+        compaction_original_input_tokens: None,
+        compaction_compacted_input_tokens: None,
+        backend: None,
+        provider_response_id: None,
+        ws_pool_delta: None,
+    })
+    .expect("accept compact response");
+
+    let mut compacted = 0;
+    let mut cursor = crate::event_log::EventLogSeq::new(0);
+    while let Some(entry) = h.event_log.get_next_from(cursor) {
+        cursor = entry.seq.next();
+        compacted += usize::from(matches!(entry.event, Event::AgentCompacted(_)));
+    }
+    assert_eq!(compacted, 1);
+    assert!(matches!(
+        agent_tree_for_conversation(&h, &cid).current_branch().last(),
+        Some(tau_core::AgentEntry::Compaction { replacement_window })
+            if replacement_window.len() == 1
+    ));
+    h.shutdown().expect("shutdown");
+}
+
+/// Provider-default standalone auto-compaction runs before a submitted turn,
+/// excludes that turn from compact input, then dispatches it exactly once after
+/// installing the boundary.
+#[test]
+fn standalone_auto_compaction_schedules_at_threshold() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(&td.path().join("state")).expect("start");
+    enable_remote_compaction_for_test_model(&mut h);
+    let info = h
+        .provider_model_info
+        .get_mut(&"test/model".into())
+        .expect("test model");
+    info.supports_compaction = false;
+    info.supports_standalone_compaction = true;
+    info.standalone_compaction_threshold = Some(900);
+    let cid = ensure_test_user_agent(&mut h);
+    h.agents.get_mut(&cid).expect("agent").context_input_tokens = Some(900);
+    h.dispatch_prompt_for_agent(&cid, PendingPrompt::user("queued once".to_owned()))
+        .expect("schedule compact before user turn");
+    let compact = read_nth_prompt_created(&h, 0);
+    assert_eq!(
+        compact.operation,
+        tau_proto::PromptOperation::StandaloneCompaction
+    );
+    assert!(
+        !serde_json::to_string(&compact.context)
+            .expect("context")
+            .contains("queued once")
+    );
+
+    let agent_id = h.agents[&cid].agent_id.clone().expect("agent id");
+    h.handle_provider_response_finished(ProviderResponseFinished {
+        agent_prompt_id: compact.agent_prompt_id,
+        agent_id: crate::parse_agent_id(&agent_id),
+        output_items: vec![ContextItem::Message(tau_proto::MessageItem {
+            role: tau_proto::ContextRole::Assistant,
+            content: vec![tau_proto::ContentPart::Text {
+                text: "summary".to_owned(),
+            }],
+            phase: None,
+            responses_raw_json: None,
+        })],
+        stop_reason: tau_proto::ProviderStopReason::EndTurn,
+        error: None,
+        originator: tau_proto::PromptOriginator::User,
+        usage: None,
+        compaction_original_input_tokens: None,
+        compaction_compacted_input_tokens: None,
+        backend: None,
+        provider_response_id: None,
+        ws_pool_delta: None,
+    })
+    .expect("accept compact response");
+
+    let inference = read_nth_prompt_created(&h, 1);
+    assert_eq!(inference.operation, tau_proto::PromptOperation::Inference);
+    let context = serde_json::to_string(&inference.context).expect("context");
+    assert_eq!(context.matches("queued once").count(), 1);
+
+    assert!(event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::AgentCompactionTriggered(triggered) if triggered.resume_inference
+    )));
+    h.shutdown().expect("shutdown");
+}
+
 fn enable_remote_compaction_for_test_model(h: &mut Harness) {
     h.selected_model = Some("test/model".into());
     h.provider_model_info.insert(
@@ -7320,6 +7458,8 @@ fn enable_remote_compaction_for_test_model(h: &mut Harness) {
             verbosities: vec![tau_proto::Verbosity::Medium],
             thinking_summaries: vec![tau_proto::ThinkingSummary::Auto],
             supports_compaction: true,
+            supports_standalone_compaction: false,
+            standalone_compaction_threshold: None,
         },
     );
 }

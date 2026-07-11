@@ -256,6 +256,7 @@ fn deterministic_provider_and_tool_complete_one_vertical_slice() {
         ctx_id: None,
         compaction: None,
         share_user_cache_key: false,
+        operation: tau_proto::PromptOperation::Inference,
     };
     let _ = bus.send_to(
         &provider_id,

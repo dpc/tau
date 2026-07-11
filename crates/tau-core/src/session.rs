@@ -221,6 +221,18 @@ pub enum AgentEntry {
         /// Direction, envelope, and harness-derived presentation policy.
         item: Box<tau_proto::MessageEnvelopeItem>,
     },
+    /// Standalone compaction boundary whose replacement window becomes the
+    /// complete model-visible history.
+    Compaction {
+        /// Ordered provider items replacing all preceding prompt context.
+        replacement_window: Vec<ContextItem>,
+    },
+    /// Durable request for either legacy inline or standalone compaction.
+    CompactionTrigger {
+        /// Whether successful standalone compaction resumes an
+        /// already-published inference turn.
+        resume_inference: bool,
+    },
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -840,7 +852,18 @@ impl AgentTree {
             Event::AgentPromptSteered(steered) => {
                 Some(self.append_user_text_input(parent, steered.text.clone()))
             }
-            Event::AgentCompactionTriggered(_) => Some(self.append_compaction_trigger(parent)),
+            Event::AgentCompactionTriggered(triggered) => Some(self.append_node_at(
+                parent,
+                AgentEntry::CompactionTrigger {
+                    resume_inference: triggered.resume_inference,
+                },
+            )),
+            Event::AgentCompacted(compacted) => Some(self.append_node_at(
+                parent,
+                AgentEntry::Compaction {
+                    replacement_window: compacted.replacement_window.clone(),
+                },
+            )),
             Event::AgentMessageSent(message) => self
                 .agent_message_entry_from_sent(message)
                 .map(|entry| self.append_node_at(parent, entry)),
@@ -897,15 +920,6 @@ impl AgentTree {
             return None;
         }
         Some(self.append_node_at(parent, AgentEntry::MessageEnvelope { item }))
-    }
-
-    fn append_compaction_trigger(&mut self, parent: Option<NodeId>) -> NodeId {
-        self.append_node_at(
-            parent,
-            AgentEntry::UserInput {
-                items: vec![ContextItem::CompactionTrigger],
-            },
-        )
     }
 
     fn apply_provider_response_finished(
@@ -1162,6 +1176,15 @@ impl AgentTree {
             Event::AgentCompactionTriggered(triggered) if triggered.agent_id == self.agent_id => {
                 Some(Ok(()))
             }
+            Event::AgentCompacted(compacted) if compacted.agent_id == self.agent_id => Some(
+                tau_proto::validate_compaction_window(&compacted.replacement_window).map_err(
+                    |error| {
+                        AgentEventValidationError::new(format!(
+                            "invalid compaction replacement window: {error}"
+                        ))
+                    },
+                ),
+            ),
             Event::AgentHeadMoved(moved) if moved.agent_id == self.agent_id => {
                 Some(self.validate_head_moved(moved))
             }
@@ -1210,6 +1233,7 @@ impl AgentTree {
                 | Event::AgentUserMessageInjected(_)
                 | Event::AgentPromptSteered(_)
                 | Event::AgentCompactionTriggered(_)
+                | Event::AgentCompacted(_)
                 | Event::AgentMessageSent(_)
                 | Event::AgentMessageReceived(_)
                 | Event::AgentMessageIncoming(_)

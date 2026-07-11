@@ -207,6 +207,7 @@ pub struct SharedWsPool {
 struct SharedWsPoolInner {
     pool: WsPool,
     busy: HashSet<PoolKey>,
+    invalidated_busy: HashSet<PoolKey>,
     abort_wake_generation: u64,
 }
 
@@ -216,6 +217,7 @@ impl SharedWsPool {
             inner: Arc::new(Mutex::new(SharedWsPoolInner {
                 pool: WsPool::new(),
                 busy: HashSet::new(),
+                invalidated_busy: HashSet::new(),
                 abort_wake_generation: 0,
             })),
             changed: Arc::new(Condvar::new()),
@@ -224,6 +226,22 @@ impl SharedWsPool {
 
     pub fn stats(&self) -> Option<WsPoolStats> {
         self.inner.lock().ok().map(|inner| inner.pool.stats())
+    }
+
+    /// Drops the cached socket for one conversation after a transcript
+    /// boundary.
+    pub fn invalidate(
+        &self,
+        config: &ResponsesConfig,
+        request: &PromptPayload<'_>,
+    ) -> Result<(), WsTurnError> {
+        let key = PoolKey::for_request(config, request);
+        let mut inner = self.lock_inner()?;
+        inner.pool.conns.pop(&key);
+        if inner.busy.contains(&key) {
+            inner.invalidated_busy.insert(key);
+        }
+        Ok(())
     }
 
     /// Try to reserve `key` without waiting for an active same-key turn. This
@@ -290,7 +308,9 @@ impl SharedWsPool {
 
     fn release(&self, key: PoolKey, conn: WsConn) -> Result<(), WsTurnError> {
         let mut inner = self.lock_inner()?;
-        inner.pool.release(key.clone(), conn);
+        if !inner.invalidated_busy.remove(&key) {
+            inner.pool.release(key.clone(), conn);
+        }
         inner.busy.remove(&key);
         self.changed.notify_all();
         Ok(())
@@ -299,6 +319,7 @@ impl SharedWsPool {
     fn abandon(&self, key: &PoolKey) -> Result<(), WsTurnError> {
         let mut inner = self.lock_inner()?;
         inner.busy.remove(key);
+        inner.invalidated_busy.remove(key);
         self.changed.notify_all();
         Ok(())
     }

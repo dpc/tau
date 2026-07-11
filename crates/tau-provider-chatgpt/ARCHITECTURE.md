@@ -22,16 +22,19 @@ contract. HTTP requests carry the internal Responses Lite routing header, while
 WebSocket `response.create` messages carry the equivalent per-request
 `client_metadata` marker so pooled sockets remain reusable.
 
-Responses Lite is incompatible with upstream server-side context management.
-Tau therefore does not advertise server-side compaction for GPT-5.6 and
-defensively suppresses compaction context and trigger items if a caller supplies
-them. The Lite request shape and routing marker remain enabled on both transports;
-non-Lite models retain their normal server-side compaction behavior.
+Responses Lite is incompatible with legacy inline `context_management`. Tau
+therefore suppresses inline compaction context and trigger items on normal GPT-5.6
+inference. GPT-5.6 instead advertises standalone compaction: the provider sends a
+unary HTTP `POST /codex/responses/compact` with the Lite header and lowering, and
+the harness installs its output as one replacement-window boundary. Non-Lite
+models retain their existing inline context-management behavior.
 
 Responses Lite moves tool declarations and base instructions from the top-level
 request fields into leading developer input items, disables parallel tool
 calls, and keeps reasoning context across all turns. Hosted Responses tools are
 not part of this contract; Tau's tools remain client-executed definitions.
+Chained Lite WebSocket deltas omit the developer prefix already owned by the
+previous response. Full replay after reconnect or compaction includes it again.
 
 ChatGPT model metadata distinguishes the raw provider context window from the
 effective window published to the harness. Server-side compaction thresholds

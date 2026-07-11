@@ -854,6 +854,195 @@ fn build_request_extension_matches_user_wire_body_for_same_context() {
     assert_eq!(ext_body["previous_response_id"], "resp_parent");
 }
 
+/// A chained Lite delta must not resend the developer-owned tools/instructions
+/// prefix already represented by `previous_response_id`.
+#[test]
+fn build_request_lite_chain_omits_owned_developer_prefix() {
+    let config = ResponsesConfig {
+        model_id: "gpt-5.6-terra".to_owned(),
+        ..chain_test_config()
+    };
+    let request = PromptPayload {
+        system_prompt: "system",
+        context: context_with_response_id(
+            "resp_parent",
+            vec![user_text("first")],
+            vec![assistant_text("answer")],
+            vec![user_text("second")],
+        ),
+        tools: &[],
+        params: tau_proto::ModelParams::default(),
+        tool_choice: tau_proto::ToolChoice::Auto,
+        compaction: None,
+        originator: &tau_proto::PromptOriginator::User,
+        share_user_cache_key: false,
+        session_id: &tau_proto::SessionId::new("test-session"),
+        agent_id: &tau_proto::AgentId::parse("test-agent").expect("agent id"),
+        debug_provider_requests: false,
+    };
+
+    let body = serde_json::to_value(build_request(&config, &request, Some("resp_parent")))
+        .expect("serialize");
+    let input = body["input"].as_array().expect("input");
+    assert_eq!(body["previous_response_id"], "resp_parent");
+    assert!(input.iter().all(|item| item["role"] != "developer"));
+    assert!(input.iter().all(|item| item["type"] != "additional_tools"));
+    assert_eq!(body["parallel_tool_calls"], false);
+}
+
+/// Standalone Lite compaction must use the compact schema while retaining the
+/// Lite developer-prefix, all-turn reasoning, and serial-tool lowering.
+#[test]
+fn build_compact_request_uses_lite_schema() {
+    let config = ResponsesConfig {
+        model_id: "gpt-5.6-terra".to_owned(),
+        ..chain_test_config()
+    };
+    let request = PromptPayload {
+        system_prompt: "system",
+        context: context(&[user_text("compact me"), ContextItem::CompactionTrigger]),
+        tools: &[],
+        params: tau_proto::ModelParams::default(),
+        tool_choice: tau_proto::ToolChoice::Auto,
+        compaction: Some(tau_proto::PromptCompactionContext {
+            compact_threshold: Some(10),
+        }),
+        originator: &tau_proto::PromptOriginator::User,
+        share_user_cache_key: false,
+        session_id: &tau_proto::SessionId::new("test-session"),
+        agent_id: &tau_proto::AgentId::parse("test-agent").expect("agent id"),
+        debug_provider_requests: false,
+    };
+
+    let body = build_compact_request(&config, &request).expect("compact body");
+    let object = body.as_object().expect("object");
+    for forbidden in [
+        "stream",
+        "store",
+        "tool_choice",
+        "include",
+        "context_management",
+        "previous_response_id",
+        "client_metadata",
+    ] {
+        assert!(!object.contains_key(forbidden), "unexpected {forbidden}");
+    }
+    assert_eq!(body["parallel_tool_calls"], false);
+    assert_eq!(body["reasoning"]["context"], "all_turns");
+    assert_eq!(body["input"][0]["type"], "additional_tools");
+    assert_eq!(body["input"][1]["role"], "developer");
+    assert!(
+        body["input"]
+            .as_array()
+            .expect("input")
+            .iter()
+            .all(|item| item["type"] != "compaction_trigger")
+    );
+}
+
+/// Unary compact output must preserve provider order and unknown raw items so
+/// the accepted replacement window can be replayed without semantic loss.
+#[test]
+fn parse_compact_response_preserves_ordered_replacement_items() {
+    let output = parse_compact_response(
+        r#"{"output":[
+          {"type":"reasoning","id":"r1","encrypted_content":"opaque"},
+          {"type":"message","role":"assistant","content":[{"type":"output_text","text":"summary"}]},
+          {"type":"future_item","payload":{"x":1}}
+        ]}"#,
+    )
+    .expect("compact response");
+
+    assert!(matches!(output[0], ContextItem::Reasoning(_)));
+    assert!(matches!(output[1], ContextItem::Message(_)));
+    assert!(matches!(output[2], ContextItem::UnknownProviderItem(_)));
+}
+
+/// Empty and structurally incomplete compact windows must fail closed rather
+/// than becoming a durable boundary that erases valid history.
+#[test]
+fn parse_compact_response_rejects_unsafe_windows() {
+    assert!(matches!(
+        parse_compact_response(r#"{"output":[]}"#),
+        Err(LlmError::InvalidResponse(_))
+    ));
+    assert!(matches!(
+        parse_compact_response(
+            r#"{"output":[{"type":"function_call","call_id":"dangling","name":"shell","arguments":"{}"}]}"#
+        ),
+        Err(LlmError::InvalidResponse(_))
+    ));
+}
+
+/// Compact parsing must preserve exact provider JSON spelling in replay
+/// sidecars, including key order and numeric spelling for unknown fields.
+#[test]
+fn parse_compact_response_preserves_raw_item_spelling() {
+    let raw = r#"{"type":"future_item","z":1.2300,"a":{"k":2}}"#;
+    let output =
+        parse_compact_response(&format!(r#"{{"output":[{raw}]}}"#)).expect("compact output");
+    let ContextItem::UnknownProviderItem(item) = &output[0] else {
+        panic!("expected unknown provider item");
+    };
+    assert_eq!(item.raw_json.as_deref(), Some(raw));
+}
+
+/// Unary Lite compaction must POST the dedicated endpoint with JSON framing and
+/// all required routing headers, never SSE or WebSocket framing.
+#[test]
+fn compact_http_request_uses_dedicated_lite_transport_contract() {
+    use std::io::{Read, Write};
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind capture server");
+    let address = listener.local_addr().expect("capture address");
+    let captured = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+    let captured_server = std::sync::Arc::clone(&captured);
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept compact request");
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+            .expect("read timeout");
+        let mut request = Vec::new();
+        let mut chunk = [0_u8; 4096];
+        loop {
+            let count = stream.read(&mut chunk).expect("read request");
+            request.extend_from_slice(&chunk[..count]);
+            if count == 0
+                || request
+                    .windows(b"\r\n\r\n".len())
+                    .any(|window| window == b"\r\n\r\n")
+            {
+                break;
+            }
+        }
+        *captured_server.lock().expect("capture lock") =
+            String::from_utf8(request).expect("UTF-8 request");
+        stream
+            .write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 13\r\nConnection: close\r\n\r\n{\"output\":[]}",
+            )
+            .expect("write response");
+    });
+    let config = ResponsesConfig {
+        base_url: format!("http://{address}"),
+        model_id: "gpt-5.6-terra".to_owned(),
+        account_id: Some("acct-test".to_owned()),
+        ..chain_test_config()
+    };
+
+    let body = compact_http_request(&config, "thread-test", "{}").expect("compact response");
+    assert_eq!(body, r#"{"output":[]}"#);
+    server.join().expect("capture server");
+    let request = captured.lock().expect("capture lock").to_ascii_lowercase();
+    assert!(request.starts_with("post /codex/responses/compact http/1.1\r\n"));
+    assert!(request.contains("x-openai-internal-codex-responses-lite: true\r\n"));
+    assert!(request.contains("chatgpt-account-id: acct-test\r\n"));
+    assert!(request.contains("session-id: thread-test\r\n"));
+    assert!(request.contains("thread-id: thread-test\r\n"));
+    assert!(request.contains("accept: application/json\r\n"));
+    assert!(!request.contains("text/event-stream"));
+}
+
 /// `ToolChoice::None` emits `tool_choice: "none"` on the Responses
 /// body while leaving the `tools` array fully declared. That is valid
 /// for callers that intentionally want a different wire request, but

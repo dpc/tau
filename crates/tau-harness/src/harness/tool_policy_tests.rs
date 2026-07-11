@@ -48,6 +48,8 @@ fn model_info(model: &ModelId, tags: &[&str]) -> ProviderModelInfo {
         verbosities: vec![Verbosity::Medium],
         thinking_summaries: vec![ThinkingSummary::Off],
         supports_compaction: false,
+        supports_standalone_compaction: false,
+        standalone_compaction_threshold: None,
     }
 }
 

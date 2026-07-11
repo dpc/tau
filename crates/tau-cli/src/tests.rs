@@ -875,6 +875,7 @@ fn agent_prompt_created(agent_prompt_id: &str, session_id: &str) -> AgentPromptC
         share_user_cache_key: false,
         ctx_id: None,
         compaction: None,
+        operation: tau_proto::PromptOperation::Inference,
     }
 }
 
@@ -3354,6 +3355,7 @@ fn manual_compaction_selects_agent_from_empty_state() {
     renderer.handle(&Event::AgentCompactionTriggered(AgentCompactionTriggered {
         agent_id: tau_proto::AgentId::parse("live-agent").expect("agent id"),
         originator: tau_proto::PromptOriginator::User,
+        resume_inference: false,
     }));
     sync(&handle);
 
@@ -6077,6 +6079,7 @@ fn manual_compaction_trigger_does_not_render_progress_status() {
     renderer.handle(&Event::AgentCompactionTriggered(AgentCompactionTriggered {
         agent_id: tau_proto::AgentId::parse("main").expect("agent id"),
         originator: tau_proto::PromptOriginator::User,
+        resume_inference: false,
     }));
     sync(&handle);
 

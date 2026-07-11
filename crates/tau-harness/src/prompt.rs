@@ -659,6 +659,21 @@ pub(crate) fn assemble_prompt_context_from(
 
     for entry in tree.branch_from(head) {
         match entry {
+            AgentEntry::Compaction { replacement_window } => {
+                blocks.clear();
+                blocks.push(tau_proto::ContextBlock::UserInput(
+                    tau_proto::UserInputBlock {
+                        items: replacement_window.clone(),
+                    },
+                ));
+            }
+            AgentEntry::CompactionTrigger { .. } => {
+                blocks.push(tau_proto::ContextBlock::UserInput(
+                    tau_proto::UserInputBlock {
+                        items: vec![ContextItem::CompactionTrigger],
+                    },
+                ));
+            }
             AgentEntry::UserInput { items } => {
                 blocks.push(tau_proto::ContextBlock::UserInput(
                     tau_proto::UserInputBlock {

@@ -1223,6 +1223,8 @@ fn quiet_provider_harness_with_start_reason_and_persistence(
                         verbosities: vec![tau_proto::Verbosity::Medium],
                         thinking_summaries: vec![tau_proto::ThinkingSummary::Auto],
                         supports_compaction: true,
+                        supports_standalone_compaction: false,
+                        standalone_compaction_threshold: None,
                     }],
                 },
             )))?;

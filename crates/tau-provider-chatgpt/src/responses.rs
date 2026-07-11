@@ -43,6 +43,78 @@ const RESPONSES_LITE_HEADER: &str = "X-OpenAI-Internal-Codex-Responses-Lite";
 const DEFAULT_PROVIDER_STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const SSE_READ_POLL_TIMEOUT: Duration = Duration::from_millis(250);
 const MAX_SSE_LINE_BYTES: usize = 1024 * 1024;
+const MAX_COMPACT_HTTP_THREADS: usize = 4;
+
+#[derive(Default)]
+struct CompactTransportState {
+    active: usize,
+    wake_generation: u64,
+}
+
+struct CompactTransportPermit;
+
+impl Drop for CompactTransportPermit {
+    fn drop(&mut self) {
+        let (state, changed) = compact_transport_gate();
+        if let Ok(mut state) = state.lock() {
+            state.active = state.active.saturating_sub(1);
+            state.wake_generation = state.wake_generation.wrapping_add(1);
+            changed.notify_all();
+        }
+    }
+}
+
+fn compact_transport_gate() -> &'static (std::sync::Mutex<CompactTransportState>, std::sync::Condvar)
+{
+    static GATE: std::sync::OnceLock<(
+        std::sync::Mutex<CompactTransportState>,
+        std::sync::Condvar,
+    )> = std::sync::OnceLock::new();
+    GATE.get_or_init(|| {
+        (
+            std::sync::Mutex::new(CompactTransportState::default()),
+            std::sync::Condvar::new(),
+        )
+    })
+}
+
+fn acquire_compact_transport(
+    abort: &mut impl TurnAbort,
+) -> Result<CompactTransportPermit, LlmError> {
+    let (state, changed) = compact_transport_gate();
+    let _abort_waker = abort.register_waker(std::sync::Arc::new(|| {
+        let (state, changed) = compact_transport_gate();
+        if let Ok(mut state) = state.lock() {
+            state.wake_generation = state.wake_generation.wrapping_add(1);
+            changed.notify_all();
+        }
+    }));
+    let mut state = state
+        .lock()
+        .map_err(|_| LlmError::InvalidResponse("compact transport lock poisoned".to_owned()))?;
+    while state.active >= MAX_COMPACT_HTTP_THREADS && !abort.is_aborted() {
+        let generation = state.wake_generation;
+        while state.active >= MAX_COMPACT_HTTP_THREADS
+            && state.wake_generation == generation
+            && !abort.is_aborted()
+        {
+            state = changed.wait(state).map_err(|_| {
+                LlmError::InvalidResponse("compact transport lock poisoned".to_owned())
+            })?;
+        }
+    }
+    if abort.is_aborted() {
+        return Err(LlmError::Canceled);
+    }
+    state.active += 1;
+    Ok(CompactTransportPermit)
+}
+
+#[derive(Default)]
+struct CompactCompletion {
+    result: Option<Result<String, LlmError>>,
+    canceled: bool,
+}
 /// Which ChatGPT/Codex Responses surface a model is served through.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ResponsesSurface {
@@ -55,6 +127,10 @@ impl ResponsesSurface {
         let _ = self;
         let base = base_url.trim_end_matches('/');
         format!("{base}/codex/responses")
+    }
+
+    fn compact_url(self, base_url: &str) -> String {
+        format!("{}/compact", self.responses_url(base_url))
     }
 
     fn store_value(self) -> bool {
@@ -313,6 +389,169 @@ pub fn responses_stream(
         abort,
         on_update,
     )
+}
+
+/// Calls the unary Responses compact endpoint and returns its ordered
+/// replacement window.
+pub fn responses_compact(
+    agent_prompt_id: &str,
+    config: &ResponsesConfig,
+    request: &PromptPayload<'_>,
+    abort: &mut impl TurnAbort,
+) -> Result<Vec<ContextItem>, LlmError> {
+    if abort.is_aborted() {
+        return Err(LlmError::Canceled);
+    }
+    let body = build_compact_request(config, request)?;
+    send_compact_request(agent_prompt_id, config, request, abort, body)
+}
+
+fn build_compact_request(
+    config: &ResponsesConfig,
+    request: &PromptPayload<'_>,
+) -> Result<serde_json::Value, LlmError> {
+    let mut body =
+        serde_json::to_value(build_request(config, request, None)).map_err(LlmError::Json)?;
+    let object = body
+        .as_object_mut()
+        .expect("Responses request serializes as an object");
+    for field in [
+        "stream",
+        "store",
+        "tool_choice",
+        "include",
+        "context_management",
+        "previous_response_id",
+        "client_metadata",
+    ] {
+        object.remove(field);
+    }
+    Ok(body)
+}
+
+fn send_compact_request(
+    agent_prompt_id: &str,
+    config: &ResponsesConfig,
+    request: &PromptPayload<'_>,
+    abort: &mut impl TurnAbort,
+    body: serde_json::Value,
+) -> Result<Vec<ContextItem>, LlmError> {
+    maybe_debug_write_provider_request(
+        agent_prompt_id,
+        config,
+        request,
+        tau_proto::ProviderBackendTransport::HttpSse,
+        &body,
+    );
+    let body_str = serde_json::to_string(&body).map_err(LlmError::Json)?;
+    let permit = acquire_compact_transport(abort)?;
+    let thread_id = request.prompt_cache_key(&config.base_url);
+    let config = config.clone();
+    let completion = std::sync::Arc::new((
+        std::sync::Mutex::new(CompactCompletion::default()),
+        std::sync::Condvar::new(),
+    ));
+    let network_completion = std::sync::Arc::clone(&completion);
+    std::thread::Builder::new()
+        .name("responses-compact-http".to_owned())
+        .spawn(move || {
+            let _permit = permit;
+            let result =
+                std::panic::catch_unwind(|| compact_http_request(&config, &thread_id, &body_str))
+                    .unwrap_or_else(|_| {
+                        Err(LlmError::InvalidResponse(
+                            "compact HTTP worker panicked".to_owned(),
+                        ))
+                    });
+            let (result_slot, changed) = &*network_completion;
+            if let Ok(mut slot) = result_slot.lock() {
+                slot.result = Some(result);
+                changed.notify_all();
+            }
+        })
+        .map_err(LlmError::Io)?;
+    let wake_completion = std::sync::Arc::clone(&completion);
+    let _abort_waker = abort.register_waker(std::sync::Arc::new(move || {
+        if let Ok(mut state) = wake_completion.0.lock() {
+            state.canceled = true;
+            wake_completion.1.notify_all();
+        }
+    }));
+    let (result_slot, changed) = &*completion;
+    let mut slot = result_slot
+        .lock()
+        .map_err(|_| LlmError::InvalidResponse("compact completion lock poisoned".to_owned()))?;
+    while slot.result.is_none() && !slot.canceled {
+        slot = changed.wait(slot).map_err(|_| {
+            LlmError::InvalidResponse("compact completion lock poisoned".to_owned())
+        })?;
+    }
+    if slot.canceled || abort.is_aborted() {
+        return Err(LlmError::Canceled);
+    }
+    let response_body = slot
+        .result
+        .take()
+        .expect("compact completion is present unless canceled")?;
+    parse_compact_response(&response_body)
+}
+
+fn compact_http_request(
+    config: &ResponsesConfig,
+    thread_id: &str,
+    body_str: &str,
+) -> Result<String, LlmError> {
+    let mut req = tau_provider::oauth::proxy_agent()
+        .post(config.surface.compact_url(&config.base_url))
+        .config()
+        .timeout_global(Some(DEFAULT_PROVIDER_STREAM_IDLE_TIMEOUT * 4))
+        .build()
+        .content_type("application/json")
+        .header("Accept", "application/json")
+        .header("Authorization", format!("Bearer {}", config.api_key))
+        .header("OpenAI-Beta", "responses=experimental")
+        .header("session-id", thread_id)
+        .header("thread-id", thread_id);
+    if let Some(account_id) = &config.account_id {
+        req = req.header("chatgpt-account-id", account_id);
+    }
+    if crate::uses_responses_lite(&config.model_id) {
+        req = req.header(RESPONSES_LITE_HEADER, "true");
+    }
+    let mut response = req
+        .send(body_str)
+        .map_err(|error| LlmError::Http(Box::new(error)))?;
+    if !response.status().is_success() {
+        let code = response.status().as_u16();
+        let body = response.body_mut().read_to_string().unwrap_or_default();
+        return Err(LlmError::HttpStatus(code, body));
+    }
+    response
+        .body_mut()
+        .read_to_string()
+        .map_err(|error| LlmError::Http(Box::new(error)))
+}
+
+fn parse_compact_response(response_body: &str) -> Result<Vec<ContextItem>, LlmError> {
+    #[derive(Deserialize)]
+    struct CompactResponse<'a> {
+        #[serde(borrow)]
+        output: Vec<&'a RawValue>,
+    }
+    let response: CompactResponse<'_> =
+        serde_json::from_str(response_body).map_err(LlmError::Json)?;
+    let mut state = StreamState::new();
+    for (index, item) in response.output.iter().enumerate() {
+        let event = format!(
+            r#"{{"type":"response.output_item.done","output_index":{index},"item":{}}}"#,
+            item.get()
+        );
+        apply_raw_json_event(&mut state, &event, &mut |_| {})?;
+    }
+    let output = state.into_output_items();
+    tau_proto::validate_compaction_window(&output)
+        .map_err(|error| LlmError::InvalidResponse(error.to_owned()))?;
+    Ok(output)
 }
 
 fn responses_stream_live(
@@ -1584,22 +1823,24 @@ fn build_request(
         (tau_proto::ToolChoice::Auto, true) => None,
     };
     let (instructions, tools, parallel_tool_calls) = if responses_lite {
-        let mut prefix = vec![ResponsesInputItem::json(serde_json::json!({
-            "type": "additional_tools",
-            "role": "developer",
-            "tools": tools,
-        }))];
-        if let Some(instructions) = instructions {
-            prefix.push(ResponsesInputItem::json(serde_json::json!({
-                "type": "message",
+        if previous_response_id.is_none() {
+            let mut prefix = vec![ResponsesInputItem::json(serde_json::json!({
+                "type": "additional_tools",
                 "role": "developer",
-                "content": [{
-                    "type": "input_text",
-                    "text": instructions,
-                }],
-            })));
+                "tools": tools,
+            }))];
+            if let Some(instructions) = instructions {
+                prefix.push(ResponsesInputItem::json(serde_json::json!({
+                    "type": "message",
+                    "role": "developer",
+                    "content": [{
+                        "type": "input_text",
+                        "text": instructions,
+                    }],
+                })));
+            }
+            input.splice(0..0, prefix);
         }
-        input.splice(0..0, prefix);
         (None, Vec::new(), Some(false))
     } else {
         (instructions, tools, None)

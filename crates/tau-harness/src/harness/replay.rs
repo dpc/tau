@@ -685,6 +685,7 @@ fn should_replay_agent_event_to_late_subscriber(event: &Event) -> bool {
             | Event::AgentPromptSteered(_)
             | Event::AgentUserMessageInjected(_)
             | Event::AgentCompactionTriggered(_)
+            | Event::AgentCompacted(_)
             | Event::AgentMessageSent(_)
             | Event::AgentMessageReceived(_)
             | Event::AgentMessageIncoming(_)

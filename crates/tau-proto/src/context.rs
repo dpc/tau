@@ -463,6 +463,60 @@ pub enum ContextItem {
     UnknownProviderItem(OpaqueProviderItem),
 }
 
+/// Validates a standalone compaction replacement window before it can erase
+/// older transcript history.
+///
+/// Unknown provider items remain allowed for forward compatibility, but
+/// harness-authored triggers/boundaries and structurally incomplete tool rounds
+/// are rejected.
+pub fn validate_compaction_window(items: &[ContextItem]) -> Result<(), &'static str> {
+    use std::collections::HashSet;
+
+    if items.is_empty() {
+        return Err("replacement window is empty");
+    }
+    let mut calls = HashSet::new();
+    let mut results = HashSet::new();
+    for item in items {
+        match item {
+            ContextItem::Message(message) if message.content.is_empty() => {
+                return Err("replacement message has no content");
+            }
+            ContextItem::ToolCall(call) => {
+                if call.call_id.as_str().is_empty() || call.name.as_str().is_empty() {
+                    return Err("replacement tool call has an empty id or name");
+                }
+                if !calls.insert(call.call_id.clone()) {
+                    return Err("replacement window has a duplicate tool call id");
+                }
+            }
+            ContextItem::ToolResult(result) => {
+                if result.call_id.as_str().is_empty() {
+                    return Err("replacement tool result has an empty call id");
+                }
+                if !calls.contains(&result.call_id) {
+                    return Err("replacement tool result has no preceding call");
+                }
+                if !results.insert(result.call_id.clone()) {
+                    return Err("replacement window has a duplicate tool result");
+                }
+            }
+            ContextItem::CompactionTrigger | ContextItem::Compaction(_) => {
+                return Err("replacement window contains a compaction control item");
+            }
+            ContextItem::Message(_)
+            | ContextItem::ReasoningText(_)
+            | ContextItem::Reasoning(_)
+            | ContextItem::UnknownProviderItem(_)
+            | ContextItem::MessageEnvelope(_) => {}
+        }
+    }
+    if calls != results {
+        return Err("replacement window has a dangling tool call");
+    }
+    Ok(())
+}
+
 /// Materialized provider prompt context grouped into semantic blocks.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct PromptContext {

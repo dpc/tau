@@ -2275,6 +2275,51 @@ where
         debug_provider_requests,
     };
 
+    if prompt.operation == tau_proto::PromptOperation::StandaloneCompaction {
+        match chatgpt_runtime.compact(agent_prompt_id, config, &request, retry_ctx) {
+            Ok(output_items) => {
+                writer.write_message(&HarnessInputMessage::emit(
+                    Event::ProviderResponseFinished(ProviderResponseFinished {
+                        agent_prompt_id: agent_prompt_id.into(),
+                        agent_id: prompt.agent_id.clone(),
+                        output_items,
+                        stop_reason: ProviderStopReason::EndTurn,
+                        error: None,
+                        originator: prompt.originator.clone(),
+                        usage: None,
+                        compaction_original_input_tokens: None,
+                        compaction_compacted_input_tokens: None,
+                        backend: Some(backend_descriptor(
+                            config,
+                            ProviderBackendTransport::HttpSse,
+                            false,
+                        )),
+                        provider_response_id: None,
+                        ws_pool_delta: None,
+                    }),
+                ))?;
+                writer.flush()?;
+                return Ok(None);
+            }
+            Err(error) if error.retry_decision().is_some() => {
+                return Ok(error.retry_decision());
+            }
+            Err(error) => {
+                let backend = backend_descriptor(config, ProviderBackendTransport::HttpSse, false);
+                finish_error(
+                    agent_prompt_id,
+                    prompt,
+                    &backend,
+                    error,
+                    None,
+                    debug_provider_requests,
+                    writer,
+                )?;
+                return Ok(None);
+            }
+        }
+    }
+
     let originator = prompt.originator.clone();
     let mut chatgpt_turn_state = ChatGptTurnState::new(usize::MAX);
     let mut transport_taken = if config.supports_websocket {

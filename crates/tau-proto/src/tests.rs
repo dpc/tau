@@ -484,6 +484,11 @@ fn representative_events() -> Vec<Event> {
         Event::AgentCompactionTriggered(AgentCompactionTriggered {
             agent_id: agent_id("engineer_abcd1234"),
             originator: PromptOriginator::User,
+            resume_inference: false,
+        }),
+        Event::AgentCompacted(AgentCompacted {
+            agent_id: agent_id("engineer_abcd1234"),
+            replacement_window: vec![user_text_item("summary")],
         }),
         Event::AgentPromptCreated(AgentPromptCreated {
             agent_prompt_id: "sp-1".into(),
@@ -511,6 +516,7 @@ fn representative_events() -> Vec<Event> {
             ctx_id: None,
             compaction: None,
             share_user_cache_key: false,
+            operation: PromptOperation::Inference,
         }),
         Event::AgentPromptStarted(AgentPromptStarted {
             agent_prompt_id: "sp-1".into(),
@@ -726,6 +732,8 @@ fn representative_events() -> Vec<Event> {
                 verbosities: vec![Verbosity::Low, Verbosity::Medium, Verbosity::High],
                 thinking_summaries: vec![ThinkingSummary::Off],
                 supports_compaction: false,
+                supports_standalone_compaction: false,
+                standalone_compaction_threshold: None,
             }],
         }),
         Event::ProviderToolResult(ToolResult {
@@ -1190,6 +1198,7 @@ fn expected_first_party_event_names() -> std::collections::BTreeSet<String> {
         "action.result",
         "action.schema_published",
         "agent.compaction_triggered",
+        "agent.compacted",
         "agent.display_name_set",
         "agent.head_moved",
         "agent.message_received",

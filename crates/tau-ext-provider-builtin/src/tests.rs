@@ -489,6 +489,7 @@ fn minimal_prompt() -> tau_proto::AgentPromptCreated {
         share_user_cache_key: false,
         ctx_id: None,
         compaction: None,
+        operation: tau_proto::PromptOperation::Inference,
     }
 }
 

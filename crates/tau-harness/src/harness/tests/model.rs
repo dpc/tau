@@ -65,6 +65,8 @@ fn provider_model(id: ModelId, context_window: u64) -> ProviderModelInfo {
         verbosities: vec![Verbosity::Low, Verbosity::High],
         thinking_summaries: vec![ThinkingSummary::Off, ThinkingSummary::Auto],
         supports_compaction: false,
+        supports_standalone_compaction: false,
+        standalone_compaction_threshold: None,
     }
 }
 
@@ -703,6 +705,8 @@ fn provider_model_metadata_drives_selection_state() {
                 verbosities: vec![Verbosity::High],
                 thinking_summaries: vec![ThinkingSummary::Off],
                 supports_compaction: false,
+                supports_standalone_compaction: false,
+                standalone_compaction_threshold: None,
             }],
         })),
     )
@@ -747,6 +751,8 @@ fn selected_role_params_are_clamped_by_provider_metadata() {
             verbosities: vec![Verbosity::Medium],
             thinking_summaries: vec![ThinkingSummary::Off],
             supports_compaction: false,
+            supports_standalone_compaction: false,
+            standalone_compaction_threshold: None,
         },
         ProviderModelInfo {
             id: local.clone(),
@@ -758,6 +764,8 @@ fn selected_role_params_are_clamped_by_provider_metadata() {
             verbosities: vec![Verbosity::Medium],
             thinking_summaries: vec![ThinkingSummary::Off],
             supports_compaction: false,
+            supports_standalone_compaction: false,
+            standalone_compaction_threshold: None,
         },
     ]);
 
@@ -864,6 +872,8 @@ fn role_without_effort_picks_middle_provider_effort() {
             verbosities: vec![Verbosity::Medium],
             thinking_summaries: vec![ThinkingSummary::Off],
             supports_compaction: false,
+            supports_standalone_compaction: false,
+            standalone_compaction_threshold: None,
         },
         ProviderModelInfo {
             id: local.clone(),
@@ -875,6 +885,8 @@ fn role_without_effort_picks_middle_provider_effort() {
             verbosities: vec![Verbosity::Medium],
             thinking_summaries: vec![ThinkingSummary::Off],
             supports_compaction: false,
+            supports_standalone_compaction: false,
+            standalone_compaction_threshold: None,
         },
     ]);
     let roles = std::collections::HashMap::from([(
@@ -1030,6 +1042,8 @@ fn role_missing_fields_use_model_defaults() {
         verbosities: vec![Verbosity::Medium],
         thinking_summaries: vec![ThinkingSummary::Off],
         supports_compaction: false,
+        supports_standalone_compaction: false,
+        standalone_compaction_threshold: None,
     }]);
     let params = selected_params_for_role(&provider_models, &roles, "plain", &selected);
     assert_eq!(params.effort, Effort::Low);
@@ -1053,6 +1067,8 @@ fn role_without_verbosity_picks_low_when_supported() {
             verbosities: vec![Verbosity::Low, Verbosity::Medium, Verbosity::High],
             thinking_summaries: vec![ThinkingSummary::Off],
             supports_compaction: false,
+            supports_standalone_compaction: false,
+            standalone_compaction_threshold: None,
         },
         ProviderModelInfo {
             id: local.clone(),
@@ -1064,6 +1080,8 @@ fn role_without_verbosity_picks_low_when_supported() {
             verbosities: vec![Verbosity::Medium],
             thinking_summaries: vec![ThinkingSummary::Off],
             supports_compaction: false,
+            supports_standalone_compaction: false,
+            standalone_compaction_threshold: None,
         },
     ]);
     let roles = std::collections::HashMap::from([(
@@ -1554,6 +1572,8 @@ fn efforts_for_model_uses_provider_snapshot_levels() {
             verbosities: vec![Verbosity::Medium],
             thinking_summaries: vec![ThinkingSummary::Off],
             supports_compaction: false,
+            supports_standalone_compaction: false,
+            standalone_compaction_threshold: None,
         },
         ProviderModelInfo {
             id: local.clone(),
@@ -1565,6 +1585,8 @@ fn efforts_for_model_uses_provider_snapshot_levels() {
             verbosities: vec![Verbosity::Medium],
             thinking_summaries: vec![ThinkingSummary::Off],
             supports_compaction: false,
+            supports_standalone_compaction: false,
+            standalone_compaction_threshold: None,
         },
     ]);
 
@@ -1625,6 +1647,8 @@ fn verbosities_for_model_uses_provider_snapshot_levels() {
             verbosities: vec![V::Low, V::Medium, V::High],
             thinking_summaries: vec![ThinkingSummary::Off],
             supports_compaction: false,
+            supports_standalone_compaction: false,
+            standalone_compaction_threshold: None,
         },
         ProviderModelInfo {
             id: locked.clone(),
@@ -1636,6 +1660,8 @@ fn verbosities_for_model_uses_provider_snapshot_levels() {
             verbosities: vec![V::Medium],
             thinking_summaries: vec![ThinkingSummary::Off],
             supports_compaction: false,
+            supports_standalone_compaction: false,
+            standalone_compaction_threshold: None,
         },
     ]);
 
@@ -1675,6 +1701,8 @@ fn thinking_summaries_for_model_uses_provider_snapshot_levels() {
             verbosities: vec![Verbosity::Medium],
             thinking_summaries: vec![T::Off, T::Auto, T::Concise, T::Detailed],
             supports_compaction: false,
+            supports_standalone_compaction: false,
+            standalone_compaction_threshold: None,
         },
         ProviderModelInfo {
             id: local.clone(),
@@ -1686,6 +1714,8 @@ fn thinking_summaries_for_model_uses_provider_snapshot_levels() {
             verbosities: vec![Verbosity::Medium],
             thinking_summaries: vec![T::Off],
             supports_compaction: false,
+            supports_standalone_compaction: false,
+            standalone_compaction_threshold: None,
         },
     ]);
 
@@ -1730,6 +1760,8 @@ fn selected_params_use_runtime_role_fields() {
             ThinkingSummary::Concise,
         ],
         supports_compaction: false,
+        supports_standalone_compaction: false,
+        standalone_compaction_threshold: None,
     }]);
 
     let params = selected_params_for_role(&provider_models, &roles, selected_role, &model);

@@ -202,6 +202,22 @@ impl ChatGptRuntime {
         responses::pool::run_prewarm_through_shared_pool(&self.ws_pool, config, session_id, request)
             .map(|_| ())
     }
+
+    /// Runs unary remote compaction and invalidates any pre-boundary WebSocket
+    /// chain only after the replacement window is accepted from upstream.
+    pub fn compact(
+        &self,
+        agent_prompt_id: &str,
+        config: &responses::ResponsesConfig,
+        request: &common::PromptPayload<'_>,
+        abort: &mut impl TurnAbort,
+    ) -> Result<Vec<tau_proto::ContextItem>, common::LlmError> {
+        let output = responses::responses_compact(agent_prompt_id, config, request, abort)?;
+        self.ws_pool
+            .invalidate(config, request)
+            .map_err(|error| error.into_llm_error())?;
+        Ok(output)
+    }
 }
 
 impl Default for ChatGptRuntime {
@@ -313,6 +329,9 @@ fn model_info(provider: &ProviderName, model: &str) -> ProviderModelInfo {
             ThinkingSummary::Detailed,
         ],
         supports_compaction: !uses_responses_lite(model),
+        supports_standalone_compaction: uses_responses_lite(model),
+        standalone_compaction_threshold: uses_responses_lite(model)
+            .then_some((raw_context_window_for_model(model) * 9 / 10).max(1000)),
     }
 }
 

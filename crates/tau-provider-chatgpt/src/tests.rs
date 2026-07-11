@@ -141,6 +141,15 @@ fn publishes_chatgpt_model_metadata() {
     assert!(
         models
             .iter()
+            .filter(|model| model.id.model.as_str().starts_with("gpt-5.6-"))
+            .all(|model| {
+                model.supports_standalone_compaction
+                    && model.standalone_compaction_threshold == Some(334_800)
+            })
+    );
+    assert!(
+        models
+            .iter()
             .filter(|model| !model.id.model.as_str().starts_with("gpt-5.6-"))
             .all(|model| model.supports_compaction)
     );

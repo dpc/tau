@@ -253,6 +253,7 @@ fn prompt() -> tau_proto::AgentPromptCreated {
         share_user_cache_key: false,
         ctx_id: None,
         compaction: None,
+        operation: tau_proto::PromptOperation::Inference,
     }
 }
 
@@ -519,6 +520,12 @@ fn chatgpt_oauth_publishes_chatgpt_models() {
             .iter()
             .filter(|model| model.id.model.as_str().starts_with("gpt-5.6-"))
             .all(|model| !model.supports_compaction)
+    );
+    assert!(
+        models
+            .iter()
+            .filter(|model| model.id.model.as_str().starts_with("gpt-5.6-"))
+            .all(|model| model.supports_standalone_compaction)
     );
     assert!(
         models

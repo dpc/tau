@@ -1064,6 +1064,7 @@ fn late_joining_ui_client_replays_final_but_not_stale_queued_session_events() {
 
             share_user_cache_key: false,
             ctx_id: None,
+            operation: tau_proto::PromptOperation::Inference,
         }),
     );
     h.publish_event(
@@ -1083,6 +1084,7 @@ fn late_joining_ui_client_replays_final_but_not_stale_queued_session_events() {
         Event::AgentCompactionTriggered(tau_proto::AgentCompactionTriggered {
             agent_id: crate::parse_agent_id(&agent_id),
             originator: tau_proto::PromptOriginator::User,
+            resume_inference: false,
         }),
     );
     h.publish_event(
