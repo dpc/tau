@@ -6,6 +6,8 @@
 //! shell extension execute commands with the user's permissions. The fixture
 //! isolates Tau harness/config/session state for the test turn, but
 //! deliberately does not rewrite process-wide XDG environment variables.
+//! The fixture's trust and cassette boundaries are summarized in
+//! `ARCH-tau-e2e-tests`.
 
 use std::path::{Path, PathBuf};
 

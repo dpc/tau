@@ -7,6 +7,9 @@
 //! `ARCH-tau-ext-provider-builtin`.
 //! See `DESIGN-tau-ext-provider-builtin-testing-boundary` for that test
 //! boundary.
+//! Retry telemetry and debug-capture persistence follow
+//! `DESIGN-tau-ext-provider-builtin-structured-retry-facts` and
+//! `DESIGN-tau-ext-provider-builtin-durable-session-diagnostics`.
 
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BinaryHeap, HashMap, HashSet, VecDeque};

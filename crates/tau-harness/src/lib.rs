@@ -8,6 +8,9 @@
 //! channels (non-blocking).  Writer threads drain their channel and
 //! write to the stream; on channel close they run the shutdown
 //! sequence for that connection.
+//!
+//! Event publication/replay and durable session behavior are specified by
+//! `SPEC-tau-harness-event-processing` and `SPEC-tau-harness-session-state`.
 
 pub mod runtime_dir;
 

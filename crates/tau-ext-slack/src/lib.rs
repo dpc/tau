@@ -3,6 +3,8 @@
 //! The extension exposes `slack_register` and `slack_send` tools. It is
 //! disabled by default, requires Slack token secrets plus a non-empty
 //! allowlist, and treats Slack text as external untrusted prompt input.
+//! Reply routing follows
+//! `DESIGN-tau-ext-slack-canonical-reply-selectors`.
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::error::Error;

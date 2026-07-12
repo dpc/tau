@@ -4,6 +4,9 @@
 //! Parallel.ai-backed `web_search` / `web_fetch` tools. The Parallel tools use
 //! collision-free Tau-internal names and are disabled by default so roles can
 //! opt into them without creating a duplicate model-visible `web_search`.
+//! Provider trust, transport sanitization, and test isolation follow
+//! `DESIGN-tau-ext-websearch-provider-boundary` and
+//! `DESIGN-tau-ext-websearch-testing-strategy`.
 
 use std::error::Error;
 use std::io::{Read, Write};
