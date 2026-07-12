@@ -585,6 +585,7 @@ pub(super) fn provider_text_response(
         stop_reason: tau_proto::ProviderStopReason::EndTurn,
         error: None,
         failure_kind: None,
+        context_limit_telemetry: None,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
         originator: tau_proto::PromptOriginator::User,
@@ -607,6 +608,7 @@ fn provider_repetition_response(
         stop_reason: tau_proto::ProviderStopReason::RepetitionDetected,
         error: Some("provider stream repetition detected".to_owned()),
         failure_kind: None,
+        context_limit_telemetry: None,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
         originator: tau_proto::PromptOriginator::User,
@@ -823,6 +825,7 @@ fn seed_background_placeholder_for_agent(
                 stop_reason: tau_proto::ProviderStopReason::ToolCalls,
                 error: None,
                 failure_kind: None,
+                context_limit_telemetry: None,
                 recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
                 usage: None,
                 originator: tau_proto::PromptOriginator::User,
@@ -1058,6 +1061,7 @@ fn setup_routed_test_tool_call(call_id: &str, tool_name: &str) -> (TempDir, Harn
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
         failure_kind: None,
+        context_limit_telemetry: None,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
         originator: tau_proto::PromptOriginator::User,
@@ -1150,6 +1154,7 @@ fn invalid_tool_arguments_are_rejected_before_logical_dispatch() {
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
         failure_kind: None,
+        context_limit_telemetry: None,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
         originator: tau_proto::PromptOriginator::User,
@@ -1276,6 +1281,7 @@ fn invalid_tool_arguments_are_repaired_and_revalidated_before_dispatch() {
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
         failure_kind: None,
+        context_limit_telemetry: None,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
         originator: tau_proto::PromptOriginator::User,
@@ -1372,6 +1378,7 @@ fn repaired_tool_arguments_are_rejected_when_revalidation_fails() {
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
         failure_kind: None,
+        context_limit_telemetry: None,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
         originator: tau_proto::PromptOriginator::User,
@@ -1800,6 +1807,7 @@ fn side_agent_error_response_propagates_error_result() {
         stop_reason: tau_proto::ProviderStopReason::Error,
         error: Some("provider failed".to_owned()),
         failure_kind: Some(tau_proto::ProviderFailureKind::ContextWindowExceeded),
+        context_limit_telemetry: None,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
         originator: tau_proto::PromptOriginator::Extension {
@@ -2418,6 +2426,7 @@ fn unavailable_tool_errors_are_actionable_for_unknown_and_disabled_tools() {
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
         failure_kind: None,
+        context_limit_telemetry: None,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
         originator: tau_proto::PromptOriginator::User,
@@ -2550,6 +2559,7 @@ fn unknown_tool_suggestion_uses_prompt_tool_snapshot() {
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
         failure_kind: None,
+        context_limit_telemetry: None,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
         originator: tau_proto::PromptOriginator::User,
@@ -2638,6 +2648,7 @@ fn old_prompt_missing_provider_wins_over_strict_schema_validation() {
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
         failure_kind: None,
+        context_limit_telemetry: None,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
         originator: tau_proto::PromptOriginator::User,
@@ -2733,6 +2744,7 @@ fn disconnect_with_multiple_inflight_tools_cleans_up_all_calls() {
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
         failure_kind: None,
+        context_limit_telemetry: None,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
         originator: tau_proto::PromptOriginator::User,
@@ -2929,6 +2941,7 @@ fn background_result_clears_actual_running_call_without_blocking_later_tool() {
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
         failure_kind: None,
+        context_limit_telemetry: None,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
         originator: tau_proto::PromptOriginator::User,
@@ -3022,6 +3035,7 @@ fn background_error_clears_actual_running_call() {
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
         failure_kind: None,
+        context_limit_telemetry: None,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
         originator: tau_proto::PromptOriginator::User,
@@ -3127,6 +3141,7 @@ fn background_cancel_clears_actual_running_call() {
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
         failure_kind: None,
+        context_limit_telemetry: None,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
         originator: tau_proto::PromptOriginator::User,
@@ -3270,6 +3285,7 @@ fn disconnect_background_errors_do_not_affect_other_inflight_tools() {
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
         failure_kind: None,
+        context_limit_telemetry: None,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
         originator: tau_proto::PromptOriginator::User,
@@ -3371,6 +3387,7 @@ fn disconnect_idle_multi_background_errors_dispatch_prompt_after_batch() {
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
         failure_kind: None,
+        context_limit_telemetry: None,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
         originator: tau_proto::PromptOriginator::User,
@@ -3480,6 +3497,7 @@ fn disconnect_mixed_foreground_and_background_errors_dispatch_prompt_after_batch
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
         failure_kind: None,
+        context_limit_telemetry: None,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
         originator: tau_proto::PromptOriginator::User,
@@ -3843,6 +3861,7 @@ fn provider_owner_validation_rejects_provider_event_message_emit() {
                 stop_reason: tau_proto::ProviderStopReason::EndTurn,
                 error: None,
                 failure_kind: None,
+                context_limit_telemetry: None,
                 recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
                 usage: None,
                 originator: tau_proto::PromptOriginator::User,
@@ -3934,6 +3953,7 @@ fn cancel_publishes_tool_cancel_request() {
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
         failure_kind: None,
+        context_limit_telemetry: None,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
         originator: tau_proto::PromptOriginator::User,
@@ -4073,6 +4093,7 @@ fn cancel_remaining_backgrounded_extension_call_publishes_background_error_only(
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
         failure_kind: None,
+        context_limit_telemetry: None,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
         originator: tau_proto::PromptOriginator::User,
@@ -4348,6 +4369,7 @@ fn live_cancel_tools_running_includes_already_backgrounded_siblings() {
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
         failure_kind: None,
+        context_limit_telemetry: None,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
         originator: tau_proto::PromptOriginator::User,
@@ -4506,6 +4528,7 @@ fn cancel_backgrounded_builtin_agent_start_publishes_background_error_only() {
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
         failure_kind: None,
+        context_limit_telemetry: None,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
         originator: tau_proto::PromptOriginator::User,
@@ -4586,6 +4609,7 @@ fn live_cancel_backgrounded_builtin_agent_start_keeps_passive_completion_notice(
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
         failure_kind: None,
+        context_limit_telemetry: None,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
         originator: tau_proto::PromptOriginator::User,
@@ -4795,6 +4819,7 @@ fn cancel_while_thinking_terminates_prompt_and_drops_late_response() {
         stop_reason: tau_proto::ProviderStopReason::EndTurn,
         error: None,
         failure_kind: None,
+        context_limit_telemetry: None,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
         originator: tau_proto::PromptOriginator::User,
@@ -5347,6 +5372,7 @@ fn tool_turn_dispatches_provider_calls_without_global_locking() {
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
         failure_kind: None,
+        context_limit_telemetry: None,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: match (None, None, None) {
             (None, None, None) => None,
@@ -5469,6 +5495,7 @@ fn multi_tool_turn_keeps_all_results_in_followup_prompt() {
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
         failure_kind: None,
+        context_limit_telemetry: None,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: match (None, None, None) {
             (None, None, None) => None,
@@ -6023,6 +6050,7 @@ fn queued_prompt_is_steered_into_next_round_after_tool_result() {
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
         failure_kind: None,
+        context_limit_telemetry: None,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: match (None, None, None) {
             (None, None, None) => None,
@@ -6182,6 +6210,7 @@ fn tool_calls_stop_reason_without_tool_items_does_not_wedge_turn() {
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
         failure_kind: None,
+        context_limit_telemetry: None,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
         originator: tau_proto::PromptOriginator::User,
@@ -6238,6 +6267,7 @@ fn agent_prompt_created_uses_refs_for_linear_extension() {
         stop_reason: tau_proto::ProviderStopReason::EndTurn,
         error: None,
         failure_kind: None,
+        context_limit_telemetry: None,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: match (None, None, None) {
             (None, None, None) => None,
@@ -6300,6 +6330,7 @@ fn linear_agent_prompts_strictly_extend_previous_messages() {
         stop_reason: tau_proto::ProviderStopReason::EndTurn,
         error: None,
         failure_kind: None,
+        context_limit_telemetry: None,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: match (None, None, None) {
             (None, None, None) => None,
@@ -6381,6 +6412,7 @@ fn response_id_anchors_next_prompt_with_previous_response() {
         stop_reason: tau_proto::ProviderStopReason::EndTurn,
         error: None,
         failure_kind: None,
+        context_limit_telemetry: None,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: match (None, None, None) {
             (None, None, None) => None,
@@ -6441,6 +6473,7 @@ fn chained_sub_chunk_cacheable_tokens_does_not_emit_diagnostic() {
         stop_reason: tau_proto::ProviderStopReason::EndTurn,
         error: None,
         failure_kind: None,
+        context_limit_telemetry: None,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: match (Some(500), Some(0), None) {
             (None, None, None) => None,
@@ -6482,6 +6515,7 @@ fn chained_sub_chunk_cacheable_tokens_does_not_emit_diagnostic() {
         stop_reason: tau_proto::ProviderStopReason::EndTurn,
         error: None,
         failure_kind: None,
+        context_limit_telemetry: None,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: match (Some(500), Some(0), None) {
             (None, None, None) => None,
@@ -6547,6 +6581,7 @@ fn model_switch_invalidates_chain_anchor() {
         stop_reason: tau_proto::ProviderStopReason::EndTurn,
         error: None,
         failure_kind: None,
+        context_limit_telemetry: None,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: match (None, None, None) {
             (None, None, None) => None,
@@ -6621,6 +6656,7 @@ fn params_drift_invalidates_chain_anchor() {
         stop_reason: tau_proto::ProviderStopReason::EndTurn,
         error: None,
         failure_kind: None,
+        context_limit_telemetry: None,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: match (None, None, None) {
             (None, None, None) => None,
@@ -6693,6 +6729,7 @@ fn system_prompt_drift_invalidates_chain_anchor() {
         stop_reason: tau_proto::ProviderStopReason::EndTurn,
         error: None,
         failure_kind: None,
+        context_limit_telemetry: None,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: match (None, None, None) {
             (None, None, None) => None,
@@ -6777,6 +6814,7 @@ fn tools_drift_invalidates_chain_anchor() {
         stop_reason: tau_proto::ProviderStopReason::EndTurn,
         error: None,
         failure_kind: None,
+        context_limit_telemetry: None,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: match (None, None, None) {
             (None, None, None) => None,
@@ -6861,6 +6899,7 @@ fn stable_params_preserve_chain_anchor() {
         stop_reason: tau_proto::ProviderStopReason::EndTurn,
         error: None,
         failure_kind: None,
+        context_limit_telemetry: None,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: match (None, None, None) {
             (None, None, None) => None,
@@ -6924,6 +6963,7 @@ fn missing_response_id_leaves_chain_unset() {
         stop_reason: tau_proto::ProviderStopReason::EndTurn,
         error: None,
         failure_kind: None,
+        context_limit_telemetry: None,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: match (None, None, None) {
             (None, None, None) => None,
@@ -6998,6 +7038,7 @@ fn queued_prompt_extends_completed_first_prompt() {
         stop_reason: tau_proto::ProviderStopReason::EndTurn,
         error: None,
         failure_kind: None,
+        context_limit_telemetry: None,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: match (None, None, None) {
             (None, None, None) => None,
@@ -7623,6 +7664,7 @@ fn resumed_lost_background_tool_gets_error_and_wait_returns() {
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
         failure_kind: None,
+        context_limit_telemetry: None,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
         originator: tau_proto::PromptOriginator::User,
@@ -7750,6 +7792,7 @@ fn resumed_completed_background_result_can_be_consumed_by_no_arg_wait() {
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
         failure_kind: None,
+        context_limit_telemetry: None,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
         originator: tau_proto::PromptOriginator::User,
@@ -8350,6 +8393,7 @@ fn manual_standalone_compact_installs_one_boundary() {
         stop_reason: tau_proto::ProviderStopReason::EndTurn,
         error: None,
         failure_kind: None,
+        context_limit_telemetry: None,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         originator: tau_proto::PromptOriginator::User,
         usage: None,
@@ -8405,6 +8449,7 @@ pub(super) fn context_overflow_response(
         stop_reason: tau_proto::ProviderStopReason::Error,
         error: Some("bounded context rejection".to_owned()),
         failure_kind: Some(tau_proto::ProviderFailureKind::ContextWindowExceeded),
+        context_limit_telemetry: None,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         originator: prompt.originator.clone(),
         usage: None,
@@ -8436,7 +8481,22 @@ fn reactive_context_overflow_recovers_in_durable_order_once() {
         .expect("dispatch inference");
     let inference = read_nth_prompt_created(&h, 0);
     let turn_generation = h.agents[&cid].turn_generation;
-    h.handle_provider_response_finished(context_overflow_response(&inference))
+    let mut rejected = context_overflow_response(&inference);
+    rejected.context_limit_telemetry = Some(tau_proto::ContextLimitTelemetry {
+        model: "evil/forged".parse().expect("model"),
+        operation: tau_proto::PromptOperation::StandaloneCompaction,
+        projected_input_tokens: Some(1),
+        transcript_delta_bytes: 1,
+        advertised_context_window: Some(1),
+        provider_input_tokens: Some(1),
+        projection_reserve_tokens: 1,
+        compaction_threshold: Some(1),
+        compaction_policy: tau_proto::ContextLimitCompactionPolicy::Disabled,
+        recovery_eligible: false,
+        action: tau_proto::ContextLimitAction::Terminal,
+        observation: tau_proto::ContextLimitObservation::RejectedAtOrAboveAdvertisedLimit,
+    });
+    h.handle_provider_response_finished(rejected)
         .expect("plan reactive recovery");
     let compact = read_nth_prompt_created(&h, 1);
     assert_eq!(
@@ -8457,6 +8517,42 @@ fn reactive_context_overflow_recovers_in_durable_order_once() {
             )
         })
         .expect("planned terminal response");
+    let planned = match &events[planned_index] {
+        Event::ProviderResponseFinished(response) => response,
+        _ => unreachable!("located provider response"),
+    };
+    let telemetry = planned
+        .context_limit_telemetry
+        .as_ref()
+        .expect("harness attaches dispatch snapshot");
+    assert_eq!(telemetry.model, "test/model".parse().expect("model"));
+    assert_eq!(telemetry.operation, tau_proto::PromptOperation::Inference);
+    assert_eq!(telemetry.advertised_context_window, Some(1000));
+    assert_eq!(telemetry.projection_reserve_tokens, 4096);
+    assert!(telemetry.transcript_delta_bytes > 0);
+    assert_eq!(telemetry.provider_input_tokens, None);
+    assert_eq!(
+        telemetry.compaction_policy,
+        tau_proto::ContextLimitCompactionPolicy::ProviderDefault
+    );
+    assert_eq!(
+        telemetry.observation,
+        tau_proto::ContextLimitObservation::InsufficientEvidence
+    );
+    assert!(telemetry.recovery_eligible);
+    assert_eq!(
+        telemetry.action,
+        tau_proto::ContextLimitAction::ReactiveCompactionPlanned
+    );
+    assert_eq!(
+        planned.recovery_disposition,
+        tau_proto::ContextRecoveryDisposition::ReactiveCompactionPlanned
+    );
+    assert!(
+        !h.prompt_context_limits
+            .contains_key(&inference.agent_prompt_id),
+        "terminal response consumes prompt-local telemetry snapshot"
+    );
     let (start_index, start) = events
         .iter()
         .enumerate()
@@ -8750,6 +8846,7 @@ fn reactive_context_overflow_replay_claims_and_dispatches_once() {
         stop_reason: tau_proto::ProviderStopReason::Error,
         error: Some("bounded".to_owned()),
         failure_kind: Some(tau_proto::ProviderFailureKind::ContextWindowExceeded),
+        context_limit_telemetry: None,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::ReactiveCompactionPlanned,
         originator: tau_proto::PromptOriginator::User,
         usage: None,
@@ -8885,6 +8982,7 @@ fn reactive_context_overflow_replay_drift_allows_manual_compact() {
             stop_reason: tau_proto::ProviderStopReason::Error,
             error: Some("bounded".to_owned()),
             failure_kind: Some(tau_proto::ProviderFailureKind::ContextWindowExceeded),
+            context_limit_telemetry: None,
             recovery_disposition: tau_proto::ContextRecoveryDisposition::ReactiveCompactionPlanned,
             originator: tau_proto::PromptOriginator::User,
             usage: None,
@@ -9133,6 +9231,7 @@ fn reactive_context_overflow_compact_success_resumes_one_checkpoint() {
             stop_reason: tau_proto::ProviderStopReason::Error,
             error: Some("bounded".to_owned()),
             failure_kind: Some(tau_proto::ProviderFailureKind::ContextWindowExceeded),
+            context_limit_telemetry: None,
             recovery_disposition: tau_proto::ContextRecoveryDisposition::ReactiveCompactionPlanned,
             originator: tau_proto::PromptOriginator::User,
             usage: None,
@@ -9531,6 +9630,7 @@ fn standalone_compaction_failure_does_not_retry_automatically() {
         stop_reason: tau_proto::ProviderStopReason::EndTurn,
         error: Some("secret provider detail".to_owned()),
         failure_kind: None,
+        context_limit_telemetry: None,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         originator: tau_proto::PromptOriginator::User,
         usage: None,
@@ -9645,6 +9745,7 @@ fn blocked_compaction_replay_preserves_watch_prompt_correlation() {
             stop_reason: tau_proto::ProviderStopReason::Error,
             error: Some("raw compact failure".to_owned()),
             failure_kind: None,
+            context_limit_telemetry: None,
             recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
             originator: tau_proto::PromptOriginator::User,
             usage: None,
@@ -9711,6 +9812,7 @@ fn standalone_dispatch_uncertain_replay_projects_compaction_category() {
             stop_reason: tau_proto::ProviderStopReason::EndTurn,
             error: None,
             failure_kind: None,
+            context_limit_telemetry: None,
             recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
             originator: tau_proto::PromptOriginator::User,
             usage: None,
@@ -9858,6 +9960,7 @@ fn standalone_auto_compaction_schedules_at_threshold() {
         stop_reason: tau_proto::ProviderStopReason::EndTurn,
         error: None,
         failure_kind: None,
+        context_limit_telemetry: None,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         originator: tau_proto::PromptOriginator::User,
         usage: None,
@@ -10719,6 +10822,7 @@ fn start_background_tool_and_finish_placeholder_turn(
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
         failure_kind: None,
+        context_limit_telemetry: None,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
         originator: tau_proto::PromptOriginator::User,
@@ -11316,6 +11420,7 @@ fn start_agent_request_dispatches_while_tool_is_running_and_restores_turn() {
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
         failure_kind: None,
+        context_limit_telemetry: None,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: match (None, None, None) {
             (None, None, None) => None,
@@ -11400,6 +11505,7 @@ fn start_agent_request_dispatches_while_tool_is_running_and_restores_turn() {
         stop_reason: tau_proto::ProviderStopReason::EndTurn,
         error: None,
         failure_kind: None,
+        context_limit_telemetry: None,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: match (None, None, None) {
             (None, None, None) => None,
@@ -11515,6 +11621,7 @@ fn delegated_agent_user_interaction_prevents_auto_suspend() {
         stop_reason: tau_proto::ProviderStopReason::EndTurn,
         error: None,
         failure_kind: None,
+        context_limit_telemetry: None,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
         originator: tau_proto::PromptOriginator::Extension {
@@ -11604,6 +11711,7 @@ fn side_agent_drains_agent_message_before_extension_teardown() {
         stop_reason: tau_proto::ProviderStopReason::EndTurn,
         error: None,
         failure_kind: None,
+        context_limit_telemetry: None,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
         originator: tau_proto::PromptOriginator::Extension {
@@ -11660,6 +11768,7 @@ fn side_agent_drains_agent_message_before_extension_teardown() {
         stop_reason: tau_proto::ProviderStopReason::EndTurn,
         error: None,
         failure_kind: None,
+        context_limit_telemetry: None,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
         originator: tau_proto::PromptOriginator::Extension {
@@ -11813,6 +11922,7 @@ fn start_agent_request_during_tool_call_branches_off_unresolved_tool_use() {
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
         failure_kind: None,
+        context_limit_telemetry: None,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: match (None, None, None) {
             (None, None, None) => None,
@@ -11950,6 +12060,7 @@ fn non_tool_start_agent_request_starts_fresh_agent_branch() {
         stop_reason: tau_proto::ProviderStopReason::EndTurn,
         error: None,
         failure_kind: None,
+        context_limit_telemetry: None,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: match (None, None, None) {
             (None, None, None) => None,
@@ -12103,6 +12214,7 @@ fn non_tool_start_agent_request_preserves_tool_choice_without_parent_chain_ancho
         stop_reason: tau_proto::ProviderStopReason::EndTurn,
         error: None,
         failure_kind: None,
+        context_limit_telemetry: None,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: match (None, None, None) {
             (None, None, None) => None,
@@ -12220,6 +12332,7 @@ fn delegate_start_agent_request_keeps_tool_choice_auto() {
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
         failure_kind: None,
+        context_limit_telemetry: None,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: match (None, None, None) {
             (None, None, None) => None,
@@ -12432,6 +12545,7 @@ fn side_conversation_shared_tool_dispatches_through_parent_exclusive_delegate() 
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
         failure_kind: None,
+        context_limit_telemetry: None,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: match (None, None, None) {
             (None, None, None) => None,
@@ -12491,6 +12605,7 @@ fn side_conversation_shared_tool_dispatches_through_parent_exclusive_delegate() 
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
         failure_kind: None,
+        context_limit_telemetry: None,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: match (None, None, None) {
             (None, None, None) => None,
@@ -12615,6 +12730,7 @@ fn background_completion_from_preserved_delegate_queues_on_delegate() {
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
         failure_kind: None,
+        context_limit_telemetry: None,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
         originator: tau_proto::PromptOriginator::User,
@@ -12650,6 +12766,7 @@ fn background_completion_from_preserved_delegate_queues_on_delegate() {
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
         failure_kind: None,
+        context_limit_telemetry: None,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
         originator: tau_proto::PromptOriginator::Extension {
@@ -12696,6 +12813,7 @@ fn background_completion_from_preserved_delegate_queues_on_delegate() {
         stop_reason: tau_proto::ProviderStopReason::EndTurn,
         error: None,
         failure_kind: None,
+        context_limit_telemetry: None,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
         originator: tau_proto::PromptOriginator::Extension {
@@ -12890,6 +13008,7 @@ fn canceled_side_conversation_drops_inner_background_completion() {
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
         failure_kind: None,
+        context_limit_telemetry: None,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
         originator: tau_proto::PromptOriginator::User,
@@ -12926,6 +13045,7 @@ fn canceled_side_conversation_drops_inner_background_completion() {
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
         failure_kind: None,
+        context_limit_telemetry: None,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
         originator: tau_proto::PromptOriginator::Extension {
@@ -13042,6 +13162,7 @@ fn background_notification_suppression_keeps_error_event_but_skips_prompt() {
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
         failure_kind: None,
+        context_limit_telemetry: None,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
         originator: tau_proto::PromptOriginator::User,
@@ -13270,6 +13391,7 @@ fn backgrounded_tool_progress_is_not_published() {
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
         failure_kind: None,
+        context_limit_telemetry: None,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
         originator: tau_proto::PromptOriginator::User,
@@ -13558,6 +13680,7 @@ fn wait_tool_reply_is_folded_into_followup_prompt() {
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
         failure_kind: None,
+        context_limit_telemetry: None,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
         originator: tau_proto::PromptOriginator::User,
@@ -13669,6 +13792,7 @@ fn delegate_launcher_does_not_block_same_turn_exclusive_tool() {
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
         failure_kind: None,
+        context_limit_telemetry: None,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
         originator: tau_proto::PromptOriginator::User,
@@ -13777,6 +13901,7 @@ fn mutating_tools_in_distinct_side_conversations_dispatch_concurrently() {
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
         failure_kind: None,
+        context_limit_telemetry: None,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
         originator: tau_proto::PromptOriginator::User,
@@ -13864,6 +13989,7 @@ fn mutating_tools_in_distinct_side_conversations_dispatch_concurrently() {
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
         failure_kind: None,
+        context_limit_telemetry: None,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
         originator: tau_proto::PromptOriginator::Extension {
@@ -13891,6 +14017,7 @@ fn mutating_tools_in_distinct_side_conversations_dispatch_concurrently() {
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
         failure_kind: None,
+        context_limit_telemetry: None,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
         originator: tau_proto::PromptOriginator::Extension {
@@ -14650,6 +14777,7 @@ fn agent_watch_provider_terminal_ordering_attempt_and_success_cleanup() {
         stop_reason: tau_proto::ProviderStopReason::Error,
         error: Some("secret raw endpoint response".to_owned()),
         failure_kind: Some(tau_proto::ProviderFailureKind::RequestRejected),
+        context_limit_telemetry: None,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
         originator: tau_proto::PromptOriginator::User,
@@ -15430,6 +15558,7 @@ fn sibling_side_conv_teardown_does_not_misplace_other_side_conv_tool_result() {
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
         failure_kind: None,
+        context_limit_telemetry: None,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: match (None, None, None) {
             (None, None, None) => None,
@@ -15490,6 +15619,7 @@ fn sibling_side_conv_teardown_does_not_misplace_other_side_conv_tool_result() {
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
         failure_kind: None,
+        context_limit_telemetry: None,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: match (None, None, None) {
             (None, None, None) => None,
@@ -15558,6 +15688,7 @@ fn sibling_side_conv_teardown_does_not_misplace_other_side_conv_tool_result() {
         stop_reason: tau_proto::ProviderStopReason::EndTurn,
         error: None,
         failure_kind: None,
+        context_limit_telemetry: None,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: match (None, None, None) {
             (None, None, None) => None,
@@ -15702,6 +15833,7 @@ fn nested_start_agent_request_branches_from_tool_owner_conversation() {
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
         failure_kind: None,
+        context_limit_telemetry: None,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: match (None, None, None) {
             (None, None, None) => None,
@@ -15756,6 +15888,7 @@ fn nested_start_agent_request_branches_from_tool_owner_conversation() {
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
         failure_kind: None,
+        context_limit_telemetry: None,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: match (None, None, None) {
             (None, None, None) => None,
@@ -15877,6 +16010,7 @@ fn completed_side_conversation_tool_result_reprompts_parent() {
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
         failure_kind: None,
+        context_limit_telemetry: None,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: match (None, None, None) {
             (None, None, None) => None,
@@ -15936,6 +16070,7 @@ fn completed_side_conversation_tool_result_reprompts_parent() {
         stop_reason: tau_proto::ProviderStopReason::EndTurn,
         error: None,
         failure_kind: None,
+        context_limit_telemetry: None,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: match (None, None, None) {
             (None, None, None) => None,
@@ -16050,6 +16185,7 @@ fn recursive_delegate_prompt_contains_only_leaf_instruction() {
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
         failure_kind: None,
+        context_limit_telemetry: None,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: match (None, None, None) {
             (None, None, None) => None,
@@ -16104,6 +16240,7 @@ fn recursive_delegate_prompt_contains_only_leaf_instruction() {
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
         failure_kind: None,
+        context_limit_telemetry: None,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: match (None, None, None) {
             (None, None, None) => None,
@@ -16228,6 +16365,7 @@ fn stale_same_conversation_tool_call_response_is_ignored() {
         stop_reason: tau_proto::ProviderStopReason::ToolCalls,
         error: None,
         failure_kind: None,
+        context_limit_telemetry: None,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         usage: None,
         originator: tau_proto::PromptOriginator::User,

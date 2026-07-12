@@ -1043,3 +1043,7 @@ self-compaction or, independently, `agent_compact {agent_id}` (group
 `cross_agent_compaction`) for another loaded agent. Accepted calls are
 background operations compatible with `wait`; the harness durably defers self
 compaction until the complete sibling tool-result round is folded.
+- Sanitized durable context-limit diagnostics correlate projected and
+  provider-reported usage with exact model/operation metadata, exposing hidden
+  overhead and provider limit drift without prompt content or unsafe automatic
+  threshold calibration.

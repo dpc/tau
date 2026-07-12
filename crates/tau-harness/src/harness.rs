@@ -33,6 +33,10 @@ use tau_proto::{
     ToolResultKind, ToolType, UiCancelPrompt, UiTreeNavigationTarget, nearest_name_suggestion,
 };
 
+use self::context_limit_telemetry::{
+    MIN_CONTEXT_PROJECTION_RESERVE, PromptContextLimitSnapshot, context_limit_observation,
+    context_projection_reserve,
+};
 use crate::agent::{
     Agent, AgentTurnState, LoopCycleState, LoopGuardTrigger, LoopTurnSignature, PendingCancel,
     PendingPrompt,
@@ -1364,6 +1368,8 @@ mod agent_context_tests;
 #[cfg(test)]
 mod compaction_metadata_tests;
 #[cfg(test)]
+mod context_limit_telemetry_tests;
+#[cfg(test)]
 mod semantic_event_router_tests;
 #[cfg(test)]
 mod tests;
@@ -1371,6 +1377,7 @@ mod tests;
 mod tool_policy_tests;
 
 mod agent_context;
+mod context_limit_telemetry;
 mod current_session;
 mod dispatch;
 mod extension_data;
@@ -1535,11 +1542,8 @@ fn watch_category_for_retry(
 
 /// Central harness event loop and runtime state.
 ///
-/// `Harness` owns the event bus, live connections, durable session and agent
-/// stores, provider/tool routing state, and the currently bound session. Most
-/// fields remain crate-visible so focused harness submodules and regression
-/// tests can share the state while the implementation is gradually split into
-/// smaller owners.
+/// Owns the event bus, live connections, durable stores, and provider/tool
+/// routing state for the currently bound session.
 pub struct Harness {
     /// Sender side of the harness's central event channel. Cloned into
     /// each per-connection reader thread so they can feed
@@ -1801,6 +1805,8 @@ pub struct Harness {
     /// attribute the corresponding finished response even if the user
     /// switches models while it is in flight.
     pub(crate) prompt_models: std::collections::HashMap<AgentPromptId, ModelId>,
+    /// Immutable content-free context projection captured at provider dispatch.
+    prompt_context_limits: HashMap<AgentPromptId, PromptContextLimitSnapshot>,
     /// Prompts for which streaming exposed semantic output, making automatic
     /// no-output recovery unsafe.
     prompt_semantic_output: HashSet<AgentPromptId>,
@@ -2009,6 +2015,7 @@ where
                         stop_reason: ProviderStopReason::EndTurn,
                         error: None,
                         failure_kind: None,
+                        context_limit_telemetry: None,
                         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
                         originator: prompt.originator.clone(),
                         usage: None,
@@ -2079,6 +2086,7 @@ where
                         stop_reason: ProviderStopReason::ToolCalls,
                         error: None,
                         failure_kind: None,
+                        context_limit_telemetry: None,
                         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
                         originator: prompt.originator.clone(),
                         usage: None,
@@ -2391,6 +2399,7 @@ impl Harness {
             selected_model: parts.selected_model,
             current_session_state: CurrentSessionState::default(),
             prompt_models: HashMap::new(),
+            prompt_context_limits: HashMap::new(),
             prompt_semantic_output: HashSet::new(),
             suppressed_compaction_dispatches: HashSet::new(),
             cancelled_compaction_claims: HashSet::new(),
@@ -3639,6 +3648,7 @@ impl Harness {
         self.prompt_agents.remove(agent_prompt_id.as_str());
         self.pending_provider_prompts.remove(&agent_prompt_id);
         self.prompt_operations.remove(&agent_prompt_id);
+        self.prompt_context_limits.remove(&agent_prompt_id);
         self.clear_prompt_tool_snapshot(&agent_prompt_id);
         if let Some(model) = self.prompt_models.remove(&agent_prompt_id) {
             self.current_session_state.token_usage.total.requests = self
@@ -7889,6 +7899,7 @@ impl Harness {
         self.cancel_running_compaction(cid, &agent_prompt_id);
         self.canceled_prompts.insert(agent_prompt_id.clone());
         self.prompt_operations.remove(&agent_prompt_id);
+        self.prompt_context_limits.remove(&agent_prompt_id);
         self.prompt_semantic_output.remove(&agent_prompt_id);
         self.publish_prompt_terminated(
             session_id,
@@ -8240,6 +8251,7 @@ impl Harness {
             );
             self.prompt_agents.remove(&spid);
             self.prompt_operations.remove(&spid);
+            self.prompt_context_limits.remove(&spid);
             self.publish_event(
                 None,
                 Event::UiCancelPrompt(UiCancelPrompt {
@@ -10645,7 +10657,7 @@ impl Harness {
                 })
                 .fold(0_u64, u64::saturating_add)
         });
-        let control_reserve = (info.context_window / 100).max(4096);
+        let control_reserve = context_projection_reserve(info.context_window);
         let projected_tokens = input_tokens
             .saturating_add(delta_bytes)
             .saturating_add(control_reserve);
@@ -11213,6 +11225,7 @@ impl Harness {
             );
             self.prompt_agents.remove(spid);
             self.prompt_operations.remove(spid);
+            self.prompt_context_limits.remove(spid);
             self.emit_info(&format!(
                 "preempting side conv `{cid}` ({spid}) for incoming user prompt",
             ));
@@ -11432,6 +11445,7 @@ impl Harness {
         self.prompt_agents.clear();
         self.pending_provider_prompts.clear();
         self.prompt_models.clear();
+        self.prompt_context_limits.clear();
         self.prompt_semantic_output.clear();
         self.prompt_operations.clear();
         self.prompt_tool_specs.clear();
@@ -13870,6 +13884,9 @@ impl Harness {
         self.current_session_state.token_usage.start_request(&model);
         self.prompt_models
             .insert(agent_prompt_id.clone(), model.clone());
+        let context_limit_snapshot = self.prompt_context_limit_snapshot(cid, &model, operation);
+        self.prompt_context_limits
+            .insert(agent_prompt_id.clone(), context_limit_snapshot);
         self.prompt_operations.insert(
             agent_prompt_id.clone(),
             (
@@ -14552,6 +14569,8 @@ impl Harness {
         // extensions share this wire type for transport, so discard any value
         // supplied across that trust boundary before evaluating eligibility.
         response.recovery_disposition = tau_proto::ContextRecoveryDisposition::None;
+        response.context_limit_telemetry = None;
+        self.attach_context_limit_telemetry(&mut response);
         self.clear_malformed_repetition_output(&mut response);
         let mut tool_calls = tool_calls_from_output_items(&response.output_items);
         let assistant_text = assistant_text_from_output_items(&response.output_items);
@@ -14688,6 +14707,13 @@ impl Harness {
             if valid {
                 self.accept_standalone_compaction(&cid, &response, source);
             } else {
+                if response.context_limit_telemetry.is_some() {
+                    self.publish_for_agent_from(
+                        &cid,
+                        source,
+                        Event::ProviderResponseFinished(response.clone()),
+                    );
+                }
                 self.reject_standalone_compaction(&cid, &response);
             }
             return Ok(());
@@ -14739,6 +14765,114 @@ impl Harness {
         }
 
         Ok(())
+    }
+
+    /// Captures immutable, content-free context-limit projection evidence
+    /// immediately before provider dispatch.
+    fn prompt_context_limit_snapshot(
+        &self,
+        cid: &AgentId,
+        model: &ModelId,
+        operation: tau_proto::PromptOperation,
+    ) -> PromptContextLimitSnapshot {
+        let advertised_context_window = self
+            .provider_model_info
+            .get(model)
+            .map(|info| info.context_window)
+            .filter(|window| *window > 0);
+        let projection_reserve_tokens = advertised_context_window
+            .map_or(MIN_CONTEXT_PROJECTION_RESERVE, context_projection_reserve);
+        let (baseline, transcript_delta_bytes) = self.agents.get(cid).map_or((None, 0), |agent| {
+            let baseline = (agent.context_usage_model.as_ref() == Some(model))
+                .then_some(agent.context_input_tokens)
+                .flatten();
+            let delta = agent
+                .agent_id
+                .as_deref()
+                .and_then(|id| self.agent_store.agent(id))
+                .map_or(0, |tree| {
+                    let ids = tree.branch_node_ids_from(agent.head);
+                    let first = agent
+                        .context_usage_head
+                        .and_then(|head| ids.iter().position(|id| *id == head))
+                        .map_or(0, |index| index.saturating_add(1));
+                    ids[first..]
+                        .iter()
+                        .filter_map(|id| tree.node(*id))
+                        .map(|node| {
+                            serde_json::to_vec(&node.entry).map_or(u64::MAX, |v| v.len() as u64)
+                        })
+                        .fold(0_u64, u64::saturating_add)
+                });
+            (baseline, delta)
+        });
+        let role_compaction = self
+            .available_roles
+            .get(&self.role_name_for_agent_id(cid))
+            .and_then(|role| role.compaction)
+            .unwrap_or(tau_config::settings::RoleCompaction::ProviderDefault);
+        let (compaction_threshold, compaction_policy) = match role_compaction {
+            tau_config::settings::RoleCompaction::Threshold(value) => (
+                Some(value),
+                tau_proto::ContextLimitCompactionPolicy::Threshold,
+            ),
+            tau_config::settings::RoleCompaction::ProviderDefault => (
+                self.provider_model_info
+                    .get(model)
+                    .and_then(|info| info.standalone_compaction_threshold),
+                tau_proto::ContextLimitCompactionPolicy::ProviderDefault,
+            ),
+            tau_config::settings::RoleCompaction::Disabled => {
+                (None, tau_proto::ContextLimitCompactionPolicy::Disabled)
+            }
+        };
+        PromptContextLimitSnapshot {
+            model: model.clone(),
+            operation,
+            projected_input_tokens: baseline.map(|tokens| {
+                tokens
+                    .saturating_add(transcript_delta_bytes)
+                    .saturating_add(projection_reserve_tokens)
+            }),
+            transcript_delta_bytes,
+            advertised_context_window,
+            projection_reserve_tokens,
+            compaction_threshold,
+            compaction_policy,
+        }
+    }
+
+    fn attach_context_limit_telemetry(&mut self, response: &mut ProviderResponseFinished) {
+        let snapshot = self.prompt_context_limits.remove(&response.agent_prompt_id);
+        if response.failure_kind != Some(tau_proto::ProviderFailureKind::ContextWindowExceeded) {
+            return;
+        }
+        let Some(snapshot) = snapshot else {
+            return;
+        };
+        let provider_input_tokens = response
+            .usage
+            .as_ref()
+            .map(|usage| usage.prompt_sent_tokens);
+        let observation = context_limit_observation(
+            provider_input_tokens,
+            snapshot.projected_input_tokens,
+            snapshot.advertised_context_window,
+        );
+        response.context_limit_telemetry = Some(tau_proto::ContextLimitTelemetry {
+            model: snapshot.model,
+            operation: snapshot.operation,
+            projected_input_tokens: snapshot.projected_input_tokens,
+            transcript_delta_bytes: snapshot.transcript_delta_bytes,
+            advertised_context_window: snapshot.advertised_context_window,
+            provider_input_tokens,
+            projection_reserve_tokens: snapshot.projection_reserve_tokens,
+            compaction_threshold: snapshot.compaction_threshold,
+            compaction_policy: snapshot.compaction_policy,
+            recovery_eligible: false,
+            action: tau_proto::ContextLimitAction::Terminal,
+            observation,
+        });
     }
 
     /// Durably claims an eligible no-output context rejection and starts the
@@ -14818,6 +14952,10 @@ impl Harness {
 
         response.recovery_disposition =
             tau_proto::ContextRecoveryDisposition::ReactiveCompactionPlanned;
+        if let Some(telemetry) = response.context_limit_telemetry.as_mut() {
+            telemetry.recovery_eligible = true;
+            telemetry.action = tau_proto::ContextLimitAction::ReactiveCompactionPlanned;
+        }
         self.publish_for_agent_from(
             cid,
             source,
@@ -15187,6 +15325,7 @@ impl Harness {
     }
 
     fn discard_finished_response_prompt_tracking(&mut self, agent_prompt_id: &AgentPromptId) {
+        self.prompt_context_limits.remove(agent_prompt_id);
         self.prompt_agents.remove(agent_prompt_id.as_str());
         self.pending_provider_prompts.remove(agent_prompt_id);
         self.prompt_models.remove(agent_prompt_id);

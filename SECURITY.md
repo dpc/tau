@@ -551,3 +551,8 @@ Accepted model requests are harness-owned durable facts correlated to the
 originating prompt and tool call. Provider and extension input cannot select a
 cut, model, or caller, and exactly one durable start or pre-start failure may
 claim an accepted request.
+Context-limit diagnostics are sanitized at the harness trust boundary. They
+retain only bounded numeric/model/operation categories under normal session
+event retention and never prompt content, provider bodies, credentials,
+headers, account identifiers, or raw error prose. Provider-authored telemetry
+is overwritten, and observations cannot automatically alter safety thresholds.

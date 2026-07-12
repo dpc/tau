@@ -1417,6 +1417,7 @@ fn finished_response(
         stop_reason,
         error: None,
         failure_kind: None,
+        context_limit_telemetry: None,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         originator: tau_proto::PromptOriginator::User,
         usage: None,
@@ -4457,6 +4458,7 @@ fn model_status_shows_main_tool_usage_before_context() {
         stop_reason: ProviderStopReason::ToolCalls,
         error: None,
         failure_kind: None,
+        context_limit_telemetry: None,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         originator: tau_proto::PromptOriginator::Extension {
             name: "core-subagents".into(),
@@ -6414,6 +6416,7 @@ fn watched_agent_response_finished_removes_active_indicator() {
         stop_reason: ProviderStopReason::EndTurn,
         error: None,
         failure_kind: None,
+        context_limit_telemetry: None,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         originator: tau_proto::PromptOriginator::Extension {
             name: "__harness__".into(),
@@ -6485,6 +6488,7 @@ fn watched_agent_provider_prompt_submitted_starts_active_indicator() {
         stop_reason: ProviderStopReason::EndTurn,
         error: None,
         failure_kind: None,
+        context_limit_telemetry: None,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         originator: tau_proto::PromptOriginator::Extension {
             name: "__harness__".into(),
@@ -6558,6 +6562,7 @@ fn watched_agent_provider_response_update_uses_authoritative_agent_id() {
         stop_reason: ProviderStopReason::EndTurn,
         error: None,
         failure_kind: None,
+        context_limit_telemetry: None,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         originator: tau_proto::PromptOriginator::Extension {
             name: "__harness__".into(),
@@ -6607,6 +6612,7 @@ fn watched_agent_terminal_event_wins_over_delayed_prompt_start() {
         stop_reason: ProviderStopReason::EndTurn,
         error: None,
         failure_kind: None,
+        context_limit_telemetry: None,
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         originator: tau_proto::PromptOriginator::Extension {
             name: "__harness__".into(),

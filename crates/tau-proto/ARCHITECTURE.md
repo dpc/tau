@@ -224,3 +224,9 @@ correlation. Exactly one matching `agent.standalone_compaction_started` with a
 `agent.manual_compaction_request_failed` may terminate that pre-start state.
 These control facts are persisted for durable agents and use the same
 memory-only semantics as other facts for ephemeral agents.
+Terminal context-window responses may carry optional harness-authored
+`context_limit_telemetry`. The harness overwrites extension input and correlates
+the immutable dispatch snapshot by prompt, exact model, and operation. Closed
+observation, policy, eligibility, and action tags contain no prompt/provider
+body. `action=reactive_compaction_planned` is valid only with the matching
+`recovery_disposition`; absent fields preserve legacy decoding.

@@ -694,6 +694,7 @@ fn representative_events() -> Vec<Event> {
             stop_reason: ProviderStopReason::EndTurn,
             error: None,
             failure_kind: None,
+            context_limit_telemetry: None,
             recovery_disposition: ContextRecoveryDisposition::None,
             usage: None,
             originator: PromptOriginator::User,
@@ -2336,6 +2337,7 @@ fn execution_events_use_provider_wire_family() {
                 stop_reason: ProviderStopReason::EndTurn,
                 error: None,
                 failure_kind: None,
+                context_limit_telemetry: None,
                 recovery_disposition: ContextRecoveryDisposition::None,
                 originator: PromptOriginator::User,
                 output_items: Vec::new(),
@@ -2536,6 +2538,39 @@ fn provider_model_info_requires_context_window() {
     assert!(
         error.to_string().contains("context_window"),
         "unexpected error: {error}"
+    );
+}
+
+/// Context-limit telemetry must preserve its closed tags and optional evidence
+/// across both supported durable wire encodings without introducing content.
+#[test]
+fn context_limit_telemetry_json_and_cbor_round_trip() {
+    let telemetry = ContextLimitTelemetry {
+        model: "openai/gpt-test".parse().expect("model"),
+        operation: PromptOperation::StandaloneCompaction,
+        projected_input_tokens: Some(127_000),
+        transcript_delta_bytes: 8192,
+        advertised_context_window: Some(128_000),
+        provider_input_tokens: None,
+        projection_reserve_tokens: 4096,
+        compaction_threshold: Some(115_200),
+        compaction_policy: ContextLimitCompactionPolicy::Threshold,
+        recovery_eligible: false,
+        action: ContextLimitAction::Terminal,
+        observation: ContextLimitObservation::RejectedBelowAdvertisedLimit,
+    };
+    let json = serde_json::to_value(&telemetry).expect("json");
+    assert_eq!(json["observation"], "rejected_below_advertised_limit");
+    assert!(json.get("provider_input_tokens").is_none());
+    assert_eq!(
+        serde_json::from_value::<ContextLimitTelemetry>(json).expect("json decode"),
+        telemetry
+    );
+    let mut cbor = Vec::new();
+    ciborium::into_writer(&telemetry, &mut cbor).expect("cbor");
+    assert_eq!(
+        ciborium::from_reader::<ContextLimitTelemetry, _>(cbor.as_slice()).expect("cbor decode"),
+        telemetry
     );
 }
 
@@ -3512,6 +3547,7 @@ fn provider_failure_kind_wire_contract_is_backward_compatible() {
         stop_reason: ProviderStopReason::Error,
         error: Some("bounded detail".to_owned()),
         failure_kind: Some(ProviderFailureKind::ContextWindowExceeded),
+        context_limit_telemetry: None,
         recovery_disposition: ContextRecoveryDisposition::None,
         originator: PromptOriginator::User,
         usage: None,
@@ -3815,6 +3851,7 @@ fn reactive_context_recovery_wire_contract() {
         stop_reason: ProviderStopReason::Error,
         error: Some("safe error".to_owned()),
         failure_kind: Some(ProviderFailureKind::ContextWindowExceeded),
+        context_limit_telemetry: None,
         recovery_disposition: ContextRecoveryDisposition::None,
         originator: PromptOriginator::User,
         usage: None,

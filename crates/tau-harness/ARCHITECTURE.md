@@ -503,3 +503,15 @@ busy or dispatch-uncertain work. The target-scoped standalone transaction is
 the provider-work authority; its terminal event produces exactly one
 background completion for the original call before any self continuation
 checkpoint.
+Context-window rejection records may include sanitized, harness-owned
+`context_limit_telemetry`. Correlation is the enclosing prompt plus exact
+provider-qualified model and operation. Projection is accepted only from a
+same-model usage baseline; missing, zero, stale/model-changed, or contradictory
+inputs produce absent values or `insufficient_evidence`. The record makes hidden
+overhead and advertised-limit drift observable but does not feed back into
+automatic calibration.
+Calibration is explicit only: operators may change normal persisted model/role
+configuration (including bounded thresholds), and resetting that configuration
+removes the calibration. Tau never learns or mutates provider limits from a
+rejection. The durable evidence records the active threshold and the closed
+chosen action (`terminal` or `reactive_compaction_planned`).

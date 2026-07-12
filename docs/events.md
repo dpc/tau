@@ -233,6 +233,17 @@ Emitted by the provider backend that owns the selected model.
   response id, backend metadata, and echoed originator. Terminal request
   rejection may carry a machine-readable `failure_kind`; notably,
   `context_window_exceeded` is independent of bounded display `error` prose.
+  Such a rejection may also carry harness-authored `context_limit_telemetry`:
+  provider-qualified model, operation, projected/provider input tokens,
+  exact serialized transcript-growth bytes, advertised window, reserve, and a
+  closed observation category. The byte growth is retained as a separately
+  labeled conservative projection input and is not provider token usage. The
+  estimate conservatively counts each serialized growth byte as one projected
+  token. It contains no
+  prompt/error/body text. It is diagnostic evidence only and never changes
+  model metadata or thresholds automatically. The active explicit threshold and
+  closed policy, eligibility flag, and harness action distinguish terminal
+  handling from one planned reactive compaction.
   Successful responses and retryable attempts omit it. Routed by the harness
   based on the originator.
 - **`provider.tool_result`** / **`provider.tool_error`** — Provider-facing

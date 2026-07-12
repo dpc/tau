@@ -66,3 +66,14 @@ authorizes any other loaded agent, but self, unavailable, stopped, unloaded,
 and cross-session targets are rejected without state enumeration. Watches,
 messages, ancestry, and automatic-compaction role settings are not substitutes
 for explicit tool presence.
+## Context-limit telemetry
+
+The harness, not providers, owns the durable context-limit diagnostic attached
+to terminal responses. Provider-supplied values are discarded. The schema is
+content-free and bounded to one record per rejected prompt: model id, operation,
+optional token counts/window, exact serialized transcript-growth bytes, reserve,
+active threshold, closed policy/eligibility/action, and a closed observation
+enum. Raw
+prompts, errors, response bodies, headers, accounts, and endpoints are excluded.
+Normal session/event retention applies; watcher snapshots do not duplicate this
+record. Evidence never automatically lowers limits or thresholds.

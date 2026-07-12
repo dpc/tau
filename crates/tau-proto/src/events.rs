@@ -3963,6 +3963,81 @@ pub enum ProviderFailureKind {
     Unknown,
 }
 
+/// Content-free evidence captured when a provider rejects a prompt for context
+/// length. This is durable diagnostic telemetry, not an automatic calibration
+/// command: advertised limits and policy thresholds remain configuration-owned.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ContextLimitTelemetry {
+    /// Provider-qualified model selected for the rejected prompt.
+    pub model: ModelId,
+    /// Operation rejected by the provider.
+    pub operation: PromptOperation,
+    /// Conservative harness estimate immediately before dispatch, when a
+    /// same-model usage baseline was available. Serialized transcript growth is
+    /// treated as a one-byte-to-one-projected-token upper bound.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub projected_input_tokens: Option<u64>,
+    /// Serialized transcript growth since the usage baseline. This byte count
+    /// is intentionally not labeled or interpreted as provider tokens.
+    pub transcript_delta_bytes: u64,
+    /// Provider-published context window observed for this exact model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub advertised_context_window: Option<u64>,
+    /// Provider-reported input usage attached to the rejection, when present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_input_tokens: Option<u64>,
+    /// Conservative reserve included in the harness projection.
+    pub projection_reserve_tokens: u64,
+    /// Explicit role/model compaction threshold active at dispatch, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compaction_threshold: Option<u64>,
+    /// Explicit compaction policy active for the role at dispatch.
+    pub compaction_policy: ContextLimitCompactionPolicy,
+    /// Whether all reactive-recovery gates were satisfied.
+    pub recovery_eligible: bool,
+    /// Harness recovery action chosen after validating operation, capability,
+    /// policy, branch, and output-safety gates.
+    pub action: ContextLimitAction,
+    /// Bounded interpretation of the evidence.
+    pub observation: ContextLimitObservation,
+}
+
+/// Bounded harness action associated with context-limit evidence.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextLimitAction {
+    /// No automatic recovery was authorized.
+    Terminal,
+    /// Exactly one reactive standalone compaction was durably planned.
+    ReactiveCompactionPlanned,
+}
+
+/// Sanitized role compaction policy active at dispatch.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextLimitCompactionPolicy {
+    /// Provider/model default threshold policy.
+    ProviderDefault,
+    /// Explicit configured threshold.
+    Threshold,
+    /// Automatic compaction disabled.
+    Disabled,
+}
+
+/// Sanitized interpretation of one context-limit rejection.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextLimitObservation {
+    /// The provider rejected below its advertised window, indicating hidden
+    /// overhead or provider/model limit drift.
+    RejectedBelowAdvertisedLimit,
+    /// Available provider and projection evidence agrees that input reached or
+    /// exceeded the advertised limit.
+    RejectedAtOrAboveAdvertisedLimit,
+    /// Usage or model-limit evidence was absent or contradictory.
+    InsufficientEvidence,
+}
+
 /// Harness-authored durable disposition of a terminal provider response.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -4013,6 +4088,10 @@ pub struct ProviderResponseFinished {
     /// prose.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failure_kind: Option<ProviderFailureKind>,
+    /// Sanitized harness-authored context-limit diagnostic for terminal context
+    /// rejection. Providers cannot author this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_limit_telemetry: Option<ContextLimitTelemetry>,
     /// Harness-authored recovery decision. Provider-supplied values are
     /// overwritten before the event is committed.
     #[serde(default, skip_serializing_if = "ContextRecoveryDisposition::is_none")]
