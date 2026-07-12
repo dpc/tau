@@ -434,7 +434,8 @@ fn role_tool_tags_run_after_policy_before_groups_and_tools() {
 
 /// Ensures prompt-owned tool lookup uses the advertised snapshot rather than
 /// mutable current-role policy, while still accepting tools that were
-/// advertised in the prompt snapshot.
+/// advertised in the prompt snapshot. This is the authority boundary recorded
+/// by `DESIGN-tau-harness-tool-prompt-snapshots`.
 #[test]
 fn prompt_snapshot_lookup_is_strict_and_survives_role_changes() {
     let mut policy = policy_harness(&["shell:chatgpt"], AgentRole::default());

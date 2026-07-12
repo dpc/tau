@@ -4,6 +4,8 @@
 //! a UI may invoke. The parser in this crate intentionally follows Tau's simple
 //! whitespace-token convention: no shell quoting, no escaping, and at most one
 //! rest-string argument at the end of a leaf command.
+//!
+//! See `ARCH-tau-actions` for the crate boundary and validation contract.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;

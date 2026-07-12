@@ -1,6 +1,9 @@
 use super::*;
 use crate::style::{Color, Span, display_width};
 
+// Security and cache regressions here cover the safeguards summarized by
+// `ARCH-tau-term-screen`.
+
 /// Test harness: pairs our `Screen` with a `vt100::Parser` acting as
 /// a headless terminal emulator. We feed our escape-sequence output
 /// into vt100 and assert on the resulting screen state.

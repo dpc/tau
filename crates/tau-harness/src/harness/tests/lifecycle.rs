@@ -738,6 +738,8 @@ fn extension_authored_notice_kind_is_stable_and_sanitized() {
     ));
 }
 
+/// Covers optional-startup availability and replay required by
+/// `SPEC-tau-harness-extension-lifecycle`.
 #[test]
 fn optional_extension_config_error_is_replayed_and_disables_extension() {
     let td = TempDir::new().expect("tempdir");

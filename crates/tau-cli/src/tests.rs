@@ -4225,6 +4225,8 @@ fn status_agent_chip_shows_current_agent_watchers() {
     assert!(!status_row.contains("child of"));
 }
 
+/// Covers the watcher-derived display contract in
+/// `DESIGN-tau-cli-agent-watch-display`.
 #[test]
 fn status_agent_chip_truncates_multiple_current_agent_watchers() {
     let (_term, handle, vt) = setup(120, 24);

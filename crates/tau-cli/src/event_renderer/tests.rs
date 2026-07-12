@@ -541,7 +541,8 @@ fn agent_message_summary_excludes_body() {
 }
 
 /// Watch lifecycle records are harness-authored statuses, so the renderer must
-/// use their typed payload and never label their body as an agent message.
+/// use their typed payload and never label their body as an agent message. See
+/// `DESIGN-tau-cli-watch-lifecycle-rendering`.
 #[test]
 fn watch_turn_state_renders_as_compact_typed_status() {
     let mut event = tau_proto::Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
