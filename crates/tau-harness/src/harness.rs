@@ -4330,6 +4330,7 @@ impl Harness {
                 .retain(|(agent_id, _, _)| agent_id != &cid);
             self.agent_routes.remove(unloaded.agent_id.as_str());
             self.stopped_agent_ids.insert(unloaded.agent_id.to_string());
+            self.discard_input_wait_for(&cid);
             self.agents.remove(&cid);
         }
         if let Event::AgentMessageReceived(message) = event {
@@ -4486,7 +4487,7 @@ impl Harness {
                 };
                 conv.pending_prompts.push_back(prompt);
             }
-            self.interrupt_active_waits_for(&cid);
+            self.activate_waits_for(&cid);
             self.preempt_queued_tool_calls_for_message_received(&cid);
             self.try_advance_queue();
             return;
@@ -4551,7 +4552,7 @@ impl Harness {
                     node_id,
                 });
         }
-        self.interrupt_active_waits_for(&cid);
+        self.activate_waits_for(&cid);
         self.preempt_queued_tool_calls_for_message_received(&cid);
         self.try_advance_queue();
     }
@@ -7469,9 +7470,6 @@ impl Harness {
         if !matches!(submission, PromptSubmission::Rejected { .. }) && !is_internal {
             let _ = self.agent_store.record_agent_user_interaction(&agent_id);
         }
-        if matches!(submission, PromptSubmission::Queued) {
-            self.interrupt_active_waits();
-        }
         Ok(())
     }
 
@@ -7520,9 +7518,6 @@ impl Harness {
         let submission = self.submit_prompt_to_agent(prompt.session_id, &agent_id, pending)?;
         if !matches!(submission, PromptSubmission::Rejected { .. }) && is_user_interaction {
             let _ = self.agent_store.record_agent_user_interaction(&agent_id);
-        }
-        if matches!(submission, PromptSubmission::Queued) && !prompt.message_class.is_internal() {
-            self.interrupt_active_waits();
         }
         Ok(true)
     }
@@ -11280,6 +11275,7 @@ impl Harness {
             || !self.turn_state.is_idle()
             || !self.extensions_all_ready()
         {
+            let inference_activation = prompt.creates_inference_activation();
             if !prompt.is_internal() {
                 self.reset_loop_guard_for_progress(&cid);
             }
@@ -11294,10 +11290,14 @@ impl Harness {
                     message_class: prompt.message_class,
                 }),
             );
+            if inference_activation {
+                self.activate_waits_for(&cid);
+            }
             self.try_advance_queue();
             return Ok(PromptSubmission::Queued);
         }
         if self.dispatch_blocked_for(&cid) {
+            let inference_activation = prompt.creates_inference_activation();
             if !prompt.is_internal() {
                 self.reset_loop_guard_for_progress(&cid);
             }
@@ -11312,6 +11312,9 @@ impl Harness {
                     message_class: prompt.message_class,
                 }),
             );
+            if inference_activation {
+                self.activate_waits_for(&cid);
+            }
             self.try_advance_queue();
             return Ok(PromptSubmission::Queued);
         }
@@ -16556,7 +16559,7 @@ impl Harness {
             cid,
             call_id,
             advance_queue,
-            PendingPrompt::internal,
+            PendingPrompt::activating_background_completion,
         );
     }
 
@@ -16574,7 +16577,7 @@ impl Harness {
             return;
         }
         let prompt = background_completion_prompt(call_id);
-        if let Some(conv) = self.agents.get_mut(cid) {
+        let queued = if let Some(conv) = self.agents.get_mut(cid) {
             if conv
                 .pending_prompts
                 .iter()
@@ -16582,7 +16585,15 @@ impl Harness {
             {
                 return;
             }
-            conv.pending_prompts.push_back(make_prompt(prompt));
+            let prompt = make_prompt(prompt);
+            let inference_activation = prompt.creates_inference_activation();
+            conv.pending_prompts.push_back(prompt);
+            inference_activation
+        } else {
+            false
+        };
+        if queued {
+            self.activate_waits_for(cid);
         }
         if advance_queue {
             self.try_advance_queue();
@@ -17070,6 +17081,7 @@ impl Harness {
             .remember_cycle_pending(cycle_key, LOOP_GUARD_CYCLE_LIMIT);
         conv.pending_prompts
             .push_back(PendingPrompt::loop_guard(loop_guard_pivot_prompt(&reason)));
+        self.activate_waits_for(cid);
     }
 
     fn mark_loop_guard_breakers_dispatched(&mut self, cid: &AgentId) {

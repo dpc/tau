@@ -48,6 +48,18 @@ endpoints to remain live, preventing durable recipient records from accumulating
 when live prompt delivery is impossible and preventing stale provider status
 from crossing a same-session reload.
 
+Activating-input waits are scheduling, not a new input authority. They wake only
+after canonical accepted input is committed or queued for that exact target
+agent, using harness-owned inference-activation classification. Raw extension or
+transport traffic, rejected or replay-only envelopes, asserted sender labels,
+and another agent's input cannot wake them. The wait result is bounded and
+content-free (`input_available: true`): external payload, sender, provenance, and
+reply capability remain solely in the canonical typed envelope delivered by
+normal prompt machinery and are never rewrapped as harness-authored tool output.
+Wait registration is runtime-only harness state: cancellation, target unload,
+session rollover, and shutdown remove it, and cold recovery uses ordinary
+unresolved-tool repair rather than reviving stale scheduling authority.
+
 Model-visible watch enable classifies the target and mutates watch state in one
 harness-loop operation. Only a Live target is accepted. Stopped or Unknown
 rejection leaves forward and reverse topology, subscription identity, provider

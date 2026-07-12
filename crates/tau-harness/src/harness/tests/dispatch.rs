@@ -2814,6 +2814,18 @@ fn wait_no_args_call(call_id: &str) -> AgentToolCall {
     }
 }
 
+fn wait_input_call(call_id: &str) -> AgentToolCall {
+    AgentToolCall {
+        id: call_id.into(),
+        name: ToolName::new("wait"),
+        tool_type: tau_proto::ToolType::Function,
+        arguments: CborValue::Map(vec![(
+            CborValue::Text("any_input".to_owned()),
+            CborValue::Bool(true),
+        )]),
+    }
+}
+
 fn tool_error(call_id: &str, tool_name: &str, message: &str) -> tau_proto::ToolError {
     tau_proto::ToolError {
         call_id: call_id.into(),
@@ -11494,6 +11506,313 @@ fn wait_start_is_interrupted_by_already_queued_agent_message() {
     );
 
     h.shutdown().expect("shutdown");
+}
+
+/// An input wait is level-triggered: activating input accepted before the tool
+/// call is handled completes it immediately without copying the queued payload
+/// into the harness-authored result.
+#[test]
+fn input_wait_returns_immediately_for_already_queued_activation() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path().join("state")).expect("start");
+    let cid = ensure_test_user_agent(&mut h);
+    let call = wait_input_call("wait-input-queued");
+    seed_tools_running(&mut h, &cid, vec![call.id.clone()]);
+    let durable_id = h.agents[&cid].agent_id.clone().expect("agent id");
+    let submission = h
+        .submit_prompt_to_agent(
+            h.current_session_id.clone(),
+            &durable_id,
+            PendingPrompt::internal("secret queued input".to_owned()),
+        )
+        .expect("queue activation");
+    assert_eq!(submission, PromptSubmission::Queued);
+    h.handle_wait_tool_call(&cid, &call, ToolName::new("wait"))
+        .expect("input wait");
+
+    assert!(event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::ToolResult(result)
+            if result.call_id.as_str() == "wait-input-queued"
+                && result.result == CborValue::Map(vec![(
+                    CborValue::Text("input_available".to_owned()),
+                    CborValue::Bool(true),
+                )])
+    )));
+    h.shutdown().expect("shutdown");
+}
+
+/// Registration-before-queue is the other half of the input-wait race: an
+/// accepted internal extension-style prompt wakes exactly the addressed agent
+/// while remaining queued for normal steering.
+#[test]
+fn input_wait_wakes_once_when_activating_prompt_is_queued() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path().join("state")).expect("start");
+    let cid = ensure_test_user_agent(&mut h);
+    let durable_id = h.agents[&cid].agent_id.clone().expect("agent id");
+    let call = wait_input_call("wait-input-arrives");
+    seed_tools_running(&mut h, &cid, vec![call.id.clone()]);
+    h.handle_wait_tool_call(&cid, &call, ToolName::new("wait"))
+        .expect("register input wait");
+    assert_eq!(tool_result_count(&h, call.id.as_str()), 0);
+    assert!(matches!(
+        h.agents[&cid].turn_state,
+        AgentTurnState::ToolsRunning { .. }
+    ));
+
+    let submission = h
+        .submit_prompt_to_agent(
+            h.current_session_id.clone(),
+            &durable_id,
+            PendingPrompt::internal("timer fired".to_owned()),
+        )
+        .expect("queue prompt");
+    assert_eq!(submission, PromptSubmission::Queued);
+    assert_eq!(tool_result_count(&h, call.id.as_str()), 1);
+    assert!(event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::AgentPromptSteered(prompt) if prompt.text == "timer fired"
+    )));
+
+    h.activate_waits_for(&cid);
+    assert_eq!(tool_result_count(&h, call.id.as_str()), 1);
+    h.shutdown().expect("shutdown");
+}
+
+/// Passive completion/restore context is deliberately not an activation and
+/// cannot release an input wait until a separate activating prompt arrives.
+#[test]
+fn passive_background_notice_does_not_wake_input_wait() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path().join("state")).expect("start");
+    let cid = ensure_test_user_agent(&mut h);
+    let call = wait_input_call("wait-input-passive");
+    seed_tools_running(&mut h, &cid, vec![call.id.clone()]);
+    h.handle_wait_tool_call(&cid, &call, ToolName::new("wait"))
+        .expect("register input wait");
+
+    let passive_call: ToolCallId = "passive-input-wait-notice".into();
+    h.background_completion_targets
+        .insert(passive_call.clone(), cid.clone());
+    h.queue_passive_background_completion_prompt(&cid, &passive_call);
+    assert_eq!(tool_result_count(&h, call.id.as_str()), 0);
+
+    let durable_id = h.agents[&cid].agent_id.clone().expect("agent id");
+    h.submit_prompt_to_agent(
+        h.current_session_id.clone(),
+        &durable_id,
+        PendingPrompt::internal("live timer".to_owned()),
+    )
+    .expect("queue activation");
+    assert_eq!(tool_result_count(&h, call.id.as_str()), 1);
+    h.shutdown().expect("shutdown");
+}
+
+/// Committed endpoint unload crosses the production lifecycle boundary and
+/// drops runtime-only input-wait registration before the agent is removed.
+#[test]
+fn agent_unload_discards_registered_input_wait() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path().join("state")).expect("start");
+    let cid = ensure_test_user_agent(&mut h);
+    let durable_id = h.agents[&cid].agent_id.clone().expect("agent id");
+    let call = wait_input_call("wait-input-unload");
+    seed_tools_running(&mut h, &cid, vec![call.id.clone()]);
+    h.handle_wait_tool_call(&cid, &call, ToolName::new("wait"))
+        .expect("register input wait");
+    assert!(h.input_wait_pending_for(&cid));
+
+    h.publish_event(
+        Some(HARNESS_CONNECTION_ID),
+        Event::SessionAgentUnloaded(tau_proto::SessionAgentUnloaded {
+            session_id: h.current_session_id.clone(),
+            agent_id: crate::parse_agent_id(&durable_id),
+        }),
+    );
+    assert!(!h.input_wait_pending_for(&cid));
+    h.activate_waits_for(&cid);
+    assert_eq!(tool_result_count(&h, call.id.as_str()), 0);
+    h.shutdown().expect("shutdown");
+}
+
+/// An unsuppressed activating background-completion notice may wake an input
+/// wait, but the completion itself remains unconsumed for a later bare wait.
+#[test]
+fn background_completion_wakes_input_wait_without_consuming_result() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path().join("state")).expect("start");
+    let cid = ensure_test_user_agent(&mut h);
+    let input_call = wait_input_call("wait-input-background");
+    seed_tools_running(&mut h, &cid, vec![input_call.id.clone()]);
+    h.handle_wait_tool_call(&cid, &input_call, ToolName::new("wait"))
+        .expect("register input wait");
+
+    let background_id: ToolCallId = "background-for-input".into();
+    h.background_completion_targets
+        .insert(background_id.clone(), cid.clone());
+    h.record_wait_background_result(tau_proto::ToolBackgroundResult {
+        call_id: background_id.clone(),
+        tool_name: ToolName::new("slow"),
+        tool_type: tau_proto::ToolType::Function,
+        result: CborValue::Text("background payload".to_owned()),
+        display: None,
+        originator: tau_proto::PromptOriginator::User,
+    });
+    h.queue_background_completion_prompt_without_advancing(&cid, &background_id);
+    assert_eq!(tool_result_count(&h, input_call.id.as_str()), 1);
+
+    let consume_call = wait_no_args_call("wait-consume-after-input");
+    h.handle_wait_tool_call(&cid, &consume_call, ToolName::new("wait"))
+        .expect("consume background result");
+    assert!(event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::ToolResult(result)
+            if result.call_id.as_str() == "wait-consume-after-input"
+                && cbor_map_text(&result.result, "original_tool_call_id")
+                    == Some(background_id.as_str())
+    )));
+    h.shutdown().expect("shutdown");
+}
+
+/// If completion B is already queued, an exact wait for still-running A sees
+/// that activating input regardless of queue/register order and is preempted;
+/// a bare wait for B itself still consumes B by completion arbitration.
+#[test]
+fn queued_other_completion_preempts_exact_wait_but_remains_bare_waitable() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path().join("state")).expect("start");
+    let cid = ensure_test_user_agent(&mut h);
+    let call_a: ToolCallId = "background-a".into();
+    let call_b: ToolCallId = "background-b".into();
+    for call_id in [&call_a, &call_b] {
+        h.tool_agents.insert(call_id.clone(), cid.clone());
+        h.pending_tools.insert(
+            call_id.clone(),
+            PendingTool {
+                name: ToolName::new("slow"),
+                internal_name: ToolName::new("slow"),
+                tool_type: tau_proto::ToolType::Function,
+            },
+        );
+        h.record_wait_tool_request(call_id);
+        h.record_wait_tool_result(ToolResult {
+            call_id: call_id.clone(),
+            tool_name: ToolName::new("slow"),
+            tool_type: tau_proto::ToolType::Function,
+            result: CborValue::Text("running".to_owned()),
+            kind: tau_proto::ToolResultKind::BackgroundPlaceholder,
+            display: None,
+            originator: tau_proto::PromptOriginator::User,
+        });
+    }
+    h.background_completion_targets
+        .insert(call_b.clone(), cid.clone());
+    h.record_wait_background_result(tau_proto::ToolBackgroundResult {
+        call_id: call_b.clone(),
+        tool_name: ToolName::new("slow"),
+        tool_type: tau_proto::ToolType::Function,
+        result: CborValue::Text("B done".to_owned()),
+        display: None,
+        originator: tau_proto::PromptOriginator::User,
+    });
+    h.queue_background_completion_prompt_without_advancing(&cid, &call_b);
+
+    let exact = AgentToolCall {
+        id: "wait-exact-a".into(),
+        name: ToolName::new("wait"),
+        tool_type: tau_proto::ToolType::Function,
+        arguments: CborValue::Map(vec![(
+            CborValue::Text("tool_call_id".to_owned()),
+            CborValue::Text(call_a.to_string()),
+        )]),
+    };
+    h.handle_wait_tool_call(&cid, &exact, ToolName::new("wait"))
+        .expect("preempt exact A");
+    assert!(event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::ToolResult(result)
+            if result.call_id == exact.id
+                && matches!(&result.result, CborValue::Text(text)
+                    if text.contains("interrupted because new input is queued"))
+    )));
+
+    let bare = wait_no_args_call("wait-bare-b");
+    h.handle_wait_tool_call(&cid, &bare, ToolName::new("wait"))
+        .expect("consume B");
+    assert!(event_log_contains_any_source(&h, |event| matches!(
+        event,
+        Event::ToolResult(result)
+            if result.call_id == bare.id
+                && cbor_map_text(&result.result, "original_tool_call_id")
+                    == Some(call_b.as_str())
+    )));
+    h.shutdown().expect("shutdown");
+}
+
+/// A consumable completed candidate suppresses only its own queued notice for
+/// start-time arbitration; a second completed call's notice still preempts both
+/// exact and bare waits rather than being hidden by a coarse boolean.
+#[test]
+fn distinct_queued_completion_preempts_wait_with_consumable_candidate() {
+    for exact in [true, false] {
+        let td = TempDir::new().expect("tempdir");
+        let mut h = echo_harness(td.path().join("state")).expect("start");
+        let cid = ensure_test_user_agent(&mut h);
+        let call_a: ToolCallId = format!("completed-a-{exact}").into();
+        let call_b: ToolCallId = format!("completed-b-{exact}").into();
+        for call_id in [&call_a, &call_b] {
+            h.background_completion_targets
+                .insert(call_id.clone(), cid.clone());
+            h.record_wait_background_result(tau_proto::ToolBackgroundResult {
+                call_id: call_id.clone(),
+                tool_name: ToolName::new("slow"),
+                tool_type: tau_proto::ToolType::Function,
+                result: CborValue::Text(format!("{call_id} done")),
+                display: None,
+                originator: tau_proto::PromptOriginator::User,
+            });
+            h.queue_background_completion_prompt_without_advancing(&cid, call_id);
+        }
+        let wait = if exact {
+            AgentToolCall {
+                id: "wait-completed-exact-a".into(),
+                name: ToolName::new("wait"),
+                tool_type: tau_proto::ToolType::Function,
+                arguments: CborValue::Map(vec![(
+                    CborValue::Text("tool_call_id".to_owned()),
+                    CborValue::Text(call_a.to_string()),
+                )]),
+            }
+        } else {
+            wait_no_args_call("wait-completed-bare-a")
+        };
+        h.handle_wait_tool_call(&cid, &wait, ToolName::new("wait"))
+            .expect("other completion preempts wait");
+        assert!(event_log_contains_any_source(&h, |event| matches!(
+            event,
+            Event::ToolResult(result)
+                if result.call_id == wait.id
+                    && matches!(&result.result, CborValue::Text(text)
+                        if text.contains("interrupted because new input is queued"))
+        )));
+        let consume_a = AgentToolCall {
+            id: format!("consume-a-{exact}").into(),
+            name: ToolName::new("wait"),
+            tool_type: tau_proto::ToolType::Function,
+            arguments: CborValue::Map(vec![(
+                CborValue::Text("tool_call_id".to_owned()),
+                CborValue::Text(call_a.to_string()),
+            )]),
+        };
+        h.handle_wait_tool_call(&cid, &consume_a, ToolName::new("wait"))
+            .expect("A remains consumable");
+        assert!(event_log_contains_any_source(&h, |event| matches!(
+            event,
+            Event::ToolResult(result) if result.call_id == consume_a.id
+        )));
+        h.shutdown().expect("shutdown");
+    }
 }
 
 /// Exact `wait` is scoped to the background call owner before any waiter is

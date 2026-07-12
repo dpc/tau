@@ -43,6 +43,22 @@ fn wait_call(target_call_id: &str) -> AgentToolCall {
     }
 }
 
+/// The model-facing wait contract exposes the explicit input mode without
+/// changing the empty-object background-wait form.
+#[test]
+fn wait_spec_documents_optional_non_consuming_input_mode() {
+    let spec = wait_tool_spec();
+    let parameters = spec.parameters.expect("wait parameters");
+    assert_eq!(
+        parameters["properties"]["any_input"]["type"],
+        serde_json::json!("boolean")
+    );
+    assert!(parameters.get("required").is_none());
+    let description = spec.description.expect("wait description");
+    assert!(description.contains("`wait({\"any_input\":true})`"));
+    assert!(description.contains("does not consume"));
+}
+
 fn message_call(recipient_id: &str, message: &str) -> AgentToolCall {
     AgentToolCall {
         id: "message-call".into(),

@@ -18,6 +18,11 @@ intervening execution and collection of those requested tool results before a
 subsequent model round. Documentation and UI state must not call an individual
 model round a turn when that would make the outer lifecycle ambiguous.
 
+An activating-input `wait` remains inside the current tool round and outer agent
+turn. It does not create a suspended agent-turn state: accepted input completes
+the tool call and is folded into the following model round. The waiter itself is
+runtime-only and is repaired, not recreated, after a cold daemon restart.
+
 ## Extension availability startup layering
 
 Status: unconfirmed

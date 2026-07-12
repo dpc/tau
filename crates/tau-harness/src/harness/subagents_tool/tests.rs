@@ -15,6 +15,13 @@ fn wait_args_exact(call_id: &str) -> CborValue {
     )])
 }
 
+fn wait_args_input(value: bool) -> CborValue {
+    CborValue::Map(vec![(
+        CborValue::Text("any_input".to_owned()),
+        CborValue::Bool(value),
+    )])
+}
+
 fn wait_tool_name() -> ToolName {
     ToolName::new(WAIT_TOOL_NAME)
 }
@@ -77,6 +84,15 @@ fn start_wait_exact(
         wait_call_id.into(),
         wait_tool_name(),
         &wait_args_exact(target_call_id),
+    )
+}
+
+fn start_wait_input(tracker: &mut WaitTracker, owner: &AgentId, call_id: &str) -> WaitStart {
+    tracker.handle_wait_invoke(
+        owner,
+        call_id.into(),
+        wait_tool_name(),
+        &wait_args_input(true),
     )
 }
 
@@ -272,6 +288,15 @@ fn wait_args_omitted_tool_call_id_parse_as_any_background() {
     assert_eq!(parse_wait_args(&unrelated), Ok(WaitTarget::AnyBackground));
 }
 
+/// A bare wait with no candidates points callers at the explicit input mode
+/// rather than leaving an indefinite wait as an accidental interpretation.
+#[test]
+fn no_arg_wait_without_candidates_has_actionable_input_guidance() {
+    let mut tracker = WaitTracker::default();
+    let reply = start_reply(start_wait_any(&mut tracker, &conv("main"), "wait-empty"));
+    assert_eq!(reply_error(reply).0, NO_BACKGROUND_WAIT_CANDIDATES);
+}
+
 /// Invalid explicit ids still fail early so a typo does not silently turn
 /// into a broad no-arg wait.
 #[test]
@@ -288,6 +313,153 @@ fn wait_args_reject_non_string_and_empty_tool_call_id() {
         parse_wait_args(&wait_args_exact("   ")),
         Err("`tool_call_id` must not be empty".to_owned())
     );
+}
+
+/// The input-wait flag is explicit so false cannot silently acquire the
+/// long-standing no-argument background-wait meaning, and combining modes is
+/// rejected independent of map order.
+#[test]
+fn wait_args_parse_explicit_input_mode_and_reject_ambiguous_forms() {
+    assert_eq!(
+        parse_wait_args(&wait_args_input(true)),
+        Ok(WaitTarget::AnyInput)
+    );
+    assert_eq!(
+        parse_wait_args(&wait_args_input(false)),
+        Err("`any_input` must be true when provided".to_owned())
+    );
+    assert_eq!(
+        parse_wait_args(&CborValue::Map(vec![
+            (
+                CborValue::Text("any_input".to_owned()),
+                CborValue::Bool(true),
+            ),
+            (
+                CborValue::Text("tool_call_id".to_owned()),
+                CborValue::Text("call".to_owned()),
+            ),
+        ])),
+        Err("`tool_call_id` and `any_input` are mutually exclusive".to_owned())
+    );
+    assert_eq!(
+        parse_wait_args(&CborValue::Map(vec![(
+            CborValue::Text("any_input".to_owned()),
+            CborValue::Text("true".to_owned()),
+        )])),
+        Err("`any_input` must be a boolean".to_owned())
+    );
+    for values in [[true, false], [false, true]] {
+        assert_eq!(
+            parse_wait_args(&CborValue::Map(
+                values
+                    .into_iter()
+                    .map(|value| {
+                        (
+                            CborValue::Text("any_input".to_owned()),
+                            CborValue::Bool(value),
+                        )
+                    })
+                    .collect(),
+            )),
+            Err("`any_input` must not be repeated".to_owned())
+        );
+    }
+}
+
+/// Activating input completes only the addressed agent's input and background
+/// waits, leaves another agent's waiter untouched, and never copies input
+/// content into the bounded input-wait result.
+#[test]
+fn activating_input_wakes_only_target_owned_waits() {
+    let owner = conv("owner");
+    let other = conv("other");
+    let mut tracker = WaitTracker::default();
+    assert!(
+        start_wait_input(&mut tracker, &owner, "input-owner")
+            .reply
+            .is_none()
+    );
+    assert!(
+        start_wait_input(&mut tracker, &other, "input-other")
+            .reply
+            .is_none()
+    );
+
+    let replies = tracker.activate_waits_for(&owner);
+    assert_eq!(replies.len(), 1);
+    assert_eq!(replies[0].wait_call_id.as_str(), "input-owner");
+    assert_eq!(
+        reply_result(replies.into_iter().next().expect("input reply")),
+        CborValue::Map(vec![(
+            CborValue::Text("input_available".to_owned()),
+            CborValue::Bool(true),
+        )])
+    );
+
+    let other_replies = tracker.activate_waits_for(&other);
+    assert_eq!(other_replies.len(), 1);
+    assert_eq!(other_replies[0].wait_call_id.as_str(), "input-other");
+}
+
+/// There can be only one pending input wait per runtime agent, preventing a
+/// second tool call from replacing or aliasing the first waiter.
+#[test]
+fn duplicate_input_wait_is_rejected_without_replacing_first() {
+    let owner = conv("owner");
+    let mut tracker = WaitTracker::default();
+    assert!(
+        start_wait_input(&mut tracker, &owner, "input-first")
+            .reply
+            .is_none()
+    );
+    let duplicate = start_reply(start_wait_input(&mut tracker, &owner, "input-second"));
+    assert_eq!(
+        reply_error(duplicate).0,
+        "existing input wait for this agent already in progress"
+    );
+    let replies = tracker.activate_waits_for(&owner);
+    assert_eq!(replies.len(), 1);
+    assert_eq!(replies[0].wait_call_id.as_str(), "input-first");
+}
+
+/// Cancellation removes runtime waiter state, so input accepted later cannot
+/// produce a second terminal result for the canceled wait call.
+#[test]
+fn cancelled_input_wait_cannot_be_woken_later() {
+    let owner = conv("owner");
+    let mut tracker = WaitTracker::default();
+    assert!(
+        start_wait_input(&mut tracker, &owner, "input-cancel")
+            .reply
+            .is_none()
+    );
+    let cancelled =
+        tracker.record_tool_cancelled(&HashSet::from([ToolCallId::from("input-cancel")]));
+    assert!(cancelled.replies.is_empty());
+    assert!(tracker.activate_waits_for(&owner).is_empty());
+}
+
+/// Unloading an endpoint drops its runtime-only waiter so a later endpoint
+/// reusing the same runtime id cannot inherit or complete stale tool state.
+#[test]
+fn discarded_input_wait_is_not_inherited_by_reused_agent_id() {
+    let owner = conv("owner");
+    let mut tracker = WaitTracker::default();
+    assert!(
+        start_wait_input(&mut tracker, &owner, "input-old")
+            .reply
+            .is_none()
+    );
+    tracker.discard_input_wait_for(&owner);
+    assert!(tracker.activate_waits_for(&owner).is_empty());
+    assert!(
+        start_wait_input(&mut tracker, &owner, "input-new")
+            .reply
+            .is_none()
+    );
+    let replies = tracker.activate_waits_for(&owner);
+    assert_eq!(replies.len(), 1);
+    assert_eq!(replies[0].wait_call_id.as_str(), "input-new");
 }
 
 /// Completed any-waits must use deterministic finish order, not HashMap
@@ -473,9 +645,13 @@ fn explicit_waiter_wins_over_any_waiter_for_same_completion() {
         reply.wait_call_id.as_str() == "wait-exact"
             && matches!(reply.kind, WaitReplyKind::Result { .. })
     }));
-    assert!(replies.iter().all(|reply| {
-        reply.wait_call_id.as_str() != "wait-any"
-            || matches!(reply.kind, WaitReplyKind::Error { .. })
+    assert!(replies.iter().any(|reply| {
+        reply.wait_call_id.as_str() == "wait-any"
+            && matches!(
+                &reply.kind,
+                WaitReplyKind::Error { message, .. }
+                    if message == NO_BACKGROUND_WAIT_CANDIDATES
+            )
     }));
 }
 

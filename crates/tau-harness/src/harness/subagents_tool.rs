@@ -231,17 +231,25 @@ impl Harness {
             .cloned()
     }
 
-    pub(crate) fn interrupt_active_waits(&mut self) {
-        let replies = self.subagents.wait_tracker.interrupt_active_waits();
+    /// Complete waits owned by `owner` after inference-activating input has
+    /// been accepted and queued for that same agent.
+    pub(crate) fn activate_waits_for(&mut self, owner: &AgentId) {
+        let replies = self.subagents.wait_tracker.activate_waits_for(owner);
         self.publish_wait_replies(replies);
     }
 
-    pub(crate) fn interrupt_active_waits_for(&mut self, owner: &AgentId) {
-        let replies = self
-            .subagents
+    /// Drop runtime-only input-wait registration when its owning agent endpoint
+    /// is unloaded.
+    pub(crate) fn discard_input_wait_for(&mut self, owner: &AgentId) {
+        self.subagents.wait_tracker.discard_input_wait_for(owner);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn input_wait_pending_for(&self, owner: &AgentId) -> bool {
+        self.subagents
             .wait_tracker
-            .interrupt_active_waits_for(owner);
-        self.publish_wait_replies(replies);
+            .input_waiters
+            .contains_key(owner)
     }
 
     pub(crate) fn record_wait_tool_cancelled(&mut self, call_ids: &HashSet<ToolCallId>) {
@@ -1001,8 +1009,21 @@ impl Harness {
     ) -> Result<(), HarnessError> {
         let call_id: ToolCallId = call.id.clone();
         self.ensure_harness_owned_tool_tracking(agent_id, call, &visible_tool_name);
-        if self.has_pending_wait_preempting_prompt(agent_id) {
-            let reply = match parse_wait_args(&call.arguments) {
+        let parsed = parse_wait_args(&call.arguments);
+        let consumable_completion = match &parsed {
+            Ok(WaitTarget::Exact(target)) => self
+                .subagents
+                .wait_tracker
+                .completed_call_is_owned_by(target, agent_id)
+                .then(|| target.clone()),
+            Ok(WaitTarget::AnyBackground) => self
+                .subagents
+                .wait_tracker
+                .oldest_completed_for_owner(agent_id),
+            Ok(WaitTarget::AnyInput) | Err(_) => None,
+        };
+        if self.has_pending_wait_preempting_prompt(agent_id, consumable_completion.as_ref()) {
+            let reply = match parsed {
                 Ok(WaitTarget::Exact(target)) => {
                     if !self
                         .subagents
@@ -1033,6 +1054,7 @@ impl Harness {
                 Ok(WaitTarget::AnyBackground) => {
                     wait_interrupted_any_reply(call_id, visible_tool_name)
                 }
+                Ok(WaitTarget::AnyInput) => wait_input_available_reply(call_id, visible_tool_name),
                 Err(message) => wait_error_reply(call_id, visible_tool_name, message, None),
             };
             self.publish_wait_replies(vec![reply]);
@@ -1051,17 +1073,26 @@ impl Harness {
         Ok(())
     }
 
-    fn has_pending_wait_preempting_prompt(&self, agent_id: &AgentId) -> bool {
+    fn has_pending_wait_preempting_prompt(
+        &self,
+        agent_id: &AgentId,
+        consumable_completion: Option<&ToolCallId>,
+    ) -> bool {
         self.agents.get(agent_id).is_some_and(|agent| {
-            // `submit_prompt_to_agent` and `handle_agent_message_received` both
-            // interrupt waits that are active at queue time. This start-time
-            // guard closes the converse race where the prompt/message queued
-            // first and a later provider tool call tries to start a passive
-            // wait behind that already-pending input.
-            agent
-                .pending_prompts
-                .iter()
-                .any(|prompt| !prompt.is_internal() || prompt.is_agent_message_received())
+            // Accepted activation wakes active waits at queue time. This
+            // level-triggered guard closes queue-before-register. A completion
+            // prompt is ignored only when this exact/bare invocation can consume
+            // that prompt's call, preserving completion arbitration without
+            // hiding activating notices for other completed calls.
+            agent.pending_replay_activation
+                || !agent.pending_message_wakes.is_empty()
+                || agent.pending_prompts.iter().any(|prompt| {
+                    prompt.creates_inference_activation()
+                        && (!prompt.is_activating_background_completion()
+                            || consumable_completion.is_none_or(|call_id| {
+                                prompt.text != crate::harness::background_completion_prompt(call_id)
+                            }))
+                })
         })
     }
 
@@ -1525,11 +1556,13 @@ fn parse_message_args(arguments: &CborValue) -> Result<MessageArgs, String> {
 }
 
 const ORIGINAL_TOOL_CALL_ID_HEADER: &str = "original_tool_call_id";
+const NO_BACKGROUND_WAIT_CANDIDATES: &str = "no background tool calls are running or completed in this conversation; use `wait({\"any_input\":true})` to wait for new activating input";
 
 #[derive(Clone, Debug, PartialEq)]
 enum WaitTarget {
     Exact(ToolCallId),
     AnyBackground,
+    AnyInput,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1589,6 +1622,7 @@ struct WaitTracker {
     calls: HashMap<ToolCallId, WaitCallState>,
     waiters: HashMap<ToolCallId, WaitRequest>,
     any_waiters: HashMap<AgentId, WaitRequest>,
+    input_waiters: HashMap<AgentId, WaitRequest>,
     call_owners: HashMap<ToolCallId, AgentId>,
     call_tool_names: HashMap<ToolCallId, ToolName>,
     completion_order: VecDeque<ToolCallId>,
@@ -1630,6 +1664,7 @@ impl WaitTracker {
         match target {
             WaitTarget::Exact(target) => self.start_exact_wait(target, wait),
             WaitTarget::AnyBackground => self.start_any_wait(owner.clone(), wait),
+            WaitTarget::AnyInput => self.start_input_wait(owner.clone(), wait),
         }
     }
 
@@ -1726,6 +1761,10 @@ impl WaitTracker {
         self.call_owners.get(call_id) == Some(owner)
     }
 
+    fn completed_call_is_owned_by(&self, call_id: &ToolCallId, owner: &AgentId) -> bool {
+        self.call_is_owned_by(call_id, owner) && self.is_completed(call_id)
+    }
+
     fn start_any_wait(&mut self, owner: AgentId, wait: WaitRequest) -> WaitStart {
         if self.any_waiters.contains_key(&owner) {
             return WaitStart::reply(wait_error_reply(
@@ -1746,9 +1785,22 @@ impl WaitTracker {
         WaitStart::reply(wait_error_reply(
             wait.call_id,
             wait.tool_name,
-            "no background tool calls are running or completed in this conversation".to_owned(),
+            NO_BACKGROUND_WAIT_CANDIDATES.to_owned(),
             None,
         ))
+    }
+
+    fn start_input_wait(&mut self, owner: AgentId, wait: WaitRequest) -> WaitStart {
+        if self.input_waiters.contains_key(&owner) {
+            return WaitStart::reply(wait_error_reply(
+                wait.call_id,
+                wait.tool_name,
+                "existing input wait for this agent already in progress".to_owned(),
+                None,
+            ));
+        }
+        self.input_waiters.insert(owner, wait);
+        WaitStart::default()
     }
 
     fn consume_completed_for_any(&mut self, target: ToolCallId, wait: WaitRequest) -> WaitStart {
@@ -1968,6 +2020,8 @@ impl WaitTracker {
             .filter_map(|call_id| self.call_owners.get(call_id).cloned())
             .collect();
         let mut exact_consumed_cancelled = HashSet::new();
+        self.input_waiters
+            .retain(|_, wait| !call_ids.contains(&wait.call_id));
         let mut cancelled = WaitCancel::default();
         let waiters = std::mem::take(&mut self.waiters);
         for (target, wait) in waiters {
@@ -2067,20 +2121,6 @@ impl WaitTracker {
         cancelled
     }
 
-    fn interrupt_active_waits(&mut self) -> Vec<WaitReply> {
-        let waiters = std::mem::take(&mut self.waiters);
-        let mut replies: Vec<WaitReply> = waiters
-            .into_iter()
-            .map(|(target, wait)| self.interrupted_exact_wait_reply(target, wait))
-            .collect();
-        replies.extend(
-            std::mem::take(&mut self.any_waiters)
-                .into_values()
-                .map(|wait| wait_interrupted_any_reply(wait.call_id, wait.tool_name)),
-        );
-        replies
-    }
-
     fn interrupt_active_waits_for(&mut self, owner: &AgentId) -> Vec<WaitReply> {
         let targets: Vec<ToolCallId> = self
             .waiters
@@ -2104,6 +2144,18 @@ impl WaitTracker {
             replies.push(wait_interrupted_any_reply(wait.call_id, wait.tool_name));
         }
         replies
+    }
+
+    fn activate_waits_for(&mut self, owner: &AgentId) -> Vec<WaitReply> {
+        let mut replies = self.interrupt_active_waits_for(owner);
+        if let Some(wait) = self.input_waiters.remove(owner) {
+            replies.push(wait_input_available_reply(wait.call_id, wait.tool_name));
+        }
+        replies
+    }
+
+    fn discard_input_wait_for(&mut self, owner: &AgentId) {
+        self.input_waiters.remove(owner);
     }
 
     fn interrupted_exact_wait_reply(&self, target: ToolCallId, wait: WaitRequest) -> WaitReply {
@@ -2152,7 +2204,7 @@ impl WaitTracker {
         vec![wait_error_reply(
             wait.call_id,
             wait.tool_name,
-            "no background tool calls are running or completed in this conversation".to_owned(),
+            NO_BACKGROUND_WAIT_CANDIDATES.to_owned(),
             None,
         )]
     }
@@ -2422,23 +2474,61 @@ fn parse_wait_args(arguments: &CborValue) -> Result<WaitTarget, String> {
     let CborValue::Map(entries) = arguments else {
         return Err("arguments must be an object".to_owned());
     };
+    let mut tool_call_id_value = None;
+    let mut any_input_value = None;
+    let mut tool_call_id_count = 0_u8;
+    let mut any_input_count = 0_u8;
     for (k, v) in entries {
         let CborValue::Text(name) = k else { continue };
-        if name == "tool_call_id" {
-            return match v {
-                CborValue::Text(text) => {
-                    let text = text.trim();
-                    if text.is_empty() {
-                        Err("`tool_call_id` must not be empty".to_owned())
-                    } else {
-                        Ok(WaitTarget::Exact(text.to_owned().into()))
-                    }
-                }
-                _ => Err("`tool_call_id` must be a string".to_owned()),
-            };
+        match name.as_str() {
+            "tool_call_id" => {
+                tool_call_id_count = tool_call_id_count.saturating_add(1);
+                tool_call_id_value.get_or_insert(v);
+            }
+            "any_input" => {
+                any_input_count = any_input_count.saturating_add(1);
+                any_input_value.get_or_insert(v);
+            }
+            _ => {}
         }
     }
-    Ok(WaitTarget::AnyBackground)
+    if tool_call_id_value.is_some() && any_input_value.is_some() {
+        return Err("`tool_call_id` and `any_input` are mutually exclusive".to_owned());
+    }
+    if tool_call_id_count > 1 {
+        return Err("`tool_call_id` must not be repeated".to_owned());
+    }
+    if any_input_count > 1 {
+        return Err("`any_input` must not be repeated".to_owned());
+    }
+    if let Some(value) = tool_call_id_value {
+        return match value {
+            CborValue::Text(text) if text.trim().is_empty() => {
+                Err("`tool_call_id` must not be empty".to_owned())
+            }
+            CborValue::Text(text) => Ok(WaitTarget::Exact(text.trim().to_owned().into())),
+            _ => Err("`tool_call_id` must be a string".to_owned()),
+        };
+    }
+    match any_input_value {
+        Some(CborValue::Bool(true)) => Ok(WaitTarget::AnyInput),
+        Some(CborValue::Bool(false)) => Err("`any_input` must be true when provided".to_owned()),
+        Some(_) => Err("`any_input` must be a boolean".to_owned()),
+        None => Ok(WaitTarget::AnyBackground),
+    }
+}
+
+fn wait_input_available_reply(call_id: ToolCallId, tool_name: ToolName) -> WaitReply {
+    wait_result_reply(
+        call_id,
+        tool_name,
+        None,
+        CborValue::Map(vec![(
+            CborValue::Text("input_available".to_owned()),
+            CborValue::Bool(true),
+        )]),
+        None,
+    )
 }
 
 #[cfg(test)]

@@ -350,6 +350,8 @@ pub(crate) enum PendingPromptSource {
     WatchNotification,
     /// Internal loop-guard pivot prompt.
     LoopGuard,
+    /// An activating notice for an unsuppressed background completion.
+    ActivatingBackgroundCompletion,
     /// A passive background-completion notice that should be folded into the
     /// next real user prompt, but must not make an idle agent runnable by
     /// itself.
@@ -491,6 +493,13 @@ impl PendingPrompt {
         }
     }
 
+    /// Create an inference-activating background-completion notice.
+    pub(crate) fn activating_background_completion(text: String) -> Self {
+        let mut prompt = Self::internal(text);
+        prompt.source = PendingPromptSource::ActivatingBackgroundCompletion;
+        prompt
+    }
+
     /// Create a hidden restore notice that waits for a separate activation.
     pub(crate) fn passive_restore_notice(text: String) -> Self {
         Self {
@@ -545,6 +554,12 @@ impl PendingPrompt {
     #[must_use]
     pub(crate) fn is_passive_background_completion(&self) -> bool {
         self.source == PendingPromptSource::PassiveBackgroundCompletion
+    }
+
+    /// Whether this prompt announces an unsuppressed background completion.
+    #[must_use]
+    pub(crate) fn is_activating_background_completion(&self) -> bool {
+        self.source == PendingPromptSource::ActivatingBackgroundCompletion
     }
 
     /// Whether committing this prompt creates checkpoint-governed inference.

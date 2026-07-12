@@ -582,7 +582,15 @@ of inactivity, and idle summaries via `agent_summary: true`.
 The harness exposes an `agent_start` tool that spawns an isolated side conversation
 and automatically subscribes the caller to its responses, an `agent_watch` tool
 that subscribes the calling agent to async notifications when another agent
-responds, plus a `wait` tool for collecting background tool results. Long-running background-capable tool
+responds, plus a `wait` tool for collecting background tool results or suspending
+until activating input is available. `wait({"tool_call_id":"…"})` waits for one owned
+background call, `wait({})` consumes the next owned background completion, and
+`wait({"any_input":true})` waits without requiring background work. The input
+form does not consume or copy the input; normal prompt machinery supplies it in
+the next model round, and already-queued activation returns immediately. It
+keeps the current outer agent turn running, including
+across live UI detach/reconnect, but its registration is not restored after a
+cold daemon restart. Long-running background-capable tool
 calls return an immediate placeholder, stay visible in the UI, and deliver their
 real result or error later so the main turn can keep making progress. Unless the
 `agent_start` call supplies `role`, delegated sub-agents default to the
