@@ -99,6 +99,231 @@ fn renderer_for_agent_id_tests() -> super::EventRenderer {
     )
 }
 
+fn watch_turn_state_event(
+    message_id: &str,
+    state: tau_proto::AgentRuntimeState,
+) -> tau_proto::Event {
+    tau_proto::Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
+        message_id: message_id.into(),
+        sender_id: agent_id("worker"),
+        sender_session_id: None,
+        recipient_id: agent_id("manager"),
+        kind: tau_proto::AgentMessageKind::WatchTurnState,
+        watch_turn_state: Some(tau_proto::AgentWatchTurnStateNotification {
+            session_id: "s1".into(),
+            subscription_id: "watch-1".to_owned(),
+            state,
+            initial: false,
+            turn_generation: 1,
+        }),
+        watch_provider_status: None,
+        message: "non-authoritative compatibility text".to_owned(),
+    })
+}
+
+/// Structured agent-turn state must drive both directed watch rendering and
+/// the aggregate side-agent count after inner prompt activity has ended.
+#[test]
+fn watched_agent_turn_state_is_authoritative_for_running_counts() {
+    let mut renderer = renderer_for_agent_id_tests();
+    renderer.handle(&tau_proto::Event::AgentWatchesUpdated(
+        tau_proto::AgentWatchesUpdated {
+            session_id: "s1".into(),
+            watcher_id: agent_id("manager"),
+            watched_agent_ids: vec![agent_id("worker")],
+            changed_agent_id: Some(agent_id("worker")),
+            cause: tau_proto::AgentWatchUpdateCause::AgentWatchEnable,
+        },
+    ));
+    renderer.handle(&watch_turn_state_event(
+        "running",
+        tau_proto::AgentRuntimeState::Running,
+    ));
+
+    assert!(renderer.watched_agent_is_running("manager", "worker"));
+    assert_eq!(renderer.active_side_agent_count(), 1);
+
+    renderer.handle(&tau_proto::Event::AgentWatchesUpdated(
+        tau_proto::AgentWatchesUpdated {
+            session_id: "s1".into(),
+            watcher_id: agent_id("reviewer"),
+            watched_agent_ids: vec![agent_id("worker")],
+            changed_agent_id: Some(agent_id("worker")),
+            cause: tau_proto::AgentWatchUpdateCause::AgentWatchEnable,
+        },
+    ));
+    renderer.handle(&watch_turn_state_event(
+        "manager-idle",
+        tau_proto::AgentRuntimeState::Idle,
+    ));
+    renderer
+        .active_agent_prompts
+        .entry("worker".to_owned())
+        .or_default()
+        .insert("inner-round".to_owned());
+    assert_eq!(
+        renderer.active_side_agent_count(),
+        1,
+        "the reviewer edge still uses prompt fallback after the manager edge is idle"
+    );
+}
+
+/// An idle edge is terminal for its generation, and removing topology or
+/// resetting the session must retire the corresponding cached lifecycle.
+#[test]
+fn watched_agent_turn_state_rejects_stale_start_and_clears_with_scope() {
+    let mut renderer = renderer_for_agent_id_tests();
+    let watch_update = tau_proto::AgentWatchesUpdated {
+        session_id: "s1".into(),
+        watcher_id: agent_id("manager"),
+        watched_agent_ids: vec![agent_id("worker")],
+        changed_agent_id: Some(agent_id("worker")),
+        cause: tau_proto::AgentWatchUpdateCause::AgentWatchEnable,
+    };
+    renderer.handle(&tau_proto::Event::AgentWatchesUpdated(watch_update.clone()));
+    renderer.handle(&watch_turn_state_event(
+        "idle",
+        tau_proto::AgentRuntimeState::Idle,
+    ));
+    renderer.handle(&watch_turn_state_event(
+        "late-running",
+        tau_proto::AgentRuntimeState::Running,
+    ));
+    assert!(!renderer.watched_agent_is_running("manager", "worker"));
+
+    renderer.handle(&tau_proto::Event::AgentWatchesUpdated(
+        tau_proto::AgentWatchesUpdated {
+            watched_agent_ids: Vec::new(),
+            cause: tau_proto::AgentWatchUpdateCause::AgentWatchDisable,
+            ..watch_update.clone()
+        },
+    ));
+    assert!(renderer.watched_agent_turn_states.is_empty());
+
+    renderer
+        .active_agent_prompts
+        .entry("worker".to_owned())
+        .or_default()
+        .insert("inner-round".to_owned());
+    renderer.handle(&tau_proto::Event::AgentWatchesUpdated(watch_update));
+    assert_eq!(
+        renderer.active_side_agent_count(),
+        1,
+        "re-enabled edges use prompt fallback before their fresh snapshot"
+    );
+    renderer.handle(&watch_turn_state_event(
+        "running-again",
+        tau_proto::AgentRuntimeState::Running,
+    ));
+    renderer.clear_for_new_session();
+    assert!(renderer.watched_agent_turn_states.is_empty());
+    assert_eq!(renderer.active_side_agent_count(), 0);
+}
+
+/// Empty topology snapshots, session changes, and endpoint unload are
+/// authoritative scope boundaries even when no matching lifecycle edge arrives.
+#[test]
+fn watched_agent_turn_state_does_not_survive_scope_boundaries() {
+    let mut renderer = renderer_for_agent_id_tests();
+    let tau_proto::Event::AgentMessageReceived(orphan) =
+        watch_turn_state_event("orphan", tau_proto::AgentRuntimeState::Running)
+    else {
+        unreachable!()
+    };
+    renderer
+        .watched_agent_turn_states
+        .entry("manager".to_owned())
+        .or_default()
+        .insert(
+            "worker".to_owned(),
+            orphan.watch_turn_state.expect("watch state"),
+        );
+    let live_enable = tau_proto::AgentWatchesUpdated {
+        session_id: "s1".into(),
+        watcher_id: agent_id("manager"),
+        watched_agent_ids: vec![agent_id("worker")],
+        changed_agent_id: Some(agent_id("worker")),
+        cause: tau_proto::AgentWatchUpdateCause::AgentWatchEnable,
+    };
+    renderer.handle(&tau_proto::Event::AgentWatchesUpdated(live_enable.clone()));
+    assert!(
+        renderer.watched_agent_turn_states.is_empty(),
+        "a fresh live edge must not expose replayed orphan state"
+    );
+    renderer.handle(&tau_proto::Event::AgentWatchesUpdated(
+        tau_proto::AgentWatchesUpdated {
+            watched_agent_ids: Vec::new(),
+            cause: tau_proto::AgentWatchUpdateCause::AgentWatchDisable,
+            ..live_enable.clone()
+        },
+    ));
+    assert!(renderer.watched_agent_turn_states.is_empty());
+
+    let tau_proto::Event::AgentMessageReceived(replay) =
+        watch_turn_state_event("replay", tau_proto::AgentRuntimeState::Running)
+    else {
+        unreachable!()
+    };
+    renderer
+        .watched_agent_turn_states
+        .entry("manager".to_owned())
+        .or_default()
+        .insert(
+            "worker".to_owned(),
+            replay.watch_turn_state.expect("watch state"),
+        );
+    renderer.handle(&tau_proto::Event::AgentWatchesUpdated(
+        tau_proto::AgentWatchesUpdated {
+            cause: tau_proto::AgentWatchUpdateCause::SessionSnapshot,
+            ..live_enable
+        },
+    ));
+    assert_eq!(
+        renderer.active_side_agent_count(),
+        1,
+        "a replay session snapshot preserves its preceding folded lifecycle"
+    );
+
+    renderer.clear_for_new_session();
+    renderer.current_session_id = Some("s2".into());
+    renderer.handle(&tau_proto::Event::AgentWatchesUpdated(
+        tau_proto::AgentWatchesUpdated {
+            session_id: "s2".into(),
+            watcher_id: agent_id("manager"),
+            watched_agent_ids: vec![agent_id("worker")],
+            changed_agent_id: Some(agent_id("worker")),
+            cause: tau_proto::AgentWatchUpdateCause::AgentWatchEnable,
+        },
+    ));
+    renderer.handle(&watch_turn_state_event(
+        "old-session",
+        tau_proto::AgentRuntimeState::Running,
+    ));
+    assert!(renderer.watched_agent_turn_states.is_empty());
+
+    let mut current_session =
+        watch_turn_state_event("current-session", tau_proto::AgentRuntimeState::Running);
+    let tau_proto::Event::AgentMessageReceived(message) = &mut current_session else {
+        unreachable!()
+    };
+    message
+        .watch_turn_state
+        .as_mut()
+        .expect("watch state")
+        .session_id = "s2".into();
+    renderer.handle(&current_session);
+    assert_eq!(renderer.active_side_agent_count(), 1);
+    renderer.handle(&tau_proto::Event::SessionAgentUnloaded(
+        tau_proto::SessionAgentUnloaded {
+            session_id: "s2".into(),
+            agent_id: agent_id("manager"),
+        },
+    ));
+    assert!(renderer.watched_agents.is_empty());
+    assert!(renderer.watched_agent_turn_states.is_empty());
+    assert_eq!(renderer.active_side_agent_count(), 0);
+}
+
 /// Renderer-owned auto-selection from the empty screen must retarget any
 /// pending prompt draft, because the input loop is not involved in remote-event
 /// selection changes.

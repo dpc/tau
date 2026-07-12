@@ -74,17 +74,22 @@ Two agent-state concepts are intentionally distinct:
   agent appears in ordinary switching/autocomplete sets; it does not affect
   loading, addressability, or prompt/message delivery.
 - `running` / `waiting` is execution state. It controls whether an agent is
-  currently processing a turn after receiving a prompt and before the provider
-  response or prompt termination makes that turn terminal.
+  currently processing an outer agent turn after receiving an activating input
+  and before its final response or termination returns control to the prompting
+  user or agent. An agent turn includes every inner model round and intervening
+  tool round; a provider response that requests tools does not end it.
 
 Watched-agent `watching` blocks and the bottom status `@N` side-agent count use
 the running/waiting concept, not the navigation concept. Watches identify the
-observed agents, prompt/provider lifecycle events maintain the active prompt ids
-that define running turns, and agent stats and provider response stats only add counters/details
-to those already-running indicators. A watched or non-suspended agent that is
-waiting for a future prompt/message must not be rendered as running. The `@N`
-status chip counts running side agents and excludes the currently visible agent,
-which is already named on the left side of the status line.
+observed agents, and structured watched-agent turn state is authoritative once
+received. Prompt/provider lifecycle remains only a compatibility and catch-up
+fallback before that snapshot; those inner model-round events must not remove
+or recreate an indicator during one running agent turn. Agent stats and provider
+response stats only add counters/details to already-running indicators. A
+watched or non-suspended agent that is waiting for a future prompt/message must
+not be rendered as running. The `@N` status chip counts running side agents and
+excludes the currently visible agent, which is already named on the left side
+of the status line.
 
 When multiple watched agents are running at once, their `watching` blocks are
 ordered by stable agent id. This keeps redraws and independent prompt/stat

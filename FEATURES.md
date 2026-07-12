@@ -594,9 +594,11 @@ subscription/provider-delivery state; same-session reload requires a fresh watch
 When a watched agent receives a direct user prompt, watchers also receive a
 hidden prompt notification when that prompt becomes the watched agent's active
 turn, so the matching watched response has clear context.
-Enabling a watch also reports the current model-turn state, and later whole-turn
-start/stop transitions are delivered separately. These content-free state
-notifications span provider and tool work without exposing internal inputs.
+Enabling a watch also reports the current outer agent-turn state, and later
+agent-turn start/stop transitions are delivered separately. An agent turn spans
+activating input through terminal response; provider invocations are inner model
+rounds separated by tool rounds. These content-free state notifications span
+all such work without exposing internal inputs.
 
 When `role` is supplied, or when the default `engineer` role is used, the
 sub-agent runs with that role's resolved model, model parameters, system prompt,

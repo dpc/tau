@@ -131,9 +131,12 @@ other hidden inputs must not be forwarded as watch notifications. A terminal
 delegating watcher, even when that watcher is itself a side agent.
 
 In addition to those two content-bearing kinds, watches receive content-free
-whole-model-turn state notifications. The canonical `AgentTurnState` mapping
-emits one initial snapshot and subsequent idle/running edges; tool continuation
-rounds remain one generation. Lifecycle-only notification turns do not fan out
+outer agent-turn state notifications. An agent turn spans activating input
+through terminal response or termination; each provider invocation is an inner
+model round, with requested-tool execution forming an intervening tool round.
+The canonical `AgentTurnState` mapping emits one initial snapshot and subsequent
+idle/running edges; all inner rounds remain one generation. Lifecycle-only
+notification turns do not fan out
 more lifecycle notifications, preventing mutual-watch feedback loops.
 The initial snapshot remains durable client-visible state but is not injected
 into the watching model's context. Later transition prompts are derived from

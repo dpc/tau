@@ -1101,7 +1101,7 @@ fn assemble_conversation_replays_watch_response_as_notification_only() {
 fn assemble_conversation_replays_watch_turn_state_as_notification_only() {
     let watcher = tau_proto::AgentId::parse("watcher").expect("agent id");
     let watched = tau_proto::AgentId::parse("watched").expect("agent id");
-    let text = "[tau-internal]: Watched agent watched started a model turn";
+    let text = "[tau-internal]: Watched agent watched started an agent turn";
     let mut tree = tau_core::AgentTree::from_events(watcher.clone(), &[]);
     tree.apply_event(&Event::AgentMessageReceived(
         tau_proto::AgentMessageReceived {
@@ -1154,7 +1154,7 @@ fn assemble_conversation_omits_initial_watch_turn_state() {
                 turn_generation: 0,
             }),
             watch_provider_status: None,
-            message: "[tau-internal]: Watched agent watched is not currently running a model turn"
+            message: "[tau-internal]: Watched agent watched is not currently running an agent turn"
                 .to_owned(),
         },
     ));

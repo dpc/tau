@@ -2,6 +2,22 @@
 
 This file records major design decisions currently embodied by this directory's code, and how authoritative each decision is. It is not an architecture overview, ADR log, todo list, roadmap, implementation guide, or changelog.
 
+## Agent-turn and model-round terminology
+
+Status: confirmed, 2026-07-12, user
+
+An **agent turn** is the outer prompt-to-final-response lifecycle. It begins when
+an accepted input activates an agent and remains running until that agent emits
+its terminal response (or termination) and returns control to the prompting
+user or agent. Waiting for tools, processing tool results, provider retries, and
+repeated model invocations are all inside the same agent turn.
+
+A **model round** is one inner model/provider invocation within that agent turn.
+It can produce a terminal response or request tools. A **tool round** is the
+intervening execution and collection of those requested tool results before a
+subsequent model round. Documentation and UI state must not call an individual
+model round a turn when that would make the outer lifecycle ambiguous.
+
 ## Extension availability startup layering
 
 Status: unconfirmed

@@ -493,7 +493,8 @@ impl Harness {
         );
     }
 
-    /// Deliver one structured current/transition model-turn state to a watcher.
+    /// Deliver one structured current/transition outer agent-turn state to a
+    /// watcher.
     pub(crate) fn notify_agent_watcher_turn_state(
         &mut self,
         watcher_id: &str,
@@ -523,16 +524,16 @@ impl Harness {
         let message_id = next_agent_message_id(&sender_id);
         let message = match (initial, state) {
             (true, tau_proto::AgentRuntimeState::Running) => format!(
-                "[tau-internal]: Watched agent {watched_agent_id} is currently running a model turn (initial watch state)"
+                "[tau-internal]: Watched agent {watched_agent_id} is currently running an agent turn (initial watch state)"
             ),
             (true, tau_proto::AgentRuntimeState::Idle) => format!(
-                "[tau-internal]: Watched agent {watched_agent_id} is not currently running a model turn (initial watch state)"
+                "[tau-internal]: Watched agent {watched_agent_id} is not currently running an agent turn (initial watch state)"
             ),
             (false, tau_proto::AgentRuntimeState::Running) => {
-                format!("[tau-internal]: Watched agent {watched_agent_id} started a model turn")
+                format!("[tau-internal]: Watched agent {watched_agent_id} started an agent turn")
             }
             (false, tau_proto::AgentRuntimeState::Idle) => {
-                format!("[tau-internal]: Watched agent {watched_agent_id} stopped its model turn")
+                format!("[tau-internal]: Watched agent {watched_agent_id} stopped its agent turn")
             }
         };
         self.publish_event(

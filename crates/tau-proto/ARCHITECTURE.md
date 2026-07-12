@@ -193,7 +193,10 @@ subscribing to the full provider payload.
 ## Agent watch turn-state wire boundary
 
 `agent.message_received` uses `kind = watch_turn_state` for receiver-only,
-harness-authored model-turn observations. Such records must carry
+harness-authored outer agent-turn observations. The agent turn spans activating
+input through terminal response or termination, while each provider invocation
+is an inner model round and tool execution between invocations is a tool round.
+Such records must carry
 `watch_turn_state`; all other message kinds must omit it. The payload identifies
 the session-local subscription, distinguishes an initial snapshot from an edge,
 and carries the harness-runtime-scoped watched-agent turn generation.

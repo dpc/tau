@@ -225,12 +225,14 @@ before and after template rendering. Exceptions are only for clearly documented
 transport concerns that are not system-prompt content. This keeps custom
 templates in control of placement and wording for dynamic values.
 
-## Agent watch whole-turn lifecycle
+## Agent watch outer agent-turn lifecycle
 
 Status: confirmed, 2026-07-10, dpc
 
-`agent_watch` observes the canonical two-state whole model turn: idle versus
-running across provider and tool continuation rounds. A new watch receives one
+`agent_watch` observes the canonical two-state outer agent turn: idle versus
+running from activating input through the terminal response or termination.
+Inner model rounds and intervening tool rounds remain in the same agent turn.
+A new watch receives one
 initial snapshot; genuine transitions are receiver-only durable notifications
 with subscription identity and watched-agent runtime generation. Content
 forwarding remains limited to direct user prompts and final responses.

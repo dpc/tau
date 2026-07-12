@@ -2910,15 +2910,12 @@ fn watched_agent_stats_route_to_hidden_watcher_owner() {
         },
     ));
     renderer.handle(&Event::AgentPromptStarted(tau_proto::AgentPromptStarted {
-        session_id: "s1".into(),
         agent_id: agent_id("engineer_1"),
-        agent_prompt_id: "ap-engineer_1-0".into(),
-        model: "test/model".parse().expect("model id"),
         originator: tau_proto::PromptOriginator::Extension {
             name: "__harness__".into(),
             query_id: "delegate-1".to_owned(),
         },
-        ctx_id: None,
+        ..agent_prompt_started("ap-engineer_1-0", "s1")
     }));
     renderer.handle(&Event::AgentStatsUpdated(tau_proto::AgentStatsUpdated {
         session_id: "s1".into(),
@@ -6435,6 +6432,108 @@ fn watched_agent_response_finished_removes_active_indicator() {
         !vt.screen_contains(100, "watching [engineer_1]"),
         "watched-agent block should be removed when provider response finishes: {:?}",
         vt.screen_text(100)
+    );
+}
+
+/// A watched agent turn spans every model round and intervening tool round, so
+/// prompt-terminal events must not make its running row flicker.
+#[test]
+fn watched_agent_turn_state_keeps_indicator_across_model_rounds() {
+    let (_term, handle, vt) = setup(100, 24);
+    let mut renderer = EventRenderer::new(
+        handle.clone(),
+        tau_cli_term::CompletionData::new(),
+        cli_test_theme(),
+    );
+
+    renderer.switch_agent("parent_1".to_owned());
+    renderer.handle(&Event::AgentWatchesUpdated(
+        tau_proto::AgentWatchesUpdated {
+            session_id: "s1".into(),
+            watcher_id: agent_id("parent_1"),
+            watched_agent_ids: vec![agent_id("engineer_1")],
+            changed_agent_id: Some(agent_id("engineer_1")),
+            cause: tau_proto::AgentWatchUpdateCause::AgentWatchEnable,
+        },
+    ));
+    let watch_state = |message_id: &str, state| {
+        Event::AgentMessageReceived(tau_proto::AgentMessageReceived {
+            message_id: message_id.into(),
+            sender_id: agent_id("engineer_1"),
+            sender_session_id: None,
+            recipient_id: agent_id("parent_1"),
+            kind: tau_proto::AgentMessageKind::WatchTurnState,
+            watch_turn_state: Some(tau_proto::AgentWatchTurnStateNotification {
+                session_id: "s1".into(),
+                subscription_id: "watch-1".to_owned(),
+                state,
+                initial: false,
+                turn_generation: 1,
+            }),
+            watch_provider_status: None,
+            message: "compatibility text is not UI state".to_owned(),
+        })
+    };
+    renderer.handle(&watch_state(
+        "watch-running",
+        tau_proto::AgentRuntimeState::Running,
+    ));
+    renderer.handle(&Event::AgentPromptStarted(tau_proto::AgentPromptStarted {
+        session_id: "s1".into(),
+        agent_id: agent_id("engineer_1"),
+        agent_prompt_id: "ap-engineer_1-0".into(),
+        model: "test/model".parse().expect("model id"),
+        originator: tau_proto::PromptOriginator::Extension {
+            name: "__harness__".into(),
+            query_id: "delegate-1".to_owned(),
+        },
+        ctx_id: None,
+    }));
+    renderer.handle(&Event::ProviderResponseFinished(ProviderResponseFinished {
+        agent_id: agent_id("engineer_1"),
+        stop_reason: ProviderStopReason::ToolCalls,
+        originator: tau_proto::PromptOriginator::Extension {
+            name: "__harness__".into(),
+            query_id: "delegate-1".to_owned(),
+        },
+        ..finished_response("ap-engineer_1-0", Vec::new())
+    }));
+    sync(&handle);
+    assert!(
+        vt.screen_contains(100, "watching [engineer_1] @engineer_1"),
+        "the outer agent turn remains running while tools are pending"
+    );
+
+    renderer.handle(&Event::AgentPromptStarted(tau_proto::AgentPromptStarted {
+        agent_id: agent_id("engineer_1"),
+        originator: tau_proto::PromptOriginator::Extension {
+            name: "__harness__".into(),
+            query_id: "delegate-1".to_owned(),
+        },
+        ..agent_prompt_started("ap-engineer_1-1", "s1")
+    }));
+    renderer.handle(&Event::ProviderResponseFinished(ProviderResponseFinished {
+        agent_id: agent_id("engineer_1"),
+        originator: tau_proto::PromptOriginator::Extension {
+            name: "__harness__".into(),
+            query_id: "delegate-1".to_owned(),
+        },
+        ..finished_response("ap-engineer_1-1", Vec::new())
+    }));
+    sync(&handle);
+    assert!(
+        vt.screen_contains(100, "watching [engineer_1] @engineer_1"),
+        "the provider's final model round is not the agent-turn boundary"
+    );
+
+    renderer.handle(&watch_state(
+        "watch-idle",
+        tau_proto::AgentRuntimeState::Idle,
+    ));
+    sync(&handle);
+    assert!(
+        !vt.screen_contains(100, "watching [engineer_1]"),
+        "the row ends only at the harness-authored agent-turn idle edge"
     );
 }
 

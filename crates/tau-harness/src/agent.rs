@@ -168,8 +168,11 @@ pub(crate) struct PendingMessageWake {
     pub(crate) node_id: Option<NodeId>,
 }
 
-/// Per-agent turn state. There is no global execution slot — each loaded agent
-/// tracks whether its next prompt can be dispatched.
+/// Per-agent outer-turn state from activating input through terminal response.
+///
+/// `AgentThinking` represents an inner model round and `ToolsRunning` an
+/// intervening tool round. There is no global execution slot — each loaded
+/// agent tracks whether its next prompt can be dispatched.
 #[derive(Clone, Debug, Default)]
 pub(crate) enum AgentTurnState {
     #[default]
@@ -226,7 +229,7 @@ pub(crate) struct Agent {
     /// independently; the provider extension
     /// serializes its own consumption of `AgentPromptCreated`.
     pub(crate) pending_prompts: VecDeque<PendingPrompt>,
-    /// Canonical incoming facts waiting to activate one coalesced model turn.
+    /// Canonical incoming facts waiting to activate one coalesced agent turn.
     pub(crate) pending_message_wakes: VecDeque<PendingMessageWake>,
     /// Replay found a committed activation after the latest completed dispatch.
     pub(crate) pending_replay_activation: bool,
@@ -261,7 +264,8 @@ pub(crate) struct Agent {
     /// Last externally published runtime state, independent of internal
     /// continuation bookkeeping that may temporarily use `Idle`.
     pub(crate) published_runtime_state: tau_proto::AgentRuntimeState,
-    /// Runtime-scoped whole-turn generation used by watch state notifications.
+    /// Runtime-scoped outer agent-turn generation used by watch state
+    /// notifications.
     pub(crate) turn_generation: u64,
     /// Whether the current turn was caused only by lifecycle notifications.
     pub(crate) lifecycle_notification_only_turn: bool,
@@ -476,7 +480,7 @@ impl PendingPrompt {
     }
 
     /// Create a hidden background-completion notice that waits for the next
-    /// user-driven continuation instead of starting a standalone model turn.
+    /// user-driven continuation instead of starting a standalone agent turn.
     pub(crate) fn passive_background_completion(text: String) -> Self {
         Self {
             text,

@@ -623,8 +623,8 @@ pub(crate) fn watch_turn_transition_text(
         return None;
     }
     let transition = match state.state {
-        tau_proto::AgentRuntimeState::Running => "started a model turn",
-        tau_proto::AgentRuntimeState::Idle => "stopped its model turn",
+        tau_proto::AgentRuntimeState::Running => "started an agent turn",
+        tau_proto::AgentRuntimeState::Idle => "stopped its agent turn",
     };
     Some(format!(
         "[tau-internal]: Watched agent {sender_label} {transition}"

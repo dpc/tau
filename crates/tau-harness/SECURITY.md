@@ -32,7 +32,9 @@ notifications must be clearly labeled as watch notifications, not as explicit
 - `[tau-internal]: Watched agent <agent-id> emitted a response`
 - `[tau-internal]: Watched agent <agent-id> received a user prompt`
 
-Content-free model-turn initial/start/stop notifications are also allowed. They
+Content-free outer agent-turn initial/start/stop notifications are also allowed.
+An agent turn covers the complete activating-input-to-terminal-response
+lifecycle, including inner model and tool rounds. These notifications
 contain only stable watch/session identity, idle/running state, snapshot status,
 and a harness-runtime-scoped watched-agent turn generation. They must never include prompt,
 response, message, tool, or error content.

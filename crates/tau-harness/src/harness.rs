@@ -11956,7 +11956,7 @@ impl Harness {
     /// Consume passive background-completion notices before the next real user
     /// prompt. These notices are queued on live cancellation so a background
     /// placeholder has a visible terminal event, but they must not create a
-    /// standalone automatic model turn.
+    /// standalone automatic agent turn.
     pub(crate) fn take_passive_background_completion_prompts_for_user_prompt(
         &mut self,
         cid: &AgentId,

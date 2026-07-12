@@ -134,6 +134,12 @@ pub(crate) struct EventRenderer {
     agent_watchers: HashMap<String, Vec<String>>,
     /// Latest generic operational stats keyed by agent id.
     agent_stats: HashMap<String, tau_proto::AgentStatsUpdated>,
+    /// Latest harness-authored agent-turn state keyed by `(watcher, watched)`.
+    ///
+    /// Once present, this outer lifecycle is authoritative over provider-prompt
+    /// activity across model rounds and intervening tool rounds.
+    watched_agent_turn_states:
+        HashMap<String, HashMap<String, tau_proto::AgentWatchTurnStateNotification>>,
     /// In-flight `agent_prompt_id`s keyed by the agent currently producing a
     /// response.
     active_agent_prompts: HashMap<String, HashSet<String>>,
@@ -1285,6 +1291,7 @@ impl EventRenderer {
             watched_agents: HashMap::new(),
             agent_watchers: HashMap::new(),
             agent_stats: HashMap::new(),
+            watched_agent_turn_states: HashMap::new(),
             active_agent_prompts: HashMap::new(),
             terminal_agent_prompts: HashSet::new(),
             finished_provider_prompts: HashSet::new(),
@@ -1536,7 +1543,38 @@ impl EventRenderer {
     }
 
     fn handle_agent_watches_updated(&mut self, updated: &tau_proto::AgentWatchesUpdated) {
+        if self
+            .current_session_id
+            .as_ref()
+            .is_some_and(|session_id| session_id != &updated.session_id)
+        {
+            return;
+        }
         let watcher_id = updated.watcher_id.to_string();
+        let next_watched: HashSet<_> = updated
+            .watched_agent_ids
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        let previous_watched: HashSet<_> = self
+            .watched_agents
+            .get(&watcher_id)
+            .into_iter()
+            .flatten()
+            .map(String::as_str)
+            .collect();
+        if let Some(states) = self.watched_agent_turn_states.get_mut(&watcher_id) {
+            states.retain(|state_watched, _| {
+                next_watched.contains(state_watched)
+                    && (matches!(
+                        updated.cause,
+                        tau_proto::AgentWatchUpdateCause::SessionSnapshot
+                    ) || previous_watched.contains(state_watched.as_str()))
+            });
+            if states.is_empty() {
+                self.watched_agent_turn_states.remove(&watcher_id);
+            }
+        }
         if let Some(previous) = self.watched_agents.get(&watcher_id) {
             for watched_agent_id in previous {
                 if let Some(watchers) = self.agent_watchers.get_mut(watched_agent_id) {
@@ -1587,7 +1625,7 @@ impl EventRenderer {
             .unwrap_or_default();
         let mut active: Vec<String> = watched
             .into_iter()
-            .filter(|agent_id| self.agent_has_active_prompt(agent_id))
+            .filter(|agent_id| self.watched_agent_is_running(&current, agent_id))
             .collect();
         active.sort();
         let active_set: HashSet<_> = active.iter().cloned().collect();
@@ -1628,6 +1666,56 @@ impl EventRenderer {
         self.active_agent_prompts
             .get(agent_id)
             .is_some_and(|prompts| !prompts.is_empty())
+    }
+
+    /// Returns the authoritative agent-turn state for one directed watch.
+    ///
+    /// Prompt activity is retained as a compatibility/catch-up fallback until
+    /// the first structured lifecycle snapshot for this watch is observed.
+    fn watched_agent_is_running(&self, watcher_id: &str, watched_agent_id: &str) -> bool {
+        self.watched_agent_turn_states
+            .get(watcher_id)
+            .and_then(|states| states.get(watched_agent_id))
+            .map_or_else(
+                || self.agent_has_active_prompt(watched_agent_id),
+                |state| state.state == tau_proto::AgentRuntimeState::Running,
+            )
+    }
+
+    /// Records a structured outer agent-turn snapshot or edge for a watch.
+    fn handle_watched_agent_turn_state(
+        &mut self,
+        message: &tau_proto::AgentMessageReceived,
+        state: &tau_proto::AgentWatchTurnStateNotification,
+    ) {
+        if self
+            .current_session_id
+            .as_ref()
+            .is_some_and(|session_id| session_id != state.session_id.as_str())
+        {
+            return;
+        }
+        let watcher_id = message.recipient_id.as_str();
+        let watched_agent_id = message.sender_id.as_str();
+        let stale = self
+            .watched_agent_turn_states
+            .get(watcher_id)
+            .and_then(|states| states.get(watched_agent_id))
+            .is_some_and(|current| {
+                current.subscription_id == state.subscription_id
+                    && (state.turn_generation < current.turn_generation
+                        || (state.turn_generation == current.turn_generation
+                            && current.state == tau_proto::AgentRuntimeState::Idle
+                            && state.state == tau_proto::AgentRuntimeState::Running))
+            });
+        if !stale {
+            self.watched_agent_turn_states
+                .entry(watcher_id.to_owned())
+                .or_default()
+                .insert(watched_agent_id.to_owned(), state.clone());
+            self.render_model_status_if_present();
+            self.refresh_watched_agent_blocks();
+        }
     }
 
     fn mark_agent_prompt_active(&mut self, agent_id: &str, agent_prompt_id: &str) {
@@ -1678,6 +1766,28 @@ impl EventRenderer {
             self.handle.remove_block(block_id);
         }
         self.handle.redraw();
+    }
+
+    /// Retires all cached watch topology and state involving an unloaded agent.
+    fn remove_agent_watch_endpoint(&mut self, agent_id: &str) {
+        self.watched_agents.remove(agent_id);
+        for watched in self.watched_agents.values_mut() {
+            watched.retain(|watched_id| watched_id != agent_id);
+        }
+        self.agent_watchers.remove(agent_id);
+        for watchers in self.agent_watchers.values_mut() {
+            watchers.retain(|watcher_id| watcher_id != agent_id);
+        }
+        self.agent_watchers
+            .retain(|_, watchers| !watchers.is_empty());
+        self.watched_agent_turn_states.remove(agent_id);
+        for states in self.watched_agent_turn_states.values_mut() {
+            states.remove(agent_id);
+        }
+        self.watched_agent_turn_states
+            .retain(|_, states| !states.is_empty());
+        self.render_model_status_if_present();
+        self.refresh_watched_agent_blocks();
     }
 
     fn watched_agent_block(&self, agent_id: &str) -> tau_cli_term::StyledBlock {
@@ -2540,6 +2650,7 @@ impl EventRenderer {
         self.watched_agents.clear();
         self.agent_watchers.clear();
         self.agent_stats.clear();
+        self.watched_agent_turn_states.clear();
         self.active_agent_prompts.clear();
         self.terminal_agent_prompts.clear();
         self.interacted_agents.clear();
@@ -2842,12 +2953,29 @@ impl EventRenderer {
     }
 
     fn active_side_agent_count(&self) -> usize {
-        self.active_agent_prompts
+        let mut watched = HashSet::new();
+        let mut running = HashSet::new();
+        for (watcher_id, watched_agent_ids) in &self.watched_agents {
+            for agent_id in watched_agent_ids {
+                watched.insert(agent_id.as_str());
+                if self.watched_agent_is_running(watcher_id, agent_id) {
+                    running.insert(agent_id.as_str());
+                }
+            }
+        }
+        let prompt_only = self
+            .active_agent_prompts
             .iter()
             .filter(|(agent_id, prompts)| {
-                !prompts.is_empty() && self.current_agent_id.as_deref() != Some(agent_id.as_str())
-            })
+                !prompts.is_empty()
+                    && !watched.contains(agent_id.as_str())
+                    && self.current_agent_id.as_deref() != Some(agent_id.as_str())
+            });
+        running
+            .iter()
+            .filter(|agent_id| self.current_agent_id.as_deref() != Some(**agent_id))
             .count()
+            + prompt_only.count()
     }
 
     fn main_tools_status_chip(&self) -> Option<String> {
@@ -3509,6 +3637,7 @@ impl EventRenderer {
             }
             Event::SessionAgentUnloaded(unloaded) => {
                 self.mark_agent_suspended(unloaded.agent_id.as_str());
+                self.remove_agent_watch_endpoint(unloaded.agent_id.as_str());
                 true
             }
             Event::HarnessAgentContextUsageChanged(changed) => {
@@ -3710,6 +3839,9 @@ impl EventRenderer {
             Event::AgentMessageReceived(message) => {
                 self.remember_agent(message.sender_id.to_string());
                 self.mark_agent_interacted(message.recipient_id.to_string());
+                if let Some(state) = &message.watch_turn_state {
+                    self.handle_watched_agent_turn_state(message, state);
+                }
             }
             _ => {}
         }

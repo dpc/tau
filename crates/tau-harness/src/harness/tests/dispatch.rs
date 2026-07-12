@@ -15473,10 +15473,10 @@ fn disabling_agent_watch_removes_response_fanout_route() {
 }
 
 /// A watch must receive one structured initial snapshot and one start/stop pair
-/// per whole model turn, while provider/tool continuations retain one
+/// per outer agent turn, while provider/tool continuations retain one
 /// generation.
 #[test]
-fn agent_watch_reports_structured_whole_turn_state() {
+fn agent_watch_reports_structured_outer_agent_turn_state() {
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = echo_harness(&sp).expect("start");
@@ -15522,7 +15522,7 @@ fn agent_watch_reports_structured_whole_turn_state() {
         },
     );
     // Internal tool-result continuation bookkeeping may temporarily use Idle,
-    // but the published whole-turn state remains running.
+    // but the published outer agent-turn state remains running.
     h.agents.get_mut(&watched_cid).expect("watched").turn_state = AgentTurnState::Idle;
     h.set_agent_turn_state(
         &watched_cid,
@@ -15676,7 +15676,7 @@ fn mutual_watch_mixed_lifecycle_turn_emits_paired_state() {
         "initial watch snapshots must not create lifecycle turns"
     );
     let lifecycle_prompt = PendingPrompt::watch_notification(
-        "[tau-internal]: Watched agent peer started a model turn".to_owned(),
+        "[tau-internal]: Watched agent peer started an agent turn".to_owned(),
     );
     h.dispatch_prompt_for_agent(&b_cid, lifecycle_prompt)
         .expect("dispatch lifecycle turn");
