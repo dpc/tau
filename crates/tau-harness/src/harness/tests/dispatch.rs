@@ -9524,9 +9524,11 @@ fn restored_continuation_terminalizes_on_explicit_model_removal() {
             },
             agent_prompt_id: checkpoint_prompt_id.clone(),
             through: tau_proto::AgentHead::Root,
-            model: Some(model.clone()),
-            operation: Some(tau_proto::PromptOperation::Inference),
-            activation_cut: Some(tau_proto::AgentHead::Root),
+            dispatch: crate::agent::InferenceDispatchOwnership {
+                model: model.clone(),
+                operation: tau_proto::PromptOperation::Inference,
+                activation_cut: tau_proto::AgentHead::Root,
+            },
         };
     let other_model: tau_proto::ModelId = "other/current".into();
     let mut other_info = h.provider_model_info[&model].clone();

@@ -158,6 +158,80 @@ fn clear_quiet_provider_models(h: &mut Harness) {
     .expect("clear provider models");
 }
 
+/// Seeds the valid durable success boundary required before a restored
+/// standalone continuation can enter `AwaitingCheckpoint`.
+fn seed_restored_compaction_checkpoint(
+    h: &mut Harness,
+    cid: &AgentId,
+    model: &tau_proto::ModelId,
+    transaction: &str,
+) -> (
+    tau_proto::AgentId,
+    tau_proto::CompactionTransactionId,
+    tau_proto::AgentPromptId,
+    tau_proto::AgentHead,
+) {
+    let agent_id = crate::parse_agent_id(h.agents[cid].agent_id.as_deref().expect("durable agent"));
+    let transaction_id =
+        tau_proto::CompactionTransactionId::parse(transaction).expect("transaction id");
+    let compact_prompt_id = tau_proto::AgentPromptId::from(format!("ap-{transaction}-compact"));
+    let started = tau_proto::AgentStandaloneCompactionStarted {
+        agent_id: agent_id.clone(),
+        transaction_id: transaction_id.clone(),
+        compact_prompt_id: compact_prompt_id.clone(),
+        cut: tau_proto::AgentHead::Root,
+        resume_through: Some(tau_proto::AgentHead::Root),
+        model: model.clone(),
+        operation: tau_proto::PromptOperation::StandaloneCompaction,
+        originator: tau_proto::PromptOriginator::User,
+        supersedes: None,
+        trigger: tau_proto::StandaloneCompactionTrigger::Manual,
+    };
+    for event in [
+        Event::AgentStandaloneCompactionStarted(started),
+        Event::AgentCompacted(tau_proto::AgentCompacted {
+            agent_id: agent_id.clone(),
+            transaction_id: Some(transaction_id.clone()),
+            cut: Some(tau_proto::AgentHead::Root),
+            suffix_end: Some(tau_proto::AgentHead::Root),
+            compact_prompt_id: Some(compact_prompt_id),
+            model: Some(model.clone()),
+            operation: Some(tau_proto::PromptOperation::StandaloneCompaction),
+            replacement_window: vec![ContextItem::Message(MessageItem {
+                role: ContextRole::Assistant,
+                content: vec![ContentPart::Text {
+                    text: "durable restored summary".to_owned(),
+                }],
+                phase: None,
+                responses_raw_json: None,
+            })],
+        }),
+    ] {
+        h.agent_store
+            .append_agent_event_at(
+                agent_id.as_str(),
+                None,
+                tau_core::AgentEventParent::Root,
+                event,
+                tau_proto::UnixMicros::now(),
+            )
+            .expect("seed valid durable compaction outcome");
+    }
+    let recovery = h
+        .agent_store
+        .agent(agent_id.as_str())
+        .and_then(tau_core::AgentTree::standalone_compaction_recovery)
+        .expect("core recovery projection");
+    let tau_core::StandaloneCompactionRecovery::AwaitingCheckpoint { through, .. } = &recovery
+    else {
+        panic!("successful resumable compaction awaits its checkpoint");
+    };
+    let checkpoint_prompt_id = h
+        .stage_restored_compaction_recovery(cid, &recovery)
+        .expect("production runtime recovery projection");
+    (agent_id, transaction_id, checkpoint_prompt_id, *through)
+}
+
 fn connect_handshaking_extension(
     h: &mut Harness,
     conn_id: &str,
@@ -2277,8 +2351,8 @@ fn disconnect_before_ready_drops_all_staged_state() {
     h.shutdown().expect("shutdown");
 }
 
-/// Multiple pre-Ready provider snapshots are activated atomically: only the
-/// final snapshot may authorize restored dispatch or authoritative absence.
+/// Staged captured-model presence followed by final absence is coalesced into
+/// one authoritative removal without exposing the intermediate route.
 #[test]
 fn provider_ready_coalesces_staged_model_snapshots_to_final_state() {
     let td = TempDir::new().expect("tempdir");
@@ -2291,24 +2365,12 @@ fn provider_ready_coalesces_staged_model_snapshots_to_final_state() {
         .clone();
     clear_quiet_provider_models(&mut h);
     let conn_id = "provider-staged-model-replacement";
-    let _sink = connect_handshaking_extension(&mut h, conn_id, tau_proto::ClientKind::Provider);
+    let sink = connect_handshaking_extension(&mut h, conn_id, tau_proto::ClientKind::Provider);
     let captured: tau_proto::ModelId = "staged/captured".into();
     captured_info.id = captured.clone();
     let cid = ensure_test_user_agent(&mut h);
-    let agent_id = h.agents[&cid].agent_id.clone().expect("agent id");
-    let transaction_id =
-        tau_proto::CompactionTransactionId::parse("ct-staged-snapshot").expect("transaction id");
-    h.agents.get_mut(&cid).expect("agent").activation_dispatch =
-        crate::agent::ActivationDispatchState::AwaitingCheckpoint {
-            owner: crate::agent::InferenceCheckpointOwner::Standalone {
-                id: transaction_id.clone(),
-            },
-            agent_prompt_id: "ap-staged-snapshot".into(),
-            through: tau_proto::AgentHead::Root,
-            model: Some(captured.clone()),
-            operation: Some(tau_proto::PromptOperation::Inference),
-            activation_cut: Some(tau_proto::AgentHead::Root),
-        };
+    let (agent_id, transaction_id, checkpoint_prompt_id, through) =
+        seed_restored_compaction_checkpoint(&mut h, &cid, &captured, "ct-staged-snapshot");
 
     for models in [vec![captured_info], Vec::new()] {
         h.handle_extension_event(
@@ -2336,15 +2398,189 @@ fn provider_ready_coalesces_staged_model_snapshots_to_final_state() {
     );
     assert!(!h.provider_model_routes.contains_key(&captured));
     assert!(
-        h.enqueued_restored_compaction_checkpoints
-            .contains(&(crate::parse_agent_id(&agent_id), transaction_id)),
-        "the final Ready snapshot alone decides the restored work"
+        !h.enqueued_restored_compaction_checkpoints
+            .contains(&(agent_id.clone(), transaction_id.clone()))
     );
+    let events = event_log_events(&h);
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(
+                event,
+                Event::AgentInferenceDispatchStarted(checkpoint)
+                    if checkpoint.transaction_id.as_ref() == Some(&transaction_id)
+                        && checkpoint.agent_prompt_id == checkpoint_prompt_id
+                        && checkpoint.model.as_ref() == Some(&captured)
+                        && checkpoint.operation == Some(tau_proto::PromptOperation::Inference)
+                        && checkpoint.activation_cut == Some(tau_proto::AgentHead::Root)
+                        && checkpoint.through == through
+            ))
+            .count(),
+        1,
+        "authoritative final absence commits one fully qualified checkpoint"
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(
+                event,
+                Event::ProviderResponseFinished(response)
+                    if response.agent_prompt_id == checkpoint_prompt_id
+                        && response.stop_reason == tau_proto::ProviderStopReason::Error
+            ))
+            .count(),
+        1,
+        "the unavailable captured route has one terminal response"
+    );
+    assert!(!events.iter().any(|event| matches!(
+        event,
+        Event::AgentPromptCreated(prompt) if prompt.agent_prompt_id == checkpoint_prompt_id
+    )));
+    assert!(
+        sink.lock().expect("provider sink").iter().all(|routed| {
+            !matches!(
+                peel_inner_event(&routed.frame),
+                Some(Event::AgentPromptCreated(prompt))
+                    if prompt.agent_prompt_id == checkpoint_prompt_id
+            )
+        }),
+        "authoritative final absence must not send provider work"
+    );
+}
+
+/// An intermediate staged absence cannot terminalize restored work when the
+/// provider's final Ready snapshot contains the captured model.
+#[test]
+fn provider_ready_coalesces_staged_absence_to_captured_route_dispatch() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path()).expect("harness");
+    let mut captured_info = h
+        .provider_model_info
+        .values()
+        .next()
+        .expect("startup provider model")
+        .clone();
+    clear_quiet_provider_models(&mut h);
+    let captured: tau_proto::ModelId = "staged/captured-final".into();
+    captured_info.id = captured.clone();
+    captured_info.supported_tool_types = vec![tau_proto::ToolType::Function];
+    captured_info.efforts = vec![tau_proto::Effort::High];
+    captured_info.verbosities = vec![tau_proto::Verbosity::Low];
+    captured_info.thinking_summaries = vec![tau_proto::ThinkingSummary::Detailed];
+    let current: tau_proto::ModelId = "other/current-selection".into();
+    let mut current_info = staged_provider_model("other/current-selection");
+    current_info.supported_tool_types.clear();
+    h.provider_model_info.insert(current.clone(), current_info);
+    h.provider_model_routes
+        .insert(current.clone(), "other-provider".into());
+    let role = h
+        .available_roles
+        .get_mut(&h.selected_role)
+        .expect("selected role");
+    role.effort = Some(tau_proto::Effort::High);
+    role.verbosity = Some(tau_proto::Verbosity::Low);
+    role.thinking_summary = Some(tau_proto::ThinkingSummary::Detailed);
+    role.tools = Some(vec![ToolName::new("captured_only_tool")]);
+
+    let conn_id = "provider-staged-absence-replacement";
+    let sink = connect_handshaking_extension(&mut h, conn_id, tau_proto::ClientKind::Provider);
+    h.handle_extension_event(
+        conn_id,
+        TestProtocolItem::Event(Event::ToolRegister(tau_proto::ToolRegister {
+            tool: staged_tool_spec("captured_only_tool"),
+            tool_group: None,
+            prompt_fragment: None,
+        })),
+    )
+    .expect("stage captured tool");
+    let cid = ensure_test_user_agent(&mut h);
+    h.agents.get_mut(&cid).expect("agent").model_override = Some(current);
+    let (agent_id, transaction_id, checkpoint_prompt_id, through) =
+        seed_restored_compaction_checkpoint(&mut h, &cid, &captured, "ct-staged-captured-final");
+
+    for models in [Vec::new(), vec![captured_info]] {
+        h.handle_extension_event(
+            conn_id,
+            TestProtocolItem::Event(Event::ProviderModelsUpdated(
+                tau_proto::ProviderModelsUpdated { models },
+            )),
+        )
+        .expect("stage model snapshot");
+    }
     assert!(!event_log_events(&h).iter().any(|event| matches!(
         event,
-        Event::AgentPromptCreated(prompt)
-            if prompt.agent_prompt_id.as_str() == "ap-staged-snapshot"
+        Event::AgentInferenceDispatchStarted(checkpoint)
+            if checkpoint.transaction_id.as_ref() == Some(&transaction_id)
     )));
+
+    h.handle_extension_message(
+        conn_id,
+        TestMessage::Ready(tau_proto::Ready { message: None }),
+    )
+    .expect("activate provider");
+
+    let events = event_log_events(&h);
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(
+                event,
+                Event::AgentInferenceDispatchStarted(checkpoint)
+                    if checkpoint.transaction_id.as_ref() == Some(&transaction_id)
+                        && checkpoint.agent_prompt_id == checkpoint_prompt_id
+                        && checkpoint.agent_id == agent_id
+                        && checkpoint.model.as_ref() == Some(&captured)
+                        && checkpoint.operation == Some(tau_proto::PromptOperation::Inference)
+                        && checkpoint.activation_cut == Some(tau_proto::AgentHead::Root)
+                        && checkpoint.through == through
+            ))
+            .count(),
+        1
+    );
+    assert!(!events.iter().any(|event| matches!(
+        event,
+        Event::ProviderResponseFinished(response)
+            if response.agent_prompt_id == checkpoint_prompt_id
+    )));
+    let prompt = events
+        .iter()
+        .find_map(|event| match event {
+            Event::AgentPromptCreated(prompt) if prompt.agent_prompt_id == checkpoint_prompt_id => {
+                Some(prompt)
+            }
+            _ => None,
+        })
+        .expect("captured continuation prompt");
+    assert_eq!(prompt.model, captured);
+    assert_eq!(prompt.model_params.effort, tau_proto::Effort::High);
+    assert_eq!(prompt.model_params.verbosity, tau_proto::Verbosity::Low);
+    assert_eq!(
+        prompt.model_params.thinking_summary,
+        tau_proto::ThinkingSummary::Detailed
+    );
+    assert_eq!(
+        prompt
+            .tools
+            .iter()
+            .map(|tool| tool.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["captured_only_tool"]
+    );
+    assert_eq!(prompt.agent_id, agent_id);
+    assert_eq!(prompt.session_id, h.current_session_id);
+    assert_eq!(prompt.originator, tau_proto::PromptOriginator::User);
+    assert_eq!(h.prompt_models.get(&checkpoint_prompt_id), Some(&captured));
+    assert!(
+        sink.lock().expect("provider sink").iter().any(|routed| {
+            matches!(
+                peel_inner_event(&routed.frame),
+                Some(Event::AgentPromptCreated(sent))
+                    if sent.agent_prompt_id == checkpoint_prompt_id
+                        && sent.model == captured
+            )
+        }),
+        "the exact captured route receives the provider request"
+    );
 }
 
 #[test]

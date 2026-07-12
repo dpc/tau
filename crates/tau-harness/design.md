@@ -50,6 +50,12 @@ Restored post-compaction continuation coverage includes captured-route success,
 staggered unrelated discovery, discovery-complete absence, explicit model
 removal, warm resume, mutable role/model drift, sanitized terminal visibility,
 and replay exactly-once behavior.
+Pre-Ready provider model updates are coalesced per provider before activation.
+The final staged snapshot determines captured-model presence; earlier staged
+presence followed by final omission is an authoritative removal, while absence
+throughout remains unresolved until discovery completes. Awaiting-checkpoint
+runtime state carries provider-qualified model, inference operation, and
+activation cut as one complete ownership value.
 
 ## Daemon listener shutdown is reactive and path-independent
 

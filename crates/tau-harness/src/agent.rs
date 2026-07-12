@@ -54,12 +54,9 @@ pub(crate) enum ActivationDispatchState {
         agent_prompt_id: AgentPromptId,
         /// Immutable inference snapshot covered by the checkpoint.
         through: tau_proto::AgentHead,
-        /// Exact provider-qualified model captured by compaction.
-        model: Option<ModelId>,
-        /// Provider operation captured before the checkpoint commit.
-        operation: Option<tau_proto::PromptOperation>,
-        /// Immutable activation cut captured before the checkpoint commit.
-        activation_cut: Option<tau_proto::AgentHead>,
+        /// Complete provider dispatch ownership captured before checkpoint
+        /// commit.
+        dispatch: InferenceDispatchOwnership,
     },
     /// The checkpoint committed; remote inference completion is not durable
     /// yet.
@@ -100,6 +97,17 @@ pub(crate) enum ActivationDispatchState {
         /// Activation still owed inference.
         resume_through: Option<tau_proto::AgentHead>,
     },
+}
+
+/// Complete provider-facing ownership of an inference dispatch.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct InferenceDispatchOwnership {
+    /// Exact provider-qualified model owned by the checkpoint.
+    pub(crate) model: ModelId,
+    /// Provider operation owned by the checkpoint.
+    pub(crate) operation: tau_proto::PromptOperation,
+    /// Immutable activation cut owned by the checkpoint.
+    pub(crate) activation_cut: tau_proto::AgentHead,
 }
 
 /// Durable inference checkpoint ownership.

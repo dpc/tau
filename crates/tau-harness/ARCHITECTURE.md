@@ -468,7 +468,8 @@ automatic retry, and leaves the agent addressable for explicit recovery.
 Inference resumes only after a durable dispatch watermark commits.
 While that checkpoint is interceptable or waiting to persist, an explicit
 `AwaitingCheckpoint` runtime state blocks every ordinary dispatch path. The
-checkpoint owns its model, inference operation, activation cut, prompt id,
+checkpoint's nonoptional dispatch ownership value atomically owns its model,
+inference operation, and activation cut alongside its prompt id,
 transaction owner, and transcript head. Core rejects incomplete or
 transaction-mismatched ownership correlations. The post-commit continuation
 uses that exact model for route, parameters, tools, accounting, and prompt
@@ -481,9 +482,13 @@ rather than being silently duplicated.
 
 Crash recovery after a successful compaction but before its continuation
 checkpoint retains the transaction's exact model, cut, and owed transcript
-watermark in `AwaitingCheckpoint`. Provider snapshots may arrive in stages, so
-an unrelated snapshot does not decide absence. Discovery completion, or an
-explicit removal from the model's prior provider snapshot, is authoritative:
+watermark in `AwaitingCheckpoint`. Provider snapshots may arrive in stages.
+The final pre-Ready snapshot determines presence; a model advertised by any
+earlier staged snapshot and omitted by the final one counts as explicitly
+removed. A model absent throughout staging remains unresolved until discovery
+completes. Intermediate absence cannot suppress final captured-model presence.
+Discovery completion, or an explicit removal from the model's prior provider
+snapshot, is authoritative:
 the harness commits one fully qualified checkpoint and either dispatches its
 captured route or durably terminalizes it through the normal unavailable-route
 path. Current role or `/model` selection never substitutes another model.

@@ -541,9 +541,12 @@ impl Harness {
                         owner: crate::agent::InferenceCheckpointOwner::Inference,
                         agent_prompt_id: prompt_id.clone(),
                         through,
-                        model: Some(model.clone()),
-                        operation: Some(tau_proto::PromptOperation::Inference),
-                        activation_cut,
+                        dispatch: crate::agent::InferenceDispatchOwnership {
+                            model: model.clone(),
+                            operation: tau_proto::PromptOperation::Inference,
+                            activation_cut: activation_cut
+                                .expect("inference activation cut is always present"),
+                        },
                     };
                 Some((durable_agent_id, prompt_id, through))
             })
