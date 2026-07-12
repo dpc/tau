@@ -96,6 +96,36 @@ $ tau -r                  # pick a recent session for this cwd
 $ tau -r <id>             # resume a specific one
 ```
 
+Context-limit diagnostics are in the non-ephemeral session's append-only debug
+event log, not the session membership summary. Use the same sessions root for
+the CLI inspection commands and the event-log lookup:
+
+```console
+# Linux default; pass the configured sessions root on other setups.
+$ sessions_dir="${XDG_STATE_HOME:-$HOME/.local/state}/tau/sessions"
+$ tau session-list --sessions-dir "$sessions_dir"
+$ tau session-show --sessions-dir "$sessions_dir" --session-id <id>
+$ jq -c '
+    select(.type == "published"
+      and .event_name == "provider.response_finished"
+      and .event.payload.context_limit_telemetry != null)
+    | {recorded_at_micros,
+       agent_id: .event.payload.agent_id,
+       agent_prompt_id: .event.payload.agent_prompt_id,
+       context_limit_telemetry: .event.payload.context_limit_telemetry}
+  ' "$sessions_dir/<id>/events.jsonl"
+```
+
+`tau session-list` locates session ids and `tau session-show` confirms their
+loaded agents; `events.jsonl` is the session-inspect/debug retrieval source for
+the complete harness-authored telemetry. Replace `sessions_dir` with Tau's
+configured sessions root when it differs from the Linux default. The record
+preserves exact serialized transcript-delta bytes separately from provider
+token usage, omitting the delta and derived projection if exact derivation is
+unavailable. A byte-derived projection alone is `insufficient_evidence`, and
+neither inspection nor recording performs automatic limit or threshold
+calibration.
+
 `tau --ephemeral` starts a normal live harness session without writing the
 session membership journal, session metadata/lock files, debug `events.jsonl`,
 per-session harness/extension stderr logs, session-scoped extension data, or

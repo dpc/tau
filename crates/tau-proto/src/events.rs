@@ -3975,12 +3975,16 @@ pub struct ContextLimitTelemetry {
     pub operation: PromptOperation,
     /// Conservative harness estimate immediately before dispatch, when a
     /// same-model usage baseline was available. Serialized transcript growth is
-    /// treated as a one-byte-to-one-projected-token upper bound.
+    /// treated as a one-byte-to-one-projected-token upper bound. This estimate
+    /// is not provider-token evidence.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub projected_input_tokens: Option<u64>,
     /// Serialized transcript growth since the usage baseline. This byte count
-    /// is intentionally not labeled or interpreted as provider tokens.
-    pub transcript_delta_bytes: u64,
+    /// is intentionally not labeled or interpreted as provider tokens. It is
+    /// absent when any suffix entry is not JSON-representable or the exact
+    /// total cannot be represented.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transcript_delta_bytes: Option<u64>,
     /// Provider-published context window observed for this exact model.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub advertised_context_window: Option<u64>,
@@ -4029,13 +4033,15 @@ pub enum ContextLimitCompactionPolicy {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ContextLimitObservation {
-    /// The provider rejected below its advertised window, indicating hidden
-    /// overhead or provider/model limit drift.
+    /// Nonzero provider input usage was below the advertised window and any
+    /// available conservative projection agreed, indicating hidden overhead or
+    /// provider/model limit drift.
     RejectedBelowAdvertisedLimit,
-    /// Available provider and projection evidence agrees that input reached or
-    /// exceeded the advertised limit.
+    /// Nonzero provider input usage reached or exceeded the advertised limit
+    /// and any available conservative projection agreed.
     RejectedAtOrAboveAdvertisedLimit,
-    /// Usage or model-limit evidence was absent or contradictory.
+    /// Provider usage or model-limit evidence was absent, zero, or
+    /// contradictory. A byte-derived projection alone always has this category.
     InsufficientEvidence,
 }
 

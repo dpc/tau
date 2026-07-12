@@ -105,9 +105,14 @@ for explicit tool presence.
 The harness, not providers, owns the durable context-limit diagnostic attached
 to terminal responses. Provider-supplied values are discarded. The schema is
 content-free and bounded to one record per rejected prompt: model id, operation,
-optional token counts/window, exact serialized transcript-growth bytes, reserve,
-active threshold, closed policy/eligibility/action, and a closed observation
-enum. Raw
-prompts, errors, response bodies, headers, accounts, and endpoints are excluded.
+optional token counts/window, optional exact serialized transcript-growth bytes,
+reserve, active threshold, closed policy/eligibility/action, and a closed
+observation enum. Exact growth and its projection are absent if a supported
+raw-CBOR transcript entry cannot be represented as JSON or the checked total
+overflows. A categorical observation requires a positive advertised limit and
+nonzero provider input usage; the byte-derived projection only corroborates or
+makes contradictory evidence insufficient. Raw evidence remains present even
+when the bounded observation is insufficient. Raw prompts, errors, response
+bodies, headers, accounts, and endpoints are excluded.
 Normal session/event retention applies; watcher snapshots do not duplicate this
 record. Evidence never automatically lowers limits or thresholds.

@@ -233,3 +233,12 @@ the immutable dispatch snapshot by prompt, exact model, and operation. Closed
 observation, policy, eligibility, and action tags contain no prompt/provider
 body. `action=reactive_compaction_planned` is valid only with the matching
 `recovery_disposition`; absent fields preserve legacy decoding.
+
+Raw provider input usage remains separate from the optional exact JSON byte
+length of transcript growth. The conservative byte-as-token projection is not
+provider-token evidence: categorical below/at-or-above observations require a
+positive advertised limit and nonzero provider usage, while projection-only or
+contradictory cases are `insufficient_evidence`. If exact transcript
+serialization or checked aggregation is unavailable, both the byte delta and
+its derived projection are absent. These diagnostics never calibrate limits or
+thresholds automatically.

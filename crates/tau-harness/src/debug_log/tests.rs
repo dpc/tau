@@ -28,7 +28,20 @@ fn published_line_preserves_enriched_token_usage() {
         stop_reason: tau_proto::ProviderStopReason::EndTurn,
         error: None,
         failure_kind: None,
-        context_limit_telemetry: None,
+        context_limit_telemetry: Some(tau_proto::ContextLimitTelemetry {
+            model: model.clone(),
+            operation: tau_proto::PromptOperation::Inference,
+            projected_input_tokens: Some(999),
+            transcript_delta_bytes: Some(99),
+            advertised_context_window: Some(1024),
+            provider_input_tokens: Some(1000),
+            projection_reserve_tokens: 4096,
+            compaction_threshold: None,
+            compaction_policy: tau_proto::ContextLimitCompactionPolicy::ProviderDefault,
+            recovery_eligible: false,
+            action: tau_proto::ContextLimitAction::Terminal,
+            observation: tau_proto::ContextLimitObservation::RejectedBelowAdvertisedLimit,
+        }),
         recovery_disposition: tau_proto::ContextRecoveryDisposition::None,
         originator: PromptOriginator::User,
         usage: Some(ProviderTokenUsage {
@@ -61,6 +74,12 @@ fn published_line_preserves_enriched_token_usage() {
     assert_eq!(usage["prompt_cached_tokens"], 800);
     assert_eq!(usage["response_received_tokens"], 42);
     assert_eq!(usage["model"], "openai/gpt-5");
+    assert_eq!(line["event"]["payload"]["agent_id"], "main");
+    assert_eq!(line["event"]["payload"]["agent_prompt_id"], "sp-0");
+    assert_eq!(
+        line["event"]["payload"]["context_limit_telemetry"]["transcript_delta_bytes"],
+        99
+    );
 }
 
 #[test]

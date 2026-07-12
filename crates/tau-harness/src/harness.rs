@@ -35,7 +35,7 @@ use tau_proto::{
 
 use self::context_limit_telemetry::{
     MIN_CONTEXT_PROJECTION_RESERVE, PromptContextLimitSnapshot, context_limit_observation,
-    context_projection_reserve,
+    context_projection_reserve, projected_input_tokens, serialized_transcript_delta_bytes,
 };
 use crate::agent::{
     Agent, AgentTurnState, LoopCycleState, LoopGuardTrigger, LoopTurnSignature, PendingCancel,
@@ -15042,30 +15042,30 @@ impl Harness {
             .filter(|window| *window > 0);
         let projection_reserve_tokens = advertised_context_window
             .map_or(MIN_CONTEXT_PROJECTION_RESERVE, context_projection_reserve);
-        let (baseline, transcript_delta_bytes) = self.agents.get(cid).map_or((None, 0), |agent| {
-            let baseline = (agent.context_usage_model.as_ref() == Some(model))
-                .then_some(agent.context_input_tokens)
-                .flatten();
-            let delta = agent
-                .agent_id
-                .as_deref()
-                .and_then(|id| self.agent_store.agent(id))
-                .map_or(0, |tree| {
-                    let ids = tree.branch_node_ids_from(agent.head);
-                    let first = agent
-                        .context_usage_head
-                        .and_then(|head| ids.iter().position(|id| *id == head))
-                        .map_or(0, |index| index.saturating_add(1));
-                    ids[first..]
-                        .iter()
-                        .filter_map(|id| tree.node(*id))
-                        .map(|node| {
-                            serde_json::to_vec(&node.entry).map_or(u64::MAX, |v| v.len() as u64)
-                        })
-                        .fold(0_u64, u64::saturating_add)
-                });
-            (baseline, delta)
-        });
+        let (baseline, transcript_delta_bytes) =
+            self.agents.get(cid).map_or((None, Some(0)), |agent| {
+                let baseline = (agent.context_usage_model.as_ref() == Some(model))
+                    .then_some(agent.context_input_tokens)
+                    .flatten();
+                let delta = agent
+                    .agent_id
+                    .as_deref()
+                    .and_then(|id| self.agent_store.agent(id))
+                    .map_or(Some(0), |tree| {
+                        let ids = tree.branch_node_ids_from(agent.head);
+                        let first = agent
+                            .context_usage_head
+                            .and_then(|head| ids.iter().position(|id| *id == head))
+                            .map_or(0, |index| index.saturating_add(1));
+                        serialized_transcript_delta_bytes(
+                            ids[first..]
+                                .iter()
+                                .filter_map(|id| tree.node(*id))
+                                .map(|node| &node.entry),
+                        )
+                    });
+                (baseline, delta)
+            });
         let role_compaction = self
             .available_roles
             .get(&self.role_name_for_agent_id(cid))
@@ -15089,11 +15089,11 @@ impl Harness {
         PromptContextLimitSnapshot {
             model: model.clone(),
             operation,
-            projected_input_tokens: baseline.map(|tokens| {
-                tokens
-                    .saturating_add(transcript_delta_bytes)
-                    .saturating_add(projection_reserve_tokens)
-            }),
+            projected_input_tokens: projected_input_tokens(
+                baseline,
+                transcript_delta_bytes,
+                projection_reserve_tokens,
+            ),
             transcript_delta_bytes,
             advertised_context_window,
             projection_reserve_tokens,

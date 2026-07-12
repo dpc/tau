@@ -8498,7 +8498,7 @@ fn reactive_context_overflow_recovers_in_durable_order_once() {
         model: "evil/forged".parse().expect("model"),
         operation: tau_proto::PromptOperation::StandaloneCompaction,
         projected_input_tokens: Some(1),
-        transcript_delta_bytes: 1,
+        transcript_delta_bytes: Some(1),
         advertised_context_window: Some(1),
         provider_input_tokens: Some(1),
         projection_reserve_tokens: 1,
@@ -8541,7 +8541,11 @@ fn reactive_context_overflow_recovers_in_durable_order_once() {
     assert_eq!(telemetry.operation, tau_proto::PromptOperation::Inference);
     assert_eq!(telemetry.advertised_context_window, Some(1000));
     assert_eq!(telemetry.projection_reserve_tokens, 4096);
-    assert!(telemetry.transcript_delta_bytes > 0);
+    assert!(
+        telemetry
+            .transcript_delta_bytes
+            .is_some_and(|bytes| bytes > 0)
+    );
     assert_eq!(telemetry.provider_input_tokens, None);
     assert_eq!(
         telemetry.compaction_policy,

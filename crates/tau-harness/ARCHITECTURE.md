@@ -576,9 +576,12 @@ Context-window rejection records may include sanitized, harness-owned
 `context_limit_telemetry`. Correlation is the enclosing prompt plus exact
 provider-qualified model and operation. Projection is accepted only from a
 same-model usage baseline; missing, zero, stale/model-changed, or contradictory
-inputs produce absent values or `insufficient_evidence`. The record makes hidden
-overhead and advertised-limit drift observable but does not feed back into
-automatic calibration.
+inputs produce absent values or `insufficient_evidence`. The exact serialized
+transcript delta remains separately attributable byte provenance. Its
+one-byte-to-one-projected-token upper bound may corroborate provider usage but
+never establishes a categorical observation without nonzero provider-token
+evidence. The record makes hidden overhead and advertised-limit drift observable
+but does not feed back into automatic calibration.
 Calibration is explicit only: operators may change normal persisted model/role
 configuration (including bounded thresholds), and resetting that configuration
 removes the calibration. Tau never learns or mutates provider limits from a

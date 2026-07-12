@@ -2545,13 +2545,13 @@ fn provider_model_info_requires_context_window() {
 /// across both supported durable wire encodings without introducing content.
 #[test]
 fn context_limit_telemetry_json_and_cbor_round_trip() {
-    let telemetry = ContextLimitTelemetry {
+    let mut telemetry = ContextLimitTelemetry {
         model: "openai/gpt-test".parse().expect("model"),
         operation: PromptOperation::StandaloneCompaction,
         projected_input_tokens: Some(127_000),
-        transcript_delta_bytes: 8192,
+        transcript_delta_bytes: Some(8192),
         advertised_context_window: Some(128_000),
-        provider_input_tokens: None,
+        provider_input_tokens: Some(127_000),
         projection_reserve_tokens: 4096,
         compaction_threshold: Some(115_200),
         compaction_policy: ContextLimitCompactionPolicy::Threshold,
@@ -2561,7 +2561,7 @@ fn context_limit_telemetry_json_and_cbor_round_trip() {
     };
     let json = serde_json::to_value(&telemetry).expect("json");
     assert_eq!(json["observation"], "rejected_below_advertised_limit");
-    assert!(json.get("provider_input_tokens").is_none());
+    assert_eq!(json["provider_input_tokens"], 127_000);
     assert_eq!(
         serde_json::from_value::<ContextLimitTelemetry>(json).expect("json decode"),
         telemetry
@@ -2570,6 +2570,21 @@ fn context_limit_telemetry_json_and_cbor_round_trip() {
     ciborium::into_writer(&telemetry, &mut cbor).expect("cbor");
     assert_eq!(
         ciborium::from_reader::<ContextLimitTelemetry, _>(cbor.as_slice()).expect("cbor decode"),
+        telemetry
+    );
+
+    telemetry.transcript_delta_bytes = None;
+    let json = serde_json::to_value(&telemetry).expect("JSON without transcript delta");
+    assert!(json.get("transcript_delta_bytes").is_none());
+    assert_eq!(
+        serde_json::from_value::<ContextLimitTelemetry>(json).expect("missing JSON field decodes"),
+        telemetry
+    );
+    let mut cbor = Vec::new();
+    ciborium::into_writer(&telemetry, &mut cbor).expect("CBOR without transcript delta");
+    assert_eq!(
+        ciborium::from_reader::<ContextLimitTelemetry, _>(cbor.as_slice())
+            .expect("missing CBOR field decodes"),
         telemetry
     );
 }
