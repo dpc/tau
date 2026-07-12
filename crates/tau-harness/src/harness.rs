@@ -1795,7 +1795,8 @@ pub struct Harness {
     pub(crate) provider_model_info: HashMap<ModelId, ProviderModelInfo>,
     /// Provider extension connection for each model id. This is kept alongside
     /// [`Self::provider_model_info`] so prompt routing can address the provider
-    /// that most recently published the selected model.
+    /// selected by the deterministic sorted-source, last-advertisement-wins
+    /// registry rebuild.
     pub(crate) provider_model_routes: HashMap<ModelId, tau_proto::ConnectionId>,
     /// Provider connection that received each in-flight prompt request.
     /// Incoming provider execution events must match this owner before the
@@ -10891,6 +10892,7 @@ impl Harness {
     fn refresh_provider_model_info(&mut self) {
         let mut provider_model_info = HashMap::new();
         let mut provider_model_routes = HashMap::new();
+        let mut duplicate_model_ids = HashSet::new();
         let mut source_ids: Vec<_> = self.provider_models_by_extension.keys().collect();
         source_ids.sort();
         for source_id in source_ids {
@@ -10899,12 +10901,92 @@ impl Harness {
             };
             let connection_id = tau_proto::ConnectionId::from(source_id.as_str());
             for model in models {
-                provider_model_info.insert(model.id.clone(), model.clone());
+                if provider_model_info
+                    .insert(model.id.clone(), model.clone())
+                    .is_some()
+                {
+                    duplicate_model_ids.insert(model.id.clone());
+                }
                 provider_model_routes.insert(model.id.clone(), connection_id.clone());
             }
         }
         self.provider_model_info = provider_model_info;
         self.provider_model_routes = provider_model_routes;
+        self.warn_on_duplicate_provider_models(duplicate_model_ids);
+    }
+
+    /// Warns about ambiguous provider-qualified ids without changing the
+    /// existing sorted-source, last-advertisement-wins registry behavior.
+    fn warn_on_duplicate_provider_models(&mut self, duplicate_model_ids: HashSet<ModelId>) {
+        const DISPLAY_LIMIT: usize = 8;
+
+        if duplicate_model_ids.is_empty() {
+            return;
+        }
+        let total = duplicate_model_ids.len();
+        let mut duplicate_model_ids = duplicate_model_ids.into_iter().collect::<Vec<_>>();
+        duplicate_model_ids.sort();
+        duplicate_model_ids.truncate(DISPLAY_LIMIT);
+        let displayed = duplicate_model_ids
+            .iter()
+            .map(Self::bounded_model_id_label)
+            .collect::<Vec<_>>()
+            .join(", ");
+        let omitted = total.saturating_sub(duplicate_model_ids.len());
+        let suffix = if omitted == 0 {
+            String::new()
+        } else {
+            format!(" (and {omitted} more)")
+        };
+        self.emit_notice(
+            tau_proto::notice_kind::HARNESS_INTERNAL_WARNING,
+            tau_proto::NoticeLevel::Warning,
+            false,
+            &format!(
+                "duplicate provider-qualified model ids advertised: {displayed}{suffix}; \
+                 preserving sorted-source last-wins routing"
+            ),
+        );
+    }
+
+    /// Produces a single-line, UTF-8-safe diagnostic label with a fixed byte
+    /// cap.
+    fn bounded_model_id_label(model_id: &ModelId) -> String {
+        const BYTE_LIMIT: usize = 96;
+        const ELLIPSIS: &str = "…";
+
+        let raw = model_id.to_string();
+        let mut label = String::with_capacity(BYTE_LIMIT);
+        let mut truncated = false;
+        for character in raw.chars() {
+            let unsafe_for_display = character.is_control()
+                || matches!(
+                    character,
+                    '\u{00ad}'
+                        | '\u{061c}'
+                        | '\u{200b}'..='\u{200f}'
+                        | '\u{2028}'..='\u{202e}'
+                        | '\u{2060}'..='\u{206f}'
+                        | '\u{fdd0}'..='\u{fdef}'
+                        | '\u{feff}'
+                )
+                || (character as u32 & 0xffff == 0xfffe)
+                || (character as u32 & 0xffff == 0xffff);
+            let character = if unsafe_for_display {
+                '\u{fffd}'
+            } else {
+                character
+            };
+            if label.len() + character.len_utf8() > BYTE_LIMIT - ELLIPSIS.len() {
+                truncated = true;
+                break;
+            }
+            label.push(character);
+        }
+        if truncated {
+            label.push_str(ELLIPSIS);
+        }
+        label
     }
 
     fn refresh_available_models(&mut self) {

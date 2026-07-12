@@ -266,6 +266,120 @@ fn provider_models_snapshot_updates_available_models() {
     assert!(saw_harness_roles);
 }
 
+/// Duplicate provider-qualified ids must be diagnosed with bounded detail while
+/// retaining the established sorted-source last-wins metadata and route.
+#[test]
+fn duplicate_provider_model_ids_warn_without_changing_winner() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path()).expect("harness");
+    clear_startup_echo_models(&mut h);
+    connect_provider_source(&mut h, "provider-a");
+    connect_provider_source(&mut h, "provider-z");
+
+    let duplicate_ids = (0..10)
+        .map(|index| ModelId::from(format!("shared/model-{index:02}")))
+        .collect::<Vec<_>>();
+    h.handle_extension_event(
+        "provider-a",
+        TestProtocolItem::Event(Event::ProviderModelsUpdated(ProviderModelsUpdated {
+            models: duplicate_ids
+                .iter()
+                .cloned()
+                .map(|id| provider_model(id, 1_000))
+                .collect(),
+        })),
+    )
+    .expect("handle first provider snapshot");
+    h.handle_extension_event(
+        "provider-z",
+        TestProtocolItem::Event(Event::ProviderModelsUpdated(ProviderModelsUpdated {
+            models: duplicate_ids
+                .iter()
+                .cloned()
+                .map(|id| provider_model(id, 2_000))
+                .collect(),
+        })),
+    )
+    .expect("handle colliding provider snapshot");
+
+    let model_id = &duplicate_ids[0];
+    assert_eq!(
+        h.provider_model_info
+            .get(model_id)
+            .map(|info| info.context_window),
+        Some(2_000),
+    );
+    assert_eq!(
+        h.provider_model_routes.get(model_id).map(|id| id.as_str()),
+        Some("provider-z"),
+    );
+
+    let mut warning = None;
+    let mut seq = crate::event_log::EventLogSeq::new(0);
+    while let Some(entry) = h.event_log.get_next_from(seq) {
+        seq = entry.seq.next();
+        if let Event::HarnessNotice(notice) = entry.event
+            && notice.level == NoticeLevel::Warning
+            && notice.message.contains("duplicate provider-qualified")
+        {
+            warning = Some(notice);
+        }
+    }
+    let warning = warning.as_ref().expect("collision warning");
+    for index in 0..8 {
+        assert!(
+            warning
+                .message
+                .contains(&format!("shared/model-{index:02}"))
+        );
+    }
+    for index in 8..10 {
+        assert!(
+            !warning
+                .message
+                .contains(&format!("shared/model-{index:02}"))
+        );
+    }
+    assert!(warning.message.contains("(and 2 more)"));
+    assert!(!warning.always_show);
+
+    let hostile_id = ModelId::from(format!(
+        "shared/line\nseparator\u{2028}bidi\u{202e}mark\u{200f}{}",
+        "x".repeat(1_000)
+    ));
+    h.handle_extension_event(
+        "provider-a",
+        TestProtocolItem::Event(Event::ProviderModelsUpdated(ProviderModelsUpdated {
+            models: vec![provider_model(hostile_id.clone(), 1_000)],
+        })),
+    )
+    .expect("replace first provider snapshot");
+    h.handle_extension_event(
+        "provider-z",
+        TestProtocolItem::Event(Event::ProviderModelsUpdated(ProviderModelsUpdated {
+            models: vec![provider_model(hostile_id, 2_000)],
+        })),
+    )
+    .expect("replace second provider snapshot");
+    let mut bounded_warning = None;
+    while let Some(entry) = h.event_log.get_next_from(seq) {
+        seq = entry.seq.next();
+        if let Event::HarnessNotice(notice) = entry.event
+            && notice.message.contains("duplicate provider-qualified")
+        {
+            bounded_warning = Some(notice);
+        }
+    }
+    let bounded_warning = bounded_warning.expect("bounded collision warning");
+    assert!(!bounded_warning.message.contains('\n'));
+    assert!(!bounded_warning.message.contains('\u{2028}'));
+    assert!(!bounded_warning.message.contains('\u{202e}'));
+    assert!(!bounded_warning.message.contains('\u{200f}'));
+    assert!(bounded_warning.message.contains('\u{fffd}'));
+    assert!(bounded_warning.message.contains('…'));
+    assert!(bounded_warning.message.len() < 256);
+}
+
 /// Model snapshots are an execution-provider contract. A tool connection that
 /// publishes `provider.models_updated` must not be able to claim a model route,
 /// otherwise the next prompt could be sent to a non-provider participant.

@@ -69,6 +69,10 @@ struct ProviderModelInfo {
 Publishing a model means it is available; no separate `enabled` flag is needed initially.
 
 The harness records which extension sent the snapshot and uses that as routing state.
+If multiple snapshots advertise the same provider-qualified `ModelId`, the
+harness rebuilds the registry in lexicographically sorted extension-source
+order; the last advertisement wins both metadata and routing. A bounded ordinary
+warning reports the collision without changing that deterministic behavior.
 It also re-emits current provider snapshots to provider-event subscribers and translates the metadata into harness model/role/selection state for the UI: context window, effort choices, verbosity choices, thinking-summary choices, and role descriptions.
 
 Prompt execution for provider-published models is directed to the extension that owns the selected `ModelId`; it is not broadcast to every provider or agent.

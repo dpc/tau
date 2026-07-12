@@ -143,6 +143,14 @@ into the watching model's context. Later transition prompts are derived from
 the structured payload rather than treating their compatibility text as an
 agent-authored message.
 
+## Provider model registry
+
+Provider model snapshots are flattened in lexicographically sorted source-id
+order, with the last advertisement for an exact provider-qualified model id
+winning both metadata and routing. Duplicate ids produce an ordinary warning
+whose displayed id count and per-id text are bounded; this diagnostic does not
+change winner selection.
+
 ## Provider response stats boundary
 
 Providers own response-throughput sampling. A provider starts prompt-local response stats when it dispatches the backend request, counts backend response bytes at the transport receive boundary before semantic parsing, batches counters in memory, emits the first non-empty previous/current `response_stats` sample promptly, emits later samples at most once per second on `provider.response_updated`, and may flush once immediately before the prompt closes. `previous` is the last sample that provider actually emitted, not an internal calculation.
