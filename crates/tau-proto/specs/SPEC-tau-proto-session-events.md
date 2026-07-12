@@ -1,0 +1,95 @@
+# SPEC-tau-proto-session-events: Session events
+
+## Event names and routing
+
+`Event` serde `rename` values, `EventName` constants, and `Event::name()` are one contract. When adding or renaming an event, update all three together and update `docs/events.md` when the selected guide should mention the event.
+
+First-party event categories (`tool`, `action`, `agent`, `extension`, `provider`, `harness`, `ui`, `shell`, `session`, and `term`) are reserved for typed protocol events. `CustomEvent` names must use extension-owned categories so extension payloads cannot spoof first-party routing or policy keys.
+Parsed event names and custom event payload names must have non-empty category and call segments; empty segments are malformed protocol data rather than extension-owned names.
+
+`provider.response_updated.response_stats` is public provider-owned response-liveness metadata. It is content-free, prompt-local, and owned by the provider because the provider owns the backend request lifecycle and reads the response byte stream. Providers attach previous/current cumulative samples to rate-limited response updates: `previous` is the last sample that was actually emitted for that provider prompt, and `current` is the new cumulative sample. Providers may emit the first non-empty response/progress/stat update immediately so UIs learn that output has started. Later non-terminal provider response/progress/stat updates must not be emitted more than once per second per prompt; later byte changes never bypass that cadence. A final flush may bypass the cadence immediately before the provider prompt closes.
+
+The harness validates provider prompt ownership and routing for `provider.response_updated`, but it must not consume, strip, remap, account, or project provider response stats. UI clients render response throughput directly from the provider update. Stats-only provider updates are valid public transient events.
+
+## Tree navigation targets
+
+UI tree navigation is protocol-modeled in user-facing terms. The default
+`ui.navigate_tree` target is a one-based prompt anchor, not a raw transcript
+node id; `0`/before-first is represented as an explicit root target; and raw
+node navigation is reserved for an explicit node target. Durable
+`agent.head_moved` records the resolved root-or-node branch head, so replay can
+restore both ordinary node heads and the root cursor.
+
+## Harness notices
+
+`harness.notice` carries a stable `kind`, a user-facing `message`, a `NoticeLevel`, and optional `always_show`. Treat `kind` values as protocol identifiers: UIs may special-case them, so do not derive them from unstable connection ids or free-form message text. `critical` notices and `always_show` warnings represent mandatory diagnostics; the harness must keep emitting them even if a UI filters routine notices locally.
+
+## Session directory status
+
+`harness.session_dir` is a UI/status snapshot, not proof that a durable session
+directory exists. In session-ephemeral mode the harness reports
+`SessionDirStatus::Ephemeral` and a display-only `<ephemeral>` path. Protocol
+consumers must treat that as "no inspectable session directory"; they must not
+try to derive persistent session storage from the sentinel path.
+
+## Ephemeral agent markers
+
+`ui.create_agent.ephemeral` requests a memory-only agent at the UI-to-harness
+creation boundary. `agent.started.ephemeral` and
+`session.agent_loaded.ephemeral` announce the resulting live state to UIs and
+extensions. These markers describe Tau's local semantic stores only: protocol
+consumers must not assume providers, tools, durable recipient agents, or
+extensions forget data merely because an agent is ephemeral.
+
+## Validated identifiers
+
+Wire identifiers such as `ToolName` and `ToolGroupName` are validated newtypes. Do not add default constructors that create values rejected by serde deserialization. Shared validation helpers should be kept in sync across equivalent identifier types.
+
+`ModelTag` and `ToolTag` are also validated wire identifiers. They are metadata, not policy: providers/extensions publish tags, while the harness interprets them when assembling prompt tool surfaces.
+
+## Compatibility expectations
+
+Prefer additive optional fields with serde defaults for backward compatibility. Required fields should be intentional and covered by tests when missing data would make downstream UI, harness, or provider behavior ambiguous.
+
+## Agent metadata protocol
+
+`agent.metadata_set` and `agent.metadata_unset` are durable, extension-visible agent facts. Metadata keys are strings; values are arbitrary CBOR values capped by `MAX_AGENT_METADATA_VALUE_BYTES`; and `metadata_set.inheritable` controls child-agent copies. Do not classify these events as transient defaults: extensions may subscribe to them for live state, and replay uses the latest folded snapshot before `session.agent_loaded`.
+
+## Subscription replay protocol
+
+`Subscribe` carries separate `historical_selectors` and `live_selectors`.
+Historical catch-up is represented only by `EventDelivery.replay` on the
+delivery envelope; event payloads are identical for catch-up and live
+occurrences. Catch-up includes durable facts and harness-reconstructed current
+snapshots selected by `historical_selectors`; both are delivered with
+`replay: true`. Replay catch-up terminates with transient non-replay
+`agent.replay_complete`/`session.replay_complete` boundary events before live
+delivery is released.
+
+## Prompt lifecycle versus provider prompt payloads
+
+`agent.prompt_created` is the full provider work request and may carry large
+system prompts, context, and tool definitions. UI and observer lifecycle
+tracking should use the transient `agent.prompt_started` companion instead of
+subscribing to the full provider payload.
+
+## Agent watch turn-state wire boundary
+
+`agent.message_received` uses `kind = watch_turn_state` for receiver-only,
+harness-authored outer agent-turn observations. The agent turn spans activating
+input through terminal response or termination, while each provider invocation
+is an inner model round and tool execution between invocations is a tool round.
+Such records must carry
+`watch_turn_state`; all other message kinds must omit it. The payload identifies
+the session-local subscription, distinguishes an initial snapshot from an edge,
+and carries the harness-runtime-scoped watched-agent turn generation.
+
+## Prompt-draft scope
+
+`ui.prompt_draft` is transient and not transcript truth, but it is still
+contentful user input. Consumers that store, restore, synchronize, autocomplete,
+or otherwise maintain state from prompt drafts must key that state by both
+`session_id` and `target_agent_id`. A missing `target_agent_id` means an
+unscoped/session-level draft, normally the start-new-agent prompt, and is also
+the compatibility shape for legacy peers; consumers must not infer the current
+agent from absence.

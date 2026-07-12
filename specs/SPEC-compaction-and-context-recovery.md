@@ -1,0 +1,153 @@
+# SPEC-compaction-and-context-recovery: Compaction and context recovery
+
+## Recovery authority
+
+The CLI `/compact` command is human/UI authority. The model-callable `compact`
+tool is a separate, disabled-by-default self-compaction authority, while
+`agent_compact` is an independently opted-in authority over any *other loaded
+agent in the same harness session*. Enabling either tool never enables the
+other. Agent ancestry, watches, message capability, role names, and knowledge
+of an id do not grant compaction authority; conversely, the binding
+`agent_compact` capability does not require ancestry. Unknown, unloaded,
+stopped, and cross-session targets share a non-enumerating error.
+
+Accepted model requests are harness-owned durable facts correlated to the
+originating prompt and tool call. Provider and extension input cannot select a
+cut, model, or caller, and exactly one durable start or pre-start failure may
+claim an accepted request.
+Context-limit diagnostics are sanitized at the harness trust boundary. They
+retain only bounded numeric/model/operation categories under normal session
+event retention and never prompt content, provider bodies, credentials,
+headers, account identifiers, or raw error prose. Provider-authored telemetry
+is overwritten, and observations cannot automatically alter safety thresholds.
+
+## Reactive context-overflow recovery
+
+An ordinary inference that receives a canonical, no-output context-window rejection may authorize exactly one standalone compaction when the captured model still matches, advertises standalone support, and role policy permits compaction. The terminal response and recovery disposition commit before a uniquely correlated compaction start. Compaction dispatch and continuation reuse the existing durable transaction machinery. Standalone-compaction overflow, a post-compaction inference overflow, partial output, cancellation, unsupported policy, legacy checkpoints, and branch/model mismatch never recurse into recovery. Replay resumes an unclaimed planned recovery once, treats an interrupted compact dispatch as blocked, and retains the existing dispatch-uncertain rule after inference dispatch.
+
+## Manual compaction
+
+Harness-owned `compact` and `agent_compact` requests persist acceptance before
+acknowledgement. Self requests start only from the complete tool-round
+continuation gate, preserving tool-call/result adjacency. Cross-agent requests
+may start for idle or explicitly blocked loaded targets and never queue behind
+busy or dispatch-uncertain work. The target-scoped standalone transaction is
+the provider-work authority; its terminal event produces exactly one
+background completion for the original call before any self continuation
+checkpoint.
+Context-window rejection records may include sanitized, harness-owned
+`context_limit_telemetry`. Correlation is the enclosing prompt plus exact
+provider-qualified model and operation. Projection is accepted only from a
+same-model usage baseline; missing, zero, stale/model-changed, or contradictory
+inputs produce absent values or `insufficient_evidence`. The exact serialized
+transcript delta remains separately attributable byte provenance. Its
+one-byte-to-one-projected-token upper bound may corroborate provider usage but
+never establishes a categorical observation without nonzero provider-token
+evidence. The record makes hidden overhead and advertised-limit drift observable
+but does not feed back into automatic calibration.
+Calibration is explicit only: operators may change normal persisted model/role
+configuration (including bounded thresholds), and resetting that configuration
+removes the calibration. Tau never learns or mutates provider limits from a
+rejection. The durable evidence records the active threshold and the closed
+chosen action (`terminal` or `reactive_compaction_planned`).
+
+## Tool and telemetry trust boundary
+
+Internal registration places `compact` in `compaction` and `agent_compact` in
+`cross_agent_compaction`; both are disabled by default. Runtime caller identity
+comes from committed tool ownership, never arguments. Cross-agent possession
+authorizes any other loaded agent, but self, unavailable, stopped, unloaded,
+and cross-session targets are rejected without state enumeration. Watches,
+messages, ancestry, and automatic-compaction role settings are not substitutes
+for explicit tool presence.
+
+The harness, not providers, owns the durable context-limit diagnostic attached
+to terminal responses. Provider-supplied values are discarded. The schema is
+content-free and bounded to one record per rejected prompt: model id, operation,
+optional token counts/window, optional exact serialized transcript-growth bytes,
+reserve, active threshold, closed policy/eligibility/action, and a closed
+observation enum. Exact growth and its projection are absent if a supported
+raw-CBOR transcript entry cannot be represented as JSON or the checked total
+overflows. A categorical observation requires a positive advertised limit and
+nonzero provider input usage; the byte-derived projection only corroborates or
+makes contradictory evidence insufficient. Raw evidence remains present even
+when the bounded observation is insufficient. Raw prompts, errors, response
+bodies, headers, accounts, and endpoints are excluded.
+Normal session/event retention applies; watcher snapshots do not duplicate this
+record. Evidence never automatically lowers limits or thresholds.
+
+## Recovery eligibility boundary
+
+Reactive context recovery never trusts provider prose or a provider-authored recovery decision. Eligibility uses the closed failure category, an empty output set, harness-owned prompt operation/model routing, durable activation cut, advertised model capability, and role policy. Watchers receive only the existing sanitized `recovering_context` state; prompt bodies and raw provider errors are not included.
+
+Provider-supplied recovery disposition is unconditionally cleared at ingress and may only be stamped by the harness after eligibility checks. Any accepted streamed semantic output makes the response recovery-ineligible. Cancellation durably terminalizes an active reactive compaction transaction.
+
+## Harness dispatch refinement
+
+Standalone compaction is transaction-driven rather than inferred from a
+transcript-tail trigger. A durable start captures an immutable branch cut plus
+the pre-minted compact prompt id, provider-qualified model, and standalone
+operation. The successful boundary repeats this harness-stamped tuple; core
+accepts new boundaries only when all six transaction/cut/suffix/prompt/model/
+operation fields are present, the transaction resolves its start,
+cut/prompt/model/operation match it, operation is standalone, `suffix_end`
+equals the boundary parent, and cut is its ancestor. Legacy boundaries have
+all six absent. Runtime connection ids are deliberately not persisted:
+they identify a daemon incarnation rather than durable provider work.
+Only the start's post-commit reaction sends one cut-local compact request with
+that exact prompt id, provider-qualified model, operation, model parameters,
+tool surface, accounting identity, and synthetic trigger. Mutable `/model`
+selection applies only to future work; it cannot rewrite a committed start.
+If the captured model route disappears, the transaction durably fails
+before any provider request is published. Success installs a
+cut/suffix-bearing boundary so facts
+committed during compaction survive after the replacement window. Terminal
+failure records a safe durable category, blocks the owed activation from
+automatic retry, and leaves the agent addressable for explicit recovery.
+Inference resumes only after a durable dispatch watermark commits.
+While that checkpoint is interceptable or waiting to persist, an explicit
+`AwaitingCheckpoint` runtime state blocks every ordinary dispatch path. The
+checkpoint's nonoptional dispatch ownership value atomically owns its model,
+inference operation, and activation cut alongside its prompt id,
+transaction owner, and transcript head. Core rejects incomplete or
+transaction-mismatched ownership correlations. The post-commit continuation
+uses that exact model for route, parameters, tools, accounting, and prompt
+creation regardless of later selection changes; an unavailable route is
+durably terminalized before remote send. It acknowledges only materialized
+typed-message wakes on that branch
+through the watermark. Replay folds transaction outcomes and inference
+responses in core; an uncompleted checkpoint restores as dispatch-uncertain
+rather than being silently duplicated.
+
+Crash recovery after a successful compaction but before its continuation
+checkpoint retains the transaction's exact model, cut, and owed transcript
+watermark in `AwaitingCheckpoint`. Provider snapshots may arrive in stages.
+The final pre-Ready snapshot determines presence; a model advertised by any
+earlier staged snapshot and omitted by the final one counts as explicitly
+removed. A model absent throughout staging remains unresolved until discovery
+completes. Intermediate absence cannot suppress final captured-model presence.
+Discovery completion, or an explicit removal from the model's prior provider
+snapshot, is authoritative:
+the harness commits one fully qualified checkpoint and either dispatches its
+captured route or durably terminalizes it through the normal unavailable-route
+path. Current role or `/model` selection never substitutes another model.
+
+Canonical submitted, injected, and steered transcript facts carry a
+harness-owned `inference_activation` bit. Typed pending-prompt provenance—not
+prompt text or peer input—decides the bit: active work is true, while passive
+background and restore context is false. Interceptors may rewrite sanctioned
+text but cannot change the bit. Missing legacy fields deserialize false.
+Replay considers only true facts after the last completed checkpoint; an
+uncompleted checkpoint remains uncertain and is never automatically resent.
+
+Cold agent rehydration restores context usage only from the latest
+model-qualified durable assistant response on the selected branch and never
+across a later compaction boundary. The producing model travels with the
+runtime usage until provider model discovery can validate it against the
+agent's resolved model. A qualified model that has not been discovered yet is
+unresolved, not mismatched, so staggered provider startup retains it until its
+provider appears; only a confirmed different resolution clears it. Accepted
+compaction and explicit agent model changes also clear the usage, head, model,
+cached-token, and percentage baseline. Consequently the first post-resume
+activation runs the same projected standalone-compaction decision as a live
+agent.

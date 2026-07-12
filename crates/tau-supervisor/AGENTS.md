@@ -1,7 +1,9 @@
+Before changing this crate, discover and read the applicable Linked Specs in `specs/` and every wider `specs/` scope, then follow relevant links. Use the `linked-specs` skill when updating them and `linked-specs-review` when reviewing.
+
 # tau-supervisor agent notes
 
-Before modifying `crates/tau-supervisor`, read `ARCHITECTURE.md`,
-`SECURITY.md`, and `design.md` in this directory. Preserve the documented
+Before modifying `crates/tau-supervisor`, read `specs/ARCH-tau-supervisor.md`,
+the applicable trust-boundary records under `specs/`, and the applicable `specs/DESIGN-*.md` records in this directory. Preserve the documented
 process-ownership, stdio transport, lifecycle pid, child environment, direct-child
 cleanup, and integration-test fixture contracts.
 

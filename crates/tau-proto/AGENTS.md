@@ -1,6 +1,8 @@
+Before changing this crate, discover and read the applicable Linked Specs in `specs/` and every wider `specs/` scope, then follow relevant links. Use the `linked-specs` skill when updating them and `linked-specs-review` when reviewing.
+
 # tau-proto instructions
 
-- Read `ARCHITECTURE.md` before changing protocol DTOs, event names, message envelopes, serde/CBOR codec helpers, or validated wire identifiers.
-- Read `design.md` before changing protocol verification strategy, event-name synchronization tests, compatibility fixtures, or fixture organization.
-- Read the repository root `SECURITY.md` before changing event routing, custom event validation, tool-result/error payloads, or any field that can carry extension-provided data.
+- Read `specs/ARCH-tau-proto.md` before changing protocol DTOs, event names, message envelopes, serde/CBOR codec helpers, or validated wire identifiers.
+- Read the applicable `specs/DESIGN-*.md` records before changing protocol verification strategy, event-name synchronization tests, compatibility fixtures, or fixture organization.
+- Read the applicable trust-boundary records in the repository-root `specs/` directory before changing event routing, custom event validation, tool-result/error payloads, or any field that can carry extension-provided data.
 - Keep `docs/events.md` aligned when changing event names or selected event semantics.

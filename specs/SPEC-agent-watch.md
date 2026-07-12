@@ -1,0 +1,71 @@
+# SPEC-agent-watch: Agent watch
+
+## Topology and endpoint lifecycle
+
+Agent display names are human-facing labels, not topology metadata. They may come from a
+user-supplied topic, role/template rendering, or an explicit rename, but they must not
+encode parent/child lineage or watcher relationships. Topology and observation state
+belong in protocol facts instead, so the same agent label remains stable wherever the
+agent is referenced.
+
+Session-local watch state is represented by authoritative `agent.watches_updated`
+snapshots keyed by watcher. The harness maintains the forward watch set and reverse
+watcher index only as runtime/session state, publishes complete replacement snapshots
+for each watcher, and does not persist watch relationships into agent display names.
+Committed agent unload is an endpoint lifecycle boundary: it atomically retires every
+incoming and outgoing relation, subscription identity, provider snapshot, and
+delivery-dedupe bucket. Surviving watchers receive a replacement topology snapshot,
+while no event is addressed to the unloaded endpoint. Watch enable classification and
+mutation are one harness-loop operation. Only a Live target may create topology,
+subscription, or notification state; Stopped and Unknown targets fail without changing
+the forward or reverse topology, subscription identity, provider snapshot, or
+delivery-dedupe state. Reloading the same id does not revive retired relations and
+requires a fresh enable and subscription. Disable remains idempotent for known stopped
+endpoints.
+
+## Model-visible notifications
+
+`agent_watch` is a model-visible cross-agent content exposure boundary. A watcher may
+receive hidden internal prompts containing the watched agent's final response text or
+the text of a user prompt accepted by the watched agent. These notifications must be
+clearly labeled as watch notifications, not as explicit `message` tool deliveries:
+
+- `[tau-internal]: Watched agent <agent-id> emitted a response`
+- `[tau-internal]: Watched agent <agent-id> received a user prompt`
+
+Content-free outer agent-turn initial/start/stop notifications are also allowed. An
+agent turn covers the complete activating-input-to-terminal-response lifecycle,
+including inner model and tool rounds. These notifications contain only stable
+watch/session identity, idle/running state, snapshot status, and a
+harness-runtime-scoped watched-agent turn generation. They must never include prompt,
+response, message, tool, or error content. Initial snapshots are not model input. Later
+model-visible transition wording is reconstructed from the typed state and watched
+identity, never trusted from the event's compatibility message field.
+
+A turn caused only by lifecycle notifications suppresses both lifecycle edges to prevent
+cyclic watches from self-exciting. If ordinary input joins that generation during a
+tool/provider continuation, the harness first emits the delayed start edge, then emits
+the matching stop normally; it never exposes an orphan stop.
+
+The watch path must not forward internal steering prompts, background or foreground
+tool-completion prompts, explicit `message` tool deliveries to the watched agent, or
+other hidden/non-user inputs. A completed `agent_start` result is the started child
+agent's terminal final response to its direct delegating watcher and remains watchable
+under the response label.
+
+## Provider-work projection
+
+Provider retries carry closed structured categories, saturating attempt counts, and
+approximate bounded delays independently of human UI prose. After validating prompt
+ownership, the harness owns the current per-agent/turn/prompt snapshot and session-local
+watcher fanout. Live delivery is limited to first category, category/phase changes, and
+terminal failure; same-category storms only refresh the late-watch snapshot while their
+prompt remains among the 64 identities retained per subscription and generation.
+Terminal-error delivery retires its prompt; capacity evicts the oldest nonterminal
+prompt, which is treated as fresh if it reappears. Older generations cannot mutate newer
+bookkeeping. Cardinality tracing contains only subscription/generation identity, counts,
+and closed decisions. Enabling or re-enabling returns current sanitized state and emits
+an initial client snapshot without prompting the model. Durable live facts replay as
+transcript context without re-fanout; disable, prune, and session change stop delivery.
+Raw provider bodies, status text, errors, headers, account data, secrets, and prompt
+content never cross this boundary.

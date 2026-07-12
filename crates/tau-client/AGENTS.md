@@ -1,3 +1,5 @@
+Before changing this crate, discover and read the applicable Linked Specs in `specs/` and every wider `specs/` scope, then follow relevant links. Use the `linked-specs` skill when updating them and `linked-specs-review` when reviewing.
+
 # tau-client
 
 This crate contains shared client-side runtime helpers for Tau extension and UI
@@ -10,5 +12,5 @@ When changing this crate:
 - keep startup frame ordering stable (`Hello`, optional `Subscribe`, optional
   `Intercept`, startup events, `Ready`);
 - add focused unit tests for new handler or protocol lifecycle behavior;
-- update `ARCHITECTURE.md` when changing lifecycle, replay, writer-thread,
+- update `specs/ARCH-tau-client.md` when changing lifecycle, replay, writer-thread,
   config, or intercept semantics.

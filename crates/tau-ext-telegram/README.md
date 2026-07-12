@@ -93,8 +93,8 @@ active registrations rather than silently continuing.
 
 ## Gateway daemon MVP
 
-The crate also builds a standalone `tau-telegram-gateway` daemon. This is the
-first safe slice of the planned single-token multi-session gateway: it owns one
+The crate also builds a standalone `tau-telegram-gateway` daemon. This
+single-token multi-session gateway owns one
 Telegram update stream, takes the same advisory stream lock as the legacy
 extension, checks for active webhooks before polling, enforces
 `allowed_user_ids`, keeps a durable update offset/recent-update state file, and

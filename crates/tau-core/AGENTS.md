@@ -1,6 +1,8 @@
+Before changing this crate, discover and read the applicable Linked Specs in `specs/` and every wider `specs/` scope, then follow relevant links. Use the `linked-specs` skill when updating them and `linked-specs-review` when reviewing.
+
 # tau-core notes for agents
 
-- Read `design.md` before changing tool registration, routing, validation, or
+- Read the applicable `specs/DESIGN-*.md` records before changing tool registration, routing, validation, or
   model-visible diagnostics.
 - Keep protocol-adjacent validation behavior deterministic and bounded.
 - Put focused `tool_registry` tests in `src/tool_registry/tests.rs`; every test

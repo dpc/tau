@@ -1,0 +1,17 @@
+# ARCH-tau-proto: tau-proto architecture
+
+`tau-proto` owns Tau's shared wire data transfer objects and codec helpers. Treat every public type here as protocol surface unless it is explicitly private to tests.
+
+## Directional messages and CBOR
+
+Harness input and output messages are directionally typed. Keep request/response envelopes in the correct enum, and preserve existing serde names unless a migration plan updates all producers, consumers, docs, and recorded fixtures.
+
+`encode_message` writes one self-delimiting CBOR item. `decode_message_from_slice` and the harness input/output slice helpers must decode exactly one item and reject trailing bytes; use `MessageReader` for streams of concatenated messages.
+
+External agent-message delivery is modeled as a dedicated directional RPC
+(`external_agent_message` / `external_agent_message_result`) rather than as a
+generic `emit`. The payload carries sender and recipient session ids separately
+from slash-free `AgentId`s; do not encode `session/agent` into `AgentId`. Sender
+authentication is a second dedicated RPC (`external_agent_message_auth`) that
+validates a per-message capability before the recipient harness trusts the
+caller-supplied sender identity, message/watch-response kind, or message body.

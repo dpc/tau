@@ -1,0 +1,7 @@
+# ARCH-tau: Tau architecture
+
+Tau is a Rust workspace whose end-user `tau` binary composes first-party components. `tau-cli` starts and connects to the `tau-harness` daemon; the harness owns sessions, event sequencing, extension lifecycle, provider dispatch, and harness-owned tools. `tau-core` supplies state, routing, policy, sessions, and tool registration. `tau-proto` owns shared wire types and CBOR contracts, while `tau-client` provides the client/extension runtime and `tau-socket` supplies local Unix transport. Extensions and provider backends depend on those shared boundaries rather than owning harness state.
+
+External transport identity and trust boundaries are governed by [ARCH-external-message-boundary](ARCH-external-message-boundary.md). Cross-provider streamed output is specified by [SPEC-provider-response-streaming](SPEC-provider-response-streaming.md), observation by [SPEC-agent-watch](SPEC-agent-watch.md), and context recovery by [SPEC-compaction-and-context-recovery](SPEC-compaction-and-context-recovery.md). Component-local architecture and decisions live beside their owning crates under `specs/`.
+
+Dependency direction is inward toward shared protocol/core/client libraries: the harness composes them, the CLI and extensions communicate through protocol/client APIs, and transport bridges translate external systems without granting external payloads internal authority. Provider adapters classify and stream backend results, but the harness retains session, routing, recovery, and durable-state authority.

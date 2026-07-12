@@ -1,7 +1,9 @@
+Before changing this crate, discover and read the applicable Linked Specs in `specs/` and every wider `specs/` scope, then follow relevant links. Use the `linked-specs` skill when updating them and `linked-specs-review` when reviewing.
+
 # tau-provider-chatgpt
 
 - Read the repository root `AGENTS.md` before making changes.
-- Read `ARCHITECTURE.md`, `design.md`, and `SECURITY.md` before changing
+- Read `specs/ARCH-tau-provider-chatgpt.md`, the applicable `specs/DESIGN-*.md` records, and the applicable trust-boundary records under `specs/` before changing
   transport behavior, cancellation, retry/error mapping, diagnostics, cache
   identity, or model metadata.
-- Preserve the prompt-cache identity invariant documented in `ARCHITECTURE.md`: first-party ChatGPT/Codex cache keys are stable per provider base URL and target agent id, independent of prompt originator/provenance.
+- Preserve the prompt-cache identity invariant documented in `specs/ARCH-tau-provider-chatgpt.md`: first-party ChatGPT/Codex cache keys are stable per provider base URL and target agent id, independent of prompt originator/provenance.

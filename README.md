@@ -89,7 +89,7 @@ To explore other entry points, run `tau -h`.
 * [`#support:dpc.pw` Matrix channel](https://matrix.to/#/#support:dpc.pw)
 * [Rostra p2p social network profile](https://rostra.me/profile/rse1okfyp4yj75i6riwbz86mpmbgna3f7qr66aj1njceqoigjabegy)
 * [GitHub Discussions](https://github.com/dpc/tau/discussions) — questions, ideas, general conversation
-* [Security policy](SECURITY.md) — private vulnerability reporting and trust-boundary notes
+* [Security policy](SECURITY.md) — private vulnerability reporting; see [ARCH-tau](specs/ARCH-tau.md) for system architecture
 * [I don't want your PRs anymore](https://dpc.pw/posts/i-dont-want-your-prs-anymore/) — I do not accept pull requests
 
 

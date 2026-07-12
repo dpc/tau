@@ -19,7 +19,7 @@ facts and prefix-only prompt history retain their historical rendering.
 
 A guide to the major features of (dpc's) Tau coding agent. For high-level
 philosophy and motivation see [README.md](README.md); for design notes see
-[DESIGN.md](DESIGN.md) and [ARCHITECTURE.md](ARCHITECTURE.md).
+the scoped [Linked Specs](specs/ARCH-tau.md).
 
 
 ## Highlights

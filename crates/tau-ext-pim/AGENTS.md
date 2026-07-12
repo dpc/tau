@@ -1,13 +1,15 @@
+Before changing this crate, discover and read the applicable Linked Specs in `specs/` and every wider `specs/` scope, then follow relevant links. Use the `linked-specs` skill when updating them and `linked-specs-review` when reviewing.
+
 # tau-ext-pim
 
-Read `SECURITY.md` before changing or reviewing PIM runtime behavior,
+Read the applicable trust-boundary records under `specs/` before changing or reviewing PIM runtime behavior,
 credential handling, persistent state, OAuth/provider integrations,
 approval/policy logic, tool/action output, or backend network behavior.
 
-Read `ARCHITECTURE.md` before changing or reviewing provider/runtime wiring,
+Read `specs/ARCH-tau-ext-pim.md` before changing or reviewing provider/runtime wiring,
 storage layout, shared OAuth helpers, or cross-module email/calendar boundaries.
 
-Read `design.md` before changing or reviewing test strategy decisions.
+Read the applicable `specs/DESIGN-*.md` records before changing or reviewing test strategy decisions.
 
 After major changes to this extension's features, tool/action behavior, configuration options, provider/runtime behavior, or user-visible capabilities, update the built-in self-knowledge skill `tau-self-knowledge-ext-pim` so Tau can accurately explain the current extension behavior. For email-specific configuration, policy, approval, or security changes, also update `tau-self-knowledge-email`.
 

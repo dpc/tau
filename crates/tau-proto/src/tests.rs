@@ -1213,7 +1213,7 @@ fn event_name_round_trips_from_string() {
 /// Ensures every representative first-party event keeps its serde tag,
 /// `EventName` constant, `Event::name()` dispatch, and default durability in
 /// sync. This guards the protocol-surface rule documented in
-/// `crates/tau-proto/ARCHITECTURE.md`.
+/// `crates/tau-proto/specs/DESIGN-tau-proto-wire-contract-testing.md`.
 #[test]
 fn first_party_event_wire_tags_match_event_names_and_transience() {
     let events = representative_events();

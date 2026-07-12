@@ -1,0 +1,27 @@
+# DESIGN-tau-ext-provider-builtin-required-work-retries: Required provider work retries outside the worker pool
+
+Status: confirmed, 2026-07-11, tau-agent-jbkk
+
+A logical prompt remains pending across retryable provider attempts until it
+succeeds, is canceled, the process/session shuts down, or the unchanged request
+is positively proven deterministic and invalid. Unknown remote failures retry;
+classification selects cadence, shared cooldown, visible explanation, and
+profile reload behavior rather than default termination.
+Provider adapters attach a machine-readable terminal failure category to the
+single final `ProviderResponseFinished`. Terminal request rejections bypass the
+logical-work retry scheduler even when its configured retry budget is
+effectively unlimited.
+
+Workers execute one finite attempt. Retryable outcomes return the logical job to
+one process-lifetime delayed scheduler, releasing the bounded execution slot
+before any wait. Jittered Fibonacci cadence reaches about one minute for
+transport/overload/throttle and at most thirty minutes for persistent usage,
+account, auth, and unknown failures. Trusted `Retry-After` or structured reset
+hints are lower bounds and may be later than that generated ceiling. Prompts
+using one provider profile share limit cooldowns, while cancellation remains
+prompt-scoped. Mutable profiles and credentials are reloaded when delayed work
+becomes due.
+
+Retry state is memory-only. Cold restart intentionally does not replay an
+ambiguously accepted request because doing so can duplicate output, cost, tools,
+or side effects.

@@ -1,3 +1,5 @@
+Before changing this crate, discover and read the applicable Linked Specs in `specs/` and every wider `specs/` scope, then follow relevant links. Use the `linked-specs` skill when updating them and `linked-specs-review` when reviewing.
+
 # ext-shell
 
 File-mutation tools such as `edit` and `apply_patch` MUST attach structured UI-only diff payloads for changed UTF-8 files. The agent-visible tool result must stay minimal and must not include the diff.
@@ -12,8 +14,8 @@ backgrounding, cancellation, or wait semantics, update
 `.agents/skills/tau-tool-verification` so future tool-verification runs check
 the current behavior instead of stale assumptions.
 
-Cwd metadata, remembered-cwd path resolution, and event sequencing rules are documented in `ARCHITECTURE.md`; read and update it when touching those paths.
+Cwd metadata, remembered-cwd path resolution, and event sequencing rules are documented in `specs/ARCH-tau-ext-shell.md`; read and update it when touching those paths.
 
-Protocol/UI/locking test strategy is documented in `design.md`; read and update it when changing tool schemas, display state, directory-lock scheduling, or shell execution modes.
+Protocol/UI/locking test strategy is documented in `specs/DESIGN-tau-ext-shell-testing-strategy.md`; read and update it when changing tool schemas, display state, directory-lock scheduling, or shell execution modes.
 
-Crate-local security and reliability notes are documented in `SECURITY.md`; read and update it when changing shell execution, filesystem mutation, or directory-lock behavior.
+Security and reliability boundaries are documented in `specs/ARCH-tau-ext-shell.md`, `specs/SPEC-tau-ext-shell-directory-locking.md`, and `specs/SPEC-tau-ext-shell-process-lifecycle.md`; read and update them when changing shell execution, filesystem mutation, directory-lock behavior, process lifecycle, output draining, or cancellation.

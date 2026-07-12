@@ -31,18 +31,21 @@
 - `crates/tau-test-support` — reusable end-to-end test utilities
 - `crates/tau-themes` — themed text/style types
 
-## Design docs
+## Project knowledge
 
 - `README.md` — project overview, install, configuration, and contact info
-- `design.md` — project-wide major design decisions; MUST read before changing
-  project-wide policy, CI gates, or cross-cutting behavior
+- `specs/` and `crates/*/specs/` — current, scoped architecture, design
+  decisions, requirements, and functional specifications. Before changing code,
+  discover and read every applicable record along the changed path's scope and
+  follow its relevant links. Keep records synchronized with code and tests.
+- Use the `linked-specs` skill when creating, updating, discovering, or
+  referencing records. Use `linked-specs-review` when reviewing changes against
+  governing records.
 - `FEATURES.md` — major feature tour; update after editing any new major features
-- `SECURITY.md` — project-wide security/reliability context and trust boundaries;
-  MUST read before changing or reviewing runtime behavior, persistence,
-  extension/harness boundaries, tools, or other security/reliability-sensitive code
+- `SECURITY.md` — conventional private vulnerability-reporting policy; technical
+  trust boundaries live in the applicable Linked Specs
 - `docs/` — focused design and feature notes
 - `crates/*/README.md` — crate-specific documentation where present
-- `crates/*/ARCHITECTURE.md` — crate-specific architecture notes where present; MUST read before changing that crate
 - `crates/*/AGENTS.md` — crate-specific agent instructions - MUST read these (if exists) before modifing code in a given crate
 
 ## Common commands

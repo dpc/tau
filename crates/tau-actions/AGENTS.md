@@ -1,3 +1,5 @@
+Before changing this crate, discover and read the applicable Linked Specs in `specs/` and every wider `specs/` scope, then follow relevant links. Use the `linked-specs` skill when updating them and `linked-specs-review` when reviewing.
+
 ## Crate role
 
 `tau-actions` owns the shared v1 schema for extension-published slash actions
@@ -11,5 +13,5 @@ invocation.
 - Treat action schemas as extension-controlled prompt/UI surface: validation
   diagnostics, descriptions, completions, and parsed arguments must stay
   deterministic and bounded.
-- Update `ARCHITECTURE.md` when changing schema validation budgets,
+- Update `specs/ARCH-tau-actions.md` when changing schema validation budgets,
   tokenization, parser semantics, or action invocation shape.

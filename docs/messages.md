@@ -176,8 +176,7 @@ exceeds those limits fails with `quota_exceeded`. Current limits are 16 MiB per
 file for read/write/create/append operations and 4096 scanned directory entries
 for one list operation. These quotas bound individual harness operations; they do
 not bound aggregate disk use across many files. See
-[SECURITY.md](../SECURITY.md#harness-and-extension-boundaries) for the trust
-boundary and hardening assumptions.
+[SPEC-tau-harness-session-state](../crates/tau-harness/specs/SPEC-tau-harness-session-state.md) for the extension-data trust boundary and hardening assumptions.
 
 ## External agent-message RPC
 
