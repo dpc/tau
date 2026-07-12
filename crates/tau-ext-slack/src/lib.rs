@@ -1,7 +1,8 @@
 //! Personal Slack Socket Mode bridge extension for Tau agents.
 //!
-//! The extension exposes `slack_register` and `slack_send` tools. It is
-//! disabled by default, requires Slack token secrets plus a non-empty
+//! The extension exposes `slack_register` and `slack_send` tools. Proactive
+//! destination authorization follows `DESIGN-tau-ext-slack-proactive-sends`. It
+//! is disabled by default, requires Slack token secrets plus a non-empty
 //! allowlist, and treats Slack text as external untrusted prompt input.
 //! Reply routing follows
 //! `DESIGN-tau-ext-slack-canonical-reply-selectors`.
@@ -1476,6 +1477,9 @@ impl Extension {
     }
 
     /// Route a validated edit only when its original committed create is known.
+    ///
+    /// This commit-confirmed ownership lookup and its fail-closed rejection
+    /// path implement `DESIGN-tau-ext-slack-edit-ownership`.
     fn process_slack_edit(&self, edit: SlackEdit) {
         if validate_slack_ts(&edit.message_ts).is_err()
             || validate_slack_ts(&edit.revision_ts).is_err()

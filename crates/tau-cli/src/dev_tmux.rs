@@ -3,6 +3,8 @@
 //! This module starts the current checkout inside a private tmux server with a
 //! scratch Tau environment. It is intentionally a manual development helper,
 //! not a general daemon launcher and not a sandbox boundary.
+//! Its trust and workflow boundary is specified by
+//! `DESIGN-tau-cli-tmux-e2e-helper`.
 
 mod provider_access;
 

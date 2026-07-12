@@ -1,3 +1,5 @@
+//! Unit coverage implementing `DESIGN-tau-ext-xmpp-testing-strategy`.
+
 use std::io::Write;
 use std::sync::{Condvar, Mutex};
 use std::time::Duration;

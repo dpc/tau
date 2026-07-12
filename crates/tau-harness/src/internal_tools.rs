@@ -484,6 +484,9 @@ impl<'a> InternalToolHost<'a> {
 
     /// Atomically validate the target lifecycle and mutate a watch relation.
     ///
+    /// The topology mutation and endpoint lifecycle rules are specified by
+    /// `SPEC-agent-watch`.
+    ///
     /// Enabling requires a live target. Disabling is idempotent, including for
     /// stopped or unknown target ids.
     pub fn try_set_agent_watch(

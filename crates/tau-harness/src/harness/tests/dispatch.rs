@@ -8477,6 +8477,10 @@ pub(super) fn context_overflow_response(
 /// A canonical no-output inference rejection commits the harness-authored plan
 /// before one durable claim, dispatches one compact request, and continues the
 /// owed activation exactly once after the accepted replacement boundary.
+///
+/// This test cluster covers durable ordering, fail-closed eligibility, replay,
+/// crash cuts, and continuation under
+/// `DESIGN-tau-harness-reactive-overflow-transaction`.
 #[test]
 fn reactive_context_overflow_recovers_in_durable_order_once() {
     let td = TempDir::new().expect("tempdir");

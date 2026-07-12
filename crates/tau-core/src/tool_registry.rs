@@ -3,6 +3,8 @@
 //!
 //! Tool-example validation and repair selection follow
 //! `DESIGN-tau-core-tool-examples`.
+//! Model-visible argument validation diagnostics follow
+//! `DESIGN-tau-core-bounded-validation-diagnostics`.
 
 use std::collections::HashMap;
 use std::error::Error;
