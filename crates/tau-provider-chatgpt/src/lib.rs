@@ -3,6 +3,8 @@
 //! This crate owns the ChatGPT/Codex model metadata and OpenAI Responses API
 //! implementation, including HTTP/SSE, WebSocket transport, and pooled WS
 //! sessions.
+//! Its transport test boundary is recorded in
+//! `DESIGN-tau-provider-chatgpt-backend-testing`.
 
 use tau_proto::{
     Effort, ModelId, ModelName, ModelTag, ProviderBackendTransport, ProviderModelInfo,

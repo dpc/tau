@@ -1,4 +1,5 @@
 //! Bounded provider-status delivery bookkeeping for one watch subscription.
+//! See `DESIGN-tau-harness-watcher-provider-work`.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 

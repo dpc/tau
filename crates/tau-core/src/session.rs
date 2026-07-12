@@ -504,7 +504,7 @@ fn normalize_display_name(value: Option<&str>) -> Option<String> {
 
 impl AgentTree {
     /// Returns the latest validated standalone transaction's recovery
-    /// projection.
+    /// projection, following `DESIGN-tau-core-standalone-compaction-replay`.
     #[must_use]
     pub fn standalone_compaction_recovery(&self) -> Option<StandaloneCompactionRecovery> {
         let id = self.compaction_transaction_order.last()?;

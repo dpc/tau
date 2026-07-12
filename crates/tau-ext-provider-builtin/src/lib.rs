@@ -3,6 +3,8 @@
 //! This crate owns Tau's built-in provider process, profile CLI, auth/profile
 //! storage scan, model publication, and dispatch across built-in provider
 //! backends. Individual backend crates own provider-specific wire formats.
+//! See `DESIGN-tau-ext-provider-builtin-testing-boundary` for that test
+//! boundary.
 
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BinaryHeap, HashMap, HashSet, VecDeque};
@@ -2305,6 +2307,8 @@ where
     };
 
     if prompt.operation == tau_proto::PromptOperation::StandaloneCompaction {
+        // This deliberately has no inline fallback; see
+        // `DESIGN-tau-ext-provider-builtin-standalone-compaction`.
         match chatgpt_runtime.compact(agent_prompt_id, config, &request, retry_ctx) {
             Ok(output_items) => {
                 writer.write_message(&HarnessInputMessage::emit(

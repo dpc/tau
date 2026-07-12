@@ -159,6 +159,8 @@ fn agent_runtime_state_for_turn(state: &AgentTurnState) -> tau_proto::AgentRunti
 }
 
 fn provider_response_update_has_public_content(updated: &ProviderResponseUpdated) -> bool {
+    // Provider-owned stats remain public content per
+    // `DESIGN-tau-harness-provider-response-stats`.
     !updated.deltas.is_empty()
         || updated.compaction.is_some()
         || updated.status.is_some()
