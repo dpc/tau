@@ -434,7 +434,8 @@ tool for testing. The shell command and any wrapper prefix are configurable:
       },
     },
     // Advisory directory update locks are disabled by default; set true to opt in.
-    // See `docs/shell-locking.md` for detailed semantics and caveats.
+    // See `crates/tau-ext-shell/specs/SPEC-tau-ext-shell-directory-locking.md`
+    // for detailed semantics and boundaries.
     // When enabled, shell commands are inferred read-write only while the agent
     // holds a matching manual lock. Otherwise they are inferred read-only.
     // `backend` defaults to "memory"; use "filesystem" plus an optional
