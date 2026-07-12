@@ -5854,15 +5854,49 @@ impl Harness {
             Some(source_id),
             Event::ProviderModelsUpdated(update.clone()),
         );
-        self.set_provider_models(source_id, update.models);
-        self.reconcile_pending_context_recoveries(false);
-        self.resume_restored_compaction_checkpoints();
+        self.apply_provider_models_snapshot(source_id, update.models);
     }
 
-    /// Commits checkpoints deferred during cold restore until provider model
-    /// discovery is available, then lets the normal post-commit path dispatch.
-    fn resume_restored_compaction_checkpoints(&mut self) {
-        if self.provider_model_info.is_empty() {
+    /// Applies one authoritative snapshot from a ready provider and reconciles
+    /// restored work against models explicitly removed by that provider.
+    fn apply_provider_models_snapshot(&mut self, source_id: &str, models: Vec<ProviderModelInfo>) {
+        let previous_models = self
+            .provider_models_by_extension
+            .get(source_id)
+            .map(|models| {
+                models
+                    .iter()
+                    .map(|model| model.id.clone())
+                    .collect::<HashSet<_>>()
+            })
+            .unwrap_or_default();
+        let updated_models = models
+            .iter()
+            .map(|model| model.id.clone())
+            .collect::<HashSet<_>>();
+        let removed_models = previous_models
+            .difference(&updated_models)
+            .cloned()
+            .collect::<HashSet<_>>();
+        self.set_provider_models(source_id, models);
+        self.reconcile_pending_context_recoveries(false);
+        self.resume_restored_compaction_checkpoints(false, &removed_models);
+    }
+
+    /// Reconciles restored checkpoints against discovered models.
+    ///
+    /// `all_absence_is_authoritative` marks completed session discovery, while
+    /// `authoritatively_removed_models` contains models removed from one ready
+    /// provider's later snapshot. Other missing models continue waiting.
+    fn resume_restored_compaction_checkpoints(
+        &mut self,
+        all_absence_is_authoritative: bool,
+        authoritatively_removed_models: &HashSet<ModelId>,
+    ) {
+        if self.provider_model_info.is_empty()
+            && !all_absence_is_authoritative
+            && authoritatively_removed_models.is_empty()
+        {
             return;
         }
         let pending = self
@@ -5906,7 +5940,9 @@ impl Harness {
             let Some(model) = model else {
                 continue;
             };
-            if !self.provider_model_info.contains_key(&model)
+            let absence_is_authoritative =
+                all_absence_is_authoritative || authoritatively_removed_models.contains(&model);
+            if (!self.provider_model_info.contains_key(&model) && !absence_is_authoritative)
                 || !self
                     .enqueued_restored_compaction_checkpoints
                     .insert((crate::parse_agent_id(&agent_id), transaction_id.clone()))
@@ -6047,8 +6083,27 @@ impl Harness {
         for registration in stage.tool_registrations {
             self.register_extension_tool(source_id, registration);
         }
+        let mut staged_model_ids = HashSet::new();
+        let mut final_provider_models = None;
         for update in stage.provider_model_updates {
-            self.publish_provider_models_update(source_id, update);
+            staged_model_ids.extend(update.models.iter().map(|model| model.id.clone()));
+            self.publish_event(
+                Some(source_id),
+                Event::ProviderModelsUpdated(update.clone()),
+            );
+            final_provider_models = Some(update.models);
+        }
+        if let Some(models) = final_provider_models {
+            let final_model_ids = models
+                .iter()
+                .map(|model| model.id.clone())
+                .collect::<HashSet<_>>();
+            let removed_before_ready = staged_model_ids
+                .difference(&final_model_ids)
+                .cloned()
+                .collect::<HashSet<_>>();
+            self.apply_provider_models_snapshot(source_id, models);
+            self.resume_restored_compaction_checkpoints(false, &removed_before_ready);
         }
         if let Some(schema) = stage.action_schema {
             self.publish_action_schema(source_id, schema);
@@ -12323,6 +12378,7 @@ impl Harness {
             self.repair_restored_session_tool_state(&session_id);
         }
         self.reconcile_pending_context_recoveries(true);
+        self.resume_restored_compaction_checkpoints(true, &HashSet::new());
         self.request_prompt_prewarm(&session_id);
         self.turn_state = TurnState::Idle;
         self.try_advance_queue();
@@ -12744,42 +12800,23 @@ impl Harness {
                     model,
                     through,
                 }) if !defer_manual_checkpoint => {
-                    let prompt_id = {
-                        let conv = self.agents.get_mut(&cid).expect("restored agent exists");
-                        let prompt_id = tau_proto::AgentPromptId::from(format!(
-                            "ap-{agent_id_string}-{}",
-                            conv.next_prompt_index
-                        ));
-                        conv.next_prompt_index = conv.next_prompt_index.saturating_add(1);
-                        conv.activation_dispatch =
-                            crate::agent::ActivationDispatchState::AwaitingCheckpoint {
-                                owner: crate::agent::InferenceCheckpointOwner::Standalone {
-                                    id: transaction_id.clone(),
-                                },
-                                agent_prompt_id: prompt_id.clone(),
-                                through,
-                                model: Some(model.clone()),
-                                operation: Some(tau_proto::PromptOperation::Inference),
-                                activation_cut: Some(cut),
-                            };
-                        prompt_id
-                    };
-                    if !self.provider_model_info.is_empty() {
-                        self.publish_for_agent(
-                            &cid,
-                            Event::AgentInferenceDispatchStarted(
-                                tau_proto::AgentInferenceDispatchStarted {
-                                    agent_id: agent_id.clone(),
-                                    transaction_id: Some(transaction_id),
-                                    agent_prompt_id: prompt_id,
-                                    through,
-                                    model: Some(model),
-                                    operation: Some(tau_proto::PromptOperation::Inference),
-                                    activation_cut: Some(cut),
-                                },
-                            ),
-                        );
-                    }
+                    let conv = self.agents.get_mut(&cid).expect("restored agent exists");
+                    let prompt_id = tau_proto::AgentPromptId::from(format!(
+                        "ap-{agent_id_string}-{}",
+                        conv.next_prompt_index
+                    ));
+                    conv.next_prompt_index = conv.next_prompt_index.saturating_add(1);
+                    conv.activation_dispatch =
+                        crate::agent::ActivationDispatchState::AwaitingCheckpoint {
+                            owner: crate::agent::InferenceCheckpointOwner::Standalone {
+                                id: transaction_id.clone(),
+                            },
+                            agent_prompt_id: prompt_id.clone(),
+                            through,
+                            model: Some(model.clone()),
+                            operation: Some(tau_proto::PromptOperation::Inference),
+                            activation_cut: Some(cut),
+                        };
                 }
                 Some(tau_core::StandaloneCompactionRecovery::DispatchUncertain(checkpoint)) => {
                     let status_prompt_id = checkpoint.agent_prompt_id.clone();
@@ -13159,7 +13196,7 @@ impl Harness {
                         &request.initiating_tool_call_id,
                     );
                     self.fold_pending_prompts_as_steered(&caller_cid);
-                    self.publish_restored_manual_checkpoint(&target_cid, &started);
+                    self.stage_restored_manual_checkpoint(&target_cid, &started);
                 }
                 continue;
             }
@@ -13199,7 +13236,7 @@ impl Harness {
                         .remove(&started.transaction_id);
                     if request.resume_inference {
                         self.fold_pending_prompts_as_steered(&target_cid);
-                        self.publish_restored_manual_checkpoint(&target_cid, &started);
+                        self.stage_restored_manual_checkpoint(&target_cid, &started);
                     }
                 }
                 Some(tau_core::ManualCompactionOutcome::Failed(failed)) => {
@@ -13280,26 +13317,25 @@ impl Harness {
             .is_some_and(|tree| tree.has_user_input_text_on_branch(caller_head, &text))
     }
 
-    fn publish_restored_manual_checkpoint(
+    /// Stages an exact manual-compaction continuation for the common
+    /// provider-discovery reconciliation path.
+    fn stage_restored_manual_checkpoint(
         &mut self,
         target_cid: &AgentId,
         started: &tau_proto::AgentStandaloneCompactionStarted,
     ) {
-        let Some((agent_id, agent_prompt_id, through)) =
-            self.agents.get(target_cid).and_then(|agent| {
-                let agent_id = agent.agent_id.clone()?;
-                Some((
-                    agent_id.clone(),
-                    tau_proto::AgentPromptId::from(format!(
-                        "ap-{agent_id}-{}",
-                        agent.next_prompt_index
-                    )),
-                    agent
-                        .head
-                        .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node),
-                ))
-            })
-        else {
+        let Some((agent_prompt_id, through)) = self.agents.get(target_cid).and_then(|agent| {
+            let agent_id = agent.agent_id.clone()?;
+            Some((
+                tau_proto::AgentPromptId::from(format!(
+                    "ap-{agent_id}-{}",
+                    agent.next_prompt_index
+                )),
+                agent
+                    .head
+                    .map_or(tau_proto::AgentHead::Root, tau_proto::AgentHead::Node),
+            ))
+        }) else {
             return;
         };
         if let Some(agent) = self.agents.get_mut(target_cid) {
@@ -13315,18 +13351,6 @@ impl Harness {
                 activation_cut: Some(started.cut),
             };
         }
-        self.publish_for_agent(
-            target_cid,
-            Event::AgentInferenceDispatchStarted(tau_proto::AgentInferenceDispatchStarted {
-                agent_id: crate::parse_agent_id(&agent_id),
-                transaction_id: Some(started.transaction_id.clone()),
-                agent_prompt_id,
-                through,
-                model: Some(started.model.clone()),
-                operation: Some(tau_proto::PromptOperation::Inference),
-                activation_cut: Some(started.cut),
-            }),
-        );
     }
 
     fn is_pending_manual_compaction_call(&self, call_id: &ToolCallId) -> bool {

@@ -479,6 +479,15 @@ through the watermark. Replay folds transaction outcomes and inference
 responses in core; an uncompleted checkpoint restores as dispatch-uncertain
 rather than being silently duplicated.
 
+Crash recovery after a successful compaction but before its continuation
+checkpoint retains the transaction's exact model, cut, and owed transcript
+watermark in `AwaitingCheckpoint`. Provider snapshots may arrive in stages, so
+an unrelated snapshot does not decide absence. Discovery completion, or an
+explicit removal from the model's prior provider snapshot, is authoritative:
+the harness commits one fully qualified checkpoint and either dispatches its
+captured route or durably terminalizes it through the normal unavailable-route
+path. Current role or `/model` selection never substitutes another model.
+
 Canonical submitted, injected, and steered transcript facts carry a
 harness-owned `inference_activation` bit. Typed pending-prompt provenance—not
 prompt text or peer input—decides the bit: active work is true, while passive

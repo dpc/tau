@@ -11,6 +11,10 @@ timing and later `/model` changes cannot substitute another provider, parameter
 set, tool surface, or accounting identity. Missing captured routes fail
 durably before any remote send, and core rejects transaction checkpoints whose
 model, inference operation, or activation cut differs from the owning start.
+Restored post-compaction continuations use the same ownership rule. Staged
+provider discovery cannot redirect them to a currently selected model; once
+absence is authoritative, Tau records an exact checkpoint and a sanitized
+terminal status without exposing the transcript to another provider.
 
 Prompt capability data is sparse. Tool names are only the model-visible,
 policy-authorized, provider-supported names advertised for that prompt; internal

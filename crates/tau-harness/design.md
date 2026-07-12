@@ -46,6 +46,10 @@ all-six group, exact mismatches, duplicate/unknown outcomes, and legacy
 boundaries; and `tau-harness` covers Started-before-dispatch and terminal
 correlation, interception/peer ownership, typed passive replay, crash restart,
 checkpoint ranges, and dispatch uncertainty.
+Restored post-compaction continuation coverage includes captured-route success,
+staggered unrelated discovery, discovery-complete absence, explicit model
+removal, warm resume, mutable role/model drift, sanitized terminal visibility,
+and replay exactly-once behavior.
 
 ## Daemon listener shutdown is reactive and path-independent
 

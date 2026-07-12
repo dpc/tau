@@ -1199,6 +1199,20 @@ fn quiet_provider_harness_with_start_reason_and_persistence(
     start_reason: tau_proto::SessionStartReason,
     session_persistence: tau_core::SessionPersistenceMode,
 ) -> Result<Harness, HarnessError> {
+    quiet_provider_harness_for_with_start_reason_and_persistence(
+        "s1",
+        state_dir,
+        start_reason,
+        session_persistence,
+    )
+}
+
+fn quiet_provider_harness_for_with_start_reason_and_persistence(
+    session_id: &str,
+    state_dir: impl Into<PathBuf>,
+    start_reason: tau_proto::SessionStartReason,
+    session_persistence: tau_core::SessionPersistenceMode,
+) -> Result<Harness, HarnessError> {
     fn quiet_provider_runner(r: UnixStream, w: UnixStream) -> Result<(), String> {
         fn inner(r: UnixStream, w: UnixStream) -> Result<(), Box<dyn std::error::Error>> {
             let mut reader = TestOutputReader::new(BufReader::new(r));
@@ -1258,7 +1272,7 @@ fn quiet_provider_harness_with_start_reason_and_persistence(
         dirs,
         quiet_provider_runner,
         Vec::new(),
-        "s1",
+        session_id,
         start_reason,
         session_persistence,
     )?;

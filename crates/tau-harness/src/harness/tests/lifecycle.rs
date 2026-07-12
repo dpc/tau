@@ -2277,6 +2277,76 @@ fn disconnect_before_ready_drops_all_staged_state() {
     h.shutdown().expect("shutdown");
 }
 
+/// Multiple pre-Ready provider snapshots are activated atomically: only the
+/// final snapshot may authorize restored dispatch or authoritative absence.
+#[test]
+fn provider_ready_coalesces_staged_model_snapshots_to_final_state() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = quiet_provider_harness(td.path()).expect("harness");
+    let mut captured_info = h
+        .provider_model_info
+        .values()
+        .next()
+        .expect("startup provider model")
+        .clone();
+    clear_quiet_provider_models(&mut h);
+    let conn_id = "provider-staged-model-replacement";
+    let _sink = connect_handshaking_extension(&mut h, conn_id, tau_proto::ClientKind::Provider);
+    let captured: tau_proto::ModelId = "staged/captured".into();
+    captured_info.id = captured.clone();
+    let cid = ensure_test_user_agent(&mut h);
+    let agent_id = h.agents[&cid].agent_id.clone().expect("agent id");
+    let transaction_id =
+        tau_proto::CompactionTransactionId::parse("ct-staged-snapshot").expect("transaction id");
+    h.agents.get_mut(&cid).expect("agent").activation_dispatch =
+        crate::agent::ActivationDispatchState::AwaitingCheckpoint {
+            owner: crate::agent::InferenceCheckpointOwner::Standalone {
+                id: transaction_id.clone(),
+            },
+            agent_prompt_id: "ap-staged-snapshot".into(),
+            through: tau_proto::AgentHead::Root,
+            model: Some(captured.clone()),
+            operation: Some(tau_proto::PromptOperation::Inference),
+            activation_cut: Some(tau_proto::AgentHead::Root),
+        };
+
+    for models in [vec![captured_info], Vec::new()] {
+        h.handle_extension_event(
+            conn_id,
+            TestProtocolItem::Event(Event::ProviderModelsUpdated(
+                tau_proto::ProviderModelsUpdated { models },
+            )),
+        )
+        .expect("stage model snapshot");
+    }
+    assert!(!h.provider_model_info.contains_key(&captured));
+    assert!(
+        h.enqueued_restored_compaction_checkpoints.is_empty(),
+        "pre-Ready snapshots must not reconcile restored work"
+    );
+
+    h.handle_extension_message(
+        conn_id,
+        TestMessage::Ready(tau_proto::Ready { message: None }),
+    )
+    .expect("activate provider");
+    assert!(
+        !h.provider_model_info.contains_key(&captured),
+        "an intermediate staged route must never become the active provider route"
+    );
+    assert!(!h.provider_model_routes.contains_key(&captured));
+    assert!(
+        h.enqueued_restored_compaction_checkpoints
+            .contains(&(crate::parse_agent_id(&agent_id), transaction_id)),
+        "the final Ready snapshot alone decides the restored work"
+    );
+    assert!(!event_log_events(&h).iter().any(|event| matches!(
+        event,
+        Event::AgentPromptCreated(prompt)
+            if prompt.agent_prompt_id.as_str() == "ap-staged-snapshot"
+    )));
+}
+
 #[test]
 fn tool_unregister_removes_tool_from_future_prompt() {
     // Regression: an explicit ToolUnregister must update the live registry used
