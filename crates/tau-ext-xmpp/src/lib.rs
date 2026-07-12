@@ -5,6 +5,8 @@
 //! untrusted prompt input.
 //! Its transport, routing, lifecycle, and trust boundaries are summarized in
 //! `ARCH-tau-ext-xmpp`.
+//! The plaintext-over-TLS limitation is recorded in
+//! `DESIGN-tau-ext-xmpp-tls-security-model`.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::error::Error;

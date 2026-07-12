@@ -6,6 +6,8 @@
 //! This crate is not currently wired into the production harness extension
 //! supervisor path. Treat its tests as prototype coverage until the harness
 //! integrates this crate or duplicates the same contracts.
+//! Lifecycle, transport, and trust boundaries are summarized in
+//! `ARCH-tau-supervisor`.
 
 use std::io::{self, BufReader, BufWriter};
 #[cfg(target_os = "linux")]

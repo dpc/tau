@@ -47,6 +47,9 @@ impl ToolPromptFragment {
 }
 
 /// Context made available to role prompt Handlebars templates.
+///
+/// Dynamic system-prompt values remain template inputs as required by
+/// `DESIGN-tau-harness-system-prompt-templates`.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct RolePromptTemplateContext<'a> {
     /// Name of the role whose prompt is being rendered.

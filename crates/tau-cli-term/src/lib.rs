@@ -7,6 +7,8 @@
 //! *presentation* (how the menu is rendered as a styled block under
 //! the prompt). It also handles `$EDITOR` integration, which doesn't
 //! belong in the raw layer.
+//! The ownership split and subprocess/editor contracts are summarized in
+//! `ARCH-tau-cli-term`.
 
 mod bounded_command;
 pub mod completion;

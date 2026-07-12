@@ -3,6 +3,8 @@
 //! This crate owns Tau's built-in provider process, profile CLI, auth/profile
 //! storage scan, model publication, and dispatch across built-in provider
 //! backends. Individual backend crates own provider-specific wire formats.
+//! Component responsibilities and trust boundaries are summarized in
+//! `ARCH-tau-ext-provider-builtin`.
 //! See `DESIGN-tau-ext-provider-builtin-testing-boundary` for that test
 //! boundary.
 

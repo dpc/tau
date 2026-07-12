@@ -464,7 +464,8 @@ struct SlackMessage {
 ///
 /// The channel is configured or linked when captured, and `thread_ts` is absent
 /// or passed `validate_slack_ts`; neither value comes from model input. Channel
-/// authorization is checked again immediately before every send.
+/// authorization is checked again immediately before every send. See
+/// `DESIGN-tau-ext-slack-immutable-thread-destinations`.
 #[derive(Clone, Eq, PartialEq)]
 struct SlackConversation {
     /// Configured channel or linked DM id.

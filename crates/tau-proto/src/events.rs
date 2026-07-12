@@ -7,6 +7,8 @@
 //!
 //! The event-name, routing, replay, and selected payload contracts are
 //! specified by `SPEC-tau-proto-session-events`.
+//! Provider streaming, retry, and recovery update payloads are specified by
+//! `SPEC-tau-proto-provider-updates`.
 
 use std::fmt;
 

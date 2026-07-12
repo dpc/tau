@@ -1,5 +1,8 @@
 //! Public entry points: blocking `run_*` daemons, the embedded
 //! single-message helpers, and the small types passed to/from them.
+//!
+//! Listener cancellation follows
+//! `DESIGN-tau-harness-reactive-listener-shutdown`.
 
 use std::net::Shutdown;
 use std::os::unix::net::{UnixListener, UnixStream};
