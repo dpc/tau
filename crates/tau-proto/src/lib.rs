@@ -1162,6 +1162,12 @@ impl<W, M> MessageWriter<W, M> {
     pub fn into_inner(self) -> W {
         self.inner
     }
+
+    /// Borrows the wrapped writer for transport-specific configuration.
+    #[must_use]
+    pub fn get_ref(&self) -> &W {
+        &self.inner
+    }
 }
 
 impl<W, M> MessageWriter<W, M>

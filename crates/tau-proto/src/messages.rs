@@ -388,6 +388,25 @@ pub struct ExternalAgentMessageResult {
     pub error: Option<String>,
 }
 
+/// Narrow live-harness probe used by bounded session discovery.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct PeerSessionProbe {
+    /// Caller-generated correlation id.
+    pub request_id: String,
+    /// Active session id advertised by runtime metadata.
+    pub session_id: SessionId,
+}
+
+/// Harness-authored answer to a peer-session discovery probe.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct PeerSessionProbeResult {
+    /// Correlation id copied from the request.
+    pub request_id: String,
+    /// True only when this live harness is on the requested session and
+    /// currently has an effective peer entrypoint.
+    pub available: bool,
+}
+
 impl Emit {
     /// Creates a durable-by-default emit request.
     #[must_use]
@@ -799,6 +818,7 @@ pub enum HarnessInputMessage {
     ExtensionDataRequest(ExtensionDataRequest),
     ExternalAgentMessage(ExternalAgentMessageRequest),
     ExternalAgentMessageAuth(ExternalAgentMessageAuthRequest),
+    PeerSessionProbe(PeerSessionProbe),
     RegisterTransportCapability(RegisterTransportCapabilityRequest),
     TransportMessageIngress(Box<TransportMessageIngressRequest>),
     CompleteTransportSend(Box<CompleteTransportSendRequest>),
@@ -837,6 +857,7 @@ pub enum HarnessOutputMessage {
     ExtensionDataResult(Box<ExtensionDataResult>),
     ExternalAgentMessageResult(ExternalAgentMessageResult),
     ExternalAgentMessageAuthResult(ExternalAgentMessageAuthResult),
+    PeerSessionProbeResult(PeerSessionProbeResult),
     RegisterTransportCapabilityResult(RegisterTransportCapabilityResult),
     TransportMessageIngressResult(TransportMessageIngressResult),
     CompleteTransportSendResult(CompleteTransportSendResult),

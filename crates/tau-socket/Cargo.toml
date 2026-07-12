@@ -15,6 +15,7 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+socket2.workspace = true
 tau-proto.workspace = true
 
 [dev-dependencies]

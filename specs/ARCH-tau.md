@@ -4,4 +4,7 @@ Tau is a Rust workspace whose end-user `tau` binary composes first-party compone
 
 External transport identity and trust boundaries are governed by [ARCH-external-message-boundary](ARCH-external-message-boundary.md). Cross-provider streamed output is specified by [SPEC-provider-response-streaming](SPEC-provider-response-streaming.md), observation by [SPEC-agent-watch](SPEC-agent-watch.md), and context recovery by [SPEC-compaction-and-context-recovery](SPEC-compaction-and-context-recovery.md). Component-local architecture and decisions live beside their owning crates under `specs/`.
 
+Opt-in same-UID peer rendezvous authority is governed by
+[DESIGN-peer-entrypoints](DESIGN-peer-entrypoints.md).
+
 Dependency direction is inward toward shared protocol/core/client libraries: the harness composes them, the CLI and extensions communicate through protocol/client APIs, and transport bridges translate external systems without granting external payloads internal authority. Provider adapters classify and stream backend results, but the harness retains session, routing, recovery, and durable-state authority.

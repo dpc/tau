@@ -32,6 +32,9 @@ const MESSAGE_TOOL_NAME: &str = "message";
 const AGENT_WATCH_TOOL_NAME: &str = "agent_watch";
 const COMPACT_TOOL_NAME: &str = "compact";
 const AGENT_COMPACT_TOOL_NAME: &str = "agent_compact";
+const SESSION_LIST_TOOL_NAME: &str = "session_list";
+const AGENT_LIST_TOOL_NAME: &str = "agent_list";
+const DISCOVERY_MAX_RESULTS: usize = 50;
 
 /// Return handlers for Tau's built-in harness-process tools.
 pub fn builtin_handlers() -> Vec<Arc<dyn InternalToolHandler>> {
@@ -197,6 +200,8 @@ impl InternalToolHandler for BuiltinTools {
             agent_watch_tool_spec(),
             compact_tool_spec(),
             agent_compact_tool_spec(),
+            session_list_tool_spec(),
+            agent_list_tool_spec(),
         ]
     }
 
@@ -204,6 +209,8 @@ impl InternalToolHandler for BuiltinTools {
         let name = match internal_tool_name.as_str() {
             COMPACT_TOOL_NAME => "compaction",
             AGENT_COMPACT_TOOL_NAME => "cross_agent_compaction",
+            SESSION_LIST_TOOL_NAME => "session_discovery",
+            AGENT_LIST_TOOL_NAME => "agent_discovery",
             _ => return None,
         };
         Some(tau_proto::ToolGroup {
@@ -223,6 +230,8 @@ impl InternalToolHandler for BuiltinTools {
                 | AGENT_WATCH_TOOL_NAME
                 | COMPACT_TOOL_NAME
                 | AGENT_COMPACT_TOOL_NAME
+                | SESSION_LIST_TOOL_NAME
+                | AGENT_LIST_TOOL_NAME
         )
     }
 
@@ -300,6 +309,18 @@ impl InternalToolHandler for BuiltinTools {
                             }
                         }
                     }
+                    SESSION_LIST_TOOL_NAME => handle_session_list_tool_call(
+                        host,
+                        &conversation_id,
+                        &call,
+                        visible_tool_name,
+                    ),
+                    AGENT_LIST_TOOL_NAME => handle_agent_list_tool_call(
+                        host,
+                        &conversation_id,
+                        &call,
+                        visible_tool_name,
+                    ),
                     _ => Ok(()),
                 }
             }
@@ -1351,6 +1372,191 @@ struct MessageArgs {
     message: String,
 }
 
+#[derive(Default)]
+struct DiscoveryArgs {
+    query: Option<String>,
+    role: Option<String>,
+    group: Option<String>,
+    state: Option<String>,
+    limit: usize,
+}
+
+fn parse_discovery_args(arguments: &CborValue, agent_list: bool) -> Result<DiscoveryArgs, String> {
+    let CborValue::Map(entries) = arguments else {
+        return Err("arguments must be an object".to_owned());
+    };
+    let mut parsed = DiscoveryArgs {
+        limit: DISCOVERY_MAX_RESULTS,
+        ..DiscoveryArgs::default()
+    };
+    for (key, value) in entries {
+        let CborValue::Text(key) = key else {
+            return Err("argument names must be strings".to_owned());
+        };
+        match (key.as_str(), value) {
+            ("query", CborValue::Text(value)) => parsed.query = Some(value.clone()),
+            ("role", CborValue::Text(value)) if agent_list => parsed.role = Some(value.clone()),
+            ("group", CborValue::Text(value)) if agent_list => parsed.group = Some(value.clone()),
+            ("state", CborValue::Text(value)) if agent_list => parsed.state = Some(value.clone()),
+            ("limit", CborValue::Integer(value)) => {
+                let limit: u64 = (*value)
+                    .try_into()
+                    .map_err(|_| "`limit` must be a positive integer".to_owned())?;
+                if limit == 0 {
+                    return Err("`limit` must be a positive integer".to_owned());
+                }
+                parsed.limit = usize::try_from(limit)
+                    .unwrap_or(usize::MAX)
+                    .min(DISCOVERY_MAX_RESULTS);
+            }
+            ("query" | "role" | "group" | "state", _) => {
+                return Err(format!("`{key}` must be a string"));
+            }
+            ("limit", _) => return Err("`limit` must be a positive integer".to_owned()),
+            _ => return Err(format!("unknown discovery filter `{key}`")),
+        }
+    }
+    for (name, value) in [
+        ("query", parsed.query.as_ref()),
+        ("role", parsed.role.as_ref()),
+        ("group", parsed.group.as_ref()),
+        ("state", parsed.state.as_ref()),
+    ] {
+        if value.is_some_and(|value| value.len() > 256) {
+            return Err(format!("`{name}` exceeds 256 bytes"));
+        }
+    }
+    if let Some(state) = parsed.state.as_deref()
+        && !matches!(state, "pending" | "idle" | "running")
+    {
+        return Err("`state` must be `pending`, `idle`, or `running`".to_owned());
+    }
+    Ok(parsed)
+}
+
+fn handle_session_list_tool_call(
+    host: &mut InternalToolHost<'_>,
+    conversation_id: &AgentId,
+    call: &AgentToolCall,
+    visible_tool_name: ToolName,
+) -> Result<(), HarnessError> {
+    match parse_discovery_args(&call.arguments, false) {
+        Ok(parsed) => host.start_session_discovery(
+            conversation_id,
+            call,
+            visible_tool_name,
+            parsed.query,
+            parsed.limit,
+        ),
+        Err(message) => {
+            host.ensure_internal_tool_tracking(conversation_id, call, &visible_tool_name);
+            host.finish_tool_with_error(
+                conversation_id,
+                call.id.clone(),
+                visible_tool_name,
+                call.tool_type,
+                message,
+                Some(call.arguments.clone()),
+            );
+        }
+    }
+    Ok(())
+}
+
+fn handle_agent_list_tool_call(
+    host: &mut InternalToolHost<'_>,
+    conversation_id: &AgentId,
+    call: &AgentToolCall,
+    visible_tool_name: ToolName,
+) -> Result<(), HarnessError> {
+    host.ensure_internal_tool_tracking(conversation_id, call, &visible_tool_name);
+    let parsed = match parse_discovery_args(&call.arguments, true) {
+        Ok(parsed) => parsed,
+        Err(message) => {
+            host.finish_tool_with_error(
+                conversation_id,
+                call.id.clone(),
+                visible_tool_name,
+                call.tool_type,
+                message,
+                Some(call.arguments.clone()),
+            );
+            return Ok(());
+        }
+    };
+    let self_id = host
+        .ensure_agent_id_for_agent(conversation_id)
+        .ok_or_else(|| HarnessError::Participant("calling agent no longer exists".to_owned()))?;
+    let needle = parsed.query.map(|query| query.to_lowercase());
+    let mut agents = host
+        .current_agent_summaries()
+        .into_iter()
+        .filter(|agent| {
+            needle
+                .as_ref()
+                .is_none_or(|needle| agent.agent_id.to_lowercase().contains(needle))
+                && parsed.role.as_ref().is_none_or(|role| role == &agent.role)
+                && parsed
+                    .group
+                    .as_ref()
+                    .is_none_or(|group| group == &agent.group)
+                && parsed
+                    .state
+                    .as_deref()
+                    .is_none_or(|state| state == agent.state)
+        })
+        .collect::<Vec<_>>();
+    let truncated = agents.len() > parsed.limit;
+    agents.truncate(parsed.limit);
+    let result = CborValue::Map(vec![
+        (
+            CborValue::Text("agents".to_owned()),
+            CborValue::Array(
+                agents
+                    .into_iter()
+                    .map(|agent| {
+                        CborValue::Map(vec![
+                            (
+                                CborValue::Text("agent_id".to_owned()),
+                                CborValue::Text(agent.agent_id.clone()),
+                            ),
+                            (
+                                CborValue::Text("role".to_owned()),
+                                CborValue::Text(agent.role),
+                            ),
+                            (
+                                CborValue::Text("group".to_owned()),
+                                CborValue::Text(agent.group),
+                            ),
+                            (
+                                CborValue::Text("state".to_owned()),
+                                CborValue::Text(agent.state.to_owned()),
+                            ),
+                            (
+                                CborValue::Text("self".to_owned()),
+                                CborValue::Bool(agent.agent_id == self_id),
+                            ),
+                        ])
+                    })
+                    .collect(),
+            ),
+        ),
+        (
+            CborValue::Text("truncated".to_owned()),
+            CborValue::Bool(truncated),
+        ),
+    ]);
+    host.finish_tool_with_cbor_result(
+        conversation_id,
+        call.id.clone(),
+        visible_tool_name,
+        call.tool_type,
+        result,
+        None,
+    );
+    Ok(())
+}
+
 enum MessageRecipientAddress {
     User,
     LocalAgent(tau_proto::AgentId),
@@ -1692,6 +1898,36 @@ fn message_tool_spec() -> ToolSpec {
 
 fn agent_watch_tool_spec() -> ToolSpec {
     ToolSpec { name: ToolName::new(AGENT_WATCH_TOOL_NAME), model_visible_name: None, description: Some("Enable or disable session-local async notifications for another agent's model-turn starts/stops, final responses, and received user prompts. Enabling reports client-visible current model-turn state; that initial status is not injected into this agent's model context. Meaningful later transitions are delivered separately regardless of what triggered the watched turn. Content notifications remain clearly labeled `Watched agent <agent-id> emitted a response` or `Watched agent <agent-id> received a user prompt`. internal steering and tool-completion notices, explicit messages, and their content are not forwarded as content notifications. `agent_start` automatically enables a watch for the started sub-agent; use `enable: false` to stop watching. Requires `agent_id` and `enable`.".to_owned()), tool_type: ToolType::Function, parameters: Some(serde_json::json!({"type":"object","properties":{"agent_id":{"type":"string","maxLength": tau_proto::AGENT_ID_MAX_LEN, "pattern": "^[A-Za-z0-9_-]{1,64}$", "description":"Agent id to watch or stop watching. Must contain only ASCII letters, digits, `_`, or `-`."},"enable":{"type":"boolean","description":"True to enable watching, false to disable it."}},"required":["agent_id","enable"],"additionalProperties":false})), format: None, tags: Vec::new(), enabled_by_default: true, background_support: Some(BackgroundSupport::Never), examples: Vec::new() }
+}
+
+fn session_list_tool_spec() -> ToolSpec {
+    ToolSpec {
+        name: ToolName::new(SESSION_LIST_TOOL_NAME),
+        model_visible_name: None,
+        description: Some("List a bounded, redacted snapshot of live Tau sessions that advertise a peer entrypoint. Results are racy and sorted by session id.".to_owned()),
+        tool_type: ToolType::Function,
+        parameters: Some(serde_json::json!({"type":"object","properties":{"query":{"type":"string","maxLength":256,"description":"Optional case-insensitive literal match over session id or project label."},"limit":{"type":"integer","minimum":1,"maximum":DISCOVERY_MAX_RESULTS}},"additionalProperties":false})),
+        format: None,
+        tags: vec![tau_proto::ToolTag::new("harness:discovery:session")],
+        enabled_by_default: false,
+        background_support: Some(BackgroundSupport::Never),
+        examples: Vec::new(),
+    }
+}
+
+fn agent_list_tool_spec() -> ToolSpec {
+    ToolSpec {
+        name: ToolName::new(AGENT_LIST_TOOL_NAME),
+        model_visible_name: None,
+        description: Some("List a bounded, redacted, current-session-only snapshot of loaded or pending agents. Results are racy and sorted by agent id.".to_owned()),
+        tool_type: ToolType::Function,
+        parameters: Some(serde_json::json!({"type":"object","properties":{"query":{"type":"string","maxLength":256,"description":"Optional case-insensitive literal match over agent id."},"role":{"type":"string","maxLength":256,"description":"Exact creation-role filter."},"group":{"type":"string","maxLength":256,"description":"Exact creation-role-group filter."},"state":{"type":"string","maxLength":256,"enum":["pending","idle","running"]},"limit":{"type":"integer","minimum":1,"maximum":DISCOVERY_MAX_RESULTS}},"additionalProperties":false})),
+        format: None,
+        tags: vec![tau_proto::ToolTag::new("harness:discovery:agent")],
+        enabled_by_default: false,
+        background_support: Some(BackgroundSupport::Never),
+        examples: Vec::new(),
+    }
 }
 
 fn cancel_tool_spec() -> ToolSpec {

@@ -75,6 +75,7 @@ enum TestMessage {
     ExtensionDataResult(Box<tau_proto::ExtensionDataResult>),
     ExternalAgentMessageResult(tau_proto::ExternalAgentMessageResult),
     ExternalAgentMessageAuthResult(tau_proto::ExternalAgentMessageAuthResult),
+    PeerSessionProbeResult(tau_proto::PeerSessionProbeResult),
     RegisterTransportCapabilityResult(tau_proto::RegisterTransportCapabilityResult),
     TransportMessageIngressResult(tau_proto::TransportMessageIngressResult),
     CompleteTransportSendResult(tau_proto::CompleteTransportSendResult),
@@ -126,6 +127,9 @@ impl TestProtocolItem {
             }
             HarnessOutputMessage::ExternalAgentMessageAuthResult(message) => {
                 Self::Message(TestMessage::ExternalAgentMessageAuthResult(message))
+            }
+            HarnessOutputMessage::PeerSessionProbeResult(message) => {
+                Self::Message(TestMessage::PeerSessionProbeResult(message))
             }
             HarnessOutputMessage::RegisterTransportCapabilityResult(message) => {
                 Self::Message(TestMessage::RegisterTransportCapabilityResult(message))
@@ -181,6 +185,7 @@ impl TestMessage {
             | Self::ExtensionDataResult(_)
             | Self::ExternalAgentMessageResult(_)
             | Self::ExternalAgentMessageAuthResult(_)
+            | Self::PeerSessionProbeResult(_)
             | Self::RegisterTransportCapabilityResult(_)
             | Self::TransportMessageIngressResult(_)
             | Self::CompleteTransportSendResult(_) => {

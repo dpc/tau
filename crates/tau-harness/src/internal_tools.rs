@@ -58,6 +58,20 @@ pub struct InternalSkill {
     pub source: InternalSkillSource,
 }
 
+/// Redacted current-session agent summary exposed to the opt-in `agent_list`
+/// built-in tool.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InternalAgentSummary {
+    /// Stable public agent id.
+    pub agent_id: String,
+    /// Immutable creation role.
+    pub role: String,
+    /// Role group containing the creation role.
+    pub group: String,
+    /// `pending`, `idle`, or `running`.
+    pub state: &'static str,
+}
+
 /// Public snapshot of a skill Markdown source.
 #[derive(Clone)]
 pub enum InternalSkillSource {
@@ -139,6 +153,126 @@ impl<'a> InternalToolHost<'a> {
     /// Ensure and return the agent id for a conversation.
     pub fn ensure_agent_id_for_agent(&mut self, conversation_id: &AgentId) -> Option<String> {
         self.harness.ensure_agent_id_for_agent(conversation_id)
+    }
+
+    /// Return a redacted, deterministically ordered current-session agent
+    /// snapshot.
+    pub fn current_agent_summaries(&self) -> Vec<InternalAgentSummary> {
+        let mut summaries = self
+            .harness
+            .agents
+            .values()
+            .filter(|agent| !agent.terminating)
+            .filter_map(|agent| {
+                let agent_id = agent.agent_id.clone()?;
+                let role = agent
+                    .role
+                    .clone()
+                    .unwrap_or_else(|| self.harness.selected_role.clone());
+                Some(InternalAgentSummary {
+                    group: self.harness.role_group_name_for_role(&role),
+                    role,
+                    agent_id,
+                    state: match agent.published_runtime_state {
+                        tau_proto::AgentRuntimeState::Idle => "idle",
+                        tau_proto::AgentRuntimeState::Running => "running",
+                    },
+                })
+            })
+            .collect::<Vec<_>>();
+        summaries.extend(self.harness.pending_agent_summary_data().into_iter().map(
+            |(agent_id, role)| InternalAgentSummary {
+                group: self.harness.role_group_name_for_role(&role),
+                agent_id,
+                role,
+                state: "pending",
+            },
+        ));
+        summaries.sort_by(|left, right| left.agent_id.cmp(&right.agent_id));
+        summaries
+    }
+
+    /// Start bounded runtime-dir peer-session discovery off the harness event
+    /// loop.
+    pub fn start_session_discovery(
+        &mut self,
+        conversation_id: &AgentId,
+        call: &AgentToolCall,
+        visible_tool_name: ToolName,
+        query: Option<String>,
+        limit: usize,
+    ) {
+        self.ensure_internal_tool_tracking(conversation_id, call, &visible_tool_name);
+        let Some(permit) = crate::runtime_dir::DiscoveryCallPermit::try_acquire() else {
+            self.harness.finish_harness_owned_tool_with_error(
+                conversation_id,
+                call.id.clone(),
+                visible_tool_name,
+                call.tool_type,
+                "session discovery is busy; retry later".to_owned(),
+                None,
+            );
+            return;
+        };
+        let tx = self.harness.tx.clone();
+        let current_session_id = self.harness.current_session_id.clone();
+        let command = crate::event::SessionDiscoveryCompletedCommand {
+            conversation_id: conversation_id.clone(),
+            session_generation: self.harness.current_session_generation,
+            call_id: call.id.clone(),
+            tool_name: visible_tool_name,
+            tool_type: call.tool_type,
+            result: CborValue::Null,
+        };
+        std::thread::spawn(move || {
+            let snapshot = crate::runtime_dir::discover_peer_sessions(
+                query.as_deref(),
+                limit,
+                current_session_id.as_str(),
+                permit,
+            );
+            let sessions = snapshot
+                .sessions
+                .into_iter()
+                .map(|session| {
+                    let mut fields = vec![
+                        (
+                            CborValue::Text("session_id".to_owned()),
+                            CborValue::Text(session.session_id),
+                        ),
+                        (
+                            CborValue::Text("current".to_owned()),
+                            CborValue::Bool(session.current),
+                        ),
+                    ];
+                    if let Some(label) = session.project_label {
+                        fields.push((
+                            CborValue::Text("project".to_owned()),
+                            CborValue::Text(label),
+                        ));
+                    }
+                    CborValue::Map(fields)
+                })
+                .collect();
+            let mut command = command;
+            command.result = CborValue::Map(vec![
+                (
+                    CborValue::Text("sessions".to_owned()),
+                    CborValue::Array(sessions),
+                ),
+                (
+                    CborValue::Text("truncated".to_owned()),
+                    CborValue::Bool(snapshot.truncated),
+                ),
+                (
+                    CborValue::Text("scan_truncated".to_owned()),
+                    CborValue::Bool(snapshot.scan_truncated),
+                ),
+            ]);
+            let _ = tx.send(crate::event::HarnessEvent::Command(
+                crate::event::HarnessCommand::SessionDiscoveryCompleted(Box::new(command)),
+            ));
+        });
     }
 
     /// Enqueue a start-agent request from an internal handler without draining.

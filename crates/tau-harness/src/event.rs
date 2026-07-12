@@ -26,6 +26,24 @@ pub(crate) enum HarnessCommand {
     ExternalMessageToolCompleted(Box<ExternalMessageToolCompletedCommand>),
     /// Complete receiver-side authentication for an inbound external message.
     ExternalMessageAuthCompleted(Box<ExternalMessageAuthCompletedCommand>),
+    /// Complete one bounded peer-session discovery tool call.
+    SessionDiscoveryCompleted(Box<SessionDiscoveryCompletedCommand>),
+}
+
+/// Completion payload for asynchronous peer-session discovery.
+pub(crate) struct SessionDiscoveryCompletedCommand {
+    /// Conversation that owns the tool call.
+    pub(crate) conversation_id: tau_proto::AgentId,
+    /// Session generation active when discovery began.
+    pub(crate) session_generation: u64,
+    /// Tool call id being completed.
+    pub(crate) call_id: tau_proto::ToolCallId,
+    /// Visible tool name.
+    pub(crate) tool_name: tau_proto::ToolName,
+    /// Provider-declared tool type.
+    pub(crate) tool_type: tau_proto::ToolType,
+    /// Structured redacted discovery result.
+    pub(crate) result: tau_proto::CborValue,
 }
 
 /// Completion payload for asynchronous external message tool delivery.

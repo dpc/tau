@@ -1152,3 +1152,81 @@ fn agent_compact_arguments_require_only_agent_id() {
     ]);
     assert!(parse_compaction_args(AGENT_COMPACT_TOOL_NAME, &extra).is_err());
 }
+
+/// Discovery capabilities are independently opt-in and never become available
+/// merely because the built-in handler is installed.
+#[test]
+fn discovery_tools_are_disabled_by_default_in_separate_groups() {
+    let tools = BuiltinTools::default();
+    let specs = tools.tool_specs();
+    for (tool_name, group_name) in [
+        (SESSION_LIST_TOOL_NAME, "session_discovery"),
+        (AGENT_LIST_TOOL_NAME, "agent_discovery"),
+    ] {
+        let spec = specs
+            .iter()
+            .find(|spec| spec.name.as_str() == tool_name)
+            .expect("discovery tool spec");
+        assert!(!spec.enabled_by_default);
+        assert_eq!(
+            tools
+                .tool_group(&spec.name)
+                .expect("discovery group")
+                .name
+                .as_str(),
+            group_name
+        );
+    }
+}
+
+/// Bounded discovery parsing rejects unknown filters, invalid states, and
+/// non-positive limits instead of silently broadening enumeration.
+#[test]
+fn discovery_arguments_are_strict_and_bounded() {
+    let valid = CborValue::Map(vec![
+        (
+            CborValue::Text("query".to_owned()),
+            CborValue::Text("peer".to_owned()),
+        ),
+        (
+            CborValue::Text("limit".to_owned()),
+            CborValue::Integer(500_u64.into()),
+        ),
+    ]);
+    let parsed = parse_discovery_args(&valid, false).expect("valid session filters");
+    assert_eq!(parsed.query.as_deref(), Some("peer"));
+    assert_eq!(parsed.limit, DISCOVERY_MAX_RESULTS);
+    assert!(
+        parse_discovery_args(
+            &CborValue::Map(vec![(
+                CborValue::Text("state".to_owned()),
+                CborValue::Text("sleeping".to_owned()),
+            )]),
+            true,
+        )
+        .is_err()
+    );
+    assert!(
+        parse_discovery_args(
+            &CborValue::Map(vec![(
+                CborValue::Text("agent_id".to_owned()),
+                CborValue::Text("secret".to_owned()),
+            )]),
+            true,
+        )
+        .is_err()
+    );
+    for filter in ["query", "role", "group", "state"] {
+        assert!(
+            parse_discovery_args(
+                &CborValue::Map(vec![(
+                    CborValue::Text(filter.to_owned()),
+                    CborValue::Text("x".repeat(257)),
+                )]),
+                true,
+            )
+            .is_err(),
+            "{filter} must have a byte bound"
+        );
+    }
+}

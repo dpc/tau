@@ -18105,6 +18105,7 @@ fn switch_session_updates_runtime_metadata_active_session() {
             pid: std::process::id(),
             project_root: Some(td.path().to_path_buf()),
             session_id: "s1".to_owned(),
+            peer_entrypoint: false,
         })
         .expect("metadata json"),
     )
@@ -19414,4 +19415,108 @@ fn ui_cannot_emit_custom_event_with_reserved_first_party_category() {
         tau_proto::CustomEvent::try_new(reserved, None, CborValue::Null).is_err(),
         "reserved first-party category must be rejected at construction"
     );
+}
+
+/// Discovery probes a real opted-in Harness event loop, ignores a second
+/// non-opted daemon record, and returns only the basename project label.
+#[test]
+fn peer_discovery_uses_real_harness_probe_and_redacted_output() {
+    let td = TempDir::new().expect("tempdir");
+    let _runtime = crate::runtime_dir::override_test_runtime_dir(td.path());
+    std::fs::create_dir_all(crate::runtime_dir::harnesses_dir()).expect("harnesses dir");
+    let mut target = echo_harness(td.path().join("target-state")).expect("target harness");
+    target.peer_entrypoint = Some(tau_config::settings::RoleGroup {
+        name: "engineer".to_owned(),
+        roles: vec!["engineer".to_owned()],
+        peer_entrypoint: Some(tau_config::settings::PeerEntrypoint::default()),
+    });
+    let target_path = crate::runtime_dir::harnesses_dir().join("real-target");
+    let target_listener =
+        std::os::unix::net::UnixListener::bind(crate::runtime_dir::socket_path(&target_path))
+            .expect("target listener");
+    std::fs::write(
+        crate::runtime_dir::metadata_path(&target_path),
+        serde_json::to_vec(&crate::runtime_dir::DaemonMetadata {
+            version: 2,
+            pid: std::process::id(),
+            project_root: Some(PathBuf::from("/secret/root/redacted-project")),
+            session_id: target.current_session_id.to_string(),
+            peer_entrypoint: true,
+        })
+        .expect("target metadata"),
+    )
+    .expect("write target metadata");
+    let target_tx = target.tx.clone();
+    let forwarder = std::thread::spawn(move || {
+        let (stream, _) = target_listener.accept().expect("accept discovery probe");
+        target_tx
+            .send(HarnessEvent::NewClient(stream))
+            .expect("forward discovery probe");
+    });
+    let private_path = crate::runtime_dir::harnesses_dir().join("private-target");
+    let _private_listener =
+        std::os::unix::net::UnixListener::bind(crate::runtime_dir::socket_path(&private_path))
+            .expect("private listener");
+    std::fs::write(
+        crate::runtime_dir::metadata_path(&private_path),
+        serde_json::to_vec(&crate::runtime_dir::DaemonMetadata {
+            version: 2,
+            pid: std::process::id(),
+            project_root: Some(PathBuf::from("/secret/root/private-project")),
+            session_id: "private-session".to_owned(),
+            peer_entrypoint: false,
+        })
+        .expect("private metadata"),
+    )
+    .expect("write private metadata");
+    let runtime_root = td.path().to_path_buf();
+    let (snapshot_tx, snapshot_rx) = std::sync::mpsc::channel();
+    let discovery = std::thread::spawn(move || {
+        let _runtime = crate::runtime_dir::override_test_runtime_dir(&runtime_root);
+        let snapshot = crate::runtime_dir::discover_peer_sessions(
+            None,
+            50,
+            "unrelated-current",
+            crate::runtime_dir::DiscoveryCallPermit::try_acquire().expect("discovery permit"),
+        );
+        snapshot_tx.send(snapshot).expect("return snapshot");
+    });
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let snapshot = loop {
+        if let Ok(snapshot) = snapshot_rx.try_recv() {
+            break snapshot;
+        }
+        assert!(Instant::now() < deadline, "timed out waiting for discovery");
+        match target.rx.recv_timeout(Duration::from_millis(10)) {
+            Ok(HarnessEvent::NewClient(stream)) => {
+                target.accept_client(stream).expect("accept probe client");
+            }
+            Ok(HarnessEvent::FromConnection {
+                connection_id,
+                message,
+            }) => {
+                target
+                    .handle_client_message(&connection_id, *message)
+                    .expect("handle discovery frame");
+            }
+            Ok(HarnessEvent::Command(command)) => target
+                .handle_harness_command(command)
+                .expect("handle discovery command"),
+            Ok(other) => target.log_event(&other),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                panic!("target event loop disconnected")
+            }
+        }
+    };
+
+    assert_eq!(snapshot.sessions.len(), 1);
+    assert_eq!(
+        snapshot.sessions[0].project_label.as_deref(),
+        Some("redacted-project")
+    );
+    assert!(!format!("{snapshot:?}").contains("/secret/"));
+    discovery.join().expect("discovery thread");
+    forwarder.join().expect("probe forwarder");
+    target.shutdown().expect("shutdown target");
 }

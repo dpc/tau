@@ -15,3 +15,7 @@ from slash-free `AgentId`s; do not encode `session/agent` into `AgentId`. Sender
 authentication is a second dedicated RPC (`external_agent_message_auth`) that
 validates a per-message capability before the recipient harness trusts the
 caller-supplied sender identity, message/watch-response kind, or message body.
+
+`peer_session_probe` is a separate narrow RPC that returns only whether the live
+harness is currently bound to a claimed session and advertises an effective
+peer entrypoint. It does not enumerate agents or expose entrypoint policy.

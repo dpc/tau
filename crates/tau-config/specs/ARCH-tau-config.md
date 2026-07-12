@@ -78,6 +78,10 @@ array replacement:
   allow-list.
 - Disabled roles are removed only after all file, drop-in, and CLI layers have
   been merged.
+- `peer_entrypoint` is group policy rather than a role default. At most one
+  effective group may set it. Nested `auto_start_role` independently inherits,
+  sets, or clears spending authority and must name an enabled member of that
+  group; `peer_entrypoint: null` clears routing authority.
 
 ## Extension names and paths
 

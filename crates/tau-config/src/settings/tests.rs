@@ -2786,6 +2786,125 @@ fn harness_role_groups_reject_duplicate_role_names() {
     assert!(err.to_string().contains("appears in multiple role_groups"));
 }
 
+/// Peer entrypoint policy is group-owned and preserves the three-way
+/// absent/null/value layering contract for both the group and auto-start grant.
+#[test]
+fn peer_entrypoint_layering_can_clear_auto_start_and_routing_independently() {
+    let td = TempDir::new().expect("tempdir");
+    std::fs::write(
+        td.path().join("harness.yaml"),
+        r#"
+agents:
+  role_groups:
+    manager:
+      peer_entrypoint:
+        auto_start_role: micro-manager
+"#,
+    )
+    .expect("write base");
+    let settings =
+        load_harness_settings_in(&dirs_with_config(td.path())).expect("load entrypoint policy");
+    assert_eq!(
+        settings
+            .role_groups
+            .iter()
+            .find(|group| group.name == "manager")
+            .and_then(|group| group.peer_entrypoint.as_ref())
+            .and_then(|entrypoint| entrypoint.auto_start_role.as_deref()),
+        Some("micro-manager")
+    );
+
+    std::fs::create_dir(td.path().join("harness.d")).expect("drop-in dir");
+    std::fs::write(
+        td.path().join("harness.d/10-clear-auto.yaml"),
+        "agents: { role_groups: { manager: { peer_entrypoint: { auto_start_role: null } } } }",
+    )
+    .expect("write clear auto");
+    let settings =
+        load_harness_settings_in(&dirs_with_config(td.path())).expect("clear only auto-start");
+    assert_eq!(
+        settings
+            .role_groups
+            .iter()
+            .find(|group| group.name == "manager")
+            .and_then(|group| group.peer_entrypoint.as_ref())
+            .and_then(|entrypoint| entrypoint.auto_start_role.as_ref()),
+        None
+    );
+    assert!(
+        settings
+            .role_groups
+            .iter()
+            .find(|group| group.name == "manager")
+            .is_some_and(|group| group.peer_entrypoint.is_some())
+    );
+
+    std::fs::write(
+        td.path().join("harness.d/20-clear-routing.yaml"),
+        "agents: { role_groups: { manager: { peer_entrypoint: null } } }",
+    )
+    .expect("write clear entrypoint");
+    let settings =
+        load_harness_settings_in(&dirs_with_config(td.path())).expect("clear routing authority");
+    assert!(
+        settings
+            .role_groups
+            .iter()
+            .find(|group| group.name == "manager")
+            .is_some_and(|group| group.peer_entrypoint.is_none())
+    );
+}
+
+/// At most one effective group may advertise the point-to-one peer boundary.
+#[test]
+fn peer_entrypoint_rejects_multiple_effective_groups() {
+    let td = TempDir::new().expect("tempdir");
+    std::fs::write(
+        td.path().join("harness.yaml"),
+        r#"
+agents:
+  role_groups:
+    engineer:
+      peer_entrypoint: {}
+    manager:
+      peer_entrypoint: {}
+"#,
+    )
+    .expect("write");
+    let error =
+        load_harness_settings_in(&dirs_with_config(td.path())).expect_err("multiple entrypoints");
+    assert!(
+        error
+            .to_string()
+            .contains("multiple role_groups configure peer_entrypoint")
+    );
+}
+
+/// Spending authority must name an enabled member of the same effective group;
+/// Tau never infers a first role.
+#[test]
+fn peer_entrypoint_rejects_unavailable_or_outside_auto_start_role() {
+    let td = TempDir::new().expect("tempdir");
+    std::fs::write(
+        td.path().join("harness.yaml"),
+        r#"
+agents:
+  role_groups:
+    manager:
+      peer_entrypoint:
+        auto_start_role: engineer
+"#,
+    )
+    .expect("write");
+    let error =
+        load_harness_settings_in(&dirs_with_config(td.path())).expect_err("outside group role");
+    assert!(
+        error
+            .to_string()
+            .contains("auto_start_role `engineer` is not an enabled role in group `manager`")
+    );
+}
+
 /// Ensures absent user config files still load the built-in harness baseline.
 #[test]
 fn missing_user_files_load_the_built_in_baseline() {

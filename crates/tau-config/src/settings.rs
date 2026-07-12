@@ -724,6 +724,9 @@ impl<'de> Deserialize<'de> for HarnessSettings {
             .map_err(D::Error::custom)?;
         validate_custom_prompts(&settings.custom_prompts).map_err(D::Error::custom)?;
         settings.remove_disabled_roles();
+        settings
+            .validate_peer_entrypoint()
+            .map_err(D::Error::custom)?;
         Ok(settings)
     }
 }
@@ -947,6 +950,16 @@ pub struct RoleGroup {
     pub name: String,
     /// Globally unique role names in this group, in config declaration order.
     pub roles: Vec<String>,
+    /// Optional policy making this group the session's peer-routing entrypoint.
+    pub peer_entrypoint: Option<PeerEntrypoint>,
+}
+
+/// Effective peer-routing authority for one role group.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct PeerEntrypoint {
+    /// Optional enabled role that peer routing may start when no eligible
+    /// endpoint exists. Absence permits routing to existing endpoints only.
+    pub auto_start_role: Option<String>,
 }
 
 type RawRoleGroups = IndexMap<String, RawRoleGroup>;
@@ -954,6 +967,8 @@ type RawRoleGroups = IndexMap<String, RawRoleGroup>;
 #[derive(Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct RawRoleGroup {
+    #[serde(alias = "peerEntryPoint", deserialize_with = "present_option")]
+    peer_entrypoint: Option<Option<RawPeerEntrypoint>>,
     // `enabled` was a mistaken old spelling. Keep it as a little bandaid for
     // reading old config during migration.
     #[serde(alias = "enabled", deserialize_with = "present_option")]
@@ -995,6 +1010,13 @@ struct RawRoleGroup {
     #[serde(alias = "requiredSkills")]
     required_skills: Option<Vec<tau_proto::SkillName>>,
     roles: IndexMap<String, AgentRolePatch>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct RawPeerEntrypoint {
+    #[serde(alias = "autoStartRole", deserialize_with = "present_option")]
+    auto_start_role: Option<Option<String>>,
 }
 
 // Role patches must distinguish three scalar states during layered merges:
@@ -1121,6 +1143,7 @@ impl HarnessSettings {
 
     fn apply_role_group_overrides(&mut self, groups: RawRoleGroups) -> Result<(), SettingsError> {
         for (group_name, group) in groups {
+            let peer_entrypoint = group.peer_entrypoint.clone();
             let group_defaults = group.defaults();
             let existing_role_names = self
                 .role_groups
@@ -1137,10 +1160,12 @@ impl HarnessSettings {
             if group.roles.is_empty() {
                 if existing_role_names.is_none() {
                     self.role_groups.push(RoleGroup {
-                        name: group_name,
+                        name: group_name.clone(),
                         roles: Vec::new(),
+                        peer_entrypoint: None,
                     });
                 }
+                self.apply_peer_entrypoint_patch(&group_name, peer_entrypoint);
                 continue;
             }
             for (role_name, role_overrides) in group.roles {
@@ -1156,8 +1181,35 @@ impl HarnessSettings {
                     })
                     .or_insert(override_role);
             }
+            self.apply_peer_entrypoint_patch(&group_name, peer_entrypoint);
         }
         Ok(())
+    }
+
+    fn apply_peer_entrypoint_patch(
+        &mut self,
+        group_name: &str,
+        patch: Option<Option<RawPeerEntrypoint>>,
+    ) {
+        let Some(patch) = patch else {
+            return;
+        };
+        let group = self
+            .role_groups
+            .iter_mut()
+            .find(|group| group.name == group_name)
+            .expect("role group was inserted before applying its peer policy");
+        match patch {
+            None => group.peer_entrypoint = None,
+            Some(patch) => {
+                let effective = group
+                    .peer_entrypoint
+                    .get_or_insert_with(PeerEntrypoint::default);
+                if let Some(auto_start_role) = patch.auto_start_role {
+                    effective.auto_start_role = auto_start_role;
+                }
+            }
+        }
     }
 
     fn apply_role_cli_overrides(
@@ -1198,7 +1250,8 @@ impl HarnessSettings {
                 .roles
                 .retain(|role_name| self.roles.contains_key(role_name));
         }
-        self.role_groups.retain(|group| !group.roles.is_empty());
+        self.role_groups
+            .retain(|group| !group.roles.is_empty() || group.peer_entrypoint.is_some());
     }
 
     fn ensure_role_group_member(
@@ -1229,6 +1282,37 @@ impl HarnessSettings {
             self.role_groups.push(RoleGroup {
                 name: group_name.to_owned(),
                 roles: vec![role_name.to_owned()],
+                peer_entrypoint: None,
+            });
+        }
+        Ok(())
+    }
+
+    fn validate_peer_entrypoint(&self) -> Result<(), SettingsError> {
+        let mut entrypoints = self
+            .role_groups
+            .iter()
+            .filter(|group| group.peer_entrypoint.is_some());
+        let Some(group) = entrypoints.next() else {
+            return Ok(());
+        };
+        if let Some(second) = entrypoints.next() {
+            return Err(SettingsError::MultiplePeerEntrypoints {
+                first_group: group.name.clone(),
+                second_group: second.name.clone(),
+            });
+        }
+        let Some(auto_start_role) = group
+            .peer_entrypoint
+            .as_ref()
+            .and_then(|entrypoint| entrypoint.auto_start_role.as_ref())
+        else {
+            return Ok(());
+        };
+        if !group.roles.contains(auto_start_role) || !self.roles.contains_key(auto_start_role) {
+            return Err(SettingsError::InvalidPeerAutoStartRole {
+                group: group.name.clone(),
+                role: auto_start_role.clone(),
             });
         }
         Ok(())
@@ -1612,6 +1696,20 @@ pub enum SettingsError {
         /// Later group that attempted to contain the same role.
         second_group: String,
     },
+    /// More than one effective role group advertised peer-routing authority.
+    MultiplePeerEntrypoints {
+        /// First configured entrypoint group.
+        first_group: String,
+        /// Later conflicting entrypoint group.
+        second_group: String,
+    },
+    /// A peer auto-start role was not an enabled member of its owning group.
+    InvalidPeerAutoStartRole {
+        /// Entrypoint group containing the invalid role reference.
+        group: String,
+        /// Invalid role name.
+        role: String,
+    },
     /// A command-line role override named a role absent from effective config.
     UnknownRoleCliOverride(String),
     /// A `--harness-config KEY=VALUE` override had invalid syntax, YAML, or
@@ -1633,6 +1731,17 @@ impl fmt::Display for SettingsError {
             Self::UnknownRoleCliOverride(role) => {
                 write!(f, "unknown role in CLI override: `{role}`")
             }
+            Self::MultiplePeerEntrypoints {
+                first_group,
+                second_group,
+            } => write!(
+                f,
+                "multiple role_groups configure peer_entrypoint (`{first_group}` and `{second_group}`)"
+            ),
+            Self::InvalidPeerAutoStartRole { group, role } => write!(
+                f,
+                "peer_entrypoint auto_start_role `{role}` is not an enabled role in group `{group}`"
+            ),
             Self::InvalidHarnessConfigCliOverride(message) => {
                 write!(f, "invalid harness config CLI override: {message}")
             }
@@ -1645,6 +1754,8 @@ impl std::error::Error for SettingsError {
         match self {
             Self::Config(source) => Some(source),
             Self::DuplicateGroupedRole { .. }
+            | Self::MultiplePeerEntrypoints { .. }
+            | Self::InvalidPeerAutoStartRole { .. }
             | Self::UnknownRoleCliOverride(_)
             | Self::InvalidHarnessConfigCliOverride(_) => None,
         }
@@ -1907,6 +2018,7 @@ pub fn load_harness_settings_with_cli_overrides_in(
     }
     role_settings.apply_role_cli_overrides(role_overrides)?;
     role_settings.remove_disabled_roles();
+    role_settings.validate_peer_entrypoint()?;
     role_settings.apply_agent_globals_to_roles();
     settings.prompt_fragments = role_settings.prompt_fragments;
     settings.required_skills = role_settings.required_skills;
@@ -2039,6 +2151,26 @@ fn normalize_harness_config_value(
     if let Some(serde_json::Value::Object(role_groups)) = agents.get_mut("role_groups") {
         for (group_name, group) in role_groups {
             let group_path = format!("agents.role_groups.{group_name}");
+            if let serde_json::Value::Object(group_map) = group {
+                normalize_alias_key(
+                    group_map,
+                    "peerEntryPoint",
+                    "peer_entrypoint",
+                    source,
+                    &group_path,
+                )?;
+                if let Some(serde_json::Value::Object(entrypoint)) =
+                    group_map.get_mut("peer_entrypoint")
+                {
+                    normalize_alias_key(
+                        entrypoint,
+                        "autoStartRole",
+                        "auto_start_role",
+                        source,
+                        &format!("{group_path}.peer_entrypoint"),
+                    )?;
+                }
+            }
             normalize_role_config_keys(group, source, &group_path)?;
             if let serde_json::Value::Object(group_map) = group
                 && let Some(serde_json::Value::Object(roles)) = group_map.get_mut("roles")
@@ -2187,7 +2319,12 @@ fn normalize_harness_config_override_key(key: &str) -> String {
     if parts[0] == "agents" && parts.len() > 1 {
         parts[1] = canonical_agents_key(parts[1]);
         if parts[1] == "role_groups" && parts.len() > 3 {
-            if parts[3] == "roles" {
+            if matches!(parts[3], "peerEntryPoint" | "peer_entrypoint") {
+                parts[3] = "peer_entrypoint";
+                if parts.len() > 4 && parts[4] == "autoStartRole" {
+                    parts[4] = "auto_start_role";
+                }
+            } else if parts[3] == "roles" {
                 if parts.len() > 5 {
                     parts[5] = canonical_role_key(parts[5]);
                 }

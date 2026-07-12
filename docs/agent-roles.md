@@ -65,6 +65,25 @@ for example `--harness-config 'agents.promptFragments=[{ name: "run.policy", pri
 
 Roles live in `harness.yaml` under globally unique `agents.role_groups`. Each group has a `roles` map, plus optional role fields such as `prompt_fragments` that apply as defaults to every role in the group. `agents.default_role` selects the startup role; if omitted, Tau starts on the first role in `agents.role_groups` order. Within a group, role cycling sorts by `order` first and role name second; roles without `order` sort after ordered roles by name.
 
+At most one effective group may opt into same-UID peer rendezvous with
+`peer_entrypoint: {}`. The independent `auto_start_role` field is the only grant
+that permits a future bare peer message to start a model-backed endpoint, and it
+must explicitly name an enabled role in that group:
+
+```yaml
+agents:
+  role_groups:
+    external:
+      peer_entrypoint:
+        auto_start_role: external
+      roles:
+        external: {}
+```
+
+Higher-precedence `peer_entrypoint: null` removes routing/discovery authority;
+`auto_start_role: null` removes only auto-start authority. Group ordering never
+selects a spending role.
+
 ```json5
 {
   agents: {
@@ -183,3 +202,18 @@ Exact `enable_tools` entries may be used instead. `RoleCompaction::Disabled`
 controls automatic compaction and does not override an explicit tool opt-in.
 The cross-agent tool authorizes any other loaded same-session agent; ancestry,
 watching, and messaging are irrelevant to that explicit capability.
+
+## Discovery tool opt-in
+
+`session_list` and `agent_list` are independently disabled by default:
+
+```yaml
+enable_tool_groups:
+  - session_discovery
+  - agent_discovery
+```
+
+`session_list` returns only bounded, basename-redacted live sessions that confirm
+an entrypoint. `agent_list` returns a bounded current-session-only snapshot of
+agent id, creation role/group, `pending|idle|running`, and self status. Neither
+tool grants messaging, watching, starting, or compaction authority.

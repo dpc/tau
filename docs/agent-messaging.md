@@ -87,6 +87,14 @@ sender transcript records `agent.message_sent` with recipient
 `agent.message_received` with `sender_session_id`. UI and prompt rendering show
 external addresses as `session/agent`.
 
+Roles that explicitly enable the `session_discovery` tool group can use
+`session_list({query?, limit?})` to find live sessions whose target harness
+advertises a configured peer entrypoint. The snapshot is bounded and racy and
+contains only session id, project basename, and current-session status. It does
+not enumerate remote agents. The independent `agent_discovery` group enables
+`agent_list({query?, role?, group?, state?, limit?})`, which lists only redacted
+loaded/pending agents in the caller's current session.
+
 External delivery failures (no daemon, stale socket, ambiguous session, wrong
 active target session, stopped/unknown recipient) fail the tool call and do not
 record a successful sender-side projection.

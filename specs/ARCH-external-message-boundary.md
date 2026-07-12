@@ -29,3 +29,10 @@ or ambiguous metadata must fail discovery rather than silently choosing a target
 A failed socket probe alone must not delete runtime discovery files while the
 metadata pid is still live; dead-pid entries remain eligible for cleanup on
 platforms where Tau has a safe pid-liveness backend.
+
+Peer-session discovery uses a metadata-schema-versioned `peer_entrypoint` hint
+only to select bounded probe candidates. A live target RPC confirms the active
+session and effective entrypoint before a session is returned. Discovery never
+exposes socket paths, pids, full project roots, agent ids, prompts, tasks,
+models, tools, or provider state. The authority split is confirmed by
+[DESIGN-peer-entrypoints](DESIGN-peer-entrypoints.md).

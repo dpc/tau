@@ -26,6 +26,8 @@ pub(crate) struct LoadedRoles {
     pub selected_role: String,
     /// Effective role groups used for UI navigation.
     pub role_groups: Vec<tau_proto::HarnessRoleGroup>,
+    /// Effective role group authorized as the peer-routing entrypoint.
+    pub peer_entrypoint: Option<tau_config::settings::RoleGroup>,
     /// Missing configured default role warning to surface after startup.
     pub missing_default_role: Option<MissingDefaultRole>,
 }
@@ -37,6 +39,11 @@ pub(crate) fn load_roles(harness_settings: &HarnessSettings) -> LoadedRoles {
     let roles = harness_settings.roles.clone();
     let role_overrides = HashMap::new();
     let role_groups = role_groups_for_roles(&roles, &harness_settings.role_groups);
+    let peer_entrypoint = harness_settings
+        .role_groups
+        .iter()
+        .find(|group| group.peer_entrypoint.is_some())
+        .cloned();
     let (selected_role, missing_default_role) =
         select_startup_role(harness_settings, &roles, &role_groups);
     LoadedRoles {
@@ -44,6 +51,7 @@ pub(crate) fn load_roles(harness_settings: &HarnessSettings) -> LoadedRoles {
         role_overrides,
         selected_role,
         role_groups,
+        peer_entrypoint,
         missing_default_role,
     }
 }

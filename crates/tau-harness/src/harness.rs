@@ -1810,6 +1810,8 @@ pub struct Harness {
     disabled_role_reasons: HashMap<String, DisabledRoleReason>,
     /// Ordered role navigation groups for the currently available roles.
     pub(crate) available_role_groups: Vec<tau_proto::HarnessRoleGroup>,
+    /// Effective role group authorized for peer discovery and bare routing.
+    pub(crate) peer_entrypoint: Option<tau_config::settings::RoleGroup>,
     /// Reusable prompt templates from the effective startup harness settings.
     pub(crate) custom_prompts: Vec<tau_proto::HarnessCustomPrompt>,
     /// Handlebars template used to mint new stable agent identifiers.
@@ -2198,6 +2200,8 @@ struct HarnessBaseParts {
     available_roles: HashMap<String, tau_config::settings::AgentRole>,
     /// Role groups available for navigation and UI display.
     available_role_groups: Vec<tau_proto::HarnessRoleGroup>,
+    /// Effective role group authorized for peer discovery and bare routing.
+    peer_entrypoint: Option<tau_config::settings::RoleGroup>,
     /// Reusable prompt templates loaded from effective harness settings.
     custom_prompts: Vec<tau_proto::HarnessCustomPrompt>,
     /// Runtime role overrides loaded from settings.
@@ -2241,6 +2245,8 @@ struct StartupRoles {
     selected_role: String,
     /// Role groups visible to clients.
     available_role_groups: Vec<tau_proto::HarnessRoleGroup>,
+    /// Effective peer entrypoint group.
+    peer_entrypoint: Option<tau_config::settings::RoleGroup>,
     /// Warning emitted when the configured default role was unavailable.
     missing_default_role: Option<MissingDefaultRole>,
     /// Model selected for the startup role before provider metadata arrives.
@@ -2422,6 +2428,7 @@ impl Harness {
             available_roles: parts.available_roles,
             disabled_role_reasons: HashMap::new(),
             available_role_groups: parts.available_role_groups,
+            peer_entrypoint: parts.peer_entrypoint,
             custom_prompts: parts.custom_prompts,
             role_overrides: parts.role_overrides,
             tool_policy: parts.tool_policy,
@@ -2563,6 +2570,7 @@ impl Harness {
             role_overrides,
             selected_role,
             role_groups: available_role_groups,
+            peer_entrypoint,
             missing_default_role,
         } = load_roles(&harness_settings);
         let custom_prompts = harness_settings
@@ -2601,6 +2609,7 @@ impl Harness {
             current_session_start_reason: launch.reason,
             available_roles,
             available_role_groups,
+            peer_entrypoint,
             custom_prompts,
             role_overrides,
             tool_policy: harness_settings.tool_policy.clone(),
@@ -2892,6 +2901,7 @@ impl Harness {
             role_overrides,
             selected_role,
             role_groups: available_role_groups,
+            peer_entrypoint,
             missing_default_role,
         } = load_roles(harness_settings);
         if available_roles.is_empty() {
@@ -2906,6 +2916,7 @@ impl Harness {
             role_overrides,
             selected_role,
             available_role_groups,
+            peer_entrypoint,
             missing_default_role,
             selected_model,
         })
@@ -2938,6 +2949,7 @@ impl Harness {
             current_session_start_reason: parts.launch.reason,
             available_roles: parts.roles.available_roles,
             available_role_groups: parts.roles.available_role_groups,
+            peer_entrypoint: parts.roles.peer_entrypoint,
             custom_prompts,
             role_overrides: parts.roles.role_overrides,
             tool_policy: parts.harness_settings.tool_policy.clone(),
@@ -2972,6 +2984,11 @@ impl Harness {
     /// Record the runtime harness metadata path stem owned by the daemon.
     pub(crate) fn set_runtime_harness_path(&mut self, path: PathBuf) {
         self.runtime_harness_path = Some(path);
+    }
+
+    /// Return whether this harness advertises an effective peer entrypoint.
+    pub(crate) fn has_peer_entrypoint(&self) -> bool {
+        self.peer_entrypoint.is_some()
     }
 
     fn accept_initial_client(
@@ -3292,6 +3309,27 @@ impl Harness {
                     client_id.as_str(),
                     None,
                     HarnessOutputMessage::ExternalAgentMessageResult(result),
+                );
+            }
+            HarnessCommand::SessionDiscoveryCompleted(command) => {
+                if command.session_generation != self.current_session_generation
+                    || self.tool_agents.get(&command.call_id) != Some(&command.conversation_id)
+                    || !self.agents.contains_key(&command.conversation_id)
+                {
+                    tracing::debug!(
+                        target: "tau_harness::session_discovery",
+                        call_id = %command.call_id,
+                        "dropping stale session discovery completion"
+                    );
+                    return Ok(());
+                }
+                self.finish_harness_owned_tool_with_cbor_result(
+                    &command.conversation_id,
+                    command.call_id,
+                    command.tool_name,
+                    command.tool_type,
+                    command.result,
+                    None,
                 );
             }
         }
@@ -6289,7 +6327,8 @@ impl Harness {
             | HarnessInputMessage::GetRenderedPrompt(_)
             | HarnessInputMessage::GetRenderedToolDefinitions(_)
             | HarnessInputMessage::ExternalAgentMessage(_)
-            | HarnessInputMessage::ExternalAgentMessageAuth(_) => {}
+            | HarnessInputMessage::ExternalAgentMessageAuth(_)
+            | HarnessInputMessage::PeerSessionProbe(_) => {}
         }
         Ok(())
     }
@@ -7014,6 +7053,25 @@ impl Harness {
                     client_id,
                     None,
                     HarnessOutputMessage::ExternalAgentMessageAuthResult(result),
+                );
+                Ok(true)
+            }
+            HarnessInputMessage::PeerSessionProbe(request) => {
+                if !self
+                    .external_message_peers
+                    .contains(&tau_proto::ConnectionId::from(client_id))
+                {
+                    return Ok(true);
+                }
+                let result = tau_proto::PeerSessionProbeResult {
+                    request_id: request.request_id,
+                    available: request.session_id == self.current_session_id
+                        && self.has_peer_entrypoint(),
+                };
+                let _ = self.bus.send_to(
+                    client_id,
+                    None,
+                    HarnessOutputMessage::PeerSessionProbeResult(result),
                 );
                 Ok(true)
             }
@@ -13588,12 +13646,21 @@ impl Harness {
             .filter(|role| self.available_roles.contains_key(role))
     }
 
-    fn role_group_name_for_role(&self, role: &str) -> String {
+    pub(crate) fn role_group_name_for_role(&self, role: &str) -> String {
         self.available_role_groups
             .iter()
             .find(|group| group.roles.iter().any(|group_role| group_role == role))
             .map(|group| group.name.clone())
             .unwrap_or_else(|| role.to_owned())
+    }
+
+    /// Return public id and creation role for pending start requests without
+    /// exposing their parent, prompt, source, or tool ownership.
+    pub(crate) fn pending_agent_summary_data(&self) -> Vec<(String, String)> {
+        self.pending_start_agent_requests
+            .iter()
+            .map(|pending| (pending.agent_id.clone(), pending.role.clone()))
+            .collect()
     }
 
     fn display_name_for_new_agent(

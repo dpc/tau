@@ -3829,6 +3829,7 @@ dependencies = [
 name = "tau-socket"
 version = "0.1.0"
 dependencies = [
+ "socket2",
  "tau-proto",
  "tau-test-support",
  "tempfile",

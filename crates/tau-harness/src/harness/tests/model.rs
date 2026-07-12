@@ -192,6 +192,7 @@ fn role_groups_sort_roles_by_order_then_name() {
             "alpha-peer".to_owned(),
             "engineer-junior".to_owned(),
         ],
+        peer_entrypoint: None,
     }];
 
     let groups = crate::model::role_groups_for_roles(&roles, &configured_groups);
@@ -955,6 +956,7 @@ fn load_roles_ignores_stale_harness_state() {
         selected_role,
         role_groups: _role_groups,
         missing_default_role: _missing_default_role,
+        peer_entrypoint: _,
     } = load_roles(&harness_settings);
     assert!(role_overrides.is_empty());
     assert_eq!(selected_role, "engineer");
@@ -1078,6 +1080,7 @@ fn load_roles_falls_back_to_engineer_role_while_models_are_provider_owned() {
         selected_role,
         role_groups: _role_groups,
         missing_default_role: _missing_default_role,
+        peer_entrypoint: _,
     } = load_roles(&harness_settings);
     assert!(!role_overrides.contains_key("default"));
     assert!(!roles.contains_key("default"));
@@ -1139,6 +1142,7 @@ fn role_missing_fields_use_model_defaults() {
         selected_role,
         role_groups: _role_groups,
         missing_default_role: _missing_default_role,
+        peer_entrypoint: _,
     } = load_roles(&harness_settings);
     let available = ["local/aaa".into(), "local/engineer".into()];
     let available_provider_models = provider_models(

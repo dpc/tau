@@ -4,6 +4,7 @@
 //! same self-delimiting CBOR event codec as stdio transports.
 
 use std::io::{self, BufWriter};
+use std::os::fd::OwnedFd;
 use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
@@ -378,7 +379,43 @@ impl SocketPeer {
     /// independent reader/writer ownership.
     pub fn connect(path: impl Into<PathBuf>) -> Result<Self, SocketTransportError> {
         let path = path.into();
-        let stream = UnixStream::connect(&path)
+        let stream =
+            UnixStream::connect(&path).map_err(|source| SocketTransportError::Connect {
+                path: path.clone(),
+                source,
+            })?;
+        Self::new(stream)
+    }
+
+    /// Connects to an existing Unix socket and bounds subsequent stream I/O.
+    ///
+    /// This is intended for short-lived runtime discovery and control RPCs
+    /// whose caller owns an absolute deadline. The caller must still bound
+    /// how long it waits for a complete protocol response.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the socket cannot be connected, its I/O timeouts
+    /// cannot be configured, or it cannot be cloned for split I/O ownership.
+    pub fn connect_with_io_timeout(
+        path: impl Into<PathBuf>,
+        timeout: Duration,
+    ) -> Result<Self, SocketTransportError> {
+        let path = path.into();
+        let stream = connect_unix_with_timeout(&path, timeout).map_err(|source| {
+            SocketTransportError::Connect {
+                path: path.clone(),
+                source,
+            }
+        })?;
+        stream
+            .set_read_timeout(Some(timeout))
+            .map_err(|source| SocketTransportError::Connect {
+                path: path.clone(),
+                source,
+            })?;
+        stream
+            .set_write_timeout(Some(timeout))
             .map_err(|source| SocketTransportError::Connect { path, source })?;
         Self::new(stream)
     }
@@ -413,6 +450,19 @@ impl SocketPeer {
             .map_err(|source| SocketTransportError::Flush { source })
     }
 
+    /// Updates the write timeout for the next bounded control-plane operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the connected stream rejects the timeout update.
+    pub fn set_write_timeout(&self, timeout: Duration) -> Result<(), SocketTransportError> {
+        self.writer
+            .get_ref()
+            .get_ref()
+            .set_write_timeout(Some(timeout))
+            .map_err(|source| SocketTransportError::Flush { source })
+    }
+
     /// Reads one harness → peer protocol message or an explicit timeout/close
     /// outcome.
     ///
@@ -434,6 +484,13 @@ impl SocketPeer {
             Err(RecvTimeoutError::Disconnected) => Ok(SocketReceive::Closed),
         }
     }
+}
+
+fn connect_unix_with_timeout(path: &Path, timeout: Duration) -> io::Result<UnixStream> {
+    let socket = socket2::Socket::new(socket2::Domain::UNIX, socket2::Type::STREAM, None)?;
+    socket.connect_timeout(&socket2::SockAddr::unix(path)?, timeout)?;
+    let fd: OwnedFd = socket.into();
+    Ok(fd.into())
 }
 
 impl Drop for SocketPeer {

@@ -29,7 +29,9 @@ the scoped [Linked Specs](specs/ARCH-tau.md).
 - **Durable agent work:** event logs preserve sessions, transcripts, branch
   trees, rewinds, detach, and resume.
 - **Multi-agent workflows:** agents can delegate to isolated sub-agents, exchange
-  messages, and collect background tool work without blocking the main flow.
+  messages, discover explicitly advertised peer sessions or redacted local
+  agents through disabled-by-default tools, and collect background tool work
+  without blocking the main flow.
 - **PIM extensions:** controlled email and calendar tools expose useful personal
   information while keeping reads, writes, approvals, and logs explicit.
 - **Safe shell/filesystem access:** mutating shell and file tools acquire update

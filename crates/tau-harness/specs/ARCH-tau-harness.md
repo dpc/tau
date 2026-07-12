@@ -37,6 +37,11 @@ conversation/thread routes are rejected independently of presentation metadata.
 clients and extensions, sequences events, applies interception, persists durable
 session/agent facts, and delivers committed events to subscribers.
 
+The harness also owns the bounded, redacted discovery snapshots specified by
+[SPEC-tau-harness-peer-discovery](SPEC-tau-harness-peer-discovery.md).
+Runtime metadata advertises only an untrusted entrypoint hint; the live harness
+confirms its current session and effective policy through a narrow probe.
+
 ## Watch ownership
 
 The harness owns the live topology, endpoint retirement, sanitized provider-work snapshots, and notification fanout specified by [SPEC-agent-watch](../../../specs/SPEC-agent-watch.md). Display labels remain separate from topology.

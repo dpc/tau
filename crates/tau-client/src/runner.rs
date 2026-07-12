@@ -276,6 +276,7 @@ pub(crate) fn dispatch_message<State>(
         | tau_proto::HarnessOutputMessage::ExtensionDataResult(_)
         | tau_proto::HarnessOutputMessage::ExternalAgentMessageResult(_)
         | tau_proto::HarnessOutputMessage::ExternalAgentMessageAuthResult(_)
+        | tau_proto::HarnessOutputMessage::PeerSessionProbeResult(_)
         | tau_proto::HarnessOutputMessage::RegisterTransportCapabilityResult(_)
         | tau_proto::HarnessOutputMessage::TransportMessageIngressResult(_)
         | tau_proto::HarnessOutputMessage::CompleteTransportSendResult(_) => {

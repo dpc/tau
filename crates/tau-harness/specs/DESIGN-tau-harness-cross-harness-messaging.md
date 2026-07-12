@@ -1,6 +1,6 @@
 # DESIGN-tau-harness-cross-harness-messaging: Cross-harness agent messages use a dedicated asynchronous RPC
 
-Status: unconfirmed
+Status: confirmed, 2026-07-12, tau-agent-44tt user approval
 
 The harness-owned `message` tool treats `<session-id>/<agent_id>` as an external
 address only when the session id differs from the current active session. It
@@ -30,6 +30,10 @@ Tests should cover the runtime metadata active-session contract, stale/ambiguous
 discovery, untrusted peer rejection, target-session and recipient validation,
 external prompt/UI labels, sender capability binding, non-blocking receiver-side
 authentication, and failure not publishing a sent projection.
+
+Opt-in discovery, bare entrypoint routing, and its separate auto-start authority
+are governed by
+[DESIGN-peer-entrypoints](../../../specs/DESIGN-peer-entrypoints.md).
 
 Schema-guided argument repair runs only in the pre-dispatch validation failure
 branch. The harness executes a repaired call only after the repaired arguments
