@@ -6,6 +6,8 @@
 //! client.
 //! Shared-token multi-session ownership follows
 //! `DESIGN-tau-ext-telegram-single-token-gateway`.
+//! The standalone daemon and sidecar split is described by
+//! `ARCH-tau-telegram-gateway`.
 
 mod gateway;
 mod gateway_client;

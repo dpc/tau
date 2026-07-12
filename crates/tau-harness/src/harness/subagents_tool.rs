@@ -432,6 +432,8 @@ impl Harness {
     /// and the local removal fallback may observe the same endpoint.
     /// Surviving watchers receive an authoritative replacement snapshot;
     /// the unloaded watcher does not receive another event addressed to it.
+    ///
+    /// See `DESIGN-tau-harness-watch-endpoint-retirement`.
     pub(crate) fn retire_agent_watch_endpoint(&mut self, agent_id: &str) {
         let outgoing = self.agent_watches.remove(agent_id).unwrap_or_default();
         let incoming = self.agent_watchers.remove(agent_id).unwrap_or_default();

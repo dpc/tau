@@ -1,3 +1,6 @@
+//! Local-fake and loopback lifecycle coverage follows
+//! `DESIGN-tau-ext-slack-lifecycle-testing`.
+
 use std::io::{Read, Write};
 use std::sync::Mutex;
 
