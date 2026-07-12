@@ -1,5 +1,36 @@
 use super::*;
 
+/// Peer I/O admission rejects excess work before spawning another worker and
+/// releases every process-wide slot when the admitted jobs finish.
+#[test]
+fn peer_io_admission_is_non_queued_and_bounded() {
+    let outbound = (0..MAX_OUTBOUND_PEER_IO_JOBS)
+        .map(|_| PeerIoPermit::outbound().expect("outbound slot"))
+        .collect::<Vec<_>>();
+    assert!(PeerIoPermit::outbound().is_none());
+    drop(outbound);
+    assert!(PeerIoPermit::outbound().is_some());
+
+    let connection = tau_proto::ConnectionId::from("bounded-peer");
+    let inbound = (0..MAX_INBOUND_PEER_AUTH_JOBS_PER_CONNECTION)
+        .map(|_| PeerIoPermit::inbound(connection.clone()).expect("inbound slot"))
+        .collect::<Vec<_>>();
+    assert!(PeerIoPermit::inbound(connection).is_none());
+    drop(inbound);
+}
+
+/// Isolated runtime lookup leases reject the seventeenth stalled operation and
+/// restore capacity after every retained worker exits.
+#[test]
+fn runtime_lookup_admission_is_non_queued_and_recovers() {
+    let permits = (0..MAX_OUTBOUND_PEER_IO_JOBS)
+        .map(|_| RuntimeLookupPermit::try_acquire().expect("runtime lookup slot"))
+        .collect::<Vec<_>>();
+    assert!(RuntimeLookupPermit::try_acquire().is_none());
+    drop(permits);
+    assert!(RuntimeLookupPermit::try_acquire().is_some());
+}
+
 fn conv(id: &str) -> AgentId {
     crate::parse_agent_id(id)
 }

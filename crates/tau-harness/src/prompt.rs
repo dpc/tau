@@ -974,8 +974,10 @@ pub(crate) fn assemble_prompt_context_from(
                     let message_text = match (direction, sender_session_id) {
                         (tau_core::AgentMessageDirection::Inbound, Some(sender_session_id)) => {
                             format!(
-                                "[tau-internal]: Message from {sender_session_id}/{sender_id}\n\n{}",
-                                message
+                                "[tau-internal]: Authenticated peer message\n\n<tau_peer_message sender_session=\"{}\" sender_agent=\"{}\">\n{}\n</tau_peer_message>",
+                                xml_escape(sender_session_id.as_str()),
+                                xml_escape(sender_id.as_str()),
+                                xml_escape(message)
                             )
                         }
                         _ => message.clone(),

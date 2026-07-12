@@ -696,9 +696,9 @@ fn message_recipient_parser_validates_external_address_grammar() {
 
     match parse_message_recipient("session-b/agent_b", &current).expect("valid external recipient")
     {
-        MessageRecipientAddress::ExternalAgent {
+        MessageRecipientAddress::External {
             session_id,
-            agent_id,
+            recipient: tau_proto::ExternalAgentMessageRecipient::Exact(agent_id),
         } => {
             assert_eq!(session_id.as_str(), "session-b");
             assert_eq!(agent_id.as_str(), "agent_b");
@@ -708,6 +708,26 @@ fn message_recipient_parser_validates_external_address_grammar() {
     assert!(parse_message_recipient("session-b/agent/extra", &current).is_err());
     assert!(parse_message_recipient("session-b/", &current).is_err());
     assert!(parse_message_recipient("session-b/bad/agent", &current).is_err());
+    assert!(matches!(
+        parse_message_recipient("&session-b", &current),
+        Ok(MessageRecipientAddress::External {
+            recipient: tau_proto::ExternalAgentMessageRecipient::BareEntrypoint,
+            ..
+        })
+    ));
+    assert!(matches!(
+        parse_message_recipient("&session-b/@agent_b", &current),
+        Ok(MessageRecipientAddress::External {
+            recipient: tau_proto::ExternalAgentMessageRecipient::Exact(agent),
+            ..
+        }) if agent.as_str() == "agent_b"
+    ));
+    assert!(matches!(
+        parse_message_recipient("&session-a", &current),
+        Ok(MessageRecipientAddress::LocalEntrypoint)
+    ));
+    assert!(parse_message_recipient("&session-b/agent_b", &current).is_err());
+    assert!(parse_message_recipient("&bad session", &current).is_err());
 }
 
 #[test]

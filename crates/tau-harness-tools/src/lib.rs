@@ -1275,14 +1275,23 @@ fn handle_message_tool_call(
             MessageRecipientAddress::LocalAgent(agent_id) => host
                 .publish_agent_message(conversation_id, agent_id.to_string(), parsed.message)
                 .map(|()| MessageToolFlow::Finished),
-            MessageRecipientAddress::ExternalAgent {
+            MessageRecipientAddress::LocalEntrypoint => host
+                .publish_local_peer_message(
+                    conversation_id,
+                    parsed.message,
+                    call_id.clone(),
+                    visible_tool_name.clone(),
+                    call.tool_type,
+                )
+                .map(|()| MessageToolFlow::PendingPeer),
+            MessageRecipientAddress::External {
                 session_id,
-                agent_id,
+                recipient,
             } => {
                 host.publish_external_agent_message(
                     conversation_id,
                     session_id,
-                    agent_id,
+                    recipient,
                     parsed.message,
                     call_id.clone(),
                     visible_tool_name.clone(),
@@ -1302,7 +1311,7 @@ fn handle_message_tool_call(
             "Message sent".to_owned(),
             None,
         ),
-        Ok(MessageToolFlow::PendingExternal) => {}
+        Ok(MessageToolFlow::PendingPeer | MessageToolFlow::PendingExternal) => {}
         Err(message) => host.finish_tool_with_error(
             conversation_id,
             call_id,
@@ -1317,6 +1326,7 @@ fn handle_message_tool_call(
 
 enum MessageToolFlow {
     Finished,
+    PendingPeer,
     PendingExternal,
 }
 
@@ -1560,9 +1570,10 @@ fn handle_agent_list_tool_call(
 enum MessageRecipientAddress {
     User,
     LocalAgent(tau_proto::AgentId),
-    ExternalAgent {
+    LocalEntrypoint,
+    External {
         session_id: tau_proto::SessionId,
-        agent_id: tau_proto::AgentId,
+        recipient: tau_proto::ExternalAgentMessageRecipient,
     },
 }
 
@@ -1572,6 +1583,37 @@ fn parse_message_recipient(
 ) -> Result<MessageRecipientAddress, String> {
     if raw == "user" {
         return Ok(MessageRecipientAddress::User);
+    }
+    if let Some(peer) = raw.strip_prefix('&') {
+        let slash_count = peer.matches('/').count();
+        if slash_count == 0 {
+            let session_id = parse_peer_session_id(peer)?;
+            return Ok(if &session_id == current_session_id {
+                MessageRecipientAddress::LocalEntrypoint
+            } else {
+                MessageRecipientAddress::External {
+                    session_id,
+                    recipient: tau_proto::ExternalAgentMessageRecipient::BareEntrypoint,
+                }
+            });
+        }
+        if slash_count != 1 {
+            return Err("peer recipient must have at most one `/`".to_owned());
+        }
+        let (session, agent) = peer.split_once("/@").ok_or_else(|| {
+            "explicit peer recipient must be `&<session-id>/@<agent-id>`".to_owned()
+        })?;
+        let session_id = parse_peer_session_id(session)?;
+        let agent_id = tau_proto::AgentId::parse(agent)
+            .map_err(|err| format!("invalid peer recipient agent id `{agent}`: {err}"))?;
+        return Ok(if &session_id == current_session_id {
+            MessageRecipientAddress::LocalAgent(agent_id)
+        } else {
+            MessageRecipientAddress::External {
+                session_id,
+                recipient: tau_proto::ExternalAgentMessageRecipient::Exact(agent_id),
+            }
+        });
     }
     let slash_count = raw.matches('/').count();
     if slash_count == 0 {
@@ -1590,14 +1632,26 @@ fn parse_message_recipient(
     }
     let agent_id = tau_proto::AgentId::parse(agent)
         .map_err(|err| format!("invalid external recipient agent id `{agent}`: {err}"))?;
-    let session_id = tau_proto::SessionId::from(session.to_owned());
+    let session_id = parse_peer_session_id(session)?;
     if &session_id == current_session_id {
         return Ok(MessageRecipientAddress::LocalAgent(agent_id));
     }
-    Ok(MessageRecipientAddress::ExternalAgent {
+    Ok(MessageRecipientAddress::External {
         session_id,
-        agent_id,
+        recipient: tau_proto::ExternalAgentMessageRecipient::Exact(agent_id),
     })
+}
+
+fn parse_peer_session_id(raw: &str) -> Result<tau_proto::SessionId, String> {
+    if raw.is_empty()
+        || raw.len() > 128
+        || !raw
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+    {
+        return Err("session id must contain 1-128 route-safe ASCII characters".to_owned());
+    }
+    Ok(raw.to_owned().into())
 }
 
 fn parse_message_args(arguments: &CborValue) -> Result<MessageArgs, String> {
@@ -1893,7 +1947,7 @@ fn agent_start_tool_spec() -> ToolSpec {
 }
 
 fn message_tool_spec() -> ToolSpec {
-    ToolSpec { name: ToolName::new(MESSAGE_TOOL_NAME), model_visible_name: None, description: Some("Send an async message to another agent, or the user. Use recipient_id `user`, a local agent id, or an external `<session-id>/<agent_id>` address. Requires `recipient_id` and `message`.".to_owned()), tool_type: ToolType::Function, parameters: Some(serde_json::json!({"type":"object","properties":{"recipient_id":{"type":"string","description":"Recipient `user`, local agent_id, or external `<session-id>/<agent_id>`."},"message":{"type":"string","description":"Message body."}},"required":["recipient_id","message"],"additionalProperties":false})), format: None, tags: Vec::new(), enabled_by_default: true, background_support: Some(BackgroundSupport::Never), examples: Vec::new() }
+    ToolSpec { name: ToolName::new(MESSAGE_TOOL_NAME), model_visible_name: None, description: Some("Send an async message to another agent, a peer session entrypoint, or the user. Use recipient_id `user`, a local agent id, `&<session-id>`, `&<session-id>/@<agent-id>`, or the legacy exact `<session-id>/<agent-id>` spelling. Requires `recipient_id` and `message`.".to_owned()), tool_type: ToolType::Function, parameters: Some(serde_json::json!({"type":"object","properties":{"recipient_id":{"type":"string","description":"Recipient `user`, local agent id, bare `&session`, or exact `&session/@agent` (legacy `session/agent` is accepted)."},"message":{"type":"string","description":"Message body."}},"required":["recipient_id","message"],"additionalProperties":false})), format: None, tags: Vec::new(), enabled_by_default: true, background_support: Some(BackgroundSupport::Never), examples: Vec::new() }
 }
 
 fn agent_watch_tool_spec() -> ToolSpec {

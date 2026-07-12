@@ -561,13 +561,31 @@ impl<'a> InternalToolHost<'a> {
         self.harness.current_session_id.clone()
     }
 
+    /// Resolve and publish one bare message through this session's entrypoint.
+    pub fn publish_local_peer_message(
+        &mut self,
+        conversation_id: &AgentId,
+        message: String,
+        call_id: ToolCallId,
+        tool_name: ToolName,
+        tool_type: tau_proto::ToolType,
+    ) -> Result<(), String> {
+        self.harness.publish_peer_entrypoint_message_from_agent(
+            conversation_id,
+            message,
+            call_id,
+            tool_name,
+            tool_type,
+        )
+    }
+
     /// Publish an external message and arrange asynchronous tool completion.
     #[allow(clippy::too_many_arguments)]
     pub fn publish_external_agent_message(
         &mut self,
         conversation_id: &AgentId,
         recipient_session_id: tau_proto::SessionId,
-        recipient_id: tau_proto::AgentId,
+        recipient: tau_proto::ExternalAgentMessageRecipient,
         message: String,
         call_id: ToolCallId,
         tool_name: ToolName,
@@ -577,7 +595,7 @@ impl<'a> InternalToolHost<'a> {
         self.harness.publish_external_agent_message_from_agent(
             conversation_id,
             recipient_session_id,
-            recipient_id,
+            recipient,
             message,
             tau_proto::AgentMessageKind::Message,
             Some(crate::harness::ExternalMessageToolCompletion {

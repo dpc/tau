@@ -48,6 +48,8 @@ pub(crate) struct SessionDiscoveryCompletedCommand {
 
 /// Completion payload for asynchronous external message tool delivery.
 pub(crate) struct ExternalMessageToolCompletedCommand {
+    /// Global outbound-I/O admission retained until event-loop consumption.
+    pub(crate) _permit: Option<crate::harness::PeerIoPermit>,
     /// Conversation that owns the tool call.
     pub(crate) conversation_id: tau_proto::AgentId,
     /// Session generation that was active when the external message tool call
@@ -59,21 +61,33 @@ pub(crate) struct ExternalMessageToolCompletedCommand {
     pub(crate) tool_name: tau_proto::ToolName,
     /// Tool type declared by the provider.
     pub(crate) tool_type: tau_proto::ToolType,
-    /// `Ok` on delivery success, `Err` with user-facing failure text.
-    pub(crate) result: Result<(), String>,
+    /// Resolved recipient and started flag on delivery success.
+    pub(crate) result: Result<(tau_proto::AgentId, bool), String>,
     /// Original call arguments for error details.
     pub(crate) details: tau_proto::CborValue,
     /// Pending sender-authentication entry to remove when the async attempt
     /// ends.
     pub(crate) auth_message_id: tau_proto::AgentMessageId,
-    /// Sender-side projection to publish only after confirmed delivery.
-    pub(crate) sent_event: Option<tau_proto::AgentMessageSent>,
+    /// Whether an ordinary message needs a sender-side durable projection.
+    pub(crate) publish_sent: bool,
+    /// Harness-authored sender id for the eventual projection.
+    pub(crate) sender_id: tau_proto::AgentId,
+    /// Target session for the eventual resolved projection.
+    pub(crate) recipient_session_id: tau_proto::SessionId,
+    /// Delivery kind.
+    pub(crate) kind: tau_proto::AgentMessageKind,
+    /// Message body.
+    pub(crate) message: String,
 }
 
 /// Completion payload for receiver-side external-message authentication.
 pub(crate) struct ExternalMessageAuthCompletedCommand {
+    /// Global inbound-I/O admission retained until event-loop consumption.
+    pub(crate) _permit: Option<crate::harness::PeerIoPermit>,
     /// Socket client that sent the external message RPC.
     pub(crate) client_id: tau_proto::ConnectionId,
+    /// Session generation in which callback authentication began.
+    pub(crate) session_generation: u64,
     /// Request to publish after successful sender authentication.
     pub(crate) request: tau_proto::ExternalAgentMessageRequest,
     /// Authentication result from the helper thread.

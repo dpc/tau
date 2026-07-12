@@ -829,25 +829,35 @@ impl Harness {
                 }
             }
             InterceptAction::Drop => {
-                let must_pass_default = MUST_PASS_BY_DEFAULT.contains(&event_name)
-                    || mandatory_harness_notice(&original_event);
-                if must_pass || must_pass_default {
-                    tracing::warn!(
-                        target: "tau_harness::interception",
-                        event = %event_name,
-                        must_pass_caller = must_pass,
-                        must_pass_default = must_pass_default,
-                        "interceptor tried to Drop a must-pass event; \
-                         publishing original instead",
-                    );
-                    Some(original_event)
-                } else {
-                    tracing::debug!(
-                        target: "tau_harness::interception",
-                        event = %event_name,
-                        "interceptor dropped event",
+                if Harness::pending_external_receive_message_id(&original_event)
+                    .is_some_and(|id| self.pending_external_receive_acks.contains_key(id))
+                {
+                    self.fail_pending_external_receive(
+                        &original_event,
+                        "peer receive projection was rejected by interception",
                     );
                     None
+                } else {
+                    let must_pass_default = MUST_PASS_BY_DEFAULT.contains(&event_name)
+                        || mandatory_harness_notice(&original_event);
+                    if must_pass || must_pass_default {
+                        tracing::warn!(
+                            target: "tau_harness::interception",
+                            event = %event_name,
+                            must_pass_caller = must_pass,
+                            must_pass_default = must_pass_default,
+                            "interceptor tried to Drop a must-pass event; \
+                             publishing original instead",
+                        );
+                        Some(original_event)
+                    } else {
+                        tracing::debug!(
+                            target: "tau_harness::interception",
+                            event = %event_name,
+                            "interceptor dropped event",
+                        );
+                        None
+                    }
                 }
             }
         };

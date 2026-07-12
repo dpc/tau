@@ -20,11 +20,19 @@ agents. Existing exact cross-session addressing remains available to callers
 that already know an agent id, so entrypoint opt-in is an accidental
 coordination boundary rather than a same-UID security sandbox.
 
-Authentication of the sender's exact pending request must precede endpoint
-selection and any auto-start spend. Delivery retries use a durable two-sided
-transaction keyed by sender session, sender agent, and logical message id.
-Selection, one in-flight auto-start reservation, bounded queued input, role
-availability, and active-session generation are target-harness-owned.
+Callback correlation of the sender's exact pending request must precede bare
+endpoint selection and any auto-start spend. Peer delivery is cooperative
+same-UID, best-effort at-least-once IPC: live success waits for the exact receive
+projection to commit, but crash ambiguity may duplicate delivery, agent/model
+work, or spend. No distributed WAL, restart resumption, or cross-session
+exactly-once deduplication is required. Selection, live single-flight auto-start,
+bounded queued input, role availability, and active-session generation are
+target-harness-owned.
+
+Current implementation state: `auto_start_role` is validated configuration
+only. Bare routing uses an already loaded or pending eligible endpoint,
+always reports `started: false`, and fails privately when none exists. No peer
+message can start an agent until the separately reviewed auto-start phase lands.
 
 Manager roles and task-brokering policy are deliberately outside this decision;
 they can compose these ordinary tools and role-group settings later without a

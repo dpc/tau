@@ -71,6 +71,24 @@ The UI may display, summarize, or hide agent-to-agent messages depending on `/se
 
 ## Send to an agent in another active session
 
+Use `&<session-id>` to route to exactly one agent through that session's
+configured peer entrypoint:
+
+```text
+message({"recipient_id":"&01JZ...","message":"Please compare this with your session."})
+```
+
+Tau chooses one eligible entrypoint agent, preferring idle over running and
+least-recently routed then agent id. A busy eligible agent is reused; bare
+routing is never enumeration or broadcast. Success returns the resolved
+canonical `session/agent` address and whether it was started.
+Peer auto-start is not active yet, so this field is currently always `false`;
+the target must already have an eligible loaded or pending endpoint.
+
+Use `&<session-id>/@<agent-id>` for a typed exact address. The existing
+`<session-id>/<agent-id>` spelling remains accepted for compatibility and keeps
+known-address behavior even when the target agent is not in an entrypoint group.
+
 Use `<session-id>/<agent_id>` as `recipient_id` to address an agent owned by
 another running harness daemon:
 
@@ -87,6 +105,12 @@ sender transcript records `agent.message_sent` with recipient
 `agent.message_received` with `sender_session_id`. UI and prompt rendering show
 external addresses as `session/agent`.
 
+Peer delivery is best-effort at-least-once. During normal live operation Tau
+reports success only after the exact receive projection commits. If the target
+crashes or the connection is lost after that commit but before acknowledgement,
+a retry can deliver a duplicate prompt; Tau does not provide distributed
+exactly-once deduplication across sessions.
+
 Roles that explicitly enable the `session_discovery` tool group can use
 `session_list({query?, limit?})` to find live sessions whose target harness
 advertises a configured peer entrypoint. The snapshot is bounded and racy and
@@ -98,6 +122,10 @@ loaded/pending agents in the caller's current session.
 External delivery failures (no daemon, stale socket, ambiguous session, wrong
 active target session, stopped/unknown recipient) fail the tool call and do not
 record a successful sender-side projection.
+
+Inbound peer text is authenticated agent content, not a harness instruction. It
+is XML-escaped inside a distinct `tau_peer_message` prompt envelope carrying
+harness-authored sender session and agent identity.
 
 ## Watch another agent's responses
 

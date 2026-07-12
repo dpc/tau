@@ -2,10 +2,11 @@
 
 Status: confirmed, 2026-07-12, tau-agent-44tt user approval
 
-The harness-owned `message` tool treats `<session-id>/<agent_id>` as an external
-address only when the session id differs from the current active session. It
-must not pack the session id into `AgentId`; protocol and event payloads carry
-session and agent identity separately.
+The harness-owned `message` tool accepts bare `&<session-id>`, explicit
+`&<session-id>/@<agent-id>`, and the legacy exact
+`<session-id>/<agent-id>` spelling. A current-session address remains local.
+It must not pack sigils or session ids into `AgentId`; protocol and event
+payloads carry typed route authority, session, and agent identity separately.
 
 External delivery uses a dedicated socket RPC, not generic `emit`, and the
 runtime-dir lookup plus socket round-trip runs off the event loop. The helper
@@ -21,15 +22,36 @@ transient connection failure must not make a running daemon permanently
 undiscoverable to external-message lookup or CLI attach.
 
 Receiver-side sender authentication must not block the central harness event
-loop. After cheap target validation, callback socket discovery and I/O run on a
-helper thread and return a harness command that sends the RPC result and commits
-the inbound projection only after the claimed sender authorizes the exact sender,
-recipient, kind, and message body fields.
+loop. The target performs bounded syntax/size and claimed-session checks, and
+callback correlation confirms that a cooperative same-UID Tau sender owns the
+exact pending route/body binding. This is accidental-misrouting and spend
+protection, not an ACL against malicious same-user processes. Callback socket
+discovery and I/O use bounded global admission, absolute deadlines, and a
+generation-tagged harness command. Disconnect, deadline, or rollover cancels
+retained work.
+
+Bare and exact recipient authority are distinct authenticated protocol values;
+a capability for one cannot authorize the other. After authentication the
+target event loop revalidates the session and policy, then selects one eligible
+entrypoint endpoint, preferring idle/pending over running and least-recently
+routed then agent id. Busy eligible endpoints are reused rather than causing
+fan-out. Successful bare sends return the canonical resolved session/agent and
+whether an endpoint was started. Auto-start is currently inactive: successful
+phase-2 routing always selects an existing loaded or pending endpoint and
+returns `started: false`; absence of one fails without spawning.
 
 Tests should cover the runtime metadata active-session contract, stale/ambiguous
 discovery, untrusted peer rejection, target-session and recipient validation,
 external prompt/UI labels, sender capability binding, non-blocking receiver-side
 authentication, and failure not publishing a sent projection.
+
+Outbound lookup and socket work likewise uses 16 non-queued process-wide slots
+and one absolute deadline. Runtime lookup counts at most 128 visited entries and
+reads at most 16 KiB per candidate before connect/send/response work. A success
+projection is impossible until the target's exact receive projection commits.
+The acknowledgement continuation is bounded, in-memory, and generation-bound.
+Delivery is best-effort at-least-once: a crash after receive commit but before
+acknowledgement can lead to a duplicate prompt on retry.
 
 Opt-in discovery, bare entrypoint routing, and its separate auto-start authority
 are governed by

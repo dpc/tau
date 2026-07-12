@@ -24,6 +24,355 @@ fn add_second_test_model(h: &mut Harness) {
     h.provider_model_routes.insert(second, route);
 }
 
+fn queue_intercepted_peer_receive(
+    h: &mut Harness,
+    connection_id: &tau_proto::ConnectionId,
+    recipient_id: tau_proto::AgentId,
+    suffix: &str,
+) {
+    h.external_message_peers.insert(connection_id.clone());
+    let result = h.complete_external_agent_message_auth(
+        connection_id.clone(),
+        h.current_session_generation,
+        tau_proto::ExternalAgentMessageRequest {
+            request_id: format!("peer-request-{suffix}"),
+            message_id: format!("peer-message-{suffix}").into(),
+            capability: "test-capability".to_owned(),
+            sender_session_id: "sender-session".into(),
+            sender_id: crate::parse_agent_id("sender_agent"),
+            recipient_session_id: h.current_session_id.clone(),
+            recipient: tau_proto::ExternalAgentMessageRecipient::Exact(recipient_id),
+            kind: tau_proto::AgentMessageKind::Message,
+            message: "peer body".to_owned(),
+        },
+        Ok(()),
+    );
+    assert!(result.is_none(), "success must wait for receive commit");
+}
+
+fn committed_peer_receives(h: &Harness) -> Vec<tau_proto::AgentMessageReceived> {
+    event_log_events(h)
+        .into_iter()
+        .filter_map(|event| match event {
+            Event::AgentMessageReceived(received)
+                if received.sender_session_id.as_deref() == Some("sender-session") =>
+            {
+                Some(received)
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// Remote success remains pending while interception parks the exact receive
+/// projection and is released only by the post-persistence commit reaction.
+#[test]
+fn peer_receive_ack_waits_for_intercepted_projection_commit() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(tmp.path()).expect("harness");
+    let cid = ensure_test_user_agent(&mut h);
+    let recipient_id = durable_agent_id_for_conversation(&h, &cid).clone();
+    let _interceptor = connect_test_tool(&mut h, "peer-receive-interceptor");
+    h.handle_extension_event(
+        "peer-receive-interceptor",
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(
+                tau_proto::EventName::AGENT_MESSAGE_RECEIVED,
+            )],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("register interceptor");
+    let connection_id = tau_proto::ConnectionId::from("peer-client");
+
+    queue_intercepted_peer_receive(&mut h, &connection_id, recipient_id, "commit");
+
+    assert_eq!(h.pending_external_receive_acks.len(), 1);
+    assert!(committed_peer_receives(&h).is_empty());
+    h.handle_extension_event(
+        "peer-receive-interceptor",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Pass(None),
+        })),
+    )
+    .expect("pass receive");
+    assert!(h.pending_external_receive_acks.is_empty());
+    assert_eq!(committed_peer_receives(&h).len(), 1);
+}
+
+/// An interceptor rejection fails and removes the live continuation rather than
+/// acknowledging or committing a receive projection.
+#[test]
+fn peer_receive_interception_drop_never_acknowledges_or_commits() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(tmp.path()).expect("harness");
+    let cid = ensure_test_user_agent(&mut h);
+    let recipient_id = durable_agent_id_for_conversation(&h, &cid).clone();
+    let _interceptor = connect_test_tool(&mut h, "peer-drop-interceptor");
+    h.handle_extension_event(
+        "peer-drop-interceptor",
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(
+                tau_proto::EventName::AGENT_MESSAGE_RECEIVED,
+            )],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("register interceptor");
+    let connection_id = tau_proto::ConnectionId::from("peer-client");
+
+    queue_intercepted_peer_receive(&mut h, &connection_id, recipient_id, "drop");
+    h.handle_extension_event(
+        "peer-drop-interceptor",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Drop,
+        })),
+    )
+    .expect("drop receive");
+
+    assert!(h.pending_external_receive_acks.is_empty());
+    assert!(committed_peer_receives(&h).is_empty());
+}
+
+/// Recipient disappearance while a receive is parked invalidates the
+/// continuation at commit-time and cannot produce a durable receive.
+#[test]
+fn peer_receive_target_disappearance_before_commit_fails() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(tmp.path()).expect("harness");
+    let cid = ensure_test_user_agent(&mut h);
+    let recipient_id = durable_agent_id_for_conversation(&h, &cid).clone();
+    let _interceptor = connect_test_tool(&mut h, "peer-target-interceptor");
+    h.handle_extension_event(
+        "peer-target-interceptor",
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(
+                tau_proto::EventName::AGENT_MESSAGE_RECEIVED,
+            )],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("register interceptor");
+    let connection_id = tau_proto::ConnectionId::from("peer-client");
+    queue_intercepted_peer_receive(&mut h, &connection_id, recipient_id, "target-gone");
+
+    h.remove_agent(&cid);
+    h.handle_extension_event(
+        "peer-target-interceptor",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Pass(None),
+        })),
+    )
+    .expect("pass receive");
+
+    assert!(h.pending_external_receive_acks.is_empty());
+    assert!(committed_peer_receives(&h).is_empty());
+}
+
+/// Current-session bare routing delays its sent projection until the exact
+/// receive projection passes interception and commits.
+#[test]
+fn local_peer_sent_projection_waits_for_receive_commit() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(tmp.path()).expect("harness");
+    h.peer_entrypoint = Some(tau_config::settings::RoleGroup {
+        name: "engineer".to_owned(),
+        roles: vec!["engineer".to_owned()],
+        peer_entrypoint: Some(tau_config::settings::PeerEntrypoint::default()),
+    });
+    let cid = ensure_test_user_agent(&mut h);
+    let _interceptor = connect_test_tool(&mut h, "local-peer-interceptor");
+    h.handle_extension_event(
+        "local-peer-interceptor",
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(
+                tau_proto::EventName::AGENT_MESSAGE_RECEIVED,
+            )],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("register interceptor");
+
+    h.publish_peer_entrypoint_message_from_agent(
+        &cid,
+        "local peer body".to_owned(),
+        "local-peer-call".into(),
+        ToolName::new("message"),
+        tau_proto::ToolType::Function,
+    )
+    .expect("queue local peer");
+
+    assert!(h.pending_external_receive_acks.len() == 1);
+    assert!(
+        !event_log_events(&h)
+            .iter()
+            .any(|event| matches!(event, Event::AgentMessageSent(_)))
+    );
+    h.handle_extension_event(
+        "local-peer-interceptor",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Pass(None),
+        })),
+    )
+    .expect("pass receive");
+    assert!(h.pending_external_receive_acks.is_empty());
+    assert!(
+        event_log_events(&h)
+            .iter()
+            .any(|event| matches!(event, Event::AgentMessageSent(_)))
+    );
+}
+
+/// A canceled local continuation released after rollover retires silently and
+/// cannot publish old receive/sent/tool terminal facts into the new session.
+#[test]
+fn local_peer_parked_across_rollover_has_no_stale_terminal() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(tmp.path()).expect("harness");
+    h.peer_entrypoint = Some(tau_config::settings::RoleGroup {
+        name: "engineer".to_owned(),
+        roles: vec!["engineer".to_owned()],
+        peer_entrypoint: Some(tau_config::settings::PeerEntrypoint::default()),
+    });
+    let cid = ensure_test_user_agent(&mut h);
+    let call_id: ToolCallId = "local-rollover-call".into();
+    h.tool_agents.insert(call_id.clone(), cid.clone());
+    let _interceptor = connect_test_tool(&mut h, "local-rollover-interceptor");
+    h.handle_extension_event(
+        "local-rollover-interceptor",
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(
+                tau_proto::EventName::AGENT_MESSAGE_RECEIVED,
+            )],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("register interceptor");
+    h.publish_peer_entrypoint_message_from_agent(
+        &cid,
+        "old-session peer body".to_owned(),
+        call_id.clone(),
+        ToolName::new("message"),
+        tau_proto::ToolType::Function,
+    )
+    .expect("queue local peer");
+
+    h.switch_session("replacement".into(), tau_proto::SessionStartReason::New)
+        .expect("switch session");
+    h.handle_extension_event(
+        "local-rollover-interceptor",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Pass(None),
+        })),
+    )
+    .expect("release old receive");
+
+    assert!(h.pending_external_receive_acks.is_empty());
+    assert!(!event_log_events(&h).iter().any(|event| {
+        matches!(event, Event::AgentMessageSent(message) if message.message == "old-session peer body")
+            || matches!(event, Event::AgentMessageReceived(message) if message.message == "old-session peer body")
+            || matches!(event, Event::ToolResult(result) if result.call_id == call_id)
+            || matches!(event, Event::ToolError(error) if error.call_id == call_id)
+    }));
+}
+
+/// Bare entrypoint authority is revalidated at the persistence boundary, so a
+/// parked receive cannot commit after the target policy is revoked.
+#[test]
+fn peer_receive_bare_authority_revocation_before_commit_fails() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(tmp.path()).expect("harness");
+    h.peer_entrypoint = Some(tau_config::settings::RoleGroup {
+        name: "engineer".to_owned(),
+        roles: vec!["engineer".to_owned()],
+        peer_entrypoint: Some(tau_config::settings::PeerEntrypoint::default()),
+    });
+    ensure_test_user_agent(&mut h);
+    let _interceptor = connect_test_tool(&mut h, "bare-revoke-interceptor");
+    h.handle_extension_event(
+        "bare-revoke-interceptor",
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(
+                tau_proto::EventName::AGENT_MESSAGE_RECEIVED,
+            )],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("register interceptor");
+    let connection_id = tau_proto::ConnectionId::from("peer-client");
+    h.external_message_peers.insert(connection_id.clone());
+    let result = h.complete_external_agent_message_auth(
+        connection_id,
+        h.current_session_generation,
+        tau_proto::ExternalAgentMessageRequest {
+            request_id: "bare-revoke".to_owned(),
+            message_id: "bare-revoke-message".into(),
+            capability: "capability".to_owned(),
+            sender_session_id: "sender-session".into(),
+            sender_id: crate::parse_agent_id("sender_agent"),
+            recipient_session_id: h.current_session_id.clone(),
+            recipient: tau_proto::ExternalAgentMessageRecipient::BareEntrypoint,
+            kind: tau_proto::AgentMessageKind::Message,
+            message: "peer body".to_owned(),
+        },
+        Ok(()),
+    );
+    assert!(result.is_none());
+
+    h.peer_entrypoint = None;
+    h.handle_extension_event(
+        "bare-revoke-interceptor",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Pass(None),
+        })),
+    )
+    .expect("pass receive");
+
+    assert!(h.pending_external_receive_acks.is_empty());
+    assert!(committed_peer_receives(&h).is_empty());
+}
+
+/// A parked old-generation receive retains a canceled tombstone across rollover
+/// and is rejected when the interceptor later releases it.
+#[test]
+fn peer_receive_parked_across_rollover_cannot_commit() {
+    let tmp = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(tmp.path()).expect("harness");
+    let cid = ensure_test_user_agent(&mut h);
+    let recipient_id = durable_agent_id_for_conversation(&h, &cid).clone();
+    let _interceptor = connect_test_tool(&mut h, "peer-rollover-interceptor");
+    h.handle_extension_event(
+        "peer-rollover-interceptor",
+        TestProtocolItem::Message(TestMessage::Intercept(Intercept {
+            selectors: vec![EventSelector::Exact(
+                tau_proto::EventName::AGENT_MESSAGE_RECEIVED,
+            )],
+            priority: InterceptionPriority::new(0),
+        })),
+    )
+    .expect("register interceptor");
+    let connection_id = tau_proto::ConnectionId::from("peer-client");
+    queue_intercepted_peer_receive(&mut h, &connection_id, recipient_id, "rollover");
+
+    h.switch_session("replacement".into(), tau_proto::SessionStartReason::New)
+        .expect("switch session");
+    assert!(
+        h.pending_external_receive_acks
+            .values()
+            .all(|pending| pending.canceled)
+    );
+    h.handle_extension_event(
+        "peer-rollover-interceptor",
+        TestProtocolItem::Message(TestMessage::InterceptReply(InterceptReply {
+            action: InterceptAction::Pass(None),
+        })),
+    )
+    .expect("release old receive");
+
+    assert!(h.pending_external_receive_acks.is_empty());
+    assert!(committed_peer_receives(&h).is_empty());
+}
+
 /// A final response parked before commit must not fan out watch content after
 /// removing the watched sender has made that endpoint non-live.
 #[test]

@@ -17437,7 +17437,9 @@ fn external_agent_message_request_publishes_received_projection() {
             sender_session_id: "other-session".into(),
             sender_id: crate::parse_agent_id("sender_agent"),
             recipient_session_id: "s1".into(),
-            recipient_id: crate::parse_agent_id(&recipient_id),
+            recipient: tau_proto::ExternalAgentMessageRecipient::Exact(crate::parse_agent_id(
+                &recipient_id,
+            )),
             kind: tau_proto::AgentMessageKind::Message,
             message: "hello from outside".to_owned(),
         },
@@ -17486,7 +17488,9 @@ fn external_agent_message_request_rejects_wrong_active_session() {
             sender_session_id: "other-session".into(),
             sender_id: crate::parse_agent_id("sender_agent"),
             recipient_session_id: "not-s1".into(),
-            recipient_id: crate::parse_agent_id(&recipient_id),
+            recipient: tau_proto::ExternalAgentMessageRecipient::Exact(crate::parse_agent_id(
+                &recipient_id,
+            )),
             kind: tau_proto::AgentMessageKind::Message,
             message: "hello from outside".to_owned(),
         },
@@ -17515,7 +17519,9 @@ fn external_agent_message_request_rejects_unknown_recipient() {
             sender_session_id: "other-session".into(),
             sender_id: crate::parse_agent_id("sender_agent"),
             recipient_session_id: "s1".into(),
-            recipient_id: crate::parse_agent_id("missing_agent"),
+            recipient: tau_proto::ExternalAgentMessageRecipient::Exact(crate::parse_agent_id(
+                "missing_agent",
+            )),
             kind: tau_proto::AgentMessageKind::Message,
             message: "hello from outside".to_owned(),
         },
@@ -17551,7 +17557,9 @@ fn external_agent_message_request_rejects_empty_message() {
             sender_session_id: "other-session".into(),
             sender_id: crate::parse_agent_id("sender_agent"),
             recipient_session_id: "s1".into(),
-            recipient_id: crate::parse_agent_id(&recipient_id),
+            recipient: tau_proto::ExternalAgentMessageRecipient::Exact(crate::parse_agent_id(
+                &recipient_id,
+            )),
             kind: tau_proto::AgentMessageKind::Message,
             message: " \n\t ".to_owned(),
         },
@@ -17584,7 +17592,9 @@ fn external_agent_message_auth_start_rejects_invalid_target_before_callback() {
         sender_session_id: "other-session".into(),
         sender_id: crate::parse_agent_id("sender_agent"),
         recipient_session_id: h.current_session_id.clone(),
-        recipient_id: crate::parse_agent_id(&recipient_id),
+        recipient: tau_proto::ExternalAgentMessageRecipient::Exact(crate::parse_agent_id(
+            &recipient_id,
+        )),
         kind: tau_proto::AgentMessageKind::Message,
         message: "hello".to_owned(),
     };
@@ -17596,7 +17606,7 @@ fn external_agent_message_auth_start_rejects_invalid_target_before_callback() {
                 recipient_session_id: "wrong-session".into(),
                 ..base.clone()
             },
-            "active session",
+            "target session unavailable",
         ),
         (
             tau_proto::ExternalAgentMessageRequest {
@@ -17605,14 +17615,6 @@ fn external_agent_message_auth_start_rejects_invalid_target_before_callback() {
                 ..base.clone()
             },
             "must not be empty",
-        ),
-        (
-            tau_proto::ExternalAgentMessageRequest {
-                request_id: "external-preauth-unknown".to_owned(),
-                recipient_id: crate::parse_agent_id("missing_agent"),
-                ..base
-            },
-            "unknown message recipient",
         ),
     ];
 
@@ -17624,6 +17626,18 @@ fn external_agent_message_auth_start_rejects_invalid_target_before_callback() {
         assert_eq!(result.request_id, request_id);
         assert!(result.error.expect("error").contains(expected_error));
     }
+    let unknown = tau_proto::ExternalAgentMessageRequest {
+        request_id: "external-preauth-unknown".to_owned(),
+        recipient: tau_proto::ExternalAgentMessageRecipient::Exact(crate::parse_agent_id(
+            "missing_agent",
+        )),
+        ..base
+    };
+    assert!(
+        h.start_external_agent_message_auth(client_id, unknown)
+            .is_none(),
+        "exact inventory must not be consulted before sender authentication"
+    );
     assert!(session_agent_message_received_events(&h).is_empty());
 
     h.shutdown().expect("shutdown");
@@ -17645,7 +17659,9 @@ fn external_agent_message_auth_binds_sender_identity_and_kind() {
             sender_session_id: h.current_session_id.clone(),
             sender_id: crate::parse_agent_id("sender_agent"),
             recipient_session_id: "target-session".into(),
-            recipient_id: crate::parse_agent_id("recipient_agent"),
+            recipient: tau_proto::ExternalAgentMessageRecipient::Exact(crate::parse_agent_id(
+                "recipient_agent",
+            )),
             kind: tau_proto::AgentMessageKind::WatchResponse,
             message: "authorized body".to_owned(),
         },
@@ -17658,7 +17674,9 @@ fn external_agent_message_auth_binds_sender_identity_and_kind() {
         sender_session_id: h.current_session_id.clone(),
         sender_id: crate::parse_agent_id("sender_agent"),
         recipient_session_id: "target-session".into(),
-        recipient_id: crate::parse_agent_id("recipient_agent"),
+        recipient: tau_proto::ExternalAgentMessageRecipient::Exact(crate::parse_agent_id(
+            "recipient_agent",
+        )),
         kind: tau_proto::AgentMessageKind::WatchResponse,
         message: "authorized body".to_owned(),
     };
@@ -17713,7 +17731,9 @@ fn external_agent_message_rpc_requires_external_peer_hello() {
         sender_session_id: "other-session".into(),
         sender_id: crate::parse_agent_id("sender_agent"),
         recipient_session_id: "s1".into(),
-        recipient_id: crate::parse_agent_id(&recipient_id),
+        recipient: tau_proto::ExternalAgentMessageRecipient::Exact(crate::parse_agent_id(
+            &recipient_id,
+        )),
         kind: tau_proto::AgentMessageKind::Message,
         message: "forged".to_owned(),
     };
@@ -17806,7 +17826,9 @@ fn external_agent_message_rpc_rejects_unauthenticated_socket_sender() {
             sender_session_id: sender.current_session_id.clone(),
             sender_id: crate::parse_agent_id("sender_agent"),
             recipient_session_id: target.current_session_id.clone(),
-            recipient_id: crate::parse_agent_id(&recipient_id),
+            recipient: tau_proto::ExternalAgentMessageRecipient::Exact(crate::parse_agent_id(
+                &recipient_id,
+            )),
             kind: tau_proto::AgentMessageKind::Message,
             message: "hello over socket".to_owned(),
         },
@@ -17852,12 +17874,243 @@ fn external_agent_message_rpc_rejects_unauthenticated_socket_sender() {
         result
             .error
             .expect("authentication error")
-            .contains("no running daemon for sender session")
+            .contains("external message authentication failed")
     );
     assert!(session_agent_message_received_events(&target).is_empty());
 
     target.shutdown().expect("shutdown target");
     sender.shutdown().expect("shutdown sender");
+}
+
+/// Two real harness event loops complete callback correlation over separate
+/// Unix sockets, and the target acknowledges only after its receive projection
+/// commits.
+#[test]
+fn external_agent_message_two_harness_live_success_commits_before_ack() {
+    let td = TempDir::new().expect("tempdir");
+    let mut sender = echo_harness(td.path().join("sender-state")).expect("start sender");
+    let mut target = echo_harness(td.path().join("target-state")).expect("start target");
+    let sender_cid = ensure_test_user_agent(&mut sender);
+    let sender_id = crate::parse_agent_id(
+        sender
+            .ensure_agent_id_for_agent(&sender_cid)
+            .expect("sender id"),
+    );
+    let target_cid = ensure_test_user_agent(&mut target);
+    let recipient_id = crate::parse_agent_id(
+        target
+            .ensure_agent_id_for_agent(&target_cid)
+            .expect("target id"),
+    );
+    let message_id: tau_proto::AgentMessageId = "two-harness-message".into();
+    let request = tau_proto::ExternalAgentMessageRequest {
+        request_id: "two-harness-request".to_owned(),
+        message_id: message_id.clone(),
+        capability: "two-harness-capability".to_owned(),
+        sender_session_id: sender.current_session_id.clone(),
+        sender_id: sender_id.clone(),
+        recipient_session_id: target.current_session_id.clone(),
+        recipient: tau_proto::ExternalAgentMessageRecipient::Exact(recipient_id.clone()),
+        kind: tau_proto::AgentMessageKind::Message,
+        message: "hello between harnesses".to_owned(),
+    };
+    sender.pending_external_message_auth.insert(
+        message_id,
+        crate::harness::PendingExternalAgentMessageAuth {
+            capability: request.capability.clone(),
+            sender_session_id: request.sender_session_id.clone(),
+            sender_id,
+            recipient_session_id: request.recipient_session_id.clone(),
+            recipient: request.recipient.clone(),
+            kind: request.kind,
+            message: request.message.clone(),
+        },
+    );
+
+    let sender_path = td.path().join("sender-daemon");
+    let sender_listener =
+        std::os::unix::net::UnixListener::bind(crate::runtime_dir::socket_path(&sender_path))
+            .expect("bind sender");
+    let sender_tx = sender.tx.clone();
+    let accept_sender = std::thread::spawn(move || {
+        let (stream, _) = sender_listener.accept().expect("accept callback");
+        sender_tx
+            .send(HarnessEvent::NewClient(stream))
+            .expect("forward callback");
+    });
+    let _sender_registration = crate::runtime_dir::register_test_session_harness(
+        sender.current_session_id.as_str(),
+        sender_path,
+    );
+
+    let target_socket = td.path().join("target.sock");
+    let target_listener =
+        std::os::unix::net::UnixListener::bind(&target_socket).expect("bind target");
+    let mut peer = tau_socket::SocketPeer::connect(&target_socket).expect("connect target");
+    let (stream, _) = target_listener.accept().expect("accept target");
+    target
+        .accept_client(stream)
+        .expect("register target client");
+    peer.send(&tau_proto::HarnessInputMessage::Hello(tau_proto::Hello {
+        protocol_version: tau_proto::PROTOCOL_VERSION,
+        client_name: crate::harness::EXTERNAL_AGENT_MESSAGE_CLIENT_NAME.into(),
+        client_kind: tau_proto::ClientKind::External,
+    }))
+    .expect("target hello");
+    peer.send(&tau_proto::HarnessInputMessage::ExternalAgentMessage(
+        request,
+    ))
+    .expect("target request");
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let result = loop {
+        for harness in [&mut target, &mut sender] {
+            match harness.rx.recv_timeout(Duration::from_millis(10)) {
+                Ok(HarnessEvent::FromConnection {
+                    connection_id,
+                    message,
+                }) => {
+                    harness
+                        .handle_client_message(&connection_id, *message)
+                        .expect("handle peer frame");
+                }
+                Ok(HarnessEvent::NewClient(stream)) => {
+                    harness
+                        .accept_client(stream)
+                        .expect("accept callback client");
+                }
+                Ok(HarnessEvent::Command(command)) => harness
+                    .handle_harness_command(command)
+                    .expect("handle peer command"),
+                Ok(other) => harness.log_event(&other),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    panic!("harness event loop disconnected")
+                }
+            }
+        }
+        match peer
+            .recv_timeout(Duration::from_millis(10))
+            .expect("peer result")
+        {
+            tau_socket::SocketReceive::Message {
+                message: tau_proto::HarnessOutputMessage::ExternalAgentMessageResult(result),
+            } => break result,
+            tau_socket::SocketReceive::Message { .. } | tau_socket::SocketReceive::Timeout
+                if Instant::now() < deadline => {}
+            tau_socket::SocketReceive::Timeout => panic!("timed out waiting for target result"),
+            tau_socket::SocketReceive::Closed => panic!("target closed before result"),
+            tau_socket::SocketReceive::Message { .. } => {}
+        }
+    };
+
+    assert_eq!(result.error, None);
+    assert_eq!(result.recipient_id, Some(recipient_id));
+    assert!(!result.started);
+    assert_eq!(durable_agent_message_received_events(&target).len(), 1);
+    accept_sender.join().expect("sender accept thread");
+    target.shutdown().expect("shutdown target");
+    sender.shutdown().expect("shutdown sender");
+}
+
+/// Discovery probes a real opted-in Harness event loop, ignores a second
+/// non-opted daemon record, and returns only the basename project label.
+#[test]
+fn peer_discovery_uses_real_harness_probe_and_redacted_output() {
+    let td = TempDir::new().expect("tempdir");
+    let _runtime = crate::runtime_dir::override_test_runtime_dir(td.path());
+    std::fs::create_dir_all(crate::runtime_dir::harnesses_dir()).expect("harnesses dir");
+    let mut target = echo_harness(td.path().join("target-state")).expect("target harness");
+    target.peer_entrypoint = Some(tau_config::settings::RoleGroup {
+        name: "engineer".to_owned(),
+        roles: vec!["engineer".to_owned()],
+        peer_entrypoint: Some(tau_config::settings::PeerEntrypoint::default()),
+    });
+    let target_path = crate::runtime_dir::harnesses_dir().join("real-target");
+    let target_listener =
+        std::os::unix::net::UnixListener::bind(crate::runtime_dir::socket_path(&target_path))
+            .expect("target listener");
+    std::fs::write(
+        crate::runtime_dir::metadata_path(&target_path),
+        serde_json::to_vec(&crate::runtime_dir::DaemonMetadata {
+            version: 2,
+            pid: std::process::id(),
+            project_root: Some(PathBuf::from("/secret/root/redacted-project")),
+            session_id: target.current_session_id.to_string(),
+            peer_entrypoint: true,
+        })
+        .expect("target metadata"),
+    )
+    .expect("write target metadata");
+    let target_tx = target.tx.clone();
+    let forwarder = std::thread::spawn(move || {
+        let (stream, _) = target_listener.accept().expect("accept discovery probe");
+        target_tx
+            .send(HarnessEvent::NewClient(stream))
+            .expect("forward discovery probe");
+    });
+    let private_path = crate::runtime_dir::harnesses_dir().join("private-target");
+    let _private_listener =
+        std::os::unix::net::UnixListener::bind(crate::runtime_dir::socket_path(&private_path))
+            .expect("private listener");
+    std::fs::write(
+        crate::runtime_dir::metadata_path(&private_path),
+        serde_json::to_vec(&crate::runtime_dir::DaemonMetadata {
+            version: 2,
+            pid: std::process::id(),
+            project_root: Some(PathBuf::from("/secret/root/private-project")),
+            session_id: "private-session".to_owned(),
+            peer_entrypoint: false,
+        })
+        .expect("private metadata"),
+    )
+    .expect("write private metadata");
+    let runtime_root = td.path().to_path_buf();
+    let (snapshot_tx, snapshot_rx) = std::sync::mpsc::channel();
+    let discovery = std::thread::spawn(move || {
+        let _runtime = crate::runtime_dir::override_test_runtime_dir(&runtime_root);
+        let snapshot =
+            crate::runtime_dir::discover_peer_sessions_for_test(None, 50, "unrelated-current");
+        snapshot_tx.send(snapshot).expect("return snapshot");
+    });
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let snapshot = loop {
+        if let Ok(snapshot) = snapshot_rx.try_recv() {
+            break snapshot;
+        }
+        assert!(Instant::now() < deadline, "timed out waiting for discovery");
+        match target.rx.recv_timeout(Duration::from_millis(10)) {
+            Ok(HarnessEvent::NewClient(stream)) => {
+                target.accept_client(stream).expect("accept probe client");
+            }
+            Ok(HarnessEvent::FromConnection {
+                connection_id,
+                message,
+            }) => {
+                target
+                    .handle_client_message(&connection_id, *message)
+                    .expect("handle discovery frame");
+            }
+            Ok(HarnessEvent::Command(command)) => target
+                .handle_harness_command(command)
+                .expect("handle discovery command"),
+            Ok(other) => target.log_event(&other),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                panic!("target event loop disconnected")
+            }
+        }
+    };
+
+    assert_eq!(snapshot.sessions.len(), 1);
+    assert_eq!(
+        snapshot.sessions[0].project_label.as_deref(),
+        Some("redacted-project")
+    );
+    assert!(!format!("{snapshot:?}").contains("/secret/"));
+    discovery.join().expect("discovery thread");
+    forwarder.join().expect("probe forwarder");
+    target.shutdown().expect("shutdown target");
 }
 
 /// Receiver-side sender authentication must run off the central harness loop.
@@ -17893,7 +18146,9 @@ fn external_agent_message_authentication_starts_without_blocking_client_handler(
                 sender_session_id: "missing-sender-session".into(),
                 sender_id: crate::parse_agent_id("sender_agent"),
                 recipient_session_id: h.current_session_id.clone(),
-                recipient_id: crate::parse_agent_id(&recipient_id),
+                recipient: tau_proto::ExternalAgentMessageRecipient::Exact(crate::parse_agent_id(
+                    &recipient_id,
+                )),
                 kind: tau_proto::AgentMessageKind::Message,
                 message: "hello".to_owned(),
             },
@@ -17938,7 +18193,7 @@ fn external_message_send_failure_does_not_publish_sent_projection() {
     h.publish_external_agent_message_from_agent(
         &cid,
         "missing-session".into(),
-        crate::parse_agent_id("recipient_agent"),
+        tau_proto::ExternalAgentMessageRecipient::Exact(crate::parse_agent_id("recipient_agent")),
         "hello".to_owned(),
         tau_proto::AgentMessageKind::Message,
         Some(
@@ -17993,24 +18248,20 @@ fn external_message_success_completion_publishes_sent_projection_and_tool_result
 
     h.handle_harness_command(crate::event::HarnessCommand::ExternalMessageToolCompleted(
         Box::new(crate::event::ExternalMessageToolCompletedCommand {
+            _permit: None,
             conversation_id: cid,
             session_generation: h.current_session_generation,
             call_id: call_id.clone(),
             tool_name: ToolName::new(crate::harness::subagents_tool::MESSAGE_TOOL_NAME),
             tool_type: tau_proto::ToolType::Function,
-            result: Ok(()),
+            result: Ok((crate::parse_agent_id("recipient_agent"), false)),
             details: CborValue::Null,
             auth_message_id: "delivered-message".into(),
-            sent_event: Some(tau_proto::AgentMessageSent {
-                message_id: "delivered-message".into(),
-                sender_id: crate::parse_agent_id("sender_agent"),
-                recipient: tau_proto::AgentMessageRecipient::ExternalAgent {
-                    session_id: "other-session".into(),
-                    agent_id: crate::parse_agent_id("recipient_agent"),
-                },
-                kind: tau_proto::AgentMessageKind::Message,
-                message: "delivered".to_owned(),
-            }),
+            publish_sent: true,
+            sender_id: crate::parse_agent_id("sender_agent"),
+            recipient_session_id: "other-session".into(),
+            kind: tau_proto::AgentMessageKind::Message,
+            message: "delivered".to_owned(),
         }),
     ))
     .expect("handle completion");
@@ -18023,6 +18274,160 @@ fn external_message_success_completion_publishes_sent_projection_and_tool_result
     );
 
     h.shutdown().expect("shutdown");
+}
+
+/// Bare peer routing is point-to-one, prefers an idle eligible endpoint over a
+/// busy one, and returns only the resolved canonical recipient.
+#[test]
+fn bare_peer_route_selects_one_idle_entrypoint_endpoint() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path().join("state")).expect("start");
+    h.peer_entrypoint = Some(tau_config::settings::RoleGroup {
+        name: "engineer".to_owned(),
+        roles: vec!["engineer".to_owned()],
+        peer_entrypoint: Some(tau_config::settings::PeerEntrypoint::default()),
+    });
+    let busy = ensure_test_user_agent(&mut h);
+    let busy_id = h.ensure_agent_id_for_agent(&busy).expect("busy id");
+    h.agents
+        .get_mut(&busy)
+        .expect("busy agent")
+        .published_runtime_state = tau_proto::AgentRuntimeState::Running;
+    let idle = h.create_durable_user_agent("s1".into(), "engineer");
+    let idle_id = h.ensure_agent_id_for_agent(&idle).expect("idle id");
+    let request = tau_proto::ExternalAgentMessageRequest {
+        request_id: "bare-select".to_owned(),
+        message_id: "bare-select-message".into(),
+        capability: "test-only".to_owned(),
+        sender_session_id: "sender-session".into(),
+        sender_id: crate::parse_agent_id("sender_agent"),
+        recipient_session_id: h.current_session_id.clone(),
+        recipient: tau_proto::ExternalAgentMessageRecipient::BareEntrypoint,
+        kind: tau_proto::AgentMessageKind::Message,
+        message: "hello peer".to_owned(),
+    };
+
+    let result = h.handle_external_agent_message_request_without_auth_for_test(request);
+
+    assert_eq!(result.error, None);
+    assert_eq!(
+        result.recipient_id.as_ref().map(ToString::to_string),
+        Some(idle_id)
+    );
+    assert!(!result.started);
+    let received = durable_agent_message_received_events(&h);
+    assert_eq!(received.len(), 1);
+    assert_ne!(received[0].recipient_id.as_str(), busy_id);
+}
+
+/// Loaded endpoints whose creation role no longer resolves to an available
+/// provider model are ineligible instead of silently accepting unserviceable
+/// peer work.
+#[test]
+fn bare_peer_route_rejects_endpoint_after_role_model_becomes_unavailable() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path().join("state")).expect("start");
+    h.peer_entrypoint = Some(tau_config::settings::RoleGroup {
+        name: "engineer".to_owned(),
+        roles: vec!["engineer".to_owned()],
+        peer_entrypoint: Some(tau_config::settings::PeerEntrypoint::default()),
+    });
+    h.create_durable_user_agent("s1".into(), "engineer");
+    h.provider_model_info.clear();
+    let request = tau_proto::ExternalAgentMessageRequest {
+        request_id: "model-revoked".to_owned(),
+        message_id: "model-revoked-message".into(),
+        capability: "test-only".to_owned(),
+        sender_session_id: "sender-session".into(),
+        sender_id: crate::parse_agent_id("sender_agent"),
+        recipient_session_id: h.current_session_id.clone(),
+        recipient: tau_proto::ExternalAgentMessageRecipient::BareEntrypoint,
+        kind: tau_proto::AgentMessageKind::Message,
+        message: "hello peer".to_owned(),
+    };
+
+    let result = h.handle_external_agent_message_request_without_auth_for_test(request);
+
+    assert_eq!(result.error.as_deref(), Some("peer route unavailable"));
+    assert!(durable_agent_message_received_events(&h).is_empty());
+}
+
+/// Phase-2 routing must keep the configured future auto-start grant inert:
+/// absence of an existing endpoint fails without creating or reserving an
+/// agent.
+#[test]
+fn bare_peer_route_never_spawns_when_auto_start_is_configured() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path().join("state")).expect("start");
+    h.peer_entrypoint = Some(tau_config::settings::RoleGroup {
+        name: "engineer".to_owned(),
+        roles: vec!["engineer".to_owned()],
+        peer_entrypoint: Some(tau_config::settings::PeerEntrypoint {
+            auto_start_role: Some("engineer".to_owned()),
+        }),
+    });
+    let agents_before = h.agents.len();
+    let pending_before = h.pending_start_agent_requests.len();
+    let request = tau_proto::ExternalAgentMessageRequest {
+        request_id: "no-auto-start".to_owned(),
+        message_id: "no-auto-start-message".into(),
+        capability: "test-only".to_owned(),
+        sender_session_id: "sender-session".into(),
+        sender_id: crate::parse_agent_id("sender_agent"),
+        recipient_session_id: h.current_session_id.clone(),
+        recipient: tau_proto::ExternalAgentMessageRecipient::BareEntrypoint,
+        kind: tau_proto::AgentMessageKind::Message,
+        message: "hello peer".to_owned(),
+    };
+
+    let result = h.handle_external_agent_message_request_without_auth_for_test(request);
+
+    assert_eq!(result.error.as_deref(), Some("peer route unavailable"));
+    assert!(!result.started);
+    assert_eq!(h.agents.len(), agents_before);
+    assert_eq!(h.pending_start_agent_requests.len(), pending_before);
+    assert!(durable_agent_message_received_events(&h).is_empty());
+}
+
+/// Sender authentication binds the typed route authority so an exact request
+/// cannot substitute for a pending bare route with the same body and ids.
+#[test]
+fn external_message_auth_rejects_bare_exact_capability_substitution() {
+    let td = TempDir::new().expect("tempdir");
+    let mut h = echo_harness(td.path().join("state")).expect("start");
+    let sender = ensure_test_user_agent(&mut h);
+    let sender_id = crate::parse_agent_id(
+        h.ensure_agent_id_for_agent(&sender)
+            .expect("sender public id"),
+    );
+    let message_id: tau_proto::AgentMessageId = "typed-auth-message".into();
+    h.pending_external_message_auth.insert(
+        message_id.clone(),
+        crate::harness::PendingExternalAgentMessageAuth {
+            capability: "typed-capability".to_owned(),
+            sender_session_id: h.current_session_id.clone(),
+            sender_id: sender_id.clone(),
+            recipient_session_id: "target-session".into(),
+            recipient: tau_proto::ExternalAgentMessageRecipient::BareEntrypoint,
+            kind: tau_proto::AgentMessageKind::Message,
+            message: "same body".to_owned(),
+        },
+    );
+    let result =
+        h.handle_external_agent_message_auth_request(tau_proto::ExternalAgentMessageAuthRequest {
+            request_id: "typed-auth".to_owned(),
+            message_id,
+            capability: "typed-capability".to_owned(),
+            sender_session_id: h.current_session_id.clone(),
+            sender_id,
+            recipient_session_id: "target-session".into(),
+            recipient: tau_proto::ExternalAgentMessageRecipient::Exact(crate::parse_agent_id(
+                "known_agent",
+            )),
+            kind: tau_proto::AgentMessageKind::Message,
+            message: "same body".to_owned(),
+        });
+    assert!(!result.authorized);
 }
 
 /// Stale async external-message completions from an abandoned session must not
@@ -18050,24 +18455,20 @@ fn stale_external_message_completion_after_session_switch_with_reused_ids_is_dro
 
     h.handle_harness_command(crate::event::HarnessCommand::ExternalMessageToolCompleted(
         Box::new(crate::event::ExternalMessageToolCompletedCommand {
+            _permit: None,
             conversation_id: cid,
             session_generation: 0,
             call_id: call_id.clone(),
             tool_name: ToolName::new(crate::harness::subagents_tool::MESSAGE_TOOL_NAME),
             tool_type: tau_proto::ToolType::Function,
-            result: Ok(()),
+            result: Ok((crate::parse_agent_id("recipient_agent"), false)),
             details: CborValue::Null,
             auth_message_id: "stale-message".into(),
-            sent_event: Some(tau_proto::AgentMessageSent {
-                message_id: "stale-message".into(),
-                sender_id: crate::parse_agent_id("sender_agent"),
-                recipient: tau_proto::AgentMessageRecipient::ExternalAgent {
-                    session_id: "other-session".into(),
-                    agent_id: crate::parse_agent_id("recipient_agent"),
-                },
-                kind: tau_proto::AgentMessageKind::Message,
-                message: "stale".to_owned(),
-            }),
+            publish_sent: true,
+            sender_id: crate::parse_agent_id("sender_agent"),
+            recipient_session_id: "other-session".into(),
+            kind: tau_proto::AgentMessageKind::Message,
+            message: "stale".to_owned(),
         }),
     ))
     .expect("handle stale completion");
@@ -19415,108 +19816,4 @@ fn ui_cannot_emit_custom_event_with_reserved_first_party_category() {
         tau_proto::CustomEvent::try_new(reserved, None, CborValue::Null).is_err(),
         "reserved first-party category must be rejected at construction"
     );
-}
-
-/// Discovery probes a real opted-in Harness event loop, ignores a second
-/// non-opted daemon record, and returns only the basename project label.
-#[test]
-fn peer_discovery_uses_real_harness_probe_and_redacted_output() {
-    let td = TempDir::new().expect("tempdir");
-    let _runtime = crate::runtime_dir::override_test_runtime_dir(td.path());
-    std::fs::create_dir_all(crate::runtime_dir::harnesses_dir()).expect("harnesses dir");
-    let mut target = echo_harness(td.path().join("target-state")).expect("target harness");
-    target.peer_entrypoint = Some(tau_config::settings::RoleGroup {
-        name: "engineer".to_owned(),
-        roles: vec!["engineer".to_owned()],
-        peer_entrypoint: Some(tau_config::settings::PeerEntrypoint::default()),
-    });
-    let target_path = crate::runtime_dir::harnesses_dir().join("real-target");
-    let target_listener =
-        std::os::unix::net::UnixListener::bind(crate::runtime_dir::socket_path(&target_path))
-            .expect("target listener");
-    std::fs::write(
-        crate::runtime_dir::metadata_path(&target_path),
-        serde_json::to_vec(&crate::runtime_dir::DaemonMetadata {
-            version: 2,
-            pid: std::process::id(),
-            project_root: Some(PathBuf::from("/secret/root/redacted-project")),
-            session_id: target.current_session_id.to_string(),
-            peer_entrypoint: true,
-        })
-        .expect("target metadata"),
-    )
-    .expect("write target metadata");
-    let target_tx = target.tx.clone();
-    let forwarder = std::thread::spawn(move || {
-        let (stream, _) = target_listener.accept().expect("accept discovery probe");
-        target_tx
-            .send(HarnessEvent::NewClient(stream))
-            .expect("forward discovery probe");
-    });
-    let private_path = crate::runtime_dir::harnesses_dir().join("private-target");
-    let _private_listener =
-        std::os::unix::net::UnixListener::bind(crate::runtime_dir::socket_path(&private_path))
-            .expect("private listener");
-    std::fs::write(
-        crate::runtime_dir::metadata_path(&private_path),
-        serde_json::to_vec(&crate::runtime_dir::DaemonMetadata {
-            version: 2,
-            pid: std::process::id(),
-            project_root: Some(PathBuf::from("/secret/root/private-project")),
-            session_id: "private-session".to_owned(),
-            peer_entrypoint: false,
-        })
-        .expect("private metadata"),
-    )
-    .expect("write private metadata");
-    let runtime_root = td.path().to_path_buf();
-    let (snapshot_tx, snapshot_rx) = std::sync::mpsc::channel();
-    let discovery = std::thread::spawn(move || {
-        let _runtime = crate::runtime_dir::override_test_runtime_dir(&runtime_root);
-        let snapshot = crate::runtime_dir::discover_peer_sessions(
-            None,
-            50,
-            "unrelated-current",
-            crate::runtime_dir::DiscoveryCallPermit::try_acquire().expect("discovery permit"),
-        );
-        snapshot_tx.send(snapshot).expect("return snapshot");
-    });
-    let deadline = Instant::now() + Duration::from_secs(5);
-    let snapshot = loop {
-        if let Ok(snapshot) = snapshot_rx.try_recv() {
-            break snapshot;
-        }
-        assert!(Instant::now() < deadline, "timed out waiting for discovery");
-        match target.rx.recv_timeout(Duration::from_millis(10)) {
-            Ok(HarnessEvent::NewClient(stream)) => {
-                target.accept_client(stream).expect("accept probe client");
-            }
-            Ok(HarnessEvent::FromConnection {
-                connection_id,
-                message,
-            }) => {
-                target
-                    .handle_client_message(&connection_id, *message)
-                    .expect("handle discovery frame");
-            }
-            Ok(HarnessEvent::Command(command)) => target
-                .handle_harness_command(command)
-                .expect("handle discovery command"),
-            Ok(other) => target.log_event(&other),
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                panic!("target event loop disconnected")
-            }
-        }
-    };
-
-    assert_eq!(snapshot.sessions.len(), 1);
-    assert_eq!(
-        snapshot.sessions[0].project_label.as_deref(),
-        Some("redacted-project")
-    );
-    assert!(!format!("{snapshot:?}").contains("/secret/"));
-    discovery.join().expect("discovery thread");
-    forwarder.join().expect("probe forwarder");
-    target.shutdown().expect("shutdown target");
 }

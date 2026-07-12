@@ -50,19 +50,25 @@ facts directly.
 
 Cross-harness agent messages use the dedicated `ExternalAgentMessage` protocol
 RPC, not `Emit`. The sender-side built-in `message` tool parses
-`<session-id>/<agent_id>` addresses, treats the current session as local, mints a
+bare `&<session-id>`, explicit `&<session-id>/@<agent-id>`, and legacy exact
+`<session-id>/<agent-id>` addresses, treats the current session as local, mints a
 per-message bearer capability bound to sender identity, recipient, message body,
 and message/watch-response kind, and performs runtime-dir lookup plus socket
 round-trip on a helper thread. Completion returns to the event loop as a
 `HarnessCommand`, so target socket latency never blocks normal event processing.
 The receiver accepts the RPC only from a socket peer that completed the narrow
-external-message hello, validates that the target session is its active
-`current_session_id` and the recipient is live or pending, then calls back to the
-claimed sender harness from a helper thread to authenticate the capability and
-bound fields. The helper completion returns to the event loop as a
-`HarnessCommand`; only then does the receiver publish the harness-owned inbound
-`agent.message_received` projection through the ordinary durable path. Generic peer-authored
+external-message hello, validates bounded syntax and its active
+`current_session_id`, then calls back to the claimed sender harness from a helper
+thread to correlate the capability and bound fields. Recipient and bare-policy
+validation occurs on the event loop before publishing the harness-owned inbound
+`agent.message_received` projection. A bounded in-memory continuation sends
+success only after that exact projection commits. Generic peer-authored
 `agent.message_sent`/`agent.message_received` emits remain rejected.
+Bare route capabilities are authenticated before the target selects one
+configured entrypoint endpoint; exact capabilities preserve known-address
+delivery to non-entrypoint agents. Authenticated peer bodies remain escaped
+agent content in a typed peer-message prompt envelope, never harness
+instructions.
 Runtime-dir discovery verifies matching candidates by connecting to their
 sockets. A failed probe is not enough to unlink discovery files while the
 metadata pid is still live; dead-pid entries are eligible for cleanup on

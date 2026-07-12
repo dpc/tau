@@ -311,6 +311,17 @@ pub struct Emit {
     pub transient: bool,
 }
 
+/// Typed recipient authority for one cross-harness agent message.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExternalAgentMessageRecipient {
+    /// Resolve exactly one endpoint through the target's configured entrypoint.
+    BareEntrypoint,
+    /// Deliver to a caller-known exact agent id, independent of entrypoint
+    /// policy.
+    Exact(AgentId),
+}
+
 /// Peer-to-harness RPC that asks the active target harness to publish a
 /// harness-owned external agent-message delivery.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -330,8 +341,8 @@ pub struct ExternalAgentMessageRequest {
     pub sender_id: AgentId,
     /// Active session id expected on the receiving harness.
     pub recipient_session_id: SessionId,
-    /// Agent id of the recipient in the receiving harness.
-    pub recipient_id: AgentId,
+    /// Typed bare-entrypoint or exact recipient authority.
+    pub recipient: ExternalAgentMessageRecipient,
     /// Delivery source semantics.
     #[serde(default, skip_serializing_if = "AgentMessageKind::is_default")]
     pub kind: AgentMessageKind,
@@ -355,8 +366,8 @@ pub struct ExternalAgentMessageAuthRequest {
     pub sender_id: AgentId,
     /// Active session id expected on the receiving harness.
     pub recipient_session_id: SessionId,
-    /// Claimed recipient agent id.
-    pub recipient_id: AgentId,
+    /// Claimed typed bare-entrypoint or exact recipient authority.
+    pub recipient: ExternalAgentMessageRecipient,
     /// Claimed delivery source semantics.
     #[serde(default, skip_serializing_if = "AgentMessageKind::is_default")]
     pub kind: AgentMessageKind,
@@ -386,6 +397,12 @@ pub struct ExternalAgentMessageResult {
     /// Empty on success; otherwise a bounded user-facing delivery error.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// Canonical resolved recipient on success.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recipient_id: Option<AgentId>,
+    /// Whether resolving this request started the recipient.
+    #[serde(default, skip_serializing_if = "core::ops::Not::not")]
+    pub started: bool,
 }
 
 /// Narrow live-harness probe used by bounded session discovery.

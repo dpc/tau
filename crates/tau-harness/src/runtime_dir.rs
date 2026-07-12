@@ -802,6 +802,15 @@ pub(crate) fn find_harness_for_session_until(
     deadline: Instant,
     cancelled: &AtomicBool,
 ) -> Result<Option<PathBuf>, FindHarnessForSessionError> {
+    #[cfg(test)]
+    if let Some(path) = TEST_SESSION_HARNESSES
+        .lock()
+        .expect("test session harness registry poisoned")
+        .get(session_id)
+        .cloned()
+    {
+        return Ok(Some(path));
+    }
     if cancelled.load(Ordering::Acquire) || Instant::now() >= deadline {
         return Err(FindHarnessForSessionError::Incomplete {
             session_id: session_id.to_owned(),
@@ -826,11 +835,12 @@ pub(crate) fn find_harness_for_session_until(
     let Ok(entries) = std::fs::read_dir(&runtime_dir) else {
         return Ok(None);
     };
-    let entries = collect_directory_entries_bounded(entries, deadline, cancelled).map_err(|()| {
-        FindHarnessForSessionError::Incomplete {
-            session_id: session_id.to_owned(),
-        }
-    })?;
+    let entries =
+        collect_directory_entries_bounded(entries, deadline, cancelled).map_err(|()| {
+            FindHarnessForSessionError::Incomplete {
+                session_id: session_id.to_owned(),
+            }
+        })?;
     if cancelled.load(Ordering::Acquire) || Instant::now() >= deadline {
         return Err(FindHarnessForSessionError::Incomplete {
             session_id: session_id.to_owned(),
@@ -904,6 +914,43 @@ pub(crate) fn find_harness_for_session_until(
             session_id: session_id.to_owned(),
             matches,
         }),
+    }
+}
+
+#[cfg(test)]
+static TEST_SESSION_HARNESSES: std::sync::LazyLock<
+    Mutex<std::collections::HashMap<String, PathBuf>>,
+> = std::sync::LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
+
+/// Registers a real test harness socket for worker-thread session lookup.
+#[cfg(test)]
+pub(crate) fn register_test_session_harness(
+    session_id: &str,
+    harness_path: PathBuf,
+) -> TestSessionHarnessGuard {
+    TEST_SESSION_HARNESSES
+        .lock()
+        .expect("test session harness registry poisoned")
+        .insert(session_id.to_owned(), harness_path);
+    TestSessionHarnessGuard {
+        session_id: session_id.to_owned(),
+    }
+}
+
+/// Removes a worker-visible test session registration when dropped.
+#[cfg(test)]
+pub(crate) struct TestSessionHarnessGuard {
+    /// Registered session key.
+    session_id: String,
+}
+
+#[cfg(test)]
+impl Drop for TestSessionHarnessGuard {
+    fn drop(&mut self) {
+        TEST_SESSION_HARNESSES
+            .lock()
+            .expect("test session harness registry poisoned")
+            .remove(&self.session_id);
     }
 }
 
@@ -1125,12 +1172,14 @@ mod tests {
             Some(())
         });
 
-        assert!(collect_directory_entries_bounded(
-            entries,
-            Instant::now() + Duration::from_secs(1),
-            &cancelled
-        )
-        .is_err());
+        assert!(
+            collect_directory_entries_bounded(
+                entries,
+                Instant::now() + Duration::from_secs(1),
+                &cancelled
+            )
+            .is_err()
+        );
         assert_eq!(dequeues.load(Ordering::Acquire), 1);
     }
 

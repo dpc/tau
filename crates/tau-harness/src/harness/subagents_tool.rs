@@ -7,6 +7,7 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -78,6 +79,104 @@ pub(crate) struct SubagentToolState {
 static NEXT_AGENT_MESSAGE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 pub(crate) const EXTERNAL_AGENT_MESSAGE_AUTH_TIMEOUT: Duration = Duration::from_secs(25);
 pub(crate) const EXTERNAL_AGENT_MESSAGE_RESULT_TIMEOUT: Duration = Duration::from_secs(30);
+const MAX_OUTBOUND_PEER_IO_JOBS: usize = 16;
+const MAX_INBOUND_PEER_AUTH_JOBS: usize = 16;
+const MAX_INBOUND_PEER_AUTH_JOBS_PER_CONNECTION: usize = 2;
+const MAX_EXTERNAL_AGENT_MESSAGE_BYTES: usize = 64 * 1024;
+
+static PEER_IO_ADMISSION: LazyLock<Mutex<PeerIoAdmission>> =
+    LazyLock::new(|| Mutex::new(PeerIoAdmission::default()));
+static ACTIVE_RUNTIME_LOOKUPS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+#[derive(Default)]
+struct PeerIoAdmission {
+    outbound: usize,
+    inbound: usize,
+    inbound_by_connection: HashMap<tau_proto::ConnectionId, usize>,
+}
+
+enum PeerIoPermitKind {
+    Outbound,
+    Inbound(tau_proto::ConnectionId),
+}
+
+pub(crate) struct PeerIoPermit(PeerIoPermitKind);
+
+struct RuntimeLookupPermit;
+
+impl RuntimeLookupPermit {
+    fn try_acquire() -> Option<Self> {
+        ACTIVE_RUNTIME_LOOKUPS
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |active| {
+                (active < MAX_OUTBOUND_PEER_IO_JOBS).then_some(active + 1)
+            })
+            .ok()
+            .map(|_| Self)
+    }
+}
+
+impl Drop for RuntimeLookupPermit {
+    fn drop(&mut self) {
+        ACTIVE_RUNTIME_LOOKUPS.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+impl PeerIoPermit {
+    fn outbound() -> Option<Self> {
+        let mut admission = PEER_IO_ADMISSION
+            .lock()
+            .expect("peer I/O admission poisoned");
+        (admission.outbound < MAX_OUTBOUND_PEER_IO_JOBS).then(|| {
+            admission.outbound += 1;
+            Self(PeerIoPermitKind::Outbound)
+        })
+    }
+
+    fn inbound(connection_id: tau_proto::ConnectionId) -> Option<Self> {
+        let mut admission = PEER_IO_ADMISSION
+            .lock()
+            .expect("peer I/O admission poisoned");
+        let per_connection = admission
+            .inbound_by_connection
+            .get(&connection_id)
+            .copied()
+            .unwrap_or(0);
+        if admission.inbound >= MAX_INBOUND_PEER_AUTH_JOBS
+            || per_connection >= MAX_INBOUND_PEER_AUTH_JOBS_PER_CONNECTION
+        {
+            return None;
+        }
+        admission.inbound += 1;
+        *admission
+            .inbound_by_connection
+            .entry(connection_id.clone())
+            .or_default() += 1;
+        Some(Self(PeerIoPermitKind::Inbound(connection_id)))
+    }
+}
+
+impl Drop for PeerIoPermit {
+    fn drop(&mut self) {
+        let mut admission = PEER_IO_ADMISSION
+            .lock()
+            .expect("peer I/O admission poisoned");
+        match &self.0 {
+            PeerIoPermitKind::Outbound => admission.outbound -= 1,
+            PeerIoPermitKind::Inbound(connection_id) => {
+                admission.inbound -= 1;
+                let count = admission
+                    .inbound_by_connection
+                    .get_mut(connection_id)
+                    .expect("inbound peer I/O connection count missing");
+                *count -= 1;
+                if *count == 0 {
+                    admission.inbound_by_connection.remove(connection_id);
+                }
+            }
+        }
+    }
+}
 
 fn build_agent_message_id(
     sender_id: &AgentId,
@@ -282,6 +381,62 @@ impl Harness {
             message,
             tau_proto::AgentMessageKind::Message,
         )
+    }
+
+    /// Resolve and publish one current-session bare entrypoint message.
+    pub(crate) fn publish_peer_entrypoint_message_from_agent(
+        &mut self,
+        conversation_id: &AgentId,
+        message: String,
+        call_id: ToolCallId,
+        tool_name: ToolName,
+        tool_type: ToolType,
+    ) -> Result<(), String> {
+        let sender = self
+            .ensure_agent_id_for_agent(conversation_id)
+            .ok_or_else(|| "sender agent no longer exists".to_owned())?;
+        let sender_id = crate::parse_agent_id(&sender);
+        let recipient_id = self.select_peer_entrypoint_recipient()?;
+        let message_id = next_agent_message_id(&sender_id);
+        if self.pending_external_receive_acks.len() >= MAX_INBOUND_PEER_AUTH_JOBS {
+            return Err("peer receive commit queue is busy; retry later".to_owned());
+        }
+        if self.pending_external_receive_acks.contains_key(&message_id) {
+            return Err("peer receive is already pending".to_owned());
+        }
+        let received = AgentMessageReceived {
+            message_id: message_id.clone(),
+            sender_id: sender_id.clone(),
+            sender_session_id: None,
+            recipient_id: recipient_id.clone(),
+            kind: tau_proto::AgentMessageKind::Message,
+            watch_turn_state: None,
+            watch_provider_status: None,
+            message: message.clone(),
+        };
+        self.pending_external_receive_acks.insert(
+            message_id.clone(),
+            crate::harness::PendingExternalReceiveAck {
+                session_generation: self.current_session_generation,
+                recipient_id: recipient_id.clone(),
+                recipient: tau_proto::ExternalAgentMessageRecipient::BareEntrypoint,
+                expected_receive: received.clone(),
+                canceled: false,
+                completion: crate::harness::PendingPeerReceiveCompletion::Local {
+                    conversation_id: conversation_id.clone(),
+                    call_id,
+                    tool_name,
+                    tool_type,
+                    sender_id: sender_id.clone(),
+                    message: message.clone(),
+                },
+            },
+        );
+        self.publish_event(
+            Some(HARNESS_CONNECTION_ID),
+            Event::AgentMessageReceived(received),
+        );
+        Ok(())
     }
 
     /// Publish final-response watch content only while the watched sender
@@ -778,11 +933,13 @@ impl Harness {
         &mut self,
         conversation_id: &AgentId,
         recipient_session_id: tau_proto::SessionId,
-        recipient_id: AgentId,
+        recipient: tau_proto::ExternalAgentMessageRecipient,
         message: String,
         kind: tau_proto::AgentMessageKind,
         completion: Option<ExternalMessageToolCompletion>,
     ) -> Result<(), String> {
+        let permit = PeerIoPermit::outbound()
+            .ok_or_else(|| "peer message I/O is busy; retry later".to_owned())?;
         let sender_id = self
             .ensure_agent_id_for_agent(conversation_id)
             .ok_or_else(|| "sender agent no longer exists".to_owned())?;
@@ -790,16 +947,7 @@ impl Harness {
         let message_id = next_agent_message_id(&sender_id);
         let request_id = format!("external-{message_id}");
         let capability = random_external_message_capability(&mut self.agent_id_rng);
-        let sent_event = (kind == tau_proto::AgentMessageKind::Message).then(|| AgentMessageSent {
-            message_id: message_id.clone(),
-            sender_id: sender_id.clone(),
-            recipient: tau_proto::AgentMessageRecipient::ExternalAgent {
-                session_id: recipient_session_id.clone(),
-                agent_id: recipient_id.clone(),
-            },
-            kind,
-            message: message.clone(),
-        });
+        let publish_sent = kind == tau_proto::AgentMessageKind::Message;
         self.pending_external_message_auth.insert(
             message_id.clone(),
             PendingExternalAgentMessageAuth {
@@ -807,7 +955,7 @@ impl Harness {
                 sender_session_id: self.current_session_id.clone(),
                 sender_id: sender_id.clone(),
                 recipient_session_id: recipient_session_id.clone(),
-                recipient_id: recipient_id.clone(),
+                recipient: recipient.clone(),
                 kind,
                 message: message.clone(),
             },
@@ -819,18 +967,25 @@ impl Harness {
             sender_session_id: self.current_session_id.clone(),
             sender_id,
             recipient_session_id,
-            recipient_id,
+            recipient,
             kind,
             message,
         };
         let tx = self.tx.clone();
+        let cancellation = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        self.peer_io_cancellations
+            .retain(|pending| pending.strong_count() > 0);
+        self.peer_io_cancellations
+            .push(Arc::downgrade(&cancellation));
         thread::spawn(move || {
+            let _permit = permit;
             let auth_message_id = request.message_id.clone();
-            let result = send_external_agent_message_request(request);
+            let result = send_external_agent_message_request(request.clone(), &cancellation);
             if let Some(completion) = completion {
                 let _ = tx.send(HarnessEvent::Command(
                     HarnessCommand::ExternalMessageToolCompleted(Box::new(
                         ExternalMessageToolCompletedCommand {
+                            _permit: Some(_permit),
                             conversation_id: completion.conversation_id,
                             session_generation: completion.session_generation,
                             call_id: completion.call_id,
@@ -839,7 +994,11 @@ impl Harness {
                             result,
                             details: completion.details,
                             auth_message_id,
-                            sent_event,
+                            publish_sent,
+                            sender_id: request.sender_id.clone(),
+                            recipient_session_id: request.recipient_session_id.clone(),
+                            kind: request.kind,
+                            message: request.message.clone(),
                         },
                     )),
                 ));
@@ -874,7 +1033,7 @@ impl Harness {
             || pending.sender_session_id != request.sender_session_id
             || pending.sender_id != request.sender_id
             || pending.recipient_session_id != request.recipient_session_id
-            || pending.recipient_id != request.recipient_id
+            || pending.recipient != request.recipient
             || pending.kind != request.kind
             || pending.message != request.message
         {
@@ -896,19 +1055,40 @@ impl Harness {
         request: tau_proto::ExternalAgentMessageRequest,
     ) -> Option<tau_proto::ExternalAgentMessageResult> {
         let request_id = request.request_id.clone();
-        if let Err(error) = self.validate_external_agent_message_target(&request) {
+        if let Err(error) = self.validate_external_agent_message_syntax(&request) {
             return Some(tau_proto::ExternalAgentMessageResult {
                 request_id,
                 error: Some(error),
+                recipient_id: None,
+                started: false,
             });
         }
+        let Some(permit) = PeerIoPermit::inbound(client_id.clone()) else {
+            return Some(tau_proto::ExternalAgentMessageResult {
+                request_id,
+                error: Some("peer message authentication is busy; retry later".to_owned()),
+                recipient_id: None,
+                started: false,
+            });
+        };
         let tx = self.tx.clone();
+        let session_generation = self.current_session_generation;
+        let cancellation = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let cancellations = self
+            .inbound_peer_io_cancellations
+            .entry(client_id.clone())
+            .or_default();
+        cancellations.retain(|pending| pending.strong_count() > 0);
+        cancellations.push(Arc::downgrade(&cancellation));
         thread::spawn(move || {
-            let result = authenticate_external_agent_message_sender(&request);
+            let result = authenticate_external_agent_message_sender(&request, &cancellation)
+                .map_err(|_| "external message authentication failed".to_owned());
             let _ = tx.send(HarnessEvent::Command(
                 HarnessCommand::ExternalMessageAuthCompleted(Box::new(
                     crate::event::ExternalMessageAuthCompletedCommand {
+                        _permit: Some(permit),
                         client_id,
+                        session_generation,
                         request,
                         result,
                     },
@@ -920,15 +1100,80 @@ impl Harness {
 
     pub(crate) fn complete_external_agent_message_auth(
         &mut self,
+        client_id: tau_proto::ConnectionId,
+        session_generation: u64,
         request: tau_proto::ExternalAgentMessageRequest,
         result: Result<(), String>,
-    ) -> tau_proto::ExternalAgentMessageResult {
+    ) -> Option<tau_proto::ExternalAgentMessageResult> {
         let request_id = request.request_id.clone();
-        let result = result.and_then(|()| self.receive_external_agent_message(request));
-        tau_proto::ExternalAgentMessageResult {
-            request_id,
-            error: result.err(),
+        if let Err(error) = result {
+            return Some(tau_proto::ExternalAgentMessageResult {
+                request_id,
+                error: Some(error),
+                recipient_id: None,
+                started: false,
+            });
         }
+        match self.queue_external_agent_message_receive(client_id, session_generation, request) {
+            Ok(()) => None,
+            Err(error) => Some(tau_proto::ExternalAgentMessageResult {
+                request_id,
+                error: Some(error),
+                recipient_id: None,
+                started: false,
+            }),
+        }
+    }
+
+    fn queue_external_agent_message_receive(
+        &mut self,
+        client_id: tau_proto::ConnectionId,
+        session_generation: u64,
+        request: tau_proto::ExternalAgentMessageRequest,
+    ) -> Result<(), String> {
+        self.validate_external_agent_message_target(&request)?;
+        let recipient_id = match &request.recipient {
+            tau_proto::ExternalAgentMessageRecipient::Exact(agent_id) => agent_id.clone(),
+            tau_proto::ExternalAgentMessageRecipient::BareEntrypoint => {
+                self.select_peer_entrypoint_recipient()?
+            }
+        };
+        if self.pending_external_receive_acks.len() >= MAX_INBOUND_PEER_AUTH_JOBS {
+            return Err("peer receive commit queue is busy; retry later".to_owned());
+        }
+        let message_id = request.message_id.clone();
+        if self.pending_external_receive_acks.contains_key(&message_id) {
+            return Err("peer receive is already pending".to_owned());
+        }
+        let received = AgentMessageReceived {
+            message_id: message_id.clone(),
+            sender_id: request.sender_id,
+            sender_session_id: Some(request.sender_session_id),
+            recipient_id: recipient_id.clone(),
+            kind: request.kind,
+            watch_turn_state: None,
+            watch_provider_status: None,
+            message: request.message,
+        };
+        self.pending_external_receive_acks.insert(
+            message_id.clone(),
+            crate::harness::PendingExternalReceiveAck {
+                session_generation,
+                recipient_id: recipient_id.clone(),
+                recipient: request.recipient,
+                expected_receive: received.clone(),
+                canceled: false,
+                completion: crate::harness::PendingPeerReceiveCompletion::Remote {
+                    client_id,
+                    request_id: request.request_id,
+                },
+            },
+        );
+        self.publish_event(
+            Some(HARNESS_CONNECTION_ID),
+            Event::AgentMessageReceived(received),
+        );
+        Ok(())
     }
 
     #[cfg(test)]
@@ -938,31 +1183,45 @@ impl Harness {
     ) -> tau_proto::ExternalAgentMessageResult {
         let request_id = request.request_id.clone();
         let result = self.receive_external_agent_message(request);
+        let (recipient_id, started, error) = match result {
+            Ok((recipient_id, started)) => (Some(recipient_id), started, None),
+            Err(error) => (None, false, Some(error)),
+        };
         tau_proto::ExternalAgentMessageResult {
             request_id,
-            error: result.err(),
+            error,
+            recipient_id,
+            started,
         }
     }
 
+    #[cfg(test)]
     fn receive_external_agent_message(
         &mut self,
         request: tau_proto::ExternalAgentMessageRequest,
-    ) -> Result<(), String> {
+    ) -> Result<(AgentId, bool), String> {
         self.validate_external_agent_message_target(&request)?;
+        let recipient_id = match &request.recipient {
+            tau_proto::ExternalAgentMessageRecipient::Exact(agent_id) => agent_id.clone(),
+            tau_proto::ExternalAgentMessageRecipient::BareEntrypoint => {
+                self.select_peer_entrypoint_recipient()?
+            }
+        };
         self.publish_event(
             Some(HARNESS_CONNECTION_ID),
             Event::AgentMessageReceived(AgentMessageReceived {
                 message_id: request.message_id,
                 sender_id: request.sender_id,
                 sender_session_id: Some(request.sender_session_id),
-                recipient_id: request.recipient_id,
+                recipient_id: recipient_id.clone(),
                 kind: request.kind,
                 watch_turn_state: None,
                 watch_provider_status: None,
                 message: request.message,
             }),
         );
-        Ok(())
+        self.record_peer_route(&recipient_id);
+        Ok((recipient_id, false))
     }
 
     fn validate_external_agent_message_target(
@@ -978,22 +1237,124 @@ impl Harness {
         if request.message.trim().is_empty() {
             return Err("`message` must not be empty".to_owned());
         }
-        match self.agent_message_recipient_status(request.recipient_id.as_str()) {
+        let tau_proto::ExternalAgentMessageRecipient::Exact(recipient_id) = &request.recipient
+        else {
+            return self
+                .peer_entrypoint
+                .as_ref()
+                .map(|_| ())
+                .ok_or_else(|| "peer route unavailable".to_owned());
+        };
+        match self.agent_message_recipient_status(recipient_id.as_str()) {
             AgentMessageRecipientStatus::Live => {}
             AgentMessageRecipientStatus::Stopped => {
-                return Err(format!(
-                    "stopped message recipient: `{}`",
-                    request.recipient_id
-                ));
+                return Err(format!("stopped message recipient: `{}`", recipient_id));
             }
             AgentMessageRecipientStatus::Unknown => {
-                return Err(format!(
-                    "unknown message recipient: `{}`",
-                    request.recipient_id
-                ));
+                return Err(format!("unknown message recipient: `{}`", recipient_id));
             }
         }
         Ok(())
+    }
+
+    fn validate_external_agent_message_syntax(
+        &self,
+        request: &tau_proto::ExternalAgentMessageRequest,
+    ) -> Result<(), String> {
+        if request.recipient_session_id != self.current_session_id {
+            return Err("target session unavailable".to_owned());
+        }
+        if request.message.trim().is_empty() {
+            return Err("`message` must not be empty".to_owned());
+        }
+        if request.message.len() > MAX_EXTERNAL_AGENT_MESSAGE_BYTES {
+            return Err("peer message exceeds the 64 KiB limit".to_owned());
+        }
+        Ok(())
+    }
+
+    fn select_peer_entrypoint_recipient(&self) -> Result<AgentId, String> {
+        let Some(group) = &self.peer_entrypoint else {
+            return Err("peer route unavailable".to_owned());
+        };
+        let role_available = |role: &str| {
+            group.roles.iter().any(|member| member == role)
+                && self.available_roles.contains_key(role)
+                && crate::model::model_for_role(
+                    &self.provider_model_info,
+                    &self.available_roles,
+                    role,
+                )
+                .is_some()
+        };
+        let mut candidates = self
+            .agents
+            .values()
+            .filter(|agent| !agent.terminating)
+            .filter_map(|agent| {
+                let id = agent.agent_id.as_ref()?;
+                let role = agent.role.as_deref()?;
+                role_available(role).then(|| {
+                    (
+                        usize::from(
+                            agent.published_runtime_state == tau_proto::AgentRuntimeState::Running,
+                        ),
+                        self.peer_last_routed.get(id).copied().unwrap_or(0),
+                        id.clone(),
+                    )
+                })
+            })
+            .chain(
+                self.pending_start_agent_requests
+                    .iter()
+                    .filter(|pending| role_available(&pending.role))
+                    .map(|pending| {
+                        (
+                            0,
+                            self.peer_last_routed
+                                .get(&pending.agent_id)
+                                .copied()
+                                .unwrap_or(0),
+                            pending.agent_id.clone(),
+                        )
+                    }),
+            )
+            .collect::<Vec<_>>();
+        candidates.sort();
+        candidates
+            .into_iter()
+            .next()
+            .map(|(_, _, id)| crate::parse_agent_id(&id))
+            .ok_or_else(|| "peer route unavailable".to_owned())
+    }
+
+    pub(crate) fn peer_entrypoint_recipient_is_eligible(&self, recipient_id: &AgentId) -> bool {
+        let Some(group) = &self.peer_entrypoint else {
+            return false;
+        };
+        let role_available = |role: &str| {
+            group.roles.iter().any(|member| member == role)
+                && self.available_roles.contains_key(role)
+                && crate::model::model_for_role(
+                    &self.provider_model_info,
+                    &self.available_roles,
+                    role,
+                )
+                .is_some()
+        };
+        self.agents.values().any(|agent| {
+            !agent.terminating
+                && agent.agent_id.as_deref() == Some(recipient_id.as_str())
+                && agent.role.as_deref().is_some_and(role_available)
+        }) || self.pending_start_agent_requests.iter().any(|pending| {
+            pending.agent_id == recipient_id.as_str() && role_available(&pending.role)
+        })
+    }
+
+    pub(crate) fn record_peer_route(&mut self, recipient_id: &AgentId) {
+        self.peer_route_clock = self.peer_route_clock.saturating_add(1);
+        self.peer_last_routed
+            .insert(recipient_id.to_string(), self.peer_route_clock);
     }
 
     #[cfg(test)]
@@ -1337,9 +1698,11 @@ fn random_external_message_capability(rng: &mut rand::rngs::StdRng) -> String {
 
 fn authenticate_external_agent_message_sender(
     request: &tau_proto::ExternalAgentMessageRequest,
+    cancelled: &Arc<std::sync::atomic::AtomicBool>,
 ) -> Result<(), String> {
+    let deadline = Instant::now() + EXTERNAL_AGENT_MESSAGE_AUTH_TIMEOUT;
     let harness_path =
-        crate::runtime_dir::find_harness_for_session(request.sender_session_id.as_str())
+        bounded_runtime_lookup(request.sender_session_id.as_str(), deadline, cancelled)
             .map_err(|err| format!("failed to find sender harness: {err}"))?
             .ok_or_else(|| {
                 format!(
@@ -1348,14 +1711,24 @@ fn authenticate_external_agent_message_sender(
                 )
             })?;
     let socket = crate::runtime_dir::socket_path(&harness_path);
-    let mut peer = tau_socket::SocketPeer::connect(&socket)
-        .map_err(|err| format!("failed to connect to sender harness: {err}"))?;
+    check_peer_io_active(deadline, cancelled)?;
+    let mut peer = tau_socket::SocketPeer::connect_with_io_timeout(
+        &socket,
+        deadline.saturating_duration_since(Instant::now()),
+    )
+    .map_err(|err| format!("failed to connect to sender harness: {err}"))?;
+    check_peer_io_active(deadline, cancelled)?;
+    peer.set_write_timeout(deadline.saturating_duration_since(Instant::now()))
+        .map_err(|err| format!("failed to set external auth deadline: {err}"))?;
     peer.send(&tau_proto::HarnessInputMessage::Hello(tau_proto::Hello {
         protocol_version: tau_proto::PROTOCOL_VERSION,
         client_name: crate::harness::EXTERNAL_AGENT_MESSAGE_CLIENT_NAME.into(),
         client_kind: tau_proto::ClientKind::External,
     }))
     .map_err(|err| format!("failed to send external auth hello: {err}"))?;
+    check_peer_io_active(deadline, cancelled)?;
+    peer.set_write_timeout(deadline.saturating_duration_since(Instant::now()))
+        .map_err(|err| format!("failed to set external auth deadline: {err}"))?;
     let auth_request_id = format!("auth-{}", request.request_id);
     peer.send(&tau_proto::HarnessInputMessage::ExternalAgentMessageAuth(
         tau_proto::ExternalAgentMessageAuthRequest {
@@ -1365,14 +1738,14 @@ fn authenticate_external_agent_message_sender(
             sender_session_id: request.sender_session_id.clone(),
             sender_id: request.sender_id.clone(),
             recipient_session_id: request.recipient_session_id.clone(),
-            recipient_id: request.recipient_id.clone(),
+            recipient: request.recipient.clone(),
             kind: request.kind,
             message: request.message.clone(),
         },
     ))
     .map_err(|err| format!("failed to send external auth request: {err}"))?;
-    let deadline = Instant::now() + EXTERNAL_AGENT_MESSAGE_AUTH_TIMEOUT;
     loop {
+        check_peer_io_active(deadline, cancelled)?;
         let Some(timeout) = deadline.checked_duration_since(Instant::now()) else {
             return Err(format!(
                 "timed out after {}s waiting for external message authentication",
@@ -1380,7 +1753,7 @@ fn authenticate_external_agent_message_sender(
             ));
         };
         match peer
-            .recv_timeout(timeout)
+            .recv_timeout(timeout.min(Duration::from_millis(100)))
             .map_err(|err| format!("failed to receive external auth result: {err}"))?
         {
             tau_socket::SocketReceive::Message {
@@ -1395,10 +1768,7 @@ fn authenticate_external_agent_message_sender(
             }
             tau_socket::SocketReceive::Message { .. } => continue,
             tau_socket::SocketReceive::Timeout => {
-                return Err(format!(
-                    "timed out after {}s waiting for external message authentication",
-                    EXTERNAL_AGENT_MESSAGE_AUTH_TIMEOUT.as_secs()
-                ));
+                continue;
             }
             tau_socket::SocketReceive::Closed => {
                 return Err("sender harness closed before external auth result".to_owned());
@@ -1409,9 +1779,11 @@ fn authenticate_external_agent_message_sender(
 
 fn send_external_agent_message_request(
     request: tau_proto::ExternalAgentMessageRequest,
-) -> Result<(), String> {
+    cancelled: &Arc<std::sync::atomic::AtomicBool>,
+) -> Result<(AgentId, bool), String> {
+    let deadline = Instant::now() + EXTERNAL_AGENT_MESSAGE_RESULT_TIMEOUT;
     let harness_path =
-        crate::runtime_dir::find_harness_for_session(request.recipient_session_id.as_str())
+        bounded_runtime_lookup(request.recipient_session_id.as_str(), deadline, cancelled)
             .map_err(|err| err.to_string())?
             .ok_or_else(|| {
                 format!(
@@ -1420,20 +1792,30 @@ fn send_external_agent_message_request(
                 )
             })?;
     let socket = crate::runtime_dir::socket_path(&harness_path);
-    let mut peer = tau_socket::SocketPeer::connect(&socket)
-        .map_err(|err| format!("failed to connect to target harness: {err}"))?;
+    check_peer_io_active(deadline, cancelled)?;
+    let mut peer = tau_socket::SocketPeer::connect_with_io_timeout(
+        &socket,
+        deadline.saturating_duration_since(Instant::now()),
+    )
+    .map_err(|err| format!("failed to connect to target harness: {err}"))?;
+    check_peer_io_active(deadline, cancelled)?;
+    peer.set_write_timeout(deadline.saturating_duration_since(Instant::now()))
+        .map_err(|err| format!("failed to set peer send deadline: {err}"))?;
     peer.send(&tau_proto::HarnessInputMessage::Hello(tau_proto::Hello {
         protocol_version: tau_proto::PROTOCOL_VERSION,
         client_name: crate::harness::EXTERNAL_AGENT_MESSAGE_CLIENT_NAME.into(),
         client_kind: tau_proto::ClientKind::External,
     }))
     .map_err(|err| format!("failed to send external message hello: {err}"))?;
+    check_peer_io_active(deadline, cancelled)?;
+    peer.set_write_timeout(deadline.saturating_duration_since(Instant::now()))
+        .map_err(|err| format!("failed to set peer send deadline: {err}"))?;
     peer.send(&tau_proto::HarnessInputMessage::ExternalAgentMessage(
         request.clone(),
     ))
     .map_err(|err| format!("failed to send external message request: {err}"))?;
-    let deadline = Instant::now() + EXTERNAL_AGENT_MESSAGE_RESULT_TIMEOUT;
     loop {
+        check_peer_io_active(deadline, cancelled)?;
         let Some(timeout) = deadline.checked_duration_since(Instant::now()) else {
             return Err(format!(
                 "timed out after {}s waiting for external message result",
@@ -1441,26 +1823,90 @@ fn send_external_agent_message_request(
             ));
         };
         match peer
-            .recv_timeout(timeout)
+            .recv_timeout(timeout.min(Duration::from_millis(100)))
             .map_err(|err| format!("failed to receive external message result: {err}"))?
         {
             tau_socket::SocketReceive::Message {
                 message: tau_proto::HarnessOutputMessage::ExternalAgentMessageResult(result),
             } if result.request_id == request.request_id => {
-                return result.error.map_or(Ok(()), Err);
+                if let Some(error) = result.error {
+                    return Err(error);
+                }
+                return result
+                    .recipient_id
+                    .map(|recipient_id| (recipient_id, result.started))
+                    .ok_or_else(|| {
+                        "target harness returned success without a resolved recipient".to_owned()
+                    });
             }
             tau_socket::SocketReceive::Message { .. } => continue,
             tau_socket::SocketReceive::Timeout => {
-                return Err(format!(
-                    "timed out after {}s waiting for external message result",
-                    EXTERNAL_AGENT_MESSAGE_RESULT_TIMEOUT.as_secs()
-                ));
+                continue;
             }
             tau_socket::SocketReceive::Closed => {
                 return Err("target harness closed before external message result".to_owned());
             }
         }
     }
+}
+
+fn bounded_runtime_lookup(
+    session_id: &str,
+    deadline: Instant,
+    cancelled: &Arc<std::sync::atomic::AtomicBool>,
+) -> Result<Option<std::path::PathBuf>, crate::runtime_dir::FindHarnessForSessionError> {
+    let Some(permit) = RuntimeLookupPermit::try_acquire() else {
+        return Err(crate::runtime_dir::FindHarnessForSessionError::Incomplete {
+            session_id: session_id.to_owned(),
+        });
+    };
+    let (tx, rx) = std::sync::mpsc::sync_channel(1);
+    let owned_session_id = session_id.to_owned();
+    let worker_session_id = owned_session_id.clone();
+    let worker_cancelled = Arc::clone(cancelled);
+    std::thread::spawn(move || {
+        let _permit = permit;
+        let result = crate::runtime_dir::find_harness_for_session_until(
+            &worker_session_id,
+            deadline,
+            &worker_cancelled,
+        );
+        let _ = tx.send(result);
+    });
+    loop {
+        if cancelled.load(Ordering::Acquire) {
+            return Err(crate::runtime_dir::FindHarnessForSessionError::Incomplete {
+                session_id: owned_session_id,
+            });
+        }
+        let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+            return Err(crate::runtime_dir::FindHarnessForSessionError::Incomplete {
+                session_id: owned_session_id,
+            });
+        };
+        match rx.recv_timeout(remaining.min(Duration::from_millis(100))) {
+            Ok(result) => return result,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                return Err(crate::runtime_dir::FindHarnessForSessionError::Incomplete {
+                    session_id: owned_session_id,
+                });
+            }
+        }
+    }
+}
+
+fn check_peer_io_active(
+    deadline: Instant,
+    cancelled: &std::sync::atomic::AtomicBool,
+) -> Result<(), String> {
+    if cancelled.load(Ordering::Acquire) {
+        return Err("peer message operation canceled".to_owned());
+    }
+    if Instant::now() >= deadline {
+        return Err("peer message operation timed out".to_owned());
+    }
+    Ok(())
 }
 
 #[cfg(test)]

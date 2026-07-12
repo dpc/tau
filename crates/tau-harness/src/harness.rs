@@ -1417,6 +1417,7 @@ mod pending_notices;
 mod replay;
 mod semantic_event_router;
 mod subagents_tool;
+pub(crate) use subagents_tool::PeerIoPermit;
 mod transport_messages;
 mod user_skill_invocation;
 
@@ -1457,12 +1458,54 @@ pub(crate) struct PendingExternalAgentMessageAuth {
     pub(crate) sender_id: tau_proto::AgentId,
     /// Recipient session targeted by the outbound message.
     pub(crate) recipient_session_id: tau_proto::SessionId,
-    /// Recipient agent targeted by the outbound message.
-    pub(crate) recipient_id: tau_proto::AgentId,
+    /// Typed recipient authority targeted by the outbound message.
+    pub(crate) recipient: tau_proto::ExternalAgentMessageRecipient,
     /// Delivery kind authorized by the harness-owned source path.
     pub(crate) kind: tau_proto::AgentMessageKind,
     /// Message body authorized by the harness-owned source path.
     pub(crate) message: String,
+}
+
+/// Remote acknowledgement held until the exact receive projection commits.
+pub(crate) struct PendingExternalReceiveAck {
+    /// Target session generation in which validation and selection occurred.
+    pub(crate) session_generation: u64,
+    /// Concrete recipient selected before the projection was enqueued.
+    pub(crate) recipient_id: tau_proto::AgentId,
+    /// Typed authority whose semantics must still hold at commit.
+    pub(crate) recipient: tau_proto::ExternalAgentMessageRecipient,
+    /// Exact immutable projection expected to emerge from interception.
+    pub(crate) expected_receive: tau_proto::AgentMessageReceived,
+    /// Whether disconnect/rollover canceled this parked continuation.
+    pub(crate) canceled: bool,
+    /// Completion released by the receive projection's commit hook.
+    pub(crate) completion: PendingPeerReceiveCompletion,
+}
+
+/// Live-only completion waiting for one exact peer receive commit.
+pub(crate) enum PendingPeerReceiveCompletion {
+    /// Remote socket acknowledgement.
+    Remote {
+        /// Socket connection awaiting the result.
+        client_id: tau_proto::ConnectionId,
+        /// RPC request id echoed in the result.
+        request_id: String,
+    },
+    /// Current-session sender projection and tool completion.
+    Local {
+        /// Conversation owning the message tool call.
+        conversation_id: AgentId,
+        /// Tool call to complete after receive commit.
+        call_id: ToolCallId,
+        /// Visible tool name.
+        tool_name: ToolName,
+        /// Declared tool type.
+        tool_type: tau_proto::ToolType,
+        /// Harness-authored sender id.
+        sender_id: tau_proto::AgentId,
+        /// Original message body for the sent projection.
+        message: String,
+    },
 }
 
 /// Message recipient state used to report precise tool errors.
@@ -1698,6 +1741,14 @@ pub struct Harness {
     /// kind before accepting the inbound projection.
     pub(crate) pending_external_message_auth:
         HashMap<tau_proto::AgentMessageId, PendingExternalAgentMessageAuth>,
+    /// Bounded live acknowledgements waiting for durable receive commit.
+    pub(crate) pending_external_receive_acks:
+        HashMap<tau_proto::AgentMessageId, PendingExternalReceiveAck>,
+    /// Weak cancellation handles for peer I/O tied to the active session.
+    pub(crate) peer_io_cancellations: Vec<std::sync::Weak<std::sync::atomic::AtomicBool>>,
+    /// Inbound callback jobs grouped by the socket whose request owns them.
+    pub(crate) inbound_peer_io_cancellations:
+        HashMap<tau_proto::ConnectionId, Vec<std::sync::Weak<std::sync::atomic::AtomicBool>>>,
     /// A UI sent `/detach` while the harness was still in startup gating.
     /// The main event loop consumes this to preserve detach semantics after
     /// startup completes.
@@ -1812,6 +1863,10 @@ pub struct Harness {
     pub(crate) available_role_groups: Vec<tau_proto::HarnessRoleGroup>,
     /// Effective role group authorized for peer discovery and bare routing.
     pub(crate) peer_entrypoint: Option<tau_config::settings::RoleGroup>,
+    /// Monotonic event-loop-owned peer selection clock.
+    pub(crate) peer_route_clock: u64,
+    /// Most recent peer-route selection clock by concrete agent id.
+    pub(crate) peer_last_routed: HashMap<String, u64>,
     /// Reusable prompt templates from the effective startup harness settings.
     pub(crate) custom_prompts: Vec<tau_proto::HarnessCustomPrompt>,
     /// Handlebars template used to mint new stable agent identifiers.
@@ -2397,6 +2452,9 @@ impl Harness {
             client_writers: HashMap::new(),
             external_message_peers: HashSet::new(),
             pending_external_message_auth: HashMap::new(),
+            pending_external_receive_acks: HashMap::new(),
+            peer_io_cancellations: Vec::new(),
+            inbound_peer_io_cancellations: HashMap::new(),
             startup_detach_requested: false,
             lifecycle_messages: Vec::new(),
             replayable_harness_notices: Vec::new(),
@@ -2429,6 +2487,8 @@ impl Harness {
             disabled_role_reasons: HashMap::new(),
             available_role_groups: parts.available_role_groups,
             peer_entrypoint: parts.peer_entrypoint,
+            peer_route_clock: 0,
+            peer_last_routed: HashMap::new(),
             custom_prompts: parts.custom_prompts,
             role_overrides: parts.role_overrides,
             tool_policy: parts.tool_policy,
@@ -3274,20 +3334,45 @@ impl Harness {
                     return Ok(());
                 }
                 match command.result {
-                    Ok(()) => {
-                        if let Some(sent_event) = command.sent_event {
+                    Ok((recipient_id, started)) => {
+                        if command.publish_sent {
                             self.publish_for_agent_from(
                                 &command.conversation_id,
                                 Some(HARNESS_CONNECTION_ID),
-                                Event::AgentMessageSent(sent_event),
+                                Event::AgentMessageSent(tau_proto::AgentMessageSent {
+                                    message_id: command.auth_message_id,
+                                    sender_id: command.sender_id,
+                                    recipient: tau_proto::AgentMessageRecipient::ExternalAgent {
+                                        session_id: command.recipient_session_id.clone(),
+                                        agent_id: recipient_id.clone(),
+                                    },
+                                    kind: command.kind,
+                                    message: command.message,
+                                }),
                             );
                         }
-                        self.finish_harness_owned_tool_with_result(
+                        self.finish_harness_owned_tool_with_cbor_result(
                             &command.conversation_id,
                             command.call_id,
                             command.tool_name,
                             command.tool_type,
-                            "Message sent".to_owned(),
+                            tau_proto::CborValue::Map(vec![
+                                (
+                                    tau_proto::CborValue::Text("status".to_owned()),
+                                    tau_proto::CborValue::Text("Message sent".to_owned()),
+                                ),
+                                (
+                                    tau_proto::CborValue::Text("recipient".to_owned()),
+                                    tau_proto::CborValue::Text(format!(
+                                        "{}/{}",
+                                        command.recipient_session_id, recipient_id
+                                    )),
+                                ),
+                                (
+                                    tau_proto::CborValue::Text("started".to_owned()),
+                                    tau_proto::CborValue::Bool(started),
+                                ),
+                            ]),
                             None,
                         );
                     }
@@ -3303,13 +3388,27 @@ impl Harness {
             }
             HarnessCommand::ExternalMessageAuthCompleted(command) => {
                 let client_id = command.client_id.clone();
-                let result =
-                    self.complete_external_agent_message_auth(command.request, command.result);
-                let _ = self.bus.send_to(
-                    client_id.as_str(),
-                    None,
-                    HarnessOutputMessage::ExternalAgentMessageResult(result),
-                );
+                if command.session_generation != self.current_session_generation
+                    || !self.external_message_peers.contains(&client_id)
+                {
+                    tracing::debug!(
+                        target: "tau_harness::external_agent_message",
+                        "dropping stale external message authentication completion"
+                    );
+                    return Ok(());
+                }
+                if let Some(result) = self.complete_external_agent_message_auth(
+                    client_id.clone(),
+                    command.session_generation,
+                    command.request,
+                    command.result,
+                ) {
+                    let _ = self.bus.send_to(
+                        client_id.as_str(),
+                        None,
+                        HarnessOutputMessage::ExternalAgentMessageResult(result),
+                    );
+                }
             }
             HarnessCommand::SessionDiscoveryCompleted(command) => {
                 if command.session_generation != self.current_session_generation
@@ -3796,6 +3895,9 @@ impl Harness {
         transient: bool,
         sync_head_for: Option<ConversationHeadSync>,
     ) {
+        if !self.validate_pending_external_receive_before_commit(&event) {
+            return;
+        }
         // When this publish was stamped with a conversation, fold
         // the event onto that agent's branch directly. This
         // skips the `UiNavigateTree` head-bouncing dance that
@@ -3859,6 +3961,10 @@ impl Harness {
                     event.name()
                 ));
                 self.fail_transport_publish(&event);
+                self.fail_pending_external_receive(
+                    &event,
+                    "peer receive projection failed to persist",
+                );
                 return;
             }
         };
@@ -3980,6 +4086,174 @@ impl Harness {
             self.emit_harness_failure(&format!("internal tool event handler failed: {error}"));
         }
         self.react_to_committed_event(&event);
+        self.complete_pending_external_receive(&event);
+    }
+
+    fn pending_external_receive_message_id(event: &Event) -> Option<&tau_proto::AgentMessageId> {
+        let Event::AgentMessageReceived(message) = event else {
+            return None;
+        };
+        Some(&message.message_id)
+    }
+
+    fn validate_pending_external_receive_before_commit(&mut self, event: &Event) -> bool {
+        let Some(message_id) = Self::pending_external_receive_message_id(event) else {
+            return true;
+        };
+        let Some(pending) = self.pending_external_receive_acks.get(message_id) else {
+            return true;
+        };
+        let completion_live = match &pending.completion {
+            PendingPeerReceiveCompletion::Remote { client_id, .. } => {
+                self.external_message_peers.contains(client_id)
+            }
+            PendingPeerReceiveCompletion::Local {
+                conversation_id, ..
+            } => self.agents.contains_key(conversation_id),
+        };
+        let route_valid = match &pending.recipient {
+            tau_proto::ExternalAgentMessageRecipient::Exact(agent_id) => {
+                agent_id == &pending.recipient_id
+            }
+            tau_proto::ExternalAgentMessageRecipient::BareEntrypoint => {
+                self.peer_entrypoint_recipient_is_eligible(&pending.recipient_id)
+            }
+        };
+        let valid = pending.session_generation == self.current_session_generation
+            && !pending.canceled
+            && completion_live
+            && route_valid
+            && matches!(
+                event,
+                Event::AgentMessageReceived(message)
+                    if message == &pending.expected_receive
+                        && self.agent_message_recipient_status(message.recipient_id.as_str())
+                            == AgentMessageRecipientStatus::Live
+            );
+        if !valid {
+            self.fail_pending_external_receive(event, "peer target changed before receive commit");
+        }
+        valid
+    }
+
+    fn fail_pending_external_receive(&mut self, event: &Event, error: &str) {
+        let Some(message_id) = Self::pending_external_receive_message_id(event) else {
+            return;
+        };
+        let Some(pending) = self.pending_external_receive_acks.remove(message_id) else {
+            return;
+        };
+        if pending.canceled || pending.session_generation != self.current_session_generation {
+            return;
+        }
+        match pending.completion {
+            PendingPeerReceiveCompletion::Remote {
+                client_id,
+                request_id,
+            } => {
+                let _ = self.bus.send_to(
+                    client_id.as_str(),
+                    None,
+                    HarnessOutputMessage::ExternalAgentMessageResult(
+                        tau_proto::ExternalAgentMessageResult {
+                            request_id,
+                            error: Some(error.to_owned()),
+                            recipient_id: None,
+                            started: false,
+                        },
+                    ),
+                );
+            }
+            PendingPeerReceiveCompletion::Local {
+                conversation_id,
+                call_id,
+                tool_name,
+                tool_type,
+                ..
+            } => self.finish_harness_owned_tool_with_error(
+                &conversation_id,
+                call_id,
+                tool_name,
+                tool_type,
+                error.to_owned(),
+                None,
+            ),
+        }
+    }
+
+    fn complete_pending_external_receive(&mut self, event: &Event) {
+        let Some(message_id) = Self::pending_external_receive_message_id(event) else {
+            return;
+        };
+        let Some(pending) = self.pending_external_receive_acks.remove(message_id) else {
+            return;
+        };
+        self.record_peer_route(&pending.recipient_id);
+        match pending.completion {
+            PendingPeerReceiveCompletion::Remote {
+                client_id,
+                request_id,
+            } => {
+                let _ = self.bus.send_to(
+                    client_id.as_str(),
+                    None,
+                    HarnessOutputMessage::ExternalAgentMessageResult(
+                        tau_proto::ExternalAgentMessageResult {
+                            request_id,
+                            error: None,
+                            recipient_id: Some(pending.recipient_id),
+                            started: false,
+                        },
+                    ),
+                );
+            }
+            PendingPeerReceiveCompletion::Local {
+                conversation_id,
+                call_id,
+                tool_name,
+                tool_type,
+                sender_id,
+                message,
+            } => {
+                self.publish_for_agent_from(
+                    &conversation_id,
+                    Some(HARNESS_CONNECTION_ID),
+                    Event::AgentMessageSent(tau_proto::AgentMessageSent {
+                        message_id: message_id.clone(),
+                        sender_id,
+                        recipient: tau_proto::AgentMessageRecipient::Agent {
+                            agent_id: pending.recipient_id.clone(),
+                        },
+                        kind: tau_proto::AgentMessageKind::Message,
+                        message,
+                    }),
+                );
+                self.finish_harness_owned_tool_with_cbor_result(
+                    &conversation_id,
+                    call_id,
+                    tool_name,
+                    tool_type,
+                    tau_proto::CborValue::Map(vec![
+                        (
+                            tau_proto::CborValue::Text("status".to_owned()),
+                            tau_proto::CborValue::Text("Message sent".to_owned()),
+                        ),
+                        (
+                            tau_proto::CborValue::Text("recipient".to_owned()),
+                            tau_proto::CborValue::Text(format!(
+                                "{}/{}",
+                                self.current_session_id, pending.recipient_id
+                            )),
+                        ),
+                        (
+                            tau_proto::CborValue::Text("started".to_owned()),
+                            tau_proto::CborValue::Bool(false),
+                        ),
+                    ]),
+                    None,
+                );
+            }
+        }
     }
 
     /// Post-commit reactions. Drains the deferred-agent-dispatch
@@ -8549,6 +8823,25 @@ impl Harness {
             .remove(&tau_proto::ConnectionId::from(connection_id));
         self.external_message_peers
             .remove(&tau_proto::ConnectionId::from(connection_id));
+        for pending in self.pending_external_receive_acks.values_mut() {
+            if matches!(
+                &pending.completion,
+                PendingPeerReceiveCompletion::Remote { client_id, .. }
+                    if client_id.as_str() == connection_id
+            ) {
+                pending.canceled = true;
+            }
+        }
+        if let Some(cancellations) = self
+            .inbound_peer_io_cancellations
+            .remove(&tau_proto::ConnectionId::from(connection_id))
+        {
+            for cancellation in cancellations {
+                if let Some(cancellation) = cancellation.upgrade() {
+                    cancellation.store(true, std::sync::atomic::Ordering::Release);
+                }
+            }
+        }
         if self
             .provider_models_by_extension
             .remove(connection_id)
@@ -11772,6 +12065,45 @@ impl Harness {
         self.pending_notices.tool_availability.clear();
         self.pending_notices.unavailable_tools_delivered.clear();
         self.pending_start_agent_requests.clear();
+        for pending in self.pending_external_receive_acks.values_mut() {
+            pending.canceled = true;
+            if let PendingPeerReceiveCompletion::Remote {
+                client_id,
+                request_id,
+            } = &pending.completion
+            {
+                let _ = self.bus.send_to(
+                    client_id.as_str(),
+                    None,
+                    HarnessOutputMessage::ExternalAgentMessageResult(
+                        tau_proto::ExternalAgentMessageResult {
+                            request_id: request_id.clone(),
+                            error: Some("target session changed before receive commit".to_owned()),
+                            recipient_id: None,
+                            started: false,
+                        },
+                    ),
+                );
+            }
+        }
+        for cancellation in self.peer_io_cancellations.drain(..) {
+            if let Some(cancellation) = cancellation.upgrade() {
+                cancellation.store(true, std::sync::atomic::Ordering::Release);
+            }
+        }
+        for cancellations in self
+            .inbound_peer_io_cancellations
+            .drain()
+            .map(|(_, value)| value)
+        {
+            for cancellation in cancellations {
+                if let Some(cancellation) = cancellation.upgrade() {
+                    cancellation.store(true, std::sync::atomic::Ordering::Release);
+                }
+            }
+        }
+        self.peer_route_clock = 0;
+        self.peer_last_routed.clear();
         self.pending_manual_compaction_tools.clear();
         self.accepted_manual_compaction_tools.clear();
         self.clear_session_agent_context();

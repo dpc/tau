@@ -84,6 +84,10 @@ Higher-precedence `peer_entrypoint: null` removes routing/discovery authority;
 `auto_start_role: null` removes only auto-start authority. Group ordering never
 selects a spending role.
 
+`auto_start_role` is currently validated and retained for the future
+best-effort auto-start phase, but it is not active. Peer routing never starts an agent and
+fails when no eligible loaded or pending endpoint exists.
+
 ```json5
 {
   agents: {

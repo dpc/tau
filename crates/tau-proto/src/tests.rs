@@ -1098,7 +1098,7 @@ fn representative_input_messages() -> Vec<HarnessInputMessage> {
             sender_session_id: "sender-session".into(),
             sender_id: agent_id("sender_agent"),
             recipient_session_id: "recipient-session".into(),
-            recipient_id: agent_id("recipient_agent"),
+            recipient: ExternalAgentMessageRecipient::Exact(agent_id("recipient_agent")),
             kind: AgentMessageKind::Message,
             message: "hello external".to_owned(),
         }),
@@ -1109,7 +1109,7 @@ fn representative_input_messages() -> Vec<HarnessInputMessage> {
             sender_session_id: "sender-session".into(),
             sender_id: agent_id("sender_agent"),
             recipient_session_id: "recipient-session".into(),
-            recipient_id: agent_id("recipient_agent"),
+            recipient: ExternalAgentMessageRecipient::Exact(agent_id("recipient_agent")),
             kind: AgentMessageKind::Message,
             message: "hello external".to_owned(),
         }),
@@ -1190,6 +1190,8 @@ fn representative_output_messages() -> Vec<HarnessOutputMessage> {
         HarnessOutputMessage::ExternalAgentMessageResult(ExternalAgentMessageResult {
             request_id: "external-1".to_owned(),
             error: None,
+            recipient_id: Some(agent_id("recipient_agent")),
+            started: false,
         }),
         HarnessOutputMessage::ExternalAgentMessageAuthResult(ExternalAgentMessageAuthResult {
             request_id: "external-auth-1".to_owned(),
