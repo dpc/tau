@@ -5,6 +5,7 @@ pub mod cli;
 
 mod action_commands;
 mod agent_activity;
+mod agent_navigation;
 mod chat;
 mod daemon;
 mod dev_tmux;

@@ -14,6 +14,9 @@ use tau_proto::{
 
 use crate::action_commands::ActionCommandState;
 use crate::agent_activity::AgentActivity;
+use crate::agent_navigation::AgentNavigation;
+#[cfg(test)]
+use crate::agent_navigation::AgentNavigationState;
 use crate::build_banner;
 use crate::chat::{DraftSlot, retarget_prompt_draft_snapshot};
 use crate::markdown_render::{
@@ -106,19 +109,10 @@ pub(crate) struct EventRenderer {
     known_agents: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
     /// Human-friendly display names keyed by agent id.
     agent_display_names: std::sync::Arc<std::sync::Mutex<HashMap<String, String>>>,
-    /// Agent ids that the harness has announced as live.
-    live_agents: std::sync::Arc<std::sync::Mutex<HashSet<String>>>,
+    /// Atomic per-UI navigation modes, live membership, and runtime states.
+    agent_navigation: Arc<Mutex<AgentNavigation>>,
     /// Agent ids whose transcripts are memory-only in the current daemon.
     ephemeral_agents: std::sync::Arc<std::sync::Mutex<HashSet<String>>>,
-    /// Agent ids locally hidden from active prompt targets until explicitly
-    /// resumed. Effective active agents are `live_agents - suspended_agents`.
-    suspended_agents: std::sync::Arc<std::sync::Mutex<HashSet<String>>>,
-    /// Agents promoted by accepted input during this UI session.
-    ///
-    /// This replay-derived guard prevents completion of an original delegated
-    /// turn from hiding an agent after a user or another agent interacted with
-    /// it.
-    interacted_agents: HashSet<String>,
     /// Map side-query ids to the accepted agent id for routing prompt/provider
     /// events whose originator only carries `query_id`.
     query_agents: HashMap<String, String>,
@@ -1280,10 +1274,8 @@ impl EventRenderer {
             preserve_on_fresh_agent_switch: false,
             known_agents: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             agent_display_names: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
-            live_agents: std::sync::Arc::new(std::sync::Mutex::new(HashSet::new())),
+            agent_navigation: Arc::new(Mutex::new(AgentNavigation::default())),
             ephemeral_agents: std::sync::Arc::new(std::sync::Mutex::new(HashSet::new())),
-            suspended_agents: std::sync::Arc::new(std::sync::Mutex::new(HashSet::new())),
-            interacted_agents: HashSet::new(),
             query_agents: HashMap::new(),
             prompt_agents: HashMap::new(),
             tool_agents: HashMap::new(),
@@ -1395,16 +1387,12 @@ impl EventRenderer {
         self.agent_display_names.clone()
     }
 
-    pub(crate) fn live_agents(&self) -> std::sync::Arc<std::sync::Mutex<HashSet<String>>> {
-        self.live_agents.clone()
-    }
-
     pub(crate) fn ephemeral_agents(&self) -> std::sync::Arc<std::sync::Mutex<HashSet<String>>> {
         self.ephemeral_agents.clone()
     }
 
-    pub(crate) fn suspended_agents(&self) -> std::sync::Arc<std::sync::Mutex<HashSet<String>>> {
-        self.suspended_agents.clone()
+    pub(crate) fn agent_navigation(&self) -> Arc<Mutex<AgentNavigation>> {
+        self.agent_navigation.clone()
     }
 
     pub(crate) fn current_agent_state(&self) -> std::sync::Arc<std::sync::Mutex<Option<String>>> {
@@ -1608,8 +1596,22 @@ impl EventRenderer {
     }
 
     fn handle_agent_stats_updated(&mut self, updated: &tau_proto::AgentStatsUpdated) {
+        if self
+            .current_session_id
+            .as_ref()
+            .is_some_and(|session_id| session_id != &updated.session_id)
+        {
+            return;
+        }
+        if let Ok(mut navigation) = self.agent_navigation.lock() {
+            navigation.update_runtime(updated.agent_id.as_str(), updated.runtime_state);
+        }
         self.agent_stats
             .insert(updated.agent_id.to_string(), updated.clone());
+        self.render_model_status_if_present();
+        if self.current_agent_id.as_deref() == Some(updated.agent_id.as_str()) {
+            self.refresh_prompt_placeholder();
+        }
         self.refresh_watched_agent_blocks();
     }
 
@@ -1823,18 +1825,18 @@ impl EventRenderer {
     }
 
     fn refresh_prompt_placeholder(&mut self) {
-        let current_agent_suspended = self.current_agent_id.as_deref().is_some_and(|agent_id| {
-            self.suspended_agents
+        let current_agent_navigation = self.current_agent_id.as_deref().and_then(|agent_id| {
+            self.agent_navigation
                 .lock()
-                .map(|agents| agents.contains(agent_id))
-                .unwrap_or(false)
+                .ok()
+                .map(|navigation| (navigation.mode(agent_id), navigation.is_active(agent_id)))
         });
         self.handle
             .set_input_placeholder(crate::theme::prompt_input_placeholder(
                 &self.theme,
                 self.current_role.as_deref(),
                 self.current_agent_id.as_deref(),
-                current_agent_suspended,
+                current_agent_navigation,
             ));
     }
 
@@ -1990,8 +1992,8 @@ impl EventRenderer {
 
     fn mark_agent_live(&mut self, agent_id: String) {
         self.remember_agent(agent_id.clone());
-        if let Ok(mut agents) = self.live_agents.lock() {
-            agents.insert(agent_id);
+        if let Ok(mut navigation) = self.agent_navigation.lock() {
+            navigation.mark_live(agent_id);
         }
         self.render_model_status_if_present();
     }
@@ -2002,14 +2004,10 @@ impl EventRenderer {
         }
     }
 
-    fn mark_agent_interacted(&mut self, agent_id: String) {
+    fn mark_agent_active_auto_if_absent(&mut self, agent_id: String) {
         self.remember_agent(agent_id.clone());
-        self.interacted_agents.insert(agent_id.clone());
-        if let Ok(mut agents) = self.live_agents.lock() {
-            agents.insert(agent_id.clone());
-        }
-        if let Ok(mut agents) = self.suspended_agents.lock() {
-            agents.remove(&agent_id);
+        if let Ok(mut navigation) = self.agent_navigation.lock() {
+            navigation.mark_active_auto_if_absent(agent_id.clone());
         }
         self.render_model_status_if_present();
         if self.current_agent_id.as_deref() == Some(agent_id.as_str()) {
@@ -2017,29 +2015,36 @@ impl EventRenderer {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn resume_agent(&mut self, agent_id: String) {
-        self.mark_agent_interacted(agent_id);
-    }
-
-    pub(crate) fn suspend_agent(&mut self, agent_id: &str) {
-        self.mark_agent_suspended(agent_id);
-    }
-
-    fn mark_agent_suspended(&mut self, agent_id: &str) {
-        self.remember_agent(agent_id.to_owned());
-        if let Ok(mut agents) = self.suspended_agents.lock() {
-            agents.insert(agent_id.to_owned());
+        self.remember_agent(agent_id.clone());
+        if let Ok(mut navigation) = self.agent_navigation.lock() {
+            navigation.set_mode(agent_id.clone(), AgentNavigationState::Active);
         }
+        self.refresh_agent_navigation(&agent_id);
+    }
+
+    /// Refresh status and placeholder rendering after the input thread changes
+    /// the shared navigation snapshot.
+    pub(crate) fn refresh_agent_navigation(&mut self, agent_id: &str) {
         self.render_model_status_if_present();
         if self.current_agent_id.as_deref() == Some(agent_id) {
             self.refresh_prompt_placeholder();
         }
     }
 
-    fn auto_suspend_agent(&mut self, agent_id: &str) {
-        if !self.interacted_agents.contains(agent_id) {
-            self.mark_agent_suspended(agent_id);
+    #[cfg(test)]
+    pub(crate) fn suspend_agent(&mut self, agent_id: &str) {
+        self.mark_agent_suspended(agent_id);
+    }
+
+    #[cfg(test)]
+    fn mark_agent_suspended(&mut self, agent_id: &str) {
+        self.remember_agent(agent_id.to_owned());
+        if let Ok(mut navigation) = self.agent_navigation.lock() {
+            navigation.set_mode(agent_id, AgentNavigationState::Suspended);
         }
+        self.refresh_agent_navigation(agent_id);
     }
 
     fn render_model_status_if_present(&mut self) {
@@ -2653,18 +2658,14 @@ impl EventRenderer {
         self.watched_agent_turn_states.clear();
         self.active_agent_prompts.clear();
         self.terminal_agent_prompts.clear();
-        self.interacted_agents.clear();
         self.clear_watched_agent_blocks();
         if let Ok(mut agents) = self.known_agents.lock() {
             agents.clear();
         }
-        if let Ok(mut agents) = self.live_agents.lock() {
-            agents.clear();
+        if let Ok(mut navigation) = self.agent_navigation.lock() {
+            navigation.clear();
         }
         if let Ok(mut agents) = self.ephemeral_agents.lock() {
-            agents.clear();
-        }
-        if let Ok(mut agents) = self.suspended_agents.lock() {
             agents.clear();
         }
         self.clear_selected_agent();
@@ -3597,12 +3598,12 @@ impl EventRenderer {
                 let agent_id = accepted.agent_id.to_string();
                 self.query_agents
                     .insert(accepted.query_id.clone(), agent_id.clone());
-                self.mark_agent_live(agent_id);
+                self.mark_agent_active_auto_if_absent(agent_id);
                 true
             }
             Event::AgentStarted(started) => {
                 let agent_id = started.agent_id.to_string();
-                self.remember_agent(agent_id.clone());
+                self.mark_agent_live(agent_id.clone());
                 if started.ephemeral {
                     self.remember_agent_ephemeral(&agent_id);
                 }
@@ -3620,12 +3621,7 @@ impl EventRenderer {
                 }
                 true
             }
-            Event::StartAgentResult(result) => {
-                if let Some(agent_id) = self.query_agents.get(&result.query_id).cloned() {
-                    self.auto_suspend_agent(&agent_id);
-                }
-                true
-            }
+            Event::StartAgentResult(_) => true,
             Event::AgentWatchesUpdated(updated) => {
                 self.handle_agent_watches_updated(updated);
                 true
@@ -3636,7 +3632,9 @@ impl EventRenderer {
                 true
             }
             Event::SessionAgentUnloaded(unloaded) => {
-                self.mark_agent_suspended(unloaded.agent_id.as_str());
+                if let Ok(mut navigation) = self.agent_navigation.lock() {
+                    navigation.unload(unloaded.agent_id.as_str());
+                }
                 self.remove_agent_watch_endpoint(unloaded.agent_id.as_str());
                 true
             }
@@ -3662,23 +3660,17 @@ impl EventRenderer {
                 true
             }
             Event::AgentPromptQueued(queued) => {
-                if queued.message_class.is_internal() {
-                    self.mark_agent_live(queued.agent_id.to_string());
-                } else {
-                    self.mark_agent_interacted(queued.agent_id.to_string());
-                }
+                self.mark_agent_live(queued.agent_id.to_string());
                 true
             }
             Event::AgentPromptSubmitted(prompt) => {
                 let agent_id = prompt.agent_id.to_string();
-                if prompt.originator.is_user() && !prompt.message_class.is_internal() {
-                    self.mark_agent_interacted(agent_id.clone());
-                } else {
-                    self.mark_agent_live(agent_id.clone());
-                }
                 if let tau_proto::PromptOriginator::Extension { query_id, .. } = &prompt.originator
                 {
-                    self.query_agents.insert(query_id.clone(), agent_id);
+                    self.query_agents.insert(query_id.clone(), agent_id.clone());
+                    self.mark_agent_active_auto_if_absent(agent_id);
+                } else {
+                    self.mark_agent_live(agent_id);
                 }
                 true
             }
@@ -3715,11 +3707,7 @@ impl EventRenderer {
             }
             Event::AgentPromptTerminated(terminated) => {
                 let agent_id = terminated.agent_id.to_string();
-                if terminated.originator.is_user() {
-                    self.mark_agent_live(agent_id);
-                } else {
-                    self.auto_suspend_agent(&agent_id);
-                }
+                self.mark_agent_live(agent_id);
                 self.mark_agent_prompt_inactive(
                     terminated.agent_id.as_str(),
                     terminated.agent_prompt_id.as_str(),
@@ -3769,15 +3757,7 @@ impl EventRenderer {
                     finished.agent_prompt_id.as_str(),
                 );
                 let requested_tools = tool_calls_from_output_items(&finished.output_items);
-                if finished.originator.is_user()
-                    || (finished.error.is_none()
-                        && (finished.stop_reason == tau_proto::ProviderStopReason::ToolCalls
-                            || !requested_tools.is_empty()))
-                {
-                    self.mark_agent_live(agent_id.clone());
-                } else {
-                    self.auto_suspend_agent(&agent_id);
-                }
+                self.mark_agent_live(agent_id.clone());
                 self.prompt_agents
                     .insert(finished.agent_prompt_id.to_string(), agent_id.clone());
                 for call in requested_tools {
@@ -3838,7 +3818,7 @@ impl EventRenderer {
             }
             Event::AgentMessageReceived(message) => {
                 self.remember_agent(message.sender_id.to_string());
-                self.mark_agent_interacted(message.recipient_id.to_string());
+                self.mark_agent_live(message.recipient_id.to_string());
                 if let Some(state) = &message.watch_turn_state {
                     self.handle_watched_agent_turn_state(message, state);
                 }

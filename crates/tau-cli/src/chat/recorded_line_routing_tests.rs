@@ -32,15 +32,13 @@ fn action_state_with_email_list() -> ActionCommandState {
 fn routing_state_with_selected_agent(selected: Option<&str>) -> InputRoutingState {
     let current_agent_state = Arc::new(Mutex::new(selected.map(str::to_owned)));
     let known_agents = Arc::new(Mutex::new(Vec::new()));
-    let live_agents = Arc::new(Mutex::new(std::collections::HashSet::new()));
+    let agent_navigation = Arc::new(Mutex::new(AgentNavigation::default()));
     let ephemeral_agents = Arc::new(Mutex::new(std::collections::HashSet::new()));
-    let suspended_agents = Arc::new(Mutex::new(std::collections::HashSet::new()));
     InputRoutingState::new(
         current_agent_state,
         known_agents,
-        live_agents,
+        agent_navigation,
         ephemeral_agents,
-        suspended_agents,
     )
 }
 

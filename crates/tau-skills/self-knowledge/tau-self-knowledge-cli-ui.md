@@ -50,8 +50,10 @@ The longest matching word prefix wins, except `/` as the first non-whitespace ch
 
 Available completers:
 
-- `complete_agents` — complete active agent mentions, preserving the trigger
-  prefix.
+- `complete_agents` — complete effectively active agent mentions, preserving
+  the trigger prefix. Ordinary agents are always active; delegated
+  `active-auto` agents are included only while their complete outer turn is
+  running. Explicitly suspended agents are excluded.
 - `complete_path` — plain filesystem directory-prefix completion.
 - `complete_path_fuzzy` — fuzzy git-tracked path completion for `./<partial>`,
   falling back to directory-prefix completion.

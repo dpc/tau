@@ -20,6 +20,7 @@ use tau_proto::{
 };
 
 use crate::action_commands::ActionCommandState;
+use crate::agent_navigation::{AgentNavigation, AgentNavigationState};
 use crate::daemon::{DaemonCliOverrides, DaemonHandle, daemon_output_for_session, resolve_daemon};
 use crate::event_renderer::{EventRenderer, ToolTimerNotifier, ToolTimerState, UiIoStats};
 use crate::prompt_history::PromptHistoryStore;
@@ -630,7 +631,7 @@ const BUILTIN_SLASH_COMMANDS: &[(&str, &str)] = &[
         "/model",
         "Switch selected agent model (e.g. /model openai/gpt-5)",
     ),
-    ("/agent", "Manage visible/suspended agent transcripts"),
+    ("/agent", "Manage agent transcript navigation"),
     (
         "/new",
         "Start a new agent, optionally with a role (`/new reviewer`)",
@@ -1065,15 +1066,13 @@ pub(crate) fn run_chat(
     let current_agent_state = renderer.current_agent_state();
     let known_agents = renderer.known_agents();
     let agent_display_names = renderer.agent_display_names();
-    let live_agents = renderer.live_agents();
+    let agent_navigation = renderer.agent_navigation();
     let ephemeral_agents = renderer.ephemeral_agents();
-    let suspended_agents = renderer.suspended_agents();
     let input_routing = InputRoutingState::new(
         current_agent_state.clone(),
         known_agents.clone(),
-        live_agents.clone(),
+        agent_navigation,
         ephemeral_agents.clone(),
-        suspended_agents.clone(),
     );
     completion_data.set_arg_completer(
         tau_cli_term::CommandName::new("/agent"),
@@ -1109,8 +1108,10 @@ pub(crate) fn run_chat(
                         RendererCmd::RemoteDisconnect(reason) => renderer.handle_disconnect(reason),
                         RendererCmd::Set { name, value } => renderer.apply_setting(&name, &value),
                         RendererCmd::SwitchAgent { agent_id } => renderer.switch_agent(agent_id),
-                        RendererCmd::SuspendAgent { agent_id } => renderer.suspend_agent(&agent_id),
-                        RendererCmd::ResumeAgent { agent_id } => renderer.resume_agent(agent_id),
+                        RendererCmd::SuspendAgent { agent_id }
+                        | RendererCmd::ResumeAgent { agent_id } => {
+                            renderer.refresh_agent_navigation(&agent_id);
+                        }
                         RendererCmd::ClearSelectedAgent => renderer.clear_selected_agent(),
                         RendererCmd::SetTheme { theme } => renderer.apply_theme(theme),
                         RendererCmd::ActionInvoked {
@@ -1371,25 +1372,22 @@ struct TerminalInputLoopCtx {
 struct InputRoutingState {
     current_agent_state: Arc<Mutex<Option<String>>>,
     known_agents: Arc<Mutex<Vec<String>>>,
-    live_agents: Arc<Mutex<std::collections::HashSet<String>>>,
+    agent_navigation: Arc<Mutex<AgentNavigation>>,
     ephemeral_agents: Arc<Mutex<std::collections::HashSet<String>>>,
-    suspended_agents: Arc<Mutex<std::collections::HashSet<String>>>,
 }
 
 impl InputRoutingState {
     fn new(
         current_agent_state: Arc<Mutex<Option<String>>>,
         known_agents: Arc<Mutex<Vec<String>>>,
-        live_agents: Arc<Mutex<std::collections::HashSet<String>>>,
+        agent_navigation: Arc<Mutex<AgentNavigation>>,
         ephemeral_agents: Arc<Mutex<std::collections::HashSet<String>>>,
-        suspended_agents: Arc<Mutex<std::collections::HashSet<String>>>,
     ) -> Self {
         Self {
             current_agent_state,
             known_agents,
-            live_agents,
+            agent_navigation,
             ephemeral_agents,
-            suspended_agents,
         }
     }
 
@@ -1420,23 +1418,17 @@ impl InputRoutingState {
     }
 
     fn active_agents(&self) -> std::collections::HashSet<String> {
-        let live = self
-            .live_agents
+        self.agent_navigation
             .lock()
-            .map(|agents| agents.clone())
-            .unwrap_or_default();
-        let suspended = self
-            .suspended_agents
-            .lock()
-            .map(|agents| agents.clone())
-            .unwrap_or_default();
-        live.into_iter()
-            .filter(|agent| !suspended.contains(agent))
-            .collect()
+            .map(|navigation| navigation.active_agents())
+            .unwrap_or_default()
     }
 
     fn active_count(&self) -> usize {
-        active_side_agent_count_from_handles(&self.live_agents, &self.suspended_agents)
+        self.agent_navigation
+            .lock()
+            .map(|navigation| navigation.active_count())
+            .unwrap_or_default()
     }
 
     fn agent_is_known(&self, agent_id: &str) -> bool {
@@ -1447,17 +1439,10 @@ impl InputRoutingState {
     }
 
     fn agent_is_active(&self, agent_id: &str) -> bool {
-        let live = self
-            .live_agents
+        self.agent_navigation
             .lock()
-            .map(|agents| agents.clone())
-            .unwrap_or_default();
-        let suspended = self
-            .suspended_agents
-            .lock()
-            .map(|agents| agents.clone())
-            .unwrap_or_default();
-        agent_is_active_in_sets(&live, &suspended, agent_id)
+            .map(|navigation| navigation.is_active(agent_id))
+            .unwrap_or(false)
     }
 
     fn agent_is_ephemeral(&self, agent_id: &str) -> bool {
@@ -1481,27 +1466,26 @@ impl InputRoutingState {
     }
 
     fn mark_suspended(&self, agent_id: &str) {
-        mark_agent_suspended(&self.suspended_agents, agent_id);
+        if let Ok(mut navigation) = self.agent_navigation.lock() {
+            navigation.set_mode(agent_id, AgentNavigationState::Suspended);
+        }
     }
 
     fn mark_resumed(&self, agent_id: &str) {
-        mark_agent_resumed(&self.live_agents, &self.suspended_agents, agent_id);
+        if let Ok(mut navigation) = self.agent_navigation.lock() {
+            navigation.set_mode(agent_id, AgentNavigationState::Active);
+        }
     }
 
     fn next_active_agent(&self, delta: isize) -> Option<String> {
         let current = self.selected_agent_id();
         let known = self.known_agents();
-        let live = self
-            .live_agents
+        let active = self
+            .agent_navigation
             .lock()
-            .map(|agents| agents.clone())
+            .map(|navigation| navigation.active_agents())
             .unwrap_or_default();
-        let suspended = self
-            .suspended_agents
-            .lock()
-            .map(|agents| agents.clone())
-            .unwrap_or_default();
-        next_active_agent(current.as_deref(), &known, &live, &suspended, delta)
+        next_active_agent(current.as_deref(), &known, &active, delta)
     }
 
     fn role_cycling_enabled(&self) -> bool {
@@ -2907,13 +2891,12 @@ pub(crate) fn role_cycling_enabled(current_agent_state: &Arc<Mutex<Option<String
 pub(crate) fn next_active_agent(
     current: Option<&str>,
     known_agents: &[String],
-    live_agents: &std::collections::HashSet<String>,
-    suspended_agents: &std::collections::HashSet<String>,
+    active_agent_ids: &std::collections::HashSet<String>,
     delta: isize,
 ) -> Option<String> {
     let active_agents = known_agents
         .iter()
-        .filter(|agent| live_agents.contains(*agent) && !suspended_agents.contains(*agent))
+        .filter(|agent| active_agent_ids.contains(*agent))
         .collect::<Vec<_>>();
     if active_agents.is_empty() {
         return None;
@@ -2991,60 +2974,13 @@ fn terminal_input_loop(
     .run()
 }
 
-pub(crate) fn agent_is_active_in_sets(
-    live_agents: &std::collections::HashSet<String>,
-    suspended_agents: &std::collections::HashSet<String>,
-    agent_id: &str,
-) -> bool {
-    live_agents.contains(agent_id) && !suspended_agents.contains(agent_id)
-}
-
-fn mark_agent_suspended(
-    suspended_agents: &Arc<Mutex<std::collections::HashSet<String>>>,
-    agent_id: &str,
-) {
-    if let Ok(mut suspended) = suspended_agents.lock() {
-        suspended.insert(agent_id.to_owned());
-    }
-}
-
-fn mark_agent_resumed(
-    live_agents: &Arc<Mutex<std::collections::HashSet<String>>>,
-    suspended_agents: &Arc<Mutex<std::collections::HashSet<String>>>,
-    agent_id: &str,
-) {
-    if let Ok(mut live) = live_agents.lock() {
-        live.insert(agent_id.to_owned());
-    }
-    if let Ok(mut suspended) = suspended_agents.lock() {
-        suspended.remove(agent_id);
-    }
-}
-
-fn active_side_agent_count_from_handles(
-    live_agents: &Arc<Mutex<std::collections::HashSet<String>>>,
-    suspended_agents: &Arc<Mutex<std::collections::HashSet<String>>>,
-) -> usize {
-    let live = live_agents
-        .lock()
-        .map(|agents| agents.clone())
-        .unwrap_or_default();
-    let suspended = suspended_agents
-        .lock()
-        .map(|agents| agents.clone())
-        .unwrap_or_default();
-    live.iter()
-        .filter(|agent| !suspended.contains(*agent))
-        .count()
-}
-
 const SESSION_SUBCOMMAND_COMPLETIONS: &[(&str, &str)] = &[("new", "Start a fresh chat session")];
 
 const AGENT_SUBCOMMAND_COMPLETIONS: &[(&str, &str)] = &[
     ("new", "Clear the selected agent"),
     ("switch", "Show a known agent transcript"),
     ("suspend", "Hide an active agent transcript"),
-    ("resume", "Show a suspended agent transcript"),
+    ("resume", "Keep a hidden agent in navigation"),
     ("name", "Set an agent display name"),
 ];
 

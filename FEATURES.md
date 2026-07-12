@@ -771,12 +771,15 @@ agents whose transcripts are stored under `<state_dir>/agents/<agent_id>/`. The
 `/suspend`, and `/resume` do not synchronize selection or hidden-agent
 preferences to other UIs.
 
-`/agent switch` completion lists active agents so suspended transcripts stay out
-of normal prompt-routing choices. If you explicitly type a known suspended agent
-id, `/agent switch <id>` still selects that transcript for viewing; prompts
-can be submitted normally, and accepted user prompts or agent-message receipts
-mark it active again. `/agent resume <id>` and `/resume` remain explicit ways
-to restore it before interaction.
+Navigation modes are local to each UI and are not persisted: ordinary agents
+default to `active`, delegated agents to `active-auto`, and explicit suspend to
+`suspended`. `active-auto` is effectively active only while authoritative
+`agent.stats_updated.runtime_state` is `running`, spanning the complete outer
+turn and its tool/model rounds. Switch/mention completion, suspend candidates,
+and keyboard cycling use this effective set; resume candidates are its complement
+among known agents. Explicitly typing a known hidden id still selects it for
+viewing and prompting without changing its mode; only `/agent resume` or
+`/resume` changes it to unconditional `active`.
 
 Available `/set` names include `show-diff` (expanded vs. compact diffs),
 `show-thinking` (agent reasoning summaries), `show-turn-stats` (per-turn

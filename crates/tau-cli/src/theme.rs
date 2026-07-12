@@ -7,6 +7,8 @@ use std::{fmt, io};
 use tau_config::settings::{CliTheme, TauDirs};
 use tau_themes::{SpanTree, ThemedText};
 
+use crate::agent_navigation::AgentNavigationState;
+
 const THEME_ENV: &str = "TAU_THEME";
 const THEME_CHOICE_METADATA_LIMIT: u64 = 64 * 1024;
 
@@ -37,19 +39,21 @@ pub(crate) fn prompt_input_placeholder(
     theme: &tau_themes::Theme,
     role: Option<&str>,
     current_agent_id: Option<&str>,
-    current_agent_suspended: bool,
+    current_agent_navigation: Option<(AgentNavigationState, bool)>,
 ) -> tau_cli_term::StyledText {
     let role = role.unwrap_or("agent");
     let mut text = ThemedText::new();
     let placeholder_style = text.add_style(tau_themes::names::PROMPT_PLACEHOLDER);
     let role_style = text.add_style(tau_themes::names::STATUS_ROLE);
 
-    let parts = if current_agent_suspended {
-        vec![SpanTree::text(
-            "This agent is suspended. Sending a message will mark it as active.",
-        )]
-    } else {
-        match current_agent_id {
+    let parts = match current_agent_navigation {
+        Some((AgentNavigationState::Suspended, _)) => vec![SpanTree::text(
+            "This agent is suspended. Use /resume to include it in navigation.",
+        )],
+        Some((AgentNavigationState::ActiveAuto, false)) => vec![SpanTree::text(
+            "This active-auto agent is idle. Use /resume to keep it in navigation.",
+        )],
+        _ => match current_agent_id {
             Some(agent_id) => vec![
                 SpanTree::text("Write a message to "),
                 SpanTree::span(role_style, vec![SpanTree::text(agent_id)]),
@@ -60,7 +64,7 @@ pub(crate) fn prompt_input_placeholder(
                 SpanTree::span(role_style, vec![SpanTree::text(role)]),
                 SpanTree::text(" agent..."),
             ],
-        }
+        },
     };
 
     text.push_tree(SpanTree::span(placeholder_style, parts));

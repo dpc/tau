@@ -27,6 +27,15 @@ for that running turn. Merely live, selectable, non-suspended, or watched agents
 must not appear as active watched-agent work or be counted in the bottom
 active-side-agent `@N` status chip.
 
+Prompt navigation has separate per-UI modes: ordinary agents default to
+`active`, delegated agents default to `active-auto`, and users can explicitly
+set `suspended` or `active` with suspend/resume. `active-auto` follows the
+complete outer-turn `agent.stats_updated.runtime_state`: it is offered by
+switch/mention completion and keyboard cycling only while `running`. These
+modes are not persisted or sent over the protocol; replayed extension prompt
+provenance and stats catch-up reconstruct delegated defaults and current
+effectiveness. Selecting or prompting a hidden agent does not change its mode.
+
 There is also a narrow temporary action-input redaction exception: `/email auth
 google finish ...` command echo and prompt-history entries are redacted because
 the pasted Gmail loopback URL contains a one-time OAuth authorization code and

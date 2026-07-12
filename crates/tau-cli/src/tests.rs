@@ -16,9 +16,10 @@ use tau_proto::{
     UiRoleUpdateAction, Verbosity,
 };
 
+use super::agent_navigation::AgentNavigationState;
 use super::chat::{
-    DraftSlot, agent_is_active_in_sets, custom_prompt_replacement, invalidate_pending_draft,
-    is_local_slash_command, leading_slash_action, next_active_agent, queue_prompt_draft_snapshot,
+    DraftSlot, custom_prompt_replacement, invalidate_pending_draft, is_local_slash_command,
+    leading_slash_action, next_active_agent, queue_prompt_draft_snapshot,
     redacted_command_echo_line, redacted_prompt_history_line, retarget_prompt_draft_snapshot,
     role_cycling_enabled, should_send_draft_snapshot,
 };
@@ -960,9 +961,10 @@ fn renderer_starts_without_selected_or_default_agent() {
     );
     assert!(
         renderer
-            .live_agents()
+            .agent_navigation()
             .lock()
-            .expect("live agents")
+            .expect("agent navigation")
+            .active_agents()
             .is_empty()
     );
 }
@@ -1207,10 +1209,10 @@ fn replayed_durable_first_user_prompt_selects_live_agent() {
     );
     assert!(
         renderer
-            .live_agents()
+            .agent_navigation()
             .lock()
-            .expect("live agents")
-            .contains("engineer_abc12345")
+            .expect("agent navigation")
+            .is_live("engineer_abc12345")
     );
     assert!(vt.screen_contains(80, "hello"));
 }
@@ -1295,29 +1297,14 @@ fn agent_switching_cycles_active_agents_and_skips_suspended() {
     // known for completion/resume, but switching to them would leave the prompt
     // pointed at an agent that immediately refuses user prompts.
     let known_agents = vec!["alpha".to_owned(), "bravo".to_owned(), "charlie".to_owned()];
-    let live_agents = HashSet::from(["alpha".to_owned(), "bravo".to_owned(), "charlie".to_owned()]);
-    let suspended_agents = HashSet::from(["bravo".to_owned()]);
+    let active_agents = HashSet::from(["alpha".to_owned(), "charlie".to_owned()]);
 
     assert_eq!(
-        next_active_agent(
-            Some("alpha"),
-            &known_agents,
-            &live_agents,
-            &suspended_agents,
-            1
-        )
-        .as_deref(),
+        next_active_agent(Some("alpha"), &known_agents, &active_agents, 1).as_deref(),
         Some("charlie")
     );
     assert_eq!(
-        next_active_agent(
-            Some("alpha"),
-            &known_agents,
-            &live_agents,
-            &suspended_agents,
-            -1
-        )
-        .as_deref(),
+        next_active_agent(Some("alpha"), &known_agents, &active_agents, -1).as_deref(),
         Some("charlie")
     );
 }
@@ -1327,15 +1314,14 @@ fn agent_switching_without_selection_starts_at_edge_for_direction() {
     // When the user is at the no-agent prompt, the first switch should enter
     // the active-agent ring from the side implied by the shortcut direction.
     let known_agents = vec!["alpha".to_owned(), "bravo".to_owned()];
-    let live_agents = HashSet::from(["alpha".to_owned(), "bravo".to_owned()]);
-    let suspended_agents = HashSet::new();
+    let active_agents = HashSet::from(["alpha".to_owned(), "bravo".to_owned()]);
 
     assert_eq!(
-        next_active_agent(None, &known_agents, &live_agents, &suspended_agents, 1).as_deref(),
+        next_active_agent(None, &known_agents, &active_agents, 1).as_deref(),
         Some("alpha")
     );
     assert_eq!(
-        next_active_agent(None, &known_agents, &live_agents, &suspended_agents, -1).as_deref(),
+        next_active_agent(None, &known_agents, &active_agents, -1).as_deref(),
         Some("bravo")
     );
 }
@@ -2431,300 +2417,234 @@ fn agent_stats_does_not_overwrite_display_name() {
     );
 }
 
-/// Ensures replay/live ordering is monotonic: an accepted message promotes a
-/// hidden delegate and stale completion from its original turn cannot hide it.
+/// Ensures accepted input and stale terminal events preserve a delegated
+/// agent's mode.
 #[test]
-fn accepted_message_reactivates_suspended_agent_before_delegate_completion() {
+fn accepted_input_and_terminal_events_preserve_active_auto() {
     let (_term, handle, _vt) = setup(80, 24);
     let mut renderer = EventRenderer::new(
         handle,
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
     );
-
-    renderer.handle(&Event::SessionStarted(tau_proto::SessionStarted {
+    renderer.handle(&Event::SessionStarted(SessionStarted {
         session_id: "s1".into(),
-        reason: tau_proto::SessionStartReason::Initial,
+        reason: SessionStartReason::Initial,
     }));
     renderer.handle(&Event::StartAgentAccepted(tau_proto::StartAgentAccepted {
         query_id: "q-worker".to_owned(),
         agent_id: agent_id("worker-1"),
     }));
-    renderer.handle(&Event::UiPromptSubmitted(tau_proto::UiPromptSubmitted {
-        session_id: "s1".into(),
-        text: "not yet accepted".to_owned(),
-        agent_id: agent_id("worker-1"),
-        message_class: tau_proto::PromptMessageClass::User,
-        originator: tau_proto::PromptOriginator::User,
-        ctx_id: None,
-    }));
-    renderer.handle(&Event::StartAgentResult(tau_proto::StartAgentResult {
-        query_id: "q-worker".to_owned(),
-        text: "done".to_owned(),
-        error: None,
-    }));
-    assert!(
-        renderer
-            .suspended_agents()
-            .lock()
-            .expect("suspended agents lock poisoned")
-            .contains("worker-1"),
-        "transient submission must not protect an active delegate from completion"
-    );
-
-    renderer.handle(&Event::SessionStarted(tau_proto::SessionStarted {
-        session_id: "s2".into(),
-        reason: tau_proto::SessionStartReason::New,
-    }));
-    renderer.handle(&Event::StartAgentAccepted(tau_proto::StartAgentAccepted {
-        query_id: "q-worker".to_owned(),
-        agent_id: agent_id("worker-1"),
-    }));
-    renderer.suspend_agent("worker-1");
     renderer.handle(&Event::AgentStatsUpdated(tau_proto::AgentStatsUpdated {
         session_id: "s1".into(),
         agent_id: agent_id("worker-1"),
         runtime_state: tau_proto::AgentRuntimeState::Running,
-        tools: tau_proto::AgentToolStats {
-            in_flight: 1,
-            started_total: 1,
-        },
-        context: tau_proto::AgentContextStats::default(),
+        tools: Default::default(),
+        context: Default::default(),
     }));
-    renderer.handle(&Event::AgentPromptCreated(AgentPromptCreated {
+    renderer.handle(&Event::AgentPromptSubmitted(AgentPromptSubmitted {
+        inference_activation: false,
         agent_id: agent_id("worker-1"),
-        ..agent_prompt_created("worker-sp", "s1")
-    }));
-    renderer.handle(&Event::UiPromptSubmitted(tau_proto::UiPromptSubmitted {
-        session_id: "s1".into(),
-        text: "not yet accepted".to_owned(),
-        agent_id: agent_id("worker-1"),
+        text: "follow up".to_owned(),
         message_class: tau_proto::PromptMessageClass::User,
         originator: tau_proto::PromptOriginator::User,
+        submission_source: Default::default(),
+        display_name: None,
         ctx_id: None,
     }));
-    renderer.handle(&Event::ProviderResponseFinished(ProviderResponseFinished {
-        agent_id: agent_id("worker-1"),
-        ..finished_response("worker-sp", vec![assistant_message_item("done")])
-    }));
     renderer.handle(&Event::StartAgentResult(tau_proto::StartAgentResult {
         query_id: "q-worker".to_owned(),
         text: "done".to_owned(),
         error: None,
     }));
+    let navigation = renderer.agent_navigation();
+    let navigation = navigation.lock().expect("agent navigation");
+    assert_eq!(
+        navigation.mode("worker-1"),
+        AgentNavigationState::ActiveAuto
+    );
+    assert!(navigation.is_active("worker-1"));
+    drop(navigation);
 
-    let live = renderer
-        .live_agents()
-        .lock()
-        .expect("live agents lock poisoned")
-        .clone();
-    let suspended = renderer
-        .suspended_agents()
-        .lock()
-        .expect("suspended agents lock poisoned")
-        .clone();
-    assert!(live.contains("worker-1"));
-    assert!(suspended.contains("worker-1"));
-    assert!(!agent_is_active_in_sets(&live, &suspended, "worker-1"));
-
-    renderer.handle(&Event::AgentMessageReceived(
-        tau_proto::AgentMessageReceived {
-            message_id: "message-1".into(),
-            sender_id: agent_id("sender-1"),
-            sender_session_id: None,
-            recipient_id: agent_id("worker-1"),
-            kind: tau_proto::AgentMessageKind::Message,
-            watch_turn_state: None,
-            watch_provider_status: None,
-            message: "follow up".to_owned(),
-        },
-    ));
-    renderer.handle(&Event::ProviderResponseFinished(ProviderResponseFinished {
+    renderer.handle(&Event::AgentStatsUpdated(tau_proto::AgentStatsUpdated {
+        session_id: "s1".into(),
         agent_id: agent_id("worker-1"),
-        ..finished_response("worker-sp", vec![assistant_message_item("done")])
+        runtime_state: tau_proto::AgentRuntimeState::Idle,
+        tools: Default::default(),
+        context: Default::default(),
     }));
-    renderer.handle(&Event::StartAgentResult(tau_proto::StartAgentResult {
-        query_id: "q-worker".to_owned(),
-        text: "done".to_owned(),
-        error: None,
-    }));
-    let live = renderer
-        .live_agents()
-        .lock()
-        .expect("live agents lock poisoned")
-        .clone();
-    let suspended = renderer
-        .suspended_agents()
-        .lock()
-        .expect("suspended agents lock poisoned")
-        .clone();
-    assert!(agent_is_active_in_sets(&live, &suspended, "worker-1"));
+    let navigation = renderer.agent_navigation();
+    let navigation = navigation.lock().expect("agent navigation");
+    assert_eq!(
+        navigation.mode("worker-1"),
+        AgentNavigationState::ActiveAuto
+    );
+    assert!(!navigation.is_active("worker-1"));
 }
 
+/// Ensures placeholder copy distinguishes idle automatic hiding from an
+/// unconditional manual suspension.
 #[test]
-fn selected_suspended_agent_placeholder_explains_implicit_activation() {
-    // Regression: suspending the currently selected agent must update the live
-    // input placeholder immediately, so the empty prompt itself explains why a
-    // normal message cannot be sent until `/resume` runs.
+fn selected_hidden_agent_placeholder_distinguishes_modes() {
+    // Hidden selected agents remain viewable, and copy names the explicit
+    // transition.
     let (_term, handle, vt) = setup(100, 24);
     let mut renderer = EventRenderer::new(
         handle.clone(),
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
     );
-
     renderer.handle(&Event::StartAgentAccepted(tau_proto::StartAgentAccepted {
         query_id: "q-worker".to_owned(),
         agent_id: agent_id("worker-1"),
     }));
     renderer.switch_agent("worker-1".to_owned());
     sync(&handle);
-    assert!(vt.screen_contains(100, "Write a message to worker-1"));
-
+    assert!(vt.screen_contains(100, "active-auto agent is idle"));
     renderer.suspend_agent("worker-1");
     sync(&handle);
-    assert!(vt.screen_contains(
-        100,
-        "This agent is suspended. Sending a message will mark it as active."
-    ));
-
+    assert!(vt.screen_contains(100, "This agent is suspended"));
     renderer.resume_agent("worker-1".to_owned());
     sync(&handle);
     assert!(vt.screen_contains(100, "Write a message to worker-1"));
-    assert!(!vt.screen_contains(
-        100,
-        "This agent is suspended. Sending a message will mark it as active."
-    ));
 }
 
+/// Ensures start-result delivery cannot replace canonical outer-turn runtime
+/// state as the effective-activity authority.
 #[test]
-fn delegated_agent_is_active_until_start_agent_result() {
+fn delegated_agent_effectiveness_follows_stats_not_start_result() {
     let (_term, handle, _vt) = setup(80, 24);
     let mut renderer = EventRenderer::new(
         handle,
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
     );
-
+    renderer.handle(&Event::SessionStarted(SessionStarted {
+        session_id: "s1".into(),
+        reason: SessionStartReason::Initial,
+    }));
     renderer.handle(&Event::StartAgentAccepted(tau_proto::StartAgentAccepted {
         query_id: "q-worker".to_owned(),
         agent_id: agent_id("worker-1"),
     }));
-
-    let live = renderer
-        .live_agents()
-        .lock()
-        .expect("live agents lock poisoned")
-        .clone();
-    let suspended = renderer
-        .suspended_agents()
-        .lock()
-        .expect("suspended agents lock poisoned")
-        .clone();
-    assert!(agent_is_active_in_sets(&live, &suspended, "worker-1"));
-
+    {
+        let navigation = renderer.agent_navigation();
+        let navigation = navigation.lock().expect("agent navigation");
+        assert_eq!(
+            navigation.mode("worker-1"),
+            AgentNavigationState::ActiveAuto
+        );
+        assert!(!navigation.is_active("worker-1"));
+    }
+    renderer.handle(&Event::AgentStatsUpdated(tau_proto::AgentStatsUpdated {
+        session_id: "s1".into(),
+        agent_id: agent_id("worker-1"),
+        runtime_state: tau_proto::AgentRuntimeState::Running,
+        tools: Default::default(),
+        context: Default::default(),
+    }));
     renderer.handle(&Event::StartAgentResult(tau_proto::StartAgentResult {
         query_id: "q-worker".to_owned(),
         text: "done".to_owned(),
         error: None,
     }));
-
-    let live = renderer
-        .live_agents()
-        .lock()
-        .expect("live agents lock poisoned")
-        .clone();
-    let suspended = renderer
-        .suspended_agents()
-        .lock()
-        .expect("suspended agents lock poisoned")
-        .clone();
-    assert!(live.contains("worker-1"));
-    assert!(suspended.contains("worker-1"));
-    assert!(!agent_is_active_in_sets(&live, &suspended, "worker-1"));
+    let navigation = renderer.agent_navigation();
+    assert!(
+        navigation
+            .lock()
+            .expect("agent navigation")
+            .is_active("worker-1")
+    );
 }
 
+/// Ensures durable extension prompt provenance reconstructs the delegated
+/// default without overwriting a local explicit resume.
 #[test]
-fn extension_agent_prompt_lifecycle_is_active_until_response_finishes() {
+fn extension_replay_reconstructs_active_auto_without_overwriting_override() {
     let (_term, handle, _vt) = setup(80, 24);
     let mut renderer = EventRenderer::new(
         handle,
         tau_cli_term::CompletionData::new(),
         cli_test_theme(),
     );
-
-    renderer.handle(&Event::AgentPromptCreated(AgentPromptCreated {
+    let prompt = AgentPromptSubmitted {
+        inference_activation: false,
         agent_id: agent_id("worker-1"),
+        text: "side task".to_owned(),
+        message_class: tau_proto::PromptMessageClass::User,
         originator: tau_proto::PromptOriginator::Extension {
             name: "core-subagents".into(),
             query_id: "q-worker".to_owned(),
         },
-        ..agent_prompt_created("worker-sp", "s1")
-    }));
-    let live = renderer
-        .live_agents()
-        .lock()
-        .expect("live agents lock poisoned")
-        .clone();
-    let suspended = renderer
-        .suspended_agents()
-        .lock()
-        .expect("suspended agents lock poisoned")
-        .clone();
-    assert!(agent_is_active_in_sets(&live, &suspended, "worker-1"));
-
-    renderer.handle(&Event::ProviderResponseFinished(ProviderResponseFinished {
-        agent_id: agent_id("worker-1"),
-        originator: tau_proto::PromptOriginator::Extension {
-            name: "core-subagents".into(),
-            query_id: "q-worker".to_owned(),
-        },
-        ..finished_response(
-            "worker-sp",
-            vec![ContextItem::ToolCall(ToolCallItem {
-                call_id: "worker-tool".into(),
-                name: tau_proto::ToolName::new("read"),
-                tool_type: tau_proto::ToolType::Function,
-                arguments: CborValue::Map(Vec::new()),
-                raw_arguments_json: None,
-                responses_envelope: None,
-            })],
-        )
-    }));
-    let live = renderer
-        .live_agents()
-        .lock()
-        .expect("live agents lock poisoned")
-        .clone();
-    let suspended = renderer
-        .suspended_agents()
-        .lock()
-        .expect("suspended agents lock poisoned")
-        .clone();
-    assert!(agent_is_active_in_sets(&live, &suspended, "worker-1"));
-
-    renderer.handle(&Event::ProviderResponseFinished(ProviderResponseFinished {
-        agent_id: agent_id("worker-1"),
-        originator: tau_proto::PromptOriginator::Extension {
-            name: "core-subagents".into(),
-            query_id: "q-worker".to_owned(),
-        },
-        ..finished_response("worker-sp", vec![assistant_message_item("done")])
-    }));
-    let live = renderer
-        .live_agents()
-        .lock()
-        .expect("live agents lock poisoned")
-        .clone();
-    let suspended = renderer
-        .suspended_agents()
-        .lock()
-        .expect("suspended agents lock poisoned")
-        .clone();
-    assert!(live.contains("worker-1"));
-    assert!(suspended.contains("worker-1"));
-    assert!(!agent_is_active_in_sets(&live, &suspended, "worker-1"));
+        submission_source: Default::default(),
+        display_name: None,
+        ctx_id: None,
+    };
+    renderer.handle(&Event::AgentPromptSubmitted(prompt.clone()));
+    assert_eq!(
+        renderer
+            .agent_navigation()
+            .lock()
+            .expect("agent navigation")
+            .mode("worker-1"),
+        AgentNavigationState::ActiveAuto,
+    );
+    renderer.resume_agent("worker-1".to_owned());
+    renderer.handle(&Event::AgentPromptSubmitted(prompt));
+    assert_eq!(
+        renderer
+            .agent_navigation()
+            .lock()
+            .expect("agent navigation")
+            .mode("worker-1"),
+        AgentNavigationState::Active,
+    );
 }
+
+/// Ensures a delayed renderer refresh after unload cannot resurrect membership
+/// or attach an override to a later same-id delegated endpoint.
+#[test]
+fn delayed_navigation_refresh_cannot_resurrect_unloaded_agent() {
+    let (_term, handle, _vt) = setup(80, 24);
+    let mut renderer = EventRenderer::new(
+        handle,
+        tau_cli_term::CompletionData::new(),
+        cli_test_theme(),
+    );
+    renderer.handle(&Event::StartAgentAccepted(tau_proto::StartAgentAccepted {
+        query_id: "q-worker-1".to_owned(),
+        agent_id: agent_id("worker-1"),
+    }));
+    renderer.resume_agent("worker-1".to_owned());
+    renderer.handle(&Event::SessionAgentUnloaded(
+        tau_proto::SessionAgentUnloaded {
+            session_id: "s1".into(),
+            agent_id: agent_id("worker-1"),
+        },
+    ));
+
+    renderer.refresh_agent_navigation("worker-1");
+    assert!(
+        !renderer
+            .agent_navigation()
+            .lock()
+            .expect("agent navigation")
+            .is_live("worker-1")
+    );
+
+    renderer.handle(&Event::StartAgentAccepted(tau_proto::StartAgentAccepted {
+        query_id: "q-worker-2".to_owned(),
+        agent_id: agent_id("worker-1"),
+    }));
+    let navigation = renderer.agent_navigation();
+    let navigation = navigation.lock().expect("agent navigation");
+    assert_eq!(
+        navigation.mode("worker-1"),
+        AgentNavigationState::ActiveAuto
+    );
+    assert!(!navigation.is_active("worker-1"));
+}
+
 #[test]
 fn clearing_selected_agent_preserves_previous_transcript() {
     let (_term, handle, vt) = setup(80, 24);

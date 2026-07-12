@@ -70,9 +70,12 @@ must not mutate display names or durable transcript state.
 
 Two agent-state concepts are intentionally distinct:
 
-- `active` / `suspended` is UI navigation state only. It controls whether an
-  agent appears in ordinary switching/autocomplete sets; it does not affect
-  loading, addressability, or prompt/message delivery.
+- `active` / `active-auto` / `suspended` is per-UI, memory-only navigation
+  state. `active` is always offered, `active-auto` is offered only while
+  `agent.stats_updated.runtime_state` is `running`, and `suspended` is never
+  offered. It does not affect loading, addressability, or prompt/message
+  delivery. Delegated agents default to `active-auto`; ordinary agents default
+  to `active`.
 - `running` / `waiting` is execution state. It controls whether an agent is
   currently processing an outer agent turn after receiving an activating input
   and before its final response or termination returns control to the prompting
@@ -173,12 +176,13 @@ emits a targeted `ui.agent_model_select`; after `/new`, with no selected agent,
 it stages a one-shot `ui.create_agent.model_override` for the next prompt-created
 agent instead of sending an untargeted agent update.
 
-Agent switch commands distinguish known transcript selection from active prompt
-routing. `/agent switch` completions list active agents and `none`, keeping
-suspended agents out of ordinary switch suggestions. An explicitly typed known
-suspended agent id is still accepted so the UI can view that transcript and
-submit a prompt. An accepted user prompt or agent-message receipt marks it
-active again; `/agent resume` and `/resume` remain explicit alternatives.
+Agent switch commands distinguish known transcript selection from effective
+prompt routing. `/agent switch` completions list effectively active agents and
+`none`; mentions, cycling, and suspend completion use the same effective set.
+Resume completion lists the remaining known agents, including idle
+`active-auto` agents. Explicitly typing a known hidden id still selects it.
+Accepted input preserves the mode; only `/agent resume` or `/resume` changes a
+mode to unconditional `active`, and suspend changes it to `suspended`.
 
 `/name <display name>` is the selected-agent shortcut for `/agent name
 <agent_id> <display name>`. It emits the same display-name update as `/agent

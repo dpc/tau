@@ -315,7 +315,7 @@ fn prompt_input_placeholder_keeps_placeholder_style_around_role_style() {
             "##,
     )
     .expect("test theme parses");
-    let prompt = prompt_input_placeholder(&theme, Some("engineer"), None, false);
+    let prompt = prompt_input_placeholder(&theme, Some("engineer"), None, None);
     let spans = prompt.spans();
 
     assert_eq!(spans.len(), 3);
@@ -330,7 +330,12 @@ fn prompt_input_placeholder_keeps_placeholder_style_around_role_style() {
     assert_eq!(spans[2].style.fg, Some(tau_cli_term::Color::DarkGrey));
     assert!(spans[2].style.italic);
 
-    let prompt = prompt_input_placeholder(&theme, Some("engineer"), Some("engineer_abc"), false);
+    let prompt = prompt_input_placeholder(
+        &theme,
+        Some("engineer"),
+        Some("engineer_abc"),
+        Some((AgentNavigationState::Active, true)),
+    );
     let spans = prompt.spans();
     assert_eq!(spans[0].text, "Write a message to ");
     assert_eq!(spans[1].text, "engineer_abc");
@@ -340,12 +345,17 @@ fn prompt_input_placeholder_keeps_placeholder_style_around_role_style() {
 }
 
 #[test]
-fn suspended_prompt_input_placeholder_explains_implicit_activation() {
+fn suspended_prompt_input_placeholder_explains_explicit_resume() {
     // Regression coverage for the disabled-input copy shown while the selected
     // agent is suspended. The text must make clear that users need to resume it
-    // while explaining that accepted input activates the agent.
+    // without incorrectly claiming that accepted input changes its mode.
     let theme = tau_themes::Theme::new();
-    let prompt = prompt_input_placeholder(&theme, Some("engineer"), Some("engineer_abc"), true);
+    let prompt = prompt_input_placeholder(
+        &theme,
+        Some("engineer"),
+        Some("engineer_abc"),
+        Some((AgentNavigationState::Suspended, false)),
+    );
     let text: String = prompt
         .spans()
         .iter()
@@ -354,7 +364,7 @@ fn suspended_prompt_input_placeholder_explains_implicit_activation() {
 
     assert_eq!(
         text,
-        "This agent is suspended. Sending a message will mark it as active."
+        "This agent is suspended. Use /resume to include it in navigation."
     );
 }
 
