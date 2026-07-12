@@ -60,6 +60,9 @@ pub(crate) struct RolePromptTemplateContext<'a> {
 }
 
 /// Harness-owned capabilities visible to one prompt render.
+///
+/// Source-of-truth and render-failure semantics are governed by
+/// `DESIGN-tau-harness-prompt-capability-truth`.
 #[derive(Clone, Debug, Default, serde::Serialize)]
 pub(crate) struct PromptCapabilities {
     /// Model-visible tools authorized for this turn.

@@ -1,5 +1,8 @@
 //! Live tool registration tracking and routing of `tool.request` events
 //! to the connection that owns each tool.
+//!
+//! Tool-example validation and repair selection follow
+//! `DESIGN-tau-core-tool-examples`.
 
 use std::collections::HashMap;
 use std::error::Error;

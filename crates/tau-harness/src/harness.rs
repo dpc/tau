@@ -10273,6 +10273,9 @@ impl Harness {
     /// requests defer until their complete tool round folds, while
     /// cross-agent requests start immediately; every rejection completes as
     /// a foreground error.
+    ///
+    /// See `DESIGN-tau-harness-manual-compaction` for capability and replay
+    /// ownership.
     pub(crate) fn request_agent_tool_compaction(
         &mut self,
         caller_cid: &AgentId,

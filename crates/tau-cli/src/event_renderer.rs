@@ -2577,6 +2577,8 @@ impl EventRenderer {
         self.save_cli_state();
     }
 
+    /// Applies the UI-owned threshold and override policy from
+    /// `DESIGN-tau-cli-notice-filtering`.
     fn notice_visible(&self, level: tau_proto::NoticeLevel, always_show: bool) -> bool {
         level == tau_proto::NoticeLevel::Critical
             || always_show

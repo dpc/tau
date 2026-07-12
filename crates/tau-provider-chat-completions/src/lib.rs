@@ -338,6 +338,7 @@ fn emit_stream_update<W: Write>(
     response_stats: ProviderResponseStats,
     writer: &mut PeerOutputWriter<W>,
 ) -> bool {
+    // Transient delta/stat emission follows `SPEC-provider-response-streaming`.
     // RATE-LIMIT GUARDRAIL — DO NOT CALL THIS DIRECTLY FROM UPSTREAM CHUNKS.
     // provider.response_updated is a bus/event-log event, not a per-chunk
     // callback. After the first prompt update, progress/byte updates MUST be

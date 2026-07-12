@@ -207,7 +207,8 @@ impl std::error::Error for SupervisionError {
 /// One supervised child process connected over stdin/stdout.
 ///
 /// The child lifecycle is owned by this value, while a dedicated waiter thread
-/// owns the `Child` handle and reports exit status through a channel. On Linux,
+/// owns the `Child` handle and reports exit status through a channel, as
+/// specified by `DESIGN-tau-supervisor-spawn-time-exit-waiter`. On Linux,
 /// a pidfd is opened before spawn cleanup is disarmed, so hard termination can
 /// signal the same direct child without a PID-reuse race. Callers should prefer
 /// explicit graceful protocol shutdown or `terminate`; `Drop` only hard-kills

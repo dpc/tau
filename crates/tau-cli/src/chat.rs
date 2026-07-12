@@ -1657,7 +1657,8 @@ struct TerminalInputSession<'a> {
     pending_new_agent_options: PendingNewAgentOptions,
 }
 
-/// One-shot options staged while the UI is in new-agent mode.
+/// One-shot options staged while the UI is in new-agent mode, as governed by
+/// `DESIGN-tau-cli-new-agent-staging`.
 #[derive(Default)]
 struct PendingNewAgentOptions {
     /// Optional role override for the next created agent.
