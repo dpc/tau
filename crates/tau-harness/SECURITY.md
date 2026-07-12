@@ -79,6 +79,14 @@ is the started child agent's terminal final response to its direct delegating
 watcher and remains watchable under the response label.
 
 Provider-authored status text, response bodies, headers, prompt text, account identifiers, and raw errors never cross the watch boundary. Only protocol closed enums and bounded numeric retry facts are accepted after prompt ownership validation. Terminal watched responses use the typed failure kind rather than `ProviderResponseFinished.error`.
+Per-subscription delivery dedupe retains at most 64 nonterminal prompt identities
+for the newest observed turn generation and rejects older generations without
+mutation. Terminal-error delivery retires its prompt immediately. Capacity
+evicts the oldest nonterminal prompt, so a later status for that evicted prompt
+is intentionally treated as first delivery again; same-category suppression is
+guaranteed only while the prompt remains retained. Cardinality instrumentation
+contains only subscription and generation identity, counts, and closed
+delivery/eviction decisions, never prompt ids or provider-authored content.
 
 Reactive context recovery never trusts provider prose or a provider-authored recovery decision. Eligibility uses the closed failure category, an empty output set, harness-owned prompt operation/model routing, durable activation cut, advertised model capability, and role policy. Watchers receive only the existing sanitized `recovering_context` state; prompt bodies and raw provider errors are not included.
 

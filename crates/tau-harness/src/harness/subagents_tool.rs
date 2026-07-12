@@ -645,19 +645,41 @@ impl Harness {
         else {
             return;
         };
-        let key = (
-            status.turn_generation,
-            status.agent_prompt_id.clone(),
-            crate::harness::AgentWatchProviderDeliveryKind::from(&status.state),
-        );
-        if !initial
-            && !self
+        if !initial {
+            let deliveries = self
                 .agent_watch_provider_deliveries
                 .entry(subscription_id.clone())
-                .or_default()
-                .insert(key)
-        {
-            return;
+                .or_default();
+            let decision = deliveries.record(
+                status.turn_generation,
+                &status.agent_prompt_id,
+                crate::harness::AgentWatchProviderDeliveryKind::from(&status.state),
+            );
+            tracing::trace!(
+                target: "tau_harness::agent_watch",
+                subscription_id,
+                turn_generation = status.turn_generation,
+                tracked_prompts = deliveries.prompt_count(),
+                tracked_delivery_keys = deliveries.delivery_key_count(),
+                should_deliver = decision.should_deliver,
+                stale_generation = decision.stale_generation,
+                capacity_evicted = decision.capacity_evicted,
+                terminal_retired = decision.terminal_retired,
+                "updated provider-status delivery dedupe cardinality"
+            );
+            if decision.capacity_evicted {
+                tracing::debug!(
+                    target: "tau_harness::agent_watch",
+                    subscription_id,
+                    turn_generation = status.turn_generation,
+                    tracked_prompts = deliveries.prompt_count(),
+                    tracked_delivery_keys = deliveries.delivery_key_count(),
+                    "evicted oldest provider-status prompt from delivery dedupe state"
+                );
+            }
+            if !decision.should_deliver {
+                return;
+            }
         }
         let mut status = status.clone();
         status.session_id = self.current_session_id.clone();

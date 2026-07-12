@@ -295,7 +295,11 @@ retry/recovery/terminal fanout, and fresh state after same-session reload.
 
 Status: confirmed, 2026-07-11, dpc
 
-Provider retries carry closed structured categories, saturating attempt counts, and approximate bounded delays independently of human UI prose. After validating prompt ownership, the harness owns the current per-agent/turn/prompt snapshot and session-local watcher fanout. Live delivery is limited to first category, category/phase changes, and terminal failure; same-category storms only refresh the late-watch snapshot. Enabling or re-enabling returns current sanitized state and emits an initial client snapshot without prompting the model. Durable live facts replay as transcript context without re-fanout; disable, prune, and session change stop delivery. Raw provider bodies, status text, errors, headers, account data, secrets, and prompt content never cross this boundary.
+Provider retries carry closed structured categories, saturating attempt counts, and approximate bounded delays independently of human UI prose. After validating prompt ownership, the harness owns the current per-agent/turn/prompt snapshot and session-local watcher fanout. Live delivery is limited to first category, category/phase changes, and terminal failure; same-category storms only refresh the late-watch snapshot while its prompt remains retained. Per-subscription dedupe state drops terminal-error prompt keys immediately and retains at most 64 nonterminal prompt identities per generation. Sixty-four avoids churn during ordinary serial provider work while placing a fixed bound on malformed or unusually long tool turns; a later status for a capacity-evicted prompt is intentionally treated as first delivery again. Trace fields expose prompt/key cardinality and a debug event identifies capacity eviction. Enabling or re-enabling returns current sanitized state and emits an initial client snapshot without prompting the model. Durable live facts replay as transcript context without re-fanout; disable, prune, and session change stop delivery. Raw provider bodies, status text, errors, headers, account data, secrets, and prompt content never cross this boundary.
+
+Focused delivery-bookkeeping tests own generation, dedupe, terminal-retirement,
+and FIFO-capacity decisions. Harness dispatch tests own watcher fanout, durable
+facts and replay, initial snapshots, relation cleanup, and long-turn integration.
 
 ## Reactive overflow transaction
 

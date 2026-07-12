@@ -63,6 +63,7 @@ use crate::extension::{
 };
 use crate::format::{format_tool_progress, render_entry_preview};
 use crate::harness::agent_context::AgentContextStore;
+use crate::harness::agent_watch_provider_deliveries::AgentWatchProviderDeliveries;
 use crate::harness::current_session::CurrentSessionState;
 use crate::harness::extension_data::{
     ExtensionDataError, run_extension_data_append_file, run_extension_data_create_file,
@@ -1390,6 +1391,8 @@ fn validate_protocol_version(hello: &Hello) -> Result<(), HarnessError> {
 #[cfg(test)]
 mod agent_context_tests;
 #[cfg(test)]
+mod agent_watch_provider_deliveries_tests;
+#[cfg(test)]
 mod compaction_metadata_tests;
 #[cfg(test)]
 mod context_limit_telemetry_tests;
@@ -1401,6 +1404,7 @@ mod tests;
 mod tool_policy_tests;
 
 mod agent_context;
+mod agent_watch_provider_deliveries;
 mod context_limit_telemetry;
 mod current_session;
 mod dispatch;
@@ -1742,10 +1746,8 @@ pub struct Harness {
     /// Current sanitized provider-work snapshot by watched public agent id.
     pub(crate) agent_watch_provider_status:
         HashMap<String, tau_proto::AgentWatchProviderStatusNotification>,
-    /// Already delivered status keys; bounded by the closed phase/category sets
-    /// and cleared whenever a watched agent begins a new whole turn.
-    pub(crate) agent_watch_provider_deliveries:
-        HashMap<String, HashSet<(u64, AgentPromptId, AgentWatchProviderDeliveryKind)>>,
+    /// Bounded already-delivered provider-status state by watch subscription.
+    pub(crate) agent_watch_provider_deliveries: HashMap<String, AgentWatchProviderDeliveries>,
     /// Agent ids that were once known but can no longer receive messages.
     pub(crate) stopped_agent_ids: HashSet<String>,
     /// Global harness state. Currently only tracks per-session init
