@@ -3846,7 +3846,8 @@ pub struct ProviderResponseUpdated {
     pub originator: PromptOriginator,
 }
 
-/// One provider-owned, prompt-local response throughput update.
+/// One prompt-local public throughput update, whose provider ownership is
+/// specified by `DESIGN-tau-proto-provider-response-stats`.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ProviderResponseStats {
     /// Latest cumulative provider-response statistics sample for this prompt.

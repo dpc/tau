@@ -284,6 +284,9 @@ pub fn validate_tool_arguments(
 
 /// Attempts narrow schema-guided repairs for invalid model-produced arguments.
 ///
+/// The conservative repair and mandatory revalidation boundary is recorded in
+/// `DESIGN-tau-core-schema-guided-argument-repair`.
+///
 /// This helper does not decide whether repair is allowed for a call. Callers
 /// must run normal validation first, invoke repair only after validation
 /// failure, and revalidate the returned arguments before dispatch.

@@ -1,4 +1,7 @@
 //! OpenAI-compatible Chat Completions backend helpers.
+//!
+//! Component responsibilities and provider/replay trust boundaries are
+//! documented in `ARCH-tau-provider-chat-completions`.
 
 pub mod openrouter;
 

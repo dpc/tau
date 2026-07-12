@@ -741,6 +741,8 @@ fn format_seconds(seconds: u64) -> String {
 }
 
 fn ok_display(args: String) -> ToolUseState {
+    // Keep successful tool-result metadata consistent with
+    // `DESIGN-tool-result-ok-status`.
     ToolUseState {
         args,
         status: ToolUseStatus::Success,

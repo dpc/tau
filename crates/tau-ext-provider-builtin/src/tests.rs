@@ -322,9 +322,9 @@ fn test_chat_model(id: &str) -> ChatCompletionsModel {
 
 #[test]
 fn chat_completions_profiles_publish_and_route_only_configured_models() {
-    // Chat Completions provider profiles are user-configured namespaces. The
-    // provider must publish exactly the configured models and reject unknown
-    // model ids instead of falling back to any ChatGPT/Codex backend.
+    // Under `DESIGN-tau-ext-provider-builtin-profile-ownership`, user-configured
+    // Chat Completions namespaces publish exactly their configured models and
+    // reject unknown model ids instead of falling back to a ChatGPT/Codex backend.
     let provider_name = ProviderName::new("local");
     let configured = test_chat_model("llama");
     let provider = ChatCompletionsProvider {

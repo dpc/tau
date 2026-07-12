@@ -1,8 +1,9 @@
 //! Personal XMPP bridge extension for Tau agents.
 //!
-//! The extension exposes `xmpp_register` and `xmpp_send`. It is disabled by
-//! default, uses a mandatory JID allowlist, and treats XMPP text as external
-//! untrusted prompt input.
+//! The extension exposes `xmpp_register` and `xmpp_send`. Under
+//! `DESIGN-tau-ext-xmpp-opt-in-bridge`, it is disabled by default; it also uses
+//! a mandatory JID allowlist and treats XMPP text as external untrusted prompt
+//! input.
 //! Its transport, routing, lifecycle, and trust boundaries are summarized in
 //! `ARCH-tau-ext-xmpp`.
 //! The plaintext-over-TLS limitation is recorded in
