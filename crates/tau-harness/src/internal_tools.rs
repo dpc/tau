@@ -542,6 +542,14 @@ impl<'a> InternalToolHost<'a> {
             crate::harness::AgentMessageRecipientStatus::Unknown
         )
     }
+
+    /// Return whether `agent_id` is a currently live recipient.
+    pub fn is_live_agent_id(&self, agent_id: &str) -> bool {
+        matches!(
+            self.harness.agent_message_recipient_status(agent_id),
+            crate::harness::AgentMessageRecipientStatus::Live
+        )
+    }
 }
 
 impl Harness {

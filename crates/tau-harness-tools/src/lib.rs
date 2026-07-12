@@ -456,6 +456,9 @@ impl BuiltinTools {
                 return Err(format!("unknown agent: `{}`", parsed.agent_id));
             }
             if parsed.enable {
+                if !host.is_live_agent_id(&parsed.agent_id) {
+                    return Err(format!("agent is not live: `{}`", parsed.agent_id));
+                }
                 host.set_agent_watch(
                     &self_agent_id,
                     &parsed.agent_id,

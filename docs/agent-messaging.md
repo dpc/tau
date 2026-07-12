@@ -103,6 +103,9 @@ agent_watch({"agent_id":"engineer_b","enable":true})
 Successful enable first reports whether the watched agent is currently running
 a model turn. Later `Idle → Running` and `Running → Idle` transitions arrive as
 separate “started a model turn” and “stopped its model turn” notifications.
+Enabling requires the target agent to be live. An enable request for a stopped
+or unknown target fails without creating any watch relation or notification
+state; after reloading the same agent id, explicitly enable a fresh watch.
 One turn remains running across provider/tool continuation rounds. The durable
 notification carries a watch-subscription id, an initial-snapshot marker, and a
 harness-runtime-scoped watched-agent turn generation so consumers can correlate
