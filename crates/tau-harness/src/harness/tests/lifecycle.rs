@@ -653,7 +653,8 @@ fn extension_config_error_is_mandatory_warning_and_replayed_to_late_ui() {
     // Extension config validation often runs during daemon startup, before the
     // terminal UI has subscribed. This is regression coverage for the user
     // contract: any extension `ConfigError` must become a mandatory warning
-    // `harness.notice` visible to late UI clients, not just a debug-log line.
+    // `harness.notice` visible to late UI clients, not just a debug-log line;
+    // see DESIGN-tau-harness-lifecycle-testing.
     let td = TempDir::new().expect("tempdir");
     let sp = td.path().join("state");
     let mut h = quiet_provider_harness(&sp).expect("start");

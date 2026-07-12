@@ -7444,7 +7444,8 @@ fn restore_looking_user_text_remains_an_activation() {
 
 /// A completed checkpoint consumes every true activation through its head,
 /// leaves a later true node pending once, and an uncompleted replacement
-/// checkpoint restores as uncertain without redispatch.
+/// checkpoint restores as uncertain without redispatch. This guards
+/// `DESIGN-tau-harness-compaction-activation-binding`.
 #[test]
 fn replay_respects_activation_checkpoint_ranges_and_uncertainty() {
     let td = TempDir::new().expect("tempdir");
@@ -11514,7 +11515,8 @@ fn wait_start_is_interrupted_by_already_queued_agent_message() {
 
 /// An input wait is level-triggered: activating input accepted before the tool
 /// call is handled completes it immediately without copying the queued payload
-/// into the harness-authored result.
+/// into the harness-authored result. This guards
+/// `SPEC-tau-harness-activating-input-wait`.
 #[test]
 fn input_wait_returns_immediately_for_already_queued_activation() {
     let td = TempDir::new().expect("tempdir");

@@ -1798,6 +1798,7 @@ fn slack_send_preserves_root_and_thread_context() {
 
 /// Authorized reactions to an agent-owned bridge post preserve structured
 /// source metadata, and retries are resubmitted with the same durable identity.
+/// This guards `DESIGN-tau-ext-slack-reaction-ownership`.
 #[test]
 fn authorized_reactions_to_agent_posts_preserve_durable_dedup_identity() {
     let (ext, rx, _client) = extension();

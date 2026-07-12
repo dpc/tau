@@ -3,6 +3,8 @@
 //! The extension exposes `xmpp_register` and `xmpp_send`. It is disabled by
 //! default, uses a mandatory JID allowlist, and treats XMPP text as external
 //! untrusted prompt input.
+//! Its transport, routing, lifecycle, and trust boundaries are summarized in
+//! `ARCH-tau-ext-xmpp`.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::error::Error;

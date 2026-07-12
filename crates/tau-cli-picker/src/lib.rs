@@ -8,6 +8,9 @@
 //!   caller-provided writer.
 //! - [`pick_with_io`] — does *not* manage raw mode. Intended for tests or
 //!   non-terminal hosts that drive the picker via in-memory streams.
+//!
+//! The crate's terminal-ownership and input contracts are summarized in
+//! `ARCH-tau-cli-picker`.
 
 mod error;
 mod item;

@@ -750,9 +750,13 @@ impl DiscoveryState {
 /// 3. Recurse into subdirectories to find `SKILL.md`.
 /// 4. Skip dot-prefixed entries and `node_modules`.
 /// 5. Follow symlinked roots and entries while using canonical directory paths
-///    to avoid recursing forever through symlink cycles.
+///    to avoid recursing forever through symlink cycles, as chosen by
+///    `DESIGN-instruction-symlink-discovery`.
 /// 6. Bound traversal by directory, entry, and depth budgets; diagnostics are
 ///    available to loading callers when a budget is exceeded.
+///
+/// The wider discovery and prompt-trust boundary is recorded in
+/// `ARCH-tau-skills`.
 pub fn discover_skill_paths(root: &Path) -> Vec<PathBuf> {
     discover_skill_paths_with_diagnostics(root).0
 }

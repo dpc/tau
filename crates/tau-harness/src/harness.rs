@@ -1608,7 +1608,7 @@ pub struct Harness {
     /// Session persistence policy. Agent transcripts and user/cache extension
     /// data remain on their normal persistent paths; ephemeral mode suppresses
     /// session membership/debug/log artifacts and session-scoped extension
-    /// data.
+    /// data, per `DESIGN-tau-harness-ephemeral-session-persistence`.
     pub(crate) session_persistence: tau_core::SessionPersistenceMode,
     /// Runtime harness path stem for this daemon's socket/metadata pair.
     ///
