@@ -4,6 +4,8 @@
 //! token. This module keeps the local ownership mechanics independent from the
 //! legacy extension runtime so gateway code can reuse the same lock scope,
 //! token redaction, webhook preflight messages, and 409 diagnostics.
+//! Bot API long polling is the chosen inbound transport; see
+//! `DESIGN-tau-ext-telegram-long-polling`.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{ErrorKind, Read, Seek, SeekFrom, Write};

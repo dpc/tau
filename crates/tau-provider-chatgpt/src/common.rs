@@ -185,6 +185,8 @@ fn classify_http_status(
     body: &str,
     transport_hint: Option<Duration>,
 ) -> Option<RetryDecision> {
+    // Keep adapter classification independent from UI prose as required by
+    // DESIGN-tau-provider-chatgpt-retry-observability.
     let provider_code = parse_json_error_code(body).or_else(|| {
         body.split("(type=")
             .nth(1)

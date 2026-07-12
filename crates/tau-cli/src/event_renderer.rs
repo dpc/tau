@@ -194,7 +194,8 @@ pub(crate) struct EventRenderer {
     /// Dynamic action invocations keyed by invocation id. Action results and
     /// errors do not carry an agent id, so the CLI snapshots the viewed
     /// transcript when the slash command is invoked and routes completion
-    /// output back to that transcript.
+    /// output back to that transcript, per
+    /// `DESIGN-tau-cli-action-completion-snapshots`.
     action_invocation_owners: HashMap<tau_proto::ActionInvocationId, UiSnapshotOwner>,
     /// Extensions that are already up in this daemon. `/session new` starts a
     /// fresh session, but these processes are intentionally kept.
@@ -348,7 +349,7 @@ pub(crate) struct EventRenderer {
     /// True while folding an event for a hidden agent transcript. During this
     /// window renderer fields contain the hidden agent's snapshot, but
     /// input-loop mirrors must continue exposing the actually visible
-    /// transcript.
+    /// transcript, per `DESIGN-tau-cli-prompt-editor-context`.
     suppress_editor_context_publish: bool,
     /// Symbol shown before the active prompt input.
     prompt_symbol: String,

@@ -2,6 +2,7 @@
 //!
 //! The extension keeps Tau protocol handling in Rust and exposes delivered
 //! events to Rhai scripts as JSON-shaped maps matching Serde's JSON form.
+//! Component boundaries are summarized in `ARCH-tau-ext-rhai`.
 //! Runtime concurrency and shell-worker supervision follow
 //! `DESIGN-tau-ext-rhai-runtime-model`.
 

@@ -399,6 +399,9 @@ enum ListeningScope {
 
 impl RuntimeConfig {
     /// Classify an admitted sender, or deny it under the configured policy.
+    ///
+    /// Kept independent from listening scope per
+    /// `DESIGN-tau-ext-slack-sender-admission`.
     fn sender_policy(&self, user_id: &str) -> Option<SenderPolicyStatus> {
         if self.allowed_user_ids.contains(user_id) {
             Some(SenderPolicyStatus::Allowlisted)

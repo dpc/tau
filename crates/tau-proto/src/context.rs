@@ -1,4 +1,7 @@
 //! Provider context and transcript item support types.
+//!
+//! Semantic fields and provider replay sidecars follow
+//! `SPEC-tau-proto-provider-data`.
 
 use std::fmt::Write as _;
 

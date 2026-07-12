@@ -1131,6 +1131,7 @@ struct ScheduledPrompt {
 ///
 /// Time is supplied to [`Self::pop_due`] by the caller so scheduling and
 /// cooldown behavior can be acceptance-tested without wall-clock sleeps.
+/// See `DESIGN-tau-ext-provider-builtin-required-work-retries`.
 #[derive(Default)]
 struct RetryScheduleQueue {
     /// Min-heap of delayed logical prompts.
