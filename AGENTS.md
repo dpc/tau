@@ -1,68 +1,25 @@
-## Workspace layout
+## Workspace
 
-- `crates/tau` — main end-user binary that bundles first-party components
-- `crates/tau-actions` — shared extension action schema, validation, and slash-line parsing helpers
-- `crates/tau-blocking-notify-channel` — blocking notification channel utility
-- `crates/tau-client` — shared client/extension protocol runtime API
-- `crates/tau-cli` — CLI entrypoint: starts harness daemon and connects UI clients
-- `crates/tau-cli-picker` — shared interactive picker for terminal selection prompts
-- `crates/tau-cli-term` — higher-level terminal prompt: slash-command/path completion, menu rendering, `$EDITOR` integration
-- `crates/tau-cli-term-raw` — raw terminal rendering/input layer
-- `crates/tau-config` — user and project configuration loading
-- `crates/tau-core` — event bus, routing, state, sessions, policy, and tool registry
-- `crates/tau-ext-std-notifications` — built-in notification extension
-- `crates/tau-ext-telegram` — disabled-by-default Telegram text bridge extension
-- `crates/tau-ext-shell` — shell- and filesystem-oriented extension
-- `crates/tau-ext-slack` — disabled-by-default Slack Socket Mode text bridge extension
-- `crates/tau-ext-rhai` — disabled-by-default trusted local Rhai scripting extension for event hooks, tool registration, and direct shell automation
-- `crates/tau-ext-test-dummy` — test-only dummy extension
-- `crates/tau-ext-websearch` — built-in generic web search extension (Exa default plus opt-in Parallel.ai tools)
-- `crates/tau-ext-xmpp` — disabled-by-default XMPP text bridge extension
-- `crates/tau-harness` — harness daemon: extensions, bus, sessions, socket server, harness-owned delegate/wait tools
-- `crates/tau-provider` — provider credential/config library plus shared provider runtime utilities (OAuth, storage, stream guards)
-- `crates/tau-provider-chat-completions` — OpenAI-compatible Chat Completions backend helpers
-- `crates/tau-provider-chatgpt` — ChatGPT/Codex Responses backend helpers, including HTTP/SSE, WebSocket, and pool logic
-- `crates/tau-ext-provider-builtin` — built-in provider extension plus `tau provider {add,remove,list}` profile CLI
-- `crates/tau-proto` — shared protocol types and CBOR codec helpers
-- `crates/tau-skills` — skill discovery/loading support
-- `crates/tau-socket` — Unix socket transport glue
-- `crates/tau-supervisor` — supervised child-process and stdio transport glue
-- `crates/tau-term-screen` — terminal screen layout and styled-cell renderer
-- `crates/tau-test-support` — reusable end-to-end test utilities
-- `crates/tau-themes` — themed text/style types
+- `crates/` contains the major code components.
+- This project uses the Linked Specs convention; consult the `linked-specs`
+  skill before working with specs or governed code.
+- `FEATURES.md` — major feature tour.
+- `docs/` — focused design and feature notes.
+- `**/README.md` — component-specific human-oriented documentation where
+  present.
+- `**/AGENTS.md` — scoped agent instructions; read every applicable file before
+  modifying code.
 
-## Project knowledge
+## Verification
 
-- `README.md` — project overview, install, configuration, and contact info
-- `specs/` and `crates/*/specs/` — current, scoped architecture, design
-  decisions, requirements, and functional specifications. Before changing code,
-  discover and read every applicable record along the changed path's scope and
-  follow its relevant links. Keep records synchronized with code and tests.
-- Use the `linked-specs` skill when creating, updating, discovering, or
-  referencing records. Use `linked-specs-review` when reviewing changes against
-  governing records.
-- `FEATURES.md` — major feature tour; update after editing any new major features
-- `SECURITY.md` — conventional private vulnerability-reporting policy; technical
-  trust boundaries live in the applicable Linked Specs
-- `docs/` — focused design and feature notes
-- `crates/*/README.md` — crate-specific documentation where present
-- `crates/*/AGENTS.md` — crate-specific agent instructions - MUST read these (if exists) before modifing code in a given crate
+- Use `cargo check --workspace --all-targets` to check Rust code.
+- Use `cargo nextest run` for tests and `treefmt` for formatting.
+- Before considering a change done, run final local CI with
+  `selfci check --candidate <change-id>`.
 
-## Common commands
+## General guidance
 
-- `cargo check --workspace --all-targets` or `just check` — check Rust code
-- `cargo nextest run` or `just test` — run tests
-- `treefmt` or `just format` — format code
-- `selfci check --candidate <change-id>` — full local CI verification for an explicit candidate change; WARNING: slow, but independent of working copy state, so it can run safely in parallel, and working copy files can be modified without affecting it; prefer to run in parallel and/or only as a final verification step
-
-## Definition of done
-
-- `selfci check --candidate <change-id>` (CI) passes
-- Update `FEATURES.md` after editing any new major features.
-
-## Rules
-
-- This project is still very immuture and backward compatibility is never needed.
-- ALWAYS consult `tau-commit` skill before making commits
-- When asked to debug existing tau sessions, read `tau-self-knowledge-debugging` skill
-- Extension configuration errors must never be silent. Extensions that fail to parse or apply their `Configure.config` MUST send `HarnessInputMessage::ConfigError`; the harness MUST surface those as mandatory `harness.notice` and replay them to late UI subscribers.
+- This project is still very immature; backward compatibility is not required.
+- Always consult the `tau-commit` skill before making commits.
+- When debugging existing Tau sessions, consult the
+  `tau-self-knowledge-debugging` skill.
